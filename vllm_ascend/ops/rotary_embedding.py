@@ -579,9 +579,7 @@ class AscendApplyRotaryEmb(ApplyRotaryEmb):
         head_dim = x.shape[-1]
         rotary_dim = cos.shape[-1] * 2
         if rotary_dim > head_dim:
-            raise ValueError(
-                f"rotary_dim ({rotary_dim}) must not exceed head_dim ({head_dim})"
-            )
+            raise ValueError(f"rotary_dim ({rotary_dim}) must not exceed head_dim ({head_dim})")
 
         # cos, sin: [seq_len, rotary_dim // 2]
         cos = torch.cat((cos, cos), dim=-1)

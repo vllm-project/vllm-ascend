@@ -7,7 +7,6 @@ import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
-
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -29,13 +28,7 @@ def test_glm47_patch_is_noop_without_legacy_private_method(monkeypatch):
     parser_module.Glm47MoeModelToolParser = ParserWithoutLegacyMethod
     monkeypatch.setitem(sys.modules, parser_module_name, parser_module)
 
-    patch_path = (
-        REPO_ROOT
-        / "vllm_ascend"
-        / "patch"
-        / "platform"
-        / "patch_glm47_tool_call_parser.py"
-    )
+    patch_path = REPO_ROOT / "vllm_ascend" / "patch" / "platform" / "patch_glm47_tool_call_parser.py"
     _load_module_from_path("test_glm47_patch_noop", patch_path)
 
     assert not hasattr(
@@ -57,18 +50,10 @@ def test_glm47_patch_still_wraps_legacy_private_method(monkeypatch):
     parser_module.Glm47MoeModelToolParser = LegacyParser
     monkeypatch.setitem(sys.modules, parser_module_name, parser_module)
 
-    patch_path = (
-        REPO_ROOT
-        / "vllm_ascend"
-        / "patch"
-        / "platform"
-        / "patch_glm47_tool_call_parser.py"
-    )
+    patch_path = REPO_ROOT / "vllm_ascend" / "patch" / "platform" / "patch_glm47_tool_call_parser.py"
     _load_module_from_path("test_glm47_patch_legacy", patch_path)
 
-    assert LegacyParser()._extract_tool_call_regions("get_time") == [
-        ("get_time\n", True)
-    ]
+    assert LegacyParser()._extract_tool_call_regions("get_time") == [("get_time\n", True)]
 
 
 def test_rejection_sampler_helper_resolution_supports_vllm_024_names():
@@ -81,14 +66,7 @@ def test_rejection_sampler_helper_resolution_supports_vllm_024_names():
         _insert_resampled_kernel=insert_resampled,
     )
 
-    compat_path = (
-        REPO_ROOT
-        / "vllm_ascend"
-        / "worker"
-        / "v2"
-        / "spec_decode"
-        / "compat.py"
-    )
+    compat_path = REPO_ROOT / "vllm_ascend" / "worker" / "v2" / "spec_decode" / "compat.py"
     compat = _load_module_from_path("test_rejection_sampler_compat", compat_path)
 
     assert compat.resolve_rejection_sampler_helpers(upstream_module) == (
@@ -108,14 +86,7 @@ def test_rejection_sampler_helper_resolution_supports_new_main_names():
         _insert_resampled_kernel=insert_resampled,
     )
 
-    compat_path = (
-        REPO_ROOT
-        / "vllm_ascend"
-        / "worker"
-        / "v2"
-        / "spec_decode"
-        / "compat.py"
-    )
+    compat_path = REPO_ROOT / "vllm_ascend" / "worker" / "v2" / "spec_decode" / "compat.py"
     compat = _load_module_from_path("test_rejection_sampler_compat_main", compat_path)
 
     assert compat.resolve_rejection_sampler_helpers(upstream_module) == (
@@ -154,13 +125,7 @@ def _load_dflash_patch(monkeypatch, causal_lm_cls):
     )
     monkeypatch.setitem(sys.modules, qwen_module_name, qwen_module)
 
-    patch_path = (
-        REPO_ROOT
-        / "vllm_ascend"
-        / "patch"
-        / "worker"
-        / "patch_qwen3_dflash.py"
-    )
+    patch_path = REPO_ROOT / "vllm_ascend" / "patch" / "worker" / "patch_qwen3_dflash.py"
     _load_module_from_path("test_qwen3_dflash_patch", patch_path)
 
 

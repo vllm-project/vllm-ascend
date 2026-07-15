@@ -6,7 +6,7 @@
 
 ### 核心计算
 
-```
+```text
 O = softmax(Q @ K^T / sqrt(d)) @ V
 ```
 
@@ -61,7 +61,7 @@ O = softmax(Q @ K^T / sqrt(d)) @ V
 
 ### Task 分解
 
-```
+```text
 totalTaskNum = totalQTokens × kvHeads
 blockDim = min(totalTaskNum, aicNum)
 ```
@@ -83,7 +83,7 @@ Host 侧计算并传递给 kernel 的 tiling 数据包括：
 
 ### 4.1 总体流水线
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │  Per Task: 1 token × groupSize heads × topK KV blocks      │
 ├─────────────────────────────────────────────────────────────┤
@@ -118,7 +118,7 @@ int64_t gmOffsetQ = qToken * strideQO + qHeadStart * embed_;
 
 ### 4.3 Matmul 维度
 
-```
+```text
 QK: M=groupSize, N=kvBlockSize(≤128), K=headDim(128)
      Q[groupSize, D] × K[D, blockSize]^T → S[groupSize, blockSize]
 
@@ -141,7 +141,7 @@ int64_t gmOffsetK = physicalBlockId * strideKVBlock + kvHeadIdx * embed_;
 
 对于 topK 个 KV block 逐一处理，使用 online softmax：
 
-```
+```text
 for each KV block:
     S = Q × K^T (bf16 matmul)
     S_scaled = S * scale (bf16)
@@ -222,10 +222,12 @@ mm2L0ATotalStages = mL0Loop * (kvBaseTile / L0_TILE_K);
 ### 搬运量对比（单 token decode, groupSize=4, topK=8, D=128, blockSize=128）
 
 **优化前（per-head task）**：
+
 - Q 搬运: 4 次 × 128 elements = 512 bf16 = 1KB
 - KV 搬运: 4 × 8 blocks × 128×128 × 2 dtype = 4 × 256KB = **1024KB**
 
 **优化后（per-group task）**：
+
 - Q 搬运: 1 次 × 4×128 elements = 512 bf16 = 1KB
 - KV 搬运: 1 × 8 blocks × 128×128 × 2 dtype = **256KB**
 
@@ -249,7 +251,7 @@ SparseAttentionScore 在 A5 (Ascend 950PR/950DT) 上 **仅支持 `inner_precise=
 
 具体计算精度分配如下：
 
-```
+```text
 ┌────────────────────────────────────────────────────────────────┐
 │ Stage            │ 计算精度          │ 存储精度               │
 ├────────────────────────────────────────────────────────────────┤
@@ -266,10 +268,12 @@ SparseAttentionScore 在 A5 (Ascend 950PR/950DT) 上 **仅支持 `inner_precise=
 ```
 
 **与 ALL_HIGH (mode 0) 的差异**：
+
 - mode=0 时 softmax 阶段的 max/exp/sum 也在 fp32 下计算，精度更高但需要 fp32 中间存储（L1 占用翻倍）和额外的 cast 指令
 - mode=4 时 softmax 在 bf16 下完成，P 以 bf16 格式存入 L1（节省 L1 空间），但 exp 近似精度受限于 bf16 的 7-bit 尾数
 
 **与 ALL_LOW (mode 1) 的差异**：
+
 - mode=1 时 rescaleO 也在 fp16 下执行，长序列多次 correction 累乘后精度退化严重
 - mode=4 的 rescaleO 使用 fp32 累积，在 online softmax 迭代次数多（topK 大）时仍能保持最终输出精度
 
@@ -282,6 +286,7 @@ SparseAttentionScore 在 A5 (Ascend 950PR/950DT) 上 **仅支持 `inner_precise=
 ### 精度影响
 
 在 `inner_precise=4` 下，典型精度表现：
+
 - QKV 值域 [-1, 1]，`max_diff` 通常 < 4e-3，`mean_diff` < 5e-4
 - 长序列（topK≥6）时，softmax 的 bf16 exp 累积误差可能使 `max_diff` 达到 ~1e-2
 - 对比双精度 golden（strict bf16 模拟），relative error < 1%
@@ -289,6 +294,7 @@ SparseAttentionScore 在 A5 (Ascend 950PR/950DT) 上 **仅支持 `inner_precise=
 ## 8. 精度模型
 
 BF16 路径 (`inner_precise=4`) 的精度链路：
+
 1. QK matmul: `bf16 × bf16 → fp32 累加 → FixPipe cast bf16`
 2. Softmax: `bf16 scale → bf16 max/sub → bf16 exp → bf16 sum`（per-row 独立）
 3. PV matmul: `bf16 × bf16 → fp32 累加`（OTmp 保持 fp32）

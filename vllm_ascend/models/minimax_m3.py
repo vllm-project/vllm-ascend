@@ -30,7 +30,6 @@ from typing import Any
 import torch
 from torch import nn
 from transformers import BatchFeature, PretrainedConfig
-
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -39,6 +38,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.inputs import MultiModalDataDict
+from vllm.logger import logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
@@ -47,9 +47,9 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
-    MergedColumnParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -58,11 +58,28 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
+from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
+    MultiModalEmbeddings,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
+)
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    PPMissingLayer,
+    WeightsMapper,
+    is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory,
+    make_layers,
+    maybe_prefix,
+)
+from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -79,30 +96,8 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 
-from vllm.model_executor.models.interfaces import (
-    EagleModelMixin,
-    MultiModalEmbeddings,
-    SupportsEagle3,
-    SupportsLoRA,
-    SupportsMultiModal,
-    SupportsPP,
-)
-from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
-    WeightsMapper,
-    PPMissingLayer,
-    is_pp_missing_parameter,
-    make_empty_intermediate_tensors_factory,
-    make_layers,
-    maybe_prefix,
-)
-from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
-
 from vllm_ascend.attention.msa_m3 import MiniMaxM3SparseAttention
 from vllm_ascend.models.minimax_m3_vllm_vision import MiniMaxVLVisionModel
-
-
-logger = init_logger(__name__)
 
 
 def _sparse_attention_layer_ids(config: PretrainedConfig) -> set[int]:
@@ -158,6 +153,7 @@ class MiniMaxM3SwiGLUOAI(nn.Module):
             interleaved=False,
         )
 
+
 class MiniMaxM3MLP(nn.Module):
     def __init__(
         self,
@@ -195,9 +191,7 @@ class MiniMaxM3MLP(nn.Module):
                 limit=config.swiglu_limit,
             )
         else:
-            raise ValueError(
-                f"Unsupported activation: {hidden_act}. Only swigluoai is supported."
-            )
+            raise ValueError(f"Unsupported activation: {hidden_act}. Only swigluoai is supported.")
 
     def forward(
         self,
@@ -222,18 +216,13 @@ class MiniMaxM3MoE(nn.Module):
 
         if self.tp_size > config.num_local_experts:
             raise ValueError(
-                f"Tensor parallel size {self.tp_size} is greater than "
-                f"the number of experts {config.num_local_experts}."
+                f"Tensor parallel size {self.tp_size} is greater than the number of experts {config.num_local_experts}."
             )
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
         self.use_routing_bias = getattr(config, "use_routing_bias", False)
         if self.use_routing_bias:
-            self.e_score_correction_bias = nn.Parameter(
-                torch.empty(config.num_local_experts, dtype=torch.float32)
-            )
-            self.e_score_correction_bias.weight_loader = (
-                MiniMaxM3MoE.ebias_weight_loader
-            )
+            self.e_score_correction_bias = nn.Parameter(torch.empty(config.num_local_experts, dtype=torch.float32))
+            self.e_score_correction_bias.weight_loader = MiniMaxM3MoE.ebias_weight_loader
         else:
             self.e_score_correction_bias = None
 
@@ -289,9 +278,7 @@ class MiniMaxM3MoE(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
-        )
+        final_hidden_states = self.experts(hidden_states=hidden_states, router_logits=router_logits)
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
@@ -354,10 +341,7 @@ class MiniMaxM3Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        if (
-            rope_parameters is not None
-            and "partial_rotary_factor" not in rope_parameters
-        ):
+        if rope_parameters is not None and "partial_rotary_factor" not in rope_parameters:
             rope_parameters["partial_rotary_factor"] = rotary_dim / self.head_dim
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -379,9 +363,7 @@ class MiniMaxM3Attention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-    def _qk_norm(
-        self, q: torch.Tensor, k: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def _qk_norm(self, q: torch.Tensor, k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         q_shape = q.shape
         k_shape = k.shape
         q = q.reshape(-1, self.head_dim).contiguous()
@@ -401,7 +383,7 @@ class MiniMaxM3Attention(nn.Module):
 
         q, k = self._qk_norm(q, k)
         q, k = self.rotary_emb(positions, q, k)
-        
+
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
@@ -428,12 +410,8 @@ class MiniMaxM3DecoderLayer(nn.Module):
         sparse_attention_config = getattr(config, "sparse_attention_config", None)
 
         if sparse_attention_config is not None:
-            is_sparse_attention_layer = (
-                layer_idx in _sparse_attention_layer_ids(config)
-            )
-            disable_index_value = (
-                sparse_attention_config["sparse_disable_index_value"][layer_idx] == 1
-            )
+            is_sparse_attention_layer = layer_idx in _sparse_attention_layer_ids(config)
+            disable_index_value = sparse_attention_config["sparse_disable_index_value"][layer_idx] == 1
         else:
             is_sparse_attention_layer = False
             disable_index_value = False
@@ -468,17 +446,14 @@ class MiniMaxM3DecoderLayer(nn.Module):
         # rest of sglang -- ``OperationsStrategy``, ``LayerScatterModes``,
         # ``LayerCommunicator``, ``gpt_oss``, ``falcon_h1`` etc all access
         # ``layer.is_layer_sparse``.
-        self.is_layer_sparse = (
-            moe_layer_freq[layer_idx] != 0 if moe_layer_freq is not None else True
-        )
+        self.is_layer_sparse = moe_layer_freq[layer_idx] != 0 if moe_layer_freq is not None else True
 
-        
         if self.is_layer_sparse:
             self.block_sparse_moe = MiniMaxM3MoE(
                 config=config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.block_sparse_moe",
-            )  
+            )
         else:
             self.mlp = MiniMaxM3MLP(
                 config=config,
@@ -487,9 +462,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 intermediate_size=config.dense_intermediate_size,
             )
         self.input_layernorm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = GemmaRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
+        self.post_attention_layernorm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -534,8 +507,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         quant_config = vllm_config.quant_config
         self.config = config
         self._enable_eagle3_aux_hidden_states = (
-            vllm_config.speculative_config is not None
-            and vllm_config.speculative_config.method == "eagle3"
+            vllm_config.speculative_config is not None and vllm_config.speculative_config.method == "eagle3"
         )
 
         self.vocab_size = text_config.vocab_size
@@ -592,18 +564,12 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             residual = intermediate_tensors["residual"]
 
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
-        for idx, layer in enumerate(
-            islice(self.layers, self.start_layer, self.end_layer)
-        ):
+        for idx, layer in enumerate(islice(self.layers, self.start_layer, self.end_layer)):
             hidden_states, residual = layer(positions, hidden_states, residual)
-            self._maybe_add_hidden_state(
-                aux_hidden_states, idx + 1, hidden_states, residual
-            )
+            self._maybe_add_hidden_state(aux_hidden_states, idx + 1, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
-            )
+            return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
         hidden_states, _ = self.norm(hidden_states, residual)
 
         if len(aux_hidden_states) > 0:
@@ -665,7 +631,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 
         for name, loaded_weight in weights:
             if name.startswith("model."):
-                name = name[len("model."):]
+                name = name[len("model.") :]
             if "mtp." in name:
                 mark_skipped("mtp")
                 continue
@@ -684,11 +650,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 
             # Sparse layers fold index_q/index_k into fused qkv_proj (handled below).
             # Other index_* weights (e.g. index_v/index_o) load explicitly here.
-            if (
-                ".index_" in name
-                and ".index_q_proj" not in name
-                and ".index_k_proj" not in name
-            ):
+            if ".index_" in name and ".index_q_proj" not in name and ".index_k_proj" not in name:
                 if name.endswith(".bias") and name not in params_dict:
                     mark_skipped("missing_bias")
                     continue
@@ -719,14 +681,10 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                     mark_skipped("pp_missing")
                     continue
                 if param_name_full.endswith((".k_scale", ".v_scale")):
-                    remapped_name = maybe_remap_kv_scale_name(
-                        param_name_full, params_dict
-                    )
+                    remapped_name = maybe_remap_kv_scale_name(param_name_full, params_dict)
                     if remapped_name is not None and remapped_name in params_dict:
                         param = params_dict[remapped_name]
-                        weight_loader = getattr(
-                            param, "weight_loader", default_weight_loader
-                        )
+                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
                         weight_loader(param, loaded_weight)
                         mark_loaded(remapped_name)
                         break
@@ -788,9 +746,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                         continue
 
                     param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
+                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     if getattr(weight_loader, "supports_moe_loading", False):
                         if loaded_weight.shape == param.shape:
                             default_weight_loader(param, loaded_weight)
@@ -817,7 +773,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 
 
 class MiniMaxM3SparseForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
-
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "indexer_proj": ["index_q_proj", "index_k_proj"],
@@ -840,9 +795,7 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEa
         self.quant_config = quant_config
         if hasattr(vllm_config.model_config, "max_model_len"):
             self.config.max_model_len = vllm_config.model_config.max_model_len
-        self.model = MiniMaxM3Model(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
+        self.model = MiniMaxM3Model(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
@@ -853,10 +806,8 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEa
             self.logits_processor = LogitsProcessor(config.vocab_size)
         else:
             self.lm_head = PPMissingLayer()
-        
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
-        )
+
+        self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -876,9 +827,7 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEa
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors:
-        hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds
-        )
+        hidden_states = self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
         return hidden_states
 
     def compute_logits(
@@ -898,19 +847,13 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEa
             nonlocal raw_tensors, text_tensors, skipped_multimodal_tensors
             for name, weight in weights:
                 raw_tensors += 1
-                if (
-                    "vision_tower" in name
-                    or "multi_modal_projector" in name
-                    or "patch_merge_mlp" in name
-                ):
+                if "vision_tower" in name or "multi_modal_projector" in name or "patch_merge_mlp" in name:
                     skipped_multimodal_tensors += 1
                     continue
                 text_tensors += 1
                 yield name, weight
 
-        loaded_params = loader.load_weights(
-            text_weights(), mapper=self.hf_to_vllm_mapper
-        )
+        loaded_params = loader.load_weights(text_weights(), mapper=self.hf_to_vllm_mapper)
         logger.warning(
             "MiniMax M3 top-level load_weights saw %d checkpoint tensors, "
             "passed %d text tensors, skipped %d multimodal tensors, "
@@ -955,9 +898,7 @@ def _get_minimax_m3_num_image_tokens(
 ) -> int:
     merge_size = int(getattr(image_processor, "merge_size", 2))
     if hasattr(image_processor, "get_number_of_image_patches"):
-        num_patches = image_processor.get_number_of_image_patches(
-            image_height, image_width
-        )
+        num_patches = image_processor.get_number_of_image_patches(image_height, image_width)
     else:
         patch_size = int(getattr(image_processor, "patch_size", 14))
         grid_h = image_height // patch_size
@@ -1071,14 +1012,9 @@ class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
         )
 
 
-class MiniMaxM3VLDummyInputsBuilder(
-    BaseDummyInputsBuilder[MiniMaxM3VLProcessingInfo]
-):
+class MiniMaxM3VLDummyInputsBuilder(BaseDummyInputsBuilder[MiniMaxM3VLProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        return (
-            self.info.IMAGE_TOKEN * mm_counts.get("image", 0)
-            + self.info.VIDEO_TOKEN * mm_counts.get("video", 0)
-        )
+        return self.info.IMAGE_TOKEN * mm_counts.get("image", 0) + self.info.VIDEO_TOKEN * mm_counts.get("video", 0)
 
     def get_dummy_mm_data(
         self,
@@ -1087,9 +1023,7 @@ class MiniMaxM3VLDummyInputsBuilder(
         mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         size = self.info.get_image_size_with_most_features()
-        num_frames = self.info.get_num_frames_with_most_features(
-            seq_len, mm_counts
-        )
+        num_frames = self.info.get_num_frames_with_most_features(seq_len, mm_counts)
         return {
             "image": self._get_dummy_images(
                 width=size.width,
@@ -1107,9 +1041,7 @@ class MiniMaxM3VLDummyInputsBuilder(
         }
 
 
-class MiniMaxM3VLMultiModalProcessor(
-    BaseMultiModalProcessor[MiniMaxM3VLProcessingInfo]
-):
+class MiniMaxM3VLMultiModalProcessor(BaseMultiModalProcessor[MiniMaxM3VLProcessingInfo]):
     def _call_hf_processor(
         self,
         prompt: str,
@@ -1141,12 +1073,8 @@ class MiniMaxM3VLMultiModalProcessor(
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
 
-        image_token = getattr(
-            hf_processor, "image_token", MiniMaxM3VLProcessingInfo.IMAGE_TOKEN
-        )
-        video_token = getattr(
-            hf_processor, "video_token", MiniMaxM3VLProcessingInfo.VIDEO_TOKEN
-        )
+        image_token = getattr(hf_processor, "image_token", MiniMaxM3VLProcessingInfo.IMAGE_TOKEN)
+        video_token = getattr(hf_processor, "video_token", MiniMaxM3VLProcessingInfo.VIDEO_TOKEN)
         start_token = getattr(
             hf_processor,
             "VISION_START_TOKEN",
@@ -1164,18 +1092,14 @@ class MiniMaxM3VLMultiModalProcessor(
         end_token_id = vocab[end_token]
         image_merge_length = int(getattr(image_processor, "merge_size", 2)) ** 2
         video_merge_length = int(getattr(video_processor, "merge_size", 2)) ** 2
-        temporal_patch_size = int(
-            getattr(video_processor, "temporal_patch_size", 2)
-        )
+        temporal_patch_size = int(getattr(video_processor, "temporal_patch_size", 2))
         fps = float(getattr(video_processor, "fps", 1.0) or 1.0)
 
         def get_image_replacement(item_idx: int):
             grid_thw = out_mm_kwargs["image"][item_idx]["image_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
             num_tokens = int(grid_thw.prod().item()) // image_merge_length
-            full = [start_token_id] + [image_token_id] * num_tokens + [
-                end_token_id
-            ]
+            full = [start_token_id] + [image_token_id] * num_tokens + [end_token_id]
             return PromptUpdateDetails.select_token_id(full, image_token_id)
 
         def get_video_replacement(item_idx: int):
@@ -1229,18 +1153,10 @@ class MiniMaxM3VLMultiModalProcessor(
             video_grid_sizes = video_grid_thw.prod(-1)
 
         return {
-            "pixel_values": MultiModalFieldConfig.flat_from_sizes(
-                "image", image_grid_sizes
-            ),
-            "image_grid_thw": MultiModalFieldConfig.batched(
-                "image", keep_on_cpu=True
-            ),
-            "pixel_values_videos": MultiModalFieldConfig.flat_from_sizes(
-                "video", video_grid_sizes
-            ),
-            "video_grid_thw": MultiModalFieldConfig.batched(
-                "video", keep_on_cpu=True
-            ),
+            "pixel_values": MultiModalFieldConfig.flat_from_sizes("image", image_grid_sizes),
+            "image_grid_thw": MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            "pixel_values_videos": MultiModalFieldConfig.flat_from_sizes("video", video_grid_sizes),
+            "video_grid_thw": MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         }
 
 
@@ -1294,9 +1210,7 @@ class MiniMaxM3VLModel(nn.Module):
     info=MiniMaxM3VLProcessingInfo,
     dummy_inputs=MiniMaxM3VLDummyInputsBuilder,
 )
-class MiniMaxM3SparseForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsEagle3
-):
+class MiniMaxM3SparseForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsEagle3):
     supports_encoder_tp_data = True
 
     packed_modules_mapping = {
@@ -1311,9 +1225,7 @@ class MiniMaxM3SparseForConditionalGeneration(
             "language_model.lm_head.": "model.language_model.lm_head.",
             "model.vision_tower.": "model.vision_tower.",
             "vision_tower.": "model.vision_tower.",
-            "multi_modal_projector.": (
-                "model.vision_tower.multi_modal_projector."
-            ),
+            "multi_modal_projector.": ("model.vision_tower.multi_modal_projector."),
             "patch_merge_mlp.": "model.vision_tower.patch_merge_mlp.",
             "lm_head.": "model.language_model.lm_head.",
         },
@@ -1339,8 +1251,7 @@ class MiniMaxM3SparseForConditionalGeneration(
         self.model_config = vllm_config.model_config
         self.multimodal_config = vllm_config.model_config.multimodal_config
         self.use_data_parallel = (
-            self.multimodal_config is not None
-            and self.multimodal_config.mm_encoder_tp_mode == "data"
+            self.multimodal_config is not None and self.multimodal_config.mm_encoder_tp_mode == "data"
         )
 
         with self._mark_composite_model(
@@ -1355,9 +1266,7 @@ class MiniMaxM3SparseForConditionalGeneration(
 
         self.vision_tower = self.model.vision_tower
         self.language_model = self.model.language_model
-        self.make_empty_intermediate_tensors = (
-            self.language_model.make_empty_intermediate_tensors
-        )
+        self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
 
     @property
     def lm_head(self) -> nn.Module:
@@ -1432,9 +1341,7 @@ class MiniMaxM3SparseForConditionalGeneration(
         if video_input["type"] == "video_embeds":
             video_embeds = video_input["video_embeds"].type(self.vision_tower.dtype)
         else:
-            pixel_values = video_input["pixel_values_videos"].type(
-                self.vision_tower.dtype
-            )
+            pixel_values = video_input["pixel_values_videos"].type(self.vision_tower.dtype)
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
                     self.vision_tower,
@@ -1451,22 +1358,14 @@ class MiniMaxM3SparseForConditionalGeneration(
         sizes = (grid_thw.prod(-1) // (merge_size * merge_size)).tolist()
         return video_embeds.split(sizes)
 
-    def _parse_and_validate_multimodal_inputs(
-        self, **kwargs: object
-    ) -> dict[str, dict]:
+    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict[str, dict]:
         mm_input_by_modality: dict[str, dict] = {}
         for input_key in kwargs:
-            if (
-                input_key in ("pixel_values", "image_embeds")
-                and "image" not in mm_input_by_modality
-            ):
+            if input_key in ("pixel_values", "image_embeds") and "image" not in mm_input_by_modality:
                 image_input = self._parse_and_validate_image_input(**kwargs)
                 if image_input is not None:
                     mm_input_by_modality["image"] = image_input
-            if (
-                input_key in ("pixel_values_videos", "video_embeds")
-                and "video" not in mm_input_by_modality
-            ):
+            if input_key in ("pixel_values_videos", "video_embeds") and "video" not in mm_input_by_modality:
                 video_input = self._parse_and_validate_video_input(**kwargs)
                 if video_input is not None:
                     mm_input_by_modality["video"] = video_input
@@ -1480,13 +1379,9 @@ class MiniMaxM3SparseForConditionalGeneration(
         multimodal_embeddings: list[torch.Tensor] = []
         for modality, multimodal_input in mm_input_by_modality.items():
             if modality == "image":
-                multimodal_embeddings.extend(
-                    self._process_image_input(multimodal_input)
-                )
+                multimodal_embeddings.extend(self._process_image_input(multimodal_input))
             elif modality == "video":
-                multimodal_embeddings.extend(
-                    self._process_video_input(multimodal_input)
-                )
+                multimodal_embeddings.extend(self._process_video_input(multimodal_input))
         return tuple(multimodal_embeddings)
 
     def embed_input_ids(
@@ -1553,12 +1448,9 @@ class MiniMaxM3SparseForConditionalGeneration(
                 yield name, weight
 
         logger.warning("MiniMax M3 VL load_weights entered")
-        loaded_params = loader.load_weights(
-            counted_weights(), mapper=self.hf_to_vllm_mapper
-        )
+        loaded_params = loader.load_weights(counted_weights(), mapper=self.hf_to_vllm_mapper)
         logger.warning(
-            "MiniMax M3 VL load_weights saw %d checkpoint tensors by prefix %s; "
-            "returned %d loaded parameter names",
+            "MiniMax M3 VL load_weights saw %d checkpoint tensors by prefix %s; returned %d loaded parameter names",
             raw_tensors,
             prefix_counts,
             len(loaded_params),
@@ -1566,9 +1458,7 @@ class MiniMaxM3SparseForConditionalGeneration(
         return loaded_params
 
 
-def get_spec_layer_idx_from_weight_name(
-    config: PretrainedConfig, weight_name: str
-) -> int | None:
+def get_spec_layer_idx_from_weight_name(config: PretrainedConfig, weight_name: str) -> int | None:
     if hasattr(config, "num_mtp_modules") and (config.num_mtp_modules > 0):
         layer_idx = config.num_hidden_layers
         for i in range(config.num_mtp_modules):

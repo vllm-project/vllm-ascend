@@ -10,7 +10,7 @@
 
 /**
  * @brief matmul implementation for single q&k^t base tile
- * This implementation is designed for the following senario:
+ * This implementation is designed for the following scenario:
  * A full q base tile is loaded to L1 from GM at the very beginning,
  * and it remains persistent until each k base tile is dealt
  * A full q*k^t base tile is loaded to UB from l0C, no workspace transit
@@ -172,7 +172,7 @@ public:
     __aicore__ inline
     void SetCrossCoreSync(Arch::CrossCoreFlag &crossCoreFlag)
     {
-        // in mode 4, AIC set for 2 AIVs seperately
+        // in mode 4, AIC set for 2 AIVs separately
         if constexpr (MODE == 4U) {
             uint16_t flagIdV0 = crossCoreFlag.id;
             uint16_t flagIdV1 = flagIdV0 + V0_V1_FLAG_ID_OFFSET;
@@ -186,7 +186,7 @@ public:
     __aicore__ inline
     void WaitCrossCoreSync(Arch::CrossCoreFlag &crossCoreFlag)
     {
-        // in mode 4, AIC wait for 2 AIVs seperately
+        // in mode 4, AIC wait for 2 AIVs separately
         if constexpr (MODE == 4U) {
             uint16_t flagIdV0 = crossCoreFlag.id;
             uint16_t flagIdV1 = flagIdV0 + V0_V1_FLAG_ID_OFFSET;
@@ -291,7 +291,7 @@ public:
 
         // while splitting the base tile S to 2 AIVs,
         // the order of the elements in each column is expected to be preserved,
-        // which means a column in l0C cannot be chunked and processed by dualMode FixPipe seperately.
+        // which means a column in l0C cannot be chunked and processed by dualMode FixPipe separately.
         // therefore, FixPipe won't launch until each portion(chunked only by columns, based on nbuffer strategy)
         // of the base tile is ready on l0C
         for (uint32_t nL1Itr = 0; nL1Itr < nL1LoopNum; nL1Itr++) {
@@ -390,7 +390,7 @@ public:
                 AscendC::SetFlag<AscendC::HardEvent::M_FIX>(l0CEventId);
                 AscendC::WaitFlag<AscendC::HardEvent::M_FIX>(l0CEventId);
                 // 需要kernel传输ubCTensor的时候确保其shape的m，n是满足32B（8个32位元素）对齐的
-                // rounded up by 8 and splited in half to each AIV
+                // rounded up by 8 and split in half to each AIV
                 // valid rows in AIV0: [0, mFixPAligned8 / 2 - 1]
                 // valid rows in AIV1: [mFixPAligned8 / 2, rowNum - 1]
                 uint32_t mFixPAligned8 = RoundUp(rowNum, 8);
@@ -440,7 +440,7 @@ public:
 
         // while splitting the base tile S to 2 AIVs,
         // the order of the elements in each column is expected to be preserved,
-        // which means a column in l0C cannot be chunked and processed by dualMode FixPipe seperately.
+        // which means a column in l0C cannot be chunked and processed by dualMode FixPipe separately.
         // therefore, FixPipe won't launch until each portion(chunked only by columns, based on nbuffer strategy)
         // of the base tile is ready on l0C
         for (uint32_t nL1Itr = 0; nL1Itr < nL1LoopNum; nL1Itr++) {
@@ -539,7 +539,7 @@ public:
                 AscendC::SetFlag<AscendC::HardEvent::M_FIX>(l0CEventId);
                 AscendC::WaitFlag<AscendC::HardEvent::M_FIX>(l0CEventId);
                 // 需要kernel传输ubCTensor的时候确保其shape的m，n是满足32B（8个32位元素）对齐的
-                // rounded up by 8 and splited in half to each AIV
+                // rounded up by 8 and split in half to each AIV
                 // valid rows in AIV0: [0, mFixPAligned8 / 2 - 1]
                 // valid rows in AIV1: [mFixPAligned8 / 2, rowNum - 1]
                 uint32_t mFixPAligned8 = RoundUp(rowNum, 8);

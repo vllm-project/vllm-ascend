@@ -62,10 +62,7 @@ def _create_common_attn_metadata(
     seq_lens = torch.tensor(batch_spec.seq_lens, dtype=torch.int32, device=device)
     seq_lens_cpu = seq_lens.cpu()
     max_seq_len = int(seq_lens_cpu.max())
-    context_lens = [
-        batch_spec.seq_lens[i] - batch_spec.query_lens[i]
-        for i in range(batch_spec.batch_size)
-    ]
+    context_lens = [batch_spec.seq_lens[i] - batch_spec.query_lens[i] for i in range(batch_spec.batch_size)]
     num_computed_tokens_cpu = torch.tensor(context_lens, dtype=torch.int32)
     max_blocks = (max(batch_spec.seq_lens) + block_size - 1) // block_size
     block_table_tensor = torch.arange(
@@ -170,9 +167,7 @@ def test_minimax_m3_sparse_forward_dispatches_to_layer(
 
     minimax_m3_sparse_forward(q, k, v, index_q, index_k, out, "layer.attn")
 
-    layer._run_sparse_attention.assert_called_once_with(
-        q, k, v, index_q, index_k, out
-    )
+    layer._run_sparse_attention.assert_called_once_with(q, k, v, index_q, index_k, out)
 
 
 @patch("vllm_ascend.attention.msa_m3.get_forward_context")
@@ -259,9 +254,7 @@ def test_sparse_metadata_builder_fia_padded_dummy_request() -> None:
     )
     common = _create_common_attn_metadata(batch_spec, block_size=128, device=device)
 
-    padded_query_start_loc = torch.zeros(
-        batch_size + 2, dtype=torch.int32, device=device
-    )
+    padded_query_start_loc = torch.zeros(batch_size + 2, dtype=torch.int32, device=device)
     padded_query_start_loc[: batch_size + 1] = common.query_start_loc
     padded_query_start_loc[batch_size + 1] = common.query_start_loc[batch_size]
     padded_query_start_loc_cpu = padded_query_start_loc.cpu()
@@ -297,16 +290,9 @@ def test_sparse_metadata_builder_fia_padded_dummy_request() -> None:
 
 
 def test_sparse_proj_quant_type_falls_back_to_language_model_prefix() -> None:
-    quant_config = SimpleNamespace(
-        quant_description={
-            "language_model.model.layers.0.self_attn.q_proj.weight": "w8a8"
-        }
-    )
+    quant_config = SimpleNamespace(quant_description={"language_model.model.layers.0.self_attn.q_proj.weight": "w8a8"})
 
-    assert (
-        _sparse_proj_quant_type(quant_config, "model.layers.0.self_attn", "q_proj")
-        == "w8a8"
-    )
+    assert _sparse_proj_quant_type(quant_config, "model.layers.0.self_attn", "q_proj") == "w8a8"
 
 
 def test_use_fused_qkv_indexer_returns_false_for_mixed_qkv_and_indexer_quant() -> None:
@@ -494,9 +480,7 @@ def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
             max_seq_len=7,
         ),
     )
-    mock_get_forward_context.return_value = SimpleNamespace(
-        attn_metadata={"layer.attn": metadata}
-    )
+    mock_get_forward_context.return_value = SimpleNamespace(attn_metadata={"layer.attn": metadata})
     layer = SimpleNamespace(layer_name="layer.attn")
     query = torch.arange(24, dtype=torch.float32).view(3, 8)
     kv_cache = torch.zeros(2, 4, 128, 2, 4)

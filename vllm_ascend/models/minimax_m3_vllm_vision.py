@@ -25,13 +25,7 @@ import vllm
 _MODULE_NAME = "vllm_ascend.models._vllm_024_minimax_m3_vision_tower"
 if vllm.__file__ is None:
     raise ImportError("Unable to locate the installed vLLM package.")
-_SOURCE_PATH = (
-    Path(vllm.__file__).resolve().parent
-    / "models"
-    / "minimax_m3"
-    / "common"
-    / "vision_tower.py"
-)
+_SOURCE_PATH = Path(vllm.__file__).resolve().parent / "models" / "minimax_m3" / "common" / "vision_tower.py"
 
 
 def _load_vision_tower_module() -> ModuleType:
