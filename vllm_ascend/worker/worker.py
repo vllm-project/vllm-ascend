@@ -659,7 +659,7 @@ class NPUWorker(WorkerBase):
 
         if self.profiler is not None:
             self.profiler.step()
-
+        logger.info('_execute_model intermediate_tensors: %s', intermediate_tensors)
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
             return output
