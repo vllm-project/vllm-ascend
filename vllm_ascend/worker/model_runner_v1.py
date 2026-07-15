@@ -2883,6 +2883,7 @@ class NPUModelRunner(GPUModelRunner):
             "inputs_embeds": inputs_embeds,
             **model_kwargs,
         }
+        logger.info('_model_forward model_inputs: %s', model_inputs)
         run_model = partial(self.model, **model_inputs)
 
         if self.enable_enpu:
