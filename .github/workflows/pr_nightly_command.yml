@@ -70,10 +70,9 @@ jobs:
         id: auth
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          ACTOR: ${{ github.event.client_payload.github.payload.comment.user.login }}
+          REPO: ${{ github.event.client_payload.github.payload.repository.full_name }}
         run: |
-          ACTOR='${{ github.event.client_payload.github.payload.comment.user.login }}'
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-
           ROLE_NAME=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq '.role_name')
           case "$ROLE_NAME" in
             triage|write|maintain|admin)
@@ -112,9 +111,9 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           ALL_ARGS: ${{ github.event.client_payload.slash_command.args.all }}
           PR_URL: ${{ github.event.client_payload.github.payload.issue.pull_request.url }}
+          COMMAND: ${{ github.event.action }}
         run: |
           # Derive command type from repository_dispatch action (e.g. nightly-command -> nightly)
-          COMMAND='${{ github.event.action }}'
           COMMAND="${COMMAND%-command}"
           echo "command=$COMMAND" >> "$GITHUB_OUTPUT"
 

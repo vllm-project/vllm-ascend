@@ -51,11 +51,10 @@ jobs:
         id: auth
         env:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+          ACTOR: ${{ github.event.client_payload.github.payload.comment.user.login }}
+          PR_AUTHOR: ${{ github.event.client_payload.pull_request.user.login }}
+          REPO: ${{ github.event.client_payload.github.payload.repository.full_name }}
         run: |
-          ACTOR='${{ github.event.client_payload.github.payload.comment.user.login }}'
-          PR_AUTHOR='${{ github.event.client_payload.pull_request.user.login }}'
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-
           if [ "$ACTOR" = "$PR_AUTHOR" ]; then
             echo "User $ACTOR is the PR author, authorized."
             echo "authorized=true" >> "$GITHUB_OUTPUT"
@@ -77,10 +76,9 @@ jobs:
         id: check_merged
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          PR_NUMBER: ${{ github.event.client_payload.pull_request.number }}
+          REPO: ${{ github.event.client_payload.github.payload.repository.full_name }}
         run: |
-          PR_NUMBER='${{ github.event.client_payload.pull_request.number }}'
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-
           PR_JSON=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state,mergeCommit,baseRefName,title,body,number,author --jq '.')
 
           STATE=$(echo "$PR_JSON" | jq -r '.state')
@@ -143,14 +141,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+          PR_NUMBER: ${{ github.event.client_payload.pull_request.number }}
+          PR_TITLE: ${{ steps.check_merged.outputs.pr_title }}
+          PR_BODY: ${{ steps.check_merged.outputs.pr_body }}
+          PR_AUTHOR: ${{ steps.check_merged.outputs.pr_author }}
+          MERGE_COMMIT: ${{ steps.check_merged.outputs.merge_commit }}
+          BASE_BRANCH: ${{ steps.check_merged.outputs.base_branch }}
+          REPO: ${{ github.event.client_payload.github.payload.repository.full_name }}
         run: |
-          PR_NUMBER='${{ github.event.client_payload.pull_request.number }}'
-          PR_TITLE='${{ steps.check_merged.outputs.pr_title }}'
-          PR_BODY='${{ steps.check_merged.outputs.pr_body }}'
-          PR_AUTHOR='${{ steps.check_merged.outputs.pr_author }}'
-          MERGE_COMMIT='${{ steps.check_merged.outputs.merge_commit }}'
-          BASE_BRANCH='${{ steps.check_merged.outputs.base_branch }}'
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
 
           # Get the PAT_TOKEN owner's username
           TOKEN_USER=$(gh api user --jq '.login')
