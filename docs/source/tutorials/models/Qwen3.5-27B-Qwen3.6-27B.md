@@ -1,8 +1,8 @@
-# Qwen3.5-Dense/Qwen3.6-Dense
+# Qwen3.5-27B/Qwen3.6-27B
 
 ## 1 Introduction
 
-Qwen3.5-Dense and Qwen3.6-27B are dense hybrid Mamba-Transformer language models in the Qwen3.5/Qwen3.6 family, integrating breakthroughs in architectural efficiency, reinforcement learning scale, and global accessibility. They share the same hybrid attention design (GDN + full attention), so deployment on Ascend NPUs follows the same pattern for both models. They are suitable for general-purpose text generation tasks such as dialogue, content creation, and code generation running on Ascend NPUs.
+Qwen3.5-27B and Qwen3.6-27B are dense hybrid Mamba-Transformer language models in the Qwen3.5/Qwen3.6 family, integrating breakthroughs in architectural efficiency, reinforcement learning scale, and global accessibility. They share the same hybrid attention design (GDN + full attention), so deployment on Ascend NPUs follows the same pattern for both models. They are suitable for general-purpose text generation tasks such as dialogue, content creation, and code generation running on Ascend NPUs.
 
 This document will demonstrate the main validation steps for the models, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, as well as accuracy and performance evaluation.
 
@@ -22,18 +22,6 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 - `Qwen3.5-27B` (BF16 version): requires 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3.5-27B)
 - `Qwen3.5-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-27B-w8a8-mtp)
-
-**Qwen3.5-2B**
-
-- `Qwen3.5-2B` (FP16 version): requires Atlas inference products or Atlas 200I Pro. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3.5-2B)
-
-**Qwen3.5-4B**
-
-- `Qwen3.5-4B` (FP16 version): requires Atlas inference products or Atlas 200I Pro. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3.5-4B)
-
-**Qwen3.5-9B**
-
-- `Qwen3.5-9B` (FP16 version): requires Atlas inference products or Atlas 200I Pro. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3.5-9B)
 
 **Qwen3.6-27B**
 

@@ -159,9 +159,9 @@ TITLES = {
     },
     "tutorials/models/Qwen3-VL-Embedding.md": {"en": "Qwen3-VL-Embedding", "zh": "Qwen3-VL-Embedding"},
     "tutorials/models/Qwen3-VL-Reranker.md": {"en": "Qwen3-VL-Reranker", "zh": "Qwen3-VL-Reranker"},
-    "tutorials/models/Qwen3.5-Dense-Qwen3.6-Dense.md": {
-        "en": "Qwen3.5-Dense & Qwen3.6-Dense",
-        "zh": "Qwen3.5-Dense & Qwen3.6-Dense",
+    "tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md": {
+        "en": "Qwen3.5-27B & Qwen3.6-27B",
+        "zh": "Qwen3.5-27B & Qwen3.6-27B",
     },
     "tutorials/models/Qwen3.5-397B-A17B.md": {"en": "Qwen3.5-397B-A17B", "zh": "Qwen3.5-397B-A17B"},
     "tutorials/models/Qwen3.6-35B-A3B.md": {"en": "Qwen3.6-35B-A3B", "zh": "Qwen3.6-35B-A3B"},
