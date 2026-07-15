@@ -45,7 +45,6 @@ from vllm_ascend.utils import (
     bootstrap_custom_op_env,
     check_kv_extra_config,
     enable_sfa_dcp_replicated_indexer,
-    flashcomm2_enable,
     get_ascend_device_type,
     is_moe_model,
     model_uses_sfa_sparse,
@@ -986,8 +985,7 @@ class NPUPlatform(Platform):
         else:
             flash_comm_v1_enabled = enable_sp(vllm_config) and num_tokens is not None and num_tokens > 1000
 
-        # TODO(Levi-JQ): another PR to normalize the enabling logic for sp/fc2
-        flashcomm_v2_enabled = flashcomm2_enable() and tp_world_size > 1 and num_tokens is not None
+        flashcomm_v2_enabled = False
         pad_size = 0
         padded_length = None
         if flash_comm_v1_enabled or flashcomm_v2_enabled:
