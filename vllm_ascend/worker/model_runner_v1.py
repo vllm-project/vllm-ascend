@@ -2273,7 +2273,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_reqs=num_reqs,
                     num_reqs_padded=num_reqs_padded,
                     max_query_len=max_num_scheduled_tokens,
-                    ubatch_slices=ubatch_slices_attn,
+                    ubatch_slices=None,
                     logits_indices=logits_indices,
                     use_spec_decode=use_spec_decode,
                     num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
