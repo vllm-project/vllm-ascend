@@ -284,7 +284,7 @@ class AscendDSparkProposer(AscendDflashProposer):
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata, tuple[Any, Any] | None]:
         del token_indices_to_sample, req_scheduled_tokens, long_seq_metadata
         is_prefill = (num_decode_reqs == 0 and num_prefill_reqs > 0)
-        batch_size = cad.num_reqs
+        batch_size = num_prefill_reqs + num_decode_reqs
         block_size = self.num_speculative_tokens
         num_query_total = batch_size * block_size
         request_slots = self._assign_request_slots(batch_size)
@@ -374,6 +374,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.max_seq_len = cad.max_seq_len + block_size
         if max_model_len > 0:
             cad.max_seq_len = min(cad.max_seq_len, max_model_len)
+        cad.num_reqs = batch_size
         cad.slot_mapping = self._slot_mapping_buffer[:num_query_total]
         cad.positions = self.positions[:num_query_total]
         cad.causal = False
