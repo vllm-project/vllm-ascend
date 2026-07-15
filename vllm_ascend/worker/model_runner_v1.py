@@ -2171,6 +2171,12 @@ class NPUModelRunner(GPUModelRunner):
 
                 num_tokens_padded = batch_desc.num_tokens
                 num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
+                logger.info(
+                    "num_tokens_padded: %s, num_reqs_padded: %s, num_scheduled_tokens_np: %s",
+                    num_tokens_padded,
+                    num_reqs_padded,
+                    num_scheduled_tokens_np,
+                )
                 ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
                     should_ubatch,
                     num_scheduled_tokens_np,
@@ -3006,7 +3012,7 @@ class NPUModelRunner(GPUModelRunner):
             )
         # Extra coordination when running data-parallel since we need to coordinate
         # across ranks
-        should_ubatch, num_tokens_across_dp = False, None
+        should_ubatch, num_tokens_across_dp = True, None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
             _, num_tokens_across_dp, synced_cudagraph_mode = self._sync_metadata_across_dp(
                 num_tokens=num_tokens_padded,
