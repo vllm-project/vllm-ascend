@@ -2176,7 +2176,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         ):
         if self.method == 'dspark':
             multi_steps_attn_metadata = self._build_standard_dsa_attn_metadata(
-            common_attn_metadata, num_input_tokens, num_tokens
+                common_attn_metadata, num_input_tokens, num_tokens
             )
             self._pad_draft_query_buffers(num_tokens, num_input_tokens)
             return multi_steps_attn_metadata, None
@@ -2224,9 +2224,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         base_cm.num_actual_tokens = num_actual_tokens
         base_cm.causal = False
         base_cm.attn_state = AscendAttentionState.ChunkedPrefill
-        token_to_req_indices = getattr(self, "_dspark_token_to_req_indices_buffer", None)
-        if isinstance(token_to_req_indices, torch.Tensor):
-            base_cm.token_to_req_indices = token_to_req_indices[:num_input_tokens]
+        if hasattr(base_cm, "token_to_req_indices"):
+            base_cm.token_to_req_indices = base_cm.token_to_req_indices[:num_input_tokens]
 
         per_layer_attn_metadata: dict[str, Any] = {}
         for attn_group in self.draft_attn_groups:
@@ -2257,9 +2256,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.input_ids[num_actual_tokens:num_input_tokens].fill_(self.parallel_drafting_token_id)
         self.positions[num_actual_tokens:num_input_tokens].fill_(0)
         self._slot_mapping_buffer[num_actual_tokens:num_input_tokens].fill_(-1)
-        token_to_req_indices = getattr(self, "_dspark_token_to_req_indices_buffer", None)
-        if isinstance(token_to_req_indices, torch.Tensor):
-            token_to_req_indices[num_actual_tokens:num_input_tokens].fill_(-1)
         for buf in getattr(self, "_dspark_query_slot_mapping_buffers", {}).values():
             buf[num_actual_tokens:num_input_tokens].fill_(-1)
 

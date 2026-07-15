@@ -1,26 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections import defaultdict
-from copy import copy
 from typing import Any
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
-from vllm.forward_context import BatchDescriptor, get_forward_context
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
-from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
-from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
-from vllm_ascend.spec_decode.llm_base_proposer import greedy_sample
 from vllm_ascend.ops.triton.spec_decode.utils import (
     copy_and_expand_dflash_inputs_py,
 )
@@ -42,69 +36,24 @@ class AscendDSparkProposer(AscendDflashProposer):
     ):
         super().__init__(vllm_config, device, runner=runner)
         assert vllm_config.speculative_config is not None
-        draft_hf_config = vllm_config.speculative_config.draft_model_config.hf_config
         if vllm_config.speculative_config.draft_sample_method == "probabilistic":
             raise ValueError(
                 "DSpark probabilistic draft sampling is not supported on the v1 "
                 "model runner; use greedy (the default) instead."
             )
-        dspark_target_layer_ids = getattr(draft_hf_config, "dspark_target_layer_ids", None)
-        if dspark_target_layer_ids:
-            self.hidden_size = vllm_config.speculative_config.draft_model_config.get_hidden_size()
-            self.hidden_states = torch.zeros(
-                (self.max_num_tokens, self.hidden_size),
-                dtype=self.dtype,
-                device=self.device,
-            )
-            self._dflash_hidden_states = torch.zeros(
-                (self.max_num_tokens, self.hidden_size),
-                dtype=self.dtype,
-                device=self.device,
-            )
-        self.method = "dspark"
-        self.parallel_drafting = True
-        self.block_size = self.num_speculative_tokens
-        # Per-request extra KV slots = num_speculative_tokens (one slot per
-        # draft token in the block). Overrides upstream llm_base:100; v2 drops
-        # it (BlockTables manages slots).
-        self.extra_slots_per_request = self.num_speculative_tokens
-        # Net new slots per request this step = num_speculative_tokens.
-        # Overrides llm_base:103; v2 drops it.
-        self.net_num_new_slots_per_request = self.num_speculative_tokens
-        # DSpark always needs extra input slots for the draft block.
-        # Overrides llm_base:106; v2 drops it.
-        self.needs_extra_input_slots = True
-        # [max_num_tokens] bool mask of rejected draft positions, set per step
-        # by the rejection sampler. getattr fallback because upstream
-        # llm_base:211 only builds it under its own needs_extra_input_slots
-        # branch, which runs before DSpark overrides that flag. v2 drops it
-        # (mask handled sampler-side).
-        self.is_rejected_token_mask: torch.Tensor | None = getattr(self, "is_rejected_token_mask", None)
-        if self.is_rejected_token_mask is None:
-            self.is_rejected_token_mask = torch.zeros(
-                (self.max_num_tokens,),
-                dtype=torch.bool,
-                device=device,
-            )
-        # [max_num_tokens] bool mask of non-anchor (noise) query positions in
-        # the draft block. Same getattr-fallback reason as above. v2 drops it.
-        self.is_masked_token_mask: torch.Tensor | None = getattr(self, "is_masked_token_mask", None)
-        if self.is_masked_token_mask is None:
-            self.is_masked_token_mask = torch.zeros(
-                (self.max_num_tokens,),
-                dtype=torch.bool,
-                device=device,
-            )
-        # Token id filling non-anchor (noise) positions of the draft block.
-        # From draft_hf_config.ptd_token_id (fallback dspark_noise_token_id, 0).
-        # Mirrors v2 dflash:47 get_parallel_drafting_token_id.
-        self.parallel_drafting_token_id = getattr(
-            draft_hf_config,
-            "ptd_token_id",
-            getattr(draft_hf_config, "dspark_noise_token_id", 0),
+        # DSpark is not supported in vllm v1, so related property needs to be reset here.
+        self.hidden_size = vllm_config.speculative_config.draft_model_config.get_hidden_size()
+        self.hidden_states = torch.zeros(
+            (self.max_num_tokens, self.hidden_size),
+            dtype=self.dtype,
+            device=self.device,
+        )
+        self._dflash_hidden_states = torch.zeros(
+            (self.max_num_tokens, self.hidden_size),
+            dtype=self.dtype,
+            device=self.device,
         )
         # DSpark runs eager only (Ascend cudagraph unsupported on this path).
-        # Overrides ascend llm_base:214; v2 DSpark supports FULL graph.
         self.use_cuda_graph = False
         # Max query tokens = max_batch_size * num_speculative_tokens
         # (anchor-first: N query tokens per request, no bonus token, unlike
@@ -139,7 +88,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         # Per-token -> request index map consumed by the SAS attention op. Sliced
         # to num_query_total for real query tokens; padding slots in
         # [num_actual_tokens, num_input_tokens) are filled with -1.
-        self._dspark_token_to_req_indices_buffer = torch.zeros(
+        self.token_to_req_indices_buffer = torch.zeros(
             self.max_query_tokens,
             dtype=torch.int32,
             device=device,
@@ -345,15 +294,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         block_size = self.num_speculative_tokens
         num_query_total = batch_size * block_size
         has_num_rejected = num_rejected_tokens_gpu is not None
-        token_to_req_capacity = max(int(self.positions.numel()), num_query_total)
-        token_to_req_indices = getattr(self, "_dspark_token_to_req_indices_buffer", None)
-        if not isinstance(token_to_req_indices, torch.Tensor) or token_to_req_indices.numel() < token_to_req_capacity:
-            token_to_req_indices = torch.empty(
-                token_to_req_capacity,
-                dtype=torch.int32,
-                device=self.device,
-            )
-            self._dspark_token_to_req_indices_buffer = token_to_req_indices
         primary_gid = getattr(self, "kv_cache_gid", 0)
         block_tables_by_gid = self._get_draft_block_tables(cad, batch_size)
         self._dspark_block_tables_by_gid = block_tables_by_gid
@@ -441,9 +381,10 @@ class AscendDSparkProposer(AscendDflashProposer):
 
         # token_to_req: per-token request index (vectorized; equivalent to
         # token_to_req_indices[req*block:(req+1)*block] = req per req).
-        token_to_req_indices[:num_query_total] = (
+        self.token_to_req_indices_buffer[:num_query_total] = (
             torch.arange(num_query_total, device=self.device, dtype=torch.int32) // block_size
         )
+        self.token_to_req_indices_buffer[num_query_total:].fill_(-1)
 
         effective_seq_lens = cad.seq_lens
         if has_num_rejected:
@@ -475,6 +416,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.causal = False
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
+        cad.token_to_req_indices = self.token_to_req_indices_buffer[:num_query_total]
         self._dspark_query_start_loc = cad.query_start_loc_cpu[: batch_size + 1]
         self._dspark_seq_lens = cad.seq_lens[:batch_size]
 
@@ -526,11 +468,11 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._dspark_seq_lens = torch.full(
             (batch_size,), block_size, dtype=torch.int32, device=self.device
         )
-        token_to_req = self._dspark_token_to_req_indices_buffer[:model_num_query_tokens]
         req_ids = (
             torch.arange(model_num_query_tokens, device=self.device, dtype=torch.int32) // block_size % batch_size
         )
-        token_to_req.copy_(req_ids)
+        self.token_to_req_indices_buffer[:model_num_query_tokens].copy_(req_ids)
+        self.token_to_req_indices_buffer[model_num_query_tokens:].fill_(-1)
 
     @torch.inference_mode()
     def dummy_run(
