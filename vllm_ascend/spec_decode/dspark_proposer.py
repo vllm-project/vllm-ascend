@@ -282,71 +282,81 @@ class AscendDSparkProposer(AscendDflashProposer):
         num_prefill_reqs=0,
         num_decode_reqs=0,
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata, tuple[Any, Any] | None]:
-        del target_token_ids, token_indices_to_sample, req_scheduled_tokens, long_seq_metadata
+        del token_indices_to_sample, req_scheduled_tokens, long_seq_metadata
         is_prefill = (num_decode_reqs == 0 and num_prefill_reqs > 0)
         batch_size = cad.num_reqs
         block_size = self.num_speculative_tokens
         num_query_total = batch_size * block_size
         request_slots = self._assign_request_slots(batch_size)
+        request_slots_tensor = torch.tensor(request_slots, dtype=torch.int32, device=self.device)
         self._dspark_seed_buffer[:batch_size].copy_(next_token_ids)
         has_num_rejected = num_rejected_tokens_gpu is not None
-        context_cursor = 0
-        for req_idx in range(batch_size):
-            request_slot = request_slots[req_idx]
-            ctx_start = int(cad.query_start_loc[req_idx].item())
-            ctx_end = int(cad.query_start_loc[req_idx + 1].item())
-            valid_ctx_end = ctx_end
-            if has_num_rejected:
-                assert num_rejected_tokens_gpu is not None
-                valid_ctx_end -= int(num_rejected_tokens_gpu[req_idx].item())
-            valid_ctx_end = max(ctx_start, valid_ctx_end)
-            valid_ctx_len = valid_ctx_end - ctx_start
-            if valid_ctx_len == 0:
-                continue
-            out_end = context_cursor + valid_ctx_len
-            self._dflash_hidden_states[context_cursor:out_end] = target_hidden_states[ctx_start:valid_ctx_end]
-            self._context_positions_buffer[context_cursor:out_end] = target_positions[ctx_start:valid_ctx_end]
-            self._context_request_slots_buffer[context_cursor:out_end] = request_slot
+        query_start_loc = cad.query_start_loc[: batch_size + 1]
+        query_start = query_start_loc[:-1]
+        query_end = query_start_loc[1:]
+        if has_num_rejected:
+            assert num_rejected_tokens_gpu is not None
+            valid_query_end = query_end - num_rejected_tokens_gpu[:batch_size].to(query_end.dtype)
+        else:
+            valid_query_end = query_end
+        valid_query_end = torch.maximum(query_start, valid_query_end)
+
+        num_context = target_token_ids.shape[0]
+        self._dflash_num_context = num_context
+        if num_context > 0:
+            context_token_indices = self.arange_dspark[:num_context]
+            context_req_indices = torch.searchsorted(query_end, context_token_indices, right=True).to(torch.long)
+            valid_context_end = valid_query_end.index_select(0, context_req_indices)
+            valid_context_mask = context_token_indices < valid_context_end
+            invalid_context_position = torch.full_like(target_positions[:num_context], -1)
+
+            self._dflash_hidden_states[:num_context] = target_hidden_states[:num_context]
+            self._context_positions_buffer[:num_context] = torch.where(
+                valid_context_mask,
+                target_positions[:num_context].to(self._context_positions_buffer.dtype),
+                invalid_context_position.to(self._context_positions_buffer.dtype),
+            )
+            self._context_request_slots_buffer[:num_context] = request_slots_tensor.index_select(0, context_req_indices)
             if getattr(cad, "slot_mapping", None) is not None:
-                self._context_slot_mapping_buffer[context_cursor:out_end] = cad.slot_mapping[ctx_start:valid_ctx_end]
-            context_cursor = out_end
-        self._dflash_num_context = context_cursor
+                self._context_slot_mapping_buffer[:num_context] = torch.where(
+                    valid_context_mask,
+                    cad.slot_mapping[:num_context].to(self._context_slot_mapping_buffer.dtype),
+                    torch.full_like(self._context_slot_mapping_buffer[:num_context], -1),
+                )
         if is_prefill:
             return num_query_total, token_indices_to_sample, cad, None
         token_indices_to_sample = torch.arange(num_query_total, dtype=torch.int32, device=self.device)
         model_config = getattr(getattr(self, "vllm_config", None), "model_config", None)
         max_model_len = int(getattr(model_config, "max_model_len", 0) or 0)
-        for req_idx in range(batch_size):
-            request_slot = request_slots[req_idx]
-            ctx_start = int(cad.query_start_loc[req_idx].item())
-            ctx_end = int(cad.query_start_loc[req_idx + 1].item())
-            valid_ctx_end = ctx_end
-            if has_num_rejected:
-                assert num_rejected_tokens_gpu is not None
-                valid_ctx_end -= int(num_rejected_tokens_gpu[req_idx].item())
-            last_pos = target_positions[valid_ctx_end - 1]
-            out_start = req_idx * block_size
-            out_end = out_start + block_size
-            draft_positions = last_pos + 1 + self.arange_dspark[:block_size]
-            if max_model_len > 0:
-                exceeds_max_model_len = draft_positions >= max_model_len
-                draft_positions = torch.where(exceeds_max_model_len, torch.zeros_like(draft_positions), draft_positions)
-            else:
-                exceeds_max_model_len = torch.zeros(block_size, dtype=torch.bool, device=draft_positions.device)
-            self.positions[out_start:out_end] = draft_positions
-            self.input_ids[out_start] = next_token_ids[req_idx]
-            if block_size > 1:
-                self.input_ids[out_start + 1 : out_end] = self.parallel_drafting_token_id
-            self._request_slots_buffer[out_start:out_end] = request_slot
-            if getattr(cad, "block_table_tensor", None) is not None:
-                block_nums = draft_positions // self.kernel_block_size
-                block_offsets = draft_positions % self.kernel_block_size
-                block_ids = cad.block_table_tensor[req_idx].index_select(0, block_nums.long())
-                slot_mapping = block_ids.to(torch.int32) * self.kernel_block_size + block_offsets
-            else:
-                slot_mapping = draft_positions.to(torch.int32)
-            slot_mapping.masked_fill_(exceeds_max_model_len, -1)
-            self._slot_mapping_buffer[out_start:out_end] = slot_mapping
+        last_token_indices = torch.clamp(valid_query_end - 1, min=0).to(torch.long)
+        last_positions = target_positions.index_select(0, last_token_indices).to(self.positions.dtype)
+        draft_offsets = self.arange_dspark[:block_size].view(1, block_size)
+        draft_positions = last_positions.view(batch_size, 1) + 1 + draft_offsets
+        if max_model_len > 0:
+            exceeds_max_model_len = draft_positions >= max_model_len
+            draft_positions = torch.where(exceeds_max_model_len, torch.zeros_like(draft_positions), draft_positions)
+        else:
+            exceeds_max_model_len = torch.zeros_like(draft_positions, dtype=torch.bool)
+        self.positions[:num_query_total] = draft_positions.flatten()
+        input_ids_view = self.input_ids[:num_query_total].view(batch_size, block_size)
+        input_ids_view.fill_(self.parallel_drafting_token_id)
+        input_ids_view[:, 0].copy_(next_token_ids[:batch_size])
+        self._request_slots_buffer[:num_query_total] = (
+            request_slots_tensor.view(batch_size, 1).expand(-1, block_size).flatten()
+        )
+        if getattr(cad, "block_table_tensor", None) is not None:
+            block_nums = draft_positions // self.kernel_block_size
+            block_offsets = draft_positions % self.kernel_block_size
+            block_ids = torch.gather(cad.block_table_tensor[:batch_size], 1, block_nums.long())
+            slot_mapping = block_ids.to(torch.int32) * self.kernel_block_size + block_offsets
+        else:
+            slot_mapping = draft_positions.to(torch.int32)
+        slot_mapping = torch.where(
+            exceeds_max_model_len,
+            torch.full_like(slot_mapping, -1),
+            slot_mapping,
+        )
+        self._slot_mapping_buffer[:num_query_total] = slot_mapping.flatten()
         effective_seq_lens = cad.seq_lens - num_rejected_tokens_gpu if has_num_rejected else cad.seq_lens
         cad.query_start_loc = self.arange_dspark[: batch_size + 1] * block_size
         cad.seq_lens = effective_seq_lens + block_size

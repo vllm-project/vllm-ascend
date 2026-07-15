@@ -174,15 +174,21 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
     def precompute_context_kv(self, main_x: torch.Tensor, positions: torch.Tensor, request_slots: torch.Tensor | None) -> None:
         if positions.numel() == 0:
             return
-        shared_kv = self._project_shared_kv(main_x, positions)
         if request_slots is None:
             request_slots = torch.zeros_like(positions, dtype=torch.int32)
+        valid = positions >= 0
+        safe_positions = torch.where(valid, positions, torch.zeros_like(positions))
+        shared_kv = self._project_shared_kv(main_x, safe_positions)
         slots_long = request_slots.to(device=shared_kv.device, dtype=torch.long)
-        pos_long = positions.to(device=shared_kv.device, dtype=torch.long)
+        pos_long = safe_positions.to(device=shared_kv.device, dtype=torch.long)
         cache_indices = pos_long % self._dspark_cache_capacity
-        self._dspark_kv_cache[slots_long, cache_indices] = shared_kv
-        self._dspark_cache_positions[slots_long, cache_indices] = positions.to(torch.int32)
-        self._dspark_cache_valid[slots_long, cache_indices] = True
+        flat_valid = valid.reshape(-1)
+        flat_slots = slots_long.reshape(-1)[flat_valid]
+        flat_cache_indices = cache_indices.reshape(-1)[flat_valid]
+        flat_shared_kv = shared_kv.reshape(-1, shared_kv.shape[-1])[flat_valid]
+        self._dspark_kv_cache[flat_slots, flat_cache_indices] = flat_shared_kv
+        self._dspark_cache_positions[flat_slots, flat_cache_indices] = safe_positions.to(torch.int32).reshape(-1)[flat_valid]
+        self._dspark_cache_valid[flat_slots, flat_cache_indices] = True
 
     def _dspark_sparse_attn(
         self,
