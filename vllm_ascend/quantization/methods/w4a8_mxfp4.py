@@ -201,14 +201,25 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
 
         topk_weights = topk_weights.to(x.dtype)
 
+        if self.dynamic_eplb:
+            # EPLB stores each expert as an independent (N, K) NZ tensor; transpose to (K, N) for
+            # the 单多单 (single-x, multi-weight, single-out) matmul (fp8-fp4 needs a transposed
+            # weight). The transpose is a view, so the stored tensors stay contiguous for EPLB.
+            w1 = [w.transpose(0, 1) for w in layer.w13_weight_list]
+            w2 = [w.transpose(0, 1) for w in layer.w2_weight_list]
+            w1_scale, w2_scale = layer.w13_weight_scale_list, layer.w2_weight_scale_list
+        else:
+            w1, w2 = layer.w13_weight, layer.w2_weight
+            w1_scale, w2_scale = layer.w13_weight_scale, layer.w2_weight_scale
+
         moe_comm_method = get_forward_context().moe_comm_method
         return moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
                 hidden_states=x,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
+                w1=w1,
+                w2=w2,
                 quant_type=self.quant_type,
                 dynamic_eplb=self.dynamic_eplb,
                 expert_map=expert_map,
@@ -223,8 +234,8 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 mxfp_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
                 mxfp_per_token_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
                 mxfp_use_bf16=(x.dtype == torch.bfloat16),
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
                 swiglu_limit=layer.swiglu_limit,
             )
         )
