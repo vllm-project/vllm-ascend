@@ -566,6 +566,7 @@
   tests:
     - tests/ut/worker
     - tests/e2e/pull_request/one_card/model_runner_v2
+    - tests/e2e/pull_request/two_card/model_runner_v2
 
 # XLite
 - name: xlite
@@ -734,6 +735,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py: 160
   tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py: 510
   tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora_tp.py: 170
+  tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py: 130
   tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 760
   tests/e2e/pull_request/two_card/test_data_parallel.py: 500
   tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 140
