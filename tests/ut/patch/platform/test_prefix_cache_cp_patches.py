@@ -420,6 +420,7 @@ def test_mamba_eagle_lookup_does_not_expand_hybrid_hit() -> None:
     coordinator.eagle_attn_group_indices = {1}
     coordinator.dcp_world_size = 1
     coordinator.pcp_world_size = 1
+    coordinator.enable_caching = True
     coordinator.hash_block_size = 16
     coordinator.lcm_block_size = 16
     coordinator.block_pool = MagicMock()
