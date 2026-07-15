@@ -300,6 +300,13 @@ class NPUModelRunner310(NPUModelRunner):
                 self.input_batch.num_prompt_tokens,
             )
 
+        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+        self._compute_prev_positions(num_reqs)
+        prev_positions_gpu = None
+        if self.use_async_scheduling and self.input_batch.prev_sampled_token_ids is not None and prev_req_id_to_index:
+            self.prev_positions.copy_to_gpu(num_reqs)
+            prev_positions_gpu = self.prev_positions.gpu[:num_reqs]
+
         if self.speculative_config and self.use_cp:
             self.pcp_manager.generate_pcp_mtp_input(
                 total_num_scheduled_tokens,
@@ -313,6 +320,7 @@ class NPUModelRunner310(NPUModelRunner):
                 self._draft_token_ids,  # type: ignore[has-type]
                 scheduler_output,
                 self.num_spec_tokens,
+                prev_positions=prev_positions_gpu,
             )
 
         if self.pcp_size > 1:
@@ -407,9 +415,6 @@ class NPUModelRunner310(NPUModelRunner):
         )
         self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
 
-        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
-        self._compute_prev_positions(num_reqs)
-
         if not is_rc_device():
             self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
 
@@ -472,7 +477,8 @@ class NPUModelRunner310(NPUModelRunner):
             self.use_async_spec_decode and self.valid_sampled_token_count_gpu is not None and prev_req_id_to_index
         )
         if need_async_num_computed_update:
-            self.prev_positions.copy_to_gpu(num_reqs)
+            if prev_positions_gpu is None:
+                self.prev_positions.copy_to_gpu(num_reqs)
             self.prev_num_draft_tokens.copy_to_gpu()
             cpu_values = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
                 device=self.device, non_blocking=True
