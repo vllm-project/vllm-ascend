@@ -23,6 +23,7 @@ import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -367,8 +368,12 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             raise ValueError("The current weight does not support moe part tp>16.")
 
         if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
-            device_group = get_mc2_group().device_group
-            self.moe_all_to_all_group_name = get_group_name(device_group)
+            self.moe_all_to_all_group_name = get_group_name(get_mc2_group())
+            if not self.moe_all_to_all_group_name:
+                logger.warning_once(
+                    "[vllm-ascend/W4A8] MC2 group metadata unavailable, "
+                    "falling back to empty moe_all_to_all_group_name."
+                )
 
     def get_weight(
         self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype

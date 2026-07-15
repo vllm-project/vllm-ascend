@@ -36,6 +36,7 @@ def init_ascend_model_parallel(
     global_dp_size = parallel_config.data_parallel_size
     global_pp_size = parallel_config.pipeline_parallel_size
     global_pcp_size = parallel_config.prefill_context_parallel_size
+    coord_store = None
     if enable_elastic_ep:
         coord_store = get_cached_tcp_store_client(
             parallel_config.data_parallel_master_ip,

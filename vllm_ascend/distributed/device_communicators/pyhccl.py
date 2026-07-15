@@ -152,62 +152,6 @@ class PyHcclCommunicator:
         )
         return out_tensor
 
-    def all_gather(self, in_tensor: torch.Tensor, out_tensor: torch.Tensor, stream=None) -> torch.Tensor:
-        if self.disabled:
-            return None
-        # hccl communicator created on a specific device
-        # will only work on tensors on the same device
-        # otherwise it will cause "illegal memory access"
-        assert in_tensor.device == self.device, (
-            f"this hccl communicator is created to work on {self.device}, but the input tensor is on {in_tensor.device}"
-        )
-
-        if stream is None:
-            stream = current_stream()
-        self.hccl.hcclAllGather(
-            buffer_type(in_tensor.data_ptr()),
-            buffer_type(out_tensor.data_ptr()),
-            in_tensor.numel(),
-            hcclDataTypeEnum.from_torch(in_tensor.dtype),
-            self.comm,
-            aclrtStream_t(stream.npu_stream),
-        )
-        return out_tensor
-
-    def send(self, tensor: torch.Tensor, dst: int, stream=None):
-        if self.disabled:
-            return None
-        assert tensor.device == self.device, (
-            f"this hccl communicator is created to work on {self.device}, but the tensor is on {tensor.device}"
-        )
-        if stream is None:
-            stream = current_stream()
-        self.hccl.hcclSend(
-            buffer_type(tensor.data_ptr()),
-            tensor.numel(),
-            hcclDataTypeEnum.from_torch(tensor.dtype),
-            dst,
-            self.comm,
-            aclrtStream_t(stream.npu_stream),
-        )
-
-    def recv(self, tensor: torch.Tensor, src: int, stream=None):
-        if self.disabled:
-            return None
-        assert tensor.device == self.device, (
-            f"this hccl communicator is created to work on {self.device}, but the tensor is on {tensor.device}"
-        )
-        if stream is None:
-            stream = current_stream()
-        self.hccl.hcclRecv(
-            buffer_type(tensor.data_ptr()),
-            tensor.numel(),
-            hcclDataTypeEnum.from_torch(tensor.dtype),
-            src,
-            self.comm,
-            aclrtStream_t(stream.npu_stream),
-        )
-
     def broadcast(self, tensor: torch.Tensor, src: int, stream=None):
         if self.disabled:
             return
@@ -225,14 +169,3 @@ class PyHcclCommunicator:
             self.comm,
             aclrtStream_t(stream.npu_stream),
         )
-
-    def batch_isend_irecv(self, p2p_ops: list, stream=None):
-        if self.disabled:
-            return
-        if stream is None:
-            stream = current_stream()
-        for op in p2p_ops:
-            if op.op is torch.distributed.isend:
-                self.send(op.tensor, op.group_peer, stream)
-            elif op.op is torch.distributed.irecv:
-                self.recv(op.tensor, op.group_peer, stream)

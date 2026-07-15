@@ -102,38 +102,14 @@ class NPUCommunicator(DeviceCommunicatorBase):
         output_tensor = torch.cat(output_list, dim=gather_dim).contiguous()
         return output_tensor
 
-    def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
-        if self.pyhccl_comm is not None:
-            if dim < 0:
-                # Convert negative dim to positive.
-                dim += input_.dim()
-            input_size = input_.size()
-            # NOTE: we have to use concat-style all-gather here,
-            # stack-style all-gather has compatibility issues with
-            # torch.compile . see https://github.com/pytorch/pytorch/issues/138795
-            output_size = (input_size[0] * self.world_size,) + input_size[1:]
-            # Allocate output tensor.
-            output_tensor = torch.empty(output_size, dtype=input_.dtype, device=input_.device)
-            # All-gather.
-            output_tensor = self.pyhccl_comm.all_gather(input_, output_tensor)
-            # Reshape
-            output_tensor = output_tensor.reshape((self.world_size,) + input_size)
-            output_tensor = output_tensor.movedim(0, dim)
-            output_tensor = output_tensor.reshape(
-                input_size[:dim] + (self.world_size * input_size[dim],) + input_size[dim + 1 :]
-            )
-            return output_tensor
-        else:
-            return super().all_gather(input_, dim)
+    def batch_isend_irecv(self, p2p_ops: list):
+        for op in p2p_ops:
+            if op.op is dist.isend:
+                dist.isend(op.tensor, op.group_peer, group=self.device_group)
+            else:
+                dist.irecv(op.tensor, op.group_peer, group=self.device_group)
 
     def destroy(self):
         if self.pyhccl_comm is not None:
             self.pyhccl_comm.destroy()
             self.pyhccl_comm = None
-
-    def batch_isend_irecv(self, p2p_ops: list):
-        pyhccl_comm = self.pyhccl_comm
-        if pyhccl_comm is not None and not pyhccl_comm.disabled:
-            pyhccl_comm.batch_isend_irecv(p2p_ops)
-        else:
-            raise ValueError("No PyHccl communicator found")

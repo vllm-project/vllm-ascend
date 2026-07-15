@@ -171,8 +171,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         self.supports_eplb = True
 
         if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
-            device_group = get_mc2_group().device_group
-            self.moe_all_to_all_group_name = get_group_name(device_group)
+            self.moe_all_to_all_group_name = get_group_name(get_mc2_group())
             if not self.moe_all_to_all_group_name:
                 logger.warning_once(
                     "[vllm-ascend/W8A8_DYNAMIC] MC2 group metadata unavailable, "
