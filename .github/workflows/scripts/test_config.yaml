@@ -121,6 +121,16 @@
   tests:
     - tests/e2e/pull_request/four_card/context_parallel/
 
+- name: attention_quest
+  optional: false
+  base: attention_common
+  source_file_dependencies:
+    - vllm_ascend/attention/quest_decode.py
+    - vllm_ascend/ops/select_attention.py
+  tests:
+    - tests/e2e/pull_request/one_card/ops/quest/test_paged_select_attention.py
+    - tests/e2e/pull_request/one_card/ops/quest/test_quest_ops.py
+
 # Compilation
 - name: compilation_aclgraph
   optional: false
@@ -699,6 +709,8 @@ estimated_times:
   tests/e2e/pull_request/one_card/lora/test_qwen3_reranker_lora.py: 340
   tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py: 1310
   tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py: 30
+  tests/e2e/pull_request/one_card/ops/quest/test_paged_select_attention.py: 30
+  tests/e2e/pull_request/one_card/ops/quest/test_quest_ops.py: 40
   tests/e2e/pull_request/one_card/pooling/test_classification.py: 250
   tests/e2e/pull_request/one_card/pooling/test_embedding.py: 580
   tests/e2e/pull_request/one_card/pooling/test_scoring.py: 700

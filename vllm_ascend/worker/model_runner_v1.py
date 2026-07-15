@@ -558,6 +558,7 @@ class NPUModelRunner(GPUModelRunner):
             ),
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
         )
+        self.quest_decode_metadata_manager: Any = None
         self.num_draft_tokens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         # here we use int32
         self.sampled_token_ids_pinned_cpu = torch.empty(
@@ -3210,9 +3211,11 @@ class NPUModelRunner(GPUModelRunner):
             attn_state=self.attn_state,
             decode_token_per_req=self.decode_token_per_req,
             prefill_context_parallel_metadata=self.long_seq_metadata,
-            group_len = self.group_len.gpu[:num_reqs_padded],
-            group_key_idx = self.group_key_idx.gpu[:num_reqs_padded],
-            group_key_cache_idx = self.group_key_cache_idx.gpu[:num_reqs_padded],
+            group_len=self.group_len.gpu[:num_reqs_padded],
+            group_key_idx=self.group_key_idx.gpu[:num_reqs_padded],
+            group_key_cache_idx=self.group_key_cache_idx.gpu[:num_reqs_padded],
+            quest_manager=self.quest_decode_metadata_manager,
+            quest_req_ids=self.input_batch.req_ids[:num_reqs],
         )
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
@@ -3891,6 +3894,20 @@ class NPUModelRunner(GPUModelRunner):
 
         self.may_reinitialize_input_batch(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
+        if self.ascend_config.quest_decode_config.enable:
+            from vllm_ascend.attention.quest_decode import QuestDecodeMetadataManager
+
+            self.quest_decode_metadata_manager = QuestDecodeMetadataManager(
+                vllm_config=self.vllm_config,
+                ascend_config=self.ascend_config,
+                max_encoder_len=self.max_encoder_len,
+                max_num_reqs=self.max_num_reqs,
+                device=self.device,
+                pin_memory=self.pin_memory,
+                use_sparse=self.use_sparse,
+                kv_caches=kv_caches,
+                shared_kv_cache_layers=self.shared_kv_cache_layers,
+            )
         # TODO: refactor the logic of attention
         if (
             self.speculative_config

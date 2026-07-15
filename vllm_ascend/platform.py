@@ -33,7 +33,7 @@ os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 
 # isort: off
 from vllm_ascend.utils import (
@@ -807,7 +807,18 @@ class NPUPlatform(Platform):
         if is_310p():
             return backend_map_310.get(key, backend_map_310[(False, False)])
 
+        # Replace attention_v1 with quest if it is enabled
+        if cls._quest_decode_enabled() and key == (False, False) and not use_compress:
+            return "vllm_ascend.attention.quest_decode.QuestAttentionBackend"
+
         return backend_map[(attn_selector_config.use_mla, attn_selector_config.use_sparse, use_compress)]
+
+    @classmethod
+    def _quest_decode_enabled(cls) -> bool:
+        try:
+            return bool(get_ascend_config().quest_decode_config.enable)
+        except RuntimeError:
+            return False
 
     @classmethod
     def _validate_fa3_backend(cls, key, attn_selector_config):
