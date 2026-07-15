@@ -99,7 +99,7 @@ jobs:
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           python3 .github/workflows/scripts/select_tests.py \
             --explicit-e2e-tests \
-              tests/e2e/pull_request/one_card/test_batch_invariant.py \
+              tests/e2e/pull_request/one_card/test_sampler.py \
               tests/e2e/pull_request/one_card/test_cpu_offloading.py
 
   run-full-tests:

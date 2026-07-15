@@ -473,10 +473,30 @@ jobs:
                 ('coverage.tar', f'{OBS_PREFIX}/coverage.tar'),
                 ('coverage_version.txt', f'{OBS_PREFIX}/coverage_version.txt'),
             ]
+            import time
+            # uploadFile does automatic multipart upload: each part is its own
+            # small HTTP request that the SDK re-transmits on transient failures,
+            # so a mid-upload TLS drop (SSLEOFError on putFile's single big body)
+            # no longer loses the whole file.
             for local_path, obs_path in uploads:
-                resp = client.putFile(OBS_BUCKET, obs_path, local_path)
-                if resp.status < 300:
-                    print(f'Uploaded: {local_path} -> {obs_path}')
-                else:
-                    raise Exception(f'Failed to upload {local_path}: {resp.errorMessage}')
+                last_err = None
+                for attempt in range(1, 4):
+                    try:
+                        resp = client.uploadFile(
+                            OBS_BUCKET, obs_path, local_path,
+                            partSize=8 * 1024 * 1024,
+                            taskNum=3,
+                            enableCheckpoint=False,
+                        )
+                        if resp.status < 300:
+                            print(f'Uploaded: {local_path} -> {obs_path}')
+                            last_err = None
+                            break
+                        last_err = f'{resp.status} {resp.errorMessage}'
+                    except Exception as exc:
+                        last_err = repr(exc)
+                    print(f'Upload attempt {attempt} failed for {local_path}: {last_err}; retrying...')
+                    time.sleep(5 * attempt)
+                if last_err is not None:
+                    raise Exception(f'Failed to upload {local_path}: {last_err}')
             EOF
