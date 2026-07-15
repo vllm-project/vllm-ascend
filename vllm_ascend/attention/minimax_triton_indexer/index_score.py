@@ -31,9 +31,7 @@ def _as_triton_index_kv_cache(
         index_kv_cache = index_kv_cache[0]
     if index_kv_cache.ndim == 4:
         if index_kv_cache.shape[2] != 1:
-            raise ValueError(
-                f"Unexpected index cache head dim: {tuple(index_kv_cache.shape)}"
-            )
+            raise ValueError(f"Unexpected index cache head dim: {tuple(index_kv_cache.shape)}")
         index_kv_cache = index_kv_cache.squeeze(2)
     if index_kv_cache.ndim != 3:
         raise ValueError(f"Unexpected index cache ndim: {index_kv_cache.ndim}")
@@ -42,14 +40,14 @@ def _as_triton_index_kv_cache(
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE_Q': 4}, num_warps=1),
-        triton.Config({'BLOCK_SIZE_Q': 8}, num_warps=1),
-        triton.Config({'BLOCK_SIZE_Q': 16}, num_warps=1),
-        triton.Config({'BLOCK_SIZE_Q': 32}, num_warps=1),
-        triton.Config({'BLOCK_SIZE_Q': 64}, num_warps=1),
-        triton.Config({'BLOCK_SIZE_Q': 128}, num_warps=1),
+        triton.Config({"BLOCK_SIZE_Q": 4}, num_warps=1),
+        triton.Config({"BLOCK_SIZE_Q": 8}, num_warps=1),
+        triton.Config({"BLOCK_SIZE_Q": 16}, num_warps=1),
+        triton.Config({"BLOCK_SIZE_Q": 32}, num_warps=1),
+        triton.Config({"BLOCK_SIZE_Q": 64}, num_warps=1),
+        triton.Config({"BLOCK_SIZE_Q": 128}, num_warps=1),
     ],
-    key=['head_dim', 'num_q_blocks'],
+    key=["head_dim", "num_q_blocks"],
 )
 @triton.jit(do_not_specialize_on_alignment=["seq_lens", "prefix_lens"])
 def _index_block_score_kernel(
@@ -105,10 +103,7 @@ def _index_block_score_kernel(
     hi = min(seq_len, prefix_len + (pid_q + 1) * BLOCK_SIZE_Q)
     q_store_mask = (pid_q * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q)) < q_len
     s_ptrs_base = (
-        score_ptr
-        + pid_h * stride_s_h
-        + (seq_start + pid_q * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q))
-        * stride_s_n
+        score_ptr + pid_h * stride_s_h + (seq_start + pid_q * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q)) * stride_s_n
     )
     # Process four sparse blocks per outer iteration to minimize loop overhead
     # and expose multiple independent dot-product streams for scheduling.
@@ -218,9 +213,7 @@ def minimax_m3_index_score(
     """
     index_kv_cache = _as_triton_index_kv_cache(index_kv_cache)
     total_q, num_idx_heads, head_dim = idx_q.shape
-    assert num_idx_heads == num_kv_heads, (
-        "M3 expects num_idx_heads == num_kv_heads (no topk index reduce)"
-    )
+    assert num_idx_heads == num_kv_heads, "M3 expects num_idx_heads == num_kv_heads (no topk index reduce)"
     batch = cu_seqlens_q.shape[0] - 1
     max_block = triton.cdiv(max_seq_len, SPARSE_BLOCK_SIZE)
 
@@ -233,7 +226,7 @@ def minimax_m3_index_score(
     BLOCK_SIZE_Q = 64  # default, overridden by autotune
     num_q_blocks = triton.cdiv(max_query_len, BLOCK_SIZE_Q)
     sm_scale_log2e = sm_scale * 1.4426950409
-    grid_score = lambda META: (triton.cdiv(max_query_len, META['BLOCK_SIZE_Q']), batch * num_idx_heads)
+    grid_score = lambda META: (triton.cdiv(max_query_len, META["BLOCK_SIZE_Q"]), batch * num_idx_heads)
     _index_block_score_kernel[grid_score](
         idx_q,
         index_kv_cache,

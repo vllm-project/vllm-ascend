@@ -11,34 +11,27 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import regex as re
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
     FunctionDefinition,
 )
 from vllm.entrypoints.openai.engine.protocol import (
-    DeltaFunctionCall,
     DeltaMessage,
-    DeltaToolCall,
-    ExtractedToolCallInformation,
-    ToolCall,
 )
-
 from vllm_ascend.patch.platform.patch_minimax_m3_tool_call_parser import (
+    _ELEMENT_END_START,
+    _ELEMENT_START,
+    _INVOKE_END,
+    _INVOKE_START,
+    _NAMESPACE,
+    _TOOL_CALL_END,
+    _TOOL_CALL_START,
     MinimaxM3ToolParser,
     _coerce_value,
     _extract_types_from_schema,
     _find_tool_properties,
     _find_tool_properties_from_schemas,
     _normalize_to_json,
-    _NAMESPACE,
-    _TOOL_CALL_START,
-    _TOOL_CALL_END,
-    _INVOKE_START,
-    _INVOKE_END,
-    _ELEMENT_START,
-    _ELEMENT_END_START,
-    _MIXED_TEXT_FIELD,
 )
 
 # ===========================================================================
@@ -173,6 +166,7 @@ def _collect_tool_calls(results: list[DeltaMessage]) -> dict[int, dict[str, Any]
 # Module-level function: _extract_types_from_schema
 # ===========================================================================
 
+
 class TestExtractTypesFromSchema:
     def test_none_returns_string(self):
         assert _extract_types_from_schema(None) == ["string"]
@@ -223,6 +217,7 @@ class TestExtractTypesFromSchema:
 # ===========================================================================
 # Module-level function: _coerce_value
 # ===========================================================================
+
 
 class TestCoerceValue:
     def test_empty_string(self):
@@ -292,6 +287,7 @@ class TestCoerceValue:
 # Module-level function: _find_tool_properties
 # ===========================================================================
 
+
 class TestFindToolProperties:
     def test_none_tools(self):
         assert _find_tool_properties(None, "fn") == {}
@@ -348,6 +344,7 @@ class TestFindToolProperties:
 # Module-level function: _find_tool_properties_from_schemas
 # ===========================================================================
 
+
 class TestFindToolPropertiesFromSchemas:
     def test_existing_key(self):
         schemas = {"fn": {"city": {"type": "string"}}}
@@ -361,6 +358,7 @@ class TestFindToolPropertiesFromSchemas:
 # ===========================================================================
 # Module-level function: _normalize_to_json
 # ===========================================================================
+
 
 class TestNormalizeToJson:
     def test_flat_elements_no_schema(self):
@@ -424,6 +422,7 @@ class TestNormalizeToJson:
 # MinimaxM3ToolParser: __init__
 # ===========================================================================
 
+
 class TestParserInit:
     def test_init_without_tools(self):
         parser = _make_parser()
@@ -478,6 +477,7 @@ class TestParserInit:
 # MinimaxM3ToolParser: extract_tool_calls (non-streaming)
 # ===========================================================================
 
+
 class TestExtractToolCalls:
     def test_plain_text_no_tool_call(self):
         parser = _make_parser()
@@ -499,9 +499,7 @@ class TestExtractToolCalls:
     def test_multiple_invokes_in_one_block(self):
         parser = _make_parser(_get_weather_tools())
         invokes = (
-            _invoke("get_weather", _element("city", "Seattle"))
-            + "\n"
-            + _invoke("get_weather", _element("city", "NYC"))
+            _invoke("get_weather", _element("city", "Seattle")) + "\n" + _invoke("get_weather", _element("city", "NYC"))
         )
         tc = _tool_block(invokes)
         output = parser.extract_tool_calls(tc, None)
@@ -517,11 +515,7 @@ class TestExtractToolCalls:
             "shipping",
             _element("city", "Singapore") + _element("zip", "018956"),
         )
-        body = (
-            _element("user_id", "42")
-            + _element("urgent", "true")
-            + shipping_elem
-        )
+        body = _element("user_id", "42") + _element("urgent", "true") + shipping_elem
         tc = _tool_block(_invoke("create_order", body))
         output = parser.extract_tool_calls(tc, None)
         args = json.loads(output.tool_calls[0].function.arguments)
@@ -568,6 +562,7 @@ class TestExtractToolCalls:
 # MinimaxM3ToolParser: _parse_complete_output
 # ===========================================================================
 
+
 class TestParseCompleteOutput:
     def test_returns_content_before_tool_block(self):
         parser = _make_parser(_get_weather_tools())
@@ -602,6 +597,7 @@ class TestParseCompleteOutput:
 # MinimaxM3ToolParser: _parse_invoke_params
 # ===========================================================================
 
+
 class TestParseInvokeParams:
     def test_empty_body(self):
         parser = _make_parser(_get_weather_tools())
@@ -630,6 +626,7 @@ class TestParseInvokeParams:
 # ===========================================================================
 # MinimaxM3ToolParser: _parse_element_children
 # ===========================================================================
+
 
 class TestParseElementChildren:
     def test_empty_text(self):
@@ -696,6 +693,7 @@ class TestParseElementChildren:
 # MinimaxM3ToolParser: streaming state management
 # ===========================================================================
 
+
 class TestResetStreamingState:
     def test_all_fields_reset(self):
         parser = _make_parser()
@@ -739,9 +737,7 @@ class TestStartsNewToolBlock:
 
     def test_previous_has_start(self):
         parser = _make_parser()
-        assert parser._starts_new_tool_block(
-            _TOOL_CALL_START, _TOOL_CALL_START + "more"
-        ) is False
+        assert parser._starts_new_tool_block(_TOOL_CALL_START, _TOOL_CALL_START + "more") is False
 
 
 class TestGenerateToolCallId:
@@ -755,6 +751,7 @@ class TestGenerateToolCallId:
 # ===========================================================================
 # MinimaxM3ToolParser: _find_invoke_blocks
 # ===========================================================================
+
 
 class TestFindInvokeBlocks:
     def test_no_invoke(self):
@@ -780,10 +777,7 @@ class TestFindInvokeBlocks:
 
     def test_multiple_invokes(self):
         parser = _make_parser()
-        invokes = (
-            _invoke("get_weather", _element("city", "A"))
-            + _invoke("get_weather", _element("city", "B"))
-        )
+        invokes = _invoke("get_weather", _element("city", "A")) + _invoke("get_weather", _element("city", "B"))
         result = parser._find_invoke_blocks(invokes)
         assert len(result) == 2
         assert result[0]["complete"] is True
@@ -799,6 +793,7 @@ class TestFindInvokeBlocks:
 # ===========================================================================
 # MinimaxM3ToolParser: _extract_completed_invokes
 # ===========================================================================
+
 
 class TestExtractCompletedInvokes:
     def test_single_complete_invoke(self):
@@ -837,6 +832,7 @@ class TestExtractCompletedInvokes:
 # MinimaxM3ToolParser: _try_stream_partial_args
 # ===========================================================================
 
+
 class TestTryStreamPartialArgs:
     def test_first_sight_emits_name(self):
         parser = _make_parser(_get_weather_tools())
@@ -862,15 +858,14 @@ class TestTryStreamPartialArgs:
         parser._invoke_names.append("get_weather")
         parser.streamed_args_for_tool.append("{")
         parser._tool_call_ids.append("call_test123")
-        result = parser._try_stream_partial_args(
-            0, "get_weather", _element("city", "Seattle")
-        )
+        result = parser._try_stream_partial_args(0, "get_weather", _element("city", "Seattle"))
         assert result is not None
 
 
 # ===========================================================================
 # MinimaxM3ToolParser: _build_partial_arguments
 # ===========================================================================
+
 
 class TestBuildPartialArguments:
     def test_complete_params(self):
@@ -908,71 +903,53 @@ class TestBuildPartialArguments:
 # MinimaxM3ToolParser: _serialize_param_value (static)
 # ===========================================================================
 
+
 class TestSerializeParamValue:
     def test_complete_string(self):
-        result = MinimaxM3ToolParser._serialize_param_value(
-            "hello", ["string"], is_complete=True
-        )
+        result = MinimaxM3ToolParser._serialize_param_value("hello", ["string"], is_complete=True)
         assert "hello" in result
 
     def test_complete_integer(self):
-        result = MinimaxM3ToolParser._serialize_param_value(
-            "42", ["integer"], is_complete=True
-        )
+        result = MinimaxM3ToolParser._serialize_param_value("42", ["integer"], is_complete=True)
         assert "42" in result
 
     def test_complete_boolean(self):
-        result = MinimaxM3ToolParser._serialize_param_value(
-            "true", ["boolean"], is_complete=True
-        )
+        result = MinimaxM3ToolParser._serialize_param_value("true", ["boolean"], is_complete=True)
         assert result == "true"
 
     def test_incomplete_empty_value(self):
-        result = MinimaxM3ToolParser._serialize_param_value(
-            "", ["string"], is_complete=False
-        )
+        result = MinimaxM3ToolParser._serialize_param_value("", ["string"], is_complete=False)
         assert result == ""
 
     def test_incomplete_null(self):
-        result = MinimaxM3ToolParser._serialize_param_value(
-            "nu", ["null"], is_complete=False
-        )
+        result = MinimaxM3ToolParser._serialize_param_value("nu", ["null"], is_complete=False)
         assert result == "nu"
 
     def test_incomplete_boolean_true(self):
-        result = MinimaxM3ToolParser._serialize_param_value(
-            "tr", ["boolean"], is_complete=False
-        )
+        result = MinimaxM3ToolParser._serialize_param_value("tr", ["boolean"], is_complete=False)
         assert result == "tr"
 
     def test_incomplete_boolean_false(self):
-        result = MinimaxM3ToolParser._serialize_param_value(
-            "fal", ["boolean"], is_complete=False
-        )
+        result = MinimaxM3ToolParser._serialize_param_value("fal", ["boolean"], is_complete=False)
         assert result == "fal"
 
     def test_incomplete_numeric(self):
-        result = MinimaxM3ToolParser._serialize_param_value(
-            "12", ["integer"], is_complete=False
-        )
+        result = MinimaxM3ToolParser._serialize_param_value("12", ["integer"], is_complete=False)
         assert result == "12"
 
     def test_incomplete_object(self):
-        result = MinimaxM3ToolParser._serialize_param_value(
-            '{"key":', ["object"], is_complete=False
-        )
+        result = MinimaxM3ToolParser._serialize_param_value('{"key":', ["object"], is_complete=False)
         assert result == '{"key":'
 
     def test_incomplete_string_quoted(self):
-        result = MinimaxM3ToolParser._serialize_param_value(
-            "hello", ["string"], is_complete=False
-        )
+        result = MinimaxM3ToolParser._serialize_param_value("hello", ["string"], is_complete=False)
         assert "hello" in result  # JSON-quoted
 
 
 # ===========================================================================
 # MinimaxM3ToolParser: extract_tool_calls_streaming
 # ===========================================================================
+
 
 class TestExtractToolCallsStreaming:
     def test_plain_text_before_tool_call(self):
@@ -1006,13 +983,15 @@ class TestExtractToolCallsStreaming:
 
     def test_streaming_with_token_ids(self):
         parser = _make_parser(_get_weather_tools())
-        full = _tool_block(_invoke("get_weather", _element("city", "Seattle")))
         # Split into chunks and simulate
-        results = _feed(parser, [
-            _TOOL_CALL_START,
-            _invoke("get_weather", _element("city", "Seattle")),
-            _TOOL_CALL_END,
-        ])
+        results = _feed(
+            parser,
+            [
+                _TOOL_CALL_START,
+                _invoke("get_weather", _element("city", "Seattle")),
+                _TOOL_CALL_END,
+            ],
+        )
         tcs = _collect_tool_calls(results)
         assert len(tcs) >= 1
 
@@ -1034,7 +1013,7 @@ class TestExtractToolCallsStreaming:
         parser._in_tool_block = True
         parser._tool_block_done = True
         parser._emitted_tool_count = 3
-        result = parser.extract_tool_calls_streaming(
+        parser.extract_tool_calls_streaming(
             previous_text="",
             current_text=_TOOL_CALL_START,
             delta_text=_TOOL_CALL_START,
@@ -1063,11 +1042,11 @@ class TestExtractToolCallsStreaming:
 # Registration function
 # ===========================================================================
 
+
 class TestRegistration:
     def test_registration_idempotent(self):
         """Calling the registration function twice should not raise."""
         from vllm.tool_parsers.abstract_tool_parser import ToolParserManager
-
         from vllm_ascend.patch.platform.patch_minimax_m3_tool_call_parser import (
             _register_minimax_m3_tool_parser,
         )
@@ -1085,6 +1064,7 @@ class TestRegistration:
 # Integration-style: complete tool call parsing roundtrip
 # ===========================================================================
 
+
 class TestRoundtrip:
     """End-to-end tests that exercise the full parser pipeline."""
 
@@ -1098,12 +1078,7 @@ class TestRoundtrip:
         # has the wrapper element whose name is ignored for schema-typed arrays).
         items_body = _element("sku", "book-001") + _element("qty", "2")
         items = _element("items", items_body)
-        body = (
-            _element("user_id", "42")
-            + _element("urgent", "true")
-            + shipping
-            + items
-        )
+        body = _element("user_id", "42") + _element("urgent", "true") + shipping + items
         tc = _tool_block(_invoke("create_order", body))
         output = parser.extract_tool_calls(tc, None)
         assert output.tools_called is True

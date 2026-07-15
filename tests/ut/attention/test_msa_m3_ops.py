@@ -37,9 +37,7 @@ def _allocate_main_kv_cache(
     device: torch.device,
     dtype: torch.dtype = DTYPE,
 ) -> torch.Tensor:
-    return torch.randn(
-        2, num_pages, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM, device=device, dtype=dtype
-    )
+    return torch.randn(2, num_pages, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM, device=device, dtype=dtype)
 
 
 def _allocate_index_kv_cache(
@@ -52,9 +50,7 @@ def _allocate_index_kv_cache(
     if layout == "3d":
         return torch.randn(num_pages, BLOCK_SIZE, head_dim, device=device, dtype=dtype)
     if layout == "4d":
-        return torch.randn(
-            num_pages, BLOCK_SIZE, 1, head_dim, device=device, dtype=dtype
-        )
+        return torch.randn(num_pages, BLOCK_SIZE, 1, head_dim, device=device, dtype=dtype)
     raise ValueError(f"Unknown index cache layout: {layout}")
 
 
@@ -84,9 +80,7 @@ def _reference_index_topk(
     sm_scale: float,
 ) -> torch.Tensor:
     total_q, num_idx_heads, _ = idx_q.shape
-    out = torch.full(
-        (num_idx_heads, total_q, topk), -1, device=idx_q.device, dtype=torch.int32
-    )
+    out = torch.full((num_idx_heads, total_q, topk), -1, device=idx_q.device, dtype=torch.int32)
 
     q_start = 0
     for req_id, (q_len, seq_len, prefix_len) in enumerate(
@@ -172,12 +166,8 @@ def _reference_sparse_attn(
             q_heads = q_req[:, head_start:head_end].transpose(0, 1).float()
             k_head = k_req[:, kv_head].float().T.expand(gqa_group_size, -1, -1)
             scores = torch.bmm(q_heads, k_head).transpose(0, 1) * SM_SCALE
-            probs = torch.softmax(
-                scores.masked_fill(~mask[:, None, :], -float("inf")), -1
-            )
-            out[q_start:q_end, head_start:head_end] = torch.einsum(
-                "qhk,kd->qhd", probs, v_req[:, kv_head]
-            )
+            probs = torch.softmax(scores.masked_fill(~mask[:, None, :], -float("inf")), -1)
+            out[q_start:q_end, head_start:head_end] = torch.einsum("qhk,kd->qhd", probs, v_req[:, kv_head])
         q_start += q_len
     return out.to(q.dtype)
 
@@ -194,16 +184,12 @@ def _build_prefill_topk_idx(
     total_q: int,
     device: torch.device,
 ) -> torch.Tensor:
-    topk_idx = torch.full(
-        (NUM_KV_HEADS, total_q, TOPK), -1, device=device, dtype=torch.int32
-    )
+    topk_idx = torch.full((NUM_KV_HEADS, total_q, TOPK), -1, device=device, dtype=torch.int32)
     q_start = 0
     for q_len, prefix_len in zip(q_lens_t.tolist(), prefix_lens.tolist()):
         for local_q in range(q_len):
             current_block = (prefix_len + local_q) // BLOCK_SIZE
-            older_blocks = torch.randperm(
-                current_block, device=device, dtype=torch.int32
-            )
+            older_blocks = torch.randperm(current_block, device=device, dtype=torch.int32)
             selected = torch.cat(
                 [
                     torch.tensor([current_block], device=device, dtype=torch.int32),
@@ -230,9 +216,7 @@ def _build_decode_sparse_inputs(
     block_table = torch.zeros(batch, max_blocks, device=device, dtype=torch.int32)
     base_page = 0
     for req_id, num_req_pages in enumerate(pages_per_req):
-        block_table[req_id, :num_req_pages] = physical_pages[
-            base_page : base_page + num_req_pages
-        ]
+        block_table[req_id, :num_req_pages] = physical_pages[base_page : base_page + num_req_pages]
         base_page += num_req_pages
 
     seq_lens = torch.tensor(
@@ -240,9 +224,7 @@ def _build_decode_sparse_inputs(
         device=device,
         dtype=torch.int32,
     )
-    q = torch.randn(
-        batch * decode_query_len, NUM_Q_HEADS, HEAD_DIM, device=device, dtype=DTYPE
-    )
+    q = torch.randn(batch * decode_query_len, NUM_Q_HEADS, HEAD_DIM, device=device, dtype=DTYPE)
     kv_cache = _allocate_main_kv_cache(num_pages, device)
 
     topk_idx = torch.full(
@@ -256,9 +238,7 @@ def _build_decode_sparse_inputs(
         for local_q in range(decode_query_len):
             query_pos = seq_len - decode_query_len + local_q
             current_block = query_pos // BLOCK_SIZE
-            older_blocks = torch.randperm(
-                current_block, device=device, dtype=torch.int32
-            )
+            older_blocks = torch.randperm(current_block, device=device, dtype=torch.int32)
             selected = torch.cat(
                 [
                     torch.tensor([current_block], device=device, dtype=torch.int32),
@@ -288,13 +268,9 @@ def test_prefill_index_topk_torch(device: torch.device, index_layout: str) -> No
 
     cu_seqlens = torch.zeros(batch + 1, device=device, dtype=torch.int32)
     cu_seqlens[1:] = q_lens.cumsum(0)
-    block_table = torch.randperm(num_pages, device=device, dtype=torch.int32).reshape(
-        batch, max_blocks
-    )
+    block_table = torch.randperm(num_pages, device=device, dtype=torch.int32).reshape(batch, max_blocks)
     idx_q = torch.ones(q_lens.sum().item(), num_idx_heads, head_dim, device=device)
-    index_kv_cache = _allocate_index_kv_cache(
-        num_pages, head_dim, index_layout, device
-    )
+    index_kv_cache = _allocate_index_kv_cache(num_pages, head_dim, index_layout, device)
     for req_id in range(batch):
         for block_id in range(max_blocks):
             page = int(block_table[req_id, block_id].item())
@@ -366,17 +342,11 @@ def test_decode_index_topk_torch(
     max_blocks = (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
     num_pages = active_batch * max_blocks
 
-    active_block_table = torch.randperm(
-        num_pages, device=device, dtype=torch.int32
-    ).reshape(active_batch, max_blocks)
+    active_block_table = torch.randperm(num_pages, device=device, dtype=torch.int32).reshape(active_batch, max_blocks)
     block_table = torch.zeros(batch, max_blocks, device=device, dtype=torch.int32)
     block_table[:active_batch] = active_block_table
-    idx_q = torch.randn(
-        batch * decode_query_len, num_idx_heads, head_dim, device=device
-    )
-    index_kv_cache = _allocate_index_kv_cache(
-        num_pages, head_dim, index_layout, device
-    )
+    idx_q = torch.randn(batch * decode_query_len, num_idx_heads, head_dim, device=device)
+    index_kv_cache = _allocate_index_kv_cache(num_pages, head_dim, index_layout, device)
 
     sm_scale = head_dim**-0.5
     actual = minimax_m3_index_decode_torch(
@@ -430,9 +400,7 @@ def test_prefill_sparse_attn_torch(
     block_table = torch.zeros(batch, max_blocks, device=device, dtype=torch.int32)
     base_page = 0
     for req_id, num_req_pages in enumerate(pages_per_req):
-        block_table[req_id, :num_req_pages] = physical_pages[
-            base_page : base_page + num_req_pages
-        ]
+        block_table[req_id, :num_req_pages] = physical_pages[base_page : base_page + num_req_pages]
         base_page += num_req_pages
 
     q_lens_t = torch.tensor(q_lens, device=device, dtype=torch.int32)
@@ -506,9 +474,7 @@ def test_decode_sparse_attn_torch(
 
     active_batch = len(seq_lens_list)
     active_tokens = active_batch * decode_query_len
-    q_lens_t = torch.full(
-        (active_batch,), decode_query_len, device=device, dtype=torch.int32
-    )
+    q_lens_t = torch.full((active_batch,), decode_query_len, device=device, dtype=torch.int32)
     active_seq_lens = seq_lens[:active_batch]
     prefix_lens = active_seq_lens - q_lens_t
     expected = _reference_sparse_attn(

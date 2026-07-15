@@ -16,22 +16,18 @@ _LOGGED_INDEXER = False
 def log_sparse_attention_used() -> None:
     global _LOGGED_SPARSE_ATTN
     if not _LOGGED_SPARSE_ATTN:
-        from vllm.logger import init_logger
+        from vllm.logger import logger
 
-        init_logger(__name__).warning(
-            "MiniMax M3 sparse attention path is active (Ascend torch fallback)"
-        )
+        logger.warning("MiniMax M3 sparse attention path is active (Ascend torch fallback)")
         _LOGGED_SPARSE_ATTN = True
 
 
 def log_indexer_used() -> None:
     global _LOGGED_INDEXER
     if not _LOGGED_INDEXER:
-        from vllm.logger import init_logger
+        from vllm.logger import logger
 
-        init_logger(__name__).warning(
-            "MiniMax M3 lightning indexer path is active (Ascend torch fallback)"
-        )
+        logger.warning("MiniMax M3 lightning indexer path is active (Ascend torch fallback)")
         _LOGGED_INDEXER = True
 
 
@@ -92,9 +88,7 @@ def _topk_from_scores(
     if num_blocks <= topk:
         out = torch.full((topk,), -1, dtype=torch.int32, device=scores.device)
         if num_blocks > 0:
-            out[:num_blocks] = torch.arange(
-                num_blocks, dtype=torch.int32, device=scores.device
-            )
+            out[:num_blocks] = torch.arange(num_blocks, dtype=torch.int32, device=scores.device)
         return out
 
     forced = _forced_block_ids(num_blocks, init_blocks, local_blocks)
@@ -165,17 +159,13 @@ def minimax_m3_index_score_torch(
             )
             for h in range(num_idx_heads):
                 q_heads = idx_q[q_start + t]
-                per_head = torch.full(
-                    (hi_blocks,), float("-inf"), dtype=torch.float32, device=idx_q.device
-                )
+                per_head = torch.full((hi_blocks,), float("-inf"), dtype=torch.float32, device=idx_q.device)
                 for blk in range(hi_blocks):
                     page = bt_row[blk]
                     if page < 0:
                         continue
                     k_block = _get_index_block(cache, page)
-                    pos_end = min(
-                        SPARSE_BLOCK_SIZE, max(0, seq_len - blk * SPARSE_BLOCK_SIZE)
-                    )
+                    pos_end = min(SPARSE_BLOCK_SIZE, max(0, seq_len - blk * SPARSE_BLOCK_SIZE))
                     if pos_end <= 0:
                         continue
                     k_sel = k_block[:pos_end]
@@ -199,9 +189,7 @@ def minimax_m3_index_topk_torch(
     batch = cu_seqlens_q.shape[0] - 1
     cu_seqlens_q_cpu = cu_seqlens_q.detach().cpu().tolist()
     prefix_lens_cpu = prefix_lens.detach().cpu().tolist()
-    topk_idx = torch.full(
-        (num_idx_heads, total_q, topk), -1, dtype=torch.int32, device=score.device
-    )
+    topk_idx = torch.full((num_idx_heads, total_q, topk), -1, dtype=torch.int32, device=score.device)
     for b in range(batch):
         q_start = cu_seqlens_q_cpu[b]
         q_end = cu_seqlens_q_cpu[b + 1]
@@ -250,19 +238,13 @@ def minimax_m3_index_decode_torch(
     else:
         raise ValueError(f"Unexpected index cache ndim: {cache.ndim}")
 
-    q = idx_q[: num_reqs * decode_query_len].view(
-        num_reqs, decode_query_len, num_idx_heads, head_dim
-    )
+    q = idx_q[: num_reqs * decode_query_len].view(num_reqs, decode_query_len, num_idx_heads, head_dim)
     q = q.permute(0, 2, 1, 3).float() * sm_scale
     k_flat = k_blocks.reshape(num_reqs, max_blocks * SPARSE_BLOCK_SIZE, head_dim)
     token_scores = torch.matmul(q, k_flat.transpose(1, 2).unsqueeze(1))
-    token_scores = token_scores.view(
-        num_reqs, num_idx_heads, decode_query_len, max_blocks, SPARSE_BLOCK_SIZE
-    )
+    token_scores = token_scores.view(num_reqs, num_idx_heads, decode_query_len, max_blocks, SPARSE_BLOCK_SIZE)
 
-    q_offsets = torch.arange(
-        decode_query_len, dtype=seq_lens.dtype, device=seq_lens.device
-    )
+    q_offsets = torch.arange(decode_query_len, dtype=seq_lens.dtype, device=seq_lens.device)
     q_abs = seq_lens[:, None] - decode_query_len + q_offsets[None, :]
     block_ids = torch.arange(max_blocks, dtype=torch.long, device=idx_q.device)
     visible_blocks = torch.clamp(
@@ -272,22 +254,16 @@ def minimax_m3_index_decode_torch(
     )
     block_visible = block_ids.view(1, 1, max_blocks) < visible_blocks[:, :, None]
     offsets = torch.arange(SPARSE_BLOCK_SIZE, dtype=torch.long, device=idx_q.device)
-    token_positions = (
-        block_ids[:, None] * SPARSE_BLOCK_SIZE + offsets[None, :]
-    ).view(1, 1, max_blocks, SPARSE_BLOCK_SIZE)
+    token_positions = (block_ids[:, None] * SPARSE_BLOCK_SIZE + offsets[None, :]).view(
+        1, 1, max_blocks, SPARSE_BLOCK_SIZE
+    )
     token_valid = (
-        page_valid[:, None, :, None]
-        & block_visible[:, :, :, None]
-        & (token_positions <= q_abs[:, :, None, None])
+        page_valid[:, None, :, None] & block_visible[:, :, :, None] & (token_positions <= q_abs[:, :, None, None])
     )
-    token_scores = token_scores.masked_fill(
-        ~token_valid[:, None, :, :, :], float("-inf")
-    )
+    token_scores = token_scores.masked_fill(~token_valid[:, None, :, :, :], float("-inf"))
     block_scores = token_scores.max(dim=-1).values
     valid_blocks = block_visible & page_valid[:, None, :]
-    masked_scores = block_scores.masked_fill(
-        ~valid_blocks[:, None, :, :], float("-inf")
-    )
+    masked_scores = block_scores.masked_fill(~valid_blocks[:, None, :, :], float("-inf"))
     if init_blocks > 0 or local_blocks > 0:
         forced = torch.zeros_like(valid_blocks)
         if init_blocks > 0:
@@ -296,12 +272,8 @@ def minimax_m3_index_decode_torch(
             visible_counts = valid_blocks.sum(dim=-1, dtype=torch.long)
             local_start = torch.clamp(visible_counts - local_blocks, min=0)
             block_ids_view = block_ids.view(1, 1, max_blocks)
-            forced |= (block_ids_view >= local_start[:, :, None]) & (
-                block_ids_view < visible_counts[:, :, None]
-            )
-        masked_scores = masked_scores.masked_fill(
-            forced[:, None, :, :] & valid_blocks[:, None, :, :], float("inf")
-        )
+            forced |= (block_ids_view >= local_start[:, :, None]) & (block_ids_view < visible_counts[:, :, None])
+        masked_scores = masked_scores.masked_fill(forced[:, None, :, :] & valid_blocks[:, None, :, :], float("inf"))
     effective_topk = min(topk, block_scores.shape[-1])
     values, indices = torch.topk(masked_scores, k=effective_topk, dim=-1)
     topk_idx = indices.to(torch.int32)
@@ -316,15 +288,11 @@ def minimax_m3_index_decode_torch(
         topk_idx = torch.cat(
             [
                 topk_idx,
-                torch.full(
-                    pad_shape, -1, dtype=topk_idx.dtype, device=topk_idx.device
-                ),
+                torch.full(pad_shape, -1, dtype=topk_idx.dtype, device=topk_idx.device),
             ],
             dim=-1,
         )
-    return topk_idx.permute(1, 0, 2, 3).reshape(
-        num_idx_heads, num_reqs * decode_query_len, topk
-    )
+    return topk_idx.permute(1, 0, 2, 3).reshape(num_idx_heads, num_reqs * decode_query_len, topk)
 
 
 def _fill_missing_visible_topk(
@@ -400,10 +368,14 @@ def _sparse_masked_attention_request(
         scores = torch.bmm(q_heads, k_head).transpose(0, 1) * sm_scale
         scores = scores.masked_fill(~attn_mask[:, None, :], float("-inf"))
         probs = torch.softmax(scores, dim=-1)
-        out[:, heads] = torch.matmul(
-            probs.transpose(0, 1),
-            v_req[:, kv_h].float(),
-        ).transpose(0, 1).to(q_req.dtype)
+        out[:, heads] = (
+            torch.matmul(
+                probs.transpose(0, 1),
+                v_req[:, kv_h].float(),
+            )
+            .transpose(0, 1)
+            .to(q_req.dtype)
+        )
     return out
 
 
@@ -440,9 +412,7 @@ def minimax_m3_sparse_attn_torch(
             v_req = v_req.unsqueeze(1)
         q_req = q[q_start:q_end]
         topk_req = topk_idx[:, q_start:q_end]
-        output[q_start:q_end] = _sparse_masked_attention_request(
-            q_req, k_req, v_req, topk_req, prefix_len, sm_scale
-        )
+        output[q_start:q_end] = _sparse_masked_attention_request(q_req, k_req, v_req, topk_req, prefix_len, sm_scale)
 
 
 @torch.no_grad()
@@ -470,31 +440,21 @@ def minimax_m3_sparse_attn_decode_torch(
     topk = topk_idx.shape[-1]
     gqa = num_heads // num_kv_heads
 
-    q_view = q[: num_reqs * decode_query_len].view(
-        num_reqs, decode_query_len, num_heads, head_dim
-    )
+    q_view = q[: num_reqs * decode_query_len].view(num_reqs, decode_query_len, num_heads, head_dim)
     q_view = q_view.view(num_reqs, decode_query_len, num_kv_heads, gqa, head_dim)
     q_view = q_view.permute(0, 2, 1, 3, 4).float()
 
-    selected = topk_idx[:, : num_reqs * decode_query_len].view(
-        num_kv_heads, num_reqs, decode_query_len, topk
-    )
+    selected = topk_idx[:, : num_reqs * decode_query_len].view(num_kv_heads, num_reqs, decode_query_len, topk)
     selected = selected.permute(1, 0, 2, 3).long()
     safe_selected = selected.clamp(min=0, max=max_blocks - 1)
     block_rows = block_table[:num_reqs, :max_blocks].long()
-    gather_rows = block_rows[:, None, None, :].expand(
-        num_reqs, num_kv_heads, decode_query_len, max_blocks
-    )
+    gather_rows = block_rows[:, None, None, :].expand(num_reqs, num_kv_heads, decode_query_len, max_blocks)
     pages = torch.gather(gather_rows, dim=-1, index=safe_selected)
     selected_valid = (selected >= 0) & (selected < max_blocks) & (pages >= 0)
 
     safe_pages = pages.clamp_min(0).long()
-    rows = torch.arange(
-        SPARSE_BLOCK_SIZE, dtype=torch.long, device=k_cache.device
-    ).view(1, 1, 1, 1, SPARSE_BLOCK_SIZE)
-    kv_heads = torch.arange(
-        num_kv_heads, dtype=torch.long, device=k_cache.device
-    ).view(1, num_kv_heads, 1, 1, 1)
+    rows = torch.arange(SPARSE_BLOCK_SIZE, dtype=torch.long, device=k_cache.device).view(1, 1, 1, 1, SPARSE_BLOCK_SIZE)
+    kv_heads = torch.arange(num_kv_heads, dtype=torch.long, device=k_cache.device).view(1, num_kv_heads, 1, 1, 1)
     if k_cache.ndim == 4:
         k_sel = k_cache[safe_pages.unsqueeze(-1), rows, kv_heads, :]
         v_sel = v_cache[safe_pages.unsqueeze(-1), rows, kv_heads, :]
@@ -508,29 +468,17 @@ def minimax_m3_sparse_attn_decode_torch(
     q_offsets = torch.arange(decode_query_len, dtype=torch.long, device=q.device)
     q_abs = seq_lens[:, None] - decode_query_len + q_offsets[None, :]
     offsets = torch.arange(SPARSE_BLOCK_SIZE, dtype=torch.long, device=q.device)
-    token_positions = selected[..., None] * SPARSE_BLOCK_SIZE + offsets.view(
-        1, 1, 1, 1, SPARSE_BLOCK_SIZE
-    )
-    token_valid = selected_valid[..., None] & (
-        token_positions <= q_abs[:, None, :, None, None]
-    )
+    token_positions = selected[..., None] * SPARSE_BLOCK_SIZE + offsets.view(1, 1, 1, 1, SPARSE_BLOCK_SIZE)
+    token_valid = selected_valid[..., None] & (token_positions <= q_abs[:, None, :, None, None])
 
-    k_flat = k_sel.reshape(
-        num_reqs, num_kv_heads, decode_query_len, topk * SPARSE_BLOCK_SIZE, head_dim
-    ).float()
-    v_flat = v_sel.reshape(
-        num_reqs, num_kv_heads, decode_query_len, topk * SPARSE_BLOCK_SIZE, head_dim
-    ).float()
-    flat_valid = token_valid.reshape(
-        num_reqs, num_kv_heads, decode_query_len, topk * SPARSE_BLOCK_SIZE
-    )
+    k_flat = k_sel.reshape(num_reqs, num_kv_heads, decode_query_len, topk * SPARSE_BLOCK_SIZE, head_dim).float()
+    v_flat = v_sel.reshape(num_reqs, num_kv_heads, decode_query_len, topk * SPARSE_BLOCK_SIZE, head_dim).float()
+    flat_valid = token_valid.reshape(num_reqs, num_kv_heads, decode_query_len, topk * SPARSE_BLOCK_SIZE)
 
     scores = torch.matmul(q_view, k_flat.transpose(-1, -2)) * sm_scale
     scores = scores.masked_fill(~flat_valid[:, :, :, None, :], -1.0e30)
     probs = torch.softmax(scores, dim=-1)
     probs = probs.masked_fill(~flat_valid[:, :, :, None, :], 0.0)
     out = torch.matmul(probs, v_flat).to(q.dtype)
-    out = out.permute(0, 2, 1, 3, 4).reshape(
-        num_reqs * decode_query_len, num_heads, head_dim
-    )
+    out = out.permute(0, 2, 1, 3, 4).reshape(num_reqs * decode_query_len, num_heads, head_dim)
     output[: num_reqs * decode_query_len] = out

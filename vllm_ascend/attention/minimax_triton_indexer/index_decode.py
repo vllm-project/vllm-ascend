@@ -42,9 +42,7 @@ def _as_triton_index_kv_cache(
         index_kv_cache = index_kv_cache[0]
     if index_kv_cache.ndim == 4:
         if index_kv_cache.shape[2] != 1:
-            raise ValueError(
-                f"Unexpected index cache head dim: {tuple(index_kv_cache.shape)}"
-            )
+            raise ValueError(f"Unexpected index cache head dim: {tuple(index_kv_cache.shape)}")
         index_kv_cache = index_kv_cache.squeeze(2)
     if index_kv_cache.ndim != 3:
         raise ValueError(f"Unexpected index cache ndim: {index_kv_cache.ndim}")
@@ -77,12 +75,8 @@ def _merge_topk_pairs(
 
         take_left_i32 = (left_best >= right_best).to(tl.int32)
 
-        left_selected_i32 = (
-            (off_t == left_offset).to(tl.int32) * left_valid_i32
-        )
-        right_selected_i32 = (
-            (off_t == right_offset).to(tl.int32) * right_valid_i32
-        )
+        left_selected_i32 = (off_t == left_offset).to(tl.int32) * left_valid_i32
+        right_selected_i32 = (off_t == right_offset).to(tl.int32) * right_valid_i32
         left_index = tl.sum(
             tl.where(left_selected_i32 != 0, left_indices, 0),
             axis=0,
@@ -183,10 +177,7 @@ def _decode_fused_chunk_topk_kernel(
 
     # Q [D, H]
     q = tl.load(
-        q_ptr
-        + pid_n * stride_q_n
-        + tl.arange(0, num_idx_heads) * stride_q_h
-        + off_d[:, None] * stride_q_d,
+        q_ptr + pid_n * stride_q_n + tl.arange(0, num_idx_heads) * stride_q_h + off_d[:, None] * stride_q_d,
     )  # [D, H]
 
     # Partial top-k per head: [num_idx_heads, TOPK_WIDTH]
@@ -203,10 +194,7 @@ def _decode_fused_chunk_topk_kernel(
     for blk in tl.range(chunk_start, chunk_end - 1):
         page = tl.load(bt_row + blk).to(tl.int64)
         k = tl.load(
-            ik_cache_ptr
-            + page * stride_ik_blk
-            + off_k[:, None] * stride_ik_pos
-            + off_d * stride_ik_d,
+            ik_cache_ptr + page * stride_ik_blk + off_k[:, None] * stride_ik_pos + off_d * stride_ik_d,
         )  # [N, D]
 
         kq = tl.dot(k, q) * sm_scale_log2e  # [N, H]
@@ -220,10 +208,8 @@ def _decode_fused_chunk_topk_kernel(
         min_score = tl.min(topk_scores, axis=1)  # [H]
         min_pos = tl.argmin(topk_scores, axis=1)  # [H]
 
-        should_replace = (score > min_score)  # [H]
-        replace_mask = (
-            (off_t[None, :] == min_pos[:, None]) & should_replace[:, None]
-        )
+        should_replace = score > min_score  # [H]
+        replace_mask = (off_t[None, :] == min_pos[:, None]) & should_replace[:, None]
 
         block_idx = (blk + 1).to(tl.int32)
         topk_scores = tl.where(replace_mask, score[:, None], topk_scores)
@@ -235,10 +221,7 @@ def _decode_fused_chunk_topk_kernel(
     pos = blk * BLOCK_SIZE_K + off_k
     pos_mask = pos < kv_len
     k = tl.load(
-        ik_cache_ptr
-        + page * stride_ik_blk
-        + off_k[:, None] * stride_ik_pos
-        + off_d * stride_ik_d,
+        ik_cache_ptr + page * stride_ik_blk + off_k[:, None] * stride_ik_pos + off_d * stride_ik_d,
     )  # [N, D]
 
     kq = tl.dot(k, q) * sm_scale_log2e  # [N, H]
@@ -253,10 +236,8 @@ def _decode_fused_chunk_topk_kernel(
     min_score = tl.min(topk_scores, axis=1)  # [H]
     min_pos = tl.argmin(topk_scores, axis=1)  # [H]
 
-    should_replace = (score > min_score)  # [H]
-    replace_mask = (
-        (off_t[None, :] == min_pos[:, None]) & should_replace[:, None]
-    )
+    should_replace = score > min_score  # [H]
+    replace_mask = (off_t[None, :] == min_pos[:, None]) & should_replace[:, None]
 
     block_idx = (blk + 1).to(tl.int32)
     topk_scores = tl.where(replace_mask, score[:, None], topk_scores)
@@ -331,10 +312,7 @@ def _decode_fused_score_topk_kernel(
 
     # Q [D, H]
     q = tl.load(
-        q_ptr
-        + pid_n * stride_q_n
-        + tl.arange(0, num_idx_heads) * stride_q_h
-        + off_d[:, None] * stride_q_d,
+        q_ptr + pid_n * stride_q_n + tl.arange(0, num_idx_heads) * stride_q_h + off_d[:, None] * stride_q_d,
     )  # [D, H]
 
     # Running top-k per head: [num_idx_heads, TOPK] layout.
@@ -350,10 +328,7 @@ def _decode_fused_score_topk_kernel(
         pos = blk * BLOCK_SIZE_K + off_k
         pos_mask = pos < kv_len
         k = tl.load(
-            ik_cache_ptr
-            + page * stride_ik_blk
-            + off_k[:, None] * stride_ik_pos
-            + off_d * stride_ik_d,
+            ik_cache_ptr + page * stride_ik_blk + off_k[:, None] * stride_ik_pos + off_d * stride_ik_d,
         )  # [N, D]
 
         kq = tl.dot(k, q) * sm_scale_log2e  # [N, H]
@@ -371,10 +346,8 @@ def _decode_fused_score_topk_kernel(
         min_pos = tl.argmin(topk_scores, axis=1)  # [H]
 
         # Replace mask: [H, TOPK]
-        should_replace = (score > min_score)  # [H]
-        replace_mask = (
-            (off_t[None, :] == min_pos[:, None]) & should_replace[:, None]
-        )
+        should_replace = score > min_score  # [H]
+        replace_mask = (off_t[None, :] == min_pos[:, None]) & should_replace[:, None]
 
         block_idx = (blk + 1).to(tl.int32)
         topk_scores = tl.where(replace_mask, score[:, None], topk_scores)
@@ -389,13 +362,9 @@ def _decode_fused_score_topk_kernel(
         tl.full((num_idx_heads, TOPK), -1, dtype=tl.int32),
     )
     tl.store(
-        topk_indices_ptr
-        + off_h[:, None] * stride_out_h
-        + pid_n * stride_out_n
-        + off_t[None, :] * stride_out_t,
+        topk_indices_ptr + off_h[:, None] * stride_out_h + pid_n * stride_out_n + off_t[None, :] * stride_out_t,
         output_vals,
     )
-
 
 
 @triton.jit(do_not_specialize=["num_input_chunks"])
@@ -433,34 +402,18 @@ def _topk_pair_merge_kernel(
     right_exists_i32 = (right_chunk < num_input_chunks).to(tl.int32)
 
     left_scores = tl.load(
-        in_scores_ptr
-        + left_chunk * stride_is_c
-        + pid_h * stride_is_h
-        + pid_n * stride_is_n
-        + off_t * stride_is_t,
+        in_scores_ptr + left_chunk * stride_is_c + pid_h * stride_is_h + pid_n * stride_is_n + off_t * stride_is_t,
     ).to(tl.float32)
     left_indices = tl.load(
-        in_indices_ptr
-        + left_chunk * stride_ii_c
-        + pid_h * stride_ii_h
-        + pid_n * stride_ii_n
-        + off_t * stride_ii_t,
+        in_indices_ptr + left_chunk * stride_ii_c + pid_h * stride_ii_h + pid_n * stride_ii_n + off_t * stride_ii_t,
     ).to(tl.int32)
     right_scores = tl.load(
-        in_scores_ptr
-        + right_chunk * stride_is_c
-        + pid_h * stride_is_h
-        + pid_n * stride_is_n
-        + off_t * stride_is_t,
+        in_scores_ptr + right_chunk * stride_is_c + pid_h * stride_is_h + pid_n * stride_is_n + off_t * stride_is_t,
         mask=right_exists_i32 != 0,
         other=-1e30,
     ).to(tl.float32)
     right_indices = tl.load(
-        in_indices_ptr
-        + right_chunk * stride_ii_c
-        + pid_h * stride_ii_h
-        + pid_n * stride_ii_n
-        + off_t * stride_ii_t,
+        in_indices_ptr + right_chunk * stride_ii_c + pid_h * stride_ii_h + pid_n * stride_ii_n + off_t * stride_ii_t,
         mask=right_exists_i32 != 0,
         other=0,
     ).to(tl.int32)
@@ -474,19 +427,11 @@ def _topk_pair_merge_kernel(
     )
 
     tl.store(
-        out_scores_ptr
-        + pid_out_chunk * stride_os_c
-        + pid_h * stride_os_h
-        + pid_n * stride_os_n
-        + off_t * stride_os_t,
+        out_scores_ptr + pid_out_chunk * stride_os_c + pid_h * stride_os_h + pid_n * stride_os_n + off_t * stride_os_t,
         merged_scores,
     )
     tl.store(
-        out_indices_ptr
-        + pid_out_chunk * stride_oi_c
-        + pid_h * stride_oi_h
-        + pid_n * stride_oi_n
-        + off_t * stride_oi_t,
+        out_indices_ptr + pid_out_chunk * stride_oi_c + pid_h * stride_oi_h + pid_n * stride_oi_n + off_t * stride_oi_t,
         merged_indices,
     )
 
@@ -510,10 +455,7 @@ def _topk_finalize_kernel(
     off_t = tl.arange(0, BLOCK_SIZE_T)
 
     indices = tl.load(
-        indices_partial_ptr
-        + pid_h * stride_pi_h
-        + pid_n * stride_pi_n
-        + off_t * stride_pi_t,
+        indices_partial_ptr + pid_h * stride_pi_h + pid_n * stride_pi_n + off_t * stride_pi_t,
     ).to(tl.int32)
     output = tl.where(
         (off_t < topk) & (indices > 0),
@@ -521,10 +463,7 @@ def _topk_finalize_kernel(
         -1,
     )
     tl.store(
-        indices_final_ptr
-        + pid_h * stride_f_h
-        + pid_n * stride_f_n
-        + off_t * stride_f_t,
+        indices_final_ptr + pid_h * stride_f_h + pid_n * stride_f_n + off_t * stride_f_t,
         output.to(indices_final_ptr.dtype.element_ty),
         mask=off_t < topk,
     )
