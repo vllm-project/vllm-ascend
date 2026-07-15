@@ -41,7 +41,8 @@ class CompressAttentionManager(FullAttentionManager):
         num_tokens: int,
         new_computed_blocks: Sequence[KVCacheBlock],
         total_computed_tokens: int,
-        num_tokens_main_model: int,
+        num_local_computed_tokens: int | None = None,
+        num_tokens_main_model: int | None = None,
         apply_admission_cap: bool = False,
     ) -> int:
         # Allocate extra `num_speculative_blocks` blocks for
@@ -49,15 +50,30 @@ class CompressAttentionManager(FullAttentionManager):
         # assert isinstance(self.kv_cache_spec, (CompressAttentionSpec, C4IndexerSpec))
 
         num_tokens //= self.compress_ratio
-        num_tokens_main_model //= self.compress_ratio
+        if vllm_version_is("0.24.0"):
+            if num_tokens_main_model is None:
+                assert num_local_computed_tokens is not None
+                num_tokens_main_model = num_local_computed_tokens
+            num_tokens_main_model //= self.compress_ratio
+            return super().get_num_blocks_to_allocate(
+                request_id,
+                num_tokens,
+                new_computed_blocks,
+                total_computed_tokens,
+                num_tokens_main_model,
+                apply_admission_cap=apply_admission_cap,
+            )
 
+        assert num_local_computed_tokens is not None and num_tokens_main_model is not None
+        num_tokens_main_model //= self.compress_ratio
         return super().get_num_blocks_to_allocate(
             request_id,
             num_tokens,
             new_computed_blocks,
             total_computed_tokens,
+            num_local_computed_tokens,
             num_tokens_main_model,
-            apply_admission_cap,
+            apply_admission_cap=apply_admission_cap,
         )
 
     def allocate_new_computed_blocks(
