@@ -21,11 +21,11 @@ on:
   workflow_dispatch:
   workflow_call:
     secrets:
-      hitest_apig_appcode:
+      HITEST_APIG_APPCODE:
         required: true
-      hitest_key:
+      HITEST_KEY:
         required: true
-      hitest_secret:
+      HITEST_SECRET:
         required: true
     outputs:
       hitest_paths:
@@ -57,15 +57,15 @@ jobs:
       - name: Execute hitest entry
         env:
           AUROGON_API_PREFIX: https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/aurogon_service
-          hitest_apig_appcode: ${{ secrets.hitest_apig_appcode }}
-          hitest_key: ${{ secrets.hitest_key }}
-          hitest_secret: ${{ secrets.hitest_secret }}
+          HITEST_APIG_APPCODE: ${{ secrets.HITEST_APIG_APPCODE }}
+          HITEST_KEY: ${{ secrets.HITEST_KEY }}
+          HITEST_SECRET: ${{ secrets.HITEST_SECRET }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           echo "===== DEBUG GITHUB ENV ====="
-          echo "hitest_apig_appcode: $hitest_apig_appcode"
-          echo "hitest_key: $hitest_key"
-          echo "hitest_secret: $hitest_secret"
+          echo "HITEST_APIG_APPCODE: $HITEST_APIG_APPCODE"
+          echo "HITEST_KEY: $HITEST_KEY"
+          echo "HITEST_SECRET: $HITEST_SECRET"
           python3 .github/workflows/scripts/run_hitest.py
 
       - name: Upload recommended pytest paths artifact
