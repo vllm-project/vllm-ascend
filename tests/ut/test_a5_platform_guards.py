@@ -84,7 +84,11 @@ def test_a5_platform_safety_guards_present():
     either would silently enable an unsupported A5 path. This source-level
     assertion fails fast if the guards are refactored away.
     """
-    src = Path("vllm_ascend/platform.py").read_text(encoding="utf-8")
+    # Resolve via the module's __file__ so the test does not depend on the
+    # current working directory being the repository root.
+    import vllm_ascend.platform
+
+    src = Path(vllm_ascend.platform.__file__).read_text(encoding="utf-8")
     assert "prune_capture_sizes_for_950" in src
     assert "AscendDeviceType.A5" in src
     assert "not supported on A5" in src
