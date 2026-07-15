@@ -43,7 +43,10 @@ class AscendDSparkProposer(AscendDflashProposer):
             "ptd_token_id",
             getattr(draft_hf_config, "dspark_noise_token_id", 0),
         )
-        self.max_query_tokens = self.max_batch_size * self.num_speculative_tokens
+        block_size = self.num_speculative_tokens
+        max_cudagraph_size = vllm_config.compilation_config.max_cudagraph_capture_size
+        aligned_max = ((max_cudagraph_size + block_size - 1) // block_size) * block_size
+        self.max_query_tokens = max(self.max_batch_size * block_size, aligned_max)
         self.max_positions = self.max_num_tokens + self.max_query_tokens
         self.positions = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=device)
         self._slot_mapping_buffer = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=device)
@@ -284,7 +287,7 @@ class AscendDSparkProposer(AscendDflashProposer):
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata, tuple[Any, Any] | None]:
         del token_indices_to_sample, req_scheduled_tokens, long_seq_metadata
         is_prefill = (num_decode_reqs == 0 and num_prefill_reqs > 0)
-        batch_size = num_prefill_reqs + num_decode_reqs
+        batch_size = cad.num_reqs
         block_size = self.num_speculative_tokens
         num_query_total = batch_size * block_size
         request_slots = self._assign_request_slots(batch_size)
@@ -374,7 +377,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.max_seq_len = cad.max_seq_len + block_size
         if max_model_len > 0:
             cad.max_seq_len = min(cad.max_seq_len, max_model_len)
-        cad.num_reqs = batch_size
         cad.slot_mapping = self._slot_mapping_buffer[:num_query_total]
         cad.positions = self.positions[:num_query_total]
         cad.causal = False
@@ -597,7 +599,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             num_decode_reqs,
         )
         assert self.runner is not None
-        actual_num_reqs = common_attn_metadata.num_reqs
+        actual_num_reqs = num_prefill_reqs + num_decode_reqs
         block_size = self.num_speculative_tokens
         use_cuda_graph = self.use_cuda_graph and not is_prefill
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0

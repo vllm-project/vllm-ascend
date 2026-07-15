@@ -742,11 +742,13 @@ class NPUModelRunner(GPUModelRunner):
                 self.arange_np[1 : num_reqs_padded + 1 - num_reqs] * self.uniform_decode_query_len + last_loc
             )
         else:
-            # Mixed-batch case: when batch_desc_num_reqs doesn't match
-            # actual num_reqs (e.g. FULL_DECODE_ONLY with spec decode),
-            # fall back to num_reqs to avoid stale entries in query_start_loc.
-            if num_reqs != num_reqs_padded:
-                num_reqs_padded = num_reqs
+            # If batch_desc_num_reqs exceeds actual num_reqs
+            # (e.g. FULL_DECODE_ONLY with spec decode), fill padded
+            # query_start_loc entries with the current total to avoid
+            # stale values that could cause downstream OOB accesses.
+            if num_reqs < num_reqs_padded:
+                last_val = self.query_start_loc.np[num_reqs]
+                self.query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1] = last_val
 
             # Do not insert if the last value already equals the num_tokens
             if self.query_start_loc.np[num_reqs_padded] < num_tokens_padded:
