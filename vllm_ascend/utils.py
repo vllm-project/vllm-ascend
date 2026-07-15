@@ -613,9 +613,7 @@ def vllm_version_is(target_vllm_version: str):
 
         vllm_version = vllm.__version__
     try:
-        vllm_public_version = Version(Version(vllm_version).public)
-        target_public_version = Version(Version(target_vllm_version).public)
-        return vllm_public_version == target_public_version
+        return Version(vllm_version) == Version(target_vllm_version)
     except InvalidVersion:
         raise ValueError(
             f"Invalid vllm version {vllm_version} found. A dev version of vllm "
