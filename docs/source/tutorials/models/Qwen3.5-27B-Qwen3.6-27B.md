@@ -143,73 +143,6 @@ It is **recommended to use the latest release candidate (rc) version or the late
         -it $IMAGE bash
     ```
 
-=== "Atlas 200I Pro"
-
-    Start the docker image on your each node.
-
-    === "Ubuntu 24.04"
-
-        ```bash
-        export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
-
-        docker run --rm \
-        --privileged \
-        --name vllm-ascend \
-        --shm-size=10g \
-        --device=/dev/davinci0:/dev/davinci0 \
-        --device=/dev/davinci_manager \
-        --device=/dev/ascend_manager \
-        --device=/dev/user_config \
-        -v /etc/sys_version.conf:/etc/sys_version.conf \
-        -v /etc/ld.so.conf.d/mind_so.conf:/etc/ld.so.conf.d/mind_so.conf \
-        -v /etc/hdcBasic.cfg:/etc/hdcBasic.cfg \
-        -v /var/dmp_daemon:/var/dmp_daemon \
-        -v /usr/lib64/libmmpa.so:/usr/lib64/libmmpa.so \
-        -v /usr/lib64/libcrypto.so.1.1:/usr/lib64/libcrypto.so.1.1 \
-        -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
-        -v /usr/lib64/libstackcore.so:/usr/lib64/libstackcore.so \
-        -v /usr/lib/aarch64-linux-gnu/libyaml-0.so.2:/usr/lib64/libyaml-0.so.2 \
-        -v /etc/slog.conf:/etc/slog.conf \
-        -v /var/slogd:/var/slogd \
-        -v /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64 \
-        -v /usr/lib64/libtensorflow.so:/usr/lib64/libtensorflow.so \
-        -v /root/.cache:/root/.cache \
-        -p 8080:8080 \
-        -it $IMAGE bash
-        ```
-
-    === "openEuler 24.03"
-
-        ```bash
-        export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler
-
-        docker run --rm \
-        --privileged \
-        --name vllm-ascend \
-        --shm-size=10g \
-        --device=/dev/davinci0:/dev/davinci0 \
-        --device=/dev/davinci_manager \
-        --device=/dev/ascend_manager \
-        --device=/dev/user_config \
-        -v /etc/sys_version.conf:/etc/sys_version.conf \
-        -v /etc/ld.so.conf.d/mind_so.conf:/etc/ld.so.conf.d/mind_so.conf \
-        -v /etc/hdcBasic.cfg:/etc/hdcBasic.cfg \
-        -v /var/dmp_daemon:/var/dmp_daemon \
-        -v /usr/lib64/libsemanage.so.2:/usr/lib64/libsemanage.so.2 \
-        -v /usr/lib64/libmmpa.so:/usr/lib64/libmmpa.so \
-        -v /usr/lib64/libcrypto.so.1.1:/usr/lib64/libcrypto.so.1.1 \
-        -v /usr/lib64/libyaml-0.so.2.0.9:/usr/lib64/libyaml-0.so.2 \
-        -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
-        -v /usr/lib64/libstackcore.so:/usr/lib64/libstackcore.so \
-        -v /etc/slog.conf:/etc/slog.conf \
-        -v /var/slogd:/var/slogd \
-        -v /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64 \
-        -v /usr/lib64/libtensorflow.so:/usr/lib64/libtensorflow.so \
-        -v /root/.cache:/root/.cache \
-        -p 8080:8080 \
-        -it $IMAGE bash
-        ```
-
 After a successful docker run, you can verify the running container service by executing the `docker ps` command. The expected result is that the container `vllm-ascend` is listed with status `Up`, confirming the docker installation is successful.
 
 ### 4.2 Source Code Installation
@@ -359,18 +292,18 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
 Key Parameter Descriptions:
 
 - `--data-parallel-size 1` and `--tensor-parallel-size 2` are common settings for data parallelism (DP) and tensor parallelism (TP) sizes.
-- `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. The Qwen3.6-27B model supports up to 262144. On Atlas 200I Pro, configure this value according to the actual device memory; setting it too high may cause OOM.
-- `--max-num-seqs` indicates the maximum number of requests that each DP group is allowed to process. If the number of requests sent to the service exceeds this limit, the excess requests will remain in a waiting state and will not be scheduled. Note that the time spent in the waiting state is also counted in metrics such as TTFT and TPOT. Therefore, when testing performance, it is generally recommended that `--max-num-seqs` * `--data-parallel-size` >= the actual total concurrency. On Atlas 200I Pro, configure this value according to the actual device memory; setting it too high may cause OOM.
+- `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. The Qwen3.6-27B model supports up to 262144.
+- `--max-num-seqs` indicates the maximum number of requests that each DP group is allowed to process. If the number of requests sent to the service exceeds this limit, the excess requests will remain in a waiting state and will not be scheduled. Note that the time spent in the waiting state is also counted in metrics such as TTFT and TPOT. Therefore, when testing performance, it is generally recommended that `--max-num-seqs` * `--data-parallel-size` >= the actual total concurrency.
 - `--max-num-batched-tokens` represents the maximum number of tokens that the model can process in a single step. Currently, vLLM v1 scheduling enables ChunkPrefill/SplitFuse by default, which means:
     - (1) If the input length of a request is greater than `--max-num-batched-tokens`, it will be divided into multiple rounds of computation according to `--max-num-batched-tokens`;
     - (2) Decode requests are prioritized for scheduling, and prefill requests are scheduled only if there is available capacity.
     - Generally, if `--max-num-batched-tokens` is set to a larger value, the overall latency will be lower, but the pressure on HBM memory (activation value usage) will be greater.
-- `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak HBM memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak HBM memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the HBM memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`. On Atlas 200I Pro, configure this value according to the actual device memory; setting it too high may cause OOM.
+- `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak HBM memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak HBM memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the HBM memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. The current implementation of hybrid kv cache for Qwen3.5-27B / Qwen3.6-27B may result in a very large effective `block_size` when prefix caching is enabled (e.g., 2048), which means any prefix shorter than `block_size` will never be cached. If your workload has many short repeated prefixes, consider keeping prefix caching disabled. For related issues, see the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
 - `--quantization ascend` indicates that quantization is used. To disable quantization, remove this option.
 - `--speculative-config` uses `qwen3_5_mtp` for both `Qwen3.5-27B` and `Qwen3.6-27B` because they share the same MTP head design.
 - `--mamba-ssm-cache-dtype` sets the data type of the Mamba SSM cache. On Atlas inference products, only `float16` is supported.
-- `--dtype float16` must be set on Atlas inference products and Atlas 200I Pro. These devices only support the FP16 data type.
+- `--dtype float16` must be set on Atlas inference products. These devices only support the FP16 data type.
 - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
     - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
     - `"cudagraph_capture_sizes"`: represents different levels of graph modes. The default value is `[1, 2, 4, 8, 16, 24, 32, 40,..., --max-num-seqs]`. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance. On Atlas inference products, when tensor parallelism (TP) is enabled, hardware event-id constraints allow at most two capture sizes (for example, `[1, 8]`).
