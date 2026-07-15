@@ -10,6 +10,7 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
     AscendAttentionState,
+    AscendC8AttentionBackendImpl,
 )
 from vllm_ascend.attention.kvcomp_attn.attention_utils import (
     get_kvcomp_decode_params,
@@ -323,6 +324,32 @@ class TestAscendAttentionBackendImpl(TestBase):
             kv_sharing_target_layer_name=None,
         )
 
+        self.impl_kv_share = AscendAttentionBackendImpl(
+            num_heads=8,
+            head_size=64,
+            scale=1.0,
+            num_kv_heads=8,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="float16",
+            logits_soft_cap=None,
+            attn_type=self.attention_type.DECODER,
+            kv_sharing_target_layer_name="producer_layer",
+        )
+
+        self.impl_c8_kv_share = AscendC8AttentionBackendImpl(
+            num_heads=8,
+            head_size=64,
+            scale=1.0,
+            num_kv_heads=8,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="float16",
+            logits_soft_cap=None,
+            attn_type=self.attention_type.DECODER,
+            kv_sharing_target_layer_name="producer_layer",
+        )
+
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_large_head_prefill_uses_device_operator_fallback(self, mock_get_forward_context):
         query = torch.randn(2, 8, FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)
@@ -409,6 +436,56 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_forward.assert_not_called()
         mock_fia.assert_called_once()
         self.assertEqual(result[0].shape, query.shape)
+
+    @patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache")
+    def test_kv_sharing_target_skips_cache_write(self, mock_reshape_and_cache):
+        query = torch.randn(2, 8, 64)
+        key = torch.randn(2, 8, 64)
+        value = torch.randn(2, 8, 64)
+        kv_cache = (
+            torch.empty(4, 128, 8, 64),
+            torch.empty(4, 128, 8, 64),
+        )
+        output = torch.empty_like(query)
+        metadata = MagicMock()
+        metadata.slot_mapping = torch.arange(2)
+        metadata.num_actual_tokens = 2
+        self.impl_kv_share.is_kv_producer = False
+
+        returned = self.impl_kv_share.reshape_and_cache(query, key, value, kv_cache, metadata, output)
+
+        mock_reshape_and_cache.assert_not_called()
+        self.assertIs(self.impl_kv_share.key_cache, kv_cache[0])
+        self.assertIs(self.impl_kv_share.value_cache, kv_cache[1])
+        self.assertIs(returned[0], query)
+        self.assertIs(returned[1], key)
+        self.assertIs(returned[2], value)
+        self.assertIs(returned[3], output)
+
+    @patch("torch_npu.npu_scatter_pa_kv_cache", create=True)
+    def test_c8_kv_sharing_target_skips_nz_cache_write(self, mock_scatter_pa_kv_cache):
+        query = torch.randn(2, 8, 64)
+        key = torch.randn(2, 8, 64)
+        value = torch.randn(2, 8, 64)
+        kv_cache = (
+            torch.empty(4, 128, 8, 64),
+            torch.empty(4, 128, 8, 64),
+        )
+        output = torch.empty_like(query)
+        metadata = MagicMock()
+        metadata.slot_mapping = torch.arange(2)
+        metadata.num_actual_tokens = 2
+        self.impl_c8_kv_share.is_kv_producer = False
+
+        returned = self.impl_c8_kv_share._reshape_and_cache(query, key, value, kv_cache, metadata, output)
+
+        mock_scatter_pa_kv_cache.assert_not_called()
+        self.assertIs(self.impl_c8_kv_share.key_cache, kv_cache[0])
+        self.assertIs(self.impl_c8_kv_share.value_cache, kv_cache[1])
+        self.assertIs(returned[0], query)
+        self.assertIs(returned[1], key)
+        self.assertIs(returned[2], value)
+        self.assertIs(returned[3], output)
 
     def test_forward_no_attn_metadata(self):
         """Test forward pass when attn_metadata is None"""
