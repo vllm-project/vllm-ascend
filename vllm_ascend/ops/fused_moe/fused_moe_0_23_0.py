@@ -428,18 +428,19 @@ class AscendFusedMoE(FusedMoE):
         # TP-split the per-token LoRA indices so each TP rank carries
         # only the lora_ids for the tokens it owns.
         split_lora_indices = None
-        lora_context = getattr(self, "_ascend_moe_lora_context", None)
-        if lora_context is not None:
-            token_lora_indices = lora_context.punica_wrapper.token_lora_indices
-            tp_size = get_tensor_model_parallel_world_size()
-            tp_rank = get_tensor_model_parallel_rank()
-            num_tokens = hidden_states.shape[0]
-            pad_size = tp_size - num_tokens
-            if pad_size > 0:
-                token_lora_indices = F.pad(token_lora_indices, (0, pad_size), value=-1)
-            if tp_size > 1:
-                split_lora = torch.tensor_split(token_lora_indices, tp_size, dim=0)
-                split_lora_indices = split_lora[tp_rank]
+        if self.moe_config.ep_size > 1:
+            lora_context = getattr(self, "_ascend_moe_lora_context", None)
+            if lora_context is not None:
+                token_lora_indices = lora_context.punica_wrapper.token_lora_indices
+                tp_size = get_tensor_model_parallel_world_size()
+                tp_rank = get_tensor_model_parallel_rank()
+                num_tokens = hidden_states.shape[0]
+                pad_size = tp_size - num_tokens
+                if pad_size > 0:
+                    token_lora_indices = F.pad(token_lora_indices, (0, pad_size), value=-1)
+                if tp_size > 1:
+                    split_lora = torch.tensor_split(token_lora_indices, tp_size, dim=0)
+                    split_lora_indices = split_lora[tp_rank]
 
         prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
             hidden_states=hidden_states,
