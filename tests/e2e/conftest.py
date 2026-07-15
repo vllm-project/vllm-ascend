@@ -27,6 +27,7 @@ import logging
 import multiprocessing
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import threading
@@ -227,18 +228,23 @@ class MooncakeLauncher:
         mooncake_ld_path = "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:"
         os.environ["LD_LIBRARY_PATH"] = mooncake_ld_path + curr_ld_path
         env = os.environ.copy()
-        self.process = subprocess.Popen(cmd, env=env)
+        self.process = subprocess.Popen(cmd, env=env, start_new_session=True)
         return self
 
     def __exit__(self, exc_type, exc, tb):
         if not self.process:
             return
         logger.info("Stopping mooncake server...")
-        self.process.terminate()
         try:
+            pgid = os.getpgid(self.process.pid)
+            os.killpg(pgid, signal.SIGTERM)
             self.process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            self.process.kill()
+            logger.warning("Mooncake server did not stop gracefully, force killing...")
+            os.killpg(pgid, signal.SIGKILL)
+            self.process.wait(timeout=5)
+        except ProcessLookupError:
+            pass
 
 
 class RemoteOpenAIServer:

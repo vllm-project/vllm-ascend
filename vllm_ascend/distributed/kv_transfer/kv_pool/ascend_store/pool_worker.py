@@ -1439,6 +1439,11 @@ class KVPoolWorker:
         )
         return done_sending, done_recving
 
+    def ensure_store_initialized(self) -> None:
+        ensure_initialized = getattr(self.m_store, "ensure_initialized", None)
+        if ensure_initialized is not None:
+            ensure_initialized()
+
     def lookup(
         self,
         token_len: int,
