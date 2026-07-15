@@ -880,8 +880,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     common_attn_metadata.num_computed_tokens_cpu, num_reqs_padded
                 )
 
+<<<<<<< HEAD
             if pcp_manager is not None and self.pcp_size > 1:
                 pcp_manager.mask_spec_decode_restore_idx_for_graph(
+=======
+            if self.pcp_size > 1 and self.method != "dflash":
+                pcp_allgather_restore_idx = (
+>>>>>>> 099a9ef5 (Enabling DCP/PCP for DFlash)
                     common_attn_metadata.prefill_context_parallel_metadata.pcp_allgather_restore_idx
                 )
         else:
@@ -972,6 +977,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         metadata_has_prefill = bool(getattr(attn_metadata_i, "num_prefills", 0))
         is_prefill_batch = num_prefill_reqs > 0 or metadata_has_prefill
+<<<<<<< HEAD
         pcp_mtp_inputs = None
         draft_cp_kwargs = {
             "ori_seq_len": None,
@@ -995,6 +1001,20 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     ori_seq_len_cpu=pcp_mtp_inputs.seq_lens_cpu,
                     slot_indices=pcp_mtp_inputs.slot_indices,
                     mtp_slot_mapping=pcp_mtp_inputs.slot_mapping,
+=======
+        if self.pcp_size * self.dcp_size > 1:
+            is_decode_only_batch = num_decode_reqs > 0 and not is_prefill_batch
+            if self.num_speculative_tokens > 1 and is_decode_only_batch and not self.parallel_drafting:
+                # For pcp/dcp, tokens are split across different cp ranks,
+                # so we can not simply update slot_mapping by += 1.
+                # Instead, we pre-allocate mtp slot_mapping in model_runner
+                # (_generate_pcp_mtp_input), and use updated slot_indices
+                # to get corresponding slot_mapping in each step.
+                num_reject_tokens = (
+                    torch.tensor(self.runner.pcp_manager.cu_num_tokens_pcp_full, dtype=torch.int32).to(self.device)
+                    - ori_token_indices_to_sample
+                    - 1
+>>>>>>> 099a9ef5 (Enabling DCP/PCP for DFlash)
                 )
 
         should_update_next_steps = not self.parallel_drafting and (
@@ -1147,7 +1167,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 ori_token_indices_to_sample = None
 
         pcp_manager = getattr(self.runner, "pcp_manager", None)
-        if pcp_manager is not None and self.pcp_size > 1:
+        if pcp_manager is not None and self.pcp_size > 1 and self.method != "dflash":
             # remove graph padding before all_gather
             hidden_states = pcp_manager.get_restore_hidden_states(
                 hidden_states,
