@@ -14,7 +14,7 @@ from vllm.distributed.device_communicators.pynccl_allocator import (
     set_graph_pool_id)
 from vllm.forward_context import (AFDMetadata, DPMetadata,
                                   get_forward_context, override_forward_context)
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu_ubatch_wrapper import (
     UBatchWrapper as GPUUBatchWrapper, UbatchMetadata, _cat_ubatch_outputs)
@@ -22,7 +22,6 @@ from vllm.v1.worker.ubatching import make_ubatch_contexts
 
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 
-logger = init_logger(__name__)
 
 
 @dataclass
@@ -252,6 +251,7 @@ class UBatchWrapper(GPUUBatchWrapper):
             afd_metadata.attn_metadata_list.append(attn_metadata)
             afd_metadata.dp_metadata_list.append(dp_metadata)
         else:
+            logger.info('_make_afd_ubatch_metadata ubatch_slices: %s, attn_metadata:%s', ubatch_slices, attn_metadata)
             for i, ubatch_slice in enumerate(ubatch_slices):
                 (
                     sliced_input_ids,
@@ -365,18 +365,18 @@ class UBatchWrapper(GPUUBatchWrapper):
         if ubatch_slices is None:
             # Populate the AFD metadata lists for the non-ubatch path so that
             # the FFN side receives the full (unsliced) token information.
-            if self.vllm_config.afd_config:
-                afd_metadata = self._make_afd_ubatch_metadata(
-                    ubatch_slices=None,
-                    attn_metadata=forward_context.attn_metadata,
-                    input_ids=kwargs.get('input_ids'),
-                    positions=kwargs['positions'],
-                    inputs_embeds=kwargs['inputs_embeds'],
-                    intermediate_tensors=kwargs['intermediate_tensors'],
-                    dp_metadata=forward_context.dp_metadata,
-                    afd_metadata=afd_metadata,
-                )
-                forward_context.afd_metadata = afd_metadata
+            # if self.vllm_config.afd_config:
+            #     afd_metadata = self._make_afd_ubatch_metadata(
+            #         ubatch_slices=None,
+            #         attn_metadata=forward_context.attn_metadata,
+            #         input_ids=kwargs.get('input_ids'),
+            #         positions=kwargs['positions'],
+            #         inputs_embeds=kwargs['inputs_embeds'],
+            #         intermediate_tensors=kwargs['intermediate_tensors'],
+            #         dp_metadata=forward_context.dp_metadata,
+            #         afd_metadata=afd_metadata,
+            #     )
+            #     forward_context.afd_metadata = afd_metadata
 
             # This is to account for the case where ubatching was aborted.
             # When we capture full graphs we only capture one graph per shape,
