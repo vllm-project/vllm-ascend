@@ -3835,8 +3835,7 @@ class NPUModelRunner(GPUModelRunner):
         get_offloader().post_init()
 
         # wrap the model with full graph wrapper if needed.
-        if (self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-                and not self.parallel_config.use_ubatching):
+        if (self.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.afd_config is None):
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
             self.model = ACLGraphWrapper(
                 self.model,
@@ -3845,15 +3844,15 @@ class NPUModelRunner(GPUModelRunner):
                 use_eagle=self.use_eagle,
                 enable_enpu=self.enable_enpu,
             )
-        elif self.parallel_config.use_ubatching:
-            logger.info("use_ubatching: %s", self.parallel_config.use_ubatching)
+        elif self.afd_config is not None:
+            logger.info("use_ubatching11111111111111111")
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
             if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
                 self.model = UBatchWrapper(
                     self.model, self.vllm_config,
                     CUDAGraphMode.FULL, self.device)
             else:
-                logger.info("eager use_ubatching: %s", self.parallel_config.use_ubatching)
+                logger.info("eager use_ubatching222222222222222222222222222: %s")
                 self.model = UBatchWrapper(
                     self.model, self.vllm_config,
                     CUDAGraphMode.NONE, self.device)
