@@ -558,6 +558,10 @@ def _rehash_block_hash_group(block_hashes: Sequence[BlockHash | str]) -> BlockHa
     return BlockHash(hasher.digest())
 
 
+def block_hash_to_str(block_hash: BlockHash | str) -> str:
+    return block_hash if isinstance(block_hash, str) else block_hash.hex()
+
+
 def _block_hash_to_bytes(block_hash: BlockHash | str) -> bytes:
     if isinstance(block_hash, str):
         if len(block_hash) == 64:

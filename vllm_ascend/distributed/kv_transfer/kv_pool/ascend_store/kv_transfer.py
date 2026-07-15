@@ -145,17 +145,33 @@ class LayerBatchBuilder:
     ) -> tuple[np.ndarray, np.ndarray]:
         request = block_range.request
         group_id = self.group_id
+        block_ids_np: np.ndarray | None
+        block_gvas_np: np.ndarray | None
         if is_save:
-            if request.block_gvas_by_group_np is not None and group_id < len(request.block_gvas_by_group_np):
-                block_ids_np = request.block_ids_by_group_np[group_id]
-                block_gvas_np = request.block_gvas_by_group_np[group_id]
+            group_block_ids = request.block_ids_by_group_np
+            group_block_gvas = request.block_gvas_by_group_np
+            if (
+                group_block_ids is not None
+                and group_block_gvas is not None
+                and group_id < len(group_block_ids)
+                and group_id < len(group_block_gvas)
+            ):
+                block_ids_np = group_block_ids[group_id]
+                block_gvas_np = group_block_gvas[group_id]
             else:
                 block_ids_np = request.block_ids_np
                 block_gvas_np = request.block_gvas_np
         else:
-            if request.load_block_gvas_by_group_np is not None and group_id < len(request.load_block_gvas_by_group_np):
-                block_ids_np = request.block_ids_by_group_np[group_id]
-                block_gvas_np = request.load_block_gvas_by_group_np[group_id]
+            group_block_ids = request.block_ids_by_group_np
+            group_block_gvas = request.load_block_gvas_by_group_np
+            if (
+                group_block_ids is not None
+                and group_block_gvas is not None
+                and group_id < len(group_block_ids)
+                and group_id < len(group_block_gvas)
+            ):
+                block_ids_np = group_block_ids[group_id]
+                block_gvas_np = group_block_gvas[group_id]
             else:
                 block_ids_np = request.block_ids_np
                 block_gvas_np = request.load_block_gvas_np
@@ -1225,11 +1241,10 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self.sync_save_events = sync_save_events
         self.max_transfer_blocks = max_transfer_blocks
         self.max_transfer_bytes = max_transfer_bytes
+        self.group_builders: list[LayerBatchBuilder] | None = group_builders
         if group_builders is not None:
-            self.group_builders = group_builders
             self.layer_batch_builder = group_builders[0]
         else:
-            self.group_builders = None
             self.layer_batch_builder = LayerBatchBuilder(
                 token_database,
                 my_key_index,
@@ -1372,11 +1387,10 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self.h2d_stagger_us = h2d_stagger_us
         self.max_transfer_blocks = max_transfer_blocks
         self.max_transfer_bytes = max_transfer_bytes
+        self.group_builders: list[LayerBatchBuilder] | None = group_builders
         if group_builders is not None:
-            self.group_builders = group_builders
             self.layer_batch_builder = group_builders[0]
         else:
-            self.group_builders = None
             self.layer_batch_builder = LayerBatchBuilder(
                 token_database,
                 my_key_index,

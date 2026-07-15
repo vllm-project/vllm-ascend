@@ -38,6 +38,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     LayerMultiBlockReqMeta,
     LayerTransferTask,
     ReqMeta,
+    block_hash_to_str,
     get_block_hashes,
     get_cache_family_granularity,
     infer_cache_family_ratio,
@@ -324,22 +325,6 @@ class KVPoolWorker:
             self.num_kv_cache_groups,
             {k: v for k, v in list(self.physical_layer_to_group_layers.items())[:3]},
         )
-
-    def _extract_physical_layer_index(self, layer_name: str) -> int:
-        import regex as re
-
-        m = re.search(r"layers\.(\d+)", layer_name)
-        if m:
-            return int(m.group(1))
-        # MTP layers have names like "mtp.0.self_attn.xxx" without "layers."
-        # prefix. Map them after the main model layers.
-        if ".mtp." in f".{layer_name}.":
-            m = re.search(r"mtp\.(\d+)", layer_name)
-            if m:
-                num_hidden_layers = getattr(self.hf_config, "num_hidden_layers", self.num_layers)
-                return num_hidden_layers + int(m.group(1))
-        m = re.search(r"(\d+)", layer_name)
-        return int(m.group(1)) if m else 0
 
     def _build_group_layer_builders(self) -> list[LayerBatchBuilder]:
         builders = []
@@ -925,7 +910,9 @@ class KVPoolWorker:
             if self.use_gva_layerwise and save_start_block < save_end_block:
                 group_block_hashes = get_block_hashes(request.block_hashes, block_size, self.hash_block_size)
                 while save_start_block < save_end_block and save_start_block < len(group_block_hashes):
-                    key = self._make_layerwise_gva_key(group_id, group_block_hashes[save_start_block].hex())
+                    key = self._make_layerwise_gva_key(
+                        group_id, block_hash_to_str(group_block_hashes[save_start_block])
+                    )
                     if key in self._allocated_gvas:
                         save_start_block += 1
                     else:
@@ -1050,6 +1037,8 @@ class KVPoolWorker:
                     if (request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np))
                     else request.block_ids_np
                 )
+                if block_ids_by_group is None:
+                    raise RuntimeError(f"Block IDs are not initialized for request {request.req_id}")
 
                 save_start_block = request.save_start_token // effective_block_size
                 save_end_block = request.save_end_token // effective_block_size
@@ -1059,7 +1048,9 @@ class KVPoolWorker:
                 # Skip blocks already saved (GVA cached locally from previous
                 # request). See _process_save_for_layer_batch for rationale.
                 while save_start_block < save_end_block and save_start_block < len(group_block_hashes):
-                    key = self._make_layerwise_gva_key(group_id, group_block_hashes[save_start_block].hex())
+                    key = self._make_layerwise_gva_key(
+                        group_id, block_hash_to_str(group_block_hashes[save_start_block])
+                    )
                     if key in self._allocated_gvas:
                         save_start_block += 1
                     else:
@@ -1069,7 +1060,7 @@ class KVPoolWorker:
                 new_keys: list[str] = []
                 new_positions: list[int] = []
                 for blk_idx in range(save_start_block, min(save_end_block, len(group_block_hashes))):
-                    key = self._make_layerwise_gva_key(group_id, group_block_hashes[blk_idx].hex())
+                    key = self._make_layerwise_gva_key(group_id, block_hash_to_str(group_block_hashes[blk_idx]))
                     cached = self._allocated_gvas.get(key)
                     if cached is not None:
                         block_gvas.append(cached)
@@ -1165,7 +1156,7 @@ class KVPoolWorker:
                     continue
 
                 keys = [
-                    self._make_layerwise_gva_key(group_id, group_block_hashes[i].hex())
+                    self._make_layerwise_gva_key(group_id, block_hash_to_str(group_block_hashes[i]))
                     for i in range(load_start_block, full_blocks)
                 ]
                 if not keys:

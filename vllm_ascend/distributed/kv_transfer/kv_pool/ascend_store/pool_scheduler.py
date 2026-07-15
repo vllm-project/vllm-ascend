@@ -35,6 +35,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     PoolKey,
     ReqMeta,
     RequestTracker,
+    block_hash_to_str,
     get_block_hashes,
     get_cache_family_granularity,
     infer_cache_family_ratio,
@@ -315,7 +316,8 @@ class KVPoolScheduler:
             group_block_hashes = get_block_hashes(block_hashes_to_check, effective_block_size, self.hash_block_size)
             # Generate all-rank keys for each block hash
             keys_by_block = [
-                self._make_layerwise_gva_keys_for_hit_check(group_id, bh.hex()) for bh in group_block_hashes
+                self._make_layerwise_gva_keys_for_hit_check(group_id, block_hash_to_str(bh))
+                for bh in group_block_hashes
             ]
             all_keys = [key for block_keys in keys_by_block for key in block_keys]
             if not all_keys:
