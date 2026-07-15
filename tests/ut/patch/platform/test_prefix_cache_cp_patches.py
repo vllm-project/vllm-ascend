@@ -386,7 +386,7 @@ def test_verify_and_split_propagates_eagle_to_merged_spec_siblings() -> None:
     assert coordinator.single_type_managers[0].use_eagle is False
 
 
-def test_mamba_eagle_lookup_does_not_expand_hybrid_hit(monkeypatch) -> None:
+def test_mamba_eagle_lookup_does_not_expand_hybrid_hit() -> None:
     """Mamba finders do not drop the EAGLE lookahead block.
 
     The coordinator must therefore keep the Mamba lookup capped at the hit
@@ -423,10 +423,6 @@ def test_mamba_eagle_lookup_does_not_expand_hybrid_hit(monkeypatch) -> None:
     coordinator.hash_block_size = 16
     coordinator.lcm_block_size = 16
     coordinator.block_pool = MagicMock()
-    monkeypatch.setattr(
-        "vllm_ascend.patch.platform.patch_kv_cache_coordinator.debug_enabled",
-        lambda: False,
-    )
 
     hit_blocks, hit_length = coordinator.find_longest_cache_hit(
         block_hashes=[MagicMock(), MagicMock(), MagicMock()],
