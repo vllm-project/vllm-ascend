@@ -1457,7 +1457,7 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         extra_config=None,
         num_kv_heads=8,
         use_sparse=False,
-        use_layerwize=False,
+        use_layerwise=False,
     ):
         patches = self._patches(tp_rank=tp_rank, tp_size=tp_size)
         self._start(patches)
@@ -1467,7 +1467,7 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
             )
             from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-            return KVPoolWorker(cfg, use_layerwize=use_layerwize)
+            return KVPoolWorker(cfg, use_layerwise=use_layerwise)
         finally:
             for p in patches:
                 p.stop()
@@ -1482,6 +1482,24 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         self.assertEqual(worker.local_heads_per_rank, 4)
         self.assertEqual(worker.effective_heads_per_rank, 2)
         self.assertEqual(worker.num_sub_keys, 2)
+
+    def test_register_kv_caches_initializes_tp_mismatch_strides(self):
+        worker = self._make_worker(
+            tp_size=2, kv_role="kv_consumer", extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8
+        )
+        fake_cache = MagicMock()
+        fake_cache.shape = [100, 16, 4, 64]
+        fake_cache.__getitem__.return_value.numel.return_value = 16 * 4 * 64
+        fake_cache.element_size.return_value = 2
+        fake_cache.stride.return_value = 16 * 4 * 64
+        fake_cache.data_ptr.return_value = 10000
+        fake_cache.untyped_storage.return_value.data_ptr.return_value = 10000
+        worker._transfer_threads_started = True
+
+        worker.register_kv_caches({"layers.0": (fake_cache, fake_cache)})
+
+        self.assertEqual(worker.per_token_bytes, 512)
+        self.assertEqual(worker.sub_size_bytes, 256)
 
     def test_tp_mismatch_disabled_when_no_config(self):
         # No prefill_tp_size/decode_tp_size -> tp_mismatch False (original behavior)
@@ -1508,7 +1526,7 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
             cfg.model_config.use_mla = True
             from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-            worker = KVPoolWorker(cfg, use_layerwize=False)
+            worker = KVPoolWorker(cfg, use_layerwise=False)
         finally:
             for p in patches:
                 p.stop()
@@ -1528,7 +1546,7 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
             from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
             with self.assertRaises(ValueError):
-                KVPoolWorker(cfg, use_layerwize=False)
+                KVPoolWorker(cfg, use_layerwise=False)
         finally:
             for p in patches:
                 p.stop()
@@ -1543,7 +1561,7 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
             from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
             with self.assertRaises(ValueError):
-                KVPoolWorker(cfg, use_layerwize=True)
+                KVPoolWorker(cfg, use_layerwise=True)
         finally:
             for p in patches:
                 p.stop()
