@@ -332,6 +332,7 @@ class FusedMC2CommImpl(MoECommMethod):
     def __init__(self, moe_config):
         super().__init__(moe_config)
         self._mega_moe_symm_buffer = None
+        self._mega_moe_weight_type = None
         if get_ascend_config().enable_fused_mc2 == 1:
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
@@ -352,13 +353,14 @@ class FusedMC2CommImpl(MoECommMethod):
         topk_ids: torch.Tensor,
         weight1: list[torch.Tensor],
         weight2: list[torch.Tensor],
-        dispatch_quant_mode: int,
-        dispatch_quant_out_dtype: int | None,
     ):
         # FusedMC2CommImpl always builds a TokenDispatcherWithMC2 (see
         # setup_moe_comm_method), which is where global_bs / ep_world_size live.
         # Assert it so mypy resolves those attributes off the base dispatcher.
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
+        dispatch_quant_mode, dispatch_quant_out_dtype, self._mega_moe_weight_type = _get_cann_mega_moe_quant_settings(
+            fused_experts_input.quant.quant_type
+        )
         group = get_mc2_group().device_group
         hidden = int(fused_experts_input.hidden_states.shape[-1])
         intermediate_hidden = _infer_intermediate_hidden(weight1[0], weight2[0], hidden)
@@ -429,10 +431,6 @@ class FusedMC2CommImpl(MoECommMethod):
         # branch); assert the subtype so mypy resolves it off the base class.
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
 
-        dispatch_quant_mode, dispatch_quant_out_dtype, weight_type = _get_cann_mega_moe_quant_settings(
-            fused_experts_input.quant.quant_type
-        )
-
         def to_list(x):
             return x if isinstance(x, list) else [x]
 
@@ -459,8 +457,6 @@ class FusedMC2CommImpl(MoECommMethod):
                 topk_ids,
                 weight1,
                 weight2,
-                dispatch_quant_mode,
-                dispatch_quant_out_dtype,
             )
             
         activation_clamp = fused_experts_input.swiglu_limit if fused_experts_input.swiglu_limit > 0 else None
@@ -477,8 +473,8 @@ class FusedMC2CommImpl(MoECommMethod):
             else:
                 x_active_mask = raw_mask.to(torch.int8).contiguous()
         # A8W4-INT precision-compensation biases B1/B2 (l1_bias/l2_bias). 
-        l1_bias = fused_experts_input.weights.w1_scale_bias,
-        l2_bias = fused_experts_input.weights.w2_scale_bias,
+        l1_bias = fused_experts_input.weights.w1_scale_bias
+        l2_bias = fused_experts_input.weights.w2_scale_bias
 
         out, expert_tokens = mega_moe(
             fused_experts_input.hidden_states,
@@ -493,8 +489,8 @@ class FusedMC2CommImpl(MoECommMethod):
             l2_bias=l2_bias,
             x_active_mask=x_active_mask,
             activation_clamp=activation_clamp,
-            weight1_type=weight_type,
-            weight2_type=weight_type,
+            weight1_type=self._mega_moe_weight_type,
+            weight2_type=self._mega_moe_weight_type,
         )
         # NOTE: self.expert_token_nums is only used by the
         # dispatch_ffn_combine path (enable_fused_mc2 == 1) as a
