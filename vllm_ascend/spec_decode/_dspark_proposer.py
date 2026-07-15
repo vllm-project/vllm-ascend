@@ -70,7 +70,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         )
         # Primary-group query slot mapping buffer [max_query_tokens].
         # Overrides dflash:37; v2 uses BlockTables.slot_mappings. Per-non-
-        # primary-gid buffers live in _dspark_query_slot_mapping_buffers.
+        # primary-gid buffers live in _per_group_query_slot_mapping_buffers.
         self._slot_mapping_buffer = torch.zeros(
             self.max_query_tokens,
             dtype=torch.int32,
@@ -112,21 +112,20 @@ class AscendDSparkProposer(AscendDflashProposer):
         # BlockTables scaffold; v2 injects a single self.block_tables
         # (BlockTables, with .slot_mappings) + build_slot_mappings_by_layer,
         # so the speculator holds none of these. P2 refactor target (move to
-        # runner). See /analysis/dspark-pr11431-proposer-init变量对照.md §4.
-        # per-gid block_table (current batch)
-        self._dspark_block_tables_by_gid: dict[int, torch.Tensor] = {}
-        # per-gid block_table from runner set_per_group_attn_metadata
+        # runner).
+
+        # per-gid block_table from runner (just read)
         self._per_group_block_tables: dict[int, torch.Tensor] = {}
-        # per-gid slot_mapping from runner set_per_group_attn_metadata
+        # per-gid slot_mapping from runner (just read)
         self._per_group_slot_mappings: dict[int, torch.Tensor] = {}
-        # per-gid query slot_mapping buffer (allocated on demand)
-        self._dspark_query_slot_mapping_buffers: dict[int, torch.Tensor] = {}
-        # per-gid context slot_mapping buffer (allocated on demand)
-        self._dspark_context_slot_mapping_buffers: dict[int, torch.Tensor] = {}
-        # current-batch per-gid query slot_mapping slice
-        self._dspark_query_slot_mappings_by_gid: dict[int, torch.Tensor] = {}
-        # current-batch per-gid context slot_mapping slice
-        self._dspark_context_slot_mappings_by_gid: dict[int, torch.Tensor] = {}
+
+        # per-gid block_table (use in proposer)
+        self._per_group_block_table_buffers: dict[int, torch.Tensor] = {}
+        # per-gid query slot_mapping buffer
+        self._per_group_query_slot_mapping_buffers: dict[int, torch.Tensor] = {}
+        # per-gid context slot_mapping buffer
+        self._per_group_context_slot_mapping_buffers: dict[int, torch.Tensor] = {}
+
         # per-layer context slot mappings as a flat list
         self._context_slots: list[torch.Tensor | None] = []
 
@@ -148,6 +147,7 @@ class AscendDSparkProposer(AscendDflashProposer):
 
         self._draft_attn_layer_names = sorted(self.model.get_draft_kv_cache_layer_names())
 
+        # there are many kv groups other than one
         for kv_cache_gid, kv_cache_group_spec in enumerate(kv_cache_config.kv_cache_groups):
             draft_layer_names_in_group = set(kv_cache_group_spec.layer_names) & set(self._draft_attn_layer_names)
             if not draft_layer_names_in_group:
@@ -178,22 +178,26 @@ class AscendDSparkProposer(AscendDflashProposer):
 
         self.draft_attn_groups = [attention_group for attention_groups in attention_groups_list for attention_group in attention_groups.values()]
         self.kv_cache_gid = 0
-        if self.draft_attn_groups:
-            self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
-            self.kernel_block_size = int(self.draft_attn_groups[0].kv_cache_spec.block_size)
+        if not self.draft_attn_groups:
+            raise RuntimeError(
+                "DSpark standard-cache path requires registered draft attention "
+                f"groups. Missing layers: {self._draft_attn_layer_names}"
+            )
 
-            name_to_gid = {
-                ln: gid
-                for gid, group in enumerate(kv_cache_config.kv_cache_groups)
-                for ln in group.layer_names if ln in self._draft_attn_layer_names
-            }
-            self._layer_group_idx = [name_to_gid[name] for name in self._draft_attn_layer_names]
-            return
+        self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
+        self.kernel_block_size = int(self.draft_attn_groups[0].kv_cache_spec.block_size)
 
-        raise RuntimeError(
-            "DSpark standard-cache path requires registered draft attention "
-            f"groups. Missing layers: {self._draft_attn_layer_names}"
-        )
+        name_to_gid = {
+            ln: gid
+            for gid, group in enumerate(kv_cache_config.kv_cache_groups)
+            for ln in group.layer_names if ln in self._draft_attn_layer_names
+        }
+        self._layer_group_idx = [name_to_gid[name] for name in self._draft_attn_layer_names]
+
+        # some buffers need information of groups
+        self._per_group_query_slot_mapping_buffers = {attn_group.kv_cache_group_id: torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device) for attn_group in self.draft_attn_groups}
+        self._per_group_context_slot_mapping_buffers = {attn_group.kv_cache_group_id: torch.zeros(self.max_num_tokens, dtype=torch.int32, device=self.device) for attn_group in self.draft_attn_groups}
+
 
     def set_per_group_attn_metadata(
         self,
@@ -207,20 +211,9 @@ class AscendDSparkProposer(AscendDflashProposer):
     def _slot_mapping_buffer_for_gid(self, gid: int, *, context: bool) -> torch.Tensor:
         if gid == getattr(self, "kv_cache_gid", 0):
             return self._context_slot_mapping_buffer if context else self._slot_mapping_buffer
-        buffers = self._dspark_context_slot_mapping_buffers if context else self._dspark_query_slot_mapping_buffers
+        buffers = self._per_group_context_slot_mapping_buffers if context else self._per_group_query_slot_mapping_buffers
         buf = buffers.get(gid)
-        if buf is None:
-            size = self.max_num_tokens if context else self.max_query_tokens
-            buf = torch.zeros(size, dtype=torch.int32, device=self.device)
-            buffers[gid] = buf
         return buf
-
-    @staticmethod
-    def _get_block_table_device_tensor(block_table, batch_size: int) -> torch.Tensor:
-        try:
-            return block_table.get_device_tensor(batch_size)
-        except TypeError:
-            return block_table.get_device_tensor()
 
     def _get_draft_block_table_for_gid(
         self,
@@ -237,10 +230,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             except (IndexError, KeyError, TypeError):
                 draft_block_table = None
             if draft_block_table is not None:
-                block_table = AscendDSparkProposer._get_block_table_device_tensor(
-                    draft_block_table,
-                    batch_size,
-                )
+                block_table = block_table.get_device_tensor(batch_size)
         if block_table is None and gid == getattr(self, "kv_cache_gid", 0):
             block_table = getattr(cad, "block_table_tensor", None)
         if block_table is None:
@@ -256,8 +246,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad: CommonAttentionMetadata,
         batch_size: int,
     ) -> dict[int, torch.Tensor]:
-        if not getattr(self, "draft_attn_groups", []):
-            return {}
         by_gid: dict[int, torch.Tensor] = {}
         for attn_group in self.draft_attn_groups:
             gid = attn_group.kv_cache_group_id
@@ -296,9 +284,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         has_num_rejected = num_rejected_tokens_gpu is not None
         primary_gid = getattr(self, "kv_cache_gid", 0)
         block_tables_by_gid = self._get_draft_block_tables(cad, batch_size)
-        self._dspark_block_tables_by_gid = block_tables_by_gid
-        self._dspark_query_slot_mappings_by_gid = {}
-        self._dspark_context_slot_mappings_by_gid = {}
+        self._per_group_block_table_buffers = block_tables_by_gid
         self._context_slots = None
         self._markov_anchor_tokens[:batch_size].copy_(next_token_ids)
         if batch_size < self._markov_anchor_tokens.shape[0]:
@@ -372,6 +358,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                 if block_size > 1:
                     self.input_ids[out_start + 1 : out_end] = self.parallel_drafting_token_id
 
+        # to compute self._context_slots
         if block_tables_by_gid:
             self._dspark_context_slot_mappings_by_gid = {
                 gid: self._slot_mapping_buffer_for_gid(gid, context=True)[:self._dflash_num_context]
@@ -407,11 +394,11 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.max_seq_len = cad.max_seq_len + block_size
         cad.slot_mapping = self._slot_mapping_buffer[:num_query_total]
         if block_tables_by_gid:
-            self._dspark_query_slot_mappings_by_gid = {
+            self._per_group_query_slot_mapping_buffers = {
                 gid: self._slot_mapping_buffer_for_gid(gid, context=False) for gid in block_tables_by_gid
             }
-            if primary_gid in self._dspark_query_slot_mappings_by_gid:
-                cad.slot_mapping = self._dspark_query_slot_mappings_by_gid[primary_gid][:num_query_total]
+            if primary_gid in self._per_group_query_slot_mapping_buffers:
+                cad.slot_mapping = self._per_group_query_slot_mapping_buffers[primary_gid][:num_query_total]
         cad.positions = self.positions[:num_query_total]
         cad.causal = False
         cad.attn_mask = None
@@ -445,21 +432,17 @@ class AscendDSparkProposer(AscendDflashProposer):
         # sequences (GatherV3 "Index out of range").
         num_blocks = (int(self.max_model_len) + cache_block_size - 1) // cache_block_size
         block_tables_by_gid: dict[int, torch.Tensor] = {}
-        query_slot_mappings_by_gid: dict[int, torch.Tensor] = {}
         context_slot_mappings_by_gid: dict[int, torch.Tensor] = {}
         for attn_group in self.draft_attn_groups:
             gid = attn_group.kv_cache_group_id
             block_tables_by_gid[gid] = torch.zeros(
                 (batch_size, num_blocks), dtype=torch.int32, device=self.device
             )
-            query_slot_mappings_by_gid[gid] = torch.zeros(
-                model_num_query_tokens, dtype=torch.int32, device=self.device
-            )
+            self._per_group_query_slot_mapping_buffers[gid].fill_(-1)
             context_slot_mappings_by_gid[gid] = torch.zeros(
                 num_input_tokens, dtype=torch.int32, device=self.device
             )
-        self._dspark_block_tables_by_gid = block_tables_by_gid
-        self._dspark_query_slot_mappings_by_gid = query_slot_mappings_by_gid
+        self._per_group_block_table_buffers = block_tables_by_gid
         self._dspark_context_slot_mappings_by_gid = context_slot_mappings_by_gid
         self._context_slots = [self._dspark_context_slot_mappings_by_gid[gidx] for gidx in self._layer_group_idx]
         self._dspark_query_start_loc = (
@@ -529,7 +512,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                 slot_mapping=self._slot_mapping_buffer[:num_input_tokens],
                 attn_state=AscendAttentionState.ChunkedPrefill,
                 causal=False,
-                block_table_tensor=self._dspark_block_tables_by_gid[self.kv_cache_gid][:num_reqs],
+                block_table_tensor=self._per_group_block_table_buffers[self.kv_cache_gid][:num_reqs],
             )
             multi_steps_attn_metadata, _ = self.build_draft_attn_metadata(
                 dummy_cad, num_input_tokens, num_query_total

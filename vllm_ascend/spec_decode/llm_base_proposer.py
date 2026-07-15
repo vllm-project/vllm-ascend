@@ -2187,7 +2187,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         assert len(self.draft_attn_groups) > 0
 
-        if hasattr(self, "_dspark_block_tables_by_gid"):
+        if hasattr(self, "_per_group_block_table_buffers"):
             if num_input_tokens > num_actual_tokens:
                 self.positions[num_actual_tokens:num_input_tokens].fill_(0)
                 self._slot_mapping_buffer[num_actual_tokens:num_input_tokens].fill_(-1)
@@ -2212,13 +2212,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     common_ratio_to_sas_metadata=dict(),
                     block_size=attn_group.kv_cache_spec.block_size,
                 )
-            if hasattr(self, "_dspark_block_tables_by_gid"):
+            if hasattr(self, "_per_group_block_table_buffers"):
                 gid = attn_group.kv_cache_group_id
                 common_attn_metadata = copy.copy(base_cm)
-                block_table = getattr(self, "_dspark_block_tables_by_gid", {}).get(gid)
+                block_table = getattr(self, "_per_group_block_table_buffers", {}).get(gid)
                 if block_table is not None:
                     common_attn_metadata.block_table_tensor = block_table[: common_attn_metadata.num_reqs]
-                slot_mapping = getattr(self, "_dspark_query_slot_mappings_by_gid", {}).get(gid)
+                slot_mapping = self._per_group_query_slot_mapping_buffers[gid]
                 if slot_mapping is not None:
                     common_attn_metadata.slot_mapping = slot_mapping[:num_input_tokens]
                 attn_metadata = builder.build_for_drafting(
@@ -2243,15 +2243,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         num_actual_tokens: int,
         num_input_tokens: int,
     ) -> None:
-        if not hasattr(self, "_dspark_block_tables_by_gid"):
+        if not hasattr(self, "_per_group_block_table_buffers"):
             return
         if num_input_tokens <= num_actual_tokens:
             return
         self.input_ids[num_actual_tokens:num_input_tokens].fill_(self.parallel_drafting_token_id)
         self.positions[num_actual_tokens:num_input_tokens].fill_(0)
         self._slot_mapping_buffer[num_actual_tokens:num_input_tokens].fill_(-1)
-        for buf in getattr(self, "_dspark_query_slot_mapping_buffers", {}).values():
+
+        for buf in getattr(self, "_per_group_query_slot_mapping_buffers", {}).values():
             buf[num_actual_tokens:num_input_tokens].fill_(-1)
+        for buf in getattr(self, "_per_group_context_slot_mapping_buffers", {}).values():
+            buf[self._dflash_num_context:].fill_(-1)
 
     def _sample_sequential(
         self,
