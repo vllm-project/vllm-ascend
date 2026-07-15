@@ -4,7 +4,7 @@ from typing import Any
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import get_forward_context
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
@@ -12,8 +12,6 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_inputs_kernel_single_grid
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
-
-logger = init_logger(__name__)
 
 
 class AscendDflashProposer(AscendEagleProposer):

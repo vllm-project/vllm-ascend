@@ -8,7 +8,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import Qwen3Config
-
 from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
@@ -16,7 +15,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -35,10 +34,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.multimodal.inputs import NestedTensors
-from vllm.transformers_utils.config import set_default_rope_theta
-from vllm.v1.attention.backend import AttentionType
-
 from vllm.model_executor.models.qwen2 import Qwen2MLP as Qwen3MLP
 from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 from vllm.model_executor.models.utils import (
@@ -47,14 +42,15 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     process_eagle_weight,
 )
+from vllm.multimodal.inputs import NestedTensors
+from vllm.transformers_utils.config import set_default_rope_theta
+from vllm.v1.attention.backend import AttentionType
 
 from vllm_ascend.models.dspark_quarot import (
     load_quarot_rotation,
     resolve_quarot_rotation_path,
     transform_fc_weight_for_quarot,
 )
-
-logger = init_logger(__name__)
 
 
 def _rms_norm_into(
@@ -271,10 +267,7 @@ class DFlashQwen3Attention(nn.Module):
             rope_parameters=rope_parameters,
         )
         if rope_interleave:
-            logger.warning_once(
-                "[spec_decode/dspark] using interleaved draft RoPE "
-                "(is_neox_style=False)"
-            )
+            logger.warning_once("[spec_decode/dspark] using interleaved draft RoPE (is_neox_style=False)")
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -302,12 +295,8 @@ class DFlashQwen3Attention(nn.Module):
 
         # Per-head RMSNorm
         q_shape, k_shape = q.shape, k.shape
-        q = self.q_norm(
-            q.view(*q_shape[:-1], q_shape[-1] // self.head_dim, self.head_dim)
-        ).view(q_shape)
-        k = self.k_norm(
-            k.view(*k_shape[:-1], k_shape[-1] // self.head_dim, self.head_dim)
-        ).view(k_shape)
+        q = self.q_norm(q.view(*q_shape[:-1], q_shape[-1] // self.head_dim, self.head_dim)).view(q_shape)
+        k = self.k_norm(k.view(*k_shape[:-1], k_shape[-1] // self.head_dim, self.head_dim)).view(k_shape)
 
         q, k = self.rotary_emb(positions, q, k)
 
@@ -353,9 +342,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
             prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -546,15 +533,11 @@ class DFlashQwen3Model(nn.Module):
             self._hidden_norm_weight,
             self._rms_norm_eps,
         )
-        all_kv_flat = F.linear(
-            normed_context_states, self._fused_kv_weight, self._fused_kv_bias
-        )
+        all_kv_flat = F.linear(normed_context_states, self._fused_kv_weight, self._fused_kv_bias)
         # Single contiguous copy that separates K/V and transposes to
         # layer-major layout.  Result: [2, L, num_ctx, nkv, hd] contiguous.
         # Indexing dim-0 gives contiguous [L, num_ctx, nkv, hd] for K and V.
-        all_kv = (
-            all_kv_flat.view(num_ctx, L, 2, nkv, hd).permute(2, 1, 0, 3, 4).contiguous()
-        )
+        all_kv = all_kv_flat.view(num_ctx, L, 2, nkv, hd).permute(2, 1, 0, 3, 4).contiguous()
         all_k = all_kv[0]  # [L, num_ctx, nkv, hd], contiguous
         all_v = all_kv[1]  # [L, num_ctx, nkv, hd], contiguous
 
@@ -574,10 +557,7 @@ class DFlashQwen3Model(nn.Module):
         all_k_flat = all_k_normed.view(L * num_ctx, kv)
         positions_repeated = context_positions.repeat(L)
         cos_sin_cache = self._rope_cos_sin_cache
-        if (
-            cos_sin_cache.device != all_k_flat.device
-            or cos_sin_cache.dtype != all_k_flat.dtype
-        ):
+        if cos_sin_cache.device != all_k_flat.device or cos_sin_cache.dtype != all_k_flat.dtype:
             cos_sin_cache = cos_sin_cache.to(
                 device=all_k_flat.device,
                 dtype=all_k_flat.dtype,
@@ -604,12 +584,9 @@ class DFlashQwen3Model(nn.Module):
                 valid_context = context_slot_mapping >= 0
             else:
                 valid_context = (context_slot_mapping >= 0).all(dim=-1)
-            self._dspark_context_kv_debug_count = (
-                getattr(self, "_dspark_context_kv_debug_count", 0) + 1
-            )
+            self._dspark_context_kv_debug_count = getattr(self, "_dspark_context_kv_debug_count", 0) + 1
             logger.warning(
-                "[spec_decode/dspark] context kv debug #%d: rows=%d valid_rows=%d "
-                "slot_tail=%s",
+                "[spec_decode/dspark] context kv debug #%d: rows=%d valid_rows=%d slot_tail=%s",
                 self._dspark_context_kv_debug_count,
                 int(context_slot_mapping.shape[0]),
                 int(valid_context.detach().to(torch.int32).sum().cpu().item()),
@@ -691,9 +668,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
         if getattr(self.config, "draft_vocab_size", None) is None:
             self.config.draft_vocab_size = getattr(self.config, "vocab_size", None)
-        target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config
-        )
+        target_layer_num = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
         self.model = DFlashQwen3Model(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
@@ -706,9 +681,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             self.config.hidden_size,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
-        self.logits_processor = LogitsProcessor(
-            self.config.draft_vocab_size, scale=logit_scale
-        )
+        self.logits_processor = LogitsProcessor(self.config.draft_vocab_size, scale=logit_scale)
         target_vocab_size = vllm_config.model_config.get_vocab_size()
         if self.config.draft_vocab_size != target_vocab_size:
             self.draft_id_to_target_id = nn.Parameter(
@@ -758,9 +731,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         context_slot_mapping: torch.Tensor | None = None,
     ) -> None:
         """Precompute projected + RoPE'd K/V and write to cache."""
-        self.model.precompute_and_store_context_kv(
-            context_states, context_positions, context_slot_mapping
-        )
+        self.model.precompute_and_store_context_kv(context_states, context_positions, context_slot_mapping)
 
     def combine_hidden_states(
         self,
@@ -781,9 +752,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         includes_draft_id_mapping = False
         includes_embed_tokens = False
         for name, loaded_weight in weights:
-            assert "mask_hidden" not in name, (
-                "DFlash should use mask_token_id to embed the padding hidden state"
-            )
+            assert "mask_hidden" not in name, "DFlash should use mask_token_id to embed the padding hidden state"
             if "t2d" in name:
                 continue
             if "d2t" in name:
@@ -845,12 +814,8 @@ class DSparkQwen3ForCausalLM(DFlashQwen3ForCausalLM):
                 getattr(self.config, "dspark_markov_rank", 256),
             )
         )
-        self.confidence_head_with_markov = bool(
-            getattr(self.config, "confidence_head_with_markov", True)
-        )
-        self.enable_confidence_head = bool(
-            getattr(self.config, "enable_confidence_head", True)
-        )
+        self.confidence_head_with_markov = bool(getattr(self.config, "confidence_head_with_markov", True))
+        self.enable_confidence_head = bool(getattr(self.config, "enable_confidence_head", True))
         self.markov_head = DSparkMarkovHead(
             self.config.vocab_size,
             markov_rank,
@@ -924,9 +889,7 @@ class DSparkQwen3ForCausalLM(DFlashQwen3ForCausalLM):
 
         if self.confidence_head is not None:
             markov_embed_tensor = torch.stack(markov_embeds, dim=1)
-            confidence_markov = (
-                markov_embed_tensor if self.confidence_head_with_markov else None
-            )
+            confidence_markov = markov_embed_tensor if self.confidence_head_with_markov else None
             self.last_confidence_logits = self.confidence_head(
                 proposal_hidden_states,
                 confidence_markov,
@@ -957,9 +920,7 @@ class DSparkQwen3ForCausalLM(DFlashQwen3ForCausalLM):
         rotation = None
         transformed_quarot_fc = False
         for name, loaded_weight in weights:
-            assert "mask_hidden" not in name, (
-                "DSpark should use mask_token_id to embed the padding hidden state"
-            )
+            assert "mask_hidden" not in name, "DSpark should use mask_token_id to embed the padding hidden state"
             if name == "fc.weight" and self._quarot_rotation_path is not None:
                 if rotation is None:
                     rotation = load_quarot_rotation(self._quarot_rotation_path)
