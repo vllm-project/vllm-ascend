@@ -23,8 +23,14 @@ reviewed change rather than a silent breakage.
 Background: A5 (Ascend 950) has extensive runtime support but no dedicated
 CI runner yet, so chip-detection regressions only surface on real hardware.
 Guarding the detection contract on CPU closes that gap.
+
+The tests follow the AAA (Arrange-Act-Assert) pattern: each parametrized
+case has exactly one arrangement, one act, and one assertion. The positive
+case uses ``nullcontext`` (failure if the call raises) and the negative
+cases use ``pytest.raises`` so every case carries an explicit assertion.
 """
 
+from contextlib import nullcontext
 from unittest import mock
 
 import pytest
@@ -38,37 +44,51 @@ from vllm_ascend.utils import AscendDeviceType
 A5_SOC_VERSION = 260
 
 
-def test_a5_soc_version_260_maps_uniquely():
-    """A5 maps from the single SoC value 260, and adjacent values are rejected.
+@pytest.mark.parametrize(
+    "soc_version, installed_type, expectation",
+    [
+        # SoC 260 uniquely resolves to A5: a consistent install must not raise.
+        (A5_SOC_VERSION, AscendDeviceType.A5, nullcontext()),
+        # SoC 260 must NOT resolve to any other device type -> AssertionError.
+        (A5_SOC_VERSION, AscendDeviceType.A2, pytest.raises(AssertionError)),
+        (A5_SOC_VERSION, AscendDeviceType.A3, pytest.raises(AssertionError)),
+        (A5_SOC_VERSION, AscendDeviceType._310P, pytest.raises(AssertionError)),
+        # Adjacent SoC values are unsupported, not a silent fallback to A5.
+        (A5_SOC_VERSION - 1, AscendDeviceType.A5, pytest.raises(RuntimeError)),
+        (A5_SOC_VERSION + 1, AscendDeviceType.A5, pytest.raises(RuntimeError)),
+    ],
+    ids=[
+        "soc_260_a5_ok",
+        "soc_260_vs_a2_mismatch",
+        "soc_260_vs_a3_mismatch",
+        "soc_260_vs_310p_mismatch",
+        "soc_259_unsupported",
+        "soc_261_unsupported",
+    ],
+)
+def test_check_ascend_device_type_resolves_a5_soc_uniquely(
+    soc_version, installed_type, expectation
+):
+    """SoC 260 must resolve to A5 and only A5; adjacent values are rejected.
 
     A2/A3/310P are mapped from ranges (220-225 / 250-255 / 200-205), so a new
-    SoC variant within the range is tolerated. A5 is a single discrete value,
-    which is fragile: this test documents that 260 is the *only* accepted A5
-    SoC version and that 259/261 must not silently resolve to A5.
-
-    The installed device type is set via ``mock.patch`` (not direct mutation)
-    so the module-level global is restored after the test and cannot pollute
-    other tests in the suite.
+    SoC variant within a range is tolerated. A5 is a single discrete value
+    (260), which is fragile: this test documents that 260 is the *only*
+    accepted A5 SoC version. The mismatch cases prove 260 does not silently
+    resolve to A2/A3/310P; the adjacent cases prove 259/261 do not silently
+    fall back to A5.
     """
+    # Arrange
     with (
-        mock.patch("vllm_ascend.utils._ascend_device_type", AscendDeviceType.A5),
+        mock.patch("vllm_ascend.utils._ascend_device_type", installed_type),
         mock.patch(
             "vllm_ascend.utils.torch_npu.npu.get_soc_version",
-            return_value=A5_SOC_VERSION,
+            return_value=soc_version,
         ),
     ):
-        # Must not raise: installed device type matches the detected SoC.
-        utils.check_ascend_device_type()
-
-    # Adjacent values are unsupported and must raise, not fall back to A5.
-    with mock.patch("vllm_ascend.utils._ascend_device_type", AscendDeviceType.A5):
-        for adjacent in (A5_SOC_VERSION - 1, A5_SOC_VERSION + 1):
-            with mock.patch(
-                "vllm_ascend.utils.torch_npu.npu.get_soc_version",
-                return_value=adjacent,
-            ):
-                with pytest.raises(RuntimeError, match="Can not support soc_version"):
-                    utils.check_ascend_device_type()
+        # Act + Assert
+        with expectation:
+            utils.check_ascend_device_type()
 
 
 @pytest.mark.parametrize(
@@ -79,15 +99,21 @@ def test_a5_soc_version_260_maps_uniquely():
         (AscendDeviceType.A3, False),
         (AscendDeviceType._310P, False),
     ],
+    ids=["a5_true", "a2_false", "a3_false", "310p_false"],
 )
-def test_is_950_only_true_for_a5(device_type, expected):
+def test_is_950_returns_true_only_for_a5(device_type, expected):
     """``is_950()`` must return True iff the device type is A5.
 
     Several A5-specific code paths branch on ``is_950()``; a broken helper
     would silently route A5 through non-A5 paths (or vice versa).
     """
+    # Arrange
     with mock.patch(
         "vllm_ascend.utils.get_ascend_device_type",
         return_value=device_type,
     ):
-        assert utils.is_950() is expected
+        # Act
+        result = utils.is_950()
+
+    # Assert
+    assert result is expected
