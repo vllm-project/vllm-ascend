@@ -316,9 +316,9 @@ class UBatchWrapper(GPUUBatchWrapper):
             )
             forward_context.dp_metadata = ubatch_dp_metadata
             forward_context.ubatch_idx = i
-            forward_context.attn_metadata = (
-                attn_metadata[i] if attn_metadata is not None else None
-            )
+            # forward_context.attn_metadata = (
+            #     attn_metadata[i] if attn_metadata is not None else None
+            # )
             forward_context.cudagraph_runtime_mode = aclgraph_runtime_mode
             forward_context.batch_descriptor = batch_descriptor
             forward_context.afd_metadata = afd_metadata
