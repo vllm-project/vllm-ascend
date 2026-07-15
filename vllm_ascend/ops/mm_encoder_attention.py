@@ -120,9 +120,11 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         *,
         is_capturing: bool = False,
     ) -> torch.Tensor:
-        # If cu_seqlens is not provided, we create a default one assuming all sequences have the same length.
-        # This is used by models such as Hunyuan-OCR, which always pass None as cu_seqlens and rely on the operator to
-        # compute it internally.
+        # In the eager path, if cu_seqlens is provided by the model we use it; if it is not provided, we create a
+        # default one assuming all sequences have the same length. This is used by models such as Hunyuan-OCR, which
+        # always pass None as cu_seqlens and rely on the operator to compute it internally.
+        # In the capture path, we always create the default cu_seqlens on CPU instead of using the model tensor, to
+        # avoid a device-to-host sync (.cpu()).
         if is_capturing or cu_seqlens is None:
             cu_seqlens = torch.arange(0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device="cpu")
             return cu_seqlens
