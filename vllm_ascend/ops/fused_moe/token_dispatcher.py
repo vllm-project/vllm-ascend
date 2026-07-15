@@ -504,9 +504,9 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             lora_dtype = split_lora_indices.dtype
             # Expand lora indices to match top_k expansion (each token
             # generates top_k dispatched rows).
-            expanded_lora = split_lora_indices.to(torch.float32).repeat_interleave(topk_ids.shape[1])
+            expanded_lora = split_lora_indices.repeat_interleave(topk_ids.shape[1])
             # Apply the same local permute as hidden_states (first permute).
-            permuted_lora = expanded_lora[reversed_local_input_permutation_mapping.to(torch.int64)]
+            permuted_lora = expanded_lora[reversed_local_input_permutation_mapping]
             # All_to_all exchange: send lora indices to the expert-owning ranks.
             _, exchanged_lora, handle = async_all_to_all(permuted_lora, output_splits, input_splits, self.ep_group)
             handle.wait()
@@ -548,7 +548,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             and exchanged_lora_pending is not None
             and reversed_global_input_permutation_mapping is not None
         ):
-            exchanged_lora_indices = exchanged_lora_pending[reversed_global_input_permutation_mapping.to(torch.int64)]
+            exchanged_lora_indices = exchanged_lora_pending[reversed_global_input_permutation_mapping]
 
         return MoETokenDispatchOutput(
             hidden_states=global_input_tokens,
