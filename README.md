@@ -61,8 +61,8 @@ For detailed information on supported models and features, please refer to the [
 - Hardware: Atlas 800I A2 Inference series, Atlas A2 Training series, Atlas 800I A3 Inference series, Atlas A3 Training series, Atlas 300I Duo (Experimental)
 - OS: Linux
 - Software:
-    - Python >= 3.10, < 3.12
-    - CANN == 9.0.0 (For Ascend HDK version, please refer to the [Release Notes](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html))
+    - Python >= 3.10, < 3.13
+    - CANN == 9.0.1 (For Ascend HDK version, please refer to the [Release Notes](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html))
     - PyTorch == 2.10.0, torch-npu == 2.10.0.post2
     - vLLM (the same version as vllm-ascend)
 
@@ -90,7 +90,7 @@ Below are the maintained branches:
 
 | Branch           | Status       | Note                                 |
 |------------------|--------------|--------------------------------------|
-| main             | Maintained   | CI commitment for vLLM main branch and vLLM v0.23.0 tag |
+| main             | Maintained   | CI commitment for vLLM main branch and vLLM v0.24.0 tag |
 | v0.7.1-dev       | Unmaintained | Outdated, no longer maintained. |
 | v0.7.3-dev       | Unmaintained | Only bug fixes are allowed, and no new release tags anymore. |
 | v0.9.1-dev       | Unmaintained | Only bug fixes are allowed, and no new release tags anymore. |

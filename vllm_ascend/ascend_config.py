@@ -102,15 +102,6 @@ class AscendConfig:
             os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend"),
         )
 
-        self.layer_sharding = additional_config.get("layer_sharding", None)
-        if self.layer_sharding:
-            logger.info_once(
-                "Linear layer sharding enabled with config: %s. "
-                "Note: This feature works optimally with FLASHCOMM2 and DSA-CP enabled; "
-                "using it without these features may result in significant performance degradation.",
-                str(self.layer_sharding),
-            )
-
         self.enable_shared_expert_dp = (
             additional_config.get("enable_shared_expert_dp", False)
             and vllm_config.parallel_config.enable_expert_parallel
@@ -137,7 +128,6 @@ class AscendConfig:
                     str(vllm_config.scheduler_config.max_num_batched_tokens),
                 )
         self.multistream_overlap_shared_expert = additional_config.get("multistream_overlap_shared_expert", False)
-        self.multistream_overlap_gate = additional_config.get("multistream_overlap_gate", False)
         # PD-disaggregated D node only (kv_consumer); invalid on P nodes and in PD-mixed mode.
         self.recompute_scheduler_enable = additional_config.get("recompute_scheduler_enable", False)
         # DSV4 oproj / embedding fine-grained TP (oproj_tensor_parallel_size /
@@ -232,7 +222,6 @@ class AscendConfig:
 
             if self.pd_tp_ratio == 0:
                 raise AssertionError("Only support P node tp size lagger then D node tp size")
-        self.SLO_limits_for_dynamic_batch = additional_config.get("SLO_limits_for_dynamic_batch", -1)
         from vllm_ascend.utils import get_flashcomm2_config_and_validate
 
         self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_config_and_validate(self, vllm_config)

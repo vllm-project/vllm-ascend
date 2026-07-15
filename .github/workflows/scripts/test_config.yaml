@@ -97,8 +97,10 @@
   optional: false
   base: attention_common
   source_file_dependencies:
+    - vllm_ascend/attention/indexer.py
     - vllm_ascend/attention/sfa_v1.py
   tests:
+    - tests/ut/attention/test_indexer.py
     - tests/ut/attention/a2/test_sfa_v1.py
     - tests/ut/attention/a2/test_sfa_v1_precision.py
     - tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py
@@ -343,12 +345,9 @@
 - name: ops_distributed_inference
   optional: false
   source_file_dependencies:
-    - vllm_ascend/ops/flashcomm2_oshard_manager.py
-    - vllm_ascend/ops/layer_shard_linear.py
     - vllm_ascend/ops/weight_prefetch.py
   tests:
     - tests/ut/ops
-    - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_qwen3_moe_fc2_oshard_tp2
     - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_deepseek_v2_lite_fc1_tp2
     - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_qwen3_dense_fc1_tp2
     - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_qwen3_dense_prefetch_mlp_weight_tp2
@@ -567,6 +566,7 @@
   tests:
     - tests/ut/worker
     - tests/e2e/pull_request/one_card/model_runner_v2
+    - tests/e2e/pull_request/two_card/model_runner_v2
 
 # XLite
 - name: xlite
@@ -608,7 +608,6 @@
     - vllm_ascend/ascend_forward_context.py
     - vllm_ascend/cpu_binding.py
     - vllm_ascend/envs.py
-    - vllm_ascend/flash_common3_context.py
     - vllm_ascend/logger.py
     - vllm_ascend/meta_registration.py
     - vllm_ascend/platform.py
@@ -621,7 +620,6 @@
     - tests/ut/test_cpu_binding.py
     - tests/ut/test_envs.py
     - tests/ut/test_logger.py
-    - tests/ut/test_flash_common3_context.py
     - tests/ut/test_meta_registration.py
     - tests/ut/test_profiling_config.py
     - tests/ut/test_utils.py
@@ -735,6 +733,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py: 160
   tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py: 510
   tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora_tp.py: 170
+  tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py: 130
   tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 760
   tests/e2e/pull_request/two_card/test_data_parallel.py: 500
   tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 140
@@ -839,12 +838,3 @@ partition:
   a3_x2: 3
   a3_x4: 3
   cpu_x0: 1
-
-
-
-
-
-
-
-
-

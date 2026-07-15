@@ -177,7 +177,6 @@ TITLES = {
     "user_guide/feature_guide/batch_invariance.md": {"en": "Batch Invariance", "zh": "批次不变性"},
     "user_guide/feature_guide/context_parallel.md": {"en": "Context Parallel", "zh": "上下文并行"},
     "user_guide/feature_guide/cpu_binding.md": {"en": "CPU Binding", "zh": "CPU 绑定"},
-    "user_guide/feature_guide/dynamic_batch.md": {"en": "Dynamic Batch", "zh": "动态批次"},
     "user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md": {
         "en": "Dynamic Chunk Pipeline Parallel",
         "zh": "动态分块流水线并行",
@@ -193,7 +192,6 @@ TITLES = {
     "user_guide/feature_guide/kv_cache_cpu_offload.md": {"en": "KV Cache CPU Offload", "zh": "KV Cache CPU 卸载"},
     "user_guide/feature_guide/kv_pool.md": {"en": "KV Pool", "zh": "KV 池"},
     "user_guide/feature_guide/large_scale_ep.md": {"en": "Large Scale EP", "zh": "大规模 EP"},
-    "user_guide/feature_guide/layer_sharding.md": {"en": "Layer Sharding", "zh": "层分片"},
     "user_guide/feature_guide/lmcache_ascend_deployment.md": {
         "en": "LMCache Ascend Deployment",
         "zh": "LMCache Ascend 部署",
