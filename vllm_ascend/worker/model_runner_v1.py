@@ -3224,9 +3224,9 @@ class NPUModelRunner(GPUModelRunner):
             attn_state=self.attn_state,
             decode_token_per_req=self.decode_token_per_req,
             prefill_context_parallel_metadata=self.long_seq_metadata,
-            group_len = self.group_len.gpu[:num_reqs_padded],
-            group_key_idx = self.group_key_idx.gpu[:num_reqs_padded],
-            group_key_cache_idx = self.group_key_cache_idx.gpu[:num_reqs_padded],
+            group_len=self.group_len.gpu[:num_tokens_padded],
+            group_key_idx=self.group_key_idx.gpu[:num_tokens_padded],
+            group_key_cache_idx=self.group_key_cache_idx.gpu[:num_tokens_padded],
         )
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
