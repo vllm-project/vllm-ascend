@@ -601,11 +601,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         # - C8 indexer cache for lightning indexer.
         # GLM5.2 can skip creating indexer on some layers, but these layers
         # still need the packed KV cache when sparse C8 is enabled.
-        self.use_sparse_c8_indexer = self.has_indexer and ascend_config.is_sparse_c8_layer(self.layer_name)
+        self.use_sparse_c8_indexer = self.has_indexer and ascend_config.is_sparse_c8_layer(self.indexer.k_cache.prefix)
         self.use_sparse_c8_sfa = self.use_sparse_c8_indexer or (
             ascend_config.enable_sparse_c8 and not self.has_indexer and self.skip_topk
         )
-        if self.use_sparse_c8_sfa or self.use_sparse_c8_indexer:
+        if self.use_sparse_c8_sfa:
             if get_ascend_device_type() == AscendDeviceType.A5:
                 self.c8_k_cache_dtype = torch.float8_e4m3fn
                 self.c8_k_scale_cache_dtype = torch.float32
@@ -1453,6 +1453,61 @@ class AscendSFAImpl(MLAAttentionImpl):
     ) -> None:
         return
 
+    def _compose_sfa_kv_cache(self, kv_cache) -> tuple[torch.Tensor, ...] | None:
+        """Compose split cache handles into the tuple expected by SFA kernels.
+
+        ``kv_cache`` contains only the main MLA cache owned by the attention
+        layer, while ``self.indexer.k_cache.kv_cache`` contains the cache owned
+        by the indexer layer. Their possible layouts are:
+
+        - non-C8:
+          main ``(k_cache, v_cache)`` + indexer ``(indexer_k_cache,)``
+          -> ``(k_cache, v_cache, indexer_k_cache)``
+        - Sparse C8:
+          main ``(packed_kv_cache,)`` +
+          indexer ``(indexer_k_cache, indexer_scale_cache)``
+          -> ``(packed_kv_cache, indexer_k_cache, indexer_scale_cache)``
+
+        Layers that reuse another layer's top-k indices have no local indexer;
+        for those layers, the main cache tuple is returned unchanged.
+        """
+        # TODO: Remove this recomposition once SFA kernels accept split
+        # main/indexer cache handles directly. The allocator now owns them as
+        # separate cache specs, while the current kernel path still expects the
+        # legacy combined tuple layout.
+        main_cache = kv_cache
+        if main_cache is None or not self.has_indexer:
+            return main_cache
+
+        indexer_cache = self.indexer.k_cache.kv_cache
+        if indexer_cache is None:
+            raise RuntimeError(f"SFA indexer cache is not initialized or bound. layer_name={self.layer_name}.")
+
+        if self.use_sparse_c8_indexer:
+            if len(indexer_cache) != 2:
+                raise RuntimeError(
+                    "Sparse C8 SFA indexer cache expects (k_cache, scale_cache), "
+                    f"got {len(indexer_cache)} tensors for layer_name={self.layer_name}."
+                )
+            if len(main_cache) != 1:
+                raise RuntimeError(
+                    "Sparse C8 SFA main cache expects one packed KV tensor, "
+                    f"got {len(main_cache)} tensors for layer_name={self.layer_name}."
+                )
+            return (main_cache[0], indexer_cache[0], indexer_cache[1])
+
+        if len(indexer_cache) != 1:
+            raise RuntimeError(
+                "SFA indexer cache expects one k_cache tensor, "
+                f"got {len(indexer_cache)} tensors for layer_name={self.layer_name}."
+            )
+        if len(main_cache) != 2:
+            raise RuntimeError(
+                "SFA main cache expects (k_cache, v_cache), "
+                f"got {len(main_cache)} tensors for layer_name={self.layer_name}."
+            )
+        return (main_cache[0], main_cache[1], indexer_cache[0])
+
     def forward(
         self,
         layer_name,
@@ -1466,6 +1521,10 @@ class AscendSFAImpl(MLAAttentionImpl):
         if attn_metadata is None:
             # Profiling run.
             return output.fill_(0)
+
+        composed_kv_cache = self._compose_sfa_kv_cache(kv_cache)
+        assert composed_kv_cache is not None
+        kv_cache = composed_kv_cache
 
         cos = attn_metadata.cos
         sin = attn_metadata.sin

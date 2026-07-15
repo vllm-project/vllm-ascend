@@ -42,7 +42,7 @@ class IndexerWrapper(nn.Module):
     This wrapper is currently used to solve the fp8 hard code issue of vllm's deepseek_v2.py.
     It wraps the original Indexer, inherits its module weights
     (including wq_b, wk_weights_proj or wk/weights_proj, k_norm)
-    while deletes the unused topk_indices_buffer and k_cache to save memory.
+    while deleting the unused topk_indices_buffer to save memory.
     TODO: Will be removed once original Indexer supports different quantization methods.
     """
 
@@ -57,8 +57,8 @@ class IndexerWrapper(nn.Module):
         self.wk_weights_proj = vllm_indexer.wk_weights_proj
         self.k_norm = vllm_indexer.k_norm
         self.softmax_scale = vllm_indexer.softmax_scale
+        self.k_cache = getattr(vllm_indexer, "k_cache", None)
         vllm_indexer.topk_indices_buffer = None  # delete topk_indices_buffer
-        vllm_indexer.k_cache = None  # delete k_cache
 
     def forward(self):
         return
