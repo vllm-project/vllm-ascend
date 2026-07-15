@@ -98,9 +98,8 @@ jobs:
           pip install regex pyyaml
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           python3 .github/workflows/scripts/select_tests.py \
-            --explicit-e2e-tests \
-              tests/e2e/pull_request/one_card/test_sampler.py \
-              tests/e2e/pull_request/one_card/test_cpu_offloading.py
+          --changed-files vllm_ascend/dummy.py \
+          --run-all-modules
 
   run-full-tests:
     needs: select-full-tests
