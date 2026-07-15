@@ -168,5 +168,127 @@ class TestAscendReplicatedLinear(BaseLinearTest):
         self.assertTrue(isinstance(linear.quant_method, AscendUnquantizedLinearMethod))
 
 
+class TestColumnParallelOpDispatch(unittest.TestCase):
+    """Tests for _get_column_parallel_op factory — share_expert, g_proj."""
+
+    def setUp(self):
+        self.mock_layer = MagicMock()
+        self._patches = [
+            patch("vllm_ascend.ops.linear_op.mlp_tp_enable", return_value=False),
+            patch("vllm_ascend.ops.linear_op.oproj_tp_enable", return_value=False),
+            patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
+            patch("vllm_ascend.ops.linear_op.enable_sp", return_value=False),
+            patch("vllm_ascend.ops.linear_op.is_moe_layer", return_value=False),
+            patch("vllm_ascend.ops.linear_op.flashcomm2_oshard_manager.flashcomm2_oshard_enable", return_value=False),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+
+    def _get_column_op(self, prefix: str):
+        from vllm_ascend.ops.linear_op import _get_column_parallel_op
+
+        return _get_column_parallel_op(prefix, self.mock_layer)
+
+    def test_share_expert_disabled_with_sp_column(self):
+        """share_expert / shared_expert prefix → None when SP enabled."""
+        self._patches.append(patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True))
+        self._patches[-1].start()
+        self.assertIsNone(self._get_column_op("model.layers.0.mlp.share_expert.gate_up_proj"))
+        self.assertIsNone(self._get_column_op("model.layers.0.mlp.shared_expert.gate_up_proj"))
+
+    def test_g_proj_matches_sp_column_path(self):
+        """g_proj (Step3p5 attention gate) is included in SP column prefixes."""
+        self._patches.append(patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True))
+        self._patches[-1].start()
+        self.assertIsNotNone(self._get_column_op("model.layers.0.self_attn.g_proj"))
+
+
+class TestRowParallelOpDispatch(unittest.TestCase):
+    """Tests for _get_row_parallel_op — mtp_block, share_expert."""
+
+    def setUp(self):
+        self.mock_layer = MagicMock()
+        self._patches = [
+            patch("vllm_ascend.ops.linear_op.mlp_tp_enable", return_value=False),
+            patch("vllm_ascend.ops.linear_op.oproj_tp_enable", return_value=False),
+            patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
+            patch("vllm_ascend.ops.linear_op.enable_dsa_cp_with_layer_shard", return_value=False),
+            patch("vllm_ascend.ops.linear_op.enable_sp", return_value=False),
+            patch("vllm_ascend.ops.linear_op.is_moe_layer", return_value=False),
+            patch("vllm_ascend.ops.linear_op.matmul_allreduce_enable", return_value=False),
+            patch("vllm_ascend.ops.linear_op.flashcomm2_enable", return_value=False),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+
+    def _op(self, prefix: str):
+        from vllm_ascend.ops.linear_op import _get_row_parallel_op
+
+        return _get_row_parallel_op(prefix, self.mock_layer)
+
+    def test_mtp_block_excluded_from_flashcomm2_oproj(self):
+        """No6: mtp_block prefix excluded from FlashComm2 o_proj."""
+        mock_op = MagicMock()
+        self._patches.append(patch("vllm_ascend.ops.linear_op.flashcomm2_enable", return_value=True))
+        self._patches.append(patch("vllm_ascend.ops.linear_op.Flashcomm2OProjRowParallelOp", return_value=mock_op))
+        for p in self._patches[-2:]:
+            p.start()
+        # Normal o_proj should use FlashComm2
+        result = self._op("model.layers.0.self_attn.o_proj")
+        self.assertIs(result, mock_op)
+        # But mtp_block.o_proj should NOT use FlashComm2
+        self.assertIsNone(self._op("model.mtp_block.self_attn.o_proj"))
+
+    def test_share_expert_disabled_with_sp_row(self):
+        """share_expert / shared_expert prefix → None when SP enabled."""
+        self._patches.append(patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True))
+        self._patches[-1].start()
+        self.assertIsNone(self._op("model.layers.0.mlp.share_expert.down_proj"))
+        self.assertIsNone(self._op("model.layers.0.mlp.shared_expert.down_proj"))
+
+
+class TestGetParallelOpShareExpert(unittest.TestCase):
+    """Tests for get_parallel_op — share_expert/shared_expert disables TP."""
+
+    def setUp(self):
+        self.mock_layer = MagicMock()
+        self.mock_group = MagicMock()
+        self._patches = [
+            patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=self.mock_group),
+            patch("vllm_ascend.ops.linear_op.shared_expert_dp_enabled", return_value=True),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+
+    def _call(self, prefix: str):
+        from vllm_ascend.ops.linear_op import get_parallel_op
+
+        return get_parallel_op(False, prefix, self.mock_layer, False)
+
+    def test_share_expert_disables_tp(self):
+        """share_expert / shared_expert / shared_experts → (None, 0, 1)."""
+        for prefix in (
+            "model.layers.0.mlp.share_expert.gate_up_proj",
+            "model.layers.0.mlp.shared_expert.gate_up_proj",
+            "model.layers.0.mlp.shared_experts.gate_up_proj",
+        ):
+            custom_op, tp_rank, tp_size = self._call(prefix)
+            self.assertIsNone(custom_op)
+            self.assertEqual(tp_rank, 0)
+            self.assertEqual(tp_size, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

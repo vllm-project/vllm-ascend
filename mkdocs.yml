@@ -156,7 +156,7 @@ extra:
   cann_image_tag: 9.0.0-910b-ubuntu22.04-py3.12
   main_python_version: ">= 3.10, < 3.13"
   main_cann_version: "9.0.0"
-  main_pytorch_torch_npu_version: "2.10.0 / 2.10.0"
+  main_pytorch_torch_npu_version: "2.10.0 / 2.10.0.post2"
   main_triton_ascend_version: "3.2.1"
   social:
     - icon: fontawesome/brands/github
@@ -252,8 +252,10 @@ nav:
         - user_guide/feature_guide/rfork.md
         - user_guide/feature_guide/dynamic_batch.md
         - user_guide/feature_guide/epd_disaggregation.md
+        - user_guide/feature_guide/short_request_first.md
         - user_guide/feature_guide/kv_pool.md
         - user_guide/feature_guide/kv_cache_cpu_offload.md
+        - user_guide/feature_guide/recompute_cpu_offload.md
         - user_guide/feature_guide/external_dp.md
         - user_guide/feature_guide/large_scale_ep.md
         - user_guide/feature_guide/ucm_deployment.md
@@ -292,6 +294,7 @@ nav:
         - developer_guide/Design_Documents/KV_Cache_Pool_Guide.md
         - developer_guide/Design_Documents/add_custom_aclnn_op.md
         - developer_guide/Design_Documents/context_parallel.md
+        - developer_guide/Design_Documents/balance_schedule_refactor.md
         - developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md
         - developer_guide/Design_Documents/quantization.md
         - developer_guide/Design_Documents/npugraph_ex.md

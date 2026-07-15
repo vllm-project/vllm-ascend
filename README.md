@@ -16,7 +16,7 @@ vLLM Ascend Plugin
 </div>
 
 <p align="center">
-| <a href="https://www.hiascend.com/en/"><b>About Ascend</b></a> | <a href="https://docs.vllm.ai/projects/ascend/en/latest/"><b>Documentation</b></a> | <a href="https://slack.vllm.ai"><b>#SIG-Ascend</b></a> | <a href="https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support"><b>Users Forum</b></a> | <a href="https://tinyurl.com/vllm-ascend-meeting"><b>Weekly Meeting</b></a> |
+| <a href="https://www.hiascend.com/en/"><b>About Ascend</b></a> | <a href="https://docs.vllm.ai/projects/ascend/en/latest/"><b>Documentation</b></a> | <a href="https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/"><b>Support Matrix</b></a> | <a href="https://slack.vllm.ai"><b>#SIG-Ascend</b></a> | <a href="https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support"><b>Users Forum</b></a> | <a href="https://tinyurl.com/vllm-ascend-meeting"><b>Weekly Meeting</b></a> |
 </p>
 
 <p align="center">
@@ -54,7 +54,7 @@ It is the recommended approach for supporting the Ascend backend within the vLLM
 
 By using vLLM Ascend plugin, popular open-source models, including Transformer-like, Mixture-of-Experts (MoE), Embedding, Multi-modal LLMs can run seamlessly on the Ascend NPU.
 
-For detailed information on supported models, please refer to [supported models](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_models.html).
+For detailed information on supported models and features, please refer to the [support matrix](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/).
 
 ## Prerequisites
 
@@ -63,8 +63,12 @@ For detailed information on supported models, please refer to [supported models]
 - Software:
     - Python >= 3.10, < 3.12
     - CANN == 9.0.0 (For Ascend HDK version, please refer to the [Release Notes](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html))
-    - PyTorch == 2.10.0, torch-npu == 2.10.0
+    - PyTorch == 2.10.0, torch-npu == 2.10.0.post2
     - vLLM (the same version as vllm-ascend)
+
+## Accessing Ascend NPU
+
+If you need to access Ascend NPU computing resources for development or testing, please visit the [HiDevLab - Online Development](https://hidevlab.huawei.com/online-develop-intro) page on the Huawei HiDevLab platform to apply for and use them.
 
 ## Getting Started
 

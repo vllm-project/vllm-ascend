@@ -127,7 +127,7 @@ class TestVllmAdaptor(unittest.TestCase):
         mxfp8_layer = MagicMock()
         mxfp8_layer.local_num_experts = num_local_experts
         mxfp8_layer.ep_rank = 0
-        mxfp8_layer.quant_type = QuantType.MXFP8
+        mxfp8_layer.quant_type = QuantType.W8A8MXFP
         mxfp8_layer.w13_weight = torch.randn(num_local_experts, 2, 2)
         mxfp8_layer.w2_weight = torch.randn(num_local_experts, 2, 2)
         mxfp8_layer.w13_weight_scale = torch.randn(num_local_experts, 1)
@@ -146,7 +146,7 @@ class TestVllmAdaptor(unittest.TestCase):
         adaptor = VllmEplbAdaptor(model)
 
         w8a8_key = (QuantType.W8A8, True)
-        mxfp8_key = (QuantType.MXFP8, True)
+        mxfp8_key = (QuantType.W8A8MXFP, True)
         self.assertEqual(adaptor.expert_weight_key_per_layer[0], w8a8_key)
         self.assertEqual(adaptor.expert_weight_key_per_layer[1], mxfp8_key)
         self.assertEqual(len(adaptor.buffer_tensor_list[w8a8_key][0]), len(EPLB_EXPERT_WEIGHT_NAMES[w8a8_key]))

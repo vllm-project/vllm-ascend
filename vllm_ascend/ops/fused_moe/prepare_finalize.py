@@ -366,12 +366,12 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         pertoken_scale = None
         if quant_type == QuantType.W8A8:
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
-        elif quant_type in (QuantType.MXFP8, QuantType.W4A8MXFP):
+        elif quant_type in (QuantType.W8A8MXFP, QuantType.W4A8MXFP):
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
                 hidden_states,
                 dst_type=torch.float8_e4m3fn,
             )
-        elif quant_type == QuantType.MXFP4:
+        elif quant_type == QuantType.W4A4MXFP:
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
                 hidden_states,
                 dst_type=torch_npu.float4_e2m1fn_x2,
@@ -538,11 +538,11 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         Returns:
             Tensor with shape [original_local_num_tokens, hidden_size]
         """
-        if self.moe_config.dp_size > 1 and not self.enable_shared_expert_dp:
-            hidden_states = get_dp_group().reduce_scatter(hidden_states, 0)
-            hidden_states = hidden_states[: self.num_tokens]
-
         if self.moe_config.pcp_size > 1:
             hidden_states = get_pcp_group().reduce_scatter(hidden_states, dim=0)
             hidden_states = hidden_states[: self.num_tokens_pcp]
+
+        if self.moe_config.dp_size > 1 and not self.enable_shared_expert_dp:
+            hidden_states = get_dp_group().reduce_scatter(hidden_states, 0)
+            hidden_states = hidden_states[: self.num_tokens]
         return hidden_states

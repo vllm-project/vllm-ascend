@@ -44,10 +44,12 @@ import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2_linear_attn  # noqa
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
+import vllm_ascend.patch.worker.patch_step3p5  # noqa
 
 if not is_310p():
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
     import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
+    import vllm_ascend.patch.worker.patch_qwen3_dspark  # noqa
     import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
 else:
     import vllm_ascend.patch.worker.patch_idex_310  # noqa
@@ -83,6 +85,7 @@ if _V2_MODEL_RUNNER_SUPPORTED:
     import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
     import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
     import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
+    import vllm_ascend.patch.worker.patch_v2.patch_eagle_speculator  # noqa
 
 # only patch routed experts capture in main2main.
 if _V2_MODEL_RUNNER_SUPPORTED:

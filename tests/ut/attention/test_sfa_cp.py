@@ -143,6 +143,7 @@ class TestAscendSFACPMetadataBuilder(TestBase):
 
     def _build_builder(self, pcp_size=2, dcp_size=2):
         kv_cache_spec = MagicMock()
+        kv_cache_spec.block_size = 128
         layer_names = ["layer1", "layer2"]
         vllm_config = self._make_vllm_config()
         device = torch.device("cpu")
@@ -880,9 +881,9 @@ class TestAscendSFACPImpl(TestBase):
         mock_super.assert_called_once()
         self.assertEqual(result, ("a", "b"))
 
-    @patch("vllm_ascend.attention.context_parallel.sfa_cp.torch_npu")
+    @patch("vllm_ascend.attention.context_parallel.sfa_cp.DeviceOperator.reshape_and_cache")
     @patch_distributed_groups(dcp_size=1, pcp_size=2, needs_mocks=False)
-    def test_exec_kv_with_pcp(self, mock_torch_npu):
+    def test_exec_kv_with_pcp(self, mock_reshape_and_cache):
         self.impl.pcp_size = 2
         # Configure dimensions
         self.impl.kv_lora_rank = 32
@@ -909,7 +910,7 @@ class TestAscendSFACPImpl(TestBase):
 
         result = self.impl.exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
         self.assertEqual(result, (None, None))
-        mock_torch_npu._npu_reshape_and_cache.assert_called_once()
+        mock_reshape_and_cache.assert_called_once()
 
     @patch_distributed_groups(dcp_size=1, pcp_size=1, needs_mocks=False)
     def test_execute_sparse_flash_attention_process_decode_only(self):

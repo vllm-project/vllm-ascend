@@ -15,10 +15,11 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.device = torch.device("cpu")
         runner.use_sparse = False
-        runner.use_sparse_c8_indexer = False
+        runner.use_sparse_c8 = False
         runner.use_compress = False
         runner.use_hybrid_blocks = False
         runner.hybrid_with_attn_and_mamba = False
+        runner.sfa_dcp_replicated_indexer_size = 1
         runner.runner_only_attn_layers = set()
         runner.is_kv_consumer = False
         runner.vllm_config = MagicMock()
@@ -100,7 +101,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.kv_cache_dtype = torch.bfloat16
         runner.shared_kv_cache_layers = {}
         runner.ascend_config = MagicMock()
-        runner.ascend_config.is_sparse_c8_layer.return_value = False
         runner.model_config.hf_text_config = SimpleNamespace(
             kv_lora_rank=512,
             qk_rope_head_dim=64,
@@ -109,7 +109,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         attn_module = MLAAttention.__new__(MLAAttention)
         torch.nn.Module.__init__(attn_module)
-        attn_module.impl = SimpleNamespace(has_indexer=False)
+        attn_module.impl = SimpleNamespace(has_indexer=False, use_sparse_c8=False)
         layer_name = "model.layers.1.self_attn.attn"
         mock_get_layers.return_value = {layer_name: attn_module}
 
@@ -308,6 +308,82 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         runner.debugger.start.assert_not_called()
         runner.debugger.step.assert_not_called()
         self.assertTrue(runner._debugger_started)
+
+    @patch("vllm_ascend.worker.model_runner_v1.has_kv_transfer_group", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.get_pp_group")
+    @patch("vllm_ascend.worker.model_runner_v1.record_function_or_nullcontext")
+    def test_execute_model_skips_dump_start_for_dp_dummy_run(
+        self, mock_record_function, mock_get_pp_group, _mock_has_ec_transfer, _mock_has_kv_transfer_group
+    ):
+        from contextlib import nullcontext
+
+        mock_record_function.return_value = nullcontext()
+        mock_get_pp_group.return_value = SimpleNamespace(world_size=1, is_first_rank=True, is_last_rank=True)
+        runner = self._build_runner(MagicMock(spec=["start", "stop", "step"]))
+        runner.vllm_config = MagicMock()
+        runner.vllm_config.model_config.enable_return_routed_experts = False
+        runner.ascend_config = SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=False))
+        runner.execute_model_state = None
+        runner.speculative_config = None
+        runner.use_async_scheduling = False
+        runner.num_spec_tokens = 0
+        runner._draft_token_ids = None
+        runner.pcp_size = 1
+        runner.supports_mm_inputs = False
+        runner.model_config.is_encoder_decoder = False
+        runner.synchronize_input_prep = nullcontext
+        runner._update_states = MagicMock(return_value=None)
+        runner.parallel_config = SimpleNamespace(distributed_executor_backend="external_launcher", data_parallel_size=2)
+        runner._dummy_run = MagicMock()
+        runner._start_dump_data = MagicMock()
+        runner.requests = {}
+        scheduler_output = SimpleNamespace(total_num_scheduled_tokens=0)
+
+        runner.execute_model(scheduler_output)
+
+        runner._dummy_run.assert_called_once_with(1)
+        runner._start_dump_data.assert_not_called()
+
+    @patch("vllm_ascend.worker.model_runner_v1.has_kv_transfer_group", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.get_pp_group")
+    @patch("vllm_ascend.worker.model_runner_v1.record_function_or_nullcontext")
+    def test_execute_model_starts_dump_for_real_batch(
+        self, mock_record_function, mock_get_pp_group, _mock_has_ec_transfer, _mock_has_kv_transfer_group
+    ):
+        from contextlib import nullcontext
+
+        mock_record_function.return_value = nullcontext()
+        mock_get_pp_group.return_value = SimpleNamespace(world_size=1, is_first_rank=True, is_last_rank=True)
+        runner = self._build_runner(MagicMock(spec=["start", "stop", "step"]))
+        runner.vllm_config = MagicMock()
+        runner.vllm_config.model_config.enable_return_routed_experts = False
+        runner.ascend_config = SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=False))
+        runner.execute_model_state = None
+        runner.speculative_config = None
+        runner.use_async_scheduling = False
+        runner.num_spec_tokens = 0
+        runner._draft_token_ids = None
+        runner.pcp_size = 1
+        runner.supports_mm_inputs = False
+        runner.model_config.is_encoder_decoder = False
+        runner.synchronize_input_prep = nullcontext
+        runner._update_states = MagicMock(return_value=None)
+        runner.parallel_config = SimpleNamespace(
+            distributed_executor_backend="external_launcher", data_parallel_size=2, enable_dbo=False
+        )
+        runner.cache_config = SimpleNamespace(kv_sharing_fast_prefill=False)
+        runner.input_batch = SimpleNamespace(num_reqs=1, req_ids=["req0"], prev_req_id_to_index=None)
+        runner.requests = {}
+        runner._start_dump_data = MagicMock()
+        runner._prepare_inputs = MagicMock(side_effect=RuntimeError("sentinel"))
+        scheduler_output = SimpleNamespace(total_num_scheduled_tokens=1, num_scheduled_tokens={"req0": 1})
+
+        with self.assertRaisesRegex(RuntimeError, "sentinel"):
+            runner.execute_model(scheduler_output)
+
+        runner._start_dump_data.assert_called_once_with()
 
 
 class TestCorrectOptimisticSeqLensCpu(unittest.TestCase):
