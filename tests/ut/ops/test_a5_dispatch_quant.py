@@ -24,7 +24,6 @@ drift back to the non-A5 (``quant_mode=2``) path.
 """
 
 from types import SimpleNamespace
-from unittest import mock
 
 import torch
 
@@ -59,6 +58,7 @@ def _make_dispatch_input(*, is_mxfp: bool, dispatch_with_quant: bool):
         is_mxfp=is_mxfp,
         is_fp8=False,
         mxfp=None,
+        use_w4a8_per_channel_gmm_swiglu=False,
     )
     routing = SimpleNamespace(
         expert_map=list(range(8)),
@@ -75,11 +75,7 @@ def _make_dispatch_input(*, is_mxfp: bool, dispatch_with_quant: bool):
 
 
 def _kwargs(dispatcher, dispatch_input):
-    with mock.patch(
-        "vllm_ascend.ops.fused_moe.token_dispatcher._get_expert_token_nums_type",
-        return_value=0,
-    ):
-        return dispatcher.get_dispatch_mc2_kwargs(dispatch_input)
+    return dispatcher.get_dispatch_mc2_kwargs(dispatch_input)
 
 
 def test_a5_mxfp_dispatch_uses_quant_mode_4_and_y_dtype():
