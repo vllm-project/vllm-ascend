@@ -22,7 +22,6 @@ class _FakeVideoProcessor:
 
 
 class _FakeProcessorContext:
-
     def __init__(self) -> None:
         self.calls: list[tuple[object, dict[str, object], dict[str, object]]] = []
 
@@ -37,7 +36,6 @@ class _FakeProcessorContext:
 
 
 class _FakeProcessingInfo:
-
     def __init__(self) -> None:
         self.ctx = _FakeProcessorContext()
         self.processor_kwargs: dict[str, object] | None = None
@@ -54,7 +52,6 @@ def _make_processor() -> MiniMaxM3VLMultiModalProcessor:
 
 
 class TestMiniMaxM3VitProcessor(unittest.TestCase):
-
     def test_video_token_count_pads_temporal_frames(self) -> None:
         video_processor = _FakeVideoProcessor()
 

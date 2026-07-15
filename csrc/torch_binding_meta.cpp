@@ -369,7 +369,7 @@ at::Tensor npu_sparse_attention_score_meta(
     at::ScalarType out_dtype = (query.scalar_type() == at::kFloat8_e4m3fn)
                                    ? at::kHalf
                                    : query.scalar_type();
-    return at::empty(query.sizes(), query.options().dtype(out_dtype).device(c10::kMeta));
+    return at::empty_symint(query.sym_sizes(), query.options().dtype(out_dtype).device(c10::kMeta));
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_kv_quant_sparse_flash_attention_meta(

@@ -11,12 +11,12 @@ It is recommended to place the model weight in a shared cache directory.
 ### Installation
 
 - Step 1： Download v0.21.0rc1 Docker image
-  ```
+  ```bash
   docker pull quay.io/ascend/vllm-ascend:v0.21.0rc1-a3
   ```
 
 - Step 2: Start Docker container
-  ```
+  ```bash
   # 更新 vllm-ascend 镜像，并配置对应的Image名
   export IMAGE=quay.io/ascend/vllm-ascend:v0.21.0rc1-a3
   export NAME=minimax-m3-dev
@@ -58,7 +58,7 @@ It is recommended to place the model weight in a shared cache directory.
   ```
 
 - Step 3: Update vLLM
-  ```
+  ```bash
   cd /vllm-workspace/vllm
   git checkout v0.24.0
 
@@ -68,7 +68,7 @@ It is recommended to place the model weight in a shared cache directory.
   ```
 
 - Step 4: Update vLLM Ascend
-  ```
+  ```bash
   cd /vllm-workspace/vllm-ascend
   git fetch origin pull/10682/merge:pr-10682
   git merge pr-10682
@@ -80,7 +80,7 @@ Start the online serving service with the following command:
 
 - For BF16 version
 
-  ```
+  ```bash
   export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
   export HCCL_OP_EXPANSION_MODE="AIV"
   export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
@@ -102,7 +102,7 @@ Start the online serving service with the following command:
   ```
 
 - For W8A8 version
-  ```
+  ```bash
   export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
   export HCCL_OP_EXPANSION_MODE="AIV"
   export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
@@ -136,7 +136,7 @@ The examples below use Ascend A2 servers. Update `WEIGHT_PATH`, `EAGLE3_WEIGHT_P
 
   Run the following command on node 0:
 
-  ```
+  ```bash
   local_ip="${NODE0_IP}"
   node0_ip="${NODE0_IP}"
 
@@ -179,7 +179,7 @@ The examples below use Ascend A2 servers. Update `WEIGHT_PATH`, `EAGLE3_WEIGHT_P
 
   Run the following command on node 1:
 
-  ```
+  ```bash
   local_ip="${NODE1_IP}"
   node0_ip="${NODE0_IP}"
 
@@ -225,7 +225,7 @@ The examples below use Ascend A2 servers. Update `WEIGHT_PATH`, `EAGLE3_WEIGHT_P
 
   Run the following command on node 0:
 
-  ```
+  ```bash
   local_ip="${NODE0_IP}"
   node0_ip="${NODE0_IP}"
 
@@ -269,7 +269,7 @@ The examples below use Ascend A2 servers. Update `WEIGHT_PATH`, `EAGLE3_WEIGHT_P
 
   Run the following command on node 1:
 
-  ```
+  ```bash
   local_ip="${NODE1_IP}"
   node0_ip="${NODE0_IP}"
 
@@ -360,7 +360,6 @@ print(getattr(msg, "reasoning", None))  # the <mm:think> block
 print(msg.content)                       # the final answer
 ```
 
-
 ## Reasoning Parser
 
 The MiniMax-M3 reasoning parser (`--reasoning-parser minimax_m3`) extracts the thinking block `<mm:think>...</mm:think>` from model output and exposes it as the `reasoning` field. The remaining text is returned as `content`.
@@ -379,7 +378,7 @@ vllm serve ${WEIGHT_PATH} \
 
 MiniMax-M3 uses explicit thinking delimiters:
 
-```
+```text
 <mm:think>reasoning process...</mm:think>final answer
 ```
 
@@ -468,7 +467,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 - Text
 
-  ```
+  ```bash
   #!/bin/bash
   # Verify MiniMax M3 vLLM service via OpenAI-compatible chat completions API.
   # Usage: bash script/verify_curl.sh
@@ -734,15 +733,16 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 |-------------------------------|------|--------------------|------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------|-----------------|---------------|-------------------------------|--------------------|--------------------|---------------|---------------|---------------|---------------|---------------|
 | Minimax m3 | A2/A3 | ✅ | ✅ | ✖️ | ✅ | ✅ | - | - | ✅ | ✅ | - | ✅ | ✅ | ✖️ | ✖️ | ✅ | ✅ | ✖️ | ✅ | ✅ | 1M |
 
-* 请参阅 [特性指南](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_features.html) 获取特性配置说明。
-* 模型支持最长上下文长度为1M，A3单机BF16权重实测可达42K，A3单机W8A8权重实测可达128K。
+- 请参阅 [特性指南](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_features.html) 获取特性配置说明。
+- 模型支持最长上下文长度为1M，A3单机BF16权重实测可达42K，A3单机W8A8权重实测可达128K。
 
 ## Precision
+
 ### 使用 AISBench
 
 详细步骤请参阅 [使用 AISBench 进行性能评估](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_ais_bench.html#execute-performance-evaluation)。
 
-| Dataset | Hardward | Score | max-model-len | max-num-seqs | max_out_len | batch_size | generation_kwargs |
+| Dataset | Hardware | Score | max-model-len | max-num-seqs | max_out_len | batch_size | generation_kwargs |
 |---------|----------|-------|---------------|--------------|-------------|------------|-------------------|
 | GSM8K   | GPU      | 96.72 | 65536         | 16           | 49152       | 16         | temperature=1.0, top_p=0.95 |
 | GSM8K   | NPU      | 96.36 | 10240         | 16           | 9500        | 20         | temperature=1.0, top_p=0.95 |
@@ -750,10 +750,11 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | AIME2025 | NPU     | 90    | -             | -            | -           | -          | temperature=1.0, top_p=0.95 |
 
 ## FAQ
+
 - Q: 重装vLLM Ascend
 
   A: 可以使用如下命令重装vLLM Ascend，并直接使用当前 Python 环境里的依赖来构建
-  ```
+  ```bash
   pip install -v --no-build-isolation -e . -i http://mirrors.aliyun.com/pypi/simple --trusted-host mirrors.aliyun.com
   ```
 
@@ -763,7 +764,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 - Q: 遇到`TypeError: _LazyConfigMapping.__init__() missing 1 required positional argument: 'mapping'`报错 （详细报错信息如下）
   
-  ```
+  ```text
   Traceback (most recent call last):
   File "<string>", line 1, in <module>
   File "/usr/local/python3.12.13/lib/python3.12/multiprocessing/spawn.py", line 122, in spawn_main
@@ -776,7 +777,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   ```
   
   A: 修改权重中的`configuration_minimax_m3_vl.py`文件，将`from transformers.models.auto import CONFIG_MAPPING`注释并移动到调用点中加载
-  ```
+  ```python
   from transformers.configuration_utils import PretrainedConfig
   # from transformers.models.auto import CONFIG_MAPPING
   
@@ -835,6 +836,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   如果日志中反复出现 `No available shared memory broadcast block found in 60 seconds`，通常表示 EngineCore 正在等待 worker 完成长耗时任务，例如图编译、权重量化、KV cache 量化或大 prefill 执行；它不是视频解码阶段的直接报错。
 
 ## 声明
+
 1）当前仅为尝鲜体验，性能优化中。<br>
 2）该补丁仅用于功能体验，多模态功能未充分验证，不建议直接用于生产环境。<br>
 3）本代码仓提到的数据集和模型仅作为示例，这些数据集和模型仅供您用于非商业目的，如您使用这些数据集和模型来完成示例，请您特别注意应遵守对应数据集和模型的License，如您因使用数据集或模型而产生侵权纠纷，华为不承担任何责任。<br>

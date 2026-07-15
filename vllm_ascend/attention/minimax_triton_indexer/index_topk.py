@@ -44,9 +44,7 @@ def _select_topk_pairs(
         best_score = tl.max(work_scores, axis=0)
         best_offset = tl.argmax(work_scores, axis=0).to(tl.int32)
 
-        selected_i32 = (
-            (off_k == best_offset).to(tl.int32) * work_valid_i32
-        )
+        selected_i32 = (off_k == best_offset).to(tl.int32) * work_valid_i32
         best_index = tl.sum(
             tl.where(selected_i32 != 0, indices, 0),
             axis=0,
@@ -105,9 +103,7 @@ def _select_topk_indices_direct(
         # tl.max is a pure vector reduction; tl.sum over the one-hot
         # mask gives the index.
         max_val = tl.max(work_scores, axis=0)
-        best_offset = tl.sum(
-            tl.where(work_scores == max_val, idx_ramp, 0.0), axis=0
-        ).to(tl.int32)
+        best_offset = tl.sum(tl.where(work_scores == max_val, idx_ramp, 0.0), axis=0).to(tl.int32)
 
         # Direct index computation — no reduction needed.
         best_index = base_offset + best_offset + 1
@@ -158,9 +154,7 @@ def _select_topk_pairs_direct(
         # The single tl.max gives both the value (reuse as best_score)
         # and the mask (use with sum for index).
         best_score = tl.max(work_scores, axis=0)
-        best_offset = tl.sum(
-            tl.where(work_scores == best_score, idx_ramp, 0.0), axis=0
-        ).to(tl.int32)
+        best_offset = tl.sum(tl.where(work_scores == best_score, idx_ramp, 0.0), axis=0).to(tl.int32)
 
         # Direct index computation — no reduction needed.
         best_index = base_offset + best_offset + 1
@@ -212,12 +206,8 @@ def _merge_topk_pairs(
 
         take_left_i32 = (left_best >= right_best).to(tl.int32)
 
-        left_selected_i32 = (
-            (off_t == left_offset).to(tl.int32) * left_valid_i32
-        )
-        right_selected_i32 = (
-            (off_t == right_offset).to(tl.int32) * right_valid_i32
-        )
+        left_selected_i32 = (off_t == left_offset).to(tl.int32) * left_valid_i32
+        right_selected_i32 = (off_t == right_offset).to(tl.int32) * right_valid_i32
         left_index = tl.sum(
             tl.where(left_selected_i32 != 0, left_indices, 0),
             axis=0,
@@ -302,24 +292,17 @@ def _prefill_topk_partial_kernel(
     valid_blocks = (prefix_len + pid_q + BLOCK_SIZE_BLOCK) // BLOCK_SIZE_BLOCK
     chunk_start = pid_chunk * chunk_blocks
     block_ids = chunk_start + off_k
-    valid_i32 = (
-        ((block_ids < valid_blocks) & (off_k < chunk_blocks)).to(tl.int32)
-    )
+    valid_i32 = ((block_ids < valid_blocks) & (off_k < chunk_blocks)).to(tl.int32)
 
     score = tl.load(
-        s_ptr
-        + pid_h * stride_s_h
-        + query_idx * stride_s_n
-        + block_ids * stride_s_k,
+        s_ptr + pid_h * stride_s_h + query_idx * stride_s_n + block_ids * stride_s_k,
         mask=valid_i32 != 0,
         other=-1e30,
     ).to(tl.float32)
     score = tl.where(score != score, -1e30, score)
 
     init_i32 = (block_ids < init_blocks).to(tl.int32)
-    local_i32 = (
-        block_ids >= tl.maximum(0, valid_blocks - local_blocks)
-    ).to(tl.int32)
+    local_i32 = (block_ids >= tl.maximum(0, valid_blocks - local_blocks)).to(tl.int32)
     if MASK_INIT:
         score = tl.where(
             (valid_i32 * init_i32) != 0,
@@ -422,24 +405,17 @@ def _prefill_topk_fused_kernel(
     valid_blocks = (prefix_len + pid_q + BLOCK_SIZE_BLOCK) // BLOCK_SIZE_BLOCK
     chunk_start = pid_chunk * chunk_blocks
     block_ids = chunk_start + off_k
-    valid_i32 = (
-        ((block_ids < valid_blocks) & (off_k < chunk_blocks)).to(tl.int32)
-    )
+    valid_i32 = ((block_ids < valid_blocks) & (off_k < chunk_blocks)).to(tl.int32)
 
     score = tl.load(
-        s_ptr
-        + pid_h * stride_s_h
-        + query_idx * stride_s_n
-        + block_ids * stride_s_k,
+        s_ptr + pid_h * stride_s_h + query_idx * stride_s_n + block_ids * stride_s_k,
         mask=valid_i32 != 0,
         other=-1e30,
     ).to(tl.float32)
     score = tl.where(score != score, -1e30, score)
 
     init_i32 = (block_ids < init_blocks).to(tl.int32)
-    local_i32 = (
-        block_ids >= tl.maximum(0, valid_blocks - local_blocks)
-    ).to(tl.int32)
+    local_i32 = (block_ids >= tl.maximum(0, valid_blocks - local_blocks)).to(tl.int32)
     if MASK_INIT:
         score = tl.where(
             (valid_i32 * init_i32) != 0,
@@ -486,10 +462,7 @@ def _prefill_topk_fused_kernel(
         -1,
     )
     tl.store(
-        topk_idx_ptr
-        + pid_h * stride_o_h
-        + query_idx * stride_o_n
-        + off_t * stride_o_t,
+        topk_idx_ptr + pid_h * stride_o_h + query_idx * stride_o_n + off_t * stride_o_t,
         output.to(topk_idx_ptr.dtype.element_ty),
         mask=off_t < topk,
     )
@@ -530,34 +503,18 @@ def _topk_pair_merge_kernel(
     right_exists_i32 = (right_chunk < num_input_chunks).to(tl.int32)
 
     left_scores = tl.load(
-        in_scores_ptr
-        + left_chunk * stride_is_c
-        + pid_h * stride_is_h
-        + pid_n * stride_is_n
-        + off_t * stride_is_t,
+        in_scores_ptr + left_chunk * stride_is_c + pid_h * stride_is_h + pid_n * stride_is_n + off_t * stride_is_t,
     ).to(tl.float32)
     left_indices = tl.load(
-        in_indices_ptr
-        + left_chunk * stride_ii_c
-        + pid_h * stride_ii_h
-        + pid_n * stride_ii_n
-        + off_t * stride_ii_t,
+        in_indices_ptr + left_chunk * stride_ii_c + pid_h * stride_ii_h + pid_n * stride_ii_n + off_t * stride_ii_t,
     ).to(tl.int32)
     right_scores = tl.load(
-        in_scores_ptr
-        + right_chunk * stride_is_c
-        + pid_h * stride_is_h
-        + pid_n * stride_is_n
-        + off_t * stride_is_t,
+        in_scores_ptr + right_chunk * stride_is_c + pid_h * stride_is_h + pid_n * stride_is_n + off_t * stride_is_t,
         mask=right_exists_i32 != 0,
         other=-1e30,
     ).to(tl.float32)
     right_indices = tl.load(
-        in_indices_ptr
-        + right_chunk * stride_ii_c
-        + pid_h * stride_ii_h
-        + pid_n * stride_ii_n
-        + off_t * stride_ii_t,
+        in_indices_ptr + right_chunk * stride_ii_c + pid_h * stride_ii_h + pid_n * stride_ii_n + off_t * stride_ii_t,
         mask=right_exists_i32 != 0,
         other=0,
     ).to(tl.int32)
@@ -571,19 +528,11 @@ def _topk_pair_merge_kernel(
     )
 
     tl.store(
-        out_scores_ptr
-        + pid_out_chunk * stride_os_c
-        + pid_h * stride_os_h
-        + pid_n * stride_os_n
-        + off_t * stride_os_t,
+        out_scores_ptr + pid_out_chunk * stride_os_c + pid_h * stride_os_h + pid_n * stride_os_n + off_t * stride_os_t,
         merged_scores,
     )
     tl.store(
-        out_indices_ptr
-        + pid_out_chunk * stride_oi_c
-        + pid_h * stride_oi_h
-        + pid_n * stride_oi_n
-        + off_t * stride_oi_t,
+        out_indices_ptr + pid_out_chunk * stride_oi_c + pid_h * stride_oi_h + pid_n * stride_oi_n + off_t * stride_oi_t,
         merged_indices,
     )
 
@@ -607,10 +556,7 @@ def _topk_finalize_kernel(
     off_t = tl.arange(0, BLOCK_SIZE_T)
 
     indices = tl.load(
-        indices_partial_ptr
-        + pid_h * stride_pi_h
-        + pid_n * stride_pi_n
-        + off_t * stride_pi_t,
+        indices_partial_ptr + pid_h * stride_pi_h + pid_n * stride_pi_n + off_t * stride_pi_t,
     ).to(tl.int32)
     output = tl.where(
         (off_t < topk) & (indices > 0),
@@ -618,10 +564,7 @@ def _topk_finalize_kernel(
         -1,
     )
     tl.store(
-        indices_final_ptr
-        + pid_h * stride_f_h
-        + pid_n * stride_f_n
-        + off_t * stride_f_t,
+        indices_final_ptr + pid_h * stride_f_h + pid_n * stride_f_n + off_t * stride_f_t,
         output.to(indices_final_ptr.dtype.element_ty),
         mask=off_t < topk,
     )
@@ -717,9 +660,7 @@ def minimax_m3_index_topk(
 
     if num_chunks == 1:
         # Fused fast path: skip partial buffers, merge, and finalize kernel.
-        _prefill_topk_fused_kernel[
-            (max_query_len, batch, num_heads)
-        ](
+        _prefill_topk_fused_kernel[(max_query_len, batch, num_heads)](
             score,
             topk_idx,
             cu_seqlens_q,
@@ -755,9 +696,7 @@ def minimax_m3_index_topk(
             device=score.device,
         )
 
-        _prefill_topk_partial_kernel[
-            (max_query_len, batch, num_heads * num_chunks)
-        ](
+        _prefill_topk_partial_kernel[(max_query_len, batch, num_heads * num_chunks)](
             score,
             partial_scores,
             partial_indices,

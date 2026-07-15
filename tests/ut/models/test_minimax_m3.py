@@ -23,7 +23,6 @@ from vllm_ascend.models.minimax_m3 import (
 
 
 class _FakeQKVProj(nn.Module):
-
     def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, None]:
         num_tokens = hidden_states.shape[0]
         qkv = torch.arange(
@@ -35,7 +34,6 @@ class _FakeQKVProj(nn.Module):
 
 
 class _IdentityRotary(nn.Module):
-
     def forward(
         self,
         positions: torch.Tensor,
@@ -46,7 +44,6 @@ class _IdentityRotary(nn.Module):
 
 
 class _AssertContiguousAttention(nn.Module):
-
     def __init__(self) -> None:
         super().__init__()
         self.saw_contiguous_v = False
@@ -64,7 +61,6 @@ class _AssertContiguousAttention(nn.Module):
 
 
 class _FakeOProj(nn.Module):
-
     def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, None]:
         return hidden_states, None
 
@@ -85,18 +81,11 @@ def _make_attention() -> MiniMaxM3Attention:
 
 
 class TestMiniMaxM3Modeling(unittest.TestCase):
-
     def test_vision_tower_uses_vllm_common_implementation(self) -> None:
         source_file = inspect.getsourcefile(MiniMaxVLVisionModel)
         self.assertIsNotNone(source_file)
         self.assertIsNotNone(vllm.__file__)
-        expected_source = (
-            Path(vllm.__file__).resolve().parent
-            / "models"
-            / "minimax_m3"
-            / "common"
-            / "vision_tower.py"
-        )
+        expected_source = Path(vllm.__file__).resolve().parent / "models" / "minimax_m3" / "common" / "vision_tower.py"
         self.assertTrue(Path(source_file).samefile(expected_source))
 
     def test_moe_passes_swigluoai_config_during_construction(self) -> None:
@@ -118,8 +107,7 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
 
         with (
             patch(
-                "vllm_ascend.models.minimax_m3."
-                "get_tensor_model_parallel_world_size",
+                "vllm_ascend.models.minimax_m3.get_tensor_model_parallel_world_size",
                 return_value=1,
             ),
             patch(
@@ -155,9 +143,7 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
     def test_sparse_attention_layer_ids_ignores_missing_config(self) -> None:
         self.assertEqual(_sparse_attention_layer_ids(PretrainedConfig()), set())
 
-        config = PretrainedConfig(
-            sparse_attention_config={"sparse_attention_freq": [0, 1, 0, 2]}
-        )
+        config = PretrainedConfig(sparse_attention_config={"sparse_attention_freq": [0, 1, 0, 2]})
 
         self.assertEqual(_sparse_attention_layer_ids(config), {1, 3})
 
