@@ -31,13 +31,6 @@ from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, get_cos_and_
 _mrope_cos_slice: torch.Tensor | None = None
 _mrope_sin_slice: torch.Tensor | None = None
 
-_ROPE_310P_UPDATE_FLAG = False
-
-
-def set_rope_position_flag_310p(state):
-    global _ROPE_310P_UPDATE_FLAG
-    _ROPE_310P_UPDATE_FLAG = state
-
 
 def _apply_rotary_mrope_torch(
     q_rot: torch.Tensor,
