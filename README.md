@@ -61,7 +61,7 @@ For detailed information on supported models and features, please refer to the [
 - Hardware: Atlas 800I A2 Inference series, Atlas A2 Training series, Atlas 800I A3 Inference series, Atlas A3 Training series, Atlas 300I Duo (Experimental)
 - OS: Linux
 - Software:
-    - Python >= 3.10, < 3.12
+    - Python >= 3.10, < 3.13
     - CANN == 9.0.0 (For Ascend HDK version, please refer to the [Release Notes](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html))
     - PyTorch == 2.10.0, torch-npu == 2.10.0.post2
     - vLLM (the same version as vllm-ascend)
