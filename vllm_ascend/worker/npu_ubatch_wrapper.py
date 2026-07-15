@@ -232,6 +232,22 @@ class UBatchWrapper(GPUUBatchWrapper):
             result = _cat_ubatch_outputs(sorted_results)
             return result
 
+    def _slice_model_inputs(self, tokens_slice, input_ids, positions,
+                            inputs_embeds, intermediate_tensors):
+        sliced_input_ids = input_ids[tokens_slice]
+        # if we are using mrope. Mrope adds an additional dimension to the
+        # positions tensor
+        if positions.ndim == 2:
+            sliced_positions = positions[:, tokens_slice]
+        else:
+            sliced_positions = positions[tokens_slice]
+        sliced_inputs_embeds = inputs_embeds[tokens_slice] \
+            if inputs_embeds is not None else None
+        sliced_intermediate_tensors = intermediate_tensors[tokens_slice] \
+            if intermediate_tensors is not None else None
+        return sliced_input_ids, sliced_positions, sliced_inputs_embeds, \
+            sliced_intermediate_tensors
+
     def _make_afd_ubatch_metadata(
         self,
         ubatch_slices,
@@ -451,4 +467,5 @@ class UBatchWrapper(GPUUBatchWrapper):
                 batch_descriptor=batch_descriptor,
                 aclgraph_runtime_mode=CUDAGraphMode.NONE,
                 afd_metadata=afd_metadata)
+            logger.info('_call__ ubatch_metadata: %s', ubatch_metadata)
             return self._run_ubatches(ubatch_metadata, self.runnable)
