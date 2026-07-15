@@ -98,9 +98,8 @@ jobs:
             echo "::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: ${release_tag}"
             exit 1
           }
-
           {
-            echo "main_commit=${main_commit}"            
+            echo "main_commit=${main_commit}"
             echo "release_tag=${release_tag}"
           } >> "$GITHUB_OUTPUT"
 
@@ -222,15 +221,6 @@ jobs:
       base_ref: ${{ github.base_ref }}
       test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
 
-  generate-hitest:
-    name: Generate hitest recommendations
-    needs: lint-and-select-tests
-    uses: ./.github/workflows/manual-hitest.yaml
-    secrets:
-      HITEST_APIG_APPCODE: ${{ secrets.HITEST_APIG_APPCODE }}
-      HITEST_KEY: ${{ secrets.HITEST_KEY }}
-      HITEST_SECRET: ${{ secrets.HITEST_SECRET }}
-
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
@@ -264,14 +254,3 @@ jobs:
           fi
 
           echo "=== CI Gate: PASSED ==="
-
-#this job collects failure from uploaded logs
-  analyze-failure-report:
-    name: Analyze failure report
-    needs: [run-selected-tests, generate-hitest]
-    if: always()
-    uses: ./.github/workflows/_analyze_failure.yaml
-    with:
-      log_artifact_pattern: selected-test-logs-*
-      hitest_file: .github/workflows/scripts/recommended_pytest_paths.txt
-      hitest_content: ${{ needs.generate-hitest.outputs.hitest_paths || '' }}
