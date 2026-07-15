@@ -227,9 +227,9 @@ jobs:
     needs: lint-and-select-tests
     uses: ./.github/workflows/manual-hitest.yaml
     secrets:
-      HITEST_APIG_APPCODE: ${{ secrets.HITEST_APIG_APPCODE }}
-      HITEST_KEY: ${{ secrets.HITEST_KEY }}
-      HITEST_SECRET: ${{ secrets.HITEST_SECRET }}
+      hitest_apig_appcode: ${{ secrets.hitest_apig_appcode }}
+      hitest_key: ${{ secrets.hitest_key }}
+      hitest_secret: ${{ secrets.hitest_secret }}
 
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
