@@ -49,7 +49,7 @@ test_cases:
         max_out_len: 1024
         batch_size: 30
         request_rate: 0
-        baseline: 548.06
+        baseline: 586.15
         threshold: 0.97
   - name: "MiniMax-M2.5-w8a8-in16k-16-4"
     model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
@@ -97,7 +97,7 @@ test_cases:
         max_out_len: 1024
         batch_size: 4
         request_rate: 0
-        baseline: 191.58
+        baseline: 202.68
         threshold: 0.97
   - name: "MiniMax-M2.5-w8a8-in32k-36-9"
     model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
@@ -145,7 +145,7 @@ test_cases:
         max_out_len: 512
         batch_size: 9
         request_rate: 0
-        baseline: 146.06
+        baseline: 162.16
         threshold: 0.97
   - name: "MiniMax-M2.5-w8a8-in32k-80-20"
     model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
@@ -193,7 +193,7 @@ test_cases:
         max_out_len: 512
         batch_size: 20
         request_rate: 0
-        baseline: 428.36
+        baseline: 444.84
         threshold: 0.97
   - name: "MiniMax-M2.5-w8a8-in32k-4-1"
     model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
@@ -241,7 +241,7 @@ test_cases:
         max_out_len: 512
         batch_size: 1
         request_rate: 0
-        baseline: 35.17
+        baseline: 35.57
         threshold: 0.97
   - name: "MiniMax-M2.5-w8a8-in32k-4-1-90"
     model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
@@ -337,7 +337,7 @@ test_cases:
         max_out_len: 1024
         batch_size: 18
         request_rate: 0
-        baseline: 321.37
+        baseline: 325.65
         threshold: 0.97
   - name: "MiniMax-M2.5-w8a8-in64k-4-1"
     model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
@@ -437,7 +437,7 @@ test_cases:
         max_out_len: 1024
         batch_size: 8
         request_rate: 0
-        baseline: 132.5
+        baseline: 172.94
         threshold: 0.97
   - name: "MiniMax-M2.5-w8a8-in128k-4-1"
     model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
@@ -489,7 +489,7 @@ test_cases:
         max_out_len: 1024
         batch_size: 1
         request_rate: 0
-        baseline: 24.66
+        baseline: 38.31
         threshold: 0.97
   - name: "MiniMax-M2.5-w8a8-in128k-64-16"
     model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
@@ -537,5 +537,5 @@ test_cases:
         max_out_len: 1024
         batch_size: 16
         request_rate: 0
-        baseline: 296.08
+        baseline: 259.45
         threshold: 0.97
