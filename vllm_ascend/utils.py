@@ -41,7 +41,6 @@ from vllm_ascend.ascend_config import WeightPrefetchConfig, get_ascend_config
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.kv_cache_interface import AttentionSpec
 else:
     VllmConfig = None
 
@@ -140,7 +139,6 @@ def clear_enable_sp():
     global _ENABLE_SP
     _ENABLE_SP = None
     enable_dsa_cp.cache_clear()
-    enable_dsa_cp_with_layer_shard.cache_clear()
     enable_dsa_cp_with_o_proj_tp.cache_clear()
     _libc_getenv.cache_clear()
 
@@ -1292,13 +1290,6 @@ def flashcomm2_enable() -> bool:
     return config_val > 0
 
 
-def o_shard_enable() -> bool:
-    layer_sharding = get_ascend_config().layer_sharding
-    if layer_sharding is None:
-        return False
-    return "o_proj" in layer_sharding
-
-
 def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
     flashcomm2_oproj_tp_size = ascend_config.enable_flashcomm2_parallel_size
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -1308,15 +1299,6 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
 
     logger.info("Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = %s", flashcomm2_oproj_tp_size)
 
-    layer_sharding = ascend_config.layer_sharding or []
-    if layer_sharding:
-        if layer_sharding == ["o_proj"]:
-            logger.info_once("Enable FLASHCOMM2 with o_proj layer sharding for reduced memory consumption.")
-        else:
-            raise ValueError(
-                "FLASHCOMM2 only supports 'o_proj' as the sole layer sharding configuration! "
-                f"Found invalid layer_sharding: {layer_sharding}"
-            )
     if not ascend_config.enable_flashcomm1:
         logger.warning_once(
             "It is recommended to enable FLASHCOMM1 simultaneously when starting FLASHCOMM2 for optimal performance."
@@ -1538,20 +1520,6 @@ def enable_dsa_cp() -> bool:
 
 
 @lru_cache(maxsize=1)
-def enable_dsa_cp_with_layer_shard() -> bool:
-    if not enable_dsa_cp():
-        return False
-    from vllm.config import get_current_vllm_config
-
-    vllm_config = get_current_vllm_config()
-    kv_transfer_config = vllm_config.kv_transfer_config
-    # Layer sharding broadcast only pays off when it can be hidden by the
-    # heavier prefill-stage compute, so enable it only on the P-side instance.
-    is_prefill_instance = kv_transfer_config is not None and kv_transfer_config.kv_role == "kv_producer"
-    return is_prefill_instance
-
-
-@lru_cache(maxsize=1)
 def enable_dsa_cp_with_o_proj_tp() -> bool:
     if not enable_dsa_cp():
         return False
@@ -1719,11 +1687,6 @@ def kv_cache_spec_uses_sparse_c8(kv_cache_spec) -> bool:
     from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
     return isinstance(kv_cache_spec, AscendMLAAttentionSpec) and bool(getattr(kv_cache_spec, "cache_sparse_c8", False))
-
-
-def sparse_kv_cache_has_indexer(kv_cache_spec: AttentionSpec) -> bool:
-    sparse_head_dim = getattr(kv_cache_spec, "sparse_head_dim", None)
-    return sparse_head_dim is not None and len(sparse_head_dim) == 3 and sparse_head_dim[2] > 0
 
 
 def is_hidden_state_cache_spec(spec) -> bool:

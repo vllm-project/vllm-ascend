@@ -90,7 +90,7 @@ class PrefillEagleAclGraphManager(PrefillSpeculatorCudaGraphManager):
         positions = self.speculator.input_buffers.positions[:num_tokens]
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
         # calculate num_tokens_across_dp.
-        num_tokens_across_dp = torch.full([self.speculator.dp_size], num_tokens, device=self.device)
+        num_tokens_across_dp = torch.full([self.speculator.dp_size], num_tokens)
         with set_forward_context(
             self.speculator.model_state.attn_metadata,
             self.vllm_config,
@@ -209,7 +209,7 @@ class DecodeEagleAclGraphManager(DecodeSpeculatorCudaGraphManager):
         positions = self.speculator.input_buffers.positions[:num_tokens]
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
         # calculate num_tokens_across_dp.
-        num_tokens_across_dp = torch.full([self.speculator.dp_size], num_tokens, device=self.device)
+        num_tokens_across_dp = torch.full([self.speculator.dp_size], num_tokens)
         with set_forward_context(
             self.speculator.model_state.attn_metadata,
             self.vllm_config,
