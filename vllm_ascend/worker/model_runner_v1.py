@@ -3835,7 +3835,9 @@ class NPUModelRunner(GPUModelRunner):
         get_offloader().post_init()
 
         # wrap the model with full graph wrapper if needed.
+        logger.info("44444444444444444444444444")
         if (self.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.afd_config is None):
+            logger.info("555555555555555555555555555555555555555555")
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
             self.model = ACLGraphWrapper(
                 self.model,
@@ -3844,7 +3846,7 @@ class NPUModelRunner(GPUModelRunner):
                 use_eagle=self.use_eagle,
                 enable_enpu=self.enable_enpu,
             )
-        elif self.afd_config is not None:
+        elif self.afd_config:
             logger.info("use_ubatching11111111111111111")
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
             if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
