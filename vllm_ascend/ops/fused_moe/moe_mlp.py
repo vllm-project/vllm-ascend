@@ -74,7 +74,6 @@ def cumsum_group_list(
         "This feature is under development."
     )
 
-
 def _require_single_tensor_for_swiglu_quant(
     tensor_or_list: list[torch.Tensor] | torch.Tensor, *, name: str
 ) -> torch.Tensor:

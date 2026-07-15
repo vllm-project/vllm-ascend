@@ -335,17 +335,6 @@ class NPUPlatform(Platform):
         torch.npu.set_device(device)
 
     @classmethod
-    def _validate_layer_sharding_config(cls, vllm_config: VllmConfig) -> None:
-        additional_config = vllm_config.additional_config or {}
-        layer_sharding = additional_config.get("layer_sharding") or []
-        if not layer_sharding:
-            return
-
-        kv_transfer_config = vllm_config.kv_transfer_config
-        if kv_transfer_config is None or kv_transfer_config.kv_role != "kv_producer":
-            raise ValueError("additional_config.layer_sharding can only be enabled in PD-disaggregated's P node.")
-
-    @classmethod
     def _validate_parallel_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
         if parallel_config.data_parallel_size > 1 and parallel_config.prefill_context_parallel_size > 1:
@@ -436,7 +425,6 @@ class NPUPlatform(Platform):
 
         maybe_auto_detect_quantization(vllm_config)
 
-        cls._validate_layer_sharding_config(vllm_config)
         cls._validate_draft_decode_context_parallel_config(vllm_config)
         cls._validate_parallel_config(vllm_config)
 
@@ -692,19 +680,6 @@ class NPUPlatform(Platform):
                 "ShortRequestFirst scheduling requires recompute_scheduler_enable=true "
                 "in additional_config. ShortRequestFirst scheduling will not be activated.",
             )
-
-        # Extend original scheduler_config to use SchedulerDynamicBatch.
-        if ascend_config.SLO_limits_for_dynamic_batch != -1:
-            if enable_short_request_first:
-                logger.warning_once(
-                    "ShortRequestFirst scheduling is ignored because "
-                    "SLO_limits_for_dynamic_batch selects SchedulerDynamicBatch."
-                )
-            vllm_config.scheduler_config.scheduler_cls = (
-                "vllm_ascend.core.scheduler_dynamic_batch.SchedulerDynamicBatch"
-            )
-            vllm_config.scheduler_config.enable_chunked_prefill = True
-            vllm_config.scheduler_config.SLO_limits_for_dynamic_batch = ascend_config.SLO_limits_for_dynamic_batch
 
         # Use ProfilingChunkScheduler when profiling-based chunk sizing is on.
         if ascend_config.profiling_chunk_config.enabled:

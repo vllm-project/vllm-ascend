@@ -18,6 +18,7 @@ import torch
 from vllm_ascend._310p.ops import rotary_embedding as rotary_310
 from vllm_ascend._310p.ops.rotary_embedding import (
     AscendMRotaryEmbedding310,
+    AscendRotaryEmbedding310,
     set_mrope_apply_rotary_slices,
 )
 
@@ -73,3 +74,12 @@ def test_set_mrope_apply_rotary_slices_reuses_buffer_address():
     second_ptr = rotary_310._mrope_cos_slice.data_ptr()
 
     assert first_ptr == second_ptr
+
+
+def test_ascend_rotary_embedding_310_drafting_flag():
+    assert hasattr(AscendRotaryEmbedding310, "_is_drafting_update_enabled")
+    assert AscendRotaryEmbedding310._is_drafting_update_enabled is False
+    AscendRotaryEmbedding310.set_rope_position_flag_310p(True)
+    assert AscendRotaryEmbedding310._is_drafting_update_enabled is True
+    AscendRotaryEmbedding310.set_rope_position_flag_310p(False)
+    assert AscendRotaryEmbedding310._is_drafting_update_enabled is False
