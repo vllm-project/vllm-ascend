@@ -46,12 +46,12 @@ test_cases:
         threshold: 0.95
       acc:
         case_type: accuracy
-        dataset_path: vllm-ascend/ceval
+        dataset_path: vllm-ascend/gsm8k
         request_conf: vllm_api_general_chat
-        dataset_conf: ceval/ceval_gen_0_shot_cot_chat_prompt
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
         max_out_len: 10240
         batch_size: 32
-        baseline: 84.8
+        baseline: 95.07
         threshold: 1
         temperature: 0
         top_p: 0.95
