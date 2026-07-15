@@ -131,15 +131,14 @@ def _recover_moe_lora_routing_all2all(
         lora_per_row:   [num_dispatched_tokens] lora adapter id (-1 = none)
     """
     num_local_experts = lora_context.local_num_experts
-    group_list_l = group_list.to(torch.int64)
 
-    # Build per-token expert IDs: [0]*n0 + [1]*n1 + ... + [E-1]*n_{E-1}
+    # Build per-token expert IDs
     expert_per_row = torch.repeat_interleave(
         torch.arange(num_local_experts, device=group_list.device),
-        group_list_l,
-    ).to(torch.long)
+        group_list,
+    )
 
-    lora_per_row = exchanged_lora_indices.to(torch.long)
+    lora_per_row = exchanged_lora_indices
 
     return expert_per_row, lora_per_row
 
