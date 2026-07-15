@@ -1173,7 +1173,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # [batch_size, 1]
             return draft_token_ids.view(-1, self.num_speculative_tokens)
 
-        if self.pcp_size * self.dcp_size > 1 and is_prefill:
+        if self.pcp_size > 1 and is_prefill:
             draft_token_ids_list = []
             for _ in range(self.num_speculative_tokens):
                 draft_token_ids_list.append(draft_token_ids)
