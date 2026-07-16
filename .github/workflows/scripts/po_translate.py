@@ -109,9 +109,21 @@ CRITICAL RULES — violations will cause the translation to be rejected:
 16. Use natural, fluent Chinese technical documentation style. Avoid word-by-word
     literal translation.
 17. Use standard Chinese technical terminology consistently.
-18. For markdown links [text](url): translate the display text in [] but keep
-    the URL in () exactly as-is.
-    Example: [Quick Start](quick_start.md) → [快速开始](quick_start.md)
+18. For markdown links:
+    a. For external URLs or cross-document links `[text](url)`:
+       - Translate the display text in `[]`
+       - Keep the entire URL in `()` EXACTLY as-is, including any `#anchor` part.
+       Example: `[Config](../config.md#setup)` → `[配置](../config.md#setup)`
+    b. For same-document section links `[text](#anchor)`:
+       - Translate the display text in `[]`
+       - Translate the `#anchor` part to Chinese ONLY IF it corresponds to a section title 
+         that appears in the SAME document.
+       - When translating a heading anchor, follow heading translation rules: 
+         convert to lowercase, replace spaces with hyphens.
+       Example: `[Using XliteGraph](#using-xlitegraph)` → `[使用 XliteGraph](#使用-xlitegraph)`
+       Example: `[Quick Start](#quick-start)` → `[快速开始](#快速开始)`
+    c. If you are unsure whether an anchor is a same-document section title, 
+       DO NOT translate it — keep it as-is.
 19. For headings: translate the heading text but KEEP the "#" / "##" / "###"
     prefix exactly as in the msgid.
     Example: msgid "# Quick Start" → msgstr "# 快速开始"

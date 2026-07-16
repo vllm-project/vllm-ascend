@@ -40,7 +40,7 @@ msgid ""
 "2. **Rejection Sampler** (`vllm_ascend/sample/`): Verifies draft tokens against the target model's output, accepting matches and rejecting mismatches, with optional optimizations including [Block Verify and Entropy Verify](#block-verify-and-entropy-verify)."
 msgstr ""
 "1. **提议者** (`vllm_ascend/spec_decode/`)：使用多种方法生成草稿（推测）令牌——从简单的 n-gram 匹配到基于神经网络的草稿模型。\n"
-"2. **拒绝采样器** (`vllm_ascend/sample/`)：根据目标模型的输出验证草稿令牌，接受匹配项并拒绝不匹配项，可选的优化包括[块验证和熵验证](#block-verify-and-entropy-verify)。"
+"2. **拒绝采样器** (`vllm_ascend/sample/`)：根据目标模型的输出验证草稿令牌，接受匹配项并拒绝不匹配项，可选的优化包括[块验证和熵验证](#块验证和熵验证)。"
 
 msgid "The following speculative decoding methods are supported:"
 msgstr "支持以下推测解码方法："
