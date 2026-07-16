@@ -100,7 +100,7 @@ jobs:
           }
 
           {
-            echo "main_commit=${main_commit}"            
+            echo "main_commit=${main_commit}"
             echo "release_tag=${release_tag}"
           } >> "$GITHUB_OUTPUT"
 
