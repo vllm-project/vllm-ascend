@@ -4003,8 +4003,19 @@ class NPUModelRunner(GPUModelRunner):
         decode only reads already-committed rows.
 
         Zeroing the GPU tensor is safe: every active row is re-committed from the
-        CPU source of truth (which only ever holds valid block ids) before the
-        next forward, so this restores exactly the cold-start device state.
+        CPU source of truth before the next forward, so this restores exactly the
+        cold-start device state.
+
+        The CPU source is zeroed too. Upstream #10901 added a
+        ``commit_block_table(num_reqs_padded)`` inside ``_dummy_run`` that copies
+        the first ``num_reqs_padded`` CPU rows -> GPU right before ACL graph
+        (re)capture. After restore the CPU buffer still holds the pre-snapshot
+        request's block ids, so that copy re-dirties the GPU tensor we just
+        zeroed and feeds those (out-of-cold-start-range) blocks into the FULL
+        graph paged-attention capture (run with the max-workspace seq len),
+        crashing with ``AclrtSynchronizeDeviceWithTimeout`` / MTE "invalid GM
+        address". Zeroing CPU keeps the commit a zero no-op until real requests
+        re-populate it via ``_prepare_inputs``, exactly matching the cold start.
         """
         input_batch = getattr(self, "input_batch", None)
         mgbt = getattr(input_batch, "block_table", None) if input_batch is not None else None
@@ -4021,6 +4032,9 @@ class NPUModelRunner(GPUModelRunner):
                 continue
             try:
                 gpu.zero_()
+                cpu = getattr(buf, "cpu", None)
+                if cpu is not None:
+                    cpu.zero_()
                 zeroed += 1
             except Exception as exc:  # noqa: BLE001
                 failed.append(f"group{idx}:{type(exc).__name__}:{exc}")
