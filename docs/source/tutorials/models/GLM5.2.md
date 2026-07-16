@@ -149,10 +149,11 @@ vllm serve /mnt/weight/GLM-5.2-W4A8C8-0713-MTP \
 The parameters are explained as follows:
 
 - For single-node deployment, we recommend using `dp1tp16` and turn off expert parallel in low-latency scenarios.
+- If the video memory is sufficient, there is no need to enable sfac8.
 - For short sequences, DCP does not need to be enabled;For long sequences, DCP needs to be enabled.
 - There are two cases:
-- 1. If the GPU memory is insufficient for the sequence length, enable the DCP configuration. However, enabling the DCP configuration will affect the TPOT performance.
-- 2. If the GPU memory is sufficient, you are advised not to enable the DCP configuration.
+    1. If the GPU memory is insufficient for the sequence length, enable the DCP configuration. However, enabling the DCP configuration will affect the TPOT performance.
+    2. If the GPU memory is sufficient, you are advised not to enable the DCP configuration.
 
 ### Multi-node Deployment
 
@@ -922,6 +923,7 @@ Before you start, please
 The parameters are explained as follows:
 
 - Like a single node,For short sequences, DCP does not need to be enabled; For long sequences, DCP needs to be enabled.
+- If the video memory is sufficient, there is no need to enable sfac8.
 - There are two cases:
     1. If the GPU memory is insufficient for the sequence length, enable the DCP configuration. However, enabling the DCP configuration will affect the TPOT performance.
     2. If the GPU memory is sufficient, you are advised not to enable the DCP configuration.
