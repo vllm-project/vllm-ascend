@@ -452,62 +452,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         draft_attn_metadatas=None,
     ):
         use_layer_aware_replay = needs_layer_aware_fia_graph_replay()
-        if using_paged_attention(num_tokens, vllm_config):
-            # Paged Attention update logic
-            if _EXTRA_CTX.is_draft_model:
-                if _EXTRA_CTX.is_draft_model_prefill:
-                    graph_params = get_draft_graph_prefill_params()
-                else:
-                    graph_params = get_draft_graph_params()
-            else:
-                graph_params = get_graph_params()
-            with torch.npu.stream(update_stream):
-                for key, param, handle, event in zip(
-                    forward_context.attn_metadata,
-                    graph_params.attn_params[num_tokens],
-                    graph_params.handles[num_tokens],
-                    graph_params.events[num_tokens],
-                ):
-                    (
-                        query,
-                        key_cache,
-                        value_cache,
-                        num_kv_heads,
-                        num_heads,
-                        scale,
-                        block_table,
-                        seq_lens,
-                        output,
-                    ) = param
-                    seq_lens = forward_context.attn_metadata[key].seq_lens
-
-                    workspace = torch_npu._npu_paged_attention_get_workspace(
-                        query=query,
-                        key_cache=key_cache,
-                        value_cache=value_cache,
-                        num_kv_heads=num_kv_heads,
-                        num_heads=num_heads,
-                        scale_value=scale,
-                        block_table=block_table,
-                        context_lens=seq_lens,
-                        out=output,
-                    )
-                    torch.npu.graph_task_update_begin(update_stream, handle)
-                    torch_npu._npu_paged_attention(
-                        query=query,
-                        key_cache=key_cache,
-                        value_cache=value_cache,
-                        num_kv_heads=num_kv_heads,
-                        num_heads=num_heads,
-                        scale_value=scale,
-                        block_table=block_table,
-                        context_lens=seq_lens,
-                        out=output,
-                        workspace=workspace,
-                    )
-                    torch.npu.graph_task_update_end(update_stream)
-                    event.record(update_stream)
-        elif _EXTRA_CTX.sinks:
+        if _EXTRA_CTX.sinks:
             # FIA update logic
             if _EXTRA_CTX.is_draft_model:
                 graph_params = get_draft_graph_params()
