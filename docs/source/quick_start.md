@@ -26,17 +26,17 @@ This section guides you through container-based environment setup and large mode
 
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
-    | Ascend HDK    | Refer to the documentation [CANN 9.0.0](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html) | Required for CANN |
-    | CANN          | == 9.0.0                        | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | == 2.10.0                       | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | Ascend HDK    | Refer to the documentation [CANN 9.0.1](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html) | Required for CANN |  
+    | CANN          | == 9.0.1                        | Required for vllm-ascend and torch-npu    |
+    | torch-npu     | == 2.10.0.post2                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
     | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
-    | NNAL          | == 9.0.0                        | Required for libatb.so, enables advanced tensor operations |
+    | NNAL          | == 9.0.1                        | Required for libatb.so, enables advanced tensor operations |
 
 ## Setup environment using container
 
 Before using containers, make sure Docker is installed on your system. If Docker is not installed, please refer to the [Docker installation guide](https://docs.docker.com/get-docker/) for installation instructions.
 
-=== "Ubuntu"
+=== "Ubuntu (A2)"
 
     ```bash
 
@@ -45,8 +45,6 @@ Before using containers, make sure Docker is installed on your system. If Docker
     # Update the vllm-ascend image
     # Atlas A2:
     # export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
-    # Atlas A3:
-    # export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     docker run --rm \
     --name vllm-ascend \
@@ -67,7 +65,39 @@ Before using containers, make sure Docker is installed on your system. If Docker
     apt-get update -y && apt-get install -y curl
     ```
 
-=== "openEuler"
+=== "Ubuntu (A3)"
+
+    ```bash
+
+    # A3 requires at least 2 NPUs to work together.
+    # Update DEVICE0 and DEVICE1 according to your devices (/dev/davinci[0-15])
+    export DEVICE0=/dev/davinci0
+    export DEVICE1=/dev/davinci1
+    # Update the vllm-ascend image
+    # Atlas A3:
+    # export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    docker run --rm \
+    --name vllm-ascend \
+    --shm-size=1g \
+    --device $DEVICE0 \
+    --device $DEVICE1 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -p 8000:8000 \
+    -it $IMAGE bash
+    # Install curl
+    apt-get update -y && apt-get install -y curl
+    ```
+
+=== "openEuler (A2)"
 
     ```bash
 
@@ -76,13 +106,43 @@ Before using containers, make sure Docker is installed on your system. If Docker
     # Update the vllm-ascend image
     # Atlas A2:
     # export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-openeuler
-    # Atlas A3:
-    # export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3-openeuler
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-openeuler
     docker run --rm \
     --name vllm-ascend \
     --shm-size=1g \
     --device $DEVICE \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -p 8000:8000 \
+    -it $IMAGE bash
+    # Install curl
+    yum update -y && yum install -y curl
+    ```
+
+=== "openEuler (A3)"
+
+    ```bash
+
+    # A3 requires at least 2 NPUs to work together.
+    # Update DEVICE0 and DEVICE1 according to your devices (/dev/davinci[0-15])
+    export DEVICE0=/dev/davinci0
+    export DEVICE1=/dev/davinci1
+    # Update the vllm-ascend image
+    # Atlas A3:
+    # export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3-openeuler
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3-openeuler
+    docker run --rm \
+    --name vllm-ascend \
+    --shm-size=1g \
+    --device $DEVICE0 \
+    --device $DEVICE1 \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
     --device /dev/hisi_hdc \

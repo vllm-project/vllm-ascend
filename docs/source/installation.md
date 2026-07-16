@@ -11,11 +11,11 @@ This document describes how to install vllm-ascend manually.
 
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
-    | Ascend HDK    | Refer to the documentation [CANN 9.0.0](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html) | Required for CANN |
-    | CANN          | == 9.0.0                        | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | == 2.10.0                       | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | Ascend HDK    | Refer to the documentation [CANN 9.0.1](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html) | Required for CANN |
+    | CANN          | == 9.0.1                        | Required for vllm-ascend and torch-npu    |
+    | torch-npu     | == 2.10.0.post2                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
     | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
-    | NNAL          | == 9.0.0                        | Required for libatb.so, enables advanced tensor operations |
+    | NNAL          | == 9.0.1                        | Required for libatb.so, enables advanced tensor operations |
 
 There are two installation methods:
 
@@ -85,18 +85,18 @@ Refer to [Ascend Environment Setup Guide](https://ascend.github.io/docs/sources/
         pip3 install attrs numpy decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
 
         # Download and install the CANN package.
-        wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.0/Ascend-cann-toolkit_9.0.0_linux-"$(uname -i)".run
-        chmod +x ./Ascend-cann-toolkit_9.0.0_linux-"$(uname -i)".run
-        ./Ascend-cann-toolkit_9.0.0_linux-"$(uname -i)".run --full
+        wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.1/Ascend-cann-toolkit_9.0.1_linux-"$(uname -i)".run
+        chmod +x ./Ascend-cann-toolkit_9.0.1_linux-"$(uname -i)".run
+        ./Ascend-cann-toolkit_9.0.1_linux-"$(uname -i)".run --full
         source /usr/local/Ascend/ascend-toolkit/set_env.sh
 
-        wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.0/Ascend-cann-910b-ops_9.0.0_linux-"$(uname -i)".run
-        chmod +x ./Ascend-cann-910b-ops_9.0.0_linux-"$(uname -i)".run
-        ./Ascend-cann-910b-ops_9.0.0_linux-"$(uname -i)".run --install
+        wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.1/Ascend-cann-910b-ops_9.0.1_linux-"$(uname -i)".run
+        chmod +x ./Ascend-cann-910b-ops_9.0.1_linux-"$(uname -i)".run
+        ./Ascend-cann-910b-ops_9.0.1_linux-"$(uname -i)".run --install
 
-        wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.0/Ascend-cann-nnal_9.0.0_linux-"$(uname -i)".run
-        chmod +x ./Ascend-cann-nnal_9.0.0_linux-"$(uname -i)".run
-        ./Ascend-cann-nnal_9.0.0_linux-"$(uname -i)".run --install
+        wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.1/Ascend-cann-nnal_9.0.1_linux-"$(uname -i)".run
+        chmod +x ./Ascend-cann-nnal_9.0.1_linux-"$(uname -i)".run
+        ./Ascend-cann-nnal_9.0.1_linux-"$(uname -i)".run --install
 
         source /usr/local/Ascend/nnal/atb/set_env.sh
         ```
@@ -139,7 +139,7 @@ Then you can install `vllm` and `vllm-ascend` from a **pre-built wheel** using o
 
     # Install vllm-project/vllm-ascend.
     pip install \
-    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant https://mirrors.huaweicloud.com/ascend/repos/pypi  \
+    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant \
     vllm-ascend=={{ pip_vllm_ascend_version }}
 
     ```
