@@ -18,7 +18,7 @@
 import hashlib
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
@@ -308,28 +308,6 @@ class TestLoadSpec(unittest.TestCase):
 
 
 class TestRequestTracker(unittest.TestCase):
-    def test_from_new_request(self):
-        new_req = MagicMock()
-        new_req.req_id = "req-1"
-        new_req.block_ids = [10, 20, 30]
-        new_req.prompt_token_ids = list(range(100))
-
-        tracker = RequestTracker.from_new_request(new_req, num_tokens_to_compute=48)
-        self.assertEqual(tracker.req_id, "req-1")
-        self.assertEqual(tracker.token_len, 48)
-        self.assertEqual(tracker.allocated_block_ids, [10, 20, 30])
-        self.assertEqual(len(tracker.token_ids), 48)
-        self.assertEqual(tracker.num_saved_tokens, 0)
-
-    def test_from_new_request_nested_block_ids(self):
-        new_req = MagicMock()
-        new_req.req_id = "req-2"
-        new_req.block_ids = [[10, 20], [30, 40]]
-        new_req.prompt_token_ids = list(range(32))
-
-        tracker = RequestTracker.from_new_request(new_req, num_tokens_to_compute=32)
-        self.assertEqual(tracker.allocated_block_ids, [10, 20])
-
     def test_update_with_list(self):
         tracker = RequestTracker(req_id="r1", token_len=16, allocated_block_ids=[1, 2])
         tracker.update([3, 4])

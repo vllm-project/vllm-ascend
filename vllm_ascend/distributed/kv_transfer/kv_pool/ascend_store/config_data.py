@@ -12,7 +12,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadat
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList, resolve_kv_cache_block_sizes
-from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.memcache_comm_fence import AttentionComputeStartGate
@@ -778,21 +777,6 @@ class RequestTracker:
     @allocated_block_ids.setter
     def allocated_block_ids(self, block_ids: list[int] | list[list[int]]) -> None:
         self.allocated_block_ids_by_group = normalize_block_ids_by_group(block_ids)
-
-    @staticmethod
-    def from_new_request(
-        new_request: NewRequestData,
-        num_tokens_to_compute: int,
-    ) -> RequestTracker:
-        """Create the request tracker from a new request."""
-        return RequestTracker(
-            req_id=new_request.req_id,
-            token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].copy(),
-            token_len=num_tokens_to_compute,
-            allocated_block_ids_by_group=normalize_block_ids_by_group(new_request.block_ids),
-            num_saved_tokens=0,
-            num_prompt_tokens=len(new_request.prompt_token_ids),
-        )
 
     def update(
         self,
