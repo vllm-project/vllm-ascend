@@ -1681,6 +1681,36 @@ class NPUModelRunner(GPUModelRunner):
         sample_hidden_states: torch.Tensor = None,
         target_model_batch_desc: BatchDescriptor = None,
     ) -> list[list[int]] | None:
+        # propose_draft_token_ids entry probe.
+        # Records which speculative-decoding sub-path is about to run
+        # (ngram / medusa / eagle / extract_hidden_states / ...). When the
+        # `Unknown speculative decoding method` ValueError fires further
+        # down, or when end-to-end speedup is unexpectedly absent, this
+        # single line tells the operator which drafter object was actually
+        # constructed and whether k (num_speculative_tokens) is non-trivial.
+        # Type lookups and getattr are host-only; the entire block is
+        # gated by isEnabledFor(DEBUG).
+        if logger.isEnabledFor(logging.DEBUG):
+            drafter_type = type(self.drafter).__name__ if self.drafter else None
+            spec_meta_state = (
+                "None" if spec_decode_metadata is None
+                else f"max_spec_len={spec_decode_metadata.max_spec_len}"
+            )
+            logger.debug(
+                "[spec/dfx] propose_draft_token_ids entry: "
+                "drafter=%s, method=%s, k=%d, num_reqs=%d, "
+                "num_scheduled_tokens=%d, spec_decode_metadata=%s, "
+                "use_cp=%s, pcp_size=%d",
+                drafter_type,
+                self.speculative_config.method if self.speculative_config else None,
+                self.num_spec_tokens,
+                self.input_batch.num_reqs,
+                num_scheduled_tokens,
+                spec_meta_state,
+                getattr(self, "use_cp", False),
+                getattr(self, "pcp_size", 1),
+            )
+
         if not self.drafter:
             # Speculative decoding is not enabled.
             draft_token_ids = None
