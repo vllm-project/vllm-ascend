@@ -493,26 +493,8 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             global_input_tokens_local_experts_indices,
             hidden_shape,
             hidden_shape_before_permute,
-        ) = self._dispatch_preprocess(hidden_states, topk_ids)
-
-        # Exchange LoRA indices alongside hidden states via all_to_all.
-        # The indices are permuted with the same mapping as tokens so they
-        # stay aligned through the all_to_all exchange.
-        exchanged_lora_indices = None
-        if split_lora_indices is not None:
-            lora_dtype = split_lora_indices.dtype
-            # Expand lora indices to match top_k expansion (each token
-            # generates top_k dispatched rows).
-            expanded_lora = split_lora_indices.repeat_interleave(topk_ids.shape[1])
-            # npu_moe_token_permute returns original-row -> permuted-row indices.
-            # Invert it to gather LoRA ids in permuted-row order, matching
-            # permutated_local_input_tokens.
-            local_lora_permutation = torch.argsort(reversed_local_input_permutation_mapping.reshape(-1).long())
-            permuted_lora = expanded_lora[local_lora_permutation]
-            # All_to_all exchange: send lora indices to the expert-owning ranks.
-            _, exchanged_lora, handle = async_all_to_all(permuted_lora, output_splits, input_splits, self.ep_group)
-            handle.wait()
-            exchanged_lora_indices = exchanged_lora.to(lora_dtype)
+            permuted_lora_indices,
+        ) = self._dispatch_preprocess(hidden_states, topk_ids, split_lora_indices)
 
         dynamic_scale_after_all2all = None
         if with_quant:
@@ -531,8 +513,22 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         permute1_ep_all_to_all_handle.wait()
         permutated_local_input_tokens.untyped_storage().resize_(0)
 
+        exchanged_lora_indices = None
+        if permuted_lora_indices is not None:
+            lora_dtype = permuted_lora_indices.dtype
+            _, exchanged_lora, lora_all_to_all_handle = async_all_to_all(
+                permuted_lora_indices, output_splits, input_splits, self.ep_group
+            )
+            lora_all_to_all_handle.wait()
+            exchanged_lora_indices = exchanged_lora.to(lora_dtype)
+
         # Postprocess
-        global_input_tokens, dynamic_scale_final, reversed_global_input_permutation_mapping = (
+        (
+            global_input_tokens,
+            dynamic_scale_final,
+            reversed_global_input_permutation_mapping,
+            exchanged_lora_indices,
+        ) = (
             self._dispatch_postprocess(
                 global_input_tokens,
                 dynamic_scale_after_all2all,
@@ -540,14 +536,9 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
                 with_quant,
                 dst_type,
                 scale_type,
+                exchanged_lora_indices,
             )
         )
-
-        # Apply the second LoRA permute (sort by local expert within the rank).
-        if self.num_local_experts > 1 and exchanged_lora_indices is not None:
-            assert reversed_global_input_permutation_mapping is not None
-            global_lora_permutation = torch.argsort(reversed_global_input_permutation_mapping.reshape(-1).long())
-            exchanged_lora_indices = exchanged_lora_indices[global_lora_permutation]
 
         return MoETokenDispatchOutput(
             hidden_states=global_input_tokens,
@@ -587,7 +578,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
 
         return output
 
-    def _dispatch_preprocess(self, hidden_states, topk_ids):
+    def _dispatch_preprocess(self, hidden_states, topk_ids, split_lora_indices=None):
         hidden_shape = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_states.size(-1))
         (
@@ -604,6 +595,14 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             indices=topk_ids,
             num_out_tokens=num_out_tokens,
         )
+        permuted_lora_indices = None
+        if split_lora_indices is not None:
+            expanded_lora = split_lora_indices.repeat_interleave(topk_ids.shape[1])
+            # npu_moe_token_permute returns original-row -> permuted-row indices.
+            local_lora_permutation = torch.argsort(
+                reversed_local_input_permutation_mapping.reshape(-1).long()
+            )
+            permuted_lora_indices = expanded_lora[local_lora_permutation]
 
         return (
             permutated_local_input_tokens,
@@ -614,6 +613,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             global_input_tokens_local_experts_indices,
             hidden_shape,
             hidden_shape_before_permute,
+            permuted_lora_indices,
         )
 
     def _preprocess(self, topk_ids: torch.Tensor):
@@ -669,10 +669,11 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         with_quant,
         dst_type,
         scale_type,
+        exchanged_lora_indices=None,
     ):
         # Early return if no local experts or no tokens
         if self.num_local_experts <= 1:
-            return global_input_tokens, dynamic_scale_after_all2all, None
+            return global_input_tokens, dynamic_scale_after_all2all, None, exchanged_lora_indices
 
         assert global_input_tokens_local_experts_indices is not None, (
             "global_input_tokens_local_experts_indices must be provided"
@@ -698,7 +699,12 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             )
             dynamic_scale_after_all2all = routed_scale.view(torch.uint8)
             experts_indices_2d_copy.untyped_storage().resize_(0)
-            return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
+            return (
+                global_input_tokens,
+                dynamic_scale_after_all2all,
+                reversed_global_input_permutation_mapping,
+                exchanged_lora_indices,
+            )
         elif with_quant:
             dynamic_scale_after_all2all, _ = torch_npu.npu_moe_token_permute(
                 dynamic_scale_after_all2all.unsqueeze(-1), global_input_tokens_local_experts_indices
@@ -709,7 +715,17 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         global_input_tokens, reversed_global_input_permutation_mapping = torch_npu.npu_moe_token_permute(
             global_input_tokens, global_input_tokens_local_experts_indices
         )
-        return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
+        if exchanged_lora_indices is not None:
+            global_lora_permutation = torch.argsort(
+                reversed_global_input_permutation_mapping.reshape(-1).long()
+            )
+            exchanged_lora_indices = exchanged_lora_indices[global_lora_permutation]
+        return (
+            global_input_tokens,
+            dynamic_scale_after_all2all,
+            reversed_global_input_permutation_mapping,
+            exchanged_lora_indices,
+        )
 
     def _combine_preprocess(
         self, hidden_states: torch.Tensor, combine_metadata: MoEAllToAllCombineMetadata
