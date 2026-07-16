@@ -75,6 +75,10 @@ def register_model():
     )
 
     install_hunyuan_vl_processor_compat()
+    from vllm_ascend.patch.diffusion_gemma_softcap_compat import (
+        install_diffusion_gemma_softcap_compat,
+    )
+    install_diffusion_gemma_softcap_compat()
     from .models import register_model
 
     register_model()
