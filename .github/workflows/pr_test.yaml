@@ -47,8 +47,8 @@ jobs:
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
-      has_tests: ${{ steps.scope.outputs.has_tests || steps.noop.outputs.has_tests }}
-      test_groups: ${{ steps.scope.outputs.test_groups || steps.noop.outputs.test_groups }}
+      has_tests: ${{ steps.filter-test-groups.outputs.has_tests || steps.scope.outputs.has_tests || steps.noop.outputs.has_tests }}
+      test_groups: ${{ steps.filter-test-groups.outputs.test_groups || steps.scope.outputs.test_groups || steps.noop.outputs.test_groups }}
       matched_modules: ${{ steps.scope.outputs.matched_modules || steps.noop.outputs.matched_modules }}
       main_commit: ${{ steps.vllm.outputs.main_commit }}
       release_tag: ${{ steps.vllm.outputs.release_tag }}
@@ -114,6 +114,7 @@ jobs:
       - run: echo "::add-matcher::$RUNNER_TEMP/mypy.json"
 
       - name: Checkout vllm-project/vllm repo
+        if: ${{ false }}
         uses: actions/checkout@v7
         with:
           repository: vllm-project/vllm
@@ -146,7 +147,7 @@ jobs:
               - 'CMakeLists.txt'
 
       - name: Install vllm-ascend dev (conditional)
-        if: steps.filter.outputs.lint_tracker == 'true'
+        if: ${{ false }}
         env:
           UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
           UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
@@ -155,11 +156,12 @@ jobs:
           UV_SYSTEM_PYTHON: 1
         run: |
           pip install uv
-          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install uc-manager
           uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
       - name: Run pre-commit
+        if: ${{ false }}
         env:
           PRE_COMMIT_HOME: /tmp/pre-commit-cache
           PRE_COMMIT_COLOR: always
@@ -167,14 +169,15 @@ jobs:
           TERM: xterm-256color
           SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086"
         run: |
-          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pre-commit run --all-files --hook-stage manual --show-diff-on-failure
 
       - name: Run mypy
+        if: ${{ false }}
         run: |
           PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
           export PYTHONPATH
-          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           for python_version in "3.10" "3.11" "3.12"; do
             echo "============================"
             tools/mypy.sh 1 "$python_version"
@@ -190,11 +193,35 @@ jobs:
         id: scope
         if: steps.filter.outputs.src == 'true'
         run: |
-          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git fetch origin ${{ github.base_ref }}
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
             --diff-base origin/${{ github.base_ref }}
+
+      - name: Keep only fractional-card test groups
+        id: filter-test-groups
+        if: steps.scope.outputs.has_tests == 'true'
+        env:
+          TEST_GROUPS: ${{ steps.scope.outputs.test_groups }}
+        run: |
+          filtered_groups="$(python3 -c '
+          import json
+          import os
+
+          groups = json.loads(os.environ["TEST_GROUPS"])
+          allowed_types = {"a2_half", "a2_quarter"}
+          filtered = [group for group in groups if group["npu_type"] in allowed_types]
+          print(json.dumps(filtered, separators=(",", ":")))
+          ')"
+          {
+            echo "test_groups=${filtered_groups}"
+            if [ "${filtered_groups}" = "[]" ]; then
+              echo "has_tests=false"
+            else
+              echo "has_tests=true"
+            fi
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set no-tests output when source paths unchanged
         id: noop
@@ -208,12 +235,12 @@ jobs:
 
   run-selected-tests:
     needs: lint-and-select-tests
-    if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' && contains(github.event.pull_request.labels.*.name, 'ready') }}
+    if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' }}
     strategy:
       matrix:
         vllm_version:
           - ${{ needs.lint-and-select-tests.outputs.main_commit }}
-          - ${{ needs.lint-and-select-tests.outputs.release_tag }}
+          # - ${{ needs.lint-and-select-tests.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}

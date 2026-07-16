@@ -44,6 +44,7 @@ def format_chatml_messages(prompt: str):
     quantization="BF16",
     graph_mode="eager",
 )
+@pytest.mark.skip(reason="Required Alice and Bob LoRA adapter weights are unavailable")
 @patch.dict("os.environ", {"VLLM_USE_MODELSCOPE": "False"})
 def test_multi_loras_with_tp_sync():
     lora_name_id_map = {}

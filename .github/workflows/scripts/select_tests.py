@@ -76,6 +76,8 @@ _RUNNER_LABEL_PATH = _SCRIPT_DIR / "runner_label.json"
 
 class NpuType(str, Enum):
     A2 = "a2"
+    A2_HALF = "a2_half"
+    A2_QUARTER = "a2_quarter"
     A3 = "a3"
     _310P = "310p"
     CPU = "cpu"

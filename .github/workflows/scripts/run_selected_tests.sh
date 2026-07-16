@@ -86,6 +86,7 @@ print_test_info() {
 }
 
 print_summary() {
+  local result target status log_file failed
   echo -e "\033[1;34m=== TEST SUMMARY ===\033[0m"
   for result in "${test_results[@]}"; do
     IFS='|' read -r target status log_file <<< "${result}"
@@ -138,9 +139,8 @@ run_pytest_target() {
   else
     test_results+=("${target}|FAILED|${log_file}")
     failed_logs+=("${target}|${log_file}")
-    if [ "${record_timing}" != true ]; then
-      print_summary
-      exit "${status}"
+    if [ "${overall_status}" -eq 0 ]; then
+      overall_status="${status}"
     fi
   fi
 }
@@ -180,9 +180,8 @@ run_pytest_batch() {
   else
     test_results+=("${target}|FAILED|${log_file}")
     failed_logs+=("${target}|${log_file}")
-    if [ "${record_timing}" != true ]; then
-      print_summary
-      exit "${status}"
+    if [ "${overall_status}" -eq 0 ]; then
+      overall_status="${status}"
     fi
   fi
 }
