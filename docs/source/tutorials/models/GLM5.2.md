@@ -1182,7 +1182,7 @@ Recommended configurations for serving `GLM-5.2` with a 1M context window on Atl
 | ---- | -------- | ----------- | ------- |
 | Single-node co-located | 1 Atlas 800 A3 (64G x 16) | `DP1 PP1 TP16 PCP1 DCP16` | `1024000` |
 | Dual-node co-located | 2 Atlas 800 A3 (64G x 16) | `DP4 PP1 TP8 PCP1 DCP8` | `1024000` |
-| 2P2D PD disaggregation | 2 prefiller A3 nodes + 2 decoder A3 nodes | Prefill `DP4 PP1 TP8 PCP1 DCP8`, Decode `DP4 PP1 TP8 PCP1 DCP8` | `1024000` |
+| 2P2D PD disaggregation | 1 prefiller with 2 A3 nodes + 1 decoder with 2 A3 nodes | Prefill `DP4 PP1 TP8 PCP1 DCP8`, Decode `DP4 PP1 TP8 PCP1 DCP8` | `1024000` |
 
 #### Single-Node 1M Deployment
 
@@ -1195,17 +1195,9 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=20
 export HCCL_BUFFSIZE=768
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_SERVER_DEV_MODE=1
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
-# Required only when the HDK version supports fabric memory.
-export ASCEND_ENABLE_USE_FABRIC_MEM=1
-
 export TASK_QUEUE_ENABLE=1
-export CPU_AFFINITY_CONF=1
-
-# Optional. Requires root permission in the container.
-echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 
 vllm serve <MODEL_PATH> \
   --seed 1024 \
@@ -1255,13 +1247,8 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=20
 export HCCL_BUFFSIZE=768
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_SERVER_DEV_MODE=1
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
-export ASCEND_ENABLE_USE_FABRIC_MEM=1
 export TASK_QUEUE_ENABLE=1
-export CPU_AFFINITY_CONF=1
-# Each node uses 2 local DP ranks x TP8 = 16 NPUs. Change the list if needed.
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 
 vllm serve <MODEL_PATH> \
   --seed 1024 \
@@ -1315,14 +1302,9 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=20
 export HCCL_BUFFSIZE=768
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_SERVER_DEV_MODE=1
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
-export ASCEND_ENABLE_USE_FABRIC_MEM=1
 export TASK_QUEUE_ENABLE=1
-export CPU_AFFINITY_CONF=1
 export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-# Each node uses 2 local DP ranks x TP8 = 16 NPUs. Change the list if needed.
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 
 vllm serve <MODEL_PATH> \
   --seed 1024 \
@@ -1391,14 +1373,9 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=20
 export HCCL_BUFFSIZE=768
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_SERVER_DEV_MODE=1
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
-export ASCEND_ENABLE_USE_FABRIC_MEM=1
 export TASK_QUEUE_ENABLE=1
-export CPU_AFFINITY_CONF=1
 export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-# Each node uses 2 local DP ranks x TP8 = 16 NPUs. Change the list if needed.
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 
 vllm serve <MODEL_PATH> \
   --seed 1024 \
