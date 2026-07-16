@@ -30,6 +30,9 @@ a2:
       - name: gemma4-31b-dense
         os: linux-aarch64-a2b3-4
         config_file_path: Gemma4-31B-Dense.yaml
+      - name: MiniMax-M2.5-w8a8-QuaRot-A2
+        os: linux-aarch64-a2b3-8
+        config_file_path: MiniMax-M2.5-w8a8-QuaRot-A2.yaml
   multi_node:
     test_config:
       - name: multi-node-qwen3-235b-dp

@@ -6,16 +6,14 @@ test_cases:
   - name: "MiniMax-M2.5-w8a8"
     model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
     envs:
-      HCCL_BUFFSIZE: "512"
+      HCCL_BUFFSIZE: "1200"
       HCCL_OP_EXPANSION_MODE: "AIV"
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
-      VLLM-ASCEND_BALANCE_SCHEDULING: "1"
-      HCCL_INTRA_PCIE_ENABLE: "1"
-      HCCL_INTRA_ROCE_ENABLE: "0"
-      OMP_PROC_BIND: "false"
+      VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+      VLLM_ASCEND_ENABLE_NZ: "1"
       VLLM_TORCH_PROFILER_WITH_STACK: "0"
       VLLM_TORCH_PROFILER_DIR: "./profile"
       VLLM_USE_MODELSCOPE: "true"
@@ -32,21 +30,19 @@ test_cases:
       - "ascend"
       - "--additional-config"
       - '{"enable_cpu_binding":true}'
-      - "--model-loader-extra-config"
-      - '{"enable_multithread_load":true,"num_threads":16}'
       - "--speculative_config"
       - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
       - "--enable-expert-parallel"
       - "--enable-chunked-prefill"
       - "--enable-prefix-caching"
       - "--max-num-seqs"
-      - "100"
+      - "128"
       - "--max-model-len"
       - "196608"
       - "--seed"
       - "1024"
       - "--max-num-batched-tokens"
-      - "6144"
+      - "16384"
       - "--enable-auto-tool-choice"
       - "--tool-call-parser"
       - "minimax_m2"
@@ -56,7 +52,9 @@ test_cases:
       - "--profiler-config"
       - '{"profiler":"torch","torch_profiler_dir":"./profile","torch_profiler_with_stack":false}'
       - "--compilation-config"
-      - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,16,40,80,160,256,400]}'
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_cpu_binding": true, "enable_npugraph_ex": true, "enable_static_kernel": true}'
     benchmarks:
       acc:
         case_type: accuracy
