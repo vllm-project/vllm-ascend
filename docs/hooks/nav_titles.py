@@ -177,7 +177,6 @@ TITLES = {
     "user_guide/feature_guide/batch_invariance.md": {"en": "Batch Invariance", "zh": "批次不变性"},
     "user_guide/feature_guide/context_parallel.md": {"en": "Context Parallel", "zh": "上下文并行"},
     "user_guide/feature_guide/cpu_binding.md": {"en": "CPU Binding", "zh": "CPU 绑定"},
-    "user_guide/feature_guide/dynamic_batch.md": {"en": "Dynamic Batch", "zh": "动态批次"},
     "user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md": {
         "en": "Dynamic Chunk Pipeline Parallel",
         "zh": "动态分块流水线并行",
@@ -193,7 +192,6 @@ TITLES = {
     "user_guide/feature_guide/kv_cache_cpu_offload.md": {"en": "KV Cache CPU Offload", "zh": "KV Cache CPU 卸载"},
     "user_guide/feature_guide/kv_pool.md": {"en": "KV Pool", "zh": "KV 池"},
     "user_guide/feature_guide/large_scale_ep.md": {"en": "Large Scale EP", "zh": "大规模 EP"},
-    "user_guide/feature_guide/layer_sharding.md": {"en": "Layer Sharding", "zh": "层分片"},
     "user_guide/feature_guide/lmcache_ascend_deployment.md": {
         "en": "LMCache Ascend Deployment",
         "zh": "LMCache Ascend 部署",
@@ -207,7 +205,6 @@ TITLES = {
     "user_guide/feature_guide/speculative_decoding.md": {"en": "Speculative Decoding", "zh": "推测解码"},
     "user_guide/feature_guide/structured_output.md": {"en": "Structured Output", "zh": "结构化输出"},
     "user_guide/feature_guide/ucm_deployment.md": {"en": "UCM Deployment", "zh": "UCM 部署"},
-    "user_guide/feature_guide/weight_prefetch.md": {"en": "Weight Prefetch", "zh": "权重预取"},
     "user_guide/index.md": {"en": "Overview", "zh": "概览"},
     "user_guide/release_notes.md": {"en": "Release Notes", "zh": "发布说明"},
     "user_guide/support_matrix/feature_matrix.md": {"en": "Feature Matrix", "zh": "功能矩阵"},

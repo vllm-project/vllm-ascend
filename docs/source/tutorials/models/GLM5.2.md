@@ -136,9 +136,9 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --gpu-memory-utilization 0.95 \
 --quantization ascend \
 --async-scheduling \
---additional-config '{"fuse_muls_add":true,"multistream_overlap_shared_expert":true}' \
+--additional-config '{"multistream_overlap_shared_expert":true}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 
 ```
 
@@ -202,8 +202,8 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --enable-prefix-caching \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"fuse_muls_add":true,"multistream_overlap_shared_expert":true}' \
-    --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
+    --additional-config '{"multistream_overlap_shared_expert":true}' \
+    --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
     **node 1**
@@ -253,8 +253,8 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --enable-prefix-caching \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"fuse_muls_add":true,"multistream_overlap_shared_expert":true}' \
-    --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
+    --additional-config '{"multistream_overlap_shared_expert":true}' \
+    --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
 === "A2 series"
@@ -312,9 +312,9 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --safetensors-load-strategy 'prefetch' \
     --block-size 128 \
     --async-scheduling \
-    --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
+    --additional-config '{"multistream_overlap_shared_expert": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
+    --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
     **node 1**
@@ -369,9 +369,9 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --safetensors-load-strategy 'prefetch' \
     --block-size 128 \
     --async-scheduling \
-    --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
+    --additional-config '{"multistream_overlap_shared_expert": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
+    --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
 ### Co-located Deployment on 4 Nodes (200k context)
@@ -430,9 +430,9 @@ vllm serve <MODEL_PATH> \
   --enable-chunked-prefill \
   --no-enable-prefix-caching \
   --async-scheduling \
-  --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
+  --additional-config '{"multistream_overlap_shared_expert": true}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
+  --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
 **Node 1** (headless, `--data-parallel-start-rank 1`):
@@ -489,9 +489,9 @@ vllm serve <MODEL_PATH> \
   --enable-chunked-prefill \
   --no-enable-prefix-caching \
   --async-scheduling \
-  --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
+  --additional-config '{"multistream_overlap_shared_expert": true}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
+  --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
 Node 2 and Node 3 use the same script as Node 1, with `--data-parallel-start-rank` set to `2` and `3` respectively (and `node0_ip` pointing to Node 0).
@@ -609,7 +609,6 @@ Before you start, please
 
 2. prepare the script `run_dp_template.sh` on each node.
 
-    To support a 200k context window on the stage of prefill, the parameter `"layer_sharding": ["q_b_proj"]` needs to be added to `--additional_config` on each prefill node.
     1. Prefill node 0
 
         ```shell
@@ -648,8 +647,8 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-52 \
             --max-model-len 135000 \
-            --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp"}' \
-            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true,"enable_dsa_cp": true}' \
+            --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp", "enforce_eager": true}' \
+            --additional-config '{"enable_sparse_c8":false,"multistream_overlap_shared_expert": true, "enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -718,8 +717,8 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-52 \
             --max-model-len 135000 \
-            --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp"}' \
-            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true}' \
+            --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp", "enforce_eager": true}' \
+            --additional-config '{"enable_sparse_c8":false, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -790,8 +789,8 @@ Before you start, please
             --max-model-len 135000 \
             --max-num-batched-tokens 164 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-            --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp"}' \
-            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
+            --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp", "enforce_eager": true}' \
+            --additional-config '{"enable_sparse_c8":false, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
             --trust-remote-code \
             --max-num-seqs 48 \
             --gpu-memory-utilization 0.92 \
@@ -821,7 +820,7 @@ Before you start, please
 
     4. Decode node 1
 
-         ```shell
+        ```shell
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
             
@@ -859,9 +858,9 @@ Before you start, please
             --served-model-name glm-52 \
             --max-model-len 135000 \
             --max-num-batched-tokens 164 \
-            --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp", "enforce_eager": true}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
+            --additional-config '{"enable_sparse_c8":false,"multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
             --trust-remote-code \
             --max-num-seqs 48 \
             --gpu-memory-utilization 0.92 \
@@ -887,7 +886,7 @@ Before you start, please
                          }
                  }
              }'
-         ```
+        ```
 
 Once the preparation is done, you can start the server with the following command on each node:
 
@@ -1025,12 +1024,10 @@ vllm serve <MODEL_PATH> \
   --additional-config \
   '{
     "enable_sparse_c8": false,
-    "fuse_muls_add": true,
     "multistream_overlap_shared_expert": true,
-    "recompute_scheduler_enable": true,
     "enable_dsa_cp": true
   }' \
-  --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
+  --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager": true}'
 ```
 
 `run_dp_template.sh` for the decode nodes:
@@ -1109,11 +1106,10 @@ vllm serve <MODEL_PATH> \
   --additional-config \
   '{
     "enable_sparse_c8": false,
-    "fuse_muls_add": true,
     "multistream_overlap_shared_expert": true,
     "recompute_scheduler_enable": true
   }' \
-  --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
+  --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager": true}'
 ```
 
 Once the preparation is done, start the server with the following commands:
@@ -1173,7 +1169,7 @@ python load_balance_proxy_server_example.py \
 
 Some configurations for optimization are shown below:
 
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node. With FlashComm enabled, layer_sharding list cannot include o_proj as an element.
+- `VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node.
 - `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable following fused operators: dispatch_gmm_combine_decode and dispatch_ffn_combine operator.
 
 Please refer to the following python file for further explanation and restrictions of the environment variables above: [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py)

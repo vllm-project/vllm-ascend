@@ -24,6 +24,12 @@ a2:
       - name: Qwen3.5-397B-A17B-w4a8-mtp
         os: linux-aarch64-a2b3-8
         config_file_path: Qwen3.5-397B-A17B-w4a8-mtp-A2.yaml
+      - name: gemma4
+        os: linux-aarch64-a2b3-4
+        config_file_path: Gemma4.yaml
+      - name: gemma4-31b-dense
+        os: linux-aarch64-a2b3-4
+        config_file_path: Gemma4-31B-Dense.yaml
   multi_node:
     test_config:
       - name: multi-node-qwen3-235b-dp
@@ -114,75 +120,75 @@ a3:
   single_node:
     test_config:
       - name: mtpx-deepseek-r1-0528-w8a8
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: MTPX-DeepSeek-R1-0528-W8A8.yaml
       - name: deepseek-r1-0528-w8a8
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: DeepSeek-R1-0528-W8A8.yaml
       - name: MiniMax-M2.5-w8a8-QuaRot-A3
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: MiniMax-M2.5-w8a8-QuaRot-A3.yaml
       - name: DeepSeek-V4-Flash-W8A8-A3
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: DeepSeek-V4-Flash-W8A8-A3.yaml
       - name: kimi-k2-thinking
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Kimi-K2-Thinking.yaml
       - name: kimi-k2.5
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Kimi-K2.5.yaml
       - name: Qwen3.5-122B-A10B-W8A8-A3
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3.5-122B-A10B-W8A8-A3.yaml
       - name: Qwen3.5-397B-A17B-w8a8-mtp-longseq
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3.5-397B-A17B-w8a8-mtp-longseq-A3.yaml
       - name: deepseek-v3-2-w8a8
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: DeepSeek-V3.2-W8A8.yaml
       - name: glm-5.1-w8a8-prefill-mc2
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: GLM-5.1-W8A8-PrefillMC2.yaml
       - name: qwen3-235b-a22b-w8a8
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3-235B-A22B-W8A8.yaml
       - name: Qwen3.5-397B-A17B-w8a8-mtp
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3.5-397B-A17B-W8A8-mtp-A3.yaml
       - name: deepseek-r1-0528-w8a8-prefix-cache
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Prefix-Cache-DeepSeek-R1-0528-W8A8.yaml
       - name: glm-4.7-w8a8
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: GLM-4.7.yaml
       - name: qwen3-vl-235b-a22b-instruct-w8a8
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3-VL-235B-A22B-Instruct-W8A8.yaml
   multi_card:
     test_config:
       # pytest-driven tests
       - name: qwen3-30b-acc
-        os: linux-aarch64-a3-4
+        os: linux-aarch64-nightly-a3-4
         tests: tests/e2e/weekly/single_node/models/test_qwen3_30b_acc.py
       # YAML-driven tests
       - name: Qwen3.5-27B-w8a8-A3
-        os: linux-aarch64-a3-2
+        os: linux-aarch64-nightly-a3-2
         config_file_path: Qwen3.5-27B-w8a8-A3.yaml
       - name: qwen3-32b-int8
-        os: linux-aarch64-a3-4
+        os: linux-aarch64-nightly-a3-4
         config_file_path: Qwen3-32B-Int8.yaml
       - name: Qwen3-32B-QuaRot
-        os: linux-aarch64-a3-2
+        os: linux-aarch64-nightly-a3-2
         config_file_path: Qwen3-32B-QuaRot-eagle3.yaml
       - name: qwen3-30b-a3b-w8a8
-        os: linux-aarch64-a3-4
+        os: linux-aarch64-nightly-a3-4
         config_file_path: Qwen3-30B-A3B-W8A8.yaml
       - name: qwen3-32b-int8-prefix-cache
-        os: linux-aarch64-a3-4
+        os: linux-aarch64-nightly-a3-4
         config_file_path: Prefix-Cache-Qwen3-32B-Int8.yaml
       - name: Qwen3-30B-A3B-W4A8-llm-compressor
-        os: linux-aarch64-a3-2
+        os: linux-aarch64-nightly-a3-2
         config_file_path: Qwen3-30B-A3B-W4A8-llm-compressor.yaml
       - name: Qwen3-30B-QuaRot
-        os: linux-aarch64-a3-2
+        os: linux-aarch64-nightly-a3-2
         config_file_path: Qwen3-30B-QuaRot-eagle3.yaml

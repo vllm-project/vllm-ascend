@@ -38,106 +38,103 @@ If you need to deploy a multi-node environment, verify the multi-node communicat
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the container on your node. For the available image tags and published versions, refer to [Using Docker](../../installation.md#set-up-using-docker).
+You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../installation.md#set-up-using-docker).
 
-**A3 series**
+=== "A3 series"
 
-```bash
-# Update the vllm-ascend image
-export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
-export NAME=vllm-ascend
+    **Docker Run:**
 
-# Run the container using the defined variables
-# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
-docker run --rm \
---name $NAME \
---net=host \
---shm-size=1g \
---device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci2 \
---device /dev/davinci3 \
---device /dev/davinci4 \
---device /dev/davinci5 \
---device /dev/davinci6 \
---device /dev/davinci7 \
---device /dev/davinci8 \
---device /dev/davinci9 \
---device /dev/davinci10 \
---device /dev/davinci11 \
---device /dev/davinci12 \
---device /dev/davinci13 \
---device /dev/davinci14 \
---device /dev/davinci15 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/.cache:/root/.cache \
--it $IMAGE bash
-```
+    ```bash
 
-**A2 series**
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
 
-Map your model weight directory into the container (the example maps it to `/root/.cache/`).
+    docker run \
+        --name vllm-ascend-env \
+        --ipc host \
+        --net host \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci8 \
+        --device /dev/davinci9 \
+        --device /dev/davinci10 \
+        --device /dev/davinci11 \
+        --device /dev/davinci12 \
+        --device /dev/davinci13 \
+        --device /dev/davinci14 \
+        --device /dev/davinci15 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /usr/local/sbin:/usr/local/sbin \
+        -it -d $IMAGE bash
+    ```
 
-```bash
-#!/bin/sh
-NAME=minimax
-IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    !!! note
 
-docker run -itd -u 0 --ipc=host \
-  -e VLLM_USE_MODELSCOPE=True \
-  -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
-  --name $NAME \
-  --net=host \
-  --device /dev/davinci_manager \
-  --device /dev/devmm_svm \
-  --device /dev/hisi_hdc \
-  --device /dev/davinci0 \
-  --device /dev/davinci1 \
-  --device /dev/davinci2 \
-  --device /dev/davinci3 \
-  --device /dev/davinci4 \
-  --device /dev/davinci5 \
-  --device /dev/davinci6 \
-  --device /dev/davinci7 \
-  --shm-size=1200g \
-  -v /usr/local/dcmi:/usr/local/dcmi \
-  -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-  -v /etc/ascend_install.info:/etc/ascend_install.info \
-  -v /root/.cache:/root/.cache \
-  -it $IMAGE bash
-```
+        A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
+        If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
 
-Save the script as `minimax-docker-run.sh`, then start and enter the container:
+=== "A2 series"
 
-```bash
-bash minimax-docker-run.sh
-docker exec -it minimax bash
-```
+    **Docker Run:**
 
-**Verification:**
+    ```bash
 
-After starting the container, verify the installation with:
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+
+    docker run \
+        --name vllm-ascend-env \
+        --ipc host \
+        --net host \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /usr/local/sbin:/usr/local/sbin \
+        -it -d $IMAGE bash
+    ```
+
+!!! tip
+    The mounts above are the minimum required for NPU driver access. Add additional `-v` mounts (e.g., model weight paths, datasets) as needed for your environment.
+
+The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed as Python packages in site-packages.
+
+**Installation Verification:**
+
+After starting the container, run the following command to verify the installation:
 
 ```bash
-# Check that the container is running
-docker ps | grep $NAME
-
-# Verify that NPU devices are visible inside the container
-docker exec $NAME npu-smi info
+docker ps | grep vllm-ascend-env
 ```
 
-Expected result: `docker ps` shows the container with status "Up", and `npu-smi info` lists the expected number of NPU devices.
+Expected result: The container is listed with status `Up`. You can also verify the vllm-ascend version inside the container:
+
+```bash
+pip show vllm-ascend
+```
+
+Expected result: The version information is displayed, matching the pulled image version.
 
 ### 4.2 Source Code Installation
 
