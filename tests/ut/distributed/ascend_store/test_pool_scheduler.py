@@ -424,9 +424,58 @@ class TestLookupKeyClient(unittest.TestCase):
         mock_socket.recv.return_value = (32).to_bytes(4, "big")
 
         client = LookupKeyClient(config)
-        result = client.lookup(64, [b"\xaa\xbb"])
+        # Synchronous path: blocks on the background future and returns the hit.
+        result = client.lookup("req0", 64, [b"\xaa\xbb"])
         self.assertEqual(result, 32)
         mock_socket.send_multipart.assert_called_once()
+        # Future is cleared once its result has been consumed.
+        self.assertNotIn("req0", client.futures)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")
+    def test_lookup_async(self, mock_zmq, mock_make_socket):
+        config = MagicMock()
+        config.parallel_config.data_parallel_rank = 0
+        config.kv_transfer_config.kv_connector_extra_config = {}
+        mock_make_socket.return_value = MagicMock()
+
+        client = LookupKeyClient(config)
+        # Drive the executor deterministically so the test is not timing-based.
+        client.executor = MagicMock()
+        fake_future = MagicMock()
+        client.executor.submit.return_value = fake_future
+
+        # First non-blocking call: lookup still running -> returns None and the
+        # future is retained for a later retry.
+        fake_future.done.return_value = False
+        self.assertIsNone(client.lookup("r1", 64, [b"h"], non_block=True))
+        self.assertIn("r1", client.futures)
+        client.executor.submit.assert_called_once()
+
+        # Later step: result ready -> returns it and drops the future. The
+        # in-flight future is reused (submit not called again).
+        fake_future.done.return_value = True
+        fake_future.result.return_value = 48
+        self.assertEqual(client.lookup("r1", 64, [b"h"], non_block=True), 48)
+        self.assertNotIn("r1", client.futures)
+        client.executor.submit.assert_called_once()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")
+    def test_discard(self, mock_zmq, mock_make_socket):
+        config = MagicMock()
+        config.parallel_config.data_parallel_rank = 0
+        config.kv_transfer_config.kv_connector_extra_config = {}
+        mock_make_socket.return_value = MagicMock()
+
+        client = LookupKeyClient(config)
+        fake_future = MagicMock()
+        client.futures["r1"] = fake_future
+        client.discard("r1")
+        self.assertNotIn("r1", client.futures)
+        fake_future.cancel.assert_called_once()
+        # Discarding an unknown request is a no-op.
+        client.discard("missing")
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")
