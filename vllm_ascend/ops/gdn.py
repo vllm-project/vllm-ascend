@@ -481,7 +481,11 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.2: Process non-spec-decode part in mixed non-spec batches
         if split_non_spec:
+            # The split tensors are present for every mixed prefill/decode batch.
             assert mixed_qkv_non_spec is not None
+            assert query_non_spec is not None
+            assert key_non_spec is not None
+            assert value_non_spec is not None
             assert g_non_spec is not None
             assert beta_non_spec is not None
             if use_head_major_conv:
@@ -524,6 +528,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert g_non_spec is not None
             assert beta_non_spec is not None
             if split_non_spec:
+                assert query_non_spec is not None
+                assert key_non_spec is not None
+                assert value_non_spec is not None
                 if use_head_major_conv:
                     query_non_spec = query_non_spec[:, :, num_decode_tokens:]
                     key_non_spec = key_non_spec[:, :, num_decode_tokens:]

@@ -101,7 +101,7 @@ torch.ops.npu.npu_solve_tri(
 
 ## 7. 目录结构
 
-```
+```text
 solve_tri/
 ├── docs/
 │   └── aclnnSolveTri.md
