@@ -89,7 +89,14 @@ class TestMoECommMethod(TestBase):
         padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
 
         # Verify prepare was called with correct arguments
-        mock_pf_instance.prepare.assert_called_once_with(hidden_states, router_logits, False, False, QuantType.NONE)
+        mock_pf_instance.prepare.assert_called_once_with(
+            hidden_states,
+            router_logits,
+            False,
+            False,
+            QuantType.NONE,
+            None,
+        )
 
         # Test finalize method
         comm_impl.finalize(h_out, reduce_results=True, padded_hidden_states_shape=padded_hidden_states_shape)
@@ -130,7 +137,14 @@ class TestMoECommMethod(TestBase):
         padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
 
         # Verify prepare was called with correct arguments
-        mock_pf_instance.prepare.assert_called_once_with(hidden_states, router_logits, False, False, QuantType.NONE)
+        mock_pf_instance.prepare.assert_called_once_with(
+            hidden_states,
+            router_logits,
+            False,
+            False,
+            QuantType.NONE,
+            None,
+        )
 
         # Test finalize method
         comm_impl.finalize(h_out, reduce_results=True, padded_hidden_states_shape=padded_hidden_states_shape)
@@ -169,7 +183,14 @@ class TestMoECommMethod(TestBase):
         _ = comm_impl.prepare(hidden_states, router_logits)
 
         # Verify prepare was called with correct arguments
-        mock_pf_instance.prepare.assert_called_once_with(hidden_states, router_logits, False, False, QuantType.NONE)
+        mock_pf_instance.prepare.assert_called_once_with(
+            hidden_states,
+            router_logits,
+            False,
+            False,
+            QuantType.NONE,
+            None,
+        )
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather")
