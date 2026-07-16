@@ -52,7 +52,7 @@ class FakeClock:
 def _fake_ascend_config(**overrides) -> SimpleNamespace:
     config = {"enabled": True, "threshold": THRESHOLD}
     config.update(overrides)
-    return SimpleNamespace(short_request_first_config=ShortRequestFirstConfig(config))
+    return SimpleNamespace(scheduler_config=SimpleNamespace(short_request_first_config=ShortRequestFirstConfig(config)))
 
 
 def create_requests(num_tokens_list, max_tokens: int = 16):
