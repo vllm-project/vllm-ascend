@@ -10,10 +10,10 @@ iterations later), ``synchronize()`` ensures its prior H2D completed.
 """
 
 import torch
-import torch_npu  # noqa: F401  -- required for NPU device and Event
+import torch_npu  # noqa: F401
+from vllm.v1.utils import CpuGpuBuffer
 
 import vllm_ascend.patch.worker  # noqa: F401  -- triggers patch registration
-from vllm.v1.utils import CpuGpuBuffer
 
 
 def _make_buffer(size, dtype, device):

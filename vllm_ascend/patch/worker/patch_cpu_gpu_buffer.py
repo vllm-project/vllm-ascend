@@ -41,9 +41,7 @@ _orig_copy_to_gpu = CpuGpuBuffer.copy_to_gpu
 def _patched_init(self, *args, **kwargs):
     _orig_init(self, *args, **kwargs)
     pin_memory = self.cpu.is_pinned()
-    self._shadow_buffers = [
-        torch.empty_like(self.cpu, pin_memory=pin_memory) for _ in range(2)
-    ]
+    self._shadow_buffers = [torch.empty_like(self.cpu, pin_memory=pin_memory) for _ in range(2)]
     self._shadow_events = [torch.npu.Event() for _ in range(2)]
     self._shadow_idx = 0
 
