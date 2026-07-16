@@ -2288,7 +2288,7 @@ class NPUModelRunner(GPUModelRunner):
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                     num_scheduled_tokens_compressed_list=num_scheduled_tokens_compressed_list,
                 )
-
+                logger.info("attn_metadata: %s", attn_metadata)
                 self._sanitize_placeholder_input_ids_for_forward(
                     scheduler_output,
                     num_tokens_padded
@@ -3318,14 +3318,14 @@ class NPUModelRunner(GPUModelRunner):
                 common_ratio_to_sas_metadata = builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
 
             if ubid is None:
-                # assert isinstance(attn_metadata, dict)
+                assert isinstance(attn_metadata, dict)
                 attn_metadata_dict = attn_metadata
             else:
                 assert isinstance(attn_metadata, list)
                 attn_metadata_dict = attn_metadata[ubid]
 
-            # for layer_name in attn_group.layer_names:
-            #     attn_metadata_dict[layer_name] = attn_metadata_i
+            for layer_name in attn_group.layer_names:
+                attn_metadata_dict[layer_name] = attn_metadata_i
 
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
