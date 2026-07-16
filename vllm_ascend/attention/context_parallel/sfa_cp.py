@@ -1163,7 +1163,7 @@ class AscendSFADCPImpl(AscendSFAImpl):
             topk_indices = self.dcp_group.all_gather(topk_indices.contiguous(), dim=0)
         topk_indices = self._remap_sparse_indices(topk_indices)
         ql_nope, q_pe = self._finish_all_gather_query_for_dcp(query_gather_context)
-        sfa_output, softmax_lse = DeviceOperator.execute_sparse_flash_attention_process(
+        sfa_output, softmax_max, softmax_sum = DeviceOperator.execute_sparse_flash_attention_process(
             self,
             ql_nope,
             q_pe,
@@ -1180,6 +1180,8 @@ class AscendSFADCPImpl(AscendSFAImpl):
             sparse_mode=0,
             return_lse=True,
         )
+        softmax_lse = softmax_max + torch.log(softmax_sum)
+        softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
         output_dtype = sfa_output.dtype
         if self.enable_dsa_cp:
             output = self._merge_dsa_cp_dcp_outputs(sfa_output, softmax_lse)

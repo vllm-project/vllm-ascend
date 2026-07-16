@@ -508,7 +508,7 @@ class BaseDeviceAdaptor:
         block_table: torch.Tensor | None = None,
         sparse_mode: int = 3,
         return_lse: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if block_table is None:
             block_table = attn_metadata.block_table
         kv = kv_cache[0]
@@ -555,17 +555,7 @@ class BaseDeviceAdaptor:
             attention_mode=2,
             return_softmax_lse=return_lse,
         )
-        if not isinstance(result, tuple):
-            if return_lse:
-                raise RuntimeError("Sparse flash attention did not return softmax max/sum for DCP LSE merge.")
-            return result
-        attn_output, softmax_max, softmax_sum = result
-        return BaseDeviceAdaptor._format_sparse_flash_attention_output(
-            attn_output,
-            softmax_max,
-            softmax_sum,
-            return_lse,
-        )
+        return BaseDeviceAdaptor._format_sparse_flash_attention_output(result, return_lse)
 
     @staticmethod
     def execute_kv_quant_sparse_flash_attention(
@@ -580,64 +570,44 @@ class BaseDeviceAdaptor:
         *,
         sparse_mode: int = 3,
         return_lse: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         query = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
-        common_kwargs = {
-            "query": query,
-            "key": kv,
-            "value": kv,
-            "sparse_indices": topk_indices,
-            "scale_value": sfa_impl.scale,
-            "sparse_block_size": 1,
-            "block_table": block_table,
-            "actual_seq_lengths_query": actual_seq_lengths_query,
-            "actual_seq_lengths_kv": actual_seq_lengths_key,
-            "layout_query": "TND",
-            "layout_kv": "PA_BSND",
-            "sparse_mode": sparse_mode,
-            "attention_mode": 2,
-            "quant_scale_repo_mode": 1,
-            "tile_size": getattr(sfa_impl, "sfa_qsfa_tile_size", 128),
-            "key_quant_mode": 2,
-            "value_quant_mode": 2,
-            "rope_head_dim": getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]),
-        }
-        if return_lse:
-            # The torch_npu C8 SFA binding used by current images only returns
-            # attention_out and rejects return_softmax_lse.  DCP needs the
-            # softmax max/sum tensors to build LSE, so use the vllm-ascend
-            # custom op added with LSE-capable C8 SFA only on that path.
-            result = torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention(
-                **common_kwargs,
-                return_softmax_lse=True,
-            )
-        else:
-            result = torch_npu.npu_kv_quant_sparse_flash_attention(**common_kwargs)
-        if not isinstance(result, tuple):
-            if return_lse:
-                raise RuntimeError("C8 sparse flash attention did not return softmax max/sum for DCP LSE merge.")
-            return result
-        attn_output, softmax_max, softmax_sum = result
-        return BaseDeviceAdaptor._format_sparse_flash_attention_output(
-            attn_output,
-            softmax_max,
-            softmax_sum,
-            return_lse,
+        result = torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention(
+            query=query,
+            key=kv,
+            value=kv,
+            sparse_indices=topk_indices,
+            scale_value=sfa_impl.scale,
+            sparse_block_size=1,
+            block_table=block_table,
+            actual_seq_lengths_query=actual_seq_lengths_query,
+            actual_seq_lengths_kv=actual_seq_lengths_key,
+            layout_query="TND",
+            layout_kv="PA_BSND",
+            sparse_mode=sparse_mode,
+            attention_mode=2,
+            quant_scale_repo_mode=1,
+            tile_size=getattr(sfa_impl, "sfa_qsfa_tile_size", 128),
+            key_quant_mode=2,
+            value_quant_mode=2,
+            rope_head_dim=getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]),
+            return_softmax_lse=True,
         )
+        return BaseDeviceAdaptor._format_sparse_flash_attention_output(result, return_lse)
 
     @staticmethod
     def _format_sparse_flash_attention_output(
-        attn_output: torch.Tensor,
-        softmax_max: torch.Tensor,
-        softmax_sum: torch.Tensor,
+        result: torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor],
         return_lse: bool,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if not return_lse:
-            return attn_output
-
-        softmax_lse = softmax_max.to(torch.float32) + torch.log(softmax_sum.to(torch.float32))
-        softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
-        return attn_output, softmax_lse
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if not isinstance(result, tuple):
+            if return_lse:
+                raise RuntimeError("Sparse flash attention did not return softmax max/sum for DCP LSE merge.")
+            return result
+        if return_lse:
+            return result
+        else:
+            return result[0]
 
     @staticmethod
     def npu_flash_attention(query, key, value, seq_lens_cpu, head_num, scale_value, num_kv_heads):
