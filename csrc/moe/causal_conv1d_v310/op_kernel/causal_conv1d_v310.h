@@ -29,8 +29,6 @@ namespace NsCausalConv1d {
 using namespace AscendC;
 using namespace NsCausalConv1dCommon;
 
-inline constexpr int64_t INT32_MAX_VALUE = 2147483647LL;
-
 template <typename T>
 class CausalConv1dV310 {
 public:
@@ -51,10 +49,6 @@ private:
                                               int32_t len, int32_t c0, int32_t dimTileSize, int32_t dim);
     __aicore__ inline void AllocEvents();
     __aicore__ inline void ReleaseEvents();
-    __aicore__ inline int32_t ReadQueryStartLocValue(int32_t index) const;
-    __aicore__ inline int64_t ReadCacheIndexValue(int32_t seq) const;
-    __aicore__ inline bool ReadInitialStateModeValue(int32_t seq) const;
-    __aicore__ inline int32_t ReadNumAcceptedTokensValue(int32_t seq) const;
 
 private:
     TPipe pipe;
@@ -80,15 +74,10 @@ private:
     GlobalTensor<T> weightGm;
     GlobalTensor<T> biasGm;
     GlobalTensor<T> convStatesGm;
-    GlobalTensor<int32_t> queryStartLocGmInt32;
-    GlobalTensor<int64_t> queryStartLocGmInt64;
-    GlobalTensor<int32_t> cacheIndicesGmInt32;
-    GlobalTensor<int64_t> cacheIndicesGmInt64;
-    GlobalTensor<bool> initialStateModeGmBool;
-    GlobalTensor<int32_t> initialStateModeGmInt32;
-    GlobalTensor<int64_t> initialStateModeGmInt64;
-    GlobalTensor<int32_t> numAcceptedTokensGmInt32;
-    GlobalTensor<int64_t> numAcceptedTokensGmInt64;
+    GlobalTensor<int64_t> queryStartLocGm;
+    GlobalTensor<int64_t> cacheIndicesGm;
+    GlobalTensor<int64_t> initialStateModeGm;
+    GlobalTensor<int64_t> numAcceptedTokensGm;
     GlobalTensor<T> yGm;
 
     const CausalConv1dTilingData *tilingData_{nullptr};
@@ -115,35 +104,17 @@ __aicore__ inline void CausalConv1dV310<T>::Init(GM_ADDR x, GM_ADDR weight, GM_A
         biasGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(bias));
     }
     convStatesGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(convStates));
-    if (tilingData_->hasQueryStartLoc != 0) {
-        if (tilingData_->queryStartLocUseInt64 != 0) {
-            queryStartLocGmInt64.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(queryStartLoc));
-        } else {
-            queryStartLocGmInt32.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(queryStartLoc));
-        }
+    if (tilingData_->inputMode == 0) {
+        queryStartLocGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(queryStartLoc));
     }
     if (tilingData_->hasCacheIndices != 0) {
-        if (tilingData_->cacheIndicesUseInt64 != 0) {
-            cacheIndicesGmInt64.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(cacheIndices));
-        } else {
-            cacheIndicesGmInt32.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(cacheIndices));
-        }
+        cacheIndicesGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(cacheIndices));
     }
     if (tilingData_->hasInitialStateMode != 0) {
-        if (tilingData_->initialStateModeDtype == 2) {
-            initialStateModeGmInt64.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(initialStateMode));
-        } else if (tilingData_->initialStateModeDtype == 1) {
-            initialStateModeGmInt32.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(initialStateMode));
-        } else {
-            initialStateModeGmBool.SetGlobalBuffer(reinterpret_cast<__gm__ bool *>(initialStateMode));
-        }
+        initialStateModeGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(initialStateMode));
     }
     if (tilingData_->hasNumAcceptedTokens != 0) {
-        if (tilingData_->numAcceptedTokensUseInt64 != 0) {
-            numAcceptedTokensGmInt64.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(numAcceptedTokens));
-        } else {
-            numAcceptedTokensGmInt32.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(numAcceptedTokens));
-        }
+        numAcceptedTokensGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(numAcceptedTokens));
     }
     yGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(y));
 
@@ -200,57 +171,6 @@ __aicore__ inline void CausalConv1dV310<T>::ReleaseEvents()
     GetTPipePtr()->ReleaseEventID<HardEvent::MTE2_MTE3>(specWritebackMte2ToMte3Event_[1]);
     GetTPipePtr()->ReleaseEventID<HardEvent::MTE3_MTE2>(specWritebackMte3ToMte2Event_[0]);
     GetTPipePtr()->ReleaseEventID<HardEvent::MTE3_MTE2>(specWritebackMte3ToMte2Event_[1]);
-}
-
-template <typename T>
-__aicore__ inline int32_t CausalConv1dV310<T>::ReadQueryStartLocValue(int32_t index) const
-{
-    if (tilingData_->queryStartLocUseInt64 != 0) {
-        const int64_t value = queryStartLocGmInt64.GetValue(index);
-        if (value < 0 || value > INT32_MAX_VALUE) {
-            return -1;
-        }
-        return static_cast<int32_t>(value);
-    }
-    return queryStartLocGmInt32.GetValue(index);
-}
-
-template <typename T>
-__aicore__ inline int64_t CausalConv1dV310<T>::ReadCacheIndexValue(int32_t seq) const
-{
-    const int32_t offset = seq * static_cast<int32_t>(tilingData_->cacheIndicesStride);
-    if (tilingData_->cacheIndicesUseInt64 != 0) {
-        return cacheIndicesGmInt64.GetValue(offset);
-    }
-    return static_cast<int64_t>(cacheIndicesGmInt32.GetValue(offset));
-}
-
-template <typename T>
-__aicore__ inline bool CausalConv1dV310<T>::ReadInitialStateModeValue(int32_t seq) const
-{
-    if (tilingData_->initialStateModeDtype == 2) {
-        return initialStateModeGmInt64.GetValue(seq) != 0;
-    }
-    if (tilingData_->initialStateModeDtype == 1) {
-        return initialStateModeGmInt32.GetValue(seq) != 0;
-    }
-    return initialStateModeGmBool.GetValue(seq);
-}
-
-template <typename T>
-__aicore__ inline int32_t CausalConv1dV310<T>::ReadNumAcceptedTokensValue(int32_t seq) const
-{
-    if (tilingData_->numAcceptedTokensUseInt64 != 0) {
-        const int64_t value = numAcceptedTokensGmInt64.GetValue(seq);
-        if (value <= 0) {
-            return 0;
-        }
-        if (value > INT32_MAX_VALUE) {
-            return static_cast<int32_t>(INT32_MAX_VALUE);
-        }
-        return static_cast<int32_t>(value);
-    }
-    return numAcceptedTokensGmInt32.GetValue(seq);
 }
 
 template <typename T>
@@ -576,11 +496,8 @@ __aicore__ inline void CausalConv1dV310<T>::Process()
         int32_t start = 0;
         int32_t len = 0;
         if (inputMode == 0) {
-            const int32_t startVal = ReadQueryStartLocValue(seq);
-            const int32_t endVal = ReadQueryStartLocValue(seq + 1);
-            if (startVal < 0 || endVal < startVal || endVal > tilingData_->cuSeqlen) {
-                continue;
-            }
+            const int32_t startVal = queryStartLocGm.GetValue(seq);
+            const int32_t endVal = queryStartLocGm.GetValue(seq + 1);
             start = startVal;
             len = endVal - startVal;
         } else if (inputMode == 2) {
@@ -597,22 +514,19 @@ __aicore__ inline void CausalConv1dV310<T>::Process()
 
         int32_t cacheIdx = seq;
         if (tilingData_->hasCacheIndices != 0) {
-            const int64_t cacheIdx64 = ReadCacheIndexValue(seq);
+            const int64_t cacheIdx64 = cacheIndicesGm.GetValue(seq);
             if (cacheIdx64 == tilingData_->padSlotId) {
-                continue;
-            }
-            if (cacheIdx64 < 0 || cacheIdx64 >= tilingData_->numCacheLines) {
                 continue;
             }
             cacheIdx = static_cast<int32_t>(cacheIdx64);
         }
 
         const bool hasInit = (tilingData_->hasInitialStateMode != 0)
-                                 ? ReadInitialStateModeValue(seq)
+                                 ? (initialStateModeGm.GetValue(seq) != 0)
                                  : (tilingData_->runMode == 1);
         int32_t stateTokenOffset = 0;
         if (isSpecDecodingGlobal) {
-            int32_t accepted = ReadNumAcceptedTokensValue(seq);
+            int32_t accepted = static_cast<int32_t>(numAcceptedTokensGm.GetValue(seq));
             stateTokenOffset = accepted - 1;
             const int32_t maxOffset = static_cast<int32_t>(tilingData_->stateLen - (width - 1));
             if (stateTokenOffset < 0) {

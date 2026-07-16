@@ -72,7 +72,7 @@
      int32_t right = static_cast<int32_t>(tilingData_->batch);
      while (left < right) {
          const int32_t mid = left + ((right - left) >> 1);
-         const int32_t endVal = ReadQueryStartLocValue(mid + 1);
+         const int32_t endVal = static_cast<int32_t>(queryStartLocGm.GetValue(mid + 1));
          if (tokenIdx < endVal) {
              right = mid;
          } else {
@@ -304,3 +304,4 @@
  }
  
  #endif
+ 

@@ -29,29 +29,9 @@
          this->weightGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(weight));
          this->biasGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(bias));
          this->convStatesGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(convStates));
-         if (tilingData->hasQueryStartLoc != 0) {
-             if (tilingData->queryStartLocUseInt64 != 0) {
-                 this->queryStartLocGmInt64.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(queryStartLoc));
-             } else {
-                 this->queryStartLocGmInt32.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(queryStartLoc));
-             }
-         }
-         if (tilingData->hasCacheIndices != 0) {
-             if (tilingData->cacheIndicesUseInt64 != 0) {
-                 this->cacheIndicesGmInt64.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(cacheIndices));
-             } else {
-                 this->cacheIndicesGmInt32.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(cacheIndices));
-             }
-         }
-         if (tilingData->hasInitialStateMode != 0) {
-             if (tilingData->initialStateModeDtype == 2) {
-                 this->initialStateModeGmInt64.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(initialStateMode));
-             } else if (tilingData->initialStateModeDtype == 1) {
-                 this->initialStateModeGmInt32.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(initialStateMode));
-             } else {
-                 this->initialStateModeGmBool.SetGlobalBuffer(reinterpret_cast<__gm__ bool *>(initialStateMode));
-             }
-         }
+         this->queryStartLocGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(queryStartLoc));
+         this->cacheIndicesGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(cacheIndices));
+         this->initialStateModeGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(initialStateMode));
          this->yGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(y));
          if (tilingData->hasInitStateWorkspace != 0) {
              const uint64_t syncElems =
@@ -91,3 +71,4 @@
  }
  
  #endif
+ 

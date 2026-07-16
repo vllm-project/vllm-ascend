@@ -772,6 +772,9 @@ class TestSleepGraphParams(TestBase):
             workspaces={4: torch.empty(1), 8: torch.empty(2)},
             handles={4: [], 8: []},
             attn_params={4: [], 8: []},
+            conv1d_params={4: [], 8: []},
+            conv1d_handles={4: [], 8: []},
+            conv1d_events={4: [], 8: []},
         )
 
         with (
@@ -794,6 +797,9 @@ class TestSleepGraphParams(TestBase):
             workspaces={},
             handles={},
             attn_params={},
+            conv1d_params={},
+            conv1d_handles={},
+            conv1d_events={},
         )
         with (
             patch("vllm_ascend.compilation.acl_graph._graph_params", empty_params),

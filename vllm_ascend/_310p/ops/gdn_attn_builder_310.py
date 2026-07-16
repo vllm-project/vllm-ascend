@@ -59,27 +59,39 @@ class GDNAttentionMetadataBuilder310(AscendGDNAttentionMetadataBuilder):
         torch.Tensor | None,
         torch.Tensor | None,
     ]:
-        del common_attn_metadata, num_prefills
+        del non_spec_sequence_indices, num_prefills
         assert non_spec_query_start_loc_cpu is not None
 
-        has_initial_state = context_lens_tensor > 0
+        m = common_attn_metadata
+        # 310P RC: compute has_initial_state on CPU, single H2D upload.
+        # NOTE: This must mirror the mainline device path
+        # ``has_initial_state = context_lens_tensor > 0`` where
+        # ``context_lens_tensor = m.compute_num_computed_tokens()`` is the
+        # number of *already computed* tokens (context length), NOT the total
+        # ``seq_lens``. Using ``seq_lens`` would flag fresh prefills (0
+        # computed tokens) as having an initial recurrent state and read
+        # uninitialized SSM state -> garbage output.
+        num_computed_tokens_cpu = getattr(m, "_num_computed_tokens_cpu", None)
+        if num_computed_tokens_cpu is None:
+            num_computed_tokens_cpu = getattr(m, "num_computed_tokens_cpu", None)
+        if num_computed_tokens_cpu is not None:
+            context_lens_cpu = num_computed_tokens_cpu
+        else:
+            context_lens_cpu = context_lens_tensor.detach().cpu()
+
+        has_initial_state_cpu = context_lens_cpu > 0
         if spec_sequence_masks_cpu is not None:
-            assert non_spec_sequence_indices is not None
-            has_initial_state = torch.index_select(
-                has_initial_state,
-                0,
-                non_spec_sequence_indices,
-            )
+            has_initial_state_cpu = has_initial_state_cpu[~spec_sequence_masks_cpu]
+
+        has_initial_state = has_initial_state_cpu.to(
+            query_start_loc.device,
+            non_blocking=True,
+        )
         nums_dict, batch_ptr, token_chunk_offset_ptr = compute_causal_conv1d_metadata(
             non_spec_query_start_loc_cpu,
             device=query_start_loc.device,
         )
-        return (
-            has_initial_state,
-            nums_dict,
-            batch_ptr,
-            token_chunk_offset_ptr,
-        )
+        return has_initial_state, nums_dict, batch_ptr, token_chunk_offset_ptr
 
     def _attach_non_spec_prefill_fallback_meta(
         self,
@@ -170,7 +182,6 @@ class GDNAttentionMetadataBuilder310(AscendGDNAttentionMetadataBuilder):
         )
         attn_metadata.num_accepted_tokens = self.num_accepted_tokens[:graph_batch_size]
         attn_metadata.num_accepted_tokens[num_spec_decodes:].fill_(0)
-        self._attach_spec_decode_metadata(attn_metadata)
 
     def _pad_decode_metadata(
         self,
@@ -201,10 +212,6 @@ class GDNAttentionMetadataBuilder310(AscendGDNAttentionMetadataBuilder):
                 query_start_loc[-1].expand_as(query_padding),
                 non_blocking=True,
             )
-        self._attach_non_spec_decode_metadata(
-            attn_metadata,
-            attn_metadata.non_spec_state_indices_tensor,
-        )
 
     def build(  # type: ignore[override]
         self,
