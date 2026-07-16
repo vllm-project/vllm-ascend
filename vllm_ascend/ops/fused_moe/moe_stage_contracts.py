@@ -37,6 +37,7 @@ class MoEPrepareOutput:
     mc2_mask: torch.Tensor | None
     padded_hidden_states_shape: torch.Size | None
     pertoken_scale: torch.Tensor | None = None
+    split_lora_indices: torch.Tensor | None = None
 
 
 @dataclass(frozen=True, slots=True)
