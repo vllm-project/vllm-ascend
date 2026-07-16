@@ -121,7 +121,7 @@ run_pytest_target() {
     setup_coverage "${target}"
     set +e
     # python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
-    pytest -sv --color=yes "${target}" --cov=calculator --cov-context=test --cov-report="term-missing:show_contexts" -v 2>&1 | tee "${log_file}"
+    pytest -sv --color=yes "${target}" --cov=calculator --cov-context=test 2>&1 | tee "${log_file}"
   else
     set +e
     pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
