@@ -880,13 +880,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     common_attn_metadata.num_computed_tokens_cpu, num_reqs_padded
                 )
 
-<<<<<<< HEAD
-            if pcp_manager is not None and self.pcp_size > 1:
+            if pcp_manager is not None and self.pcp_size > 1 and self.method != "dflash":
                 pcp_manager.mask_spec_decode_restore_idx_for_graph(
-=======
-            if self.pcp_size > 1 and self.method != "dflash":
-                pcp_allgather_restore_idx = (
->>>>>>> 099a9ef5 (Enabling DCP/PCP for DFlash)
                     common_attn_metadata.prefill_context_parallel_metadata.pcp_allgather_restore_idx
                 )
         else:
