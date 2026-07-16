@@ -246,6 +246,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
     group_len: torch.Tensor | None = None
     group_key_idx: torch.Tensor | None = None
     group_key_cache_idx: torch.Tensor | None = None
@@ -352,6 +353,10 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         num_input_tokens = common_attn_metadata.num_input_tokens
+
+        assert self.group_len is not None
+        assert self.group_key_idx is not None
+        assert self.group_key_cache_idx is not None
 
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
@@ -462,13 +467,20 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             )
 
         if get_ascend_config().c8_enable_reshape_optim:
+            actual_group_len = self.group_len[:num_input_tokens]
+            actual_group_key_idx = self.group_key_idx[:num_input_tokens]
+            actual_group_key_cache_idx = self.group_key_cache_idx[:num_input_tokens]
             torch.ops._C_ascend.store_kv_block_metadata(
                 slot_mapping,
-                self.group_len[:num_input_tokens],
-                self.group_key_idx[:num_input_tokens],
-                self.group_key_cache_idx[:num_input_tokens],
+                actual_group_len,
+                actual_group_key_idx,
+                actual_group_key_cache_idx,
                 block_size,
             )
+        else:
+            actual_group_len = None
+            actual_group_key_idx = None
+            actual_group_key_cache_idx = None
 
         return self.metadata_cls(  # type: ignore
             num_input_tokens=common_attn_metadata.num_input_tokens,
@@ -485,9 +497,9 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             cos=cos[:num_input_tokens],
             dsa_cp_context=dsa_cp_context,
             block_size=block_size,
-            group_len=self.group_len[:num_input_tokens],
-            group_key_idx=self.group_key_idx[:num_input_tokens],
-            group_key_cache_idx=self.group_key_cache_idx[:num_input_tokens],
+            group_len=actual_group_len,
+            group_key_idx=actual_group_key_idx,
+            group_key_cache_idx=actual_group_key_cache_idx,
         )
 
     def build_for_graph_capture(
