@@ -26,8 +26,8 @@ from .utils import prepare_chunk_indices, safe_exp
 @triton.jit(do_not_specialize=["T", "B", "bh_step", "task_num", "num_core"])
 def chunk_scaled_dot_kkt_fwd_kernel(
     k,
-    beta,  # [H, B, T]
-    g_cumsum,  # [H, B, T]
+    beta,  # [B, T, H]
+    g_cumsum,  # [B, T, H]
     A,
     cu_seqlens,
     chunk_indices,
@@ -44,7 +44,9 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
 ):
-    bt_stride = B * T
+    # Keep the original physical sequence stride for BHTD K addressing. In
+    # varlen mode T below becomes the current sequence length.
+    T_max = T
     core_id = tl.program_id(0)
 
     for task_id in tl.range(core_id, task_num, num_core):
@@ -58,26 +60,28 @@ def chunk_scaled_dot_kkt_fwd_kernel(
             )
             bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
             T = eos - bos
+            k_offset = (i_h // (H // Hg) * T_max + bos) * K
         else:
             bos, eos = i_b * T, i_b * T + T
             i_t = i_t_i
+            k_offset = (i_b * Hg + i_h // (H // Hg)) * T_max * K
         o_t = tl.arange(0, BT)
         o_t_fp32 = o_t.to(tl.float32)
+        token_offsets = i_t * BT + o_t
+        token_mask = token_offsets < T
 
-        p_beta = tl.make_block_ptr(beta + i_h * bt_stride + bos, (T,), (1,), (i_t * BT,), (BT,), (0,))
-        b_beta = tl.load(p_beta, boundary_check=(0,))
+        # A3's block-pointer lowering does not support this strided 1D BTH
+        # access. Use explicit loads to avoid materializing an HBT copy.
+        b_beta = tl.load(beta + (bos + token_offsets) * H + i_h, mask=token_mask, other=0.0)
 
         b_A = tl.zeros([BT, BT], dtype=tl.float32)
         for i_k in range(tl.cdiv(K, BK)):
-            p_k = tl.make_block_ptr(
-                k + (bos * Hg + i_h // (H // Hg)) * K, (T, K), (Hg * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0)
-            )
+            p_k = tl.make_block_ptr(k + k_offset, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
             b_k = tl.load(p_k, boundary_check=(0, 1))
             b_A += tl.dot(b_k, tl.trans(b_k))
 
         if USE_G:
-            p_g = tl.make_block_ptr(g_cumsum + i_h * bt_stride + bos, (T,), (1,), (i_t * BT,), (BT,), (0,))
-            b_g = tl.load(p_g, boundary_check=(0,))
+            b_g = tl.load(g_cumsum + (bos + token_offsets) * H + i_h, mask=token_mask, other=0.0)
             b_g_diff = b_g[:, None] - b_g[None, :]
             b_A *= safe_exp(b_g_diff)
 
@@ -101,7 +105,7 @@ def chunk_scaled_dot_kkt_fwd(
 
     Args:
         k (torch.Tensor):
-            The key tensor of shape `[B, T, H, K]`.
+            The key tensor of shape `[B, H, T, K]`.
         beta (torch.Tensor):
             The beta tensor of shape `[B, T, H]`.
         g (torch.Tensor):
@@ -119,7 +123,7 @@ def chunk_scaled_dot_kkt_fwd(
     Returns:
         beta * K * K^T of shape `[B, T, H, BT]` where `BT` is the chunk size.
     """
-    B, T, Hg, K = k.shape
+    B, Hg, T, K = k.shape
 
     H = beta.shape[-1]
     BT = chunk_size
@@ -139,8 +143,8 @@ def chunk_scaled_dot_kkt_fwd(
         bh_step=bh_step,
         task_num=task_num,
         k=k,
-        beta=torch.permute(beta, (2, 0, 1)).contiguous(),
-        g_cumsum=torch.permute(g_cumsum, (2, 0, 1)).contiguous(),
+        beta=beta,
+        g_cumsum=g_cumsum,
         A=A,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,

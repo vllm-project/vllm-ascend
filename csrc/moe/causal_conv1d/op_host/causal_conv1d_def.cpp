@@ -71,6 +71,7 @@ public:
         this->Attr("activationMode").AttrType(OPTIONAL).Int(0);
         this->Attr("padSlotId").AttrType(OPTIONAL).Int(-1);
         this->Attr("runMode").AttrType(OPTIONAL).Int(0);
+        this->Attr("headNum").AttrType(OPTIONAL).Int(0);
 
         OpAICoreConfig aicoreConfig;
         aicoreConfig.DynamicCompileStaticFlag(true)

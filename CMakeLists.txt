@@ -71,7 +71,7 @@ if(SOC_VERSION MATCHES "ascend950")
     list(REMOVE_ITEM VLLM_ASCEND_CUSTOM_OP ${VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950})
 endif()
 
-if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
+if(SOC_VERSION MATCHES "ascend310p.*|ascend950|ascend910_9391")
     message(STATUS "Hardware ${SOC_VERSION} detected: skip vllm_ascend_kernels compile")
 else()
     ascendc_library(vllm_ascend_kernels SHARED
@@ -156,7 +156,7 @@ if(SOC_VERSION MATCHES "ascend310p.*")
     target_compile_definitions(vllm_ascend_C PRIVATE -DASCEND_PLATFORM_310P)
 endif()
 
-if(NOT (SOC_VERSION MATCHES "ascend310p.*|ascend950"))
+if(NOT (SOC_VERSION MATCHES "ascend310p.*|ascend950|ascend910_9391"))
     target_compile_definitions(vllm_ascend_C PRIVATE -DVLLM_ENABLE_ATB_AND_DIRECT_KERNELS)
 endif()
 
@@ -180,7 +180,7 @@ set(VLLM_ASCEND_C_COMMON_LIBS
   opapi
 )
 
-if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
+if(SOC_VERSION MATCHES "ascend310p.*|ascend950|ascend910_9391")
   target_link_libraries(
     vllm_ascend_C
     PUBLIC
@@ -197,7 +197,7 @@ endif()
 
 target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGIN/_cann_ops_custom/vendors/custom_transformer/op_api/lib")
 
-if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
+if(SOC_VERSION MATCHES "ascend310p.*|ascend950|ascend910_9391")
   install(TARGETS vllm_ascend_C DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
 else()
   install(TARGETS vllm_ascend_C vllm_ascend_kernels DESTINATION ${VLLM_ASCEND_INSTALL_PATH})

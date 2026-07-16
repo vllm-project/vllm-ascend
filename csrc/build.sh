@@ -43,7 +43,7 @@ ENABLE_BUILT_JIT=FALSE
 ENABLE_BUILT_CUSTOM=FALSE
 ENABLE_STATIC=FALSE
 ENABLE_EXPERIMENTAL=FALSE
-ASCEND_SOC_UNITS="ascend910b"
+ASCEND_SOC_UNITS="${SOC_VERSION:-ascend910b}"
 SUPPORT_COMPUTE_UNIT_SHORT=("ascend310p" "ascend910b" "ascend910_93" "ascend950" "kirinx90")
 CMAKE_BUILD_MODE=""
 BUILD_TYPE=""
@@ -400,7 +400,7 @@ function build()
         local option="--verbose"
     fi
     export LD_LIBRARY_PATH=${BUILD_DIR}:$LD_LIBRARY_PATH
-    
+
     cmake --build . --target ${target} ${JOB_NUM} ${option}
     if [ $? -ne 0 ]; then echo "[ERROR] build failed!" && exit 1; fi
 }
@@ -590,7 +590,7 @@ build_static_lib() {
     fi
 
     rm -fr ${BUILD_PATH}/autogen/${unit}
-    python3 "${BASE_PATH}/scripts/util/build_opp_kernel_static.py" GenStaticOpResourceIni -s ${unit} -b ${BUILD_PATH} ${jit_command}   
+    python3 "${BASE_PATH}/scripts/util/build_opp_kernel_static.py" GenStaticOpResourceIni -s ${unit} -b ${BUILD_PATH} ${jit_command}
     python3 "${BASE_PATH}/scripts/util/build_opp_kernel_static.py" StaticCompile -s ${unit} -b ${BUILD_PATH} -n=0 -a=${ARCH_INFO} ${jit_command}
 
     cd "${BUILD_PATH}" && cmake ${CUSTOM_OPTION} .. -DENABLE_STATIC=ON -DASCEND_COMPUTE_UNIT=${unit}
@@ -682,6 +682,35 @@ function process_soc_input(){
     ASCEND_SOC_UNITS="${value_part//,/;}"
 }
 
+function resolve_compute_unit(){
+    local soc
+    soc=$(echo "${1:-}" | tr '[:upper:]' '[:lower:]' | xargs)
+
+    case "${soc}" in
+        310p|ascend310*)
+            echo "ascend310p"
+            ;;
+        910b|ascend910b*)
+            echo "ascend910b"
+            ;;
+        910c|ascend910_93*)
+            echo "ascend910_93"
+            ;;
+        ascend950*)
+            echo "ascend950"
+            ;;
+        kirinx90*)
+            echo "kirinx90"
+            ;;
+        "")
+            return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
   process_genop() {
     local opt_name=$1
     local genop_value=$2
@@ -731,7 +760,7 @@ gen_op() {
   elif command -v python &> /dev/null; then
       python_cmd="python"
   fi
-  
+
   if [ -n "${python_cmd}" ]; then
     ${python_cmd} "${BASE_PATH}/scripts/opgen/opgen_standalone.py" -t ${GENOP_TYPE} -n ${GENOP_NAME} -p ${GENOP_BASE}
     return $?
@@ -793,7 +822,7 @@ set_ut_mode() {
     UT_TARGETS+=("${REPOSITORY_NAME}_op_host_ut")
     UT_TARGETS+=("${REPOSITORY_NAME}_op_api_ut")
     return
-  fi 
+  fi
   UT_TEST_ALL=TRUE
   if [[ "$OP_HOST" == "TRUE" ]]; then
     OP_HOST_UT=TRUE
@@ -945,7 +974,7 @@ while [[ $# -gt 0 ]]; do
         set_example_opt $2 $3 $4
         shift $step
         ;;
-    --experimental) 
+    --experimental)
         ENABLE_EXPERIMENTAL=TRUE
         shift
         ;;
@@ -973,7 +1002,7 @@ while [[ $# -gt 0 ]]; do
         ;;
     --PR_UT)
         PR_CHANGED_FILES="$2"
-        ENABLE_TEST=TRUE 
+        ENABLE_TEST=TRUE
         shift 2
         ;;
     --PR_PKG)
@@ -984,7 +1013,7 @@ while [[ $# -gt 0 ]]; do
             log "Info: No custom packages to build for this PR."
             # ops_names="incre_flash_attention"
             exit 200
-        fi 
+        fi
         ops_names="${ops_names%;}"
         ops_names="${ops_names//;/,}"
         ascend_op_name="$ops_names"
@@ -1382,17 +1411,16 @@ fi
 # 非打包命令调用，打包模式会打进同一个包里
 function set_compute_unit_option() {
     IFS=';' read -ra SOC_ARRAY <<< "$ASCEND_SOC_UNITS"  # 分割字符串为数组
-    local COMPUTE_UNIT_SHORT=""
+    local COMPUTE_UNIT=""
+    local resolved_soc=""
     for soc in "${SOC_ARRAY[@]}"; do
-      for support_unit in "${SUPPORT_COMPUTE_UNIT_SHORT[@]}"; do
-        lowercase_word=$(echo "$soc" | tr '[:upper:]' '[:lower:]')
-        if [[ "$lowercase_word" == *"$support_unit"* ]]; then
-          COMPUTE_UNIT_SHORT="$COMPUTE_UNIT_SHORT$support_unit;"
-          break
-        fi
-      done
+      resolved_soc=$(resolve_compute_unit "$soc") || {
+        log "Error: unsupported SoC '${soc}'. Please set --soc or SOC_VERSION to a supported Ascend SoC."
+        exit 1
+      }
+      COMPUTE_UNIT="$COMPUTE_UNIT$resolved_soc;"
     done
-    CUSTOM_OPTION="$CUSTOM_OPTION -DASCEND_COMPUTE_UNIT=$COMPUTE_UNIT_SHORT"
+    CUSTOM_OPTION="$CUSTOM_OPTION -DASCEND_COMPUTE_UNIT=$COMPUTE_UNIT"
 }
 
 CUSTOM_OPTION="${CUSTOM_OPTION} -DCUSTOM_ASCEND_CANN_PACKAGE_PATH=${ASCEND_CANN_PACKAGE_PATH} -DCHECK_COMPATIBLE=${CHECK_COMPATIBLE}"
@@ -1464,7 +1492,7 @@ build_ut() {
             fi
             has_valid_target="TRUE"
         else
-            echo "Target $UT_TARGET not found, skipping build." 
+            echo "Target $UT_TARGET not found, skipping build."
         fi
     done
     if [[ "$COV" == "true" && "$ENABLE_UT_EXEC" == "TRUE" && "$has_valid_target" == "TRUE" ]]; then
@@ -1627,7 +1655,7 @@ else
         cp ${BUILD_DIR}/*.run ${CURRENT_DIR}/output
     elif [ "${BUILD}" == "kernel" ];then
         CUSTOM_OPTION="${CUSTOM_OPTION} -DENABLE_OPS_HOST=OFF -DENABLE_OPS_KERNEL=ON -DBUILD_OPS_RTY_KERNEL=ON"
-        cmake_config 
+        cmake_config
         build_kernel
     elif [ "${BUILD}" == "package" ];then
         CUSTOM_OPTION="${CUSTOM_OPTION}  -DENABLE_BUILT_IN=ON -DENABLE_OPS_HOST=ON -DENABLE_OPS_KERNEL=ON"
