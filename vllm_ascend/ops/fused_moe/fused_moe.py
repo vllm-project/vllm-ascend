@@ -289,14 +289,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 # Per-layer MoE LoRA state, set once by AscendFusedMoEWithLoRA
                 # when an adapter wraps this layer; None for non-LoRA layers.
                 lora_context=getattr(layer, "_ascend_moe_lora_context", None),
-<<<<<<< HEAD
-<<<<<<< HEAD
                 split_lora_indices=split_lora_indices,
-=======
->>>>>>> dbcdd0b8 (adapter main)
-=======
-                split_lora_indices=split_lora_indices,
->>>>>>> edeaa764 (adapter main)
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
@@ -572,10 +565,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # This approach may overlook some extreme scenarios.
         enable_force_load_balance = _EXTRA_CTX.in_profile_run
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> dbcdd0b8 (adapter main)
         # This is only needed in the EP + TP path where tokens are
         # TP-split along the token dimension.  In pure TP (AllGather
         # path) the recovery function reads token_lora_indices directly
@@ -594,29 +583,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 if tp_size > 1:
                     split_lora = torch.tensor_split(token_lora_indices, tp_size, dim=0)
                     split_lora_indices = split_lora[tp_rank]
-<<<<<<< HEAD
-=======
-            # This is only needed in the EP + TP path where tokens are
-            # TP-split along the token dimension.  In pure TP (AllGather
-            # path) the recovery function reads token_lora_indices directly
-            # from lora_context, so skip the split there.
-            split_lora_indices = None
-            if self.moe_config.ep_size > 1:
-                lora_context = getattr(self.routed_experts, "_ascend_moe_lora_context", None)
-                if lora_context is not None:
-                    token_lora_indices = lora_context.punica_wrapper.token_lora_indices
-                    tp_size = get_tensor_model_parallel_world_size()
-                    tp_rank = get_tensor_model_parallel_rank()
-                    num_tokens = hidden_states.shape[0]
-                    pad_size = tp_size - num_tokens
-                    if pad_size > 0:
-                        token_lora_indices = F.pad(token_lora_indices, (0, pad_size), value=-1)
-                    if tp_size > 1:
-                        split_lora = torch.tensor_split(token_lora_indices, tp_size, dim=0)
-                        split_lora_indices = split_lora[tp_rank]
->>>>>>> bcccc20e (fix ep tp)
-=======
->>>>>>> dbcdd0b8 (adapter main)
 
         prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
             hidden_states=hidden_states,
