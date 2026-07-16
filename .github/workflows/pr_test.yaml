@@ -261,14 +261,3 @@ jobs:
           fi
 
           echo "=== CI Gate: PASSED ==="
-
-#this job collects failure from uploaded logs
-  analyze-failure-report:
-    name: Analyze failure report
-    needs: [run-selected-tests, generate-hitest]
-    if: always()
-    uses: ./.github/workflows/_analyze_failure.yaml
-    with:
-      log_artifact_pattern: selected-test-logs-*
-      hitest_file: .github/workflows/scripts/recommended_pytest_paths.txt
-      hitest_content: ${{ needs.generate-hitest.outputs.hitest_paths || '' }}
