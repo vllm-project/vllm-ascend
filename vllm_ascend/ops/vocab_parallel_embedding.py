@@ -167,6 +167,14 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             return self._forward_origin(input_)
 
     def _forward_embed_tp(self, input_):
+        # Ensure indices sit on the weight device: the EVS video path builds
+        # repl_token_ids on CPU (from a plain Python list) before calling the
+        # language model's embedding lookup; without this the NPU embedding
+        # op receives CPU indices + NPU weight -> cross-device error. No-op
+        # for the normal path where input_ is already on the accelerator.
+        weight = getattr(self, "weight", None)
+        if weight is not None and input_.device != weight.device:
+            input_ = input_.to(weight.device)
         complete_input = self.comm_group.all_gather(input_, dim=0)
         masked_input, input_mask = self._get_masked_input_and_mask(
             complete_input,
@@ -184,6 +192,11 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         return output
 
     def _forward_origin(self, input_):
+        # See _forward_embed_tp: move CPU indices to the weight device (EVS
+        # repl_token_ids path); no-op when already on the accelerator.
+        weight = getattr(self, "weight", None)
+        if weight is not None and input_.device != weight.device:
+            input_ = input_.to(weight.device)
         if self.tp_size > 1:
             # Build the mask.
             masked_input, input_mask = self._get_masked_input_and_mask(
