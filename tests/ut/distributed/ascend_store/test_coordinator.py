@@ -165,8 +165,9 @@ class TestAscendStoreCoordinator(unittest.TestCase):
             group_cache_families=["c1"],
         )
 
-        with patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._reachable_block_mask",
+        with patch.object(
+            coord.attention_groups[0][2],
+            "reachable_block_mask",
             return_value=[False, False, False, True],
         ):
             masks = coord.store_mask(512)
@@ -192,8 +193,9 @@ class TestAscendStoreCoordinator(unittest.TestCase):
             group_cache_families=["c1", "c1"],
         )
 
-        with patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._reachable_block_mask",
+        with patch.object(
+            coord.attention_groups[0][2],
+            "reachable_block_mask",
             side_effect=fake_reachable_block_mask,
         ):
             masks = coord.store_mask(512)

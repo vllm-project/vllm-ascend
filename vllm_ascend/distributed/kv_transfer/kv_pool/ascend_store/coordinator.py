@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from importlib import import_module
-from typing import Any, cast
+from typing import cast
 
-from vllm.logger import logger
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
@@ -14,14 +12,13 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     _block_hash_to_bytes,
     get_block_hashes,
+    get_cache_family_granularity,
 )
-
-_CACHE_MISSING = object()
-_MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
 
 
 class ExternalCachedBlockPool:
@@ -80,7 +77,7 @@ class AscendStoreCoordinator:
         self.group_block_sizes = group_block_sizes
         self.group_cache_families = group_cache_families
         self.group_effective_block_sizes = [
-            _cache_family_granularity(block_size, family)
+            get_cache_family_granularity(block_size, family)
             for block_size, family in zip(group_block_sizes, group_cache_families, strict=True)
         ]
         for effective_block_size in self.group_effective_block_sizes:
@@ -186,8 +183,7 @@ class AscendStoreCoordinator:
                 masks.append([True] * num_chunks)
                 continue
             manager_cls = _get_manager_class(_unwrap_spec(self.kv_cache_groups[group_id].kv_cache_spec))
-            mask = _reachable_block_mask(
-                manager_cls,
+            mask = manager_cls.reachable_block_mask(
                 start_block=0,
                 end_block=num_chunks,
                 alignment_tokens=self.lcm_block_size,
@@ -216,8 +212,7 @@ class AscendStoreCoordinator:
         if len(self.attention_groups) == 1:
             spec, group_ids, manager_cls = self.attention_groups[0]
             hashes = self.block_hashes_for_spec(block_hashes, spec)
-            hit_blocks = _find_longest_cache_hit(
-                manager_cls,
+            hit_blocks = manager_cls.find_longest_cache_hit(
                 block_hashes=hashes,
                 max_length=max_length,
                 kv_cache_group_ids=group_ids,
@@ -252,8 +247,7 @@ class AscendStoreCoordinator:
                 if drop_eagle_block:
                     max_group_length = min(curr_hit_length + spec.block_size, max_length)
                 hashes = self.block_hashes_for_spec(block_hashes, spec)
-                hit_blocks = _find_longest_cache_hit(
-                    manager_cls,
+                hit_blocks = manager_cls.find_longest_cache_hit(
                     block_hashes=hashes,
                     max_length=max_group_length,
                     kv_cache_group_ids=group_ids,
@@ -306,102 +300,10 @@ def _copy_spec_with_block_size(spec: KVCacheSpec, block_size: int) -> KVCacheSpe
     return replace(spec, block_size=block_size)
 
 
-def _get_manager_class_cache() -> dict[str, Any]:
-    cache = getattr(_get_manager_class, _MANAGER_CLASS_CACHE_ATTR, None)
-    if not isinstance(cache, dict):
-        cache = {}
-        setattr(_get_manager_class, _MANAGER_CLASS_CACHE_ATTR, cache)
-    return cast(dict[str, Any], cache)
-
-
 def _get_manager_class(spec: KVCacheSpec) -> type[SingleTypeKVCacheManager]:
-    cache = _get_manager_class_cache()
-    compress_ratio = getattr(spec, "compress_ratio", None)
-    if compress_ratio is not None and compress_ratio > 1:
-        compress_manager = cache.get("compress_manager", _CACHE_MISSING)
-        if compress_manager is _CACHE_MISSING:
-            try:
-                from vllm_ascend.core.single_type_kv_cache_manager import CompressAttentionManager
-            except ImportError:
-                compress_manager = None
-            else:
-                compress_manager = CompressAttentionManager
-            cache["compress_manager"] = compress_manager
-        if compress_manager is not None:
-            return cast(type[SingleTypeKVCacheManager], compress_manager)
-
-    registry = cache.get("registry", _CACHE_MISSING)
-    if registry is _CACHE_MISSING:
-        try:
-            registry_module = import_module("vllm.v1.kv_cache_spec_registry")
-            registry = getattr(registry_module, "KVCacheSpecRegistry", None)
-        except ImportError:
-            registry = None
-        cache["registry"] = registry
-
-    if registry is not None:
-        manager_cls = registry.get_manager_class(spec)
-        if manager_cls is not None:
-            return manager_cls
-
-    spec_manager_map = cache.get("spec_manager_map", _CACHE_MISSING)
-    if spec_manager_map is _CACHE_MISSING:
-        try:
-            manager_module = import_module("vllm.v1.core.single_type_kv_cache_manager")
-            spec_manager_map = vars(manager_module)["spec_manager_map"]
-        except Exception as exc:
-            raise AssertionError(f"No manager registered for KVCacheSpec {type(spec)}") from exc
-        cache["spec_manager_map"] = spec_manager_map
-
-    try:
-        manager_cls = spec_manager_map[type(spec)]
-    except Exception as exc:
-        raise AssertionError(f"No manager registered for KVCacheSpec {type(spec)}") from exc
+    manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
+    assert manager_cls is not None, f"No manager registered for KVCacheSpec {type(spec)}"
     return manager_cls
-
-
-def _find_longest_cache_hit(
-    manager_cls: type[SingleTypeKVCacheManager],
-    **kwargs: Any,
-) -> tuple[list[KVCacheBlock], ...]:
-    try:
-        return manager_cls.find_longest_cache_hit(**kwargs)
-    except TypeError as exc:
-        if "drop_eagle_block" not in str(exc):
-            raise
-        kwargs["use_eagle"] = kwargs.pop("drop_eagle_block")
-        return manager_cls.find_longest_cache_hit(**kwargs)
-
-
-def _reachable_block_mask(
-    manager_cls: type[SingleTypeKVCacheManager],
-    **kwargs: Any,
-) -> list[bool] | None:
-    reachable_block_mask = getattr(manager_cls, "reachable_block_mask", None)
-    if reachable_block_mask is None:
-        return None
-    try:
-        return reachable_block_mask(**kwargs)
-    except TypeError as exc:
-        if "retention_interval" not in str(exc) and "num_prompt_tokens" not in str(exc):
-            logger.debug("KV cache manager does not support reachable_block_mask kwargs: %s", exc)
-            return reachable_block_mask(
-                start_block=kwargs["start_block"],
-                end_block=kwargs["end_block"],
-                alignment_tokens=kwargs["alignment_tokens"],
-                kv_cache_spec=kwargs["kv_cache_spec"],
-                use_eagle=kwargs["use_eagle"],
-            )
-        kwargs.pop("retention_interval", None)
-        kwargs.pop("num_prompt_tokens", None)
-        return reachable_block_mask(**kwargs)
-
-
-def _cache_family_granularity(block_size: int, cache_family: str | None) -> int:
-    if not cache_family or not cache_family.startswith("c"):
-        return block_size
-    ratio = cache_family[1:]
-    return block_size * int(ratio) if ratio.isdigit() else block_size
 
 
 def _uses_reachable_mask(cache_family: str | None) -> bool:

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib
-import math
 import threading
 from collections.abc import Generator
 from typing import Any
@@ -19,7 +18,6 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
     UniformTypeKVCacheSpecs,
@@ -39,9 +37,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     LayerTransferTask,
     ReqMeta,
     get_block_hashes,
-    get_cache_family_granularity,
     infer_group_cache_families,
     infer_tp_mismatch_info,
+    resolve_ascend_store_cache_layout,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     AscendStoreCoordinator,
@@ -135,25 +133,22 @@ class KVPoolWorker:
         self.backend = extra_config.get("backend", "mooncake")
         self.backend_name = self.backend.lower()
         self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
-        self.use_hybrid = self._uses_hybrid_kv_cache(vllm_config, kv_cache_config)
-        self.use_mamba = self._uses_mamba_kv_cache(self.use_hybrid, kv_cache_config)
-        self.original_block_size = self._infer_group_block_sizes(vllm_config, kv_cache_config)
-        cp_scale = self.pcp_size * self.dcp_size
-        self.grouped_block_size = [block_size * cp_scale for block_size in self.original_block_size]
-        requested_hash_block_size = vllm_config.cache_config.hash_block_size
-        if not isinstance(requested_hash_block_size, int):
-            requested_hash_block_size = None
-        self.hash_block_size = (
-            requested_hash_block_size if requested_hash_block_size is not None else min(self.original_block_size)
-        ) * cp_scale
-        for group_block_size in self.grouped_block_size:
-            assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
-        self.block_size = self.grouped_block_size[0]
-        self.lcm_block_size = math.lcm(*self.grouped_block_size)
-        self.num_kv_cache_groups = len(self.grouped_block_size)
         self.kv_cache_group_families = self._infer_group_families()
+        layout = resolve_ascend_store_cache_layout(
+            vllm_config,
+            kv_cache_config,
+            self.kv_cache_group_families,
+        )
+        self.use_hybrid = layout.use_hybrid
+        self.use_mamba = self._uses_mamba_kv_cache(self.use_hybrid, kv_cache_config)
+        self.original_block_size = list(layout.original_block_sizes)
+        self.grouped_block_size = list(layout.grouped_block_sizes)
+        self.hash_block_size = layout.hash_block_size
+        self.block_size = self.grouped_block_size[0]
+        self.lcm_block_size = layout.scheduler_block_size
+        self.num_kv_cache_groups = len(self.grouped_block_size)
         self.group_uses_align_state = self._infer_group_uses_align_state()
-        self.cache_transfer_granularity = self._infer_cache_transfer_granularity()
+        self.cache_transfer_granularity = layout.transfer_granularity
         if self.use_layerwise and self.num_kv_cache_groups > 1:
             raise NotImplementedError("AscendStore layerwise mode does not yet support hybrid KV cache groups.")
         self.h2d_stagger_us = int(extra_config.get("h2d_stagger_us", 0))
@@ -475,22 +470,6 @@ class KVPoolWorker:
         kv_cache_groups = self.kv_cache_config.kv_cache_groups if self.kv_cache_config is not None else None
         return infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
 
-    def _infer_group_block_sizes(
-        self,
-        vllm_config: VllmConfig,
-        kv_cache_config: KVCacheConfig | None,
-    ) -> list[int]:
-        if kv_cache_config is None or not self.use_hybrid:
-            return [vllm_config.cache_config.block_size]
-
-        block_sizes: list[int] = []
-        for kv_cache_group in kv_cache_config.kv_cache_groups:
-            kv_cache_spec = kv_cache_group.kv_cache_spec
-            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-                kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
-            block_sizes.append(kv_cache_spec.block_size)
-        return block_sizes
-
     def _infer_group_uses_align_state(self) -> list[bool]:
         if self.kv_cache_config is None:
             return [False]
@@ -508,38 +487,6 @@ class KVPoolWorker:
                 )
             )
         return group_uses_align_state
-
-    def _get_group_block_size(self, group_id: int) -> int:
-        if group_id >= len(self.grouped_block_size):
-            return self.grouped_block_size[0]
-        return self.grouped_block_size[group_id]
-
-    @staticmethod
-    def _get_group_family(families: list[str], group_id: int) -> str:
-        if group_id >= len(families):
-            return "default"
-        return families[group_id]
-
-    def _infer_cache_transfer_granularity(self) -> int:
-        granularities = [self.lcm_block_size]
-        for group_id in range(self.num_kv_cache_groups):
-            granularities.append(
-                get_cache_family_granularity(
-                    self._get_group_block_size(group_id),
-                    self._get_group_family(self.kv_cache_group_families, group_id),
-                )
-            )
-        return math.lcm(*granularities)
-
-    @staticmethod
-    def _uses_hybrid_kv_cache(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig | None) -> bool:
-        if kv_cache_config is None:
-            return False
-        if getattr(vllm_config.scheduler_config, "disable_hybrid_kv_cache_manager", False):
-            return False
-        return len(kv_cache_config.kv_cache_groups) > 1 and any(
-            not isinstance(group.kv_cache_spec, FullAttentionSpec) for group in kv_cache_config.kv_cache_groups
-        )
 
     @staticmethod
     def _uses_mamba_kv_cache(use_hybrid: bool, kv_cache_config: KVCacheConfig | None):
@@ -650,7 +597,9 @@ class KVPoolWorker:
         self.group_block_stride: dict[int, list[int]] = {}
         self.kv_caches = kv_caches
         self.group_kv_cache_families: dict[int, str] = {
-            group_id: self._get_group_family(self.kv_cache_group_families, group_id)
+            group_id: (
+                self.kv_cache_group_families[group_id] if group_id < len(self.kv_cache_group_families) else "default"
+            )
             for group_id in range(self.num_kv_cache_groups)
         }
         self.group_num_layers: dict[int, int] = {}

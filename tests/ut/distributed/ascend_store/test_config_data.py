@@ -17,11 +17,15 @@
 
 import hashlib
 import unittest
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import patch
 
+# isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
+    AscendStoreCacheLayout,
     ChunkedTokenDatabase,
     KeyMetadata,
     LayerMultiBlockReqMeta,
@@ -31,7 +35,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     ReqMeta,
     RequestTracker,
     get_block_hashes,
+    resolve_ascend_store_cache_layout,
 )
+# isort: on
 
 _GROUPED_BLOCK_HASH_DOMAIN = b"vllm-ascend-grouped-block-hash-v1\0"
 _GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
@@ -62,6 +68,38 @@ class TestKeyMetadata(unittest.TestCase):
         self.assertEqual(meta.pcp_rank, 0)
         self.assertEqual(meta.dcp_rank, 0)
         self.assertEqual(meta.pp_rank, 0)
+
+
+class TestAscendStoreCacheLayout(unittest.TestCase):
+    @staticmethod
+    def _config(block_size=16, hash_block_size=8):
+        return SimpleNamespace(
+            cache_config=SimpleNamespace(
+                block_size=block_size,
+                hash_block_size=hash_block_size,
+            ),
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=2,
+                decode_context_parallel_size=1,
+            ),
+        )
+
+    def test_layout_resolution(self):
+        kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(kv_cache_spec=FullAttentionSpec(block_size=16)),
+                SimpleNamespace(kv_cache_spec=MambaSpec(block_size=32)),
+            ]
+        )
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data.resolve_kv_cache_block_sizes",
+            return_value=(32, 8),
+        ):
+            layout = resolve_ascend_store_cache_layout(self._config(), kv_cache_config, ["default", "c4"])
+        self.assertEqual(
+            layout,
+            AscendStoreCacheLayout(True, (16, 32), (32, 32), 8, 32, 128),
+        )
 
 
 class TestPoolKey(unittest.TestCase):
@@ -270,28 +308,6 @@ class TestLoadSpec(unittest.TestCase):
 
 
 class TestRequestTracker(unittest.TestCase):
-    def test_from_new_request(self):
-        new_req = MagicMock()
-        new_req.req_id = "req-1"
-        new_req.block_ids = [10, 20, 30]
-        new_req.prompt_token_ids = list(range(100))
-
-        tracker = RequestTracker.from_new_request(new_req, num_tokens_to_compute=48)
-        self.assertEqual(tracker.req_id, "req-1")
-        self.assertEqual(tracker.token_len, 48)
-        self.assertEqual(tracker.allocated_block_ids, [10, 20, 30])
-        self.assertEqual(len(tracker.token_ids), 48)
-        self.assertEqual(tracker.num_saved_tokens, 0)
-
-    def test_from_new_request_nested_block_ids(self):
-        new_req = MagicMock()
-        new_req.req_id = "req-2"
-        new_req.block_ids = [[10, 20], [30, 40]]
-        new_req.prompt_token_ids = list(range(32))
-
-        tracker = RequestTracker.from_new_request(new_req, num_tokens_to_compute=32)
-        self.assertEqual(tracker.allocated_block_ids, [10, 20])
-
     def test_update_with_list(self):
         tracker = RequestTracker(req_id="r1", token_len=16, allocated_block_ids=[1, 2])
         tracker.update([3, 4])

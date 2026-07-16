@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -10,8 +11,8 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata, KVConnectorWorkerMetadata
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
-from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList, resolve_kv_cache_block_sizes
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.memcache_comm_fence import AttentionComputeStartGate
 
@@ -192,6 +193,57 @@ def infer_cache_family_ratio(cache_family: str | None) -> int:
 
 def get_cache_family_granularity(block_size: int, cache_family: str | None) -> int:
     return block_size * infer_cache_family_ratio(cache_family)
+
+
+@dataclass(frozen=True)
+class AscendStoreCacheLayout:
+    use_hybrid: bool
+    original_block_sizes: tuple[int, ...]
+    grouped_block_sizes: tuple[int, ...]
+    hash_block_size: int
+    scheduler_block_size: int
+    transfer_granularity: int
+
+
+def resolve_ascend_store_cache_layout(
+    vllm_config: Any,
+    kv_cache_config: Any | None,
+    cache_families: Sequence[str],
+) -> AscendStoreCacheLayout:
+    """Resolve vLLM block sizes and AscendStore transfer granularity."""
+    cache_config = vllm_config.cache_config
+    parallel_config = vllm_config.parallel_config
+    cp_scale = _as_positive_int(parallel_config.prefill_context_parallel_size, 1) * _as_positive_int(
+        parallel_config.decode_context_parallel_size, 1
+    )
+    groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else ()
+    use_hybrid = len(groups) > 1
+    if kv_cache_config is None:
+        scheduler_block_size = cache_config.block_size * cp_scale
+        hash_block_size = scheduler_block_size
+    else:
+        scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+
+    specs = [group.kv_cache_spec for group in groups]
+    original_block_sizes = [spec.block_size for spec in specs] if use_hybrid else [cache_config.block_size]
+    grouped_block_sizes = (
+        [spec.block_size * cp_scale if isinstance(spec, AttentionSpec) else spec.block_size for spec in specs]
+        if use_hybrid
+        else [scheduler_block_size]
+    )
+    granularities = [scheduler_block_size]
+    for group_id, group_block_size in enumerate(grouped_block_sizes):
+        cache_family = cache_families[group_id] if group_id < len(cache_families) else "default"
+        granularities.append(get_cache_family_granularity(group_block_size, cache_family))
+
+    return AscendStoreCacheLayout(
+        use_hybrid=use_hybrid,
+        original_block_sizes=tuple(original_block_sizes),
+        grouped_block_sizes=tuple(grouped_block_sizes),
+        hash_block_size=hash_block_size,
+        scheduler_block_size=scheduler_block_size,
+        transfer_granularity=math.lcm(*granularities),
+    )
 
 
 def _get_layer_compress_ratio(
@@ -725,21 +777,6 @@ class RequestTracker:
     @allocated_block_ids.setter
     def allocated_block_ids(self, block_ids: list[int] | list[list[int]]) -> None:
         self.allocated_block_ids_by_group = normalize_block_ids_by_group(block_ids)
-
-    @staticmethod
-    def from_new_request(
-        new_request: NewRequestData,
-        num_tokens_to_compute: int,
-    ) -> RequestTracker:
-        """Create the request tracker from a new request."""
-        return RequestTracker(
-            req_id=new_request.req_id,
-            token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].copy(),
-            token_len=num_tokens_to_compute,
-            allocated_block_ids_by_group=normalize_block_ids_by_group(new_request.block_ids),
-            num_saved_tokens=0,
-            num_prompt_tokens=len(new_request.prompt_token_ids),
-        )
 
     def update(
         self,
