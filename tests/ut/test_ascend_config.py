@@ -340,7 +340,6 @@ class TestAscendConfig(TestBase):
             (),
             {
                 "enable_flashcomm2_parallel_size": 2,
-                "layer_sharding": None,
                 "enable_flashcomm1": True,
                 "finegrained_tp_config": type("MockFinegrainedTPConfig", (), {"oproj_tensor_parallel_size": 0})(),
             },
