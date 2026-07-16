@@ -221,7 +221,7 @@ class TestAscendConfig(TestBase):
             os.environ,
             {
                 "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "1",
-                "VLLM_ASCEND_ENABLE_FUSED_MC2": "1",
+                "VLLM_ASCEND_ENABLE_FUSED_MC2": "2",
                 "VLLM_ASCEND_ENABLE_MLAPO": "0",
                 "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
                 "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": "2",
