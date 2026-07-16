@@ -3,6 +3,7 @@ from functools import lru_cache
 from typing import Any
 
 import torch
+import numpy as np
 import torch.nn.functional as F
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
