@@ -528,16 +528,14 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             dynamic_scale_final,
             reversed_global_input_permutation_mapping,
             exchanged_lora_indices,
-        ) = (
-            self._dispatch_postprocess(
-                global_input_tokens,
-                dynamic_scale_after_all2all,
-                global_input_tokens_local_experts_indices,
-                with_quant,
-                dst_type,
-                scale_type,
-                exchanged_lora_indices,
-            )
+        ) = self._dispatch_postprocess(
+            global_input_tokens,
+            dynamic_scale_after_all2all,
+            global_input_tokens_local_experts_indices,
+            with_quant,
+            dst_type,
+            scale_type,
+            exchanged_lora_indices,
         )
 
         return MoETokenDispatchOutput(
@@ -599,9 +597,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         if split_lora_indices is not None:
             expanded_lora = split_lora_indices.repeat_interleave(topk_ids.shape[1])
             # npu_moe_token_permute returns original-row -> permuted-row indices.
-            local_lora_permutation = torch.argsort(
-                reversed_local_input_permutation_mapping.reshape(-1).long()
-            )
+            local_lora_permutation = torch.argsort(reversed_local_input_permutation_mapping.reshape(-1).long())
             permuted_lora_indices = expanded_lora[local_lora_permutation]
 
         return (
@@ -716,9 +712,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             global_input_tokens, global_input_tokens_local_experts_indices
         )
         if exchanged_lora_indices is not None:
-            global_lora_permutation = torch.argsort(
-                reversed_global_input_permutation_mapping.reshape(-1).long()
-            )
+            global_lora_permutation = torch.argsort(reversed_global_input_permutation_mapping.reshape(-1).long())
             exchanged_lora_indices = exchanged_lora_indices[global_lora_permutation]
         return (
             global_input_tokens,
