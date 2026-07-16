@@ -28,7 +28,7 @@ from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
 from multiprocessing import Manager
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -445,7 +445,11 @@ class NPUModelRunner(GPUModelRunner):
         self.sfa_dcp_replicated_indexer_size = 1
         if enable_sfa_dcp_replicated_indexer():
             self.sfa_dcp_replicated_indexer_size = self.dcp_size
-            self.sparse_head_dim = (*self.sparse_head_dim[:-1], self.sparse_head_dim[-1] * self.dcp_size)
+            sparse_head_dim: tuple[int, ...] = cast(Any, self).sparse_head_dim
+            self.sparse_head_dim = (
+                *sparse_head_dim[:-1],
+                sparse_head_dim[-1] * self.dcp_size,
+            )
 
         # Create a CPU numpy buffer for positions computation when
         # self.positions is a plain tensor (non-CpuGpuBuffer case).

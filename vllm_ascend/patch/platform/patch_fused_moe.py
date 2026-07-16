@@ -28,6 +28,7 @@
 #   3. model loading  ->  deepseek_v2 imported  ->  gets patched FusedMoE  ✓
 
 import sys
+from typing import Any, cast
 
 import torch
 import vllm.model_executor.layers.fused_moe as _fused_moe_pkg
@@ -87,12 +88,12 @@ def _ascend_FusedMoE(*args, runner_cls=None, runner_args=None, **kwargs):
     return _original_FusedMoE(*args, runner_cls=runner_cls, runner_args=runner_args, **kwargs)
 
 
-_fused_moe_layer.FusedMoE = _ascend_FusedMoE
-_fused_moe_pkg.FusedMoE = _ascend_FusedMoE
+cast(Any, _fused_moe_layer).FusedMoE = _ascend_FusedMoE
+cast(Any, _fused_moe_pkg).FusedMoE = _ascend_FusedMoE
 
 # The model-registry plugin can import vLLM's native MiniMax-M3 module
 # before platform patches are applied. Refresh its captured factory so
 # model construction still creates an AscendMoERunner.
 _minimax_m3_module = sys.modules.get("vllm.models.minimax_m3.nvidia.model")
 if _minimax_m3_module is not None:
-    _minimax_m3_module.FusedMoE = _ascend_FusedMoE
+    cast(Any, _minimax_m3_module).FusedMoE = _ascend_FusedMoE
