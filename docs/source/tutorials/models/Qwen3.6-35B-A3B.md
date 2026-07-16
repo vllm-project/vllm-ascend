@@ -18,8 +18,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature
 
 ### 3.1 Model Weight
 
-- `Qwen3.6-35B-A3B` (BF16 version): requires 1 Atlas 800 A3 (64G x 16) node or 1 Atlas 800 A2 (64G x 8) node. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3.6-35B-A3B).
-- `Qwen3.6-35B-A3B-w8a8` (quantized version): requires 1 Atlas 800 A3 (64G x 16) node or 1 Atlas 800 A2 (64G x 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8).
+- `Qwen3.6-35B-A3B` (BF16 version): requires 1 Atlas A3 inference products (64G x 16) node, 1 Atlas A2 inference products (64G x 8) node, or Atlas inference products. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3.6-35B-A3B).
+- `Qwen3.6-35B-A3B-w8a8` (quantized version): requires 1 Atlas A3 inference products (64G x 16) node, 1 Atlas A2 inference products (64G x 8) node, or Atlas inference products. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8).
 
 It is recommended to download the model weight to `/root/.cache/`.
 
@@ -27,43 +27,116 @@ It is recommended to download the model weight to `/root/.cache/`.
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type. For example, use `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}` for Atlas 800 A2 and `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3` for Atlas 800 A3.
+Select an image based on your machine type. For example, use `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}` for Atlas A2 inference products, `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3` for Atlas A3 inference products, and `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p` for Atlas inference products.
 
 Refer to [using docker](../../installation.md#set-up-using-docker) for the complete installation guide.
 
-```bash
+=== "Atlas A3 inference products"
 
-# Update --device according to your device.
-# Atlas A2: /dev/davinci[0-7]
-# Atlas A3: /dev/davinci[0-15]
-# Download the model weight to /root/.cache in advance.
-export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
-export NAME=vllm-ascend
+    ```bash
 
-docker run --rm \
-  --name $NAME \
-  --net=host \
-  --shm-size=1g \
-  --device /dev/davinci0 \
-  --device /dev/davinci1 \
-  --device /dev/davinci2 \
-  --device /dev/davinci3 \
-  --device /dev/davinci4 \
-  --device /dev/davinci5 \
-  --device /dev/davinci6 \
-  --device /dev/davinci7 \
-  --device /dev/davinci_manager \
-  --device /dev/devmm_svm \
-  --device /dev/hisi_hdc \
-  -v /usr/local/dcmi:/usr/local/dcmi \
-  -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-  -v /etc/ascend_install.info:/etc/ascend_install.info \
-  -v /root/.cache:/root/.cache \
-  -it $IMAGE bash
-```
+    # Download the model weight to /root/.cache in advance.
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    export NAME=vllm-ascend
+
+    docker run --rm \
+      --name $NAME \
+      --net=host \
+      --shm-size=1g \
+      --device /dev/davinci0 \
+      --device /dev/davinci1 \
+      --device /dev/davinci2 \
+      --device /dev/davinci3 \
+      --device /dev/davinci4 \
+      --device /dev/davinci5 \
+      --device /dev/davinci6 \
+      --device /dev/davinci7 \
+      --device /dev/davinci8 \
+      --device /dev/davinci9 \
+      --device /dev/davinci10 \
+      --device /dev/davinci11 \
+      --device /dev/davinci12 \
+      --device /dev/davinci13 \
+      --device /dev/davinci14 \
+      --device /dev/davinci15 \
+      --device /dev/davinci_manager \
+      --device /dev/devmm_svm \
+      --device /dev/hisi_hdc \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /root/.cache:/root/.cache \
+      -it $IMAGE bash
+    ```
+
+=== "Atlas A2 inference products"
+
+    ```bash
+
+    # Download the model weight to /root/.cache in advance.
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    export NAME=vllm-ascend
+
+    docker run --rm \
+      --name $NAME \
+      --net=host \
+      --shm-size=1g \
+      --device /dev/davinci0 \
+      --device /dev/davinci1 \
+      --device /dev/davinci2 \
+      --device /dev/davinci3 \
+      --device /dev/davinci4 \
+      --device /dev/davinci5 \
+      --device /dev/davinci6 \
+      --device /dev/davinci7 \
+      --device /dev/davinci_manager \
+      --device /dev/devmm_svm \
+      --device /dev/hisi_hdc \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /root/.cache:/root/.cache \
+      -it $IMAGE bash
+    ```
+
+=== "Atlas inference products"
+
+    #### Standard container
+
+    ```bash
+
+    # Use the vllm-ascend image
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
+
+    docker run --rm \
+    --name vllm-ascend \
+    --shm-size=10g \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -p 8080:8080 \
+    -it $IMAGE bash
+    ```
 
 After entering the container, verify that vLLM and vLLM-Ascend can be imported:
 
@@ -75,52 +148,85 @@ python -c "import vllm, vllm_ascend; print('vllm and vllm_ascend are ready')"
 
 You can also build and install `vllm-ascend` from source. Refer to [set up using python](../../installation.md#set-up-using-python).
 
+!!! note
+
+    For Atlas inference products, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas inference products:
+
+    ```bash
+    pip uninstall -y triton-ascend triton
+    ```
+
 ## 5 Online Service Deployment
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-35B-A3B-w8a8` can be deployed on 1 Atlas 800 A3 (64G x 16) or 1 Atlas 800 A2 (64G x 8). The W8A8 version needs `--quantization ascend`.
+Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-35B-A3B-w8a8` can be deployed on 1 Atlas A3 inference products (64G x 16) or 1 Atlas A2 inference products (64G x 8), or Atlas inference products. The W8A8 version needs `--quantization ascend`.
 
-Run the following script to execute online inference with up to 262144 context length on 1 Atlas 800 A3 (64G x 16).
+=== "Atlas A2 inference products / Atlas A3 inference products"
 
-```shell
-#!/bin/sh
+    Run the following script to execute online inference with up to 262144 context length on 1 Atlas A3 inference products (64G x 16).
 
-# Load model from ModelScope to speed up download.
-export VLLM_USE_MODELSCOPE=True
+    ```shell
+    #!/bin/sh
 
-# Reduce memory fragmentation and avoid out-of-memory errors.
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    # Load model from ModelScope to speed up download.
+    export VLLM_USE_MODELSCOPE=True
 
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_BUFFSIZE=1024
-export OMP_NUM_THREADS=1
-export TASK_QUEUE_ENABLE=1
-echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
-sysctl -w vm.swappiness=0
-sysctl -w kernel.numa_balancing=0
-sysctl kernel.sched_migration_cost_ns=50000
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    # Reduce memory fragmentation and avoid out-of-memory errors.
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-vllm serve Eco-Tech/Qwen3.6-35B-A3B-w8a8 \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --data-parallel-size 1 \
-  --tensor-parallel-size 2 \
-  --enable-expert-parallel \
-  --seed 1024 \
-  --quantization ascend \
-  --served-model-name qwen3.6 \
-  --max-num-seqs 128 \
-  --max-model-len 262144 \
-  --max-num-batched-tokens 16384 \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.90 \
-  --enable-prefix-caching \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true, "multistream_overlap_shared_expert": true}' \
-  --async-scheduling
-```
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_BUFFSIZE=1024
+    export OMP_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
+    echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+    sysctl -w vm.swappiness=0
+    sysctl -w kernel.numa_balancing=0
+    sysctl kernel.sched_migration_cost_ns=50000
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+
+    vllm serve Eco-Tech/Qwen3.6-35B-A3B-w8a8 \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --data-parallel-size 1 \
+      --tensor-parallel-size 2 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --quantization ascend \
+      --served-model-name qwen3.6 \
+      --max-num-seqs 128 \
+      --max-model-len 262144 \
+      --max-num-batched-tokens 16384 \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.90 \
+      --enable-prefix-caching \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true, "multistream_overlap_shared_expert": true}' \
+      --async-scheduling
+    ```
+
+=== "Atlas inference products"
+
+    The following example follows the [hardware tutorial](../hardwares/310p.md#online-inference-on-npu) serving constraints for Atlas inference products and uses the same model variant as the Atlas A2 inference products / Atlas A3 inference products example. It uses port 8080 to match the Atlas inference products Docker port mapping in Section 4.1. Set `--dtype float16` and keep an explicit, conservative `--max-model-len`.
+
+    ```shell
+    export VLLM_USE_MODELSCOPE=True
+    export ASCEND_RT_VISIBLE_DEVICES=0,1
+
+    vllm serve Eco-Tech/Qwen3.6-35B-A3B-w8a8 \
+      --host 127.0.0.1 \
+      --port 8080 \
+      --tensor-parallel-size 2 \
+      --gpu-memory-utilization 0.90 \
+      --max-num-seqs 16 \
+      --served-model-name qwen3.6 \
+      --dtype float16 \
+      --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}' \
+      --quantization ascend \
+      --max-model-len 16384 \
+      --no-enable-prefix-caching
+    ```
 
 Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
 
