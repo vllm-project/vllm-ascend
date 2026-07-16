@@ -954,6 +954,7 @@ class AscendMiniMaxM3IndexerLinear(AscendColumnParallelLinear):
         if isinstance(param, BlockQuantScaleParameter):
             weight_block_size = getattr(self, "weight_block_size", None)
             shard_size, shard_offset = adjust_block_scale_shard(weight_block_size, shard_size, shard_offset)
+        assert shard_size is not None
 
         param_data = param.data.narrow(output_dim, shard_offset, shard_size)
         if loaded_shard_id == "index_k":
