@@ -1,0 +1,9 @@
+name: Test
+on:
+  pull_request:
+    paths: ['.github/workflows/test_sh.yml']
+jobs:
+  test:
+    runs-on: linux-aarch64-950dt-8
+    steps:
+      - run: echo DONE
