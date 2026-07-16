@@ -86,3 +86,75 @@ def test_qwen3moe_lora_ep(qwen3moe_lora_files):
     )
 
     generate_and_test(llm, qwen3moe_lora_files, lora_id=1)
+
+
+def test_qwen3moe_lora_multi_id_ep(qwen3moe_lora_files):
+    """Test multiple different LoRA IDs (-1, 1, 2) in a single batch on EP path.
+
+    This exercises the AlltoAll + LoRA routing where different tokens carry
+    different lora_id values, including -1 for no-LoRA.
+    """
+    # Per-prompt LoRA assignment: lora_id=1 / -1 / 2 / -1
+    prompts = [
+        PROMPT_TEMPLATE.format(context="Count the number of candidates."),
+        PROMPT_TEMPLATE.format(context="Count the number of candidates."),
+        PROMPT_TEMPLATE.format(context="Return the poll resource associated with the most candidates."),  # noqa: E501
+        "The capital of France is",
+    ]
+
+    lora_1 = LoRARequest("spider_1", 1, qwen3moe_lora_files)
+    lora_2 = LoRARequest("spider_2", 2, qwen3moe_lora_files)
+    lora_requests = [lora_1, None, lora_2, None]
+
+    sampling_params = vllm.SamplingParams(temperature=0, max_tokens=64)
+
+    llm = vllm.LLM(
+        MODEL_PATH,
+        max_model_len=1024,
+        enable_lora=True,
+        max_loras=4,
+        enforce_eager=True,
+        trust_remote_code=True,
+        enable_chunked_prefill=True,
+        tensor_parallel_size=2,
+        enable_expert_parallel=True,
+    )
+
+    outputs = llm.generate(prompts, sampling_params, lora_request=lora_requests)
+
+    generated_texts: list[str] = []
+    for i, output in enumerate(outputs):
+        generated_text = output.outputs[0].text.strip()
+        generated_texts.append(generated_text)
+        lora_id = lora_requests[i].lora_int_id if lora_requests[i] else -1
+        print(f"Prompt {i} (lora_id={lora_id}): {output.prompt!r}")
+        print(f"  Generated: {generated_text!r}")
+
+    # LoRA prompts: exact match against expected SQL
+    expected_lora_0 = "<think>\n\n</think>\n\nSELECT count(*) FROM candidate"
+    expected_lora_2 = (
+        "<think>\n\n</think>\n\nSELECT poll_source FROM candidate GROUP BY poll_source ORDER BY count(*) DESC LIMIT 1"  # noqa: E501
+    )
+
+    assert generated_texts[0].lower().startswith(expected_lora_0.lower()), (
+        f"Prompt 0 (LoRA id=1): expected {expected_lora_0!r}, got {generated_texts[0]!r}"
+    )
+    assert generated_texts[2].lower().startswith(expected_lora_2.lower()), (
+        f"Prompt 2 (LoRA id=2): expected {expected_lora_2!r}, got {generated_texts[2]!r}"
+    )
+
+    # No-LoRA prompts: must NOT match any LoRA expected output
+    for idx in [1, 3]:
+        actual = generated_texts[idx]
+        for expected in [expected_lora_0, expected_lora_2]:
+            assert not actual.lower().startswith(expected.lower()), (
+                f"Prompt {idx} (no-LoRA): output matches LoRA SQL {expected!r}, routing may be wrong! Got: {actual!r}"
+            )
+
+    # Cross-check: LoRA vs no-LoRA outputs must differ
+    assert generated_texts[0] != generated_texts[1], (
+        f"LoRA (id=1) vs no-LoRA should differ! Both: {generated_texts[0]!r}"
+    )
+    assert generated_texts[2] != generated_texts[3], (
+        f"LoRA (id=2) vs no-LoRA should differ! Both: {generated_texts[2]!r}"
+    )
