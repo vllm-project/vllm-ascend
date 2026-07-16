@@ -2161,7 +2161,7 @@ class NPUModelRunner(GPUModelRunner):
                 )
 
                 logger.info(
-                    "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
+                    "_determine_batch_execution_and_padding cudagraph_mode: %s, batch_descriptor: %s, "
                     "should_ubatch: %s, num_tokens_across_dp: %s",
                     cudagraph_mode,
                     batch_desc,
@@ -2190,6 +2190,13 @@ class NPUModelRunner(GPUModelRunner):
                     "ubatch_slices: %s, ubatch_slices_padded: %s",
                     ubatch_slices,
                     ubatch_slices_padded,
+                )
+                ubatch_slices_attn = (
+                    ubatch_slices_padded if ubatch_slices is not None else None
+                )
+                logger.info(
+                    "ubatch_slices_attn: %s",
+                    ubatch_slices_attn,
                 )
 
                 if self.dynamic_eplb:
@@ -2253,11 +2260,6 @@ class NPUModelRunner(GPUModelRunner):
                     )
 
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
-                ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
-                logger.info(
-                    "ubatch_slices_attn: %s",
-                    ubatch_slices_attn,
-                )
 
                 if (
                     cudagraph_mode == CUDAGraphMode.FULL
@@ -2334,7 +2336,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Build AFD metadata (if AFD is enabled) so it can be threaded through
         # the forward context to model layers.
-        afd_metadata = self._build_afd_metadata(ubatch_slices, num_tokens_unpadded)
+        afd_metadata = self._build_afd_metadata(ubatch_slices_attn, num_tokens_unpadded)
         logger.info("afd_metadata: %s", afd_metadata)
 
         # Run forward pass
@@ -2370,7 +2372,7 @@ class NPUModelRunner(GPUModelRunner):
             # pre-allocate per-stage token buffers. Only the first
             # min_size attention ranks actually send (1-to-N mapping).
             if self.afd_config and self.afd_connector:
-                dp_metadata_list = self._build_afd_dp_metadata_list(ubatch_slices)
+                dp_metadata_list = self._build_afd_dp_metadata_list(ubatch_slices_attn)
                 logger.info("dp_metadata_list: %s", dp_metadata_list)
                 self.afd_connector.update_state_from_dp_metadata(
                     dp_metadata_list, False)
@@ -3316,7 +3318,7 @@ class NPUModelRunner(GPUModelRunner):
                 common_ratio_to_sas_metadata = builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
 
             if ubid is None:
-                assert isinstance(attn_metadata, dict)
+                # assert isinstance(attn_metadata, dict)
                 attn_metadata_dict = attn_metadata
             else:
                 assert isinstance(attn_metadata, list)
