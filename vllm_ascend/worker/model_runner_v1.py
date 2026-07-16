@@ -2170,7 +2170,7 @@ class NPUModelRunner(GPUModelRunner):
                 )
                 # should_ubatch = True
                 ubatch_num = 4
-                should_ubatch = False
+                should_ubatch = True
                 num_tokens_padded = batch_desc.num_tokens
                 num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
                 logger.info(
@@ -3521,13 +3521,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.dynamic_eplb:
             self.update_eplb_heat_collection_status(num_tokens_padded)
         
-        ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
-            should_ubatch,
-            num_scheduled_tokens,
-            num_tokens_padded,
-            num_reqs_padded,
-            self.parallel_config.num_ubatches,
-        )
+        ubatch_slices, ubatch_slices_padded = None, None
         attn_metadata: PerLayerAttnMetadata | None = None
         # Build attention metadata for dummy_run
         if self._should_build_dummy_attn_metadata(force_attention, is_profile, cudagraph_runtime_mode):
@@ -3849,18 +3843,18 @@ class NPUModelRunner(GPUModelRunner):
                 use_eagle=self.use_eagle,
                 enable_enpu=self.enable_enpu,
             )
-        # elif self.afd_config:
-        #     logger.info("use_ubatching11111111111111111")
-        #     self.update_stream: torch.npu.Stream = torch.npu.Stream()
-        #     if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
-        #         self.model = UBatchWrapper(
-        #             self.model, self.vllm_config,
-        #             CUDAGraphMode.FULL, self.device)
-        #     else:
-        #         logger.info("eager use_ubatching222222222222222222222222222: %s")
-        #         self.model = UBatchWrapper(
-        #             self.model, self.vllm_config,
-        #             CUDAGraphMode.NONE, self.device)
+        elif self.afd_config:
+            logger.info("use_ubatching11111111111111111")
+            self.update_stream: torch.npu.Stream = torch.npu.Stream()
+            if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+                self.model = UBatchWrapper(
+                    self.model, self.vllm_config,
+                    CUDAGraphMode.FULL, self.device)
+            else:
+                logger.info("eager use_ubatching222222222222222222222222222: %s")
+                self.model = UBatchWrapper(
+                    self.model, self.vllm_config,
+                    CUDAGraphMode.NONE, self.device)
 
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             self._start_dump_data()
