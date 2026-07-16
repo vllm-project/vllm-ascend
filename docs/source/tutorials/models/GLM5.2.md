@@ -1447,6 +1447,7 @@ vllm serve <MODEL_PATH> \
     }
   }'
 ```
+
 ## Functional Verification
 
 Once your server is started, you can query the model with input prompts:
