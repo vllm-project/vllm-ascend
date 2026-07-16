@@ -673,7 +673,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-52 \
             --max-model-len 135000 \
-            --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp", "enforce_eager": true}' \
+            --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp", "enforce_eager": true}' \
             --additional-config '{"enable_sparse_c8":false, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
@@ -743,7 +743,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-52 \
             --max-model-len 135000 \
-            --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp", "enforce_eager": true}' \
+            --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp", "enforce_eager": true}' \
             --additional-config '{"enable_sparse_c8":false, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
