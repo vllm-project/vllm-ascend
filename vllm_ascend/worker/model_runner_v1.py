@@ -68,8 +68,8 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
-    MLAAttentionSpec,
     MambaSpec,
+    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import (
