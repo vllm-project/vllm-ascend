@@ -30,13 +30,30 @@ def random_sample(
     # that have their own seeds.
     with npu_stream_switch(global_stream()):
         q = torch.empty_like(probs)
-        if len(generators) != probs.shape[0]:
+        total_seq = probs.shape[0]
+        if len(generators) == total_seq:
+            # 全序列都有独立随机生成器：批量执行，无Python循环
+            sorted_gens = [gen for _, gen in sorted(generators.items())]
+            q.exponential_(generator=sorted_gens)
+        else:
+            # 全局批量采样打底
+            global_batch_seed = torch.randint(1, 2**31 - 1, size=(1,))
+            torch.npu.manual_seed(global_batch_seed)
             q.exponential_()
-        if generators:
-            # TODO(woosuk): This can be slow because we handle each request
-            # one by one. Optimize this.
-            for i, generator in generators.items():
-                q[i].exponential_(generator=generator)
+            logger.debug("[sample/sampler] random_sample batch_random_seed=%d", global_batch_seed)
+
+            if len(generators):
+                logger.warning_once(
+                    "[sample/sampler] Partial sequences(%d/%d) have custom seed. "
+                    "Global RNG used for remaining sequences, deterministic cannot be fully guaranteed.",
+                    len(generators),
+                    total_seq,
+                )
+                # 优化：排序后批量切片采样，干掉Python逐行循环
+                sorted_items = sorted(generators.items())
+                indices = [idx for idx, _ in sorted_items]
+                gen_list = [gen for _, gen in sorted_items]
+                q[indices].exponential_(generator=gen_list)
     torch.npu.current_stream().wait_stream(global_stream())
     return probs.div_(q).argmax(dim=-1).view(-1)
 
@@ -83,11 +100,32 @@ class AscendSampler(Sampler):
             global_stream().wait_stream(torch.npu.current_stream())
             q = torch.empty((b_s, head_dim), device="npu", dtype=torch.float32)
             # Goes to async exponential with AI-CPU exponential or default exponential.
-            if len(generators) != q.shape[0]:
+            if len(generators) == b_s:
+                # 全序列都有独立随机生成器：批量执行，无Python循环
+                sorted_gens = [gen for _, gen in sorted(generators.items())]
+                q.exponential_(generator=sorted_gens)
+            else:
+                # 全局批量采样打底
+                global_batch_seed = torch.randint(1, 2**31 - 1, size=(1,))
+                torch.npu.manual_seed(global_batch_seed)
                 q.exponential_()
-            if generators:
-                for i, generator in generators.items():
-                    q[i].exponential_(generator=generator)
+                logger.debug(
+                    "[sample/sampler] do_async_exponential random_sample batch_random_seed=%d", global_batch_seed
+                )
+
+                if len(generators):
+                    # 混合场景一次性告警，避免刷屏
+                    logger.warning_once(
+                        "[sample/sampler] do_async_exponential Partial sequences(%d/%d) have custom seed. "
+                        "Global RNG used for remaining sequences, deterministic cannot be fully guaranteed.",
+                        len(generators),
+                        b_s,
+                    )
+                    # 优化：排序后批量切片采样，干掉Python逐行循环
+                    sorted_items = sorted(generators.items())
+                    indices = [idx for idx, _ in sorted_items]
+                    gen_list = [gen for _, gen in sorted_items]
+                    q[indices].exponential_(generator=gen_list)
             self.async_exponential_event.record()
         self.set_q_event(q, self.async_exponential_event)
 
@@ -132,10 +170,29 @@ class AscendTopKTopPSampler(TopKTopPSampler):
         """Override pytorch native implementation to torch_npu"""
         # when batch_invariant mode is enabled, we should use vllm's implementation.
         # or it will make batch_invariant mode not working.
+        # logger.info(
+        #     "[sample/sampler] k=%s, p=%s",
+        #     k,
+        #     p,
+        # )
+        if k is not None and (k < 1).all():
+            logger.error("[sample/sampler] Invalid top-k value. Must be a positive integer.")
+        if p is not None and ((p <= 0).any() or (p > 1).any()):
+            logger.error("[sample/sampler] Invalid top-p value. Must be between 0 and 1.")
         if envs.VLLM_BATCH_INVARIANT:
             return super().forward_native(logits, generators, k, p)
 
         if get_ascend_config().enable_reduce_sample:
+            if (
+                self.top_k is not None
+                and k is not None
+                and bool((k > self.top_k).any().item())
+            ):
+                logger.warning_once(
+                    "[sample/sampler] local top_k=%d < requested max_top_k=%d, potential Top-K error may occur.",
+                    self.top_k,
+                    int(k.max().item()),
+                )
             cand_logits, cand_idx = self.apply_top_k_top_p(logits, k, p, self.top_k)
             logits_to_return = None
             if self.logprobs_mode == "processed_logits":
@@ -146,7 +203,7 @@ class AscendTopKTopPSampler(TopKTopPSampler):
             probs = torch.softmax(cand_logits, dim=-1)
             pos = random_sample(probs, generators)  # [B]
 
-            next_token = cand_idx.gather(dim=1, index=pos.unsqueeze(1)).squeeze(1)  # [B]
+            next_token = cand_idx.gather(dim=1, index=pos.unsqueeze(1)).squeeze(1)  # [B] global token id
             return next_token, logits_to_return
         else:
             logits = self.apply_top_k_top_p(logits, k, p)
@@ -180,7 +237,7 @@ def _apply_top_k_top_p_pytorch(
         local_vals, local_idx = torch.topk(logits, k=top_k, dim=-1)  # [B, top_k], [B, top_k]
         local_global_idx = local_idx + rank * V_local  # [B, top_k]
 
-        gathered_vals = tp_group.all_gather(local_vals, dim=-1)  # [B, top_k*tp]
+        gathered_vals = tp_group.all_gather(local_vals, dim=-1)  # k_for_topk * g_n
         gathered_idx = tp_group.all_gather(local_global_idx, dim=-1)  # [B, top_k*tp]
 
         full_logits = logits.new_full((B, V_global), -float("inf"))
@@ -191,8 +248,9 @@ def _apply_top_k_top_p_pytorch(
         probs = full_logits.softmax(dim=-1)
         probs_sort, _ = probs.sort(dim=-1, descending=False)
         if k is not None:
-            kk = k.to(torch.long).clamp(min=1, max=V_global)
-            top_k_count = (probs_sort.size(1) - kk).unsqueeze(1)  # [B,1]
+            num_gathered_vocabs = gathered_vals.shape[1]  # 等价 probs_sort.size(1)
+            kk = k.to(torch.long).clamp(min=1, max=num_gathered_vocabs)
+            top_k_count = (num_gathered_vocabs - kk).unsqueeze(1)  # [B,1]
             top_k_cutoff = probs_sort.gather(-1, top_k_count)
             no_top_k_mask = (kk == V_global).unsqueeze(1)
             top_k_cutoff.masked_fill_(no_top_k_mask, -float("inf"))
