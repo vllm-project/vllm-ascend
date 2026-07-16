@@ -177,30 +177,20 @@ class GDNAttentionMetadataBuilder310(AscendGDNAttentionMetadataBuilder):
         attn_metadata: GDNAttentionMetadata,
         graph_batch_size: int,
     ) -> None:
-        num_decodes = attn_metadata.num_decodes
         state_indices = attn_metadata.non_spec_state_indices_tensor
         query_start_loc = attn_metadata.non_spec_query_start_loc
         assert state_indices is not None
         assert query_start_loc is not None
 
-        self.non_spec_state_indices_tensor[:num_decodes].copy_(
+        (
+            attn_metadata.non_spec_state_indices_tensor,
+            attn_metadata.non_spec_query_start_loc,
+        ) = self._pad_non_spec_decode_graph_inputs(
             state_indices,
-            non_blocking=True,
-        )
-        attn_metadata.non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[:graph_batch_size]
-        attn_metadata.non_spec_state_indices_tensor[num_decodes:].fill_(NULL_BLOCK_ID)
-
-        self.non_spec_query_start_loc[: num_decodes + 1].copy_(
             query_start_loc,
-            non_blocking=True,
+            num_decode_tokens=attn_metadata.num_decode_tokens,
+            graph_batch_size=graph_batch_size,
         )
-        attn_metadata.non_spec_query_start_loc = self.non_spec_query_start_loc[: graph_batch_size + 1]
-        query_padding = attn_metadata.non_spec_query_start_loc[num_decodes + 1 :]
-        if query_padding.numel() > 0:
-            query_padding.copy_(
-                query_start_loc[-1].expand_as(query_padding),
-                non_blocking=True,
-            )
         self._attach_non_spec_decode_metadata(
             attn_metadata,
             attn_metadata.non_spec_state_indices_tensor,

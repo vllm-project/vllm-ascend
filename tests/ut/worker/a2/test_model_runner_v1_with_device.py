@@ -341,6 +341,13 @@ def test_determine_batch_execution_and_padding(
 
     try:
         runner.input_batch.num_computed_tokens_cpu[:num_reqs] = num_computed_tokens
+        computed_tokens = np.asarray(num_computed_tokens, dtype=np.int32)
+        scheduled_tokens = np.asarray(num_scheduled_tokens, dtype=np.int32)
+        runner.input_batch.num_prompt_tokens[:num_reqs] = np.where(
+            computed_tokens == 0,
+            scheduled_tokens,
+            computed_tokens,
+        )
         num_scheduled_tokens_np = np.array(num_scheduled_tokens, dtype=np.int32)
 
         kwargs = dict(
@@ -391,3 +398,37 @@ def test_determine_batch_execution_and_padding(
     finally:
         runner.speculative_config = saved_spec_config
         runner.uniform_decode_query_len = saved_query_len
+
+
+@pytest.mark.parametrize(
+    ("num_prompt_tokens", "expected_uniform_decode"),
+    [
+        pytest.param(8, False, id="one_token_pd_prefill"),
+        pytest.param(7, True, id="decode_after_prompt"),
+    ],
+)
+def test_uniform_decode_requires_completed_prompt_without_mtp(
+    model_runner,
+    num_prompt_tokens: int,
+    expected_uniform_decode: bool,
+):
+    runner = model_runner
+    runner.speculative_config = None
+    runner.uniform_decode_query_len = 1
+    runner.input_batch.num_computed_tokens_cpu[0] = 7
+    runner.input_batch.num_prompt_tokens[0] = num_prompt_tokens
+
+    with patch.object(
+        runner.cudagraph_dispatcher,
+        "dispatch",
+        wraps=runner.cudagraph_dispatcher.dispatch,
+    ) as dispatch:
+        runner._determine_batch_execution_and_padding(
+            num_tokens=1,
+            num_reqs=1,
+            num_scheduled_tokens_np=np.array([1], dtype=np.int32),
+            max_num_scheduled_tokens=1,
+            use_cascade_attn=False,
+        )
+
+    assert bool(dispatch.call_args.kwargs["uniform_decode"]) is expected_uniform_decode
