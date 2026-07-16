@@ -69,7 +69,7 @@ def _make_compress_manager(
     return spec, block_pool, manager
 
 
-def test_compressed_prefix_cache_uses_logical_block_hash() -> None:
+def test_compressed_prefix_cache_uses_short_key_and_subblock_partial() -> None:
     block_size = 128
     compress_ratio = 4
     logical_block_size = block_size * compress_ratio
@@ -90,10 +90,13 @@ def test_compressed_prefix_cache_uses_logical_block_hash() -> None:
     manager.cache_blocks(request_a, num_tokens=logical_block_size)
 
     cached_hash = get_block_hash(manager.req_to_blocks[request_a.request_id][0].block_hash)
+    # vllm-ascend uses the short-key convention: the i-th compressed block keys on
+    # the per-hash-block hash, not the full logical-span combined hash. This is what
+    # enables the correct sub-block partial hit asserted below.
     expected_hash = BlockHashListWithBlockSize(
         request_a.block_hashes,
         block_size,
-        logical_block_size,
+        block_size,
     )[0]
     assert cached_hash == expected_hash
 
@@ -107,7 +110,12 @@ def test_compressed_prefix_cache_uses_logical_block_hash() -> None:
         alignment_tokens=logical_block_size,
     )[0]
 
-    assert hit_blocks == []
+    # request_b diverges at token block_size+7 (in the 2nd hash-block). The first
+    # hash-block (tokens [0, block_size)) is identical, and compressed KV is causal,
+    # so that prefix's KV is independent of the later divergence -> a correct 1-block
+    # sub-block partial hit (vllm-ascend short-key), not the conservative full-block
+    # miss. This is a deliberate improvement over the upstream #10298 behavior.
+    assert len(hit_blocks) == 1
 
 
 def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
@@ -137,7 +145,7 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
     assert hit_blocks == manager.req_to_blocks[request.request_id]
 
 
-def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
+def test_hybrid_coordinator_subblock_partial_compressed_prefix_hit() -> None:
     block_size = 128
     compress_ratio = 4
     logical_block_size = block_size * compress_ratio
@@ -193,5 +201,8 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
         max_cache_hit_length=logical_block_size,
     )
 
-    assert hit_length == 0
-    assert hit_blocks == ([], [])
+    # The first hash-block matches and its compressed KV is causally independent of
+    # the later divergence, so the coordinator returns a correct sub-block partial
+    # hit of block_size tokens (vllm-ascend short-key) rather than rejecting it.
+    assert hit_length == block_size
+    assert hit_blocks != ([], [])

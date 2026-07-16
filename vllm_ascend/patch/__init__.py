@@ -219,6 +219,29 @@
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
 #
+# ** 10b. File: platform/patch_prefix_cache_core.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.kv_cache_utils.FreeKVCacheBlockQueue.prepend_n`
+#   2. `vllm.v1.core.block_pool.BlockPool.free_blocks`
+#   3. `vllm.v1.core.single_type_kv_cache_manager.SingleTypeKVCacheManager.remove_skipped_blocks`
+#   4. `vllm.v1.core.single_type_kv_cache_manager.SlidingWindowManager._cache_block_mask`
+#   5. `vllm.v1.core.single_type_kv_cache_manager.SlidingWindowManager.free`
+#    Why:
+#       The DeepSeek V4 prefix-cache coordinator patch relies on the vLLM core
+#       block-reuse behavior added by vLLM PR #43447. Older supported vLLM
+#       versions do not expose `free_blocks(prepend=...)`, so short/SWA prefix
+#       cache paths can recycle local blocks with poor priority.
+#    How:
+#       When `VLLM_ASCEND_APPLY_DSV4_PATCH` is enabled, monkey-patch the missing
+#       free-list/front-insertion behavior and the SWA/EAGLE cache block mask.
+#       Each patch is guarded by capability/source checks so it is skipped once
+#       the underlying vLLM already provides the upstream behavior.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/43447
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains vLLM PR
+#       #43447 or equivalent prefix-cache block-reuse behavior.
+#
 # ** 10. File: platform/patch_kv_cache_interface.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.kv_cache_interface.MLAAttentionSpec`
