@@ -196,6 +196,42 @@ def _patch_v024_processor_methods(hunyuan_vision: Any) -> None:
     hunyuan_vision.HunYuanVLMultiModalProcessor._call_hf_processor = call_hf_processor
 
 
+def _patch_main_prompt_updates(hunyuan_vision: Any) -> None:
+    """Patch _get_prompt_updates to strip start/end from replacement tokens.
+
+    Upstream main wraps each image's prompt replacement with
+    ``[image_start_id, image_id*N, image_end_id]`` via
+    ``PromptUpdateDetails.select_token_id``. The prompt text already
+    contains the ``{start}{image}{end}`` placeholder per HunYuanVL
+    convention, so the token-level wrapper produces duplicate
+    start/end tokens — causing ``IndexError`` in
+    ``get_xdrope_input_positions``.
+
+    This wrapper strips the first and last element (start/end) from
+    every ``PromptUpdateDetails.full`` returned by the replacement
+    function, keeping only the image tokens in between.
+    """
+
+    _original = hunyuan_vision.HunYuanVLMultiModalProcessor._get_prompt_updates
+
+    def _get_prompt_updates(self: Any, *args: Any, **kwargs: Any) -> Any:
+        updates = _original(self, *args, **kwargs)
+        for update in updates:
+            inner = update.replacement
+
+            def _stripped(item_idx: int, _inner: Any = inner) -> Any:
+                result = _inner(item_idx)
+                return hunyuan_vision.PromptUpdateDetails(
+                    full=result.full[1:-1],
+                    is_embed=result.is_embed,
+                )
+
+            update.replacement = _stripped
+        return updates
+
+    hunyuan_vision.HunYuanVLMultiModalProcessor._get_prompt_updates = _get_prompt_updates
+
+
 def install_hunyuan_vl_processor_compat() -> None:
     """Align both supported vLLM refs with Transformers 5.13 Hunyuan APIs."""
     # Keep each target's native, image-token-only prompt replacement. The
@@ -208,8 +244,8 @@ def install_hunyuan_vl_processor_compat() -> None:
         _patch_v024_processor_methods(v024_hunyuan_vision)
         return
 
-    if not _remove_stale_registry_entries():
-        return
+    _remove_stale_registry_entries()
     from vllm.model_executor.models import hunyuan_vision as main_hunyuan_vision
 
     _patch_hunyuan_processor_loader(main_hunyuan_vision)
+    _patch_main_prompt_updates(main_hunyuan_vision)

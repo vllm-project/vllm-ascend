@@ -157,6 +157,9 @@ def test_installer_cleans_main_registry_before_model_patch(monkeypatch):
     def patch_loader(module: Any) -> None:
         calls.append(("loader", module))
 
+    def patch_prompt_updates(module: Any) -> None:
+        calls.append(("prompt_updates", module))
+
     monkeypatch.setattr(compat, "vllm_version_is", lambda _version: False)
     monkeypatch.setattr(
         compat,
@@ -169,11 +172,17 @@ def test_installer_cleans_main_registry_before_model_patch(monkeypatch):
         "_patch_hunyuan_processor_loader",
         patch_loader,
     )
+    monkeypatch.setattr(
+        compat,
+        "_patch_main_prompt_updates",
+        patch_prompt_updates,
+    )
     compat.install_hunyuan_vl_processor_compat()
 
     assert calls == [
         "registry",
         ("loader", hunyuan_vision),
+        ("prompt_updates", hunyuan_vision),
     ]
     assert FakeMultiModalProcessor._get_prompt_updates is native_get_prompt_updates
 
