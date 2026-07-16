@@ -57,7 +57,7 @@ _benchmarks: &benchmarks
 # ==========================================
 
 test_cases:
-  - name: "Gemma4-E2B-full-decode-graph"
+  - name: "Gemma4-E2B-A3-full-decode-graph"
     model: *model
     envs:
       <<: *envs
