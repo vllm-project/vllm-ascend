@@ -1,0 +1,121 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+name: Analyze Failure Report
+
+on:
+  workflow_call:
+    inputs:
+      log_artifact_pattern:
+        type: string
+        required: true
+        description: 'Glob pattern for test log artifacts (e.g. selected-test-logs-*)'
+      hitest_file:
+        type: string
+        required: true
+        description: 'Path to hitest recommendations txt in the repo'
+      hitest_content:
+        type: string
+        required: false
+        default: ''
+        description: 'Content of hitest recommendations from workflow output (priority 1)'
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+jobs:
+  analyze:
+    name: cross-reference failures with hitest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v7
+
+      # ---- Step 1: Download hitest recommendations from artifact (preferred) ----
+      - name: Download hitest recommendations artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: recommended-pytest-paths
+          path: ./hitest-recs
+        continue-on-error: true
+
+      - name: Locate recommendations file
+        id: locate-recs
+        run: |
+          # Priority: artifact > committed file > empty placeholder
+          ARTIFACT_REC=$(find ./hitest-recs -name "recommended_pytest_paths.txt" -type f 2>/dev/null | head -1)
+          COMMITTED_REC="${{ inputs.hitest_file }}"
+
+          if [ -n "${{ inputs.hitest_content }}" ]; then
+            echo "has_recommendations=true" >> $GITHUB_OUTPUT
+            echo "Using workflow output recommendations"
+            echo "${{ inputs.hitest_content }}" > ./test-logs/_hitest_recommended.txt
+            echo "HITEST_FILE=./test-logs/_hitest_recommended.txt" >> $GITHUB_ENV
+            echo "HITEST_SOURCE=output" >> $GITHUB_ENV
+            COUNT=$(wc -l < ./test-logs/_hitest_recommended.txt)
+            echo "Recommendations count: ${COUNT}"
+          elif [ -n "${ARTIFACT_REC}" ] && [ -f "${ARTIFACT_REC}" ]; then
+            echo "has_recommendations=true" >> $GITHUB_OUTPUT
+            echo "Using artifact recommendations: ${ARTIFACT_REC}"
+            echo "HITEST_FILE=${ARTIFACT_REC}" >> $GITHUB_ENV
+            echo "HITEST_SOURCE=artifact" >> $GITHUB_ENV
+            COUNT=$(wc -l < "${ARTIFACT_REC}")
+            echo "Recommendations count: ${COUNT}"
+          elif [ -f "${COMMITTED_REC}" ]; then
+            echo "has_recommendations=true" >> $GITHUB_OUTPUT
+            echo "Using committed recommendations: ${COMMITTED_REC}"
+            echo "HITEST_FILE=${COMMITTED_REC}" >> $GITHUB_ENV
+            echo "HITEST_SOURCE=committed" >> $GITHUB_ENV
+            COUNT=$(wc -l < "${COMMITTED_REC}")
+            echo "Recommendations count: ${COUNT}"
+          else
+            echo "has_recommendations=false" >> $GITHUB_OUTPUT
+            echo "::notice::未读取到推荐用例，跳过后续分析任务"
+          fi
+
+      # ---- Step 2: Download test logs ----
+      - name: Download test logs
+        uses: actions/download-artifact@v7
+        with:
+          pattern: ${{ inputs.log_artifact_pattern }}
+          path: ./test-logs
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Show downloaded logs structure
+        run: |
+          echo "Downloaded log files:"
+          find ./test-logs -type f | head -50 || echo "  (no logs found)"
+
+      # ---- Step 3: Run analysis ----
+      - name: Run failure analysis
+        if: steps.locate-recs.outputs.has_recommendations != 'false'
+        id: analysis
+        continue-on-error: true
+        run: |
+          pip install regex
+          python3 .github/workflows/scripts/analyze_failure_report.py             --log-dir ./test-logs             --hitest-file "${HITEST_FILE}"             --hitest-source "${HITEST_SOURCE:-none}"             --output ./test-logs/failure_report.md
+
+      # ---- Step 4: Upload report ----
+      - name: Upload failure analysis report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: failure-analysis-report
+          path: ./test-logs/failure_report.md
+          if-no-files-found: ignore
+          retention-days: 14

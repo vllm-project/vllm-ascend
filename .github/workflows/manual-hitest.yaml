@@ -58,6 +58,12 @@ jobs:
           HITEST_SECRET: ${{ secrets.HITEST_SECRET }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
+          # 新增调试：打印环境变量长度
+          echo "===== DEBUG GITHUB WORKFLOW ENV LENGTH ====="
+          echo "HITEST_APIG_APPCODE len: ${#HITEST_APIG_APPCODE}"
+          echo "HITEST_KEY len: ${#HITEST_KEY}"
+          echo "HITEST_SECRET len: ${#HITEST_SECRET}"
+          echo "==========================================="
           python3 .github/workflows/scripts/run_hitest.py
 
       - name: Upload recommended pytest paths artifact
