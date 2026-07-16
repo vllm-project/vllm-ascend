@@ -75,52 +75,6 @@ After computing the results with the local KV cache, the results are updated via
 
 ![DCP-Decode](../../assets/cp/dcp-decode.png)
 
-### GLM-5.2 SFA DCP Replicated Indexer
-
-GLM-5.2 uses Sparse Flash Attention (SFA) with a LightningIndexer.  For DCP,
-the indexer needs a full-sequence view to select the same sparse top-k blocks
-as non-DCP SFA, while the much larger SFA KV cache should remain sharded to
-retain DCP's memory benefit.  The replicated-indexer path provides this split
-layout:
-
-- The LightningIndexer cache is replicated on every DCP rank.  Index selection
-  therefore uses the complete sequence and produces globally consistent sparse
-  top-k indices.
-- The SFA KV cache remains DCP-local.  The global indices from the replicated
-  indexer view are remapped to local KV indices before SFA runs.
-- During prefill or a mixed batch, only the KV blocks referenced by the sparse
-  block table are compacted and all-gathered after the current layer has
-  written its KV cache.  The gathered KV uses a remapped block table for SFA,
-  so this path does not all-gather Q and does not need LSE or output
-  post-processing.
-- Decode-only batches retain the DCP SFA Q-gather and result-merge path.
-
-This mode is selected automatically for SFA sparse models when
-`prefill_context_parallel_size=1` and `decode_context_parallel_size>1`.  It
-requires `decode_context_parallel_size == tensor_parallel_size`; PCP combined
-with this replicated-indexer path is not supported.
-
-For a GLM-5.2 DSA-CP deployment, enable FlashComm1 and DSA CP and keep the CP
-interleave size equal to the KV-cache block size:
-
-```bash
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-
-vllm serve <glm-5.2-model> \
-  --tensor-parallel-size <N> \
-  --prefill-context-parallel-size 1 \
-  --decode-context-parallel-size <N> \
-  --block-size <B> \
-  --cp-kv-cache-interleave-size <B> \
-  --additional-config '{"enable_dsa_cp": true}'
-```
-
-The replicated indexer increases indexer-cache memory in proportion to the
-DCP world size; the SFA KV cache itself remains sharded.  For this SFA CP path,
-`cp_kv_cache_interleave_size` must equal `block_size`.  A mismatched setting is
-overridden during configuration validation, but deployments should set both
-values explicitly to avoid relying on that fallback.
-
 ### Prefill Context Parallel (PCP)
 
 **Tokens Partition in Head-Tail Style**
