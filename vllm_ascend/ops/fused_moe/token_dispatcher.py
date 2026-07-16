@@ -503,30 +503,19 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             lora_dtype = split_lora_indices.dtype
             # Expand lora indices to match top_k expansion (each token
             # generates top_k dispatched rows).
-            expanded_lora = split_lora_indices.to(torch.float32).repeat_interleave(
-                topk_ids.shape[1]
-            )
+            expanded_lora = split_lora_indices.to(torch.float32).repeat_interleave(topk_ids.shape[1])
             # Apply the same local permute as hidden_states (first permute).
-            permuted_lora = expanded_lora[
-                reversed_local_input_permutation_mapping.to(torch.int64)
-            ]
+            permuted_lora = expanded_lora[reversed_local_input_permutation_mapping.to(torch.int64)]
             # All_to_all exchange: send lora indices to the expert-owning ranks.
-            _, exchanged_lora, handle = async_all_to_all(
-                permuted_lora, output_splits, input_splits, self.ep_group
-            )
+            _, exchanged_lora, handle = async_all_to_all(permuted_lora, output_splits, input_splits, self.ep_group)
             handle.wait()
 
             # Apply the second permute (sort by expert within the rank)
             # if there are multiple local experts.
-            if (
-                self.num_local_experts > 1
-                and global_input_tokens_local_experts_indices is not None
-            ):
+            if self.num_local_experts > 1 and global_input_tokens_local_experts_indices is not None:
                 # The second permute for hidden_states happens in
                 # _dispatch_postprocess; we apply the same here.
-                exchanged_lora = exchanged_lora[
-                    global_input_tokens_local_experts_indices.to(torch.int64)
-                ]
+                exchanged_lora = exchanged_lora[global_input_tokens_local_experts_indices.to(torch.int64)]
             exchanged_lora_indices = exchanged_lora.to(lora_dtype)
 
         dynamic_scale_after_all2all = None

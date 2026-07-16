@@ -318,10 +318,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     soc_version = get_ascend_device_type()
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
-    elif (
-        vllm_config.lora_config is not None
-        and vllm_config.parallel_config.enable_expert_parallel
-    ):
+    elif vllm_config.lora_config is not None and vllm_config.parallel_config.enable_expert_parallel:
         # LoRA + EP requires AlltoAll because the MC2/FusedMC2 paths
         # Ascend MoE LoRA cannot patch FusedMC2 path for dispatch_ffn_combine
         # is a single fused C++ op. This covers both normal model
