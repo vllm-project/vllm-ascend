@@ -169,10 +169,7 @@ class AscendConfig:
             "VLLM_ASCEND_ENABLE_FUSED_MC2",
             ascend_envs.VLLM_ASCEND_ENABLE_FUSED_MC2,
         )
-        assert self.enable_fused_mc2 in (0, 1), (
-            "enable_fused_mc2 must be 0 or 1, "
-            f"got {self.enable_fused_mc2}"
-        )
+        assert self.enable_fused_mc2 in (0, 1), f"enable_fused_mc2 must be 0 or 1, got {self.enable_fused_mc2}"
         self.enable_mlapo = self._get_config_value(
             additional_config,
             "enable_mlapo",
