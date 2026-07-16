@@ -151,6 +151,27 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0][0], 16)
 
+    def test_process_tokens_with_tail_clipped_block_ids_maps_tail_chunks(self):
+        db = ChunkedTokenDatabase(self.meta, block_size=128, partitions=None)
+        hashes = [bytes([idx % 251]) * 32 for idx in range(128)]
+
+        result = list(
+            db.process_tokens_with_block_ids(
+                128 * 128,
+                hashes,
+                [1000, 1001, 1002, 1003],
+            )
+        )
+
+        self.assertEqual(
+            [start for start, _, _, _ in result],
+            [124 * 128, 125 * 128, 126 * 128, 127 * 128],
+        )
+        self.assertEqual(
+            [block_id for _, _, _, block_id in result],
+            [1000, 1001, 1002, 1003],
+        )
+
     def test_process_tokens_token_len_shorter_than_all_blocks(self):
         hashes = ["a", "b", "c", "d"]
         # token_len=32 means only first 2 blocks valid
@@ -173,6 +194,32 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         hex_keys = [key.to_string() for _, _, key in db.process_tokens(32, hex_hashes)]
 
         self.assertEqual(raw_keys, hex_keys)
+
+    def test_store_mask_delegates_to_cache_coordinator(self):
+        coordinator = MagicMock()
+        coordinator.store_mask.return_value = ([False, True],)
+        self.db.set_cache_coordinator(coordinator)
+
+        mask = self.db.store_mask(32, num_prompt_tokens=24)
+
+        self.assertEqual(mask, ([False, True],))
+        coordinator.store_mask.assert_called_once_with(32, 24)
+
+    def test_load_mask_delegates_to_cache_coordinator(self):
+        coordinator = MagicMock()
+        coordinator.load_mask.return_value = ([False, True],)
+        self.db.set_cache_coordinator(coordinator)
+
+        mask = self.db.load_mask([b"h0", b"h1"], token_len=32)
+
+        self.assertEqual(mask, ([False, True],))
+        coordinator.load_mask.assert_called_once_with([b"h0", b"h1"], 32)
+
+    def test_mask_allows_chunk_uses_group_mask(self):
+        masks = ([False, True], [True, False])
+
+        self.assertTrue(self.db.mask_allows_chunk(masks, 0, 16))
+        self.assertFalse(self.db.mask_allows_chunk(masks, 1, 16))
 
     def test_get_block_hashes_rehashes_grouped_str_hashes(self):
         result = get_block_hashes(["a", "b", "c", "d"], group_block_size=32, hash_block_size=16)
@@ -217,6 +264,14 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         addr, size, block_id = self.db.prepare_value(0, 8, [5])
         self.assertEqual(size[0], 80)  # 160/16*8
         self.assertEqual(size[1], 160)  # 320/16*8
+
+    def test_prepare_value_uses_block_id_override(self):
+        addr, size, block_id = self.db.prepare_value(64, 80, [5], block_id=99)
+        self.assertEqual(block_id, 99)
+        self.assertEqual(addr[0], 1000 + 99 * 160)
+        self.assertEqual(addr[1], 2000 + 99 * 320)
+        self.assertEqual(size[0], 160)
+        self.assertEqual(size[1], 320)
 
     def test_prepare_value_layer(self):
         addr, size = self.db.prepare_value_layer(0, 16, [5, 6], layer_id=0)
@@ -273,6 +328,7 @@ class TestRequestTracker(unittest.TestCase):
         self.assertEqual(tracker.allocated_block_ids, [10, 20, 30])
         self.assertEqual(len(tracker.token_ids), 48)
         self.assertEqual(tracker.num_saved_tokens, 0)
+        self.assertEqual(tracker.num_prompt_tokens, 100)
 
     def test_from_new_request_nested_block_ids(self):
         new_req = MagicMock()
@@ -312,6 +368,7 @@ class TestReqMeta(unittest.TestCase):
             allocated_block_ids=[0, 1],
             num_saved_tokens=0,
             token_ids=list(range(32)),
+            num_prompt_tokens=40,
         )
         meta = ReqMeta.from_request_tracker(tracker, block_size=16, block_hashes=[b"h1", b"h2"])
         self.assertIsNotNone(meta)
@@ -319,6 +376,7 @@ class TestReqMeta(unittest.TestCase):
         self.assertTrue(meta.can_save)
         self.assertEqual(meta.token_len_chunk, 32)
         self.assertIsNone(meta.load_spec)
+        self.assertEqual(meta.num_prompt_tokens, 40)
 
     def test_from_request_tracker_skip_save(self):
         tracker = RequestTracker(
