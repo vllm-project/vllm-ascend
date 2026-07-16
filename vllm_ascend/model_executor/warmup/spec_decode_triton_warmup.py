@@ -85,8 +85,8 @@ def _warm_prepare_inputs_padded_kernel(
     num_reqs: int,
 ) -> None:
     draft_lens = torch.ones(num_reqs, dtype=torch.int32, device=device)
-    cu_num_draft_tokens = torch.cumsum(draft_lens, dim=0)
-    valid_sampled_tokens_count = torch.ones(num_reqs, dtype=torch.int32, device=device)
+    cu_num_draft_tokens = torch.cumsum(draft_lens, dim=0, dtype=torch.int32)
+    valid_sampled_tokens_count = torch.ones(num_reqs, dtype=torch.int64, device=device)
     query_start_loc = torch.arange(
         num_reqs + 1,
         dtype=torch.int32,
@@ -287,6 +287,12 @@ def _warm_rejection_random_sample_kernel(
         BLOCK_SIZE=block_size,
     )
 
+    constexpr_kwargs1 = dict(
+        NO_DRAFT_PROBS=not with_draft_probs,
+        ENABLE_REDUCE_SAMPLING=enable_reduce_sampling,
+        BLOCK_SIZE=block_size,
+    )
+
     if block_verify:
         rejection_random_sample_block_verify_kernel[(grid,)](
             *kernel_args,
@@ -298,6 +304,12 @@ def _warm_rejection_random_sample_kernel(
             *kernel_args,
             VOCAB_BLOCK_SIZE=_VOCAB_BLOCK_SIZE,
             **constexpr_kwargs,
+        )
+
+        rejection_random_sample_kernel[(grid,)](
+            *kernel_args,
+            VOCAB_BLOCK_SIZE=_VOCAB_BLOCK_SIZE,
+            **constexpr_kwargs1,
         )
 
 
