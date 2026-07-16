@@ -1,0 +1,10 @@
+name: Test Shanghai
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/test_shanghai.yml'
+jobs:
+  hello:
+    runs-on: linux-aarch64-950dt-8
+    steps:
+      - run: echo "Shanghai runner OK"
