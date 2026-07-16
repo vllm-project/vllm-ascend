@@ -142,6 +142,13 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to use MultiBlockPool for KV cache management
     "USE_MULTI_BLOCK_POOL":
     lambda: bool(int(os.getenv("USE_MULTI_BLOCK_POOL", '0'))),
+    # Default-off DSv4 static host-backed KV prototype.
+    # Supported family values: "c128" or empty string.
+    "VLLM_ASCEND_DSV4_HOST_KV_FAMILY":
+    lambda: os.getenv("VLLM_ASCEND_DSV4_HOST_KV_FAMILY", "").strip().lower(),
+    # Total host DRAM budget, in bytes, for the selected DSv4 host-backed KV family.
+    "VLLM_ASCEND_DSV4_HOST_KV_BYTES":
+    lambda: (int(value) if (value := os.getenv("VLLM_ASCEND_DSV4_HOST_KV_BYTES")) else None),
 }
 
 # end-env-vars-definition

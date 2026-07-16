@@ -19,6 +19,7 @@
 
 import ctypes
 import math
+import os
 import sys
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
@@ -78,6 +79,7 @@ from vllm.v1.worker.gpu_model_runner import (AsyncGPUModelRunnerOutput,
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import (AscendDSAMetadata,
@@ -148,6 +150,93 @@ U32_MAX = 0xFFFFFFFF
 @dataclass
 class GraphCaptureContext:
     stream: torch.npu.Stream
+
+
+def _acl_malloc_host(size: int) -> tuple[int, int]:
+    libacl = ctypes.CDLL("libascendcl.so")
+
+    host_ptr = ctypes.c_void_p()
+    ret = libacl.aclrtMallocHost(ctypes.byref(host_ptr), ctypes.c_size_t(size))
+    if ret != 0:
+        raise RuntimeError(
+            f"aclrtMallocHost failed: error {ret} (size={size})."
+        )
+
+    dev_ptr = ctypes.c_void_p()
+    ret = libacl.aclrtHostRegister(
+        host_ptr, ctypes.c_uint64(size), ctypes.c_int(0), ctypes.byref(dev_ptr)
+    )
+    if ret != 0:
+        libacl.aclrtFreeHost(host_ptr)
+        raise RuntimeError(f"aclrtHostRegister failed: error {ret}")
+
+    return host_ptr.value, dev_ptr.value
+
+
+def _compact_strides(shape: tuple[int, ...]) -> tuple[int, ...]:
+    strides = [1] * len(shape)
+    for i in range(len(shape) - 2, -1, -1):
+        strides[i] = strides[i + 1] * shape[i + 1]
+    return tuple(strides)
+
+
+def _make_host_tensor(dev_ptr_int: int, shape: tuple[int, ...],
+                      dtype: torch.dtype, device: torch.device,
+                      size_bytes: int) -> torch.Tensor:
+    storage = torch_npu._C._construct_storage_from_data_pointer(
+        dev_ptr_int, device, size_bytes
+    )
+    return torch.empty(0, dtype=dtype, device=device).set_(
+        storage, 0, shape, _compact_strides(shape)
+    )
+
+
+@dataclass
+class _HostKVAllocation:
+    host_ptr: int
+    size_bytes: int
+
+
+class _HostKVAllocationOwner:
+
+    def __init__(self, budget_bytes: Optional[int], device: torch.device):
+        self.budget_bytes = budget_bytes
+        self.device = device
+        self.used_bytes = 0
+        self.allocations: list[_HostKVAllocation] = []
+        self.libacl = ctypes.CDLL("libascendcl.so")
+        self.libacl.aclrtHostUnregister.argtypes = [ctypes.c_void_p]
+        self.libacl.aclrtHostUnregister.restype = ctypes.c_int
+        self.libacl.aclrtFreeHost.argtypes = [ctypes.c_void_p]
+        self.libacl.aclrtFreeHost.restype = ctypes.c_int
+
+    def alloc_int8_tensor(self, size_bytes: int) -> torch.Tensor:
+        if self.budget_bytes is not None and self.used_bytes + size_bytes > self.budget_bytes:
+            raise RuntimeError(
+                f"DSv4 host-backed KV exceeded budget: requested={self.used_bytes + size_bytes}, "
+                f"budget={self.budget_bytes}."
+            )
+        host_ptr, dev_ptr = _acl_malloc_host(size_bytes)
+        self.allocations.append(_HostKVAllocation(host_ptr, size_bytes))
+        self.used_bytes += size_bytes
+        return _make_host_tensor(dev_ptr, (size_bytes,), torch.int8,
+                                 self.device, size_bytes)
+
+    def close(self) -> None:
+        while self.allocations:
+            allocation = self.allocations.pop()
+            ptr = ctypes.c_void_p(allocation.host_ptr)
+            try:
+                self.libacl.aclrtHostUnregister(ptr)
+            finally:
+                self.libacl.aclrtFreeHost(ptr)
+        self.used_bytes = 0
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 @contextmanager
@@ -2098,6 +2187,17 @@ class NPUModelRunner(GPUModelRunner):
             invalid_req_indices,
         )
 
+    def __del__(self):
+        host_kv_owner = getattr(self, "_host_kv_owner", None)
+        if host_kv_owner is None:
+            return
+        try:
+            host_kv_owner.close()
+        except Exception:
+            pass
+        finally:
+            self._host_kv_owner = None
+
     def _build_dummy_attn_metadata(
         self,
         with_prefill: bool,
@@ -2607,8 +2707,18 @@ class NPUModelRunner(GPUModelRunner):
 
         if has_kv_transfer_group():
             if self.use_compress:
-                get_kv_transfer_group().register_kv_caches(
-                    kv_caches, kv_states)
+                if os.environ.get("VLLM_ASCEND_KV_HOST_SIDE") == "1":
+                    kv_transfer_group = get_kv_transfer_group()
+                    connector_worker = getattr(kv_transfer_group,
+                                               "connector_worker", None)
+                    if connector_worker is not None and hasattr(
+                            connector_worker, "_register_handlers"):
+                        connector_worker._register_handlers(kv_caches, {})
+                    else:
+                        kv_transfer_group.register_kv_caches(kv_caches)
+                else:
+                    get_kv_transfer_group().register_kv_caches(
+                        kv_caches, kv_states)
             else:
                 get_kv_transfer_group().register_kv_caches(kv_caches)
 
@@ -2781,8 +2891,29 @@ class NPUModelRunner(GPUModelRunner):
         # init kv cache tensors
         kv_cache_raw_tensors: dict[str, Union[torch.Tensor,
                                               Optional[torch.Tensor]]] = {}
+        layer_kv_cache_spec = {}
+        for group in kv_cache_config.kv_cache_groups:
+            for layer_name in group.layer_names:
+                layer_kv_cache_spec[layer_name] = group.kv_cache_spec
+
         # prefill disaggregation need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
+        host_kv_family = envs.VLLM_ASCEND_DSV4_HOST_KV_FAMILY
+        host_kv_budget = envs.VLLM_ASCEND_DSV4_HOST_KV_BYTES
+        host_kv_enabled = (
+            host_kv_family == "c128"
+            and host_kv_budget is not None
+            and host_kv_budget > 0
+            and self.vllm_config.kv_transfer_config is None
+        )
+        host_kv_owner = getattr(self, "_host_kv_owner", None)
+        if host_kv_owner is not None:
+            host_kv_owner.close()
+            self._host_kv_owner = None
+        if host_kv_enabled:
+            host_kv_owner = _HostKVAllocationOwner(host_kv_budget,
+                                                   self.device)
+            self._host_kv_owner = host_kv_owner
 
         def _get_aligned_tensor(size: torch.Size,
                                 dtype: torch.dtype,
@@ -2794,6 +2925,11 @@ class NPUModelRunner(GPUModelRunner):
             aligned_tensor = self._align_memory(original_tensor,
                                                 alignment)[:tensor_size]
             return aligned_tensor.view(dtype).view(size)
+
+        def _get_host_mapped_int8_tensor(size_bytes: int) -> torch.Tensor:
+            if host_kv_owner is None:
+                raise RuntimeError("DSv4 host-backed KV owner is not initialized.")
+            return host_kv_owner.alloc_int8_tensor(size_bytes)
 
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             # TODO: REFACTOR ME to sharing hybrid cache
@@ -2819,48 +2955,50 @@ class NPUModelRunner(GPUModelRunner):
                         if "linear_attn" in layer_name_inner:
                             kv_cache_raw_tensors[layer_name_inner] = tensor
                 elif "attn" in layer_name and self.use_compress:
-                    c4_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+                    layer_spec = layer_kv_cache_spec[layer_name]
                     num_blocks = kv_cache_config.num_blocks
-                    exact_layer_id = extract_layer_index(layer_name)
 
-                    if exact_layer_id % 2 == 0:
+                    if isinstance(layer_spec, Compress4AttentionSpec):
                         if self.vllm_config.kv_transfer_config is None:
                             c4_kv_tensor = torch.zeros(
-                                num_blocks * c4_spec.compress_kv_size_bytes,
+                                num_blocks * layer_spec.compress_kv_size_bytes,
                                 dtype=torch.int8,
                                 device=self.device,
                             )
                             indexer_k_tensor = torch.zeros(
-                                num_blocks * c4_spec.indexer_k_size_bytes,
+                                num_blocks * layer_spec.indexer_k_size_bytes,
                                 dtype=torch.int8,
                                 device=self.device,
                             )
                             indexer_scale_tensor = torch.zeros(
-                                num_blocks * c4_spec.indexer_scale_size_bytes,
+                                num_blocks * layer_spec.indexer_scale_size_bytes,
                                 dtype=torch.int8,
                                 device=self.device,
                             )
                         else:
                             c4_kv_tensor = _get_aligned_tensor(
                                 torch.Size([
-                                    num_blocks * c4_spec.compress_kv_size_bytes
+                                    num_blocks * layer_spec.compress_kv_size_bytes
                                 ]), torch.int8, alignment)
                             indexer_k_tensor = _get_aligned_tensor(
                                 torch.Size([
-                                    num_blocks * c4_spec.indexer_k_size_bytes
+                                    num_blocks * layer_spec.indexer_k_size_bytes
                                 ]), torch.int8, alignment)
                             indexer_scale_tensor = _get_aligned_tensor(
                                 torch.Size([
                                     num_blocks *
-                                    c4_spec.indexer_scale_size_bytes
+                                    layer_spec.indexer_scale_size_bytes
                                 ]), torch.int8, alignment)
 
                         kv_cache_raw_tensors[layer_name] = (
                             c4_kv_tensor, indexer_k_tensor,
                             indexer_scale_tensor)
 
-                    elif exact_layer_id % 2 != 0:
-                        if self.vllm_config.kv_transfer_config is None:
+                    elif isinstance(layer_spec, Compress128AttentionSpec):
+                        if host_kv_enabled:
+                            c128_kv_tensor = _get_host_mapped_int8_tensor(
+                                kv_cache_tensor.size)
+                        elif self.vllm_config.kv_transfer_config is None:
                             c128_kv_tensor = torch.zeros(
                                 kv_cache_tensor.size,
                                 dtype=torch.int8,
@@ -2871,6 +3009,11 @@ class NPUModelRunner(GPUModelRunner):
                                 torch.Size([kv_cache_tensor.size]), torch.int8,
                                 alignment)
                         kv_cache_raw_tensors[layer_name] = c128_kv_tensor
+                    else:
+                        raise TypeError(
+                            f"Unsupported compressed KV spec for {layer_name}: "
+                            f"{type(layer_spec).__name__}"
+                        )
 
                 elif "attn" in layer_name and layer_name not in kv_cache_raw_tensors.keys(
                 ):
@@ -2977,13 +3120,6 @@ class NPUModelRunner(GPUModelRunner):
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
-        c4_layers: list[int] | None = None
-        c128_layers: list[int] | None = None
-        if hasattr(self.model_config.hf_config, "num_hidden_layers"):
-            num_hidden_layers = self.model_config.hf_config.num_hidden_layers
-            c4_layers = list(range(0, num_hidden_layers, 2))
-            c128_layers = list(range(1, num_hidden_layers, 2))
-
         kv_caches: Dict[str, torch.Tensor] = {}
         for group in self._kv_cache_spec_attn_group_iterator():
             kv_cache_spec = group.kv_cache_spec
@@ -2992,56 +3128,55 @@ class NPUModelRunner(GPUModelRunner):
                 if layer_name in self.runner_only_attn_layers:
                     continue
 
-                if isinstance(kv_cache_spec, CompressAttentionSpec):
-                    dtype = kv_cache_spec.dtype
-                    layer_index = extract_layer_index(layer_name)
-                    assert c4_layers is not None
-                    assert c128_layers is not None
-                    if layer_index in c4_layers:
-                        c4_kv_tensor, indexer_k_tensor, indexer_scale_tensor = kv_cache_raw_tensors[
-                            layer_name]
-                        sum_page_size_bytes = c4_kv_tensor.numel(
-                        ) + indexer_k_tensor.numel(
-                        ) + indexer_scale_tensor.numel()
+                if isinstance(kv_cache_spec, Compress4AttentionSpec):
+                    c4_kv_tensor, indexer_k_tensor, indexer_scale_tensor = kv_cache_raw_tensors[
+                        layer_name]
+                    sum_page_size_bytes = c4_kv_tensor.numel(
+                    ) + indexer_k_tensor.numel(
+                    ) + indexer_scale_tensor.numel()
 
-                        num_blocks = sum_page_size_bytes // kv_cache_spec.page_size_bytes
-                        assert num_blocks == kv_cache_config.num_blocks, f"num_blocks: {num_blocks} kv_cache_config.num_blocks: {kv_cache_config.num_blocks}"
-                        c4_kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-                            num_blocks // 4, kv_cache_spec.block_size,
-                            kv_cache_spec.num_kv_heads,
-                            kv_cache_spec.head_size)
-                        indexer_k_cache_shape = self.attn_backend.get_kv_cache_shape(
-                            num_blocks // 4, kv_cache_spec.block_size,
-                            kv_cache_spec.num_kv_heads,
-                            kv_cache_spec.indexer_head_size)
-                        indexer_scale_shape = self.attn_backend.get_scale_shape(
-                            num_blocks // 4,
-                            kv_cache_spec.block_size,
-                            scale_size=1)
+                    num_blocks = sum_page_size_bytes // kv_cache_spec.page_size_bytes
+                    assert num_blocks == kv_cache_config.num_blocks, f"num_blocks: {num_blocks} kv_cache_config.num_blocks: {kv_cache_config.num_blocks}"
+                    c4_kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+                        num_blocks // 4, kv_cache_spec.block_size,
+                        kv_cache_spec.num_kv_heads,
+                        kv_cache_spec.head_size)
+                    indexer_k_cache_shape = self.attn_backend.get_kv_cache_shape(
+                        num_blocks // 4, kv_cache_spec.block_size,
+                        kv_cache_spec.num_kv_heads,
+                        kv_cache_spec.indexer_head_size)
+                    indexer_scale_shape = self.attn_backend.get_scale_shape(
+                        num_blocks // 4,
+                        kv_cache_spec.block_size,
+                        scale_size=1)
 
-                        c4_kv_cache = c4_kv_tensor.view(
-                            kv_cache_spec.nope_dtype).view(c4_kv_cache_shape)
-                        indexer_k_cache = indexer_k_tensor.view(
-                            kv_cache_spec.indexer_dtype).view(
-                                indexer_k_cache_shape)
-                        indexer_scale_cache = indexer_scale_tensor.view(
-                            kv_cache_spec.indexer_scale_dtype).view(
-                                indexer_scale_shape)
+                    c4_kv_cache = c4_kv_tensor.view(
+                        kv_cache_spec.nope_dtype).view(c4_kv_cache_shape)
+                    indexer_k_cache = indexer_k_tensor.view(
+                        kv_cache_spec.indexer_dtype).view(
+                            indexer_k_cache_shape)
+                    indexer_scale_cache = indexer_scale_tensor.view(
+                        kv_cache_spec.indexer_scale_dtype).view(
+                            indexer_scale_shape)
 
-                        kv_caches[layer_name] = (c4_kv_cache, indexer_k_cache,
-                                                 indexer_scale_cache)
-                    elif layer_index in c128_layers:
-                        c128_kv_tensor = kv_cache_raw_tensors[layer_name]
-                        sum_page_size_bytes = c128_kv_tensor.numel()
-                        num_blocks = sum_page_size_bytes // kv_cache_spec.page_size_bytes
-                        # TODO: now the block size of c128 layer is 16. Adapt me later
-                        c128_kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-                            num_blocks // 128, kv_cache_spec.block_size,
-                            kv_cache_spec.num_kv_heads,
-                            kv_cache_spec.head_size)
-                        c128_kv_cache = c128_kv_tensor.view(dtype).view(
-                            c128_kv_cache_shape)
-                        kv_caches[layer_name] = (c128_kv_cache, )
+                    kv_caches[layer_name] = (c4_kv_cache, indexer_k_cache,
+                                             indexer_scale_cache)
+                elif isinstance(kv_cache_spec, Compress128AttentionSpec):
+                    c128_kv_tensor = kv_cache_raw_tensors[layer_name]
+                    sum_page_size_bytes = c128_kv_tensor.numel()
+                    num_blocks = sum_page_size_bytes // kv_cache_spec.page_size_bytes
+                    c128_kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+                        num_blocks // 128, kv_cache_spec.block_size,
+                        kv_cache_spec.num_kv_heads,
+                        kv_cache_spec.head_size)
+                    c128_kv_cache = c128_kv_tensor.view(kv_cache_spec.dtype).view(
+                        c128_kv_cache_shape)
+                    kv_caches[layer_name] = (c128_kv_cache, )
+                elif isinstance(kv_cache_spec, CompressAttentionSpec):
+                    raise TypeError(
+                        f"Unsupported compressed KV spec for {layer_name}: "
+                        f"{type(kv_cache_spec).__name__}"
+                    )
 
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
