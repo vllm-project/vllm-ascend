@@ -185,14 +185,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._per_group_block_tables[gid] = block_table
         self._per_group_slot_mappings[gid] = slot_mapping
 
-    def _slot_mapping_buffer_for_gid(self, gid: int, *, context: bool) -> torch.Tensor:
-        # primary gid reuses the __init__ single-group buffers; non-primary
-        # gids use the per-gid buffers pre-allocated in initialize_attn_backend.
-        # No fallback: a missing gid raises KeyError (fast fail).
-        if gid == self.kv_cache_gid:
-            return self._context_slot_mapping_buffer if context else self._slot_mapping_buffer
-        buffers = self._per_group_context_slot_mapping_buffers if context else self._per_group_query_slot_mapping_buffers
-        return buffers[gid]
 
     def set_inputs_first_pass(
         self,
@@ -252,8 +244,8 @@ class AscendDSparkProposer(AscendDflashProposer):
                     out_input_ids=self.input_ids,
                     out_context_positions=self._context_positions_buffer,
                     out_query_positions=self.positions,
-                    out_context_slot_mapping=self._slot_mapping_buffer_for_gid(gid, context=True),
-                    out_query_slot_mapping=self._slot_mapping_buffer_for_gid(gid, context=False),
+                    out_context_slot_mapping=self._per_group_context_slot_mapping_buffers[gid],
+                    out_query_slot_mapping=self._per_group_query_slot_mapping_buffers[gid],
                     out_token_indices=token_indices_to_sample,
                     # Block table
                     block_table=gid_block_table,
@@ -292,7 +284,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         # to compute self._context_slots
         if block_tables_by_gid:
             self._dspark_context_slot_mappings_by_gid = {
-                gid: self._slot_mapping_buffer_for_gid(gid, context=True)[:self._dflash_num_context]
+                gid: self._per_group_context_slot_mapping_buffers[gid][:self._dflash_num_context]
                 for gid in block_tables_by_gid
             }
             self._context_slots = [self._dspark_context_slot_mappings_by_gid[gidx] for gidx in self._layer_group_idx]
@@ -319,7 +311,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.slot_mapping = self._slot_mapping_buffer[:num_query_total]
         if block_tables_by_gid:
             self._per_group_query_slot_mapping_buffers = {
-                gid: self._slot_mapping_buffer_for_gid(gid, context=False) for gid in block_tables_by_gid
+                gid: self._per_group_query_slot_mapping_buffers[gid] for gid in block_tables_by_gid
             }
             if primary_gid in self._per_group_query_slot_mapping_buffers:
                 cad.slot_mapping = self._per_group_query_slot_mapping_buffers[primary_gid][:num_query_total]
