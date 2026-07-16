@@ -401,7 +401,7 @@ def clear_all_aclgraph_entries():
     """
     torch.npu.synchronize()
 
-    for wrapper in list(ACLGraphWrapper._all_instances):
+    for wrapper in list(_acl_graph_wrappers):
         for entry in wrapper.concrete_aclgraph_entries.values():
             if entry.aclgraph is not None:
                 entry.aclgraph.reset()
@@ -418,5 +418,5 @@ def clear_all_aclgraph_entries():
     if hasattr(current_platform.__class__, "_global_graph_pool"):
         current_platform.__class__._global_graph_pool = None
     new_pool = current_platform.get_global_graph_pool()
-    for wrapper in list(ACLGraphWrapper._all_instances):
+    for wrapper in list(_acl_graph_wrappers):
         wrapper.graph_pool = new_pool
