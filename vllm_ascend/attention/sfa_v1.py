@@ -303,16 +303,13 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
                 for _ in range(spec_token_num)
             ]
             self.spec_group_len = [
-                torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device)
-                for _ in range(spec_token_num)
+                torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device) for _ in range(spec_token_num)
             ]
             self.spec_group_key_idx = [
-                torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device)
-                for _ in range(spec_token_num)
+                torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device) for _ in range(spec_token_num)
             ]
             self.spec_group_key_cache_idx = [
-                torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device)
-                for _ in range(spec_token_num)
+                torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device) for _ in range(spec_token_num)
             ]
 
         self.reorder_batch_threshold = self.decode_threshold
