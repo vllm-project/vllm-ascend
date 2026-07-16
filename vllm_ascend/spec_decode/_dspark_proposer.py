@@ -41,6 +41,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                 "DSpark probabilistic draft sampling is not supported on the v1 "
                 "model runner; use greedy (the default) instead."
             )
+        self._dspark_seed_buffer = torch.zeros(self.max_batch_size, dtype=torch.int64, device=device)
         # DSpark is not supported in vllm v1, so related property needs to be reset here.
         self.hidden_size = vllm_config.speculative_config.draft_model_config.get_hidden_size()
         self.hidden_states = torch.zeros(
@@ -270,14 +271,11 @@ class AscendDSparkProposer(AscendDflashProposer):
         num_prefill_reqs=0,
         num_decode_reqs=0,
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata, tuple[Any, Any] | None]:
-        del (
-            target_token_ids,
-            token_indices_to_sample,
-            req_scheduled_tokens,
-            long_seq_metadata,
-            num_prefill_reqs,
-            num_decode_reqs,
-        )
+        # The initial input token of markovHead is the next token
+        n = next_token_ids.shape[0]
+        self._dspark_seed_buffer[:n].copy_(next_token_ids)
+        if n < self._dspark_seed_buffer.shape[0]:
+            self._dspark_seed_buffer[n:].fill_(0)
         batch_size = cad.num_reqs
         block_size = self.num_speculative_tokens
         num_query_total = batch_size * block_size

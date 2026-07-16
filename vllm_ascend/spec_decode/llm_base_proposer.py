@@ -112,36 +112,6 @@ def split_inputs_tp_to_sp(hidden_states, out):
     return out[:padded_num_tokens_per_rank]
 
 
-def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
-    tp_group = get_tp_group()
-    B, V_local = logits.shape
-    rank = tp_group.rank_in_group
-
-    local_max_logits, local_max_indices = logits.max(dim=-1)
-
-    local_global_idx = local_max_indices + rank * V_local  # [B]
-
-    # [B, world_size]
-    gathered_logits = tp_group.all_gather(local_max_logits.unsqueeze(-1), dim=-1)
-    gathered_global_idx = tp_group.all_gather(local_global_idx.unsqueeze(-1), dim=-1)  # [B, world_size]
-    global_max_rank = gathered_logits.argmax(dim=-1)  # [B]
-    target_argmax = gathered_global_idx.gather(dim=-1, index=global_max_rank.unsqueeze(-1)).squeeze(-1)  # [B]
-    return target_argmax
-
-
-def _dspark_reduce_sample_enabled() -> bool:
-    try:
-        return bool(get_ascend_config().enable_reduce_sample)
-    except RuntimeError:
-        return False
-
-
-def _dspark_greedy_sample(logits: torch.Tensor) -> torch.Tensor:
-    if _dspark_reduce_sample_enabled():
-        return greedy_sample(logits)
-    return logits.argmax(dim=-1)
-
-
 # TODO(lilinsiman): Remove this code segment after future versions of the GLM
 # series models support graph input for speculative inference.
 def _is_glm_model(model_config) -> bool:
@@ -176,7 +146,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             runner._use_aclgraph() if runner else False,
             device,
         )
-
+        blk = 1 + self.num_speculative_tokens
+        self._dspark_draft_buffer = torch.zeros((self.max_batch_size, blk), dtype=torch.int64, device=device)
         self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
         self.use_compress = hasattr(self.vllm_config.model_config.hf_config, "compress_ratios")
         self.has_gdn = check_gdn_layer(self.vllm_config)
@@ -1212,25 +1183,21 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             if self.method == "dspark":
                 if hasattr(self, "_dspark_draft_buffer"):
-                    # Dspark speculation requires autoregressive applications of MarkovHead and ConfidenceHead.
-                    # The MarkovHead performs bias correction on logits.
-                    # The ConfidenceHead predicts the expected acceptance length of tokens(Not yet achieved).
+                # Dspark speculation requires autoregressive applications of MarkovHead and ConfidenceHead.
+                # The MarkovHead performs bias correction on logits.
+                # The ConfidenceHead predicts the expected acceptance length of tokens(Not yet achieved).
                     raw_logits = self.model.compute_logits(last_hidden_states)
-                    logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
-                    num_blk = logits.shape[0]
-                    draft_token_ids = self._dspark_draft_buffer[:num_blk]
-                    draft_token_ids[:, 0].copy_(self._dspark_seed_buffer[:num_blk])
-                    for idx in range(self.num_speculative_tokens):
-                        markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
-                        logits_bias = self.model.markov_bias(markov_emb)
-                        logits[:, idx].add_(logits_bias)
-                        draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
                 else:
-                    draft_token_ids = self._sample_sequential(
-                        batch_size,
-                        hidden_states,
-                        token_indices_to_sample,
-                    )
+                    raw_logits = self.model.compute_logits(hidden_states)
+                logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
+                num_blk = logits.shape[0]
+                draft_token_ids = self._dspark_draft_buffer[:num_blk]
+                draft_token_ids[:, 0].copy_(self._dspark_seed_buffer[:num_blk])
+                for idx in range(self.num_speculative_tokens):
+                    markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
+                    logits_bias = self.model.markov_bias(markov_emb)
+                    logits[:, idx].add_(logits_bias)
+                    draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable():
@@ -1246,10 +1213,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
             if self.method == "dspark":
-                if hasattr(self, "_dspark_draft_buffer"):
-                    return draft_token_ids[:, 1:]
-                else:
-                    return draft_token_ids
+                return draft_token_ids[:, 1:]
             else:
                 # [batch_size, 1]
                 return draft_token_ids.view(-1, self.num_speculative_tokens)
@@ -2255,26 +2219,3 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             buf[num_actual_tokens:num_input_tokens].fill_(-1)
         for buf in getattr(self, "_per_group_context_slot_mapping_buffers", {}).values():
             buf[self._dflash_num_context:].fill_(-1)
-
-    def _sample_sequential(
-        self,
-        num_reqs: int,
-        head_hidden: torch.Tensor,
-        token_indices_to_sample: torch.Tensor,
-    ) -> torch.Tensor:
-        block_size = self.num_speculative_tokens
-        num_sample = num_reqs * block_size
-        sample_hidden_states = head_hidden[token_indices_to_sample[:num_sample]]
-        base_logits = self.model.compute_logits(sample_hidden_states)
-        vocab_size = base_logits.shape[-1]
-        base_logits = base_logits.view(num_reqs, block_size, vocab_size)
-
-        prev_ids = self._markov_anchor_tokens[:num_reqs]
-        for idx in range(block_size):
-            markov_embed = self.model.markov_embed(prev_ids)
-            markov_bias = self.model.markov_bias(markov_embed)
-            logits = base_logits[:, idx, :] + markov_bias
-            draft_ids = _dspark_greedy_sample(logits)
-            self._markov_draft_tokens[:num_reqs, idx].copy_(draft_ids)
-            prev_ids = self._markov_draft_tokens[:num_reqs, idx]
-        return self._markov_draft_tokens[:num_reqs, :block_size]
