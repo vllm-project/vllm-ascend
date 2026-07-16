@@ -34,9 +34,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     ReqMeta,
     RequestTracker,
     infer_group_cache_families,
-    infer_kv_cache_layout,
     infer_tp_mismatch_info,
     normalize_block_ids_by_group,
+    resolve_ascend_store_cache_layout,
 )
 
 
@@ -64,11 +64,10 @@ class KVPoolScheduler:
         self.pcp_size = getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1)
         self.dcp_size = getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1)
         self.kv_cache_group_families = self._infer_group_families()
-        layout = infer_kv_cache_layout(
+        layout = resolve_ascend_store_cache_layout(
             vllm_config,
             kv_cache_config,
             self.kv_cache_group_families,
-            self.pcp_size * self.dcp_size,
         )
         self.use_hybrid = layout.use_hybrid
         self.kv_cache_group_ids = (
@@ -80,7 +79,7 @@ class KVPoolScheduler:
         self.grouped_block_size = list(layout.grouped_block_sizes)
         self.hash_block_size = layout.hash_block_size
         self._block_size = self.grouped_block_size[0]
-        self.lcm_block_size = layout.lcm_block_size
+        self.lcm_block_size = layout.scheduler_block_size
         self.cache_transfer_granularity = layout.transfer_granularity
         self.need_truncate = self.use_compress
         self.num_swa_blocks = self._infer_swa_blocks()

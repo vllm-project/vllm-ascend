@@ -25,6 +25,7 @@ Usage at the top of each test file:
 
 import importlib.util
 import logging
+import math
 import os
 import sys
 import types
@@ -175,11 +176,15 @@ class _FakeKVCacheSpec:
         return self.block_size * num_kv_heads * head_size * int(dtype_size or 1) * 2
 
 
-class _FakeFullAttentionSpec(_FakeKVCacheSpec):
+class _FakeAttentionSpec(_FakeKVCacheSpec):
     pass
 
 
-class _FakeSlidingWindowSpec(_FakeKVCacheSpec):
+class _FakeFullAttentionSpec(_FakeAttentionSpec):
+    pass
+
+
+class _FakeSlidingWindowSpec(_FakeAttentionSpec):
     def __init__(self, block_size=16, sliding_window=32, **kwargs):
         super().__init__(block_size=block_size, sliding_window=sliding_window, **kwargs)
 
@@ -222,6 +227,29 @@ class _FakeKVCacheConfig:
 
 _kv_cache_utils_mod.KVCacheBlock = _FakeKVCacheBlock  # type: ignore[attr-defined]
 _kv_cache_utils_mod.BlockHashList = list  # type: ignore[attr-defined]
+
+
+def _fake_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config):
+    pcp = vllm_config.parallel_config.prefill_context_parallel_size
+    dcp = vllm_config.parallel_config.decode_context_parallel_size
+    cp_scale = (pcp if isinstance(pcp, int) else 1) * (dcp if isinstance(dcp, int) else 1)
+    groups = kv_cache_config.kv_cache_groups
+    if len(groups) <= 1:
+        block_size = vllm_config.cache_config.block_size * cp_scale
+        return block_size, block_size
+    group_block_sizes = [
+        group.kv_cache_spec.block_size * cp_scale
+        if isinstance(group.kv_cache_spec, _FakeAttentionSpec)
+        else group.kv_cache_spec.block_size
+        for group in groups
+    ]
+    scheduler_block_size = math.lcm(*group_block_sizes)
+    requested = vllm_config.cache_config.hash_block_size
+    hash_block_size = requested if isinstance(requested, int) else math.gcd(*group_block_sizes)
+    return scheduler_block_size, hash_block_size
+
+
+_kv_cache_utils_mod.resolve_kv_cache_block_sizes = _fake_resolve_kv_cache_block_sizes  # type: ignore[attr-defined]
 
 
 class _FakeBlockPool:
@@ -321,6 +349,7 @@ _single_type_mod.spec_manager_map = {  # type: ignore[attr-defined]
 
 _kv_interface_mod: Any = sys.modules["vllm.v1.kv_cache_interface"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
 _kv_interface_mod.KVCacheSpec = _FakeKVCacheSpec  # type: ignore[attr-defined]
+_kv_interface_mod.AttentionSpec = _FakeAttentionSpec  # type: ignore[attr-defined]
 _kv_interface_mod.FullAttentionSpec = _FakeFullAttentionSpec  # type: ignore[attr-defined]
 _kv_interface_mod.SlidingWindowSpec = _FakeSlidingWindowSpec  # type: ignore[attr-defined]
 _kv_interface_mod.MambaSpec = _FakeMambaSpec  # type: ignore[attr-defined]

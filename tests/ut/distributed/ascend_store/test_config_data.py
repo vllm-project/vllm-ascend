@@ -20,7 +20,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+# isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
     ChunkedTokenDatabase,
@@ -32,8 +34,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     ReqMeta,
     RequestTracker,
     get_block_hashes,
-    infer_kv_cache_layout,
+    resolve_ascend_store_cache_layout,
 )
+# isort: on
 
 _GROUPED_BLOCK_HASH_DOMAIN = b"vllm-ascend-grouped-block-hash-v1\0"
 _GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
@@ -66,44 +69,51 @@ class TestKeyMetadata(unittest.TestCase):
         self.assertEqual(meta.pp_rank, 0)
 
 
-class TestKVCacheLayout(unittest.TestCase):
+class TestAscendStoreCacheLayout(unittest.TestCase):
     @staticmethod
-    def _config(block_size=16, hash_block_size=8, disable_hybrid=False):
+    def _config(block_size=16, hash_block_size=8):
         return SimpleNamespace(
             cache_config=SimpleNamespace(
                 block_size=block_size,
                 hash_block_size=hash_block_size,
             ),
-            scheduler_config=SimpleNamespace(
-                disable_hybrid_kv_cache_manager=disable_hybrid,
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=2,
+                decode_context_parallel_size=1,
             ),
         )
 
-    def test_layout_inference(self):
-        kv_cache_config = SimpleNamespace(
+    def test_layout_resolution(self):
+        attention_config = SimpleNamespace(
             kv_cache_groups=[
-                SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16)),
-                SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=32)),
+                SimpleNamespace(kv_cache_spec=FullAttentionSpec(block_size=16)),
+                SimpleNamespace(kv_cache_spec=FullAttentionSpec(block_size=32)),
+            ]
+        )
+        mamba_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(kv_cache_spec=FullAttentionSpec(block_size=16)),
+                SimpleNamespace(kv_cache_spec=MambaSpec(block_size=32)),
             ]
         )
         cases = [
-            (self._config(), None, 2, False, (16,), (32,), 16, 32, 32),
-            (self._config(), kv_cache_config, 2, True, (16, 32), (32, 64), 16, 64, 256),
-            (self._config(disable_hybrid=True), kv_cache_config, 1, False, (16,), (16,), 8, 16, 16),
+            (None, False, (16,), (32,), 32, 32, 32),
+            (attention_config, True, (16, 32), (32, 64), 8, 64, 256),
+            (mamba_config, True, (16, 32), (32, 32), 8, 32, 128),
         ]
-        for config, cache_config, cp_scale, use_hybrid, original, grouped, hash_size, lcm, transfer in cases:
-            with self.subTest(use_hybrid=use_hybrid, cp_scale=cp_scale):
-                layout = infer_kv_cache_layout(config, cache_config, ["default", "c4"], cp_scale)
+        for cache_config, use_hybrid, original, grouped, hash_size, scheduler_size, transfer in cases:
+            with self.subTest(use_hybrid=use_hybrid, grouped=grouped):
+                layout = resolve_ascend_store_cache_layout(self._config(), cache_config, ["default", "c4"])
                 self.assertEqual(
                     (
                         layout.use_hybrid,
                         layout.original_block_sizes,
                         layout.grouped_block_sizes,
                         layout.hash_block_size,
-                        layout.lcm_block_size,
+                        layout.scheduler_block_size,
                         layout.transfer_granularity,
                     ),
-                    (use_hybrid, original, grouped, hash_size, lcm, transfer),
+                    (use_hybrid, original, grouped, hash_size, scheduler_size, transfer),
                 )
 
 

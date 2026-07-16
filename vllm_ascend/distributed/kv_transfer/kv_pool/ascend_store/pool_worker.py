@@ -38,8 +38,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     ReqMeta,
     get_block_hashes,
     infer_group_cache_families,
-    infer_kv_cache_layout,
     infer_tp_mismatch_info,
+    resolve_ascend_store_cache_layout,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     AscendStoreCoordinator,
@@ -134,11 +134,10 @@ class KVPoolWorker:
         self.backend_name = self.backend.lower()
         self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
         self.kv_cache_group_families = self._infer_group_families()
-        layout = infer_kv_cache_layout(
+        layout = resolve_ascend_store_cache_layout(
             vllm_config,
             kv_cache_config,
             self.kv_cache_group_families,
-            self.pcp_size * self.dcp_size,
         )
         self.use_hybrid = layout.use_hybrid
         self.use_mamba = self._uses_mamba_kv_cache(self.use_hybrid, kv_cache_config)
@@ -146,7 +145,7 @@ class KVPoolWorker:
         self.grouped_block_size = list(layout.grouped_block_sizes)
         self.hash_block_size = layout.hash_block_size
         self.block_size = self.grouped_block_size[0]
-        self.lcm_block_size = layout.lcm_block_size
+        self.lcm_block_size = layout.scheduler_block_size
         self.num_kv_cache_groups = len(self.grouped_block_size)
         self.group_uses_align_state = self._infer_group_uses_align_state()
         self.cache_transfer_granularity = layout.transfer_granularity
