@@ -18,7 +18,7 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
     DCPContext,
-    DCPQueryGatherContext,
+    DCPGatherContext,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enabling_mlapo, split_decodes_and_prefills
 from vllm_ascend.device.device_op import DeviceOperator
@@ -815,6 +815,20 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
             slot_mapping = slot_mapping[: dsa_cp_context.num_tokens_pad]
         dsa_cp_context.slot_mapping_cp = slot_mapping[dsa_cp_context.local_start : dsa_cp_context.local_end_with_pad]
 
+    def _build_compact_kv_gather_metadata(
+        self,
+        dcp_block_table: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Build the compact cross-DCP KV view used by prefill attention."""
+        valid_block_ids, compact_block_table = dcp_block_table.flatten().unique(return_inverse=True)
+        compact_block_table = compact_block_table.view_as(dcp_block_table)
+        num_blocks = valid_block_ids.shape[0]
+        dcp_rank_arange = self.arange_buffer[: self.dcp_size]
+        remapped_block_table = (
+            compact_block_table.unsqueeze(-1) + (dcp_rank_arange * num_blocks).view(1, 1, -1).to(dcp_block_table)
+        ).reshape(dcp_block_table.shape[0], -1)
+        return valid_block_ids, remapped_block_table.to(torch.int32)
+
     def _build_with_replicated_view_metadata(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
@@ -853,11 +867,26 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
         self.dcp_local_seq_lens_buf[:num_reqs].copy_(local_seq_lens_src, non_blocking=True)
         local_seq_lens = self.dcp_local_seq_lens_buf[:num_reqs]
 
+        num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
+            common_attn_metadata,
+            decode_threshold=self.decode_threshold,
+            treat_short_extends_as_decodes=False,
+        )
+        dcp_block_table = dcp_block_table[:num_reqs]
+        kv_gather_block_ids = None
+        kv_gather_block_table = None
+        if num_prefills > 0:
+            kv_gather_block_ids, kv_gather_block_table = self._build_compact_kv_gather_metadata(dcp_block_table)
         metadata.dcp_context = DCPContext(
             slot_mapping=dcp_slot_mapping[:num_input_tokens],
-            block_table=dcp_block_table[:num_reqs],
+            block_table=dcp_block_table,
             seq_lens=local_seq_lens,
+            kv_gather_block_ids=kv_gather_block_ids,
+            kv_gather_block_table=kv_gather_block_table,
         )
+        metadata.num_decodes = num_decodes
+        metadata.num_decode_tokens = num_decode_tokens
+        metadata.num_prefills = num_prefills
         self._update_dsa_cp_slot_mapping_for_dcp(metadata, dcp_slot_mapping, num_input_tokens)
         return metadata
 
@@ -966,6 +995,74 @@ class AscendSFADCPImpl(AscendSFAImpl):
         device = self.q_proj.weight.device
         self._remap_order = torch.arange(self._dcp_index_topk, dtype=torch.float32, device=device)
         self._remap_invalid_index = torch.tensor(-1.0, dtype=torch.float32, device=device)
+
+    @staticmethod
+    def _has_prefill(attn_metadata: M) -> bool:
+        return attn_metadata.num_prefills > 0
+
+    def _record_dcp_kv_gather_context(
+        self,
+        kv_cache: tuple[torch.Tensor, ...],
+        attn_metadata: M,
+    ) -> None:
+        """Start the compact KV all-gather used by prefill/mixed DCP batches."""
+        if not self._has_prefill(attn_metadata):
+            return
+        assert attn_metadata.dcp_context is not None, "DCP SFA requires attn_metadata.dcp_context."
+        assert self.dcp_group is not None, "DCP SFA requires dcp_group when dcp_size > 1."
+
+        valid_block_ids = attn_metadata.dcp_context.kv_gather_block_ids
+        block_table = attn_metadata.dcp_context.kv_gather_block_table
+        assert valid_block_ids is not None and block_table is not None
+        kv = torch.index_select(kv_cache[0], 0, valid_block_ids)
+        split_sizes: tuple[int, ...]
+        if self.use_sparse_c8_sfa:
+            # Sparse C8 stores nope, rope, and quantization data in one packed
+            # SFA KV cache. The remaining cache entries belong to the indexer
+            # and must not participate in the DCP SFA KV all-gather.
+            gather_input = kv.contiguous()
+            split_sizes = (kv.shape[-1],)
+        else:
+            if len(kv_cache) < 2:
+                raise RuntimeError("DCP SFA KV all-gather requires nope and rope KV caches.")
+            key_rope = torch.index_select(kv_cache[1], 0, valid_block_ids)
+            if kv.shape[:-1] != key_rope.shape[:-1] or kv.dtype != key_rope.dtype:
+                raise RuntimeError(
+                    "Cannot fuse DCP KV gather for KV/nope and KV/rope caches with "
+                    f"shapes {tuple(kv.shape)} / {tuple(key_rope.shape)} and dtypes {kv.dtype} / {key_rope.dtype}."
+                )
+            gather_input = torch.cat([kv, key_rope], dim=-1).contiguous()
+            split_sizes = (kv.shape[-1], key_rope.shape[-1])
+        attn_metadata.dcp_context.gather_context = self._start_dcp_gather(
+            gather_input,
+            dim=0,
+            split_sizes=split_sizes,
+        )
+
+    def _start_dcp_gather(
+        self,
+        x: torch.Tensor,
+        dim: int,
+        split_sizes: tuple[int, ...],
+    ) -> DCPGatherContext:
+        gathered, handle, restore_perm = self._all_gather_dim_async(x, dim)
+        return DCPGatherContext(
+            gathered=gathered,
+            handle=handle,
+            restore_perm=restore_perm,
+            split_sizes=split_sizes,
+        )
+
+    @staticmethod
+    def _finish_dcp_gather(
+        context: DCPGatherContext,
+    ) -> tuple[torch.Tensor, ...]:
+        if context.handle is not None:
+            context.handle.wait()
+        gathered = context.gathered
+        if context.restore_perm is not None:
+            gathered = gathered.permute(context.restore_perm).contiguous()
+        return torch.split(gathered, context.split_sizes, dim=-1)
 
     def _all_gather_dim_async(
         self,
@@ -1096,7 +1193,7 @@ class AscendSFADCPImpl(AscendSFAImpl):
         self,
         ql_nope: torch.Tensor,
         q_pe: torch.Tensor,
-    ) -> DCPQueryGatherContext:
+    ) -> DCPGatherContext:
         query_gather_dim = 0 if self.enable_dsa_cp else 1
         assert self.dcp_group is not None, "DCP query gather requires dcp_group when dcp_size > 1."
         if ql_nope.shape[:-1] != q_pe.shape[:-1] or ql_nope.dtype != q_pe.dtype:
@@ -1106,15 +1203,16 @@ class AscendSFADCPImpl(AscendSFAImpl):
                 f"and dtypes {ql_nope.dtype} / {q_pe.dtype}."
             )
 
-        ql_nope_dim = ql_nope.shape[-1]
-        q_pe_dim = q_pe.shape[-1]
         # Avoid back-to-back DCP all_gather calls for the two SFA query
         # fragments. On Ascend the separate gathers can leave SFA with an
         # incomplete stream dependency on the first prefill. DSA-CP restores
         # token shards on dim 0; native DCP restores query shards on dim 1.
         fused_q = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
-        gathered, handle, restore_perm = self._all_gather_dim_async(fused_q, query_gather_dim)
-        return DCPQueryGatherContext(gathered, handle, restore_perm, ql_nope_dim, q_pe_dim)
+        return self._start_dcp_gather(
+            fused_q,
+            dim=query_gather_dim,
+            split_sizes=(ql_nope.shape[-1], q_pe.shape[-1]),
+        )
 
     def _record_dcp_query_gather_context(
         self,
@@ -1122,19 +1220,13 @@ class AscendSFADCPImpl(AscendSFAImpl):
         q_pe: torch.Tensor,
         attn_metadata: M,
     ) -> None:
+        # Prefill/mixed batches gather compact KV after its cache write instead.
+        # Keeping Q local avoids a full query all-gather and the subsequent LSE
+        # output merge in the all-KV attention path.
+        if self._has_prefill(attn_metadata):
+            return
         assert attn_metadata.dcp_context is not None, "DCP SFA requires attn_metadata.dcp_context."
-        attn_metadata.dcp_context.query_gather_context = self._start_dcp_query_gather(ql_nope, q_pe)
-
-    def _finish_all_gather_query_for_dcp(
-        self,
-        context: DCPQueryGatherContext,
-    ) -> tuple[torch.Tensor, ...]:
-        if context.handle is not None:
-            context.handle.wait()
-        gathered = context.gathered
-        if context.restore_perm is not None:
-            gathered = gathered.permute(context.restore_perm).contiguous()
-        return torch.split(gathered, [context.ql_nope_dim, context.q_pe_dim], dim=-1)
+        attn_metadata.dcp_context.gather_context = self._start_dcp_query_gather(ql_nope, q_pe)
 
     def _execute_sparse_flash_attention_process(
         self,
@@ -1149,10 +1241,43 @@ class AscendSFADCPImpl(AscendSFAImpl):
         assert attn_metadata.dcp_context is not None, "DCP SFA requires attn_metadata.dcp_context."
         assert self.dcp_group is not None, "DCP SFA requires dcp_group when dcp_size > 1."
         dcp_context = attn_metadata.dcp_context
-        query_gather_context = dcp_context.query_gather_context
-        dcp_context.query_gather_context = None
-        if query_gather_context is None:
-            query_gather_context = self._start_dcp_query_gather(ql_nope, q_pe)
+        if self._has_prefill(attn_metadata):
+            gather_context = dcp_context.gather_context
+            dcp_context.gather_context = None
+            if gather_context is None:
+                # The normal forward path starts this after KV writes so it can
+                # overlap indexer selection. Keep a synchronous fallback for
+                # callers that invoke this method outside that path.
+                self._record_dcp_kv_gather_context(kv_cache, attn_metadata)
+                gather_context = dcp_context.gather_context
+                dcp_context.gather_context = None
+            assert gather_context is not None
+            gathered_kv_cache = self._finish_dcp_gather(gather_context)
+            block_table = dcp_context.kv_gather_block_table
+            assert block_table is not None
+            # The gathered KV cache is complete, so each rank can attend with
+            # its local Q heads/tokens directly. In particular, DSA-CP keeps
+            # its token shard local; no Q all-gather, sparse-index remap, LSE,
+            # or output all-to-all merge is required.
+            attn_output = DeviceOperator.execute_sparse_flash_attention_process(
+                self,
+                ql_nope,
+                q_pe,
+                gathered_kv_cache,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+                block_table=block_table,
+                sparse_mode=3,
+                return_lse=False,
+            )
+            return attn_output
+
+        gather_context = dcp_context.gather_context
+        dcp_context.gather_context = None
+        if gather_context is None:
+            gather_context = self._start_dcp_query_gather(ql_nope, q_pe)
         if self.enable_dsa_cp:
             # DSA-CP shards the token sequence. Restore the flat token order for
             # SFA, and use the original full query lengths for varlen metadata.
@@ -1162,36 +1287,25 @@ class AscendSFADCPImpl(AscendSFAImpl):
             # DCP-local KV shard.
             topk_indices = self.dcp_group.all_gather(topk_indices.contiguous(), dim=0)
         topk_indices = self._remap_sparse_indices(topk_indices)
-        ql_nope, q_pe = self._finish_all_gather_query_for_dcp(query_gather_context)
-        kv = kv_cache[0]
-        key_rope = kv_cache[1]
-        sfa_output, softmax_max, softmax_sum = torch.ops._C_ascend.npu_sparse_flash_attention(
-            query=ql_nope,
-            key=kv,
-            value=kv,
-            sparse_indices=topk_indices,
-            scale_value=self.scale,
-            sparse_block_size=1,
-            block_table=attn_metadata.dcp_context.block_table,
-            actual_seq_lengths_query=actual_seq_lengths_query,
-            actual_seq_lengths_kv=attn_metadata.dcp_context.seq_lens,
-            query_rope=q_pe,
-            key_rope=key_rope,
-            layout_query="TND",
-            layout_kv="PA_BSND",
+        ql_nope, q_pe = self._finish_dcp_gather(gather_context)
+        sfa_output, softmax_lse = DeviceOperator.execute_sparse_flash_attention_process(
+            self,
+            ql_nope,
+            q_pe,
+            kv_cache,
+            topk_indices,
+            attn_metadata,
+            actual_seq_lengths_query,
+            dcp_context.seq_lens,
+            block_table=dcp_context.block_table,
             # The replicated-view indexer already applies the causal visibility rule.
             # After DCP remaps topk indices to local KV positions, local KV
             # length no longer shares the same coordinate system as global
             # query length, so SFA must not apply its right-down causal crop.
             sparse_mode=0,
-            attention_mode=2,
-            return_softmax_lse=True,
+            return_lse=True,
         )
         output_dtype = sfa_output.dtype
-        # SFA returns softmax max/sum separately. Convert them to LSE so the
-        # existing CP merge helper can combine local-KV partial outputs.
-        softmax_lse = softmax_max.to(torch.float32) + torch.log(softmax_sum.to(torch.float32))
-        softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
         if self.enable_dsa_cp:
             output = self._merge_dsa_cp_dcp_outputs(sfa_output, softmax_lse)
             assert attn_metadata.dsa_cp_context is not None, "DSA-CP DCP output selection requires dsa_cp_context."

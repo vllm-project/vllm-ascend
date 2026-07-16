@@ -1,4 +1,5 @@
 # Standard
+import os
 import threading
 import time
 from enum import Enum
@@ -10,9 +11,23 @@ from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 MEMCACHE_THREAD_START_WAIT_S = 0.1
+
+
+def _is_device_sdma() -> bool:
+    config_path = os.getenv("MMC_LOCAL_CONFIG_PATH")
+    if not config_path:
+        raise ValueError("The environment variable 'MMC_LOCAL_CONFIG_PATH' is not set.")
+    with open(config_path, encoding="utf-8") as config_file:
+        for line in config_file:
+            line = line.strip()
+            if not line or line.startswith(("#", ";")):
+                continue
+            key, separator, value = line.partition("=")
+            if separator and key.strip() == "ock.mmc.local_service.protocol":
+                return value.strip() == "device_sdma"
+    return False
 
 
 class MmcDirect(Enum):
@@ -32,20 +47,18 @@ class MemcacheBackend(Backend):
     ):
         self.local_rank = local_rank if local_rank is not None else get_world_group().local_rank
         self._init_bm = init_bm
-        self._is_a2 = get_ascend_device_type() in {AscendDeviceType.A2}
-        self._lazy_init = lazy_init and not self._is_a2
+        self._lazy_init = lazy_init and _is_device_sdma()
 
         self.store: Any | None = None
         self._store_initialized = False
         self._store_init_lock = threading.Lock()
-        self._registered_buffers: tuple[list[int], list[int]] | None = None
-        self._buffers_registered = False
+        self._pending_buffers: tuple[list[int], list[int]] | None = None
 
         if not self._lazy_init:
             self.store = self._setup_store()
             self._store_initialized = True
 
-    def _ensure_initialized(self):
+    def ensure_initialized(self):
         if self._store_initialized:
             return
 
@@ -67,11 +80,6 @@ class MemcacheBackend(Backend):
                 "https://gitee.com/ascend/memfabric_hybrid "  # noqa: E501
                 "to run vLLM with MemcacheConnector."
             ) from e
-
-        if self._init_bm and self._is_a2:
-            tmp_tensor = torch.zeros(1, device="npu")
-            output_tensor_list = [torch.empty_like(tmp_tensor) for _ in range(torch.distributed.get_world_size())]
-            torch.distributed.all_gather(output_tensor_list, tmp_tensor, group=get_world_group().device_group)
 
         store = DistributedObjectStore()
 
@@ -108,21 +116,17 @@ class MemcacheBackend(Backend):
         torch.npu.set_device(device)
 
     def register_buffer(self, ptrs: list[int], sizes: list[int]):
-        self._registered_buffers = (list(ptrs), list(sizes))
+        self._pending_buffers = (list(ptrs), list(sizes))
         self._register_buffers_if_needed()
 
     def _register_buffers_if_needed(self):
-        if not self._is_a2:
-            return
-        if self._registered_buffers is None or self._buffers_registered:
-            return
-        if not self._store_initialized:
+        if self._pending_buffers is None or not self._store_initialized:
             return
         assert self.store is not None
-        ptrs, sizes = self._registered_buffers
+        ptrs, sizes = self._pending_buffers
         for ptr, size in zip(ptrs, sizes):
             self.store.register_buffer(ptr, size)
-        self._buffers_registered = True
+        self._pending_buffers = None
 
     def exists(self, keys: list[str]) -> list[int]:
         if self._lazy_init and not self._store_initialized:
@@ -190,9 +194,9 @@ class MemcacheBackend(Backend):
             return None
 
     def put(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
+        self.ensure_initialized()
+        assert self.store is not None
         try:
-            self._ensure_initialized()
-            assert self.store is not None
             res = self.store.batch_put_from_layers(key, addr, size, MmcDirect.COPY_L2G.value)
             failed_codes = [int(value) for value in res if value != 0]
             failed_count = len(failed_codes)
