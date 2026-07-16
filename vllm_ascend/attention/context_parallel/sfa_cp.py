@@ -580,12 +580,8 @@ class AscendSFACPImpl(AscendSFAImpl):
         kv_c_k_pe = torch.index_select(kv_c_k_pe, 0, attn_metadata.sfa_cp_metadata.pcp_allgather_restore_idx)
         kv_c_normed, k_pe = kv_c_k_pe.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         slot_mapping = attn_metadata.slot_mapping
-        DeviceOperator.reshape_and_cache(
-            key=kv_c_normed,
-            value=k_pe,
-            key_cache=kv_cache[0],
-            value_cache=kv_cache[1],
-            slot_mapping=slot_mapping,
+        torch_npu._npu_reshape_and_cache(
+            key=kv_c_normed, value=k_pe, key_cache=kv_cache[0], value_cache=kv_cache[1], slot_indices=slot_mapping
         )
         return None, None
 
