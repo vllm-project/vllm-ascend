@@ -134,7 +134,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             weight_loader=self.weight_loader,
         )
 
-    def _get_masked_input_and_mask(
+    def _mask_input_for_vocab_range(
         self,
         input_: torch.Tensor,
         org_vocab_start_index: int,
@@ -207,7 +207,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
 
         # Masking unchanged; padding rows map to OOB and get masked to 0
         # via masked_fill_ below (token_id=0 stays in-range after shift).
-        masked_input, input_mask = self._get_masked_input_and_mask(
+        masked_input, input_mask = self._mask_input_for_vocab_range(
             complete_input,
             self.shard_indices.org_vocab_start_index,
             self.shard_indices.org_vocab_end_index,
@@ -229,7 +229,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
     def _forward_origin(self, input_):
         if self.tp_size > 1:
             # Build the mask.
-            masked_input, input_mask = self._get_masked_input_and_mask(
+            masked_input, input_mask = self._mask_input_for_vocab_range(
                 input_,
                 self.shard_indices.org_vocab_start_index,
                 self.shard_indices.org_vocab_end_index,
