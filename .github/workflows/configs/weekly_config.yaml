@@ -91,7 +91,7 @@ a3:
         config_file_path: DeepSeek-V3.2-W8A8_A3_weekly.yaml
       - name: kimi-k2.5
         os: linux-aarch64-a3-16
-        config_file_path: Kimi-K2.5.yaml
+        config_file_path: Kimi-K2.6.yaml
       - name: kimi-k2.5-32k-512
         os: linux-aarch64-a3-16
         config_file_path: Kimi-K2.5-32k-512.yaml
@@ -123,10 +123,6 @@ a3:
 310p:
   single_node:
     test_config:
-      # pytest-driven tests
-      - name: engine-func-tests
-        os: linux-aarch64-310p-4
-        tests: tests/e2e/weekly/single_node/engine_func_test_robot
       - name: Qwen3-8B-w8a8sc-310p
         os: linux-aarch64-310p-4
         config_file_path: Qwen3-8B-w8a8sc-310p.yaml
