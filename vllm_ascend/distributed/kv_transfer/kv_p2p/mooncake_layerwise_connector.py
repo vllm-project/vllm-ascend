@@ -21,7 +21,6 @@ import msgspec
 import numpy as np
 import numpy.typing as npt
 import torch
-import torch_npu
 import zmq
 from mooncake.engine import TransferEngine  # type: ignore
 from vllm.config import VllmConfig
@@ -54,6 +53,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.utils import extract_layer_index
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import GET_META_MSG
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
@@ -1750,14 +1750,14 @@ class MooncakeLayerwiseConnectorWorker:
                     )
 
                     # Load cache data into buffers
-                    torch_npu.npu_gather_pa_kv_cache(
+                    DeviceOperator.kv_cache_load(
                         kv_layer[0],
                         kv_layer[1],
                         send_task.group_block_table[layer_group_idx],
                         send_task.group_block_len_tensor[layer_group_idx],
-                        seq_offset=send_task.group_seq_start_tensor[layer_group_idx],
-                        key=keys,
-                        value=values,
+                        send_task.group_seq_start_tensor[layer_group_idx],
+                        keys,
+                        values,
                     )
                     if self.pd_head_ratio != 1:
                         # sort kv caches for each block

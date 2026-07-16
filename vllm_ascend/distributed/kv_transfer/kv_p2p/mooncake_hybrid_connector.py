@@ -52,6 +52,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
 from vllm_ascend.utils import enable_custom_op, is_vl_model
@@ -889,14 +890,14 @@ class KVCacheRecvingThread(threading.Thread):
         # Process each layer in the KV cache
         for _, (k_cache_layer, v_cache_layer) in self.kv_caches.items():
             # Load cache data into buffers
-            torch_npu.npu_gather_pa_kv_cache(
+            DeviceOperator.kv_cache_load(
                 k_cache_layer,
                 v_cache_layer,
                 block_table,
                 block_len_tensor,
-                seq_offset=seq_start_tensor,
-                key=k_buffer,
-                value=v_buffer,
+                seq_start_tensor,
+                k_buffer,
+                v_buffer,
             )
             if need_cat_cache:
                 self._cat_kv_cache(
@@ -927,13 +928,12 @@ class KVCacheRecvingThread(threading.Thread):
         v_buffer = _transpose_kv_cache_between_head(v_buffer)
 
         # Reshape and cache the processed buffers
-        torch_npu.npu_scatter_pa_kv_cache(
+        DeviceOperator.reshape_and_cache(
             key=k_buffer,
             value=v_buffer,
             key_cache=k_cache_layer,
             value_cache=v_cache_layer,
             slot_mapping=slot_mapping,
-            cache_mode="Norm",
         )
 
     def _nz_kv_cache(self, k_cache_layer, v_cache_layer, k_buffer, v_buffer, slot_mapping):

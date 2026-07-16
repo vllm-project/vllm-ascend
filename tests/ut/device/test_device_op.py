@@ -1,9 +1,78 @@
+import ast
+from pathlib import Path
 from unittest import mock
 
 import pytest
 import torch
 
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
+
+
+def _get_function_call_names(relative_path: str, function_name: str) -> set[str]:
+    repo_root = Path(__file__).parents[3]
+    tree = ast.parse((repo_root / relative_path).read_text())
+    functions = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function_name
+    ]
+    assert functions
+
+    def get_name(node: ast.expr) -> str:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            parent = get_name(node.value)
+            return f"{parent}.{node.attr}" if parent else node.attr
+        return ""
+
+    return {get_name(node.func) for function in functions for node in ast.walk(function) if isinstance(node, ast.Call)}
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "function_name", "expected_call", "forbidden_call"),
+    [
+        (
+            "vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake_connector.py",
+            "reformat_kv_cache",
+            "DeviceOperator.kv_cache_load",
+            "torch_npu.npu_gather_pa_kv_cache",
+        ),
+        (
+            "vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake_connector.py",
+            "_cat_kv_cache",
+            "DeviceOperator.reshape_and_cache",
+            "torch_npu.npu_scatter_pa_kv_cache",
+        ),
+        (
+            "vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake_hybrid_connector.py",
+            "reformat_kv_cache",
+            "DeviceOperator.kv_cache_load",
+            "torch_npu.npu_gather_pa_kv_cache",
+        ),
+        (
+            "vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake_hybrid_connector.py",
+            "_cat_kv_cache",
+            "DeviceOperator.reshape_and_cache",
+            "torch_npu.npu_scatter_pa_kv_cache",
+        ),
+        (
+            "vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake_layerwise_connector.py",
+            "save_kv_layer",
+            "DeviceOperator.kv_cache_load",
+            "torch_npu.npu_gather_pa_kv_cache",
+        ),
+    ],
+)
+def test_mooncake_pa_cache_calls_use_device_operator(
+    relative_path: str,
+    function_name: str,
+    expected_call: str,
+    forbidden_call: str,
+):
+    call_names = _get_function_call_names(relative_path, function_name)
+    assert expected_call in call_names
+    assert forbidden_call not in call_names
 
 
 def test_reshape_and_cache_makes_scatter_inputs_contiguous():
