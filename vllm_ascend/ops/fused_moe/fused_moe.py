@@ -26,8 +26,6 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
     get_tp_group,
     tensor_model_parallel_all_reduce,
 )
@@ -572,10 +570,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         lora_context = getattr(self.routed_experts, "_ascend_moe_lora_context", None)
 
         token_lora_indices = None
-        if (
-            lora_context is not None
-            and self.moe_config.ep_size > 1
-        ):
+        if lora_context is not None and self.moe_config.ep_size > 1:
             token_lora_indices = lora_context.punica_wrapper.token_lora_indices
 
         prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
