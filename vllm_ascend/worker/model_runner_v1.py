@@ -4821,18 +4821,15 @@ class NPUModelRunner(GPUModelRunner):
             attn_backends_map: dict[AttentionBackend, list[str]], kv_cache_group_id: int
         ) -> list[AttentionGroup]:
             attn_groups: list[AttentionGroup] = []
+            num_metadata_builders = 4
             for (attn_backend, kv_cache_spec), layer_names in attn_backends_map.items():
-                attn_metadata_builders = []
-                attn_metadata_builders.append(
-                    attn_backend.get_builder_cls()(
-                        kv_cache_spec,
-                        layer_names,
-                        self.vllm_config,
-                        self.device,
-                    )
-                )
                 attn_group = AttentionGroup(
-                    attn_backend, layer_names, kv_cache_spec, kv_cache_group_id, attn_metadata_builders
+                    attn_backend, layer_names, kv_cache_spec, kv_cache_group_id
+                )
+                attn_group.create_metadata_builders(
+                    self.vllm_config,
+                    self.device,
+                    num_metadata_builders=num_metadata_builders,
                 )
                 attn_groups.append(attn_group)
             return attn_groups
