@@ -1,4 +1,4 @@
-# Qwen3-VL-30B-A3B-Instruct Deployment Tutorial
+# Qwen3-VL-30B-A3B-Instruct
 
 ## 1 Introduction
 
@@ -10,7 +10,7 @@ The `Qwen3-VL-30B-A3B-Instruct` tutorial was introduced for the `vllm-ascend` `v
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix, including BF16, chunked prefill, automatic prefix caching, asynchronous scheduling, tensor parallelism, pipeline parallelism, expert parallelism, data parallelism, and ACLGraph support.
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
 Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
@@ -37,7 +37,7 @@ It is recommended to download the model weight to `/root/.cache/`. For multi-nod
 
 ### 4.1 Docker Image Installation
 
-=== "Use docker image"
+**A3 series:**
 
     For example, using images `quay.io/ascend/vllm-ascend:v0.11.0rc2`(for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.11.0rc2-a3`(for Atlas 800 A3).
 
@@ -78,17 +78,55 @@ It is recommended to download the model weight to `/root/.cache/`. For multi-nod
       -it $IMAGE bash
     ```
 
-=== "Build from source"
+**Installation Verification:**
 
-    You can build all from source.
+After starting the container, run the following command to verify the installation:
 
-    - Install `vllm-ascend`, refer to [set up using python](../../installation.md#set-up-using-python).
+```bash
+docker ps | grep vllm-ascend
+```
 
-If you want to deploy multi-node environment, you need to set up environment on each node.
+Expected result: The container is listed with status `Up`. You can also verify the vllm-ascend version inside the container:
+
+```bash
+pip show vllm-ascend
+```
+
+Expected result: The version information is displayed, matching the pulled image version.
 
 ### 4.2 Source Code Installation
 
-You can also build and install `vllm-ascend` from source. Refer to [set up using python](../../installation.md#set-up-using-python).
+If you prefer not to use the Docker image, you can build from source. Install vLLM from source first:
+
+1. Clone and install vLLM:
+
+   ```bash
+   git clone https://github.com/vllm-project/vllm.git
+   cd vllm
+   pip install -e .
+   ```
+
+2. Clone and install the vLLM-Ascend repository:
+
+   ```bash
+   git clone https://github.com/vllm-project/vllm-ascend.git
+   cd vllm-ascend
+   pip install -e .
+   ```
+
+**Installation Verification:**
+
+```bash
+pip show vllm vllm-ascend
+```
+
+Expected result: The version information for both packages is displayed, confirming a successful installation.
+
+!!! note
+
+    If deploying a multi-node environment, set up the environment on each node.
+
+For more details, please refer to the [Installation Guide](../../installation.md).
 
 ## 5 Online Service Deployment
 
@@ -129,7 +167,7 @@ vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
 ```
 
-Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
+Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [Public FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
 
 ### 5.2 Video Online Deployment
 
@@ -182,27 +220,6 @@ INFO:     Application startup complete.
 - `--limit-mm-per-prompt.video 0` disables video inputs and saves memory for image-only serving.
 - `--allowed-local-media-path /media` allows requests to use local files such as `file:///media/test.mp4`.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode ACLGraph replay to reduce dispatch overhead.
-
-### 5.3 Pipeline Parallel Validation
-
-Qwen3-VL-30B-A3B-Instruct also has pipeline-parallel functional validation. For small functional tests, you can use PP2 with a shorter context length and explicit multimodal processor limits. This is useful when you want to validate graph replay behavior or compare TP and PP layouts.
-
-```shell
-vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --served-model-name qwen3-vl-30b \
-  --pipeline-parallel-size 2 \
-  --max-model-len 4096 \
-  --max-num-batched-tokens 1024 \
-  --gpu-memory-utilization 0.9 \
-  --limit-mm-per-prompt.image 1 \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8]}'
-```
-
-### 5.4 Offline Inference
-
-The offline inference usage of `Qwen3-VL-30B-A3B-Instruct` is the same as other Qwen3-VL models. Refer to [Qwen3-VL Dense](Qwen-VL-Dense.md#offline-inference) for more details.
 
 ## 6 Functional Verification
 
@@ -308,7 +325,11 @@ After several minutes, you can get the performance evaluation result. This rando
 
 ### 9.1 Recommended Configurations
 
-The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on hardware type, image resolution, video length, maximum input/output length, request concurrency, prefix cache hit rate, and prefill/decode ratio. Tune the parameters in Section 9.2 based on your actual workload.
+> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on hardware type, image resolution, video length, maximum input/output length, request concurrency, prefix cache hit rate, and prefill/decode ratio. Tune the parameters in Section 9.2 based on your actual workload.
+
+#### Table 1: Scenario Overview
+
+> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs).
 
 | Scenario | Deployment Mode | Total NPUs | Weight Version | Key Considerations |
 | -------- | --------------- | ---------- | -------------- | ------------------ |
@@ -316,17 +337,25 @@ The following configurations are validated in specific test environments and are
 | Video serving | Single-node online serving | 2 or more NPUs | BF16 | Use local media paths, lower concurrency, and reduce video length or frame sampling if OOM occurs. |
 | Functional graph validation | Single-node PP | 2 NPUs | BF16 | Use shorter context and explicit capture sizes to validate full decode ACLGraph behavior. |
 
+#### Table 2: Detailed Node Configuration
+
 | Scenario | Node Role | NPUs | TP | PP | Max Num Seqs | Max Model Len | Max Num Batched Tokens | Prefix Cache | Main Optimizations |
 | -------- | --------- | ---- | -- | -- | ------------ | ------------- | ---------------------- | ------------ | ------------------ |
 | Image-only serving | Single node | 2 or more | 2 | 1 | 16 | 128000 | 4096 | Workload dependent | FullGraph, EP, video disabled |
 | Video serving | Single node | 2 or more | 2 | 1 | 8 | 128000 | 4096 | Workload dependent | FullGraph, EP, local media path |
 | Graph validation | Single node | 2 | 1 | 2 | Tune by test | 4096 | 1024 | Off | FullGraph capture sizes |
 
+> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
+
 ### 9.2 Tuning Guidelines
 
-Refer to [public performance tuning documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods, and refer to [feature matrix](../../user_guide/support_matrix/feature_matrix.md) for feature descriptions.
+#### 9.2.1 General Tuning Reference
 
-Recommended tuning order:
+Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
+
+Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+
+#### 9.2.2 Recommended tuning order
 
 1. Start from image-only serving. Add video only after the image path is stable.
 2. Choose the maximum context length with `--max-model-len`. Multimodal requests consume KV cache for both text tokens and visual tokens, so reduce image resolution, video length, request concurrency, or context length if OOM occurs.
@@ -350,7 +379,7 @@ Recommended tuning order:
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, refer to [FAQs](../../faqs.md). This section only covers model-specific issues for Qwen3-VL-30B-A3B-Instruct.
+For common environment, installation, and general parameter issues, refer to [Public FAQs](../../faqs.md). This section only covers model-specific issues for Qwen3-VL-30B-A3B-Instruct.
 
 ### Q1: Why does the service report OOM during startup?
 

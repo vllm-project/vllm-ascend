@@ -1,4 +1,4 @@
-# Qwen3-VL-235B-A22B-Instruct Deployment Tutorial
+# Qwen3-VL-235B-A22B-Instruct
 
 ## 1 Introduction
 
@@ -10,7 +10,7 @@ The `Qwen3-VL-235B-A22B-Instruct` tutorial was introduced in the vLLM-Ascend val
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix, including BF16, chunked prefill, automatic prefix caching, asynchronous scheduling, tensor parallelism, pipeline parallelism, expert parallelism, data parallelism, PD disaggregation, and ACLGraph support.
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
 Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
@@ -35,7 +35,7 @@ If you want to deploy the model in a multi-node environment, verify the communic
 
 ### 4.1 Docker Image Installation
 
-=== "Use docker image"
+**A3 series:**
 
     For example, using images `quay.io/ascend/vllm-ascend:v0.11.0rc2`(for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.11.0rc2-a3`(for Atlas 800 A3).
 
@@ -76,19 +76,55 @@ If you want to deploy the model in a multi-node environment, verify the communic
       -it $IMAGE bash
     ```
 
-=== "Build from source"
+**Installation Verification:**
 
-    You can build all from source.
+After starting the container, run the following command to verify the installation:
 
-    - Install `vllm-ascend`, refer to [set up using python](../../installation.md#set-up-using-python).
+```bash
+docker ps | grep vllm-ascend
+```
 
-If you want to deploy multi-node environment, you need to set up environment on each node.
+Expected result: The container is listed with status `Up`. You can also verify the vllm-ascend version inside the container:
+
+```bash
+pip show vllm-ascend
+```
+
+Expected result: The version information is displayed, matching the pulled image version.
 
 ### 4.2 Source Code Installation
 
-You can also build and install `vllm-ascend` from source. Refer to [set up using python](../../installation.md#set-up-using-python).
+If you prefer not to use the Docker image, you can build from source. Install vLLM from source first:
 
-If you want to deploy a multi-node service, install the same version of vLLM and vLLM-Ascend on each node.
+1. Clone and install vLLM:
+
+   ```bash
+   git clone https://github.com/vllm-project/vllm.git
+   cd vllm
+   pip install -e .
+   ```
+
+2. Clone and install the vLLM-Ascend repository:
+
+   ```bash
+   git clone https://github.com/vllm-project/vllm-ascend.git
+   cd vllm-ascend
+   pip install -e .
+   ```
+
+**Installation Verification:**
+
+```bash
+pip show vllm vllm-ascend
+```
+
+Expected result: The version information for both packages is displayed, confirming a successful installation.
+
+!!! note
+
+    If deploying a multi-node environment, set up the environment on each node.
+
+For more details, please refer to the [Installation Guide](../../installation.md).
 
 ## 5 Online Service Deployment
 
@@ -138,7 +174,7 @@ vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,24,32]}'
 ```
 
-Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
+Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [Public FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
 
 **Key parameters:**
 
@@ -182,9 +218,10 @@ export HCCL_BUFFSIZE=1024
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 
-vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
+vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
   --host 0.0.0.0 \
   --port 8000 \
+  --quantization ascend \
   --data-parallel-size 2 \
   --api-server-count 2 \
   --data-parallel-size-local 1 \
@@ -207,7 +244,7 @@ vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
   --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true}'
 ```
 
-Common Issues Tip: If node 1 cannot join the service or HCCL initialization times out, refer to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication) and [FAQs](../../faqs.md). Make sure the network interface names, IP addresses, and RPC ports are consistent across nodes.
+Common Issues Tip: If node 1 cannot join the service or HCCL initialization times out, refer to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication) and [Public FAQs](../../faqs.md). Make sure the network interface names, IP addresses, and RPC ports are consistent across nodes.
 
 Run the following script on node 1.
 
@@ -235,9 +272,10 @@ export HCCL_BUFFSIZE=1024
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 
-vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
+vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
   --host 0.0.0.0 \
   --port 8000 \
+  --quantization ascend \
   --headless \
   --data-parallel-size 2 \
   --data-parallel-size-local 1 \
@@ -284,13 +322,7 @@ INFO:     Application startup complete.
 - `--tensor-parallel-size 8` maps one TP group to the 8 NPUs on each A2 node.
 - `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` bind HCCL, Gloo, and TP communication to the selected network.
 
-### 5.3 Multi-Node Deployment with Ray
-
-For Ray-based distributed deployment, refer to [Ray Distributed (Qwen/Qwen3-235B-A22B)](../features/ray.md). The same model weight, communication verification, and parameter tuning principles apply to Qwen3-VL-235B-A22B-Instruct.
-
-Common Issues Tip: If Ray workers cannot discover each other, check Ray cluster status first, then verify the same HCCL and network interface settings used in MP deployment.
-
-### 5.4 Prefill-Decode Disaggregation
+### 5.3 Prefill-Decode Disaggregation
 
 PD disaggregation separates Prefill and Decode into different service groups. Prefill nodes process large prompt chunks, Decode nodes serve token generation, and a proxy forwards requests between them. This mode is suitable for production serving scenarios where prefill and decode resource ratios need to be tuned separately.
 
@@ -301,7 +333,7 @@ The following example matches the validated A3 two-node topology for `Qwen3-VL-2
 - 1 Prefill node: 1 Atlas 800 A3 (64G x 16), DP2 + TP8 + EP.
 - 1 Decode node: 1 Atlas 800 A3 (64G x 16), DP4 + TP4 + EP + full decode ACLGraph.
 
-#### 5.4.1 Prefill Node
+#### 5.3.1 Prefill Node
 
 Create `run_p.sh` on the prefill node.
 
@@ -316,9 +348,10 @@ export OMP_NUM_THREADS=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export TASK_QUEUE_ENABLE=1
 
-vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
+vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
   --host 0.0.0.0 \
   --port 8080 \
+  --quantization ascend \
   --data-parallel-size 2 \
   --data-parallel-size-local 2 \
   --tensor-parallel-size 8 \
@@ -344,7 +377,7 @@ vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
 
 Common Issues Tip: If the prefill service is not ready for a long time, check whether the model path is shared, all 16 NPUs are visible, and the Mooncake `kv_port` is available.
 
-#### 5.4.2 Decode Node
+#### 5.3.2 Decode Node
 
 Create `run_d.sh` on the decode node.
 
@@ -359,9 +392,10 @@ export OMP_NUM_THREADS=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export TASK_QUEUE_ENABLE=1
 
-vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
+vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
   --host 0.0.0.0 \
   --port 8080 \
+  --quantization ascend \
   --data-parallel-size 4 \
   --data-parallel-size-local 4 \
   --tensor-parallel-size 4 \
@@ -461,7 +495,7 @@ Take `serve` as an example:
 export VLLM_USE_MODELSCOPE=True
 
 vllm bench serve \
-  --model Qwen/Qwen3-VL-235B-A22B-Instruct \
+  --model Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
   --served-model-name qwen3-vl-235b \
   --dataset-name random \
   --random-input 200 \
@@ -477,13 +511,19 @@ After several minutes, you can get the performance evaluation result. This rando
 
 ### 9.1 Recommended Configurations
 
-The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on hardware type, maximum input/output length, image resolution, request concurrency, prefix cache hit rate, quantization, and prefill/decode ratio. Tune the parameters in Section 9.2 based on your actual workload.
+> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on hardware type, maximum input/output length, image resolution, request concurrency, prefix cache hit rate, quantization, and prefill/decode ratio. Tune the parameters in Section 9.2 based on your actual workload.
+
+#### Table 1: Scenario Overview
+
+> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs).
 
 | Scenario | Deployment Mode | Total NPUs | Weight Version | Key Considerations |
 | -------- | --------------- | ---------- | -------------- | ------------------ |
 | Functional validation | Single-node online serving | 16 A3 NPUs | W8A8 | Use shorter context, disable video, and set `--mm-processor-cache-gb 0` to reduce memory pressure. |
-| Long context | Multi-node MP | 16 A2 NPUs or 16 A3 NPUs | BF16 | Use TP across each node and DP across nodes. Lower image count or context length if OOM occurs. |
-| Low latency | 1P1D PD disaggregation | 32 A3 NPUs | BF16 | Separate prefill and decode resources and enable full decode ACLGraph on decode nodes. |
+| Long context | Multi-node MP | 16 A3 NPUs | W8A8 | Use TP across each node and DP across nodes. Lower image count or context length if OOM occurs. |
+| Low latency | 1P1D PD disaggregation | 32 A3 NPUs | W8A8 | Separate prefill and decode resources and enable full decode ACLGraph on decode nodes. |
+
+#### Table 2: Detailed Node Configuration
 
 | Scenario | Node Role | NPUs | TP | DP | Max Num Seqs | Max Model Len | Max Num Batched Tokens | Prefix Cache | Main Optimizations |
 | -------- | --------- | ---- | -- | -- | ------------ | ------------- | ---------------------- | ------------ | ------------------ |
@@ -492,11 +532,17 @@ The following configurations are validated in specific test environments and are
 | Low latency | Prefill node | 16 | 8 | 2 | 32 | 8192 | 8192 | Off | Mooncake KV producer, EP |
 | Low latency | Decode node | 16 | 4 | 4 | 32 | 8192 | 8192 | Off | Mooncake KV consumer, FullGraph, EP |
 
+> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
+
 ### 9.2 Tuning Guidelines
 
-Refer to [public performance tuning documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods, and refer to [feature matrix](../../user_guide/support_matrix/feature_matrix.md) for feature descriptions.
+#### 9.2.1 General Tuning Reference
 
-Recommended tuning order:
+Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
+
+Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+
+#### 9.2.2 Recommended tuning order
 
 1. Set the deployment topology first. Use single-node deployment for validation, MP deployment for simple multi-node serving, and PD disaggregation when prefill and decode need different resource ratios.
 2. Choose the maximum context length with `--max-model-len`. Multimodal requests consume KV cache for both text tokens and visual tokens, so reduce image resolution, image count, `--max-num-seqs`, or context length if OOM occurs.
@@ -521,7 +567,7 @@ Recommended tuning order:
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, refer to [FAQs](../../faqs.md). This section only covers model-specific issues for Qwen3-VL-235B-A22B-Instruct.
+For common environment, installation, and general parameter issues, refer to [Public FAQs](../../faqs.md). This section only covers model-specific issues for Qwen3-VL-235B-A22B-Instruct.
 
 ### Q1: Why does the service report OOM during startup or soon after accepting requests?
 
