@@ -78,6 +78,12 @@ class _GDNForwardWrapper(nn.Module):
     def kv_cache(self):
         return self.conv_state, self.ssm_state
 
+    def split_ba(self, ba: torch.Tensor):
+        # Avoid torch.chunk: torch-npu's aten.split fallback conflicts with
+        # PyTorch's decomposition check when CI is set.
+        midpoint = ba.shape[-1] // 2
+        return ba[..., :midpoint], ba[..., midpoint:]
+
     def rearrange_mixed_qkv(self, mixed_qkv: torch.Tensor | None):
         if mixed_qkv is None:
             return None, None, None
