@@ -2,7 +2,7 @@
 set -x
 set -euo pipefail
 
-MIN_FREE_GB=3
+MIN_FREE_GB=3 
 
 get_free_gb() {
     local free_kb
