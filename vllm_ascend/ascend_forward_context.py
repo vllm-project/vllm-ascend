@@ -20,7 +20,6 @@ from vllm_ascend.utils import (
     has_layer_idx,
     is_drafter_moe_model,
     is_moe_model,
-    speculative_enable_dispatch_gmm_combine_decode,
 )
 
 
@@ -254,31 +253,16 @@ def _select_a2_moe_comm_method(
 
 def _select_a3_moe_comm_method(
     num_tokens: int,
-    vllm_config: VllmConfig,
-    quant_type: str | None,
     mc2_tokens_capacity: int,
     enable_fused_mc2: int,
 ) -> MoECommType:
     # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
-    # TODO: drop speculative method guard when dispatch_gmm_combine_decode supports w16a16
     dispatch_ffn_combine_enable = get_ep_group().world_size <= 32
     if num_tokens <= mc2_tokens_capacity:
-        fused_decode_enable = enable_fused_mc2
-        if enable_fused_mc2 == 1:
-            fused_decode_enable = enable_fused_mc2 and dispatch_ffn_combine_enable
-        elif enable_fused_mc2 == 2:
-            fused_decode_enable = (
-                enable_fused_mc2
-                and speculative_enable_dispatch_gmm_combine_decode(vllm_config)
-                and quant_type == "w8a8_dynamic"
-            )
+        fused_decode_enable = enable_fused_mc2 == 1 and dispatch_ffn_combine_enable
         return MoECommType.FUSED_MC2 if fused_decode_enable else MoECommType.MC2
 
-    fused_prefill_enable = enable_fused_mc2
-    if enable_fused_mc2 == 1:
-        fused_prefill_enable = enable_fused_mc2 and dispatch_ffn_combine_enable
-    elif enable_fused_mc2 == 2:
-        fused_prefill_enable = False
+    fused_prefill_enable = enable_fused_mc2 == 1 and dispatch_ffn_combine_enable
     return MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL
 
 
@@ -302,15 +286,15 @@ def _select_a5_moe_comm_method(
 
 def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_model=False) -> MoECommType | None:
     """Select the MoE communication method according to parallel settings,
-    device generation, token count, and quantization.
+    device generation, and token count.
 
     1. Non-MoE models return `None`.
     2. Without expert parallel, fall back to all-gather.
     3. On A2 with expert parallel, pick MC2 when tokens fit the MC2 capacity
        and the DP size is large enough; otherwise use all-gather.
-    4. On A3 with expert parallel, prefer fused MC2 when using w8a8_dynamic
-       quantization with small EP size, no dynamic_eplb, and not in MTP
-       mode; otherwise use MC2 within capacity or all-to-all.
+    4. On A3 with expert parallel, prefer fused MC2 when enabled and the EP
+       group size is small enough; otherwise use MC2 within capacity or
+       all-to-all.
     5. On 310P, always use all-gather.
     6. On A5 with expert parallel, use MC2 when tokens fit the MC2 capacity
        and the EP size is large enough; otherwise use all-gather when
@@ -332,12 +316,6 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
 
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     soc_version = get_ascend_device_type()
-    quant_type = getattr(
-        vllm_config.model_config.hf_text_config,
-        "moe_quantize",
-        getattr(vllm_config.model_config.hf_text_config, "quantize", None),
-    )
-
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
     elif soc_version == AscendDeviceType.A2:
@@ -345,8 +323,6 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     elif soc_version == AscendDeviceType.A3:
         moe_comm_type = _select_a3_moe_comm_method(
             num_tokens,
-            vllm_config,
-            quant_type,
             mc2_tokens_capacity,
             get_ascend_config().enable_fused_mc2,
         )

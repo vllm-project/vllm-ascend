@@ -184,40 +184,6 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_v2_meta(
 
     return std::tuple<at::Tensor, at::Tensor>(output, output_scale);
 }
-std::tuple<at::Tensor, at::Tensor> dispatch_gmm_combine_decode_meta(
-    const at::Tensor &x,
-    const at::Tensor &expert_ids,
-    const at::TensorList &gmm1_permuted_weight,
-    const at::TensorList &gmm1_permuted_weight_scale,
-    const at::TensorList &gmm2_weight,
-    const at::TensorList &gmm2_weight_scale,
-    const at::Tensor &expert_scales,
-    const c10::optional<at::Tensor> &expert_smooth_scales,
-    const c10::optional<at::Tensor> &x_active_mask,
-    c10::string_view group_ep,
-    int64_t ep_rank_size,
-    int64_t ep_rank_id,
-    int64_t moe_expert_num,
-    int64_t shared_expert_num,
-    int64_t shared_expert_rank_num,
-    int64_t quant_mode,
-    int64_t global_bs)
-{
-    auto bs = x.sym_size(0);
-    auto h = x.sym_size(1);
-
-    c10::SymDimVector output_shape = {bs, h};
-    at::Tensor output = at::empty_symint(output_shape, x.options().device(at::kMeta));
-
-    bool is_shared_expert = (ep_rank_id < shared_expert_rank_num);
-    int64_t num_local_experts = is_shared_expert ? 1 : moe_expert_num / (ep_rank_size - shared_expert_rank_num);
-    auto opts = expert_ids.options().dtype(at::kLong);
-    c10::SymDimVector expert_token_nums_shape = {c10::SymInt(num_local_experts)};
-    at::Tensor expert_token_nums = at::empty_symint(expert_token_nums_shape, opts.device(at::kMeta));
-
-    return {output, expert_token_nums};
-}
-
 std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
     const at::Tensor& x,
     const at::TensorList& weight1,
@@ -1764,8 +1730,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("grouped_matmul_swiglu_quant_weight_nz_tensor_list", &vllm_ascend::meta::grouped_matmul_swiglu_quant_weight_nz_tensor_list_meta);
     // Grouped matmul swiglu quant v2
     ops.impl("grouped_matmul_swiglu_quant_v2", &vllm_ascend::meta::grouped_matmul_swiglu_quant_v2_meta);
-    // dispatch_gmm_combine_decode meta implementation
-    ops.impl("dispatch_gmm_combine_decode", &vllm_ascend::meta::dispatch_gmm_combine_decode_meta);
     // Lightning indexer
     ops.impl("npu_lightning_indexer", &vllm_ascend::meta::npu_lightning_indexer_meta);
     // Sparse flash attention
