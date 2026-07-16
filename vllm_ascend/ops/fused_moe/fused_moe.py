@@ -172,6 +172,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         global_redundant_expert_num: int = 0,
         pertoken_scale: torch.Tensor | None = None,
         mc2_mask: torch.Tensor | None = None,
+        split_lora_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
@@ -289,9 +290,13 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 # when an adapter wraps this layer; None for non-LoRA layers.
                 lora_context=getattr(layer, "_ascend_moe_lora_context", None),
 <<<<<<< HEAD
+<<<<<<< HEAD
                 split_lora_indices=split_lora_indices,
 =======
 >>>>>>> dbcdd0b8 (adapter main)
+=======
+                split_lora_indices=split_lora_indices,
+>>>>>>> edeaa764 (adapter main)
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
