@@ -30,6 +30,7 @@ Adapt Hugging Face or local models to run on `vllm-ascend` with minimal changes,
 - If any feature cannot be enabled, keep evidence and explain reason in final report.
 - Do not rely on `PYTHONPATH=<modified-src>:$PYTHONPATH` unless debugging fallback is strictly needed.
 - Keep code changes minimal and focused on the target model.
+- Do not add a new file, config, test, doc section, env var, CLI flag, workflow entry, helper abstraction, issue comment, model adapter, processor, patch, or registry entry unless the issue explicitly requires it or an existing entity cannot carry the change; when adding one, state the concrete necessity.
 - Final deliverable commit must be one single signed commit in the current working repo (`git commit -sm ...`).
 - Keep final docs in Chinese and compact.
 - **Dummy-first is encouraged for speed, but dummy is NOT fully equivalent to real weights.**

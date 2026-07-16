@@ -1,0 +1,23 @@
+model_name: "/models/hf/Qwen3-32B-W8A8"
+model_type: "vllm"
+hardware: "Atlas 300I Series"
+
+serve:
+  tensor_parallel_size: 4
+  dtype: float16
+  max_model_len: 4096
+  trust_remote_code: true
+  enforce_eager: true
+  max_num_batched_tokens: 512
+  max_num_seqs: 1
+
+tasks:
+- name: "gpqa_diamond_generative_n_shot"
+  metrics:
+  - name: "exact_match,flexible-extract"
+    value: 0.5606
+
+num_fewshot: 0
+apply_chat_template: false
+fewshot_as_multiturn: false
+batch_size: "auto"

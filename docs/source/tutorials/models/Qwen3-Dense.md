@@ -38,6 +38,7 @@ The following model variants are available. It is recommended to download the mo
 | Qwen3-8B-W4A8 | W4A8 | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8) |
 | Qwen3-32B-W4A4 | W4A4 | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W4A4) |
 | Qwen3-32B-W8A8 | W8A8 | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8) |
+| Qwen3-32B-W8A8 (LLM-Compressor) | W8A8 compressed-tensors | 4 Atlas 300I (310P) devices | [Download](https://huggingface.co/ramblingpolymath/Qwen3-32B-W8A8) |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -204,6 +205,51 @@ vllm serve your_model_path \
     --additional-config '{"enable_flashcomm1": true}'
 ```
 
+For LLM-Compressor `compressed-tensors` checkpoints such as
+`ramblingpolymath/Qwen3-32B-W8A8` on Atlas 300I (310P), the quantization
+method is read from the model config. Do not add `--quantization ascend`.
+Use `float16` on 310P. The validated serving path uses contiguous ND weights
+with `npu_quant_matmul_dequant` and `FULL_DECODE_ONLY` ACLGraph with one fixed
+capture size. Keep eager mode for accuracy baselines or graph-isolation
+debugging. NZ matmul is a performance exploration path and should be validated
+separately on the target CANN/runtime stack before production use.
+
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+export HCCL_OP_EXPANSION_MODE=AIV
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=0
+
+vllm serve ramblingpolymath/Qwen3-32B-W8A8 \
+    --served-model-name qwen3-w8a8 \
+    --trust-remote-code \
+    --dtype float16 \
+    --tensor-parallel-size 4 \
+    --max-model-len 40960 \
+    --max-num-batched-tokens 1536 \
+    --max-num-seqs 8 \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[8]}' \
+    --port 8000
+```
+
+For smaller smoke or accuracy runs, reduce `--max-model-len` and
+`--max-num-seqs`. Add `--enforce-eager` when reproducing the eager accuracy
+baseline or debugging graph issues. Multi-size graph capture such as
+`[1,2,4,8]` can hit `507903 Insufficient_Event_Resources` on the validated
+CANN/runtime stack; use one fixed capture size such as `[8]` for ACLGraph.
+
+```bash
+vllm serve ramblingpolymath/Qwen3-32B-W8A8 \
+    --served-model-name qwen3-w8a8 \
+    --trust-remote-code \
+    --dtype float16 \
+    --tensor-parallel-size 4 \
+    --max-model-len 4096 \
+    --max-num-batched-tokens 1536 \
+    --max-num-seqs 1 \
+    --enforce-eager \
+    --port 8000
+```
+
 Atlas 800I A2/A3：
 
 Qwen3-32B-W4A4:
@@ -283,7 +329,24 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 
 ## 7 Accuracy Evaluation
 
-### Using AISBench
+### 7.1 LLM-Compressor Qwen3-32B-W8A8 on 310P
+
+The LLM-Compressor `ramblingpolymath/Qwen3-32B-W8A8` checkpoint was validated
+with real weights on four Atlas 300I (310P) devices, TP4, and `dtype=float16`.
+Scores use the corrected scoring pass: final-answer extraction misses caused by
+answer formatting are verified and counted when the answer is correct.
+
+| Runtime path | Mode | Dataset | Metric | Corrected score | Reference |
+|--------------|------|---------|--------|-----------------|-----------|
+| Eager | Non-thinking | GPQA-Diamond full, 0-shot | mean accuracy | 56.06% | Qwen3-32B non-thinking official: BF16 54.6%, AWQ-INT4 53.1% |
+| Eager | Thinking | GPQA-Diamond full, 0-shot | mean accuracy | 67.68% | Qwen3-32B thinking official: BF16 68.4%, AWQ-INT4 69.0% |
+| `FULL_DECODE_ONLY` ACLGraph, capture size `[8]` | Non-thinking | GPQA-Diamond full, 0-shot | mean accuracy | 52.53% | Qwen3-32B non-thinking official: BF16 54.6%, AWQ-INT4 53.1% |
+| `FULL_DECODE_ONLY` ACLGraph, capture size `[8]` | Thinking | GPQA-Diamond full, 0-shot | mean accuracy | 66.67% | Qwen3-32B thinking official: BF16 68.4%, AWQ-INT4 69.0% |
+
+The official LLM-Compressor W8A8 score is not published, so the BF16 and
+AWQ-INT4 Qwen3-32B numbers are used as the alignment references.
+
+### 7.2 Using AISBench
 
 For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
 
@@ -399,6 +462,14 @@ vllm bench serve \
 After several minutes, you will get the performance evaluation result.
 
 ## 9 Performance Tuning
+
+For the LLM-Compressor Qwen3-32B-W8A8 checkpoint on 310P, the current validated
+runtime path uses `npu_quant_matmul_dequant` with `FULL_DECODE_ONLY` ACLGraph
+and one fixed capture size. Eager mode remains the baseline and graph fallback.
+NZ matmul and PIECEWISE ACLGraph showed useful performance potential in short
+probes, but require separate long-running stability validation before they
+should be used as the default path. With TP4, `--max-model-len 40960`,
+and `--max-num-seqs 8`, the full 40,960-token model context was validated.
 
 ### 9.1 Recommended Configurations
 
