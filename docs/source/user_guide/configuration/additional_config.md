@@ -100,6 +100,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
 | `short_request_first_config`       | dict | `{}`    | Configuration options for ShortRequestFirst prefill scheduling on the PD prefill (P) node. Used with `recompute_scheduler_enable=true`. |
+| `enable_reduce_sample`              | bool | `False` | Whether to enable reduce sample optimization to reduce communication and computation overheads in the tensor parallelism scenario. When enabled, logits are kept partitioned across TP ranks and only the small set of top-k candidate values/indices is communicated, instead of performing a full-vocabulary all-to-all/all-gather. |
 
 The details of each configuration option are as follows:
 
