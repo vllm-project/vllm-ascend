@@ -64,11 +64,12 @@ def cmd_dispatch(_args):
     matrix_b64 = os.environ.get("NIGHTLY_MATRIX", "") or os.environ.get("WEEKLY_MATRIX", "")
     a2_names = parse_nightly_matrix(matrix_b64, "a2")
     a3_names = parse_nightly_matrix(matrix_b64, "a3")
+    _310p_names = parse_nightly_matrix(matrix_b64, "310p")
 
     raw = os.environ.get("TEST_CASES", "")
     test_cases = [tc.strip() for tc in raw.split(",") if tc.strip()]
 
-    da2, da3 = False, False
+    da2, da3, d310p = False, False, False
     transformed = None
     for tc in test_cases:
         if "/" in tc:
@@ -84,12 +85,15 @@ def cmd_dispatch(_args):
                 da2 = True
             if tc in a3_names:
                 da3 = True
+            if tc in _310p_names:
+                d310p = True
 
     with open(os.environ["GITHUB_OUTPUT"], "a") as f:
         if transformed:
             f.write(f"test_cases={transformed}\n")
         f.write(f"dispatch_a2={str(da2).lower()}\n")
         f.write(f"dispatch_a3={str(da3).lower()}\n")
+        f.write(f"dispatch_310p={str(d310p).lower()}\n")
 
 
 def cmd_matrix(_args):
