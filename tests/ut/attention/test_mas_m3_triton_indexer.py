@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -64,7 +65,7 @@ class _FakeTL:
     constexpr = object()
 
     def __init__(self) -> None:
-        self.program_ids = (0, 0, 0)
+        self.program_ids: tuple[int, ...] = (0, 0, 0)
         self.extra = SimpleNamespace(cuda=_FakeCuda())
 
     def set_program_ids(self, *program_ids: int) -> None:
@@ -145,7 +146,7 @@ def fake_tl(monkeypatch: pytest.MonkeyPatch) -> _FakeTL:
 class _LaunchRecorder:
     def __init__(self, callback=None) -> None:
         self.callback = callback
-        self.calls = []
+        self.calls: list[tuple[Any, tuple[Any, ...], dict[str, Any]]] = []
 
     def __getitem__(self, grid):
         def launch(*args, **kwargs):

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from vllm_ascend.patch.platform.minimax.minimax_m3_reasoning_parser import (
+from vllm_ascend.patch.platform.minimax.minimax_m3_reasoning_parser import (  # type: ignore[import-untyped]
     MiniMaxM3ReasoningParser,
 )
 

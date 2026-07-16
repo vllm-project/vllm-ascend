@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 import torch
-from vllm_ascend.attention.msa_m3_ops import (
+from vllm_ascend.attention.msa_m3_ops import (  # type: ignore[import-untyped]
     SPARSE_BLOCK_SIZE,
     minimax_m3_index_decode_torch,
     minimax_m3_index_score_torch,
