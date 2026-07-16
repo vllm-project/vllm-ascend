@@ -36,8 +36,30 @@ from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.utils import is_310p, vllm_version_is
 
 _IS_VLLM_RELEASE = vllm_version_is("0.24.0")
-if not _IS_VLLM_RELEASE:
+if not vllm_version_is("0.24.0"):
+    import vllm.model_executor.models.qwen3_next as qwen3_next_module
     from vllm.model_executor.models.qwen3_next import _all_gather_hidden_and_residual
+
+    def _ascend_all_gather_hidden_and_residual(
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        full_num_tokens: int,
+        hidden_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # FlashComm maintains its own sequence-parallel communication. Let the
+        # patched linear layers gather the sharded input instead of gathering
+        # it once here and again in the column-parallel projection.
+        if _EXTRA_CTX.flash_comm_v1_enabled:
+            return hidden_states, residual
+
+        return _all_gather_hidden_and_residual(
+            hidden_states,
+            residual,
+            full_num_tokens,
+            hidden_size,
+        )
+
+    qwen3_next_module._all_gather_hidden_and_residual = _ascend_all_gather_hidden_and_residual
 
 _GDN_PATCH_TARGET = _GDNBaseCls
 
