@@ -11,12 +11,6 @@ def run_hitest_script() -> tuple[int, str, str]:
     if not os.path.exists(shell_script_path):
         raise FileNotFoundError(f"hitest.sh not found at: {shell_script_path}")
     os.chmod(shell_script_path, 0o755)
-    # 新增：打印当前进程环境中密钥变量长度，调试是否透传成功
-    print("===== DEBUG PYTHON ENV AUTH LENGTH =====")
-    print(f"HITEST_APIG_APPCODE len: {len(os.environ.get('HITEST_APIG_APPCODE', ''))}")
-    print(f"HITEST_KEY len: {len(os.environ.get('HITEST_KEY', ''))}")
-    print(f"HITEST_SECRET len: {len(os.environ.get('HITEST_SECRET', ''))}")
-    print("========================================")
     proc = subprocess.run(
         ["/bin/bash", "-el", shell_script_path],
         capture_output=True,
