@@ -24,20 +24,20 @@ The following model variants are available. It is recommended to download the mo
 
 | Model | Hardware Requirement | Download |
 |-------|---------------------|----------|
-| Qwen3-0.6B | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B) |
-| Qwen3-1.7B | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B) |
-| Qwen3-4B | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-4B) |
-| Qwen3-8B | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-8B) |
-| Qwen3-14B | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-14B) |
-| Qwen3-32B | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-32B) |
+| Qwen3-0.6B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8), or Atlas inference products | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B) |
+| Qwen3-1.7B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8), or Atlas inference products | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B) |
+| Qwen3-4B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8), or Atlas inference products | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-4B) |
+| Qwen3-8B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8), or Atlas inference products | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-8B) |
+| Qwen3-14B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8), or Atlas inference products | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-14B) |
+| Qwen3-32B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8), or Atlas inference products | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-32B) |
 
 **Quantized Versions:**
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
-| Qwen3-8B-W4A8 | W4A8 | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8) |
-| Qwen3-32B-W4A4 | W4A4 | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W4A4) |
-| Qwen3-32B-W8A8 | W8A8 | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8) |
+| Qwen3-8B-W4A8 | W4A8 | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8), or Atlas inference products | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8) |
+| Qwen3-32B-W4A4 | W4A4 | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8), or Atlas inference products | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W4A4) |
+| Qwen3-32B-W8A8 | W8A8 | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8), or Atlas inference products | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8) |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -62,7 +62,7 @@ docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
 Start the docker image on your each node.
 
-=== "A3 series"
+=== "Atlas A3 inference products"
 
     ```bash
 
@@ -103,10 +103,10 @@ Start the docker image on your each node.
 
     !!! note
 
-        A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
+        Atlas A3 inference products have 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
         If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
 
-=== "A2 series"
+=== "Atlas A2 inference products"
 
     ```bash
 
@@ -137,6 +137,37 @@ Start the docker image on your each node.
         -it $IMAGE bash
     ```
 
+=== "Atlas inference products"
+
+    ```bash
+
+    # Use the vllm-ascend image
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
+
+    docker run --rm \
+    --name vllm-ascend \
+    --shm-size=10g \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -p 8080:8080 \
+    -it $IMAGE bash
+    ```
+
 The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed as Python packages in site-packages.
 
 Installation Verification:
@@ -157,6 +188,14 @@ Expected result: The version information is displayed, matching the pulled image
 ### 4.2 Source Code Installation
 
 If you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../installation.md).
+
+!!! note
+
+    For Atlas inference products, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas inference products:
+
+    ```bash
+    pip uninstall -y triton-ascend triton
+    ```
 
 To verify the source installation:
 
@@ -179,69 +218,135 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 **Start the server:**
 > The following command is an example configuration. Adjust the parameters based on your actual scenario.
 
-Atlas 800I A2/A3:
+=== "Atlas A2 inference products / Atlas A3 inference products"
 
-Qwen3-32B-W8A8:
+    Qwen3-32B-W8A8:
 
-```bash
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
+    ```bash
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
 
-vllm serve your_model_path \
-    --served-model-name qwen3 \
-    --trust-remote-code \
-    --async-scheduling \
-    --quantization ascend \
-    --distributed-executor-backend mp \
-    --tensor-parallel-size 4 \
-    --max-model-len 5500 \
-    --max-num-batched-tokens 40960 \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --port <port> \
-    --gpu-memory-utilization 0.9 \
-    --additional-config '{"enable_flashcomm1": true}'
-```
+    vllm serve your_model_path \
+        --served-model-name qwen3 \
+        --trust-remote-code \
+        --async-scheduling \
+        --quantization ascend \
+        --distributed-executor-backend mp \
+        --tensor-parallel-size 4 \
+        --max-model-len 5500 \
+        --max-num-batched-tokens 40960 \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+        --port <port> \
+        --gpu-memory-utilization 0.9 \
+        --additional-config '{"enable_flashcomm1": true}'
+    ```
 
-Atlas 800I A2/A3：
+    Qwen3-32B-W4A4:
 
-Qwen3-32B-W4A4:
+    ```bash
+    export ASCEND_RT_VISIBLE_DEVICES=0,1
+    export VLLM_USE_V1=1
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_BUFFSIZE=1024
+    vllm serve your_model_path \
+        --port 8004 \
+        --data-parallel-size 1 \
+        --tensor-parallel-size 2 \
+        --served-model-name qwen3 \
+        --distributed_executor_backend "mp" \
+        --max-model-len 40960 \
+        --max-num-batched-tokens 16384 \
+        --max-num-seqs 64 \
+        --trust-remote-code \
+        --gpu-memory-utilization 0.9 \
+        --quantization ascend \
+        --compilation-config '{"cudagraph_capture_sizes": [64]}' \
+        --additional-config '{"enable_flashcomm1": true, "ascend_compilation_config": {"fuse_norm_quant": false}}'
+    ```
 
-```bash
-export ASCEND_RT_VISIBLE_DEVICES=0,1
-export VLLM_USE_V1=1
-export TASK_QUEUE_ENABLE=1
-export HCCL_BUFFSIZE=1024
-vllm serve your_model_path \
-    --port 8004 \
-    --data-parallel-size 1 \
-    --tensor-parallel-size 2 \
-    --served-model-name qwen3 \
-    --distributed_executor_backend "mp" \
-    --max-model-len 40960 \
-    --max-num-batched-tokens 16384 \
-    --max-num-seqs 64 \
-    --trust-remote-code \
-    --gpu-memory-utilization 0.9 \
-    --quantization ascend \
-    --compilation-config '{"cudagraph_capture_sizes": [64]}' \
-    --additional-config '{"enable_flashcomm1": true, "ascend_compilation_config": {"fuse_norm_quant": false}}'
-```
+    Qwen3-8B-W4A8:
 
-Atlas 800I A2/A3：
-Qwen3-8B-W4A8:  
+    ```bash
+    export ASCEND_RT_VISIBLE_DEVICES=0,1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    vllm serve your_model_path \
+        --served-model-name qwen3 \
+        --max-model-len 4096 \
+        --port 20001 \
+        --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}' \
+        --quantization ascend
+    ```
 
-```bash
-export ASCEND_RT_VISIBLE_DEVICES=0,1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-vllm serve your_model_path \
-    --served-model-name qwen3 \
-    --max-model-len 4096 \
-    --port 20001 \
-    --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}' \
-    --quantization ascend
-```
+=== "Atlas inference products"
+
+    Qwen3-32B-W8A8:
+
+    ```bash
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+
+    vllm serve your_model_path \
+        --host 127.0.0.1 \
+        --port 8080 \
+        --tensor-parallel-size 4 \
+        --gpu-memory-utilization 0.90 \
+        --max-num-seqs 32 \
+        --served-model-name qwen3 \
+        --dtype float16 \
+        --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [16,32]}' \
+        --quantization ascend \
+        --max-model-len 20480 \
+        --no-enable-prefix-caching
+    ```
+
+    Qwen3-32B-W4A4:
+
+    ```bash
+    export ASCEND_RT_VISIBLE_DEVICES=0,1
+    export VLLM_USE_V1=1
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_BUFFSIZE=1024
+
+    vllm serve your_model_path \
+        --host 127.0.0.1 \
+        --port 8080 \
+        --tensor-parallel-size 2 \
+        --gpu-memory-utilization 0.90 \
+        --max-num-seqs 32 \
+        --served-model-name qwen3 \
+        --dtype float16 \
+        --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [16,32]}' \
+        --quantization ascend \
+        --max-model-len 20480 \
+        --no-enable-prefix-caching
+    ```
+
+    Qwen3-8B-W4A8:
+
+    ```bash
+    export ASCEND_RT_VISIBLE_DEVICES=0
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    vllm serve your_model_path \
+        --host 127.0.0.1 \
+        --port 8080 \
+        --tensor-parallel-size 1 \
+        --gpu-memory-utilization 0.90 \
+        --max-num-seqs 32 \
+        --served-model-name qwen3 \
+        --dtype float16 \
+        --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32]}' \
+        --quantization ascend \
+        --max-model-len 16384 \
+        --no-enable-prefix-caching
+    ```
 
 !!! note
 
@@ -408,9 +513,9 @@ After several minutes, you will get the performance evaluation result.
 
 | Scenario | Deployment Mode | *Total NPUs | Weight Version | Key Considerations |
 |----------|----------------|-------------|----------------|---------------------|
-| High Throughput | Single-Node (TP4) | 4 (A3) | W8A8 | 4-card TP maximizes concurrent request processing |
-| Long Context | Single-Node (TP4) | 4 (A3) | W8A8 | 4-card TP extends context window for long sequences |
-| Low Latency | Single-Node (TP8) | 8 (A3) | W8A8 | 8-card TP reduces per-token latency for interactive responses |
+| High Throughput | Single-Node (TP4) | 4 (Atlas A3 inference products) | W8A8 | 4-card TP maximizes concurrent request processing |
+| Long Context | Single-Node (TP4) | 4 (Atlas A3 inference products) | W8A8 | 4-card TP extends context window for long sequences |
+| Low Latency | Single-Node (TP8) | 8 (Atlas A3 inference products) | W8A8 | 8-card TP reduces per-token latency for interactive responses |
 
 > `*Total NPUs` indicates the total number of NPUs used across all nodes.
 
@@ -433,21 +538,21 @@ export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 
 vllm serve your_model_path \
-  --served-model-name qwen3 \
-  --trust-remote-code \
-  --distributed-executor-backend mp \
-  --tensor-parallel-size 4 \
-  --max-model-len 5500 \
-  --max-num-batched-tokens 40960 \
-  --no-enable-prefix-caching \
-  --async-scheduling \
-  --quantization ascend \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,64,72,76,80,96,100,120,140,144,160,192,216,240,252,288,320,336,360,384,400,408,416,420,432,480,540,576,600]}' \
-  --additional-config '{"weight_prefetch_config":{"enabled":true}, "enable_flashcomm1": true}' \
-  --host <host_ip> \
-  --port <port> \
-  --block-size 128 \
-  --gpu-memory-utilization 0.9
+    --served-model-name qwen3 \
+    --trust-remote-code \
+    --distributed-executor-backend mp \
+    --tensor-parallel-size 4 \
+    --max-model-len 5500 \
+    --max-num-batched-tokens 40960 \
+    --no-enable-prefix-caching \
+    --async-scheduling \
+    --quantization ascend \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,64,72,76,80,96,100,120,140,144,160,192,216,240,252,288,320,336,360,384,400,408,416,420,432,480,540,576,600]}' \
+    --additional-config '{"weight_prefetch_config":{"enabled":true}, "enable_flashcomm1": true}' \
+    --host <host_ip> \
+    --port <port> \
+    --block-size 128 \
+    --gpu-memory-utilization 0.9
 ```
 
 <u>Long Context Configuration:</u>
@@ -459,23 +564,23 @@ export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 
 vllm serve your_model_path \
-  --host <host_ip> \
-  --port <port> \
-  --served-model-name qwen3 \
-  --trust-remote-code \
-  --seed 1024 \
-  --max-model-len 135000 \
-  --max-num-batched-tokens 40960 \
-  --tensor-parallel-size 4 \
-  --distributed-executor-backend "mp" \
-  --async-scheduling \
-  --no-enable-prefix-caching \
-  --speculative-config '{"method": "eagle3", "model":"your_eagle3_model_path", "num_speculative_tokens": 3}' \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":131072}}' \
-  --gpu-memory-utilization 0.9 \
-  --quantization ascend \
-  --additional-config '{"enable_flashcomm1": true}'
+    --host <host_ip> \
+    --port <port> \
+    --served-model-name qwen3 \
+    --trust-remote-code \
+    --seed 1024 \
+    --max-model-len 135000 \
+    --max-num-batched-tokens 40960 \
+    --tensor-parallel-size 4 \
+    --distributed-executor-backend "mp" \
+    --async-scheduling \
+    --no-enable-prefix-caching \
+    --speculative-config '{"method": "eagle3", "model":"your_eagle3_model_path", "num_speculative_tokens": 3}' \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":131072}}' \
+    --gpu-memory-utilization 0.9 \
+    --quantization ascend \
+    --additional-config '{"enable_flashcomm1": true}'
 ```
 
 <u>Low Latency Configuration:</u>
@@ -487,20 +592,20 @@ export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 
 vllm serve your_model_path \
-  --served-model-name qwen3 \
-  --trust-remote-code \
-  --distributed-executor-backend mp \
-  --tensor-parallel-size 8 \
-  --max-model-len 5500 \
-  --max-num-batched-tokens 40960 \
-  --no-enable-prefix-caching \
-  --async-scheduling \
-  --quantization ascend \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,32,64,72,76,80,96,100,120,140,144,160,192,216,240,252,288,320,336,360,384,400,408,416,420,432,480,540,576,600]}' \
-  --speculative-config '{"method": "eagle3", "model":"your_eagle3_model_path", "enforce_eager": true, "num_speculative_tokens": 3}' \
-  --port <port> \
-  --block-size 128 \
-  --gpu-memory-utilization 0.9
+    --served-model-name qwen3 \
+    --trust-remote-code \
+    --distributed-executor-backend mp \
+    --tensor-parallel-size 8 \
+    --max-model-len 5500 \
+    --max-num-batched-tokens 40960 \
+    --no-enable-prefix-caching \
+    --async-scheduling \
+    --quantization ascend \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,32,64,72,76,80,96,100,120,140,144,160,192,216,240,252,288,320,336,360,384,400,408,416,420,432,480,540,576,600]}' \
+    --speculative-config '{"method": "eagle3", "model":"your_eagle3_model_path", "enforce_eager": true, "num_speculative_tokens": 3}' \
+    --port <port> \
+    --block-size 128 \
+    --gpu-memory-utilization 0.9
 ```
 
 ### 9.2 Tuning Guidelines
