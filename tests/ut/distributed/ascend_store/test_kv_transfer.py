@@ -19,14 +19,19 @@ import threading
 import unittest
 from unittest.mock import MagicMock
 
+import numpy as np
+
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm.distributed.kv_events import BlockStored
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     KeyMetadata,
+    LayerBlockRange,
+    LayerRangeReqMeta,
     LayerMultiBlockReqMeta,
     LayerPoolKey,
+    LayerTransferTask,
     LoadSpec,
     PoolKey,
     ReqMeta,
@@ -39,6 +44,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
     KVTransferThread,
+    LayerBatchBuilder,
 )
 
 
@@ -115,6 +121,135 @@ class MaskedFakeTokenDatabase(FakeTokenDatabase):
             return True
         block_idx = start // self.block_size
         return block_idx < len(masks[kv_cache_group_id]) and masks[kv_cache_group_id][block_idx]
+
+
+class RangeBatchFakeTokenDatabase(FakeTokenDatabase):
+    def __init__(self):
+        super().__init__()
+        self.group_block_len = [[64, 32, 64, 32, 64, 32]]
+        self.group_kv_caches_base_addr = [[100, 200, 500, 600, 1000, 2000]]
+        self.group_block_stride = {0: [100, 50, 100, 50, 100, 50]}
+
+
+class TestLayerBatchBuilder(unittest.TestCase):
+    def setUp(self):
+        self.builder = LayerBatchBuilder(
+            RangeBatchFakeTokenDatabase(),
+            my_key_index=0,
+            num_ranks_per_layer=1,
+            page_size_bytes=96,
+            num_layers=3,
+        )
+
+    def _build(self, block_ids, block_keys):
+        request = ReqMeta(
+            req_id="r1",
+            block_ids=block_ids,
+            save_block_keys=block_keys,
+        )
+        task = LayerTransferTask(
+            layer_id=2,
+            block_ranges=[LayerBlockRange(request, 0, len(block_ids))],
+            use_key_major_ranges=True,
+        )
+        return self.builder.build(task)
+
+    def test_builds_memcache_shared_data_without_block_keys(self):
+        request = ReqMeta(
+            req_id="r1",
+            block_ids=[1],
+            block_ids_np=np.asarray([1], dtype=np.int64),
+            block_gvas_np=np.asarray([0x1000], dtype=np.int64),
+        )
+        task = LayerTransferTask(
+            layer_id=0,
+            block_ranges=[LayerBlockRange(request, 0, 1)],
+        )
+
+        shared = self.builder.build_shared(task)
+
+        self.assertIsNotNone(shared)
+        assert shared is not None
+        self.assertIsNone(shared.block_keys)
+        np.testing.assert_array_equal(shared.block_ids_arr, [1])
+        np.testing.assert_array_equal(shared.block_gvas_arr, [0x1000])
+
+    def test_builds_key_major_range_batch_for_two_blocks_and_two_segments(self):
+        batch = self._build([1, 2], ["key-1", "key-2"])
+
+        self.assertIsNotNone(batch)
+        assert batch is not None
+        self.assertIsInstance(batch, LayerRangeReqMeta)
+        self.assertEqual(batch.req_ids, ["r1"])
+        self.assertEqual(batch.layer_id, 2)
+        self.assertEqual(batch.block_ids, [1, 2])
+        self.assertEqual(batch.keys, ["key-1", "key-2"])
+        self.assertEqual(batch.all_buffers, [[1100, 2050], [1200, 2100]])
+        self.assertEqual(batch.all_sizes, [[64, 32], [64, 32]])
+        self.assertEqual(batch.all_offsets, [[192, 256], [192, 256]])
+
+    def test_reuses_key_major_shared_data_across_layers(self):
+        request = ReqMeta(
+            req_id="r1",
+            block_ids=[1, 2],
+            save_block_keys=["key-1", "key-2"],
+        )
+        task = LayerTransferTask(
+            layer_id=2,
+            block_ranges=[LayerBlockRange(request, 0, 2)],
+            use_key_major_ranges=True,
+        )
+        shared = self.builder.build_shared(task)
+
+        self.assertIsNotNone(shared)
+        assert shared is not None
+        layer_0_batch = self.builder.build_addrs(shared, 0)
+        layer_2_batch = self.builder.build_addrs(shared, 2)
+
+        for batch in (layer_0_batch, layer_2_batch):
+            self.assertIsInstance(batch, LayerRangeReqMeta)
+            self.assertEqual(batch.block_ids, [1, 2])
+            self.assertEqual(batch.keys, ["key-1", "key-2"])
+            self.assertEqual(batch.all_sizes, [[64, 32], [64, 32]])
+
+        self.assertEqual(layer_0_batch.all_buffers, [[200, 250], [300, 300]])
+        self.assertEqual(layer_0_batch.all_offsets, [[0, 64], [0, 64]])
+        self.assertEqual(layer_2_batch.all_buffers, [[1100, 2050], [1200, 2100]])
+        self.assertEqual(layer_2_batch.all_offsets, [[192, 256], [192, 256]])
+
+    def test_partial_only_failed_session_stays_an_empty_key_major_batch(self):
+        request = ReqMeta(
+            req_id="r1",
+            block_ids=[1],
+            save_last_block_key=None,
+        )
+        task = LayerTransferTask(
+            layer_id=0,
+            block_ranges=[LayerBlockRange(request, 0, 0, partial_block_index=0)],
+            use_key_major_ranges=True,
+        )
+
+        shared = self.builder.build_shared(task)
+
+        self.assertIsNotNone(shared)
+        assert shared is not None
+        self.assertEqual(shared.block_keys, [])
+        np.testing.assert_array_equal(shared.block_ids_arr, [])
+        batch = self.builder.build_addrs(shared, 0)
+        self.assertIsInstance(batch, LayerRangeReqMeta)
+        self.assertEqual(batch.keys, [])
+        self.assertEqual(batch.all_buffers, [])
+
+    def test_filters_none_key_with_its_aligned_block_and_range_values(self):
+        batch = self._build([1, 2, 3], ["key-1", None, "key-3"])
+
+        self.assertIsNotNone(batch)
+        assert batch is not None
+        self.assertEqual(batch.block_ids, [1, 3])
+        self.assertEqual(batch.keys, ["key-1", "key-3"])
+        self.assertEqual(batch.all_buffers, [[1100, 2050], [1300, 2150]])
+        self.assertEqual(batch.all_sizes, [[64, 32], [64, 32]])
+        self.assertEqual(batch.all_offsets, [[192, 256], [192, 256]])
 
 
 class TestKVTransferThread(unittest.TestCase):

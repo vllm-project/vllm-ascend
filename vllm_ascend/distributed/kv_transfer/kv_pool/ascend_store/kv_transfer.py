@@ -22,6 +22,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     LayerBlockRange,
     LayerLoadTask,
     LayerMultiBlockReqMeta,
+    LayerRangeReqMeta,
     LayerTransferTask,
     ReqMeta,
     SharedBlockData,
@@ -182,10 +183,105 @@ class LayerBatchBuilder:
             )
         return block_ids_np, block_gvas_np
 
+    @staticmethod
+    def _request_block_keys(
+        request: ReqMeta,
+        is_save: bool,
+    ) -> tuple[list[str | None], int, str | None]:
+        if is_save:
+            return (
+                request.save_block_keys,
+                request.save_key_block_offset,
+                request.save_last_block_key,
+            )
+        return (
+            request.load_block_keys,
+            request.load_key_block_offset,
+            request.load_last_block_key,
+        )
+
+    def _build_key_major_shared(
+        self,
+        task: LayerTransferTask,
+        is_save: bool,
+    ) -> SharedBlockData:
+        block_ids: list[int] = []
+        block_keys: list[str] = []
+        req_ids: list[str] = []
+        is_last_chunks: list[bool | None] = []
+        all_load_keys: list[str] = []
+
+        for block_range in task.block_ranges:
+            request = block_range.request
+            req_ids.append(request.req_id)
+            is_last_chunks.append(request.is_last_chunk)
+            all_load_keys.extend(request.load_keys)
+
+            request_block_ids = (
+                request.block_ids_np.tolist()
+                if request.block_ids_np is not None
+                else request.block_ids
+            )
+            if (
+                block_range.start_block < 0
+                or block_range.end_block < block_range.start_block
+                or block_range.end_block > len(request_block_ids)
+            ):
+                raise RuntimeError(
+                    f"ReqMeta block metadata does not cover requested block range "
+                    f"[{block_range.start_block}, {block_range.end_block})"
+                )
+
+            request_keys, key_block_offset, last_block_key = self._request_block_keys(
+                request,
+                is_save,
+            )
+            key_start = block_range.start_block - key_block_offset
+            key_end = block_range.end_block - key_block_offset
+            if key_start < 0 or key_end > len(request_keys):
+                raise RuntimeError(
+                    f"ReqMeta {'save' if is_save else 'load'} block key metadata "
+                    f"does not cover requested block range "
+                    f"[{block_range.start_block}, {block_range.end_block}) "
+                    f"with offset {key_block_offset}"
+                )
+
+            for block_id, key in zip(
+                request_block_ids[block_range.start_block : block_range.end_block],
+                request_keys[key_start:key_end],
+                strict=True,
+            ):
+                if key is not None:
+                    block_ids.append(block_id)
+                    block_keys.append(key)
+
+            if block_range.partial_block_index is not None:
+                partial_block_index = block_range.partial_block_index
+                if partial_block_index < 0 or partial_block_index >= len(request_block_ids):
+                    raise RuntimeError(
+                        f"ReqMeta block metadata does not cover partial block "
+                        f"index {partial_block_index}"
+                    )
+                if last_block_key is not None:
+                    block_ids.append(request_block_ids[partial_block_index])
+                    block_keys.append(last_block_key)
+
+        return SharedBlockData(
+            block_ids_arr=np.asarray(block_ids, dtype=np.int64),
+            block_gvas_arr=None,
+            block_keys=block_keys,
+            req_ids=req_ids,
+            is_last_chunks=is_last_chunks,
+            load_keys=all_load_keys,
+        )
+
     def build_shared(self, task: LayerTransferTask, is_save: bool = True) -> SharedBlockData | None:
         """Pre-compute shared block data that is identical across all layers."""
         if not task.block_ranges:
             return None
+
+        if task.use_key_major_ranges:
+            return self._build_key_major_shared(task, is_save)
 
         total = 0
         for block_range in task.block_ranges:
@@ -240,6 +336,7 @@ class LayerBatchBuilder:
         return SharedBlockData(
             block_ids_arr=block_ids_arr,
             block_gvas_arr=block_gvas_arr,
+            block_keys=None,
             req_ids=req_ids,
             is_last_chunks=is_last_chunks,
             load_keys=all_load_keys,
@@ -249,8 +346,40 @@ class LayerBatchBuilder:
         self,
         shared: SharedBlockData,
         layer_id: int,
-    ) -> LayerBatchReqMeta:
+    ) -> LayerBatchReqMeta | LayerRangeReqMeta:
         """Compute per-layer addresses from pre-computed shared block data."""
+        if shared.block_keys is not None:
+            base_offset = layer_id * self._caches_per_layer
+            layer_base_addrs = self._kv_caches_base_addr_np[
+                base_offset : base_offset + self._caches_per_layer
+            ]
+            layer_block_len = self._block_len_np[
+                base_offset : base_offset + self._caches_per_layer
+            ]
+            layer_block_stride = self._block_stride_np[
+                base_offset : base_offset + self._caches_per_layer
+            ]
+            layer_inner_offsets = np.concatenate(
+                (np.zeros(1, dtype=np.int64), np.cumsum(layer_block_len[:-1], dtype=np.int64))
+            )
+            offsets = (layer_id * self.page_size_bytes + layer_inner_offsets).tolist()
+            sizes = layer_block_len.tolist()
+            all_buffers = [
+                (layer_base_addrs + block_id * layer_block_stride).tolist()
+                for block_id in shared.block_ids_arr
+            ]
+            return LayerRangeReqMeta(
+                req_ids=shared.req_ids,
+                layer_id=layer_id,
+                block_ids=shared.block_ids_arr.tolist(),
+                keys=shared.block_keys,
+                all_buffers=all_buffers,
+                all_sizes=[sizes.copy() for _ in shared.block_ids_arr],
+                all_offsets=[offsets.copy() for _ in shared.block_ids_arr],
+                load_keys=shared.load_keys,
+            )
+
+        assert shared.block_gvas_arr is not None
         addr_array, size_array, gvas_array = self._build_transfer_arrays(
             shared.block_ids_arr, shared.block_gvas_arr, layer_id
         )
@@ -265,7 +394,11 @@ class LayerBatchBuilder:
             load_keys=shared.load_keys,
         )
 
-    def build(self, task: LayerTransferTask, is_save: bool = True) -> LayerBatchReqMeta | None:
+    def build(
+        self,
+        task: LayerTransferTask,
+        is_save: bool = True,
+    ) -> LayerBatchReqMeta | LayerRangeReqMeta | None:
         """Full build: shared data + per-layer addresses (backward compat)."""
         shared = self.build_shared(task, is_save)
         if shared is None:
