@@ -639,7 +639,7 @@ class BatchJobAwareScheduler(Scheduler):
             self, self._job_decode_estimator, self._block_reserver, self._job_name_parser, _config
         )
 
-    def schedule(self):
+    def schedule(self, *args, **kwargs):
         """Override to invalidate the block-reserve cache before each step.
 
         Inside the parent ``schedule()``, the waiting queue calls
@@ -649,7 +649,7 @@ class BatchJobAwareScheduler(Scheduler):
         redundant full scans.
         """
         self._block_reserver.invalidate_cache()
-        return super().schedule()
+        return super().schedule(*args, **kwargs)
 
     def _free_request(self, request: Request, delay_free_blocks: bool = False) -> dict[str, Any] | None:
         """Observe the decode length for naturally stopped requests."""
