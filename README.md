@@ -20,7 +20,7 @@ vLLM Ascend Plugin
 </p>
 
 <p align="center">
-<a ><b>English</b></a> | <a href="README.zh.md"><b>中文</b></a>
+<a><b>English</b></a> | <a href="README.zh.md"><b>中文</b></a>
 </p>
 
 ---
