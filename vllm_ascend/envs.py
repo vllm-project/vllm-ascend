@@ -110,6 +110,16 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Optional policy knob: skip a DSv4 sub-block ("partial") prefix-cache hit
+    # whose matched length (in prompt tokens) is below this threshold, recomputing
+    # instead. The partial path copies cached KV into a private block; the copy is
+    # issued as one batched memcpy and overlapped with input prep, which makes
+    # short-prompt hits a net win (e.g. 2k/4k both faster than no-cache on A2), so
+    # the default is 0 (never skip — use every partial hit). Raise it only on a
+    # deployment where short partial hits are measured to be unprofitable.
+    "VLLM_ASCEND_DSV4_PARTIAL_MIN_HIT_TOKENS": lambda: int(
+        os.getenv("VLLM_ASCEND_DSV4_PARTIAL_MIN_HIT_TOKENS", "0")
+    ),
 }
 
 # end-env-vars-definition
