@@ -56,7 +56,6 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config.enable_mc2_hierarchy_comm = False
         mock_ascend_config.enable_fused_mc2 = False
         mock_ascend_config.enable_flashcomm1 = False
-        mock_ascend_config.SLO_limits_for_dynamic_batch = -1
         mock_ascend_config.enable_shared_expert_dp = False
         mock_ascend_config.short_request_first_config.enabled = False
         mock_ascend_config.update_compile_ranges_split_points = MagicMock()
@@ -730,37 +729,6 @@ class TestNPUPlatform(TestBase):
         self.platform.update_block_size_for_backend(vllm_config)
 
         self.assertEqual(vllm_config.cache_config.block_size, 512)
-
-    def test_validate_layer_sharding_config_rejects_missing_kv_transfer_config(self):
-        vllm_config = TestNPUPlatform.mock_vllm_config()
-        vllm_config.additional_config = {"layer_sharding": ["q_b_proj", "o_proj"]}
-        vllm_config.kv_transfer_config = None
-
-        with pytest.raises(ValueError, match="layer_sharding can only be enabled in PD-disaggregated's P node"):
-            self.platform._validate_layer_sharding_config(vllm_config)
-
-    def test_validate_layer_sharding_config_accepts_kv_producer(self):
-        vllm_config = TestNPUPlatform.mock_vllm_config()
-        vllm_config.additional_config = {"layer_sharding": ["q_b_proj", "o_proj"]}
-        vllm_config.kv_transfer_config = MagicMock(is_kv_producer=True, kv_role="kv_producer")
-
-        self.platform._validate_layer_sharding_config(vllm_config)
-
-    def test_validate_layer_sharding_config_rejects_non_kv_producer(self):
-        vllm_config = TestNPUPlatform.mock_vllm_config()
-        vllm_config.additional_config = {"layer_sharding": ["q_b_proj", "o_proj"]}
-        vllm_config.kv_transfer_config = MagicMock(is_kv_producer=False, kv_role="kv_consumer")
-
-        with pytest.raises(ValueError, match="layer_sharding can only be enabled in PD-disaggregated's P node"):
-            self.platform._validate_layer_sharding_config(vllm_config)
-
-    def test_validate_layer_sharding_config_rejects_kv_both(self):
-        vllm_config = TestNPUPlatform.mock_vllm_config()
-        vllm_config.additional_config = {"layer_sharding": ["q_b_proj", "o_proj"]}
-        vllm_config.kv_transfer_config = MagicMock(is_kv_producer=True, kv_role="kv_both")
-
-        with pytest.raises(ValueError, match="layer_sharding can only be enabled in PD-disaggregated's P node"):
-            self.platform._validate_layer_sharding_config(vllm_config)
 
     def test_validate_parallel_config_rejects_pcp_plus_dp(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
