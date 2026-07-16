@@ -46,13 +46,8 @@ else:
 class BaseDeviceAdaptor:
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
-        torch_npu.npu_scatter_pa_kv_cache(
-            key=key.contiguous(),
-            value=value.contiguous(),
-            key_cache=key_cache,
-            value_cache=value_cache,
-            slot_mapping=slot_mapping.contiguous(),
-            cache_mode="Norm",
+        torch_npu._npu_reshape_and_cache(
+            key=key, value=value, key_cache=key_cache, value_cache=value_cache, slot_indices=slot_mapping
         )
 
     @classmethod
@@ -266,12 +261,12 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_starts, key, value):
-        torch_npu.npu_gather_pa_kv_cache(
+        torch_npu.atb.npu_paged_cache_load(
             cache_kv_c,
             cache_k_pe,
             block_table,
-            context_seq_len_npu.contiguous(),
-            seq_offset=seq_starts,
+            context_seq_len_npu,
+            seq_starts=seq_starts,
             key=key,
             value=value,
         )
@@ -1089,6 +1084,17 @@ class BaseDeviceAdaptor:
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
+    @classmethod
+    def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
+        torch_npu.npu_scatter_pa_kv_cache(
+            key=key.contiguous(),
+            value=value.contiguous(),
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_mapping=slot_mapping.contiguous(),
+            cache_mode="Norm",
+        )
+
     @classmethod
     def npu_fused_infer_attention_score(
         cls,
@@ -1970,16 +1976,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
 
 class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):
-    @classmethod
-    def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
-        torch_npu._npu_reshape_and_cache(
-            key=key,
-            value=value,
-            key_cache=key_cache,
-            value_cache=value_cache,
-            slot_indices=slot_mapping,
-        )
-
     @staticmethod
     def index_fill(
         tensor: torch.Tensor,
