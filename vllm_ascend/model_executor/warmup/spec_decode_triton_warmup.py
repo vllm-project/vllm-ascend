@@ -29,9 +29,8 @@ if TYPE_CHECKING:
 # Keep dummy tensors small; JIT keys depend on constexpr flags, not vocab size.
 _WARMUP_VOCAB_SIZE = 1024
 _WARMUP_SELECTED_VOCAB_SIZE = 256
-_SUB_BLOCK = 4 * 1024
+_SUB_BLOCK = 512
 _VOCAB_BLOCK_SIZE = 512
-_EPSILON = 1e-10
 
 
 def _collect_boundary_sizes(max_value: int) -> set[int]:
@@ -144,6 +143,7 @@ def _make_rejection_tensors(
 
     draft_token_ids = torch.zeros(num_tokens, dtype=torch.int64, device=device)
     draft_probs = None
+    global_vocab = vocab_size
     if with_draft_probs:
         global_vocab = max(vocab_size, _WARMUP_VOCAB_SIZE)
         draft_probs = torch.rand(
@@ -153,9 +153,14 @@ def _make_rejection_tensors(
             device=device,
         )
 
-    prob_vocab = (
-        _WARMUP_SELECTED_VOCAB_SIZE if enable_reduce_sampling else vocab_size
-    )
+    if enable_reduce_sampling:
+        prob_vocab = _WARMUP_SELECTED_VOCAB_SIZE
+        global_vocab_size = (
+            global_vocab if with_draft_probs else _WARMUP_SELECTED_VOCAB_SIZE
+        )
+    else:
+        prob_vocab = global_vocab if with_draft_probs else vocab_size
+        global_vocab_size = prob_vocab
     target_probs = torch.rand(
         num_tokens,
         prob_vocab,
@@ -193,12 +198,6 @@ def _make_rejection_tensors(
         dtype=torch.float32,
         device=device,
     )
-    ori_target_probs = torch.rand(
-        num_tokens,
-        vocab_size,
-        dtype=torch.float32,
-        device=device,
-    )
 
     return {
         "cu_num_draft_tokens": cu_num_draft_tokens,
@@ -212,8 +211,7 @@ def _make_rejection_tensors(
         "is_greedy": is_greedy,
         "output_token_ids": output_token_ids,
         "q": q,
-        "ori_target_probs": ori_target_probs,
-        "global_vocab_size": vocab_size,
+        "global_vocab_size": global_vocab_size,
         "prob_vocab_size": prob_vocab,
     }
 
@@ -225,6 +223,7 @@ def _warm_sample_recovered_tokens_kernel(
     *,
     with_draft_probs: bool,
     enable_reduce_sampling: bool,
+    block_verify: bool,
 ) -> None:
     global_vocab_size = tensors["global_vocab_size"]
     assert isinstance(global_vocab_size, int)
@@ -242,8 +241,8 @@ def _warm_sample_recovered_tokens_kernel(
         prob_vocab_size,
         global_vocab_size,
         NO_DRAFT_PROBS=not with_draft_probs,
+        BLOCK_VERIFY=block_verify,
         ENABLE_REDUCE_SAMPLING=enable_reduce_sampling,
-        VOCAB_BLOCK_SIZE=_VOCAB_BLOCK_SIZE,
         SUB_BLOCK=_SUB_BLOCK,
     )
 
@@ -257,35 +256,15 @@ def _warm_rejection_random_sample_kernel(
     *,
     with_draft_probs: bool,
     enable_reduce_sampling: bool,
-    entropy_verify: bool,
     block_verify: bool,
-    posterior_threshold: float,
-    posterior_alpha: float,
-    with_ori_target_probs: bool,
 ) -> None:
     global_vocab_size = tensors["global_vocab_size"]
     assert isinstance(global_vocab_size, int)
     prob_vocab_size = tensors["prob_vocab_size"]
     assert isinstance(prob_vocab_size, int)
-    ori_target_probs = (
-        tensors["ori_target_probs"]
-        if entropy_verify and with_ori_target_probs
-        else None
-    )
     uniform_probs = tensors["uniform_probs"]
     assert isinstance(uniform_probs, torch.Tensor)
 
-    constexpr_kwargs = dict(
-        NO_ORI_TARGET_PROBS=ori_target_probs is None,
-        NO_DRAFT_PROBS=not with_draft_probs,
-        ENABLE_REDUCE_SAMPLING=enable_reduce_sampling,
-        ENTROPY_VERIFY=entropy_verify,
-        BLOCK_SIZE=block_size,
-        POSTERIOR_THRESHOLD=posterior_threshold,
-        POSTERIOR_ALPHA=posterior_alpha,
-        SUB_BLOCK=_SUB_BLOCK,
-        EPSILON=_EPSILON,
-    )
     kernel_args = (
         tensors["output_token_ids"],
         tensors["cu_num_draft_tokens"],
@@ -301,17 +280,23 @@ def _warm_rejection_random_sample_kernel(
         prob_vocab_size,
         global_vocab_size,
         batch_size,
-        ori_target_probs,
+    )
+    constexpr_kwargs = dict(
+        NO_DRAFT_PROBS=not with_draft_probs,
+        ENABLE_REDUCE_SAMPLING=enable_reduce_sampling,
+        BLOCK_SIZE=block_size,
     )
 
     if block_verify:
         rejection_random_sample_block_verify_kernel[(grid,)](
             *kernel_args,
+            SUB_BLOCK=_SUB_BLOCK,
             **constexpr_kwargs,
         )
     else:
         rejection_random_sample_kernel[(grid,)](
             *kernel_args,
+            VOCAB_BLOCK_SIZE=_VOCAB_BLOCK_SIZE,
             **constexpr_kwargs,
         )
 
@@ -382,11 +367,7 @@ def _warm_rejection_random_path(
     *,
     with_draft_probs: bool,
     enable_reduce_sampling: bool,
-    entropy_verify: bool,
     block_verify: bool,
-    posterior_threshold: float,
-    posterior_alpha: float,
-    with_ori_target_probs: bool,
 ) -> None:
     grid, block_size = cal_grid_and_block_size(batch_size)
     tensors = _make_rejection_tensors(
@@ -403,6 +384,7 @@ def _warm_rejection_random_path(
         tensors,
         with_draft_probs=with_draft_probs,
         enable_reduce_sampling=enable_reduce_sampling,
+        block_verify=block_verify,
     )
     _warm_rejection_random_sample_kernel(
         batch_size,
@@ -412,67 +394,8 @@ def _warm_rejection_random_path(
         tensors,
         with_draft_probs=with_draft_probs,
         enable_reduce_sampling=enable_reduce_sampling,
-        entropy_verify=entropy_verify,
         block_verify=block_verify,
-        posterior_threshold=posterior_threshold,
-        posterior_alpha=posterior_alpha,
-        with_ori_target_probs=with_ori_target_probs,
     )
-
-
-def _warm_random_rejection_variants(
-    device: torch.device,
-    batch_size: int,
-    max_spec_len: int,
-    vocab_size: int,
-    *,
-    with_draft_probs: bool,
-    enable_reduce_sampling: bool,
-    using_entropy_verify: bool,
-    using_block_verify: bool,
-    posterior_threshold: float,
-    posterior_alpha: float,
-) -> None:
-    _warm_rejection_random_path(
-        device,
-        batch_size,
-        max_spec_len,
-        vocab_size,
-        with_draft_probs=with_draft_probs,
-        enable_reduce_sampling=enable_reduce_sampling,
-        entropy_verify=using_entropy_verify,
-        block_verify=using_block_verify,
-        posterior_threshold=posterior_threshold,
-        posterior_alpha=posterior_alpha,
-        with_ori_target_probs=using_entropy_verify,
-    )
-    if using_entropy_verify:
-        _warm_rejection_random_path(
-            device,
-            batch_size,
-            max_spec_len,
-            vocab_size,
-            with_draft_probs=with_draft_probs,
-            enable_reduce_sampling=enable_reduce_sampling,
-            entropy_verify=False,
-            block_verify=using_block_verify,
-            posterior_threshold=posterior_threshold,
-            posterior_alpha=posterior_alpha,
-            with_ori_target_probs=False,
-        )
-        _warm_rejection_random_path(
-            device,
-            batch_size,
-            max_spec_len,
-            vocab_size,
-            with_draft_probs=with_draft_probs,
-            enable_reduce_sampling=enable_reduce_sampling,
-            entropy_verify=True,
-            block_verify=using_block_verify,
-            posterior_threshold=posterior_threshold,
-            posterior_alpha=posterior_alpha,
-            with_ori_target_probs=False,
-        )
 
 
 @torch.inference_mode()
@@ -493,24 +416,16 @@ def spec_decode_triton_warmup(worker: NPUWorker) -> None:
     max_num_reqs = worker.scheduler_config.max_num_seqs
     vocab_size = min(worker.vllm_config.model_config.get_vocab_size(), _WARMUP_VOCAB_SIZE)
 
-    ascend_cfg = get_ascend_config()
-    rej_cfg = ascend_cfg.rejection_sampler_config
-    enable_reduce_sampling = ascend_cfg.enable_reduce_sample
-    using_entropy_verify = bool(rej_cfg.enable_entropy_verify)
-    using_block_verify = max_spec_len >= 3 and bool(rej_cfg.enable_block_verify)
-    posterior_threshold = float(rej_cfg.posterior_threshold)
-    posterior_alpha = float(rej_cfg.posterior_alpha)
+    enable_reduce_sampling = get_ascend_config().enable_reduce_sample
 
     req_batch_sizes = collect_warmup_req_batch_sizes(max_num_reqs)
 
     logger.info(
         "Warming up spec-decode Triton kernels: max_spec_len=%d, "
-        "req_batch_sizes=%s, reduce_sample=%s, block_verify=%s, entropy_verify=%s",
+        "req_batch_sizes=%s, reduce_sample=%s",
         max_spec_len,
         req_batch_sizes,
         enable_reduce_sampling,
-        using_block_verify,
-        using_entropy_verify,
     )
 
     draft_prob_variants = (False, True)
@@ -533,17 +448,17 @@ def spec_decode_triton_warmup(worker: NPUWorker) -> None:
             for reduce_sampling in reduce_variants:
                 if reduce_sampling and not enable_reduce_sampling:
                     continue
-                _warm_random_rejection_variants(
+                # Match rejection_sampler: block verify needs draft_probs and
+                # num_speculative_tokens >= 3.
+                block_verify = max_spec_len >= 3 and with_draft_probs
+                _warm_rejection_random_path(
                     device,
                     batch_size,
                     max_spec_len,
                     vocab_size,
                     with_draft_probs=with_draft_probs,
                     enable_reduce_sampling=reduce_sampling,
-                    using_entropy_verify=using_entropy_verify,
-                    using_block_verify=using_block_verify,
-                    posterior_threshold=posterior_threshold,
-                    posterior_alpha=posterior_alpha,
+                    block_verify=block_verify,
                 )
 
     if device.type == "npu":
