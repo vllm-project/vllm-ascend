@@ -204,18 +204,6 @@ class KVPoolScheduler:
             self._request_trackers[req_id] = tracker
         return tracker
 
-    def generate_keys(self, block_hashes, req_id="", has_last_block=False):
-        block_keys = []
-        for block_hash in block_hashes:
-            key = f"{self.model_name}@{block_hash.hex()}"
-            block_keys.append(key)
-
-        last_block_key = None
-        if has_last_block:
-            last_block_key = f"{self.model_name}@{req_id}_lastblock"
-
-        return block_keys, last_block_key
-
     def _generate_store_query_keys(
         self,
         block_hashes,
@@ -642,36 +630,6 @@ class KVPoolScheduler:
             return self._floor_to_cache_transfer_granularity(len(prompt_token_ids))
         return len(prompt_token_ids)
 
-    def _allocate_gva_if_needed(
-        self,
-        request_tracker: RequestTracker,
-        block_hashes,
-        num_blocks: int,
-        has_last_block: bool,
-    ) -> None:
-        if not self.use_gva_layerwise:
-            return
-        # GVA allocation is moved to the worker side: each worker allocates
-        # per-rank GVA via batch_alloc right before batch_copy, because memcache
-        # requires batch_alloc and batch_copy to run in the same process (the
-        # gvaBlobTracker that batch_copy consults is per-process). The scheduler
-        # only generates block keys here; block_gvas are left empty for workers
-        # to fill with per-rank GVA.
-        keys, last_block_key = self.generate_keys(
-            block_hashes[:num_blocks],
-            req_id=request_tracker.req_id,
-            has_last_block=has_last_block,
-        )
-        request_tracker.block_keys = keys
-        if last_block_key is not None:
-            request_tracker.last_block_key = last_block_key
-        logger.debug(
-            "[KVPOOL] scheduler gen_keys req=%s num_blocks=%d has_last_block=%s (GVA alloc moved to worker)",
-            request_tracker.req_id,
-            num_blocks,
-            has_last_block,
-        )
-
     def _build_req_meta(
         self,
         request_tracker: RequestTracker,
@@ -724,14 +682,6 @@ class KVPoolScheduler:
             block_sizes=self.grouped_block_size,
         )
         self._request_trackers[request.req_id] = request_tracker
-        num_blocks = num_tokens_to_compute // self.hash_block_size
-        has_last_block = num_tokens_to_compute % self._block_size != 0
-        self._allocate_gva_if_needed(
-            request_tracker,
-            request_real.block_hashes,
-            num_blocks,
-            has_last_block,
-        )
         return self._build_req_meta(
             request_tracker,
             request_real.block_hashes,
@@ -775,14 +725,6 @@ class KVPoolScheduler:
             block_sizes=self.grouped_block_size,
         )
         self._request_trackers[req_id] = request_tracker
-        num_blocks = num_tokens_to_compute // self.hash_block_size
-        has_last_block = num_tokens_to_compute % self._block_size != 0
-        self._allocate_gva_if_needed(
-            request_tracker,
-            request_real.block_hashes,
-            num_blocks,
-            has_last_block,
-        )
         return self._build_req_meta(
             request_tracker,
             request_real.block_hashes,
@@ -819,24 +761,6 @@ class KVPoolScheduler:
             request_tracker.token_len += num_new_tokens
         else:
             raise ValueError(f"Request {req_id} is not in _unfinished_requests, but it is scheduled to be cached")
-        prev_token_count = request_tracker.token_len - num_new_tokens
-        prev_hash_count = prev_token_count // self.hash_block_size
-        current_hash_count = request_tracker.token_len // self.hash_block_size
-        new_hash_count = current_hash_count - prev_hash_count
-        has_last_block = request_tracker.token_len % self._block_size != 0 or current_hash_count > len(
-            request.block_hashes
-        )
-        if self.use_gva_layerwise and (new_hash_count > 0 or has_last_block):
-            # GVA allocation moved to worker side (per-rank batch_alloc);
-            # scheduler only generates block keys here.
-            keys, last_block_key = self.generate_keys(
-                request.block_hashes[:current_hash_count],
-                req_id=request_tracker.req_id,
-                has_last_block=has_last_block,
-            )
-            request_tracker.block_keys = keys
-            if last_block_key is not None:
-                request_tracker.last_block_key = last_block_key
         if new_block_ids is not None:
             request_tracker.update(new_block_ids)
         load_spec = None
@@ -877,14 +801,6 @@ class KVPoolScheduler:
             block_sizes=self.grouped_block_size,
         )
         self._request_trackers[request_id] = request_tracker
-        num_blocks = num_tokens_to_compute // self.hash_block_size
-        has_last_block = num_tokens_to_compute % self._block_size != 0
-        self._allocate_gva_if_needed(
-            request_tracker,
-            request.block_hashes,
-            num_blocks,
-            has_last_block,
-        )
         return ReqMeta.from_request_tracker(
             request_tracker,
             self.cache_transfer_granularity,

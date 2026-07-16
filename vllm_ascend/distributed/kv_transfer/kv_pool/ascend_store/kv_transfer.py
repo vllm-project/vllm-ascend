@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 import queue
 import threading
 import time
@@ -115,18 +116,19 @@ class LayerBatchBuilder:
             (np.zeros(1, dtype=np.int64), np.cumsum(layer_block_len[:-1], dtype=np.int64))
         )
         rank_layer_offset = layer_id * self.page_size_bytes
-        logger.debug(
-            "[KVPOOL] build_transfer layer=%d page_size=%d caches_per_layer=%d "
-            "rank_layer_offset=%d layer_block_len=%s layer_inner_offsets=%s "
-            "base_gvas=%s",
-            layer_id,
-            self.page_size_bytes,
-            caches_per_layer,
-            rank_layer_offset,
-            layer_block_len.tolist(),
-            layer_inner_offsets.tolist(),
-            base_gvas_arr.tolist(),
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[KVPOOL] build_transfer layer=%d page_size=%d caches_per_layer=%d "
+                "rank_layer_offset=%d layer_block_len=%s layer_inner_offsets=%s "
+                "base_gvas=%s",
+                layer_id,
+                self.page_size_bytes,
+                caches_per_layer,
+                rank_layer_offset,
+                layer_block_len.tolist(),
+                layer_inner_offsets.tolist(),
+                base_gvas_arr.tolist(),
+            )
 
         addr_arr = layer_base_addrs[None, :] + block_ids_arr[:, None] * layer_block_stride[None, :]
         size_arr = np.broadcast_to(layer_block_len, addr_arr.shape)
@@ -231,12 +233,13 @@ class LayerBatchBuilder:
 
         block_ids_arr, block_gvas_arr = self._dedupe_transfer_blocks(block_ids_arr[:offset], block_gvas_arr[:offset])
 
-        logger.debug(
-            "[KVPOOL] build_shared req_ids=%s block_gvas_arr=%s block_ids_arr=%s",
-            req_ids,
-            block_gvas_arr.tolist(),
-            block_ids_arr.tolist(),
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[KVPOOL] build_shared req_ids=%s block_gvas_arr=%s block_ids_arr=%s",
+                req_ids,
+                block_gvas_arr.tolist(),
+                block_ids_arr.tolist(),
+            )
         return SharedBlockData(
             block_ids_arr=block_ids_arr,
             block_gvas_arr=block_gvas_arr,
@@ -426,12 +429,13 @@ class KVTransferThread(threading.Thread):
                 sizes[start:end],
                 max_transfer_bytes,
             )
-            logger.debug(
-                "[KVPOOL] batch_copy %s split_gvas=%s split_sizes=%s",
-                dir_name,
-                split_gvas.tolist(),
-                split_sizes.tolist(),
-            )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[KVPOOL] batch_copy %s split_gvas=%s split_sizes=%s",
+                    dir_name,
+                    split_gvas.tolist(),
+                    split_sizes.tolist(),
+                )
             res = self.m_store.store.batch_copy(
                 split_gvas.tolist(),
                 split_addrs.tolist(),
