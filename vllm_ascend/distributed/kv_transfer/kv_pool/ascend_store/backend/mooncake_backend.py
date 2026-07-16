@@ -116,7 +116,15 @@ class MooncakeBackend(Backend):
             )
             return [0] * len(keys)
         assert self.store is not None
-        return self.store.batch_is_exist(keys)
+        import time as _kvtrace_time
+        _kvtrace_t0 = _kvtrace_time.perf_counter()
+        _kvtrace_result = self.store.batch_is_exist(keys)
+        _kvtrace_ms = (_kvtrace_time.perf_counter() - _kvtrace_t0) * 1000
+        logger.info(
+            "KVTRACE stage=mooncake_exists elapsed_ms=%.3f keys=%d hit=%d",
+            _kvtrace_ms, len(keys), sum(1 for v in _kvtrace_result if v == 1) if _kvtrace_result else 0
+        )
+        return _kvtrace_result
 
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         self.ensure_initialized()
@@ -126,44 +134,32 @@ class MooncakeBackend(Backend):
             if self.config.preferred_segment:
                 config.preferred_segment = self.local_seg
             config.prefer_alloc_in_same_node = self.config.prefer_alloc_in_same_node
+            import time as _kvtrace_time
+            _kvtrace_t0 = _kvtrace_time.perf_counter()
             res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes, config)
-            failed_codes = [int(value) for value in res if value < 0]
-            failed_count = len(failed_codes)
-            if failed_count:
-                error_codes = sorted(set(failed_codes))
-                logger.error(
-                    "Failed to put %d keys out of %d. error_codes=%s. Check memory and store capacity.",
-                    failed_count,
-                    len(keys),
-                    error_codes,
-                )
-                logger.debug("Failed to put key details. keys=%s, result=%s", keys, res)
-                if self._lazy_init:
-                    logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
+            _kvtrace_ms = (_kvtrace_time.perf_counter() - _kvtrace_t0) * 1000
+            logger.info(
+                "KVTRACE stage=mooncake_put elapsed_ms=%.3f keys=%d",
+                _kvtrace_ms, len(keys)
+            )
+            for value in res:
+                if value < 0:
+                    logger.error("Failed to put key %s,res:%s", keys, res)
+                    if self._lazy_init:
+                        logger.error("If this is the first DSV4(compress) request, this failure is expected.")
         except Exception as e:
-            logger.error(
-                "Failed to put %d keys out of %d. Check store state and memory.",
-                len(keys),
-                len(keys),
-            )
-            logger.debug(
-                "Failed to put key details. keys=%s, type=%s, error=%s",
-                keys,
-                type(e).__name__,
-                e,
-            )
+            logger.error("Failed to put key %s,error:%s", keys, e)
             if self._lazy_init:
-                logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
+                logger.error("If this is the first DSV4(compress) request, this failure is expected.")
 
     def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         if self._lazy_init and not self._store_initialized:
             logger.error(
-                "Failed to get %d keys out of %d. Store is not initialized; "
-                "call put() first to trigger initialization.",
+                "MooncakeBackend.get called before store initialization, "
+                "keys=%d sample_keys=%s",
                 len(keys),
-                len(keys),
+                keys[:3],
             )
-            logger.debug("Failed to get key details. keys=%s", keys)
             return
         assert self.store is not None
         logger.debug(
@@ -172,36 +168,40 @@ class MooncakeBackend(Backend):
             keys[:3],
         )
         try:
+            import time as _kvtrace_time
+            _kvtrace_t0 = _kvtrace_time.perf_counter()
             res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
+            _kvtrace_ms = (_kvtrace_time.perf_counter() - _kvtrace_t0) * 1000
+            logger.info(
+                "KVTRACE stage=mooncake_get elapsed_ms=%.3f keys=%d",
+                _kvtrace_ms, len(keys)
+            )
             res_list = list(res)
-            failed_codes = [int(value) for value in res_list if value < 0]
-            failed_count = len(failed_codes)
-            error_codes = sorted(set(failed_codes))
-            if failed_count:
+            negative_count = sum(1 for value in res_list if value < 0)
+            logger.debug(
+                "MooncakeBackend.get result keys=%d sample_keys=%s "
+                "result_sample=%s negative_count=%d",
+                len(keys),
+                keys[:3],
+                res_list[:12],
+                negative_count,
+            )
+            if negative_count:
                 logger.error(
-                    "Failed to get %d keys out of %d. error_codes=%s. Check key existence and memory state.",
-                    failed_count,
+                    "Failed to get keys count=%d sample_keys=%s "
+                    "result_sample=%s negative_count=%d",
                     len(keys),
-                    error_codes,
+                    keys[:3],
+                    res_list[:12],
+                    negative_count,
                 )
-                logger.debug("Failed to get key details. keys=%s, result=%s", keys, res_list)
-            for i, value in enumerate(res_list):
-                if value > 0:
-                    res_list[i] = 0
-            return res_list
         except Exception as e:
             logger.error(
-                "Failed to get %d keys out of %d. Check store state and network.",
+                "Failed to get keys count=%d sample_keys=%s error:%s",
                 len(keys),
-                len(keys),
-            )
-            logger.debug(
-                "Failed to get key details. keys=%s, type=%s, error=%s",
-                keys,
-                type(e).__name__,
+                keys[:3],
                 e,
             )
-            return None
 
 
 @dataclass

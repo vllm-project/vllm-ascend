@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import importlib
 import math
+import os
 import threading
 from collections.abc import Generator
+from concurrent.futures import ThreadPoolExecutor
 
 import torch
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_decode_context_model_parallel_rank,
@@ -30,8 +33,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     KeyMetadata,
     LayerMultiBlockReqMeta,
     ReqMeta,
+    get_block_hashes,
     get_cache_family_granularity,
     infer_group_cache_families,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
+    AscendStoreCoordinator,
+    ExternalCachedBlockPool,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreLayerRecvingThread,
@@ -167,13 +175,26 @@ class KVPoolWorker:
                     for i in range(2, remaining_layers + 2):
                         partitions[-i] += 1
 
+        spec_cfg = getattr(vllm_config, "speculative_config", None)
+        use_eagle = bool(
+            spec_cfg.use_eagle() if spec_cfg is not None and callable(getattr(spec_cfg, "use_eagle", None)) else False
+        )
+        kv_cache_groups = (
+            list(kv_cache_config.kv_cache_groups) if kv_cache_config is not None and self.use_hybrid else None
+        )
         self.token_database = ChunkedTokenDatabase(
             self.metadata,
             self.grouped_block_size,
             partitions,
             use_hybrid=self.use_hybrid,
             hash_block_size=self.hash_block_size,
+            kv_cache_groups=kv_cache_groups,
+            alignment_tokens=self.cache_transfer_granularity,
+            retention_interval=getattr(envs, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None),
+            use_eagle=use_eagle,
         )
+        self.cache_coordinator = self._build_cache_coordinator(vllm_config)
+        self.token_database.set_cache_coordinator(self.cache_coordinator)
 
         backend = backend_map.get(self.backend.lower())
         assert backend is not None
@@ -201,6 +222,37 @@ class KVPoolWorker:
         self.kv_recv_thread: KVTransferThread | None = None
 
         self.finished_store_req: set[str] = set()
+
+        self.lookup_group_parallel = os.getenv("VLLM_ASCEND_LOOKUP_GROUP_PARALLEL", "0") == "1"
+        try:
+            self.lookup_group_parallel_workers = int(
+                os.getenv("VLLM_ASCEND_LOOKUP_GROUP_PARALLEL_WORKERS", "6")
+            )
+        except ValueError:
+            self.lookup_group_parallel_workers = 6
+        self.lookup_group_parallel_workers = max(1, self.lookup_group_parallel_workers)
+        self.lookup_early_stop = os.getenv("VLLM_ASCEND_LOOKUP_EARLY_STOP", "0") == "1"
+        self.lookup_reachable_mask = os.getenv("VLLM_ASCEND_LOOKUP_REACHABLE_MASK", "0") == "1"
+        self.lookup_full_guard = os.getenv("VLLM_ASCEND_LOOKUP_FULL_GUARD", "0") == "1"
+
+    def _build_cache_coordinator(self, vllm_config: VllmConfig) -> AscendStoreCoordinator | None:
+        if self.kv_cache_config is None or not self.use_hybrid:
+            return None
+        speculative_config = getattr(vllm_config, "speculative_config", None)
+        use_eagle_fn = getattr(speculative_config, "use_eagle", None)
+        use_eagle = bool(use_eagle_fn()) if callable(use_eagle_fn) else False
+        retention_interval = getattr(envs, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
+        if not isinstance(retention_interval, int):
+            retention_interval = None
+        return AscendStoreCoordinator(
+            list(self.kv_cache_config.kv_cache_groups),
+            scheduler_block_size=self.cache_transfer_granularity,
+            hash_block_size=self.hash_block_size,
+            group_block_sizes=self.grouped_block_size,
+            group_cache_families=self.kv_cache_group_families,
+            use_eagle=use_eagle,
+            retention_interval=retention_interval,
+        )
 
     def _infer_group_families(self) -> list[str]:
         kv_cache_groups = self.kv_cache_config.kv_cache_groups if self.kv_cache_config is not None else None
@@ -483,6 +535,7 @@ class KVPoolWorker:
                     addr_list = []
                     size_list = []
                     key_list = []
+                    load_masks = self.token_database.load_mask(request.block_hashes, token_len)
                     for group_id in load_group_ids:
                         block_ids = request.block_ids_by_group[group_id]
                         group_block_size = self.grouped_block_size[group_id]
@@ -490,7 +543,7 @@ class KVPoolWorker:
                         skip_null = (
                             group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
                         )
-                        for start, end, key, _ in self.token_database.process_tokens_with_block_ids(
+                        for start, end, key, block_id in self.token_database.process_tokens_with_block_ids(
                             token_len,
                             request.block_hashes,
                             block_ids,
@@ -498,11 +551,14 @@ class KVPoolWorker:
                             kv_cache_group_id=group_id,
                             skip_null_blocks=skip_null,
                         ):
+                            if not self.token_database.mask_allows_chunk(load_masks, group_id, start):
+                                continue
                             addr, size, _ = self.token_database.prepare_value(
                                 start,
                                 end,
                                 block_ids,
                                 kv_cache_group_id=group_id,
+                                block_id=block_id,
                             )
                             key_list.append(key.to_string())
                             addr_list.append(addr)
@@ -516,21 +572,21 @@ class KVPoolWorker:
                     size_list_c = (
                         size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
                     )
-                    logger.debug(
-                        "KV pool worker calls backend get request=%s token_len=%d groups=%s keys=%d sample_keys=%s",
-                        request.req_id,
-                        token_len,
-                        load_group_ids,
-                        len(key_list_c),
-                        key_list_c[:3],
+                    import time as _kvtrace_time
+                    logger.info(
+                        "KVTRACE req=%s stage=kvpool_get_prepare elapsed_ms=0.000 "
+                        "token_len=%d vllm_cached=%d kvpool_cached=%d keys=%d groups=%s",
+                        request.req_id, token_len,
+                        load_spec.vllm_cached_tokens, load_spec.kvpool_cached_tokens,
+                        len(key_list_c), load_group_ids
                     )
+                    _kvtrace_t0 = _kvtrace_time.perf_counter()
                     self.m_store.get(key_list_c, addr_list_c, size_list_c)
-                    logger.debug(
-                        "KV pool worker backend get returned request=%s token_len=%d groups=%s keys=%d",
-                        request.req_id,
-                        token_len,
-                        load_group_ids,
-                        len(key_list_c),
+                    _kvtrace_get_ms = (_kvtrace_time.perf_counter() - _kvtrace_t0) * 1000
+                    logger.info(
+                        "KVTRACE req=%s stage=kvpool_get_backend elapsed_ms=%.3f "
+                        "mode=sync keys=%d",
+                        request.req_id, _kvtrace_get_ms, len(key_list_c)
                     )
 
     def wait_for_layer_load(self) -> None:
@@ -577,6 +633,10 @@ class KVPoolWorker:
             current_event.record()
             break
 
+        _kvtrace_wait_events = []
+        _kvtrace_per_request_wait = getattr(
+            self.kv_send_thread, "_per_request_save_wait", False  # type: ignore[union-attr]
+        )
         for request in connector_metadata.requests:
             can_save = request.can_save
             if can_save is None or not can_save:
@@ -587,6 +647,12 @@ class KVPoolWorker:
             self.kv_send_thread.add_stored_request(  # type: ignore[union-attr]
                 request.req_id
             )
+            if _kvtrace_per_request_wait:
+                event = self.kv_send_thread.prepare_stored_request_done_event(  # type: ignore[union-attr]
+                    request.req_id
+                )
+                if event is not None:
+                    _kvtrace_wait_events.append(event)
             self.kv_send_thread.add_request(  # type: ignore[union-attr]
                 request,
             )
@@ -596,7 +662,32 @@ class KVPoolWorker:
             # vLLM expects wait_for_save() to make stores visible before the
             # request is reported as finished. Without this barrier a following
             # identical prompt can lookup before Mooncake put() has completed.
-            self.kv_send_thread.request_queue.join()  # type: ignore[union-attr]
+            import time as _kvtrace_time
+            _kvtrace_save_count = sum(1 for r in connector_metadata.requests if r.can_save)
+            _kvtrace_qsize_before = self.kv_send_thread.request_queue.qsize()  # type: ignore[union-attr]
+            _kvtrace_t0 = _kvtrace_time.perf_counter()
+            if _kvtrace_per_request_wait:
+                for event in _kvtrace_wait_events:
+                    event.wait()
+                _kvtrace_join_ms = (_kvtrace_time.perf_counter() - _kvtrace_t0) * 1000
+                _kvtrace_qsize_after = self.kv_send_thread.request_queue.qsize()  # type: ignore[union-attr]
+                logger.info(
+                    "KVTRACE stage=kvpool_wait_for_save_request elapsed_ms=%.3f "
+                    "save_requests=%d queue_size_before=%d queue_size_after=%d events=%d",
+                    _kvtrace_join_ms, _kvtrace_save_count,
+                    _kvtrace_qsize_before, _kvtrace_qsize_after,
+                    len(_kvtrace_wait_events)
+                )
+            else:
+                self.kv_send_thread.request_queue.join()  # type: ignore[union-attr]
+                _kvtrace_join_ms = (_kvtrace_time.perf_counter() - _kvtrace_t0) * 1000
+                _kvtrace_qsize_after = self.kv_send_thread.request_queue.qsize()  # type: ignore[union-attr]
+                logger.info(
+                    "KVTRACE stage=kvpool_wait_for_save_join elapsed_ms=%.3f "
+                    "save_requests=%d queue_size_before=%d queue_size_after=%d",
+                    _kvtrace_join_ms, _kvtrace_save_count,
+                    _kvtrace_qsize_before, _kvtrace_qsize_after
+                )
 
     def retrieve_layer(
         self,
@@ -807,7 +898,15 @@ class KVPoolWorker:
         try:
             hits = []
             kv_cache_group_ids = kv_cache_group_ids or [0]
-            kv_cache_group_ids = self._get_lookup_gate_group_ids(kv_cache_group_ids)
+            coordinator_hit = self._lookup_with_coordinator(
+                token_len,
+                block_hashes,
+                kv_cache_group_ids,
+                use_layerwise,
+                include_all_ranks=False,
+            )
+            if coordinator_hit is not None:
+                return coordinator_hit
             for group_id in kv_cache_group_ids:
                 end = 0
                 keys = []
@@ -860,40 +959,6 @@ class KVPoolWorker:
             return 0
         return min(hits) if hits else 0
 
-    def _get_lookup_gate_group_ids(self, kv_cache_group_ids: list[int]) -> list[int]:
-        gate_group_ids = [group_id for group_id in kv_cache_group_ids if self._is_lookup_gate_group(group_id)]
-        if not gate_group_ids:
-            return kv_cache_group_ids
-        if len(gate_group_ids) != len(kv_cache_group_ids):
-            logger.debug(
-                "KV pool lookup gates on groups %s, ignoring non-gate groups from %s",
-                gate_group_ids,
-                kv_cache_group_ids,
-            )
-        return gate_group_ids
-
-    def _is_lookup_gate_group(self, group_id: int) -> bool:
-        if group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]:
-            return False
-        cache_family = self._get_group_family(self.kv_cache_group_families, group_id)
-        # DeepSeek V4 has a c128 compressed KV group. Its key stream is much
-        # sparser than the dense KV groups, so using it as a strict gate makes
-        # the whole request report 0 hit even when the loadable groups exist.
-        if cache_family == "c128":
-            return False
-        # The DSV4 c4 group is currently written as a TP-sharded key stream in
-        # this connector path. Runtime logs show only 32/128 keys visible for a
-        # 16K prompt, so letting it gate the external pool prevents otherwise
-        # complete c1 groups from loading. Keep pooling gate/load on complete
-        # 128-token c1 KV groups until c4 storage is made fully discoverable.
-        if cache_family != "c1":
-            return False
-        # In the DSV4 hybrid layout, some auxiliary groups use smaller logical
-        # block sizes (for example 8/32). The Ascend kernels in this path are
-        # fixed to the 128-token KV block shape, so those groups cannot be used
-        # as external-pool gates or load targets for the 16K pooling path.
-        return self._get_group_block_size(group_id) == self.block_size
-
     def _get_group_num_kv_heads(self, group_id: int) -> int:
         if self.use_mla or self.use_sparse:
             return 1
@@ -901,12 +966,628 @@ class KVPoolWorker:
             return 1
         return self.num_kv_head
 
+    def get_group_tp_size(self, kv_cache_group_id: int) -> int:
+        if kv_cache_group_id < len(self.group_uses_align_state) and self.group_uses_align_state[kv_cache_group_id]:
+            return self.tp_size
+        return min(self.tp_size, self._get_group_num_kv_heads(kv_cache_group_id))
+
+    @staticmethod
+    def _replace_key_field(key: str, field: str, value: int) -> str:
+        marker = f"@{field}:"
+        start = key.find(marker)
+        if start < 0:
+            return key
+        value_start = start + len(marker)
+        value_end = key.find("@", value_start)
+        if value_end < 0:
+            value_end = len(key)
+        return f"{key[:value_start]}{value}{key[value_end:]}"
+
+    @staticmethod
+    def _chunk_hash_to_bytes(chunk_hash: BlockHash | str) -> bytes:
+        if isinstance(chunk_hash, str):
+            if len(chunk_hash) == 64:
+                try:
+                    return bytes.fromhex(chunk_hash)
+                except ValueError:
+                    pass
+            return chunk_hash.encode("utf-8")
+        return bytes(chunk_hash)
+
+    def _expand_lookup_key_variants(self, key: str, group_id: int, include_all_ranks: bool) -> list[str]:
+        if not include_all_ranks:
+            return [key]
+        variants: list[str] = []
+        group_tp_size = self.get_group_tp_size(group_id)
+        for tp_rank in range(group_tp_size):
+            tp_key = self._replace_key_field(key, "head_or_tp_rank", tp_rank)
+            for pp_rank in range(self.pp_size):
+                variants.append(self._replace_key_field(tp_key, "pp_rank", pp_rank))
+        return variants
+
+    def _lookup_coordinator_group(
+        self,
+        group_id: int,
+        token_len: int,
+        block_hashes: list[BlockHash],
+        include_all_ranks: bool,
+        hbm_hit_tokens: int = 0,
+    ) -> tuple[int, set[tuple[int, bytes]], float, float, float]:
+        """Build/exist one KV cache group for coordinator lookup.
+
+        The return value is detached from shared state so callers can run
+        groups in parallel without changing lookup semantics.
+        """
+        import time as _kvtrace_time
+
+        group_exists: set[tuple[int, bytes]] = set()
+        _kvtrace_t_kb = _kvtrace_time.perf_counter()
+        keys: list[str] = []
+        chunk_hashes: list[BlockHash | str] = []
+        variant_counts: list[int] = []
+        _kvtrace_app_ms = 0.0
+        _kvtrace_raw_count = 0
+        base_bs = self.token_database.get_block_size(group_id)
+        cf = self.token_database.group_cache_families.get("kv", {}).get(group_id, "default")
+        ebs = get_cache_family_granularity(base_bs, cf)
+        lookup_start = hbm_hit_tokens // ebs * ebs
+        for _, _, key_string, chunk_hash in self.token_database.process_token_key_strings(
+            token_len,
+            block_hashes,
+            mask_num=lookup_start,
+            kv_cache_group_id=group_id,
+        ):
+            _kvtrace_raw_count += 1
+            _kvtrace_t_a = _kvtrace_time.perf_counter()
+            variants = self._expand_lookup_key_variants(key_string, group_id, include_all_ranks)
+            keys.extend(variants)
+            chunk_hashes.append(chunk_hash)
+            variant_counts.append(len(variants))
+            _kvtrace_app_ms += (_kvtrace_time.perf_counter() - _kvtrace_t_a) * 1000
+        _kvtrace_iter_ms = (_kvtrace_time.perf_counter() - _kvtrace_t_kb) * 1000 - _kvtrace_app_ms
+        _kvtrace_str_ms = 0.0
+
+        _kvtrace_kb_ms = (_kvtrace_time.perf_counter() - _kvtrace_t_kb) * 1000
+        _kvtrace_raw_keys = len(chunk_hashes)
+        token_chunks = (token_len + ebs - 1) // ebs if ebs > 0 else 0
+        skipped_chunks = min(token_chunks, lookup_start // ebs) if ebs > 0 else 0
+        expected_lookup_chunks = max(0, token_chunks - skipped_chunks)
+        logger.info(
+            "KVTRACE stage=kvpool_lookup_group_key_build group=%d "
+            "elapsed_ms=%.3f raw_keys=%d variant_keys=%d token_len=%d "
+            "hbm_hit_tokens=%d lookup_start=%d effective_block_size=%d "
+            "token_chunks=%d skipped_chunks=%d expected_lookup_chunks=%d",
+            group_id, _kvtrace_kb_ms, _kvtrace_raw_keys, len(keys), token_len,
+            hbm_hit_tokens, lookup_start, ebs,
+            token_chunks, skipped_chunks, expected_lookup_chunks
+        )
+        logger.info(
+            "KVTRACE stage=kvpool_6d_group_mask group=%d "
+            "hbm_hit_tokens=%d lookup_start=%d effective_block_size=%d "
+            "skipped_chunks=%d expected_lookup_chunks=%d built_raw_keys=%d built_variant_keys=%d",
+            group_id, hbm_hit_tokens, lookup_start, ebs,
+            skipped_chunks, expected_lookup_chunks, _kvtrace_raw_keys, len(keys)
+        )
+        logger.info(
+            "KVTRACE stage=kvpool_kb_detail group=%d "
+            "raw_count=%d iter_ms=%.3f str_ms=%.3f app_ms=%.3f total_ms=%.3f "
+            "compress_ratios=%s grouped_block_size=%s",
+            group_id, _kvtrace_raw_count,
+            _kvtrace_iter_ms, _kvtrace_str_ms, _kvtrace_app_ms, _kvtrace_kb_ms,
+            getattr(self, "compress_ratios", None),
+            self.grouped_block_size[group_id] if hasattr(self, "grouped_block_size") else "N/A"
+        )
+
+        if not keys:
+            logger.info(
+                "KVTRACE stage=kvpool_6d_group_skip_external group=%d reason=no_keys "
+                "hbm_hit_tokens=%d lookup_start=%d effective_block_size=%d "
+                "token_chunks=%d skipped_chunks=%d expected_lookup_chunks=%d",
+                group_id, hbm_hit_tokens, lookup_start, ebs,
+                token_chunks, skipped_chunks, expected_lookup_chunks
+            )
+            return group_id, group_exists, _kvtrace_kb_ms, 0.0, 0.0
+
+        _kvtrace_t0 = _kvtrace_time.perf_counter()
+        res = self.m_store.exists(keys)  # type: ignore[assignment]
+        _kvtrace_exist_ms = (_kvtrace_time.perf_counter() - _kvtrace_t0) * 1000
+        _kvtrace_exists_count = sum(1 for v in res if v == 1) if res else 0
+        logger.info(
+            "KVTRACE stage=kvpool_exist_backend elapsed_ms=%.3f "
+            "group=%d keys=%d exists_count=%d missing_count=%d",
+            _kvtrace_exist_ms, group_id, len(keys),
+            _kvtrace_exists_count, len(keys) - _kvtrace_exists_count
+        )
+        _kvtrace_t_hc = _kvtrace_time.perf_counter()
+        offset = 0
+        for chunk_hash, count in zip(chunk_hashes, variant_counts, strict=True):
+            values = res[offset : offset + count]  # type: ignore[index]
+            if values and all(value == 1 for value in values):
+                group_exists.add((group_id, self._chunk_hash_to_bytes(chunk_hash)))
+            offset += count
+
+        _kvtrace_hc_ms = (_kvtrace_time.perf_counter() - _kvtrace_t_hc) * 1000
+        logger.info(
+            "KVTRACE stage=kvpool_lookup_group_hit_calc group=%d "
+            "elapsed_ms=%.3f hit_chunks=%d/%d token_len=%d",
+            group_id, _kvtrace_hc_ms,
+            len(group_exists), len(chunk_hashes), token_len
+        )
+        logger.debug(
+            "KV pool coordinator lookup group=%d token_len=%d keys=%d exists_chunks=%d/%d sample_keys=%s",
+            group_id,
+            token_len,
+            len(keys),
+            len(group_exists),
+            len(chunk_hashes),
+            keys[:3],
+        )
+        return group_id, group_exists, _kvtrace_kb_ms, _kvtrace_exist_ms, _kvtrace_hc_ms
+
+    def _lookup_with_coordinator(
+        self,
+        token_len: int,
+        block_hashes: list[BlockHash],
+        kv_cache_group_ids: list[int],
+        use_layerwise: bool,
+        include_all_ranks: bool,
+        hbm_hit_tokens: int = 0,
+    ) -> int | None:
+        if self.cache_coordinator is None or use_layerwise:
+            return None
+        if sorted(kv_cache_group_ids) != list(range(self.num_kv_cache_groups)):
+            return None
+
+        import time as _kvtrace_time
+        _kvtrace_total_keybuild = 0.0
+        _kvtrace_total_exist = 0.0
+        _kvtrace_total_hitcalc = 0.0
+        exists: set[tuple[int, bytes]] = set()
+        # 6D: Add HBM-hit blocks to exists without RPC (aligned per group)
+        logger.info(
+            "KVTRACE stage=kvpool_6d_lookup_start token_len=%d hbm_hit_tokens=%d "
+            "groups=%s use_layerwise=%s include_all_ranks=%s block_hashes=%d",
+            token_len, hbm_hit_tokens, kv_cache_group_ids,
+            use_layerwise, include_all_ranks, len(block_hashes)
+        )
+        if hbm_hit_tokens > 0:
+            for group_id in kv_cache_group_ids:
+                base_bs = self.token_database.get_block_size(group_id)
+                cf = self.token_database.group_cache_families.get("kv", {}).get(group_id, "default")
+                ebs = get_cache_family_granularity(base_bs, cf)
+                lookup_start = hbm_hit_tokens // ebs * ebs
+                grouped = get_block_hashes(block_hashes, ebs, self.token_database.hash_block_size)
+                injected = 0
+                if grouped:
+                    num_hbm_chunks = lookup_start // ebs
+                    for cid in range(min(num_hbm_chunks, len(grouped))):
+                        exists.add((group_id, self._chunk_hash_to_bytes(grouped[cid])))
+                        injected += 1
+                token_chunks = (token_len + ebs - 1) // ebs if ebs > 0 else 0
+                skipped_chunks = min(token_chunks, lookup_start // ebs) if ebs > 0 else 0
+                logger.info(
+                    "KVTRACE stage=kvpool_6d_hbm_inject group=%d "
+                    "base_block_size=%d cache_family=%s effective_block_size=%d "
+                    "hbm_hit_tokens=%d lookup_start=%d token_chunks=%d grouped_hashes=%d "
+                    "skipped_chunks=%d injected_chunks=%d exists_size=%d",
+                    group_id, base_bs, cf, ebs, hbm_hit_tokens, lookup_start,
+                    token_chunks, len(grouped) if grouped else 0,
+                    skipped_chunks, injected, len(exists)
+                )
+        lookup_masks = None
+        if self.lookup_reachable_mask:
+            aligned_lookup_len = token_len
+            lcm_block_size = getattr(self.cache_coordinator, "lcm_block_size", 1)
+            if lcm_block_size > 1:
+                aligned_lookup_len = ((token_len + lcm_block_size - 1) // lcm_block_size) * lcm_block_size
+            lookup_masks = self.cache_coordinator.lookup_mask(aligned_lookup_len)
+            logger.info(
+                "KVTRACE stage=kvpool_lookup_mask_start token_len=%d aligned_token_len=%d "
+                "lcm_block_size=%d mask_kinds=%s",
+                token_len, aligned_lookup_len, lcm_block_size,
+                [
+                    "all" if mask is None else f"{sum(1 for item in mask if item)}/{len(mask)}"
+                    for mask in lookup_masks
+                ],
+            )
+
+        lookup_limit = token_len
+        full_guard_group_ids: set[int] = set()
+        if self.lookup_full_guard and not self.lookup_group_parallel:
+            for spec, group_ids, _ in getattr(self.cache_coordinator, "attention_groups", []):
+                if isinstance(spec, FullAttentionSpec):
+                    full_guard_group_ids.update(
+                        group_id for group_id in group_ids if group_id in kv_cache_group_ids
+                    )
+            if full_guard_group_ids:
+                _kvtrace_full_bound = token_len
+                _kvtrace_full_keybuild = 0.0
+                _kvtrace_full_exist = 0.0
+                _kvtrace_full_hitcalc = 0.0
+                _kvtrace_full_raw = 0
+                _kvtrace_full_variant = 0
+                first_missing_group = -1
+                first_missing_start_global = -1
+                for group_id in sorted(full_guard_group_ids):
+                    _kvtrace_t_kb = _kvtrace_time.perf_counter()
+                    keys: list[str] = []
+                    chunk_hashes: list[BlockHash | str] = []
+                    variant_counts: list[int] = []
+                    starts: list[int] = []
+                    _kvtrace_app_ms = 0.0
+                    base_bs = self.token_database.get_block_size(group_id)
+                    cf = self.token_database.group_cache_families.get("kv", {}).get(group_id, "default")
+                    ebs = get_cache_family_granularity(base_bs, cf)
+                    lookup_start = hbm_hit_tokens // ebs * ebs
+                    lookup_mask = None
+                    if lookup_masks is not None and group_id < len(lookup_masks):
+                        lookup_mask = lookup_masks[group_id]
+                    skipped_by_mask = 0
+                    seen_chunks = 0
+                    for start_idx, _, key_string, chunk_hash in self.token_database.process_token_key_strings(
+                        token_len,
+                        block_hashes,
+                        mask_num=lookup_start,
+                        kv_cache_group_id=group_id,
+                    ):
+                        seen_chunks += 1
+                        if lookup_mask is not None:
+                            chunk_idx = start_idx // base_bs if base_bs > 0 else 0
+                            if chunk_idx >= len(lookup_mask) or not lookup_mask[chunk_idx]:
+                                skipped_by_mask += 1
+                                continue
+                        _kvtrace_t_a = _kvtrace_time.perf_counter()
+                        variants = self._expand_lookup_key_variants(key_string, group_id, include_all_ranks)
+                        keys.extend(variants)
+                        chunk_hashes.append(chunk_hash)
+                        variant_counts.append(len(variants))
+                        starts.append(start_idx)
+                        _kvtrace_app_ms += (_kvtrace_time.perf_counter() - _kvtrace_t_a) * 1000
+                    _kvtrace_kb_ms = (_kvtrace_time.perf_counter() - _kvtrace_t_kb) * 1000
+                    _kvtrace_full_keybuild += _kvtrace_kb_ms
+                    _kvtrace_full_raw += len(chunk_hashes)
+                    _kvtrace_full_variant += len(keys)
+                    group_exists: set[tuple[int, bytes]] = set()
+                    if keys:
+                        _kvtrace_t0 = _kvtrace_time.perf_counter()
+                        res = self.m_store.exists(keys)  # type: ignore[assignment]
+                        _kvtrace_exist_ms = (_kvtrace_time.perf_counter() - _kvtrace_t0) * 1000
+                        _kvtrace_full_exist += _kvtrace_exist_ms
+                        _kvtrace_t_hc = _kvtrace_time.perf_counter()
+                        offset = 0
+                        first_missing_start = -1
+                        for start, chunk_hash, count in zip(starts, chunk_hashes, variant_counts, strict=True):
+                            values = res[offset : offset + count]  # type: ignore[index]
+                            if values and all(value == 1 for value in values):
+                                item = (group_id, self._chunk_hash_to_bytes(chunk_hash))
+                                exists.add(item)
+                                group_exists.add(item)
+                            elif first_missing_start < 0:
+                                first_missing_start = start
+                            offset += count
+                        _kvtrace_hc_ms = (_kvtrace_time.perf_counter() - _kvtrace_t_hc) * 1000
+                        _kvtrace_full_hitcalc += _kvtrace_hc_ms
+                        if first_missing_start < 0:
+                            group_bound = token_len
+                        else:
+                            group_bound = (first_missing_start // self.cache_transfer_granularity) * self.cache_transfer_granularity
+                            group_bound = max(group_bound, min(max(hbm_hit_tokens, 0), token_len))
+                        if first_missing_start >= 0 and (
+                            first_missing_group < 0 or group_bound < _kvtrace_full_bound
+                        ):
+                            first_missing_group = group_id
+                            first_missing_start_global = first_missing_start
+                        logger.info(
+                            "KVTRACE stage=kvpool_lookup_full_guard_group group=%d "
+                            "key_build_ms=%.3f exist_ms=%.3f hit_calc_ms=%.3f "
+                            "raw_keys=%d variant_keys=%d exists_count=%d missing_count=%d "
+                            "seen_chunks=%d skipped_by_mask=%d lookup_start=%d bound=%d token_len=%d "
+                            "first_missing_start=%d",
+                            group_id, _kvtrace_kb_ms, _kvtrace_exist_ms, _kvtrace_hc_ms,
+                            len(chunk_hashes), len(keys), len(group_exists),
+                            len(chunk_hashes) - len(group_exists), seen_chunks, skipped_by_mask,
+                            lookup_start, group_bound, token_len, first_missing_start,
+                        )
+                    else:
+                        group_bound = token_len
+                        logger.info(
+                            "KVTRACE stage=kvpool_lookup_full_guard_group group=%d "
+                            "key_build_ms=%.3f exist_ms=0.000 hit_calc_ms=0.000 "
+                            "raw_keys=0 variant_keys=0 exists_count=0 missing_count=0 "
+                            "seen_chunks=%d skipped_by_mask=%d lookup_start=%d bound=%d token_len=%d",
+                            group_id, _kvtrace_kb_ms, seen_chunks, skipped_by_mask,
+                            lookup_start, group_bound, token_len,
+                        )
+                    _kvtrace_full_bound = min(_kvtrace_full_bound, group_bound)
+
+                lookup_limit = min(token_len, _kvtrace_full_bound)
+                _kvtrace_total_keybuild += _kvtrace_full_keybuild
+                _kvtrace_total_exist += _kvtrace_full_exist
+                _kvtrace_total_hitcalc += _kvtrace_full_hitcalc
+                logger.info(
+                    "KVTRACE stage=kvpool_lookup_full_guard_summary groups=%s "
+                    "lookup_limit=%d token_len=%d hbm_hit_tokens=%d raw_keys=%d "
+                    "variant_keys=%d key_build_ms=%.3f exist_ms=%.3f hit_calc_ms=%.3f",
+                    sorted(full_guard_group_ids), lookup_limit, token_len, hbm_hit_tokens,
+                    _kvtrace_full_raw, _kvtrace_full_variant, _kvtrace_full_keybuild,
+                    _kvtrace_full_exist, _kvtrace_full_hitcalc,
+                )
+                if lookup_limit <= min(max(hbm_hit_tokens, 0), token_len):
+                    hit_length = min(max(hbm_hit_tokens, 0), token_len)
+                    total_ms = _kvtrace_total_keybuild + _kvtrace_total_exist + _kvtrace_total_hitcalc
+                    logger.info(
+                        "KVTRACE stage=kvpool_lookup_full_guard_stop reason=full_attention_bound "
+                        "hit_tokens=%d lookup_limit=%d hbm_hit_tokens=%d token_len=%d "
+                        "first_missing_group=%d first_missing_start=%d total_ms=%.3f",
+                        hit_length, lookup_limit, hbm_hit_tokens, token_len,
+                        first_missing_group, first_missing_start_global, total_ms,
+                    )
+                    logger.info(
+                        "KVTRACE stage=kvpool_lookup_breakdown token_len=%d "
+                        "key_build_ms=%.3f exist_ms=%.3f hit_calc_ms=%.3f "
+                        "coord_hit_ms=0.000 total_ms=%.3f hit_tokens=%d groups=%s full_guard=True stopped=True",
+                        token_len, _kvtrace_total_keybuild, _kvtrace_total_exist,
+                        _kvtrace_total_hitcalc, total_ms, hit_length, kv_cache_group_ids,
+                    )
+                    return hit_length
+
+        if self.lookup_group_parallel:
+            _kvtrace_t_parallel = _kvtrace_time.perf_counter()
+            max_workers = min(self.lookup_group_parallel_workers, len(kv_cache_group_ids))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(
+                        self._lookup_coordinator_group,
+                        group_id,
+                        token_len,
+                        block_hashes,
+                        include_all_ranks,
+                        hbm_hit_tokens,
+                    )
+                    for group_id in kv_cache_group_ids
+                ]
+                group_results = [future.result() for future in futures]
+            for _, group_exists, keybuild_ms, exist_ms, hitcalc_ms in group_results:
+                exists.update(group_exists)
+                _kvtrace_total_keybuild += keybuild_ms
+                _kvtrace_total_exist += exist_ms
+                _kvtrace_total_hitcalc += hitcalc_ms
+            _kvtrace_parallel_ms = (_kvtrace_time.perf_counter() - _kvtrace_t_parallel) * 1000
+            logger.info(
+                "KVTRACE stage=kvpool_lookup_group_parallel elapsed_ms=%.3f "
+                "workers=%d groups=%s key_build_sum_ms=%.3f exist_sum_ms=%.3f "
+                "hit_calc_sum_ms=%.3f exists_size=%d",
+                _kvtrace_parallel_ms, max_workers, kv_cache_group_ids,
+                _kvtrace_total_keybuild, _kvtrace_total_exist,
+                _kvtrace_total_hitcalc, len(exists)
+            )
+            _kvtrace_t_coord = _kvtrace_time.perf_counter()
+            _, hit_length = self.cache_coordinator.find_longest_cache_hit(
+                block_hashes,
+                token_len,
+                ExternalCachedBlockPool(exists),
+                apply_eagle=False,
+            )
+            _kvtrace_coord_ms = (_kvtrace_time.perf_counter() - _kvtrace_t_coord) * 1000
+            logger.info(
+                "KVTRACE stage=kvpool_lookup_breakdown token_len=%d "
+                "key_build_ms=%.3f exist_ms=%.3f hit_calc_ms=%.3f "
+                "coord_hit_ms=%.3f total_ms=%.3f hit_tokens=%d groups=%s parallel=True parallel_wall_ms=%.3f",
+                token_len,
+                _kvtrace_total_keybuild, _kvtrace_total_exist,
+                _kvtrace_total_hitcalc, _kvtrace_coord_ms,
+                _kvtrace_parallel_ms + _kvtrace_coord_ms,
+                hit_length, kv_cache_group_ids, _kvtrace_parallel_ms
+            )
+            logger.debug(
+                "KV pool coordinator lookup final token_len=%d groups=%s hit=%d parallel=True",
+                token_len,
+                kv_cache_group_ids,
+                hit_length,
+            )
+            return hit_length
+
+        for group_id in kv_cache_group_ids:
+            if group_id in full_guard_group_ids:
+                logger.info(
+                    "KVTRACE stage=kvpool_lookup_group_skip_prequeried group=%d lookup_limit=%d token_len=%d",
+                    group_id, lookup_limit, token_len,
+                )
+                continue
+            _kvtrace_t_kb = _kvtrace_time.perf_counter()
+            keys: list[str] = []
+            chunk_hashes: list[BlockHash | str] = []
+            variant_counts: list[int] = []
+            _kvtrace_iter_ms = 0.0
+            _kvtrace_str_ms = 0.0
+            _kvtrace_app_ms = 0.0
+            _kvtrace_raw_count = 0
+            base_bs = self.token_database.get_block_size(group_id)
+            cf = self.token_database.group_cache_families.get("kv", {}).get(group_id, "default")
+            ebs = get_cache_family_granularity(base_bs, cf)
+            lookup_start = hbm_hit_tokens // ebs * ebs
+            lookup_mask = None
+            if lookup_masks is not None and group_id < len(lookup_masks):
+                lookup_mask = lookup_masks[group_id]
+            _kvtrace_lookup_mask_skipped = 0
+            _kvtrace_lookup_mask_seen = 0
+            for start_idx, _, key_string, chunk_hash in self.token_database.process_token_key_strings(
+                token_len,
+                block_hashes,
+                mask_num=lookup_start,
+                kv_cache_group_id=group_id,
+                max_num=lookup_limit,
+            ):
+                _kvtrace_lookup_mask_seen += 1
+                if lookup_mask is not None:
+                    chunk_idx = start_idx // base_bs if base_bs > 0 else 0
+                    if chunk_idx >= len(lookup_mask) or not lookup_mask[chunk_idx]:
+                        _kvtrace_lookup_mask_skipped += 1
+                        continue
+                _kvtrace_raw_count += 1
+                _kvtrace_t_a = _kvtrace_time.perf_counter()
+                variants = self._expand_lookup_key_variants(key_string, group_id, include_all_ranks)
+                keys.extend(variants)
+                chunk_hashes.append(chunk_hash)
+                variant_counts.append(len(variants))
+                _kvtrace_app_ms += (_kvtrace_time.perf_counter() - _kvtrace_t_a) * 1000
+            _kvtrace_iter_ms = (_kvtrace_time.perf_counter() - _kvtrace_t_kb) * 1000 - _kvtrace_app_ms
+            _kvtrace_str_ms = 0.0
+
+            _kvtrace_kb_ms = (_kvtrace_time.perf_counter() - _kvtrace_t_kb) * 1000
+            _kvtrace_total_keybuild += _kvtrace_kb_ms
+            _kvtrace_raw_keys = len(chunk_hashes)
+            token_chunks = (lookup_limit + ebs - 1) // ebs if ebs > 0 else 0
+            skipped_chunks = min(token_chunks, lookup_start // ebs) if ebs > 0 else 0
+            expected_lookup_chunks = max(0, token_chunks - skipped_chunks)
+            logger.info(
+                "KVTRACE stage=kvpool_lookup_group_key_build group=%d "
+                "elapsed_ms=%.3f raw_keys=%d variant_keys=%d token_len=%d "
+                "hbm_hit_tokens=%d lookup_start=%d lookup_limit=%d effective_block_size=%d "
+                "token_chunks=%d skipped_chunks=%d expected_lookup_chunks=%d",
+                group_id, _kvtrace_kb_ms, _kvtrace_raw_keys, len(keys), token_len,
+                hbm_hit_tokens, lookup_start, lookup_limit, ebs,
+                token_chunks, skipped_chunks, expected_lookup_chunks
+            )
+            if self.lookup_reachable_mask:
+                logger.info(
+                    "KVTRACE stage=kvpool_lookup_reachable_mask group=%d "
+                    "seen_chunks=%d skipped_by_mask=%d built_raw_keys=%d "
+                    "mask_kind=%s token_len=%d hbm_hit_tokens=%d lookup_start=%d",
+                    group_id, _kvtrace_lookup_mask_seen,
+                    _kvtrace_lookup_mask_skipped, _kvtrace_raw_keys,
+                    "all" if lookup_mask is None else f"{sum(1 for item in lookup_mask if item)}/{len(lookup_mask)}",
+                    token_len, hbm_hit_tokens, lookup_start,
+                )
+            logger.info(
+                "KVTRACE stage=kvpool_6d_group_mask group=%d "
+                "hbm_hit_tokens=%d lookup_start=%d lookup_limit=%d effective_block_size=%d "
+                "skipped_chunks=%d expected_lookup_chunks=%d built_raw_keys=%d built_variant_keys=%d",
+                group_id, hbm_hit_tokens, lookup_start, lookup_limit, ebs,
+                skipped_chunks, expected_lookup_chunks, _kvtrace_raw_keys, len(keys)
+            )
+            logger.info(
+                "KVTRACE stage=kvpool_kb_detail group=%d "
+                "raw_count=%d iter_ms=%.3f str_ms=%.3f app_ms=%.3f total_ms=%.3f "
+                "compress_ratios=%s grouped_block_size=%s",
+                group_id, _kvtrace_raw_count,
+                _kvtrace_iter_ms, _kvtrace_str_ms, _kvtrace_app_ms, _kvtrace_kb_ms,
+                getattr(self, "compress_ratios", None),
+                self.grouped_block_size[group_id] if hasattr(self, "grouped_block_size") else "N/A"
+            )
+
+            if not keys:
+                logger.info(
+                    "KVTRACE stage=kvpool_6d_group_skip_external group=%d reason=no_keys "
+                    "hbm_hit_tokens=%d lookup_start=%d lookup_limit=%d effective_block_size=%d "
+                    "token_chunks=%d skipped_chunks=%d expected_lookup_chunks=%d",
+                    group_id, hbm_hit_tokens, lookup_start, lookup_limit, ebs,
+                    token_chunks, skipped_chunks, expected_lookup_chunks
+                )
+                continue
+            _kvtrace_t0 = _kvtrace_time.perf_counter()
+            res = self.m_store.exists(keys)  # type: ignore[assignment]
+            _kvtrace_exist_ms = (_kvtrace_time.perf_counter() - _kvtrace_t0) * 1000
+            _kvtrace_total_exist += _kvtrace_exist_ms
+            _kvtrace_exists_count = sum(1 for v in res if v == 1) if res else 0
+            logger.info(
+                "KVTRACE stage=kvpool_exist_backend elapsed_ms=%.3f "
+                "group=%d keys=%d exists_count=%d missing_count=%d",
+                _kvtrace_exist_ms, group_id, len(keys),
+                _kvtrace_exists_count, len(keys) - _kvtrace_exists_count
+            )
+            _kvtrace_t_hc = _kvtrace_time.perf_counter()
+            offset = 0
+            for chunk_hash, count in zip(chunk_hashes, variant_counts, strict=True):
+                values = res[offset : offset + count]  # type: ignore[index]
+                if values and all(value == 1 for value in values):
+                    exists.add((group_id, self._chunk_hash_to_bytes(chunk_hash)))
+                offset += count
+
+            _kvtrace_hc_ms = (_kvtrace_time.perf_counter() - _kvtrace_t_hc) * 1000
+            _kvtrace_total_hitcalc += _kvtrace_hc_ms
+            logger.info(
+                "KVTRACE stage=kvpool_lookup_group_hit_calc group=%d "
+                "elapsed_ms=%.3f hit_chunks=%d/%d token_len=%d",
+                group_id, _kvtrace_hc_ms,
+                sum(1 for g, _ in exists if g == group_id),
+                len(chunk_hashes), token_len
+            )
+            logger.debug(
+                "KV pool coordinator lookup group=%d token_len=%d keys=%d exists_chunks=%d/%d sample_keys=%s",
+                group_id,
+                token_len,
+                len(keys),
+                sum(1 for group, _ in exists if group == group_id),
+                len(chunk_hashes),
+                keys[:3],
+            )
+            if self.lookup_early_stop and chunk_hashes and expected_lookup_chunks > 0:
+                first_chunk_exists = (
+                    group_id,
+                    self._chunk_hash_to_bytes(chunk_hashes[0]),
+                ) in exists
+                if not first_chunk_exists:
+                    hit_length = min(max(hbm_hit_tokens, 0), token_len)
+                    total_ms = (
+                        _kvtrace_total_keybuild
+                        + _kvtrace_total_exist
+                        + _kvtrace_total_hitcalc
+                    )
+                    logger.info(
+                        "KVTRACE stage=kvpool_lookup_early_stop group=%d "
+                        "reason=first_external_chunk_missing hit_tokens=%d "
+                        "hbm_hit_tokens=%d lookup_start=%d effective_block_size=%d "
+                        "processed_groups=%s skipped_groups=%s key_build_ms=%.3f "
+                        "exist_ms=%.3f hit_calc_ms=%.3f total_ms=%.3f",
+                        group_id, hit_length, hbm_hit_tokens, lookup_start, ebs,
+                        kv_cache_group_ids[:kv_cache_group_ids.index(group_id) + 1],
+                        kv_cache_group_ids[kv_cache_group_ids.index(group_id) + 1:],
+                        _kvtrace_total_keybuild, _kvtrace_total_exist,
+                        _kvtrace_total_hitcalc, total_ms,
+                    )
+                    logger.info(
+                        "KVTRACE stage=kvpool_lookup_breakdown token_len=%d "
+                        "key_build_ms=%.3f exist_ms=%.3f hit_calc_ms=%.3f "
+                        "coord_hit_ms=0.000 total_ms=%.3f hit_tokens=%d groups=%s early_stop=True",
+                        token_len, _kvtrace_total_keybuild, _kvtrace_total_exist,
+                        _kvtrace_total_hitcalc, total_ms, hit_length, kv_cache_group_ids,
+                    )
+                    return hit_length
+
+        _kvtrace_t_coord = _kvtrace_time.perf_counter()
+        _, hit_length = self.cache_coordinator.find_longest_cache_hit(
+            block_hashes,
+            token_len,
+            ExternalCachedBlockPool(exists),
+            apply_eagle=False,
+        )
+        _kvtrace_coord_ms = (_kvtrace_time.perf_counter() - _kvtrace_t_coord) * 1000
+        logger.info(
+            "KVTRACE stage=kvpool_lookup_breakdown token_len=%d "
+            "key_build_ms=%.3f exist_ms=%.3f hit_calc_ms=%.3f "
+            "coord_hit_ms=%.3f total_ms=%.3f hit_tokens=%d groups=%s full_guard=%s lookup_limit=%d",
+            token_len,
+            _kvtrace_total_keybuild, _kvtrace_total_exist,
+            _kvtrace_total_hitcalc, _kvtrace_coord_ms,
+            _kvtrace_total_keybuild + _kvtrace_total_exist + _kvtrace_total_hitcalc + _kvtrace_coord_ms,
+            hit_length, kv_cache_group_ids, self.lookup_full_guard, lookup_limit
+        )
+        logger.debug(
+            "KV pool coordinator lookup final token_len=%d groups=%s hit=%d",
+            token_len,
+            kv_cache_group_ids,
+            hit_length,
+        )
+        return hit_length
+
     def lookup_scheduler(
         self,
         token_len: int,
         block_hashes: list[BlockHash],
         kv_cache_group_ids: list[int] | None = None,
         use_layerwise: bool = False,
+        hbm_hit_tokens: int = 0,
     ) -> int:
         """
         Checks the existence of KV cache of the tokens from the cache engine.
@@ -916,7 +1597,16 @@ class KVPoolWorker:
         try:
             hits = []
             kv_cache_group_ids = kv_cache_group_ids or [0]
-            kv_cache_group_ids = self._get_lookup_gate_group_ids(kv_cache_group_ids)
+            coordinator_hit = self._lookup_with_coordinator(
+                token_len,
+                block_hashes,
+                kv_cache_group_ids,
+                use_layerwise,
+                include_all_ranks=True,
+                hbm_hit_tokens=hbm_hit_tokens,
+            )
+            if coordinator_hit is not None:
+                return coordinator_hit
             for group_id in kv_cache_group_ids:
                 end = 0
                 keys = []
@@ -941,7 +1631,7 @@ class KVPoolWorker:
                     continue
 
                 multi_tp_keys = keys[:]
-                group_tp_size = min(self.tp_size, self._get_group_num_kv_heads(group_id))
+                group_tp_size = self.get_group_tp_size(group_id)
                 for i in range(1, group_tp_size):
                     for item in keys:
                         new_str = item.replace(  # type: ignore[attr-defined]
