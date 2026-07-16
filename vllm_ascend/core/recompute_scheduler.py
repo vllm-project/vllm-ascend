@@ -674,6 +674,11 @@ class RecomputeScheduler(ShortRequestFirstSchedulerMixin, Scheduler):
                     delay_cache_blocks=load_kv_async,
                     num_encoder_tokens=num_encoder_tokens,
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
+                    # Apply the KV cache watermark (headroom kept free when
+                    # admitting waiting/preempted requests) only when at least
+                    # one request is already scheduled this step, so the very
+                    # first admission is never blocked by the watermark.
+                    has_scheduled_reqs=bool(self.running),
                 )
 
                 if new_blocks is None:
