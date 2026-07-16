@@ -1208,7 +1208,7 @@ Recommended configurations for serving `GLM-5.2` with a 1M context window on Atl
 | ---- | -------- | ----------- | ------- |
 | Single-node co-located | 1 Atlas 800 A3 (64G x 16) | `DP1 PP1 TP16 PCP1 DCP16` | `1024000` |
 | Dual-node co-located | 2 Atlas 800 A3 (64G x 16) | `DP4 PP1 TP8 PCP1 DCP8` | `1024000` |
-| 2P2D PD disaggregation | 1 prefiller with 2 A3 nodes + 1 decoder with 2 A3 nodes | Prefill `DP4 PP1 TP8 PCP1 DCP8`, Decode `DP4 PP1 TP8 PCP1 DCP8` | `1024000` |
+| 1P1D PD disaggregation | 1 prefiller with 2 A3 nodes + 1 decoder with 2 A3 nodes | Prefill `DP4 PP1 TP8 PCP1 DCP8`, Decode `DP4 PP1 TP8 PCP1 DCP8` | `1024000` |
 
 #### Single-Node 1M Deployment
 
