@@ -30,7 +30,7 @@ import pytest
 from PIL import Image
 from vllm import SamplingParams
 
-from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 DEEPSEEK_V2_LITE = "vllm-ascend/DeepSeek-V2-Lite-W8A8"
 DEEPSEEK_MTP = "wemaster/deepseek_mtp_main_random_bf16"
@@ -131,8 +131,7 @@ class AccuracyCase:
 
 
 def _run_accuracy_case(case: AccuracyCase) -> None:
-    runner_cls = DPVllmRunner if case.runner_kwargs.get("data_parallel_size", 1) > 1 else VllmRunner
-    with runner_cls(case.model, **case.runner_kwargs) as runner:
+    with VllmRunner(case.model, **case.runner_kwargs) as runner:
         outputs = runner.generate_greedy(list(case.prompts), case.max_tokens)
 
     if isinstance(case.expected_outputs[0], str):
@@ -293,6 +292,25 @@ DSV2_PARALLEL_CASES = [
             },
         },
     ),
+    AccuracyCase(
+        name="dsv2_dcp_only_interleave128",
+        model=DEEPSEEK_V2_LITE,
+        prompts=DSV2_PROMPTS,
+        expected_outputs=DSV2_DCP_GOLDEN,
+        max_tokens=10,
+        runner_kwargs={
+            **DSV2_COMMON_KWARGS,
+            "tensor_parallel_size": 2,
+            "prefill_context_parallel_size": 1,
+            "decode_context_parallel_size": 2,
+            "cp_kv_cache_interleave_size": 128,
+            "long_prefill_token_threshold": 64,
+            "compilation_config": {
+                **FULL_DECODE_GRAPH,
+                "pass_config": {"enable_sp": True},
+            },
+        },
+    ),
 ]
 
 FULL_FEATURE_MODEL_CASES = [
@@ -382,7 +400,6 @@ FULL_FEATURE_MODEL_CASES = [
             "max_model_len": 1024,
             "max_num_seqs": MAX_NUM_SEQS,
             "max_num_batched_tokens": 1024,
-            "data_parallel_size": 2,
             "tensor_parallel_size": 2,
             "prefill_context_parallel_size": 1,
             "decode_context_parallel_size": 2,
@@ -391,6 +408,38 @@ FULL_FEATURE_MODEL_CASES = [
             "enable_prefix_caching": True,
             "gpu_memory_utilization": 0.4,
             "cp_kv_cache_interleave_size": 1,
+            "block_size": 128,
+            "quantization": "ascend",
+            "long_prefill_token_threshold": 128,
+            "compilation_config": FULL_DECODE_GRAPH,
+            "additional_config": {
+                "enable_flashcomm1": True,
+                "enable_sparse_c8": False,
+            },
+            "speculative_config": {
+                "method": "mtp",
+                "num_speculative_tokens": 3,
+            },
+        },
+    ),
+    AccuracyCase(
+        name="dsv3_2_sfa_dcp_replicated_indexer_interleave128",
+        model="vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
+        prompts=COMMON_PROMPTS,
+        expected_outputs=DSV3_2_DCP_GOLDEN,
+        max_tokens=5,
+        runner_kwargs={
+            "max_model_len": 1024,
+            "max_num_seqs": MAX_NUM_SEQS,
+            "max_num_batched_tokens": 1024,
+            "tensor_parallel_size": 2,
+            "prefill_context_parallel_size": 1,
+            "decode_context_parallel_size": 2,
+            "enable_expert_parallel": True,
+            "enable_chunked_prefill": True,
+            "enable_prefix_caching": True,
+            "gpu_memory_utilization": 0.4,
+            "cp_kv_cache_interleave_size": 128,
             "block_size": 128,
             "quantization": "ascend",
             "long_prefill_token_threshold": 128,
