@@ -80,14 +80,22 @@ def test_npu_connector_observes_updated_gdn_state_after_compile():
         patch("vllm_ascend.attention.utils.is_v1_kv_transfer_group", return_value=True),
         patch("vllm_ascend.attention.utils.get_kv_transfer_group", return_value=connector),
     ):
-        model(hidden_states, output)
+        # vLLM 0.24 writes to output; earlier versions return the result.
+        eager_output = model(hidden_states, output)
+        torch.testing.assert_close(
+            output if eager_output is None else eager_output,
+            hidden_states + 1,
+        )
         compiled_model = torch.compile(model, backend="inductor", fullgraph=True)
-        compiled_model(hidden_states, output)
-        compiled_model(hidden_states, output)
+        for _ in range(2):
+            compiled_output = compiled_model(hidden_states, output)
+            torch.testing.assert_close(
+                output if compiled_output is None else compiled_output,
+                hidden_states + 1,
+            )
         torch.npu.synchronize()
 
     assert connector.save_kv_layer.call_count == 3
     for execution, (conv_state, ssm_state) in enumerate(observed_states, start=1):
         torch.testing.assert_close(conv_state, torch.full_like(conv_state, execution))
         torch.testing.assert_close(ssm_state, torch.full_like(ssm_state, execution))
-    torch.testing.assert_close(output, hidden_states + 1)
