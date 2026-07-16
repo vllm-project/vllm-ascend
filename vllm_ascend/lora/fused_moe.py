@@ -43,10 +43,6 @@ from __future__ import annotations
 import torch
 from torch import nn
 from vllm import envs
-from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.layers.utils import _get_lora_device
@@ -138,7 +134,13 @@ def _recover_moe_lora_routing_all2all(
         group_list,
     )
 
-    lora_per_row = exchanged_lora_indices
+    lora_per_row = exchanged_lora_indices.reshape(-1).to(torch.long)
+    if expert_per_row.numel() != lora_per_row.numel():
+        raise AssertionError(
+            "AlltoAll MoE LoRA routing metadata is misaligned: "
+            f"group_list describes {expert_per_row.numel()} rows, but "
+            f"received {lora_per_row.numel()} LoRA indices."
+        )
 
     return expert_per_row, lora_per_row
 
@@ -211,16 +213,21 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         BaseLayerWithLoRA.__init__(self)
         self.base_layer = base_layer
         _assert_ascend_moe_lora_supported(base_layer)
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
+        self.moe_config = base_layer.moe_config
+        # Match upstream FusedMoEWithLoRA: EP collapses the MoE TP dimension
+        # to one and shards experts across the original TP group.  Using the
+        # global TP rank/size here would incorrectly TP-slice every local
+        # expert's LoRA weights a second time.
+        moe_parallel_config = self.moe_config.moe_parallel_config
+        self.tp_size = moe_parallel_config.tp_size
+        self.tp_rank = moe_parallel_config.tp_rank
         self.device = _get_lora_device(base_layer)
         self._enable_aux_cuda_stream = envs.VLLM_LORA_ENABLE_DUAL_STREAM
-        self.moe_config = base_layer.moe_config
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
         # Mirrors per-(lora_id) layout of `self.lora_a_stacked` (built in
         # `create_lora_weights`) so `create_dummy_lora`'s n_slices fallback
         # matches `lora_a_stacked` length under EP.
-        self.n_slices = base_layer.local_num_experts * (self._w13_slices + 1)
+        self.n_slices = self.local_num_experts * (self._w13_slices + 1)
 
     # ------------------------------------------------------------------
     # Mapping

@@ -499,18 +499,22 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         # The indices are permuted with the same mapping as tokens so they
         # stay aligned through the all_to_all exchange.
         exchanged_lora_indices = None
-        exchanged_lora_pending = None
         if split_lora_indices is not None:
             lora_dtype = split_lora_indices.dtype
             # Expand lora indices to match top_k expansion (each token
             # generates top_k dispatched rows).
             expanded_lora = split_lora_indices.repeat_interleave(topk_ids.shape[1])
-            # Apply the same local permute as hidden_states (first permute).
-            permuted_lora = expanded_lora[reversed_local_input_permutation_mapping]
+            # npu_moe_token_permute returns original-row -> permuted-row indices.
+            # Invert it to gather LoRA ids in permuted-row order, matching
+            # permutated_local_input_tokens.
+            local_lora_permutation = torch.argsort(
+                reversed_local_input_permutation_mapping.reshape(-1).long()
+            )
+            permuted_lora = expanded_lora[local_lora_permutation]
             # All_to_all exchange: send lora indices to the expert-owning ranks.
             _, exchanged_lora, handle = async_all_to_all(permuted_lora, output_splits, input_splits, self.ep_group)
             handle.wait()
-            exchanged_lora_pending = exchanged_lora.to(lora_dtype)
+            exchanged_lora_indices = exchanged_lora.to(lora_dtype)
 
         dynamic_scale_after_all2all = None
         if with_quant:
@@ -542,13 +546,14 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         )
 
         # Apply the second LoRA permute (sort by local expert within the rank).
-        # if there are multiple local experts.
-        if (
-            self.num_local_experts > 1
-            and exchanged_lora_pending is not None
-            and reversed_global_input_permutation_mapping is not None
-        ):
-            exchanged_lora_indices = exchanged_lora_pending[reversed_global_input_permutation_mapping]
+        if self.num_local_experts > 1 and exchanged_lora_indices is not None:
+            assert reversed_global_input_permutation_mapping is not None
+            global_lora_permutation = torch.argsort(
+                reversed_global_input_permutation_mapping.reshape(-1).long()
+            )
+            exchanged_lora_indices = exchanged_lora_indices[
+                global_lora_permutation
+            ]
 
         return MoETokenDispatchOutput(
             hidden_states=global_input_tokens,
