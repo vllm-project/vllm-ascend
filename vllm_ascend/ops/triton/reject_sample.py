@@ -161,8 +161,11 @@ def rejection_random_sample_kernel(
     VOCAB_BLOCK_SIZE: tl.constexpr = 512,
 ):
     block_idx = tl.program_id(0)
-    offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < vec_len
+    MAX_BLOCK_SIZE = 16
+    offsets = block_idx * BLOCK_SIZE + tl.arange(0, MAX_BLOCK_SIZE)
+    mask = tl.arange(0, MAX_BLOCK_SIZE) < BLOCK_SIZE
+    mask = mask & (offsets < vec_len)
+
     is_greedy = tl.load(is_greedy_ptr + offsets, mask, other=1)
     not_greedy_mask = is_greedy == 0
     start_idxs = tl.where(offsets == 0, 0, tl.load(cu_num_draft_tokens_ptr + offsets - 1, not_greedy_mask))
@@ -264,7 +267,7 @@ def rejection_random_sample_kernel(
                 )
 
 
-@triton.jit(do_not_specialize=["replace_from", "replace_to", "vec_len"])
+@triton.jit(do_not_specialize=["replace_from", "replace_to", "vec_len", "output_ptr", "input_ptr"])
 def expand_kernel(
     output_ptr,  # [num_tokens]
     input_ptr,  # [batch_size]
@@ -294,7 +297,7 @@ def expand_kernel(
         tl.store(output_ptr + start_idx1 + offset1, src_val1, mask=offset1 < num_tokens1)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["output_token_ids_ptr", "cu_num_draft_tokens_ptr", "draft_token_ids_ptr"])
 def sample_recovered_tokens_kernel(
     output_token_ids_ptr,
     cu_num_draft_tokens_ptr,
