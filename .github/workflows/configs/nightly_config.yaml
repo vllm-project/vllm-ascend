@@ -164,10 +164,10 @@ a3:
       - name: qwen3-vl-235b-a22b-instruct-w8a8
         os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3-VL-235B-A22B-Instruct-W8A8.yaml
-      - name: gemma4-e2b
+      - name: gemma4-e2b-a3
         os: linux-aarch64-nightly-a3-2
         config_file_path: gemma4-E2B.yaml
-      - name: gemma4-e4b
+      - name: gemma4-e4b-a3
         os: linux-aarch64-nightly-a3-2
         config_file_path: gemma4-E4B.yaml
   multi_card:
