@@ -1463,33 +1463,51 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
     ) -> torch.Tensor:
         self.request_queue.put(req_meta)
 
+    def _finish_layer_save_task(
+        self,
+        transfer_tasks: list[LayerTransferTask],
+        layer_id: int,
+    ) -> None:
+        req_ids = [
+            block_range.request.req_id
+            for task in transfer_tasks
+            for block_range in task.block_ranges
+        ]
+        for req_id in req_ids:
+            self.dec_stored_request(req_id)
+            if self.try_finish_and_delete_stored_request(req_id):
+                self.set_finished_request(req_id)
+        # Every dequeued layer task must release both waiters, including when
+        # metadata construction or transfer raised.
+        if not self.layer_save_finished_events[layer_id].is_set():
+            self.layer_save_finished_events[layer_id].set()
+        transfer_tasks.clear()
+        self.request_queue.task_done()
+
     def _handle_request(  # type: ignore[override]
         self, transfer_tasks: list[LayerTransferTask]
     ):
-        if len(transfer_tasks) == 0:
-            self.request_queue.task_done()
-            return
-        physical_layer = transfer_tasks[0].layer_id
-        has_any_save = False
-        all_gvas = []
-        all_addrs = []
-        all_sizes = []
-        all_req_ids = []
-        for task in transfer_tasks:
-            shared = task.shared_block_data
-            if shared is None:
-                continue
-            has_any_save = True
-            builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
-            req_meta = builder.build_addrs(shared, task.layer_idx_in_group)
-            for req_id in req_meta.req_ids:
-                self.dec_stored_request(req_id)
-                all_req_ids.append(req_id)
-            all_gvas.append(req_meta.gvas_array)
-            all_addrs.append(req_meta.addr_array)
-            all_sizes.append(req_meta.size_array)
-        if has_any_save:
-            self.sync_save_events[physical_layer].synchronize()
+        layer_id = transfer_tasks[0].layer_id if transfer_tasks else 0
+        try:
+            if not transfer_tasks:
+                return
+            all_gvas = []
+            all_addrs = []
+            all_sizes = []
+            for task in transfer_tasks:
+                shared = task.shared_block_data
+                if shared is None:
+                    continue
+                builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
+                req_meta = builder.build_addrs(shared, task.layer_idx_in_group)
+                if not isinstance(req_meta, LayerBatchReqMeta):
+                    raise TypeError(f"Expected GVA layer batch metadata, got {type(req_meta).__name__}")
+                all_gvas.append(req_meta.gvas_array)
+                all_addrs.append(req_meta.addr_array)
+                all_sizes.append(req_meta.size_array)
+            if not all_gvas:
+                return
+            self.sync_save_events[layer_id].synchronize()
             gvas_array = np.concatenate(all_gvas) if len(all_gvas) > 1 else all_gvas[0]
             addr_array = np.concatenate(all_addrs) if len(all_addrs) > 1 else all_addrs[0]
             size_array = np.concatenate(all_sizes) if len(all_sizes) > 1 else all_sizes[0]
@@ -1501,33 +1519,20 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 self.max_transfer_blocks,
                 self.max_transfer_bytes,
             )
-            if physical_layer <= 2 or res != 0:
+            if layer_id <= 2 or res != 0:
                 logger.info(
                     "save_thread: layer=%d groups=%d blocks=%d res=%d",
-                    physical_layer,
+                    layer_id,
                     len(all_gvas),
                     len(gvas_array),
                     res,
                 )
             if res != 0:
-                logger.error("Layerwise %d save batch_copy failed with return code %d", physical_layer, res)
-            for req_id in all_req_ids:
-                if self.try_finish_and_delete_stored_request(req_id):
-                    self.set_finished_request(req_id)
-        if not has_any_save:
-            assert not self.layer_save_finished_events[physical_layer].is_set(), (
-                f"thread: {physical_layer} save failed "
-            )
-            logger.debug("Layer save event set: layer %d", physical_layer)
-            self.layer_save_finished_events[physical_layer].set()
-            transfer_tasks.clear()
-            self.request_queue.task_done()
-            return
-        assert not self.layer_save_finished_events[physical_layer].is_set(), f"thread: {physical_layer} save failed "
-        logger.debug("Layer save event set: layer %d", physical_layer)
-        self.layer_save_finished_events[physical_layer].set()
-        transfer_tasks.clear()
-        self.request_queue.task_done()
+                logger.error("Layerwise %d save batch_copy failed with return code %d", layer_id, res)
+        except Exception as exc:
+            logger.error("Layerwise save handler failed layer=%d error=%s", layer_id, exc)
+        finally:
+            self._finish_layer_save_task(transfer_tasks, layer_id)
 
 
 class KVCacheStoreLayerRecvingThread(KVTransferThread):
@@ -1551,6 +1556,9 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         max_transfer_blocks: int = 0,
         max_transfer_bytes: int = 0,
         group_builders: list[LayerBatchBuilder] | None = None,
+        *,
+        invalid_block_ids: set[int],
+        invalid_block_ids_lock: threading.Lock,
     ):
         super().__init__(
             m_store,
@@ -1569,6 +1577,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self.h2d_stagger_us = h2d_stagger_us
         self.max_transfer_blocks = max_transfer_blocks
         self.max_transfer_bytes = max_transfer_bytes
+        self._invalid_block_ids = invalid_block_ids
+        self._invalid_block_ids_lock = invalid_block_ids_lock
         self.group_builders: list[LayerBatchBuilder] | None = group_builders
         if group_builders is not None:
             self.layer_batch_builder = group_builders[0]
@@ -1609,113 +1619,136 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         while time.perf_counter() < deadline:
             pass
 
+    def _mark_invalid_transfer_task_blocks(
+        self,
+        transfer_tasks: list[LayerTransferTask],
+    ) -> None:
+        block_ids: set[int] = set()
+        for task in transfer_tasks:
+            for block_range in task.block_ranges:
+                request_block_ids = block_range.request.block_ids
+                block_ids.update(
+                    request_block_ids[
+                        block_range.start_block : block_range.end_block
+                    ]
+                )
+                partial_block_index = block_range.partial_block_index
+                if partial_block_index is not None and 0 <= partial_block_index < len(request_block_ids):
+                    block_ids.add(request_block_ids[partial_block_index])
+        with self._invalid_block_ids_lock:
+            self._invalid_block_ids.update(block_ids)
+
+    def _finish_layer_load_task(self, data: LayerLoadTask, layer_id: int) -> None:
+        if not self.layer_load_finished_events[layer_id].is_set():
+            self.layer_load_finished_events[layer_id].set()
+        data.transfer_tasks.clear()
+        self.request_queue.task_done()
+        self.get_event.set()
+
     def _handle_request(  # type: ignore[override]
         self, data: LayerLoadTask
     ):
-        wait_for_save = data.wait_for_save_layer
-        transfer_tasks = data.transfer_tasks
         layer_id = data.layer_id
-        attention_start_gate = data.attention_start_gate
+        try:
+            wait_for_save = data.wait_for_save_layer
+            transfer_tasks = data.transfer_tasks
+            attention_start_gate = data.attention_start_gate
 
-        if len(transfer_tasks) == 0:
+            if len(transfer_tasks) == 0:
+                if wait_for_save is not None:
+                    while not self.layer_save_finished_events[wait_for_save].wait(timeout=10):
+                        logger.info("Layerwise %d save wait timed out, keep waiting before load", wait_for_save)
+                    logger.debug("Layer save event cleared: layer %d", wait_for_save)
+                    self.layer_save_finished_events[wait_for_save].clear()
+                return
+
+            # Build metadata for every cache group before waiting on the save
+            # dependency. A single physical layer may contain multiple groups.
+            task_metas: list[tuple[LayerTransferTask, LayerBatchReqMeta]] = []
+            for task in transfer_tasks:
+                shared = task.shared_block_data
+                builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
+                if shared is not None:
+                    req_meta = builder.build_addrs(shared, task.layer_idx_in_group)
+                else:
+                    req_meta = builder.build(task, is_save=False)
+                if req_meta is None:
+                    continue
+                if not isinstance(req_meta, LayerBatchReqMeta):
+                    raise TypeError(f"Expected GVA layer batch metadata, got {type(req_meta).__name__}")
+                task_metas.append((task, req_meta))
+
+            if not task_metas:
+                return
+
             if wait_for_save is not None:
                 while not self.layer_save_finished_events[wait_for_save].wait(timeout=10):
                     logger.info("Layerwise %d save wait timed out, keep waiting before load", wait_for_save)
                 logger.debug("Layer save event cleared: layer %d", wait_for_save)
                 self.layer_save_finished_events[wait_for_save].clear()
-            assert not self.layer_load_finished_events[layer_id].is_set()
-            logger.debug("Layer load event set: layer %d", layer_id)
-            self.layer_load_finished_events[layer_id].set()
-            self.request_queue.task_done()
-            return
 
-        # Build req_meta for all tasks first; if all are None, early return
-        # before wait_for_save (matches original single-task behavior).
-        task_metas: list[tuple[LayerTransferTask, LayerBatchReqMeta]] = []
-        for task in transfer_tasks:
-            shared = task.shared_block_data
-            builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
-            if shared is not None:
-                req_meta: LayerBatchReqMeta | None = builder.build_addrs(shared, task.layer_idx_in_group)
-            else:
-                req_meta = builder.build(task, is_save=False)
-            if req_meta is not None:
-                task_metas.append((task, req_meta))
+            if attention_start_gate is not None:
+                while not attention_start_gate.wait(timeout=10):
+                    logger.info("Layerwise %d load waits for attention compute start", layer_id)
 
-        if not task_metas:
-            assert not self.layer_load_finished_events[layer_id].is_set()
-            logger.debug("Layer load event set: layer %d", layer_id)
-            self.layer_load_finished_events[layer_id].set()
-            self.request_queue.task_done()
-            return
+            all_load_keys: list[str] = []
+            all_req_ids: set[str] = set()
+            last_chunk_req_ids: set[str] = set()
+            all_gvas = []
+            all_addrs = []
+            all_sizes = []
+            for _, req_meta in task_metas:
+                if req_meta.load_keys:
+                    all_load_keys.extend(req_meta.load_keys)
+                for req_id, is_last_chunk in zip(req_meta.req_ids, req_meta.is_last_chunks):
+                    all_req_ids.add(req_id)
+                    if is_last_chunk:
+                        last_chunk_req_ids.add(req_id)
+                all_gvas.append(req_meta.gvas_array)
+                all_addrs.append(req_meta.addr_array)
+                all_sizes.append(req_meta.size_array)
 
-        if wait_for_save is not None:
-            while not self.layer_save_finished_events[wait_for_save].wait(timeout=10):
-                logger.info("Layerwise %d save wait timed out, keep waiting before load", wait_for_save)
-            logger.debug("Layer save event cleared: layer %d", wait_for_save)
-            self.layer_save_finished_events[wait_for_save].clear()
-
-        if attention_start_gate is not None:
-            while not attention_start_gate.wait(timeout=10):
-                logger.info("Layerwise %d load waits for attention compute start", layer_id)
-
-        all_load_keys: list[str] = []
-        all_req_ids: set[str] = set()
-        last_chunk_req_ids: set[str] = set()
-        all_gvas = []
-        all_addrs = []
-        all_sizes = []
-        for task, req_meta in task_metas:
-            if req_meta.load_keys:
-                all_load_keys.extend(req_meta.load_keys)
-            for req_id, is_last_chunk in zip(req_meta.req_ids, req_meta.is_last_chunks):
-                all_req_ids.add(req_id)
-                if is_last_chunk:
-                    last_chunk_req_ids.add(req_id)
-            all_gvas.append(req_meta.gvas_array)
-            all_addrs.append(req_meta.addr_array)
-            all_sizes.append(req_meta.size_array)
-
-        self._stagger_h2d_submit(layer_id)
-        gvas_array = np.concatenate(all_gvas) if len(all_gvas) > 1 else all_gvas[0]
-        addr_array = np.concatenate(all_addrs) if len(all_addrs) > 1 else all_addrs[0]
-        size_array = np.concatenate(all_sizes) if len(all_sizes) > 1 else all_sizes[0]
-        res = self._batch_copy_with_limits(
-            gvas_array,
-            addr_array,
-            size_array,
-            1,
-            self.max_transfer_blocks,
-            self.max_transfer_bytes,
-        )
-        if layer_id <= 2 or res != 0:
-            logger.info(
-                "load_thread: layer=%d groups=%d blocks=%d res=%d",
-                layer_id,
-                len(all_gvas),
-                len(gvas_array),
-                res,
+            self._stagger_h2d_submit(layer_id)
+            gvas_array = np.concatenate(all_gvas) if len(all_gvas) > 1 else all_gvas[0]
+            addr_array = np.concatenate(all_addrs) if len(all_addrs) > 1 else all_addrs[0]
+            size_array = np.concatenate(all_sizes) if len(all_sizes) > 1 else all_sizes[0]
+            res = self._batch_copy_with_limits(
+                gvas_array,
+                addr_array,
+                size_array,
+                1,
+                self.max_transfer_blocks,
+                self.max_transfer_bytes,
             )
-        if res != 0:
-            logger.error("Layerwise %d load batch_copy failed with return code %d", layer_id, res)
+            if layer_id <= 2 or res != 0:
+                logger.info(
+                    "load_thread: layer=%d groups=%d blocks=%d res=%d",
+                    layer_id,
+                    len(all_gvas),
+                    len(gvas_array),
+                    res,
+                )
+            if res != 0:
+                logger.error("Layerwise %d load batch_copy failed with return code %d", layer_id, res)
 
-        if layer_id == self.final_layer_id and all_load_keys:
-            self.m_store.batch_remove_lease(all_load_keys)
-            logger.info(
-                "[KVPOOL] load_thread released %d leases after final layer %d",
-                len(all_load_keys),
-                layer_id,
-            )
-        if layer_id == self.final_layer_id:
-            for req_id in all_req_ids:
-                if req_id in last_chunk_req_ids:
-                    self.set_finished_request(req_id)
-        assert not self.layer_load_finished_events[layer_id].is_set(), f"thread: {layer_id} load failed "
-        logger.debug("Layer load event set: layer %d", layer_id)
-        self.layer_load_finished_events[layer_id].set()
-        transfer_tasks.clear()
-        self.request_queue.task_done()
-        self.get_event.set()
+            if layer_id == self.final_layer_id and all_load_keys:
+                self.m_store.batch_remove_lease(all_load_keys)
+                logger.info(
+                    "[KVPOOL] load_thread released %d leases after final layer %d",
+                    len(all_load_keys),
+                    layer_id,
+                )
+            if layer_id == self.final_layer_id:
+                for req_id in all_req_ids:
+                    if req_id in last_chunk_req_ids:
+                        self.set_finished_request(req_id)
+        except Exception as exc:
+            logger.error("Layerwise load handler failed layer=%d error=%s", layer_id, exc)
+            # Publish invalid blocks before the finalizer releases the layer
+            # event, so the waiter cannot consume incomplete KV as a hit.
+            self._mark_invalid_transfer_task_blocks(data.transfer_tasks)
+        finally:
+            self._finish_layer_load_task(data, layer_id)
 
 
 def record_failed_blocks(

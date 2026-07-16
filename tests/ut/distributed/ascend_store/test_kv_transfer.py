@@ -17,7 +17,7 @@
 
 import threading
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
@@ -28,6 +28,7 @@ from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     KeyMetadata,
     LayerBlockRange,
+    LayerLoadTask,
     LayerRangeReqMeta,
     LayerMultiBlockReqMeta,
     LayerPoolKey,
@@ -565,7 +566,9 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
 
 
 @unittest.skip("LayerMultiBlockReqMeta API is deprecated, tests need update for LayerTransferTask")
-class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
+class _DeprecatedKVCacheStoreLayerSendingThreadTests(unittest.TestCase):
+    __test__ = False
+
     def _make_thread(self, exists_result=None, num_layers=2):
         store = FakeStore(exists_result or [0, 0])
         db = FakeTokenDatabase()
@@ -713,7 +716,9 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
 
 
 @unittest.skip("LayerMultiBlockReqMeta API is deprecated, tests need update for LayerTransferTask")
-class TestKVCacheStoreLayerRecvingThread(unittest.TestCase):
+class _DeprecatedKVCacheStoreLayerRecvingThreadTests(unittest.TestCase):
+    __test__ = False
+
     def test_handle_request(self):
         store = FakeStore()
         db = FakeTokenDatabase()
@@ -742,6 +747,98 @@ class TestKVCacheStoreLayerRecvingThread(unittest.TestCase):
         t._handle_request(req)
         self.assertEqual(len(store.get_calls), 1)
         self.assertTrue(get_event.is_set())
+
+
+class TestKVCacheStoreLayerFinalization(unittest.TestCase):
+    @staticmethod
+    def _make_send_thread():
+        store = FakeStore()
+        thread = KVCacheStoreLayerSendingThread(
+            m_store=store,
+            token_database=FakeTokenDatabase(),
+            block_size=16,
+            tp_rank=0,
+            tp_size=1,
+            dcp_size=1,
+            put_step=1,
+            my_key_index=0,
+            num_ranks_per_layer=1,
+            page_size_bytes=32,
+            ready_event=threading.Event(),
+            num_layers=1,
+            layer_save_finished_events=[threading.Event()],
+            sync_save_events=[MagicMock()],
+        )
+        request = ReqMeta(
+            req_id="r1",
+            block_ids=[1],
+            block_ids_np=np.asarray([1], dtype=np.int64),
+            block_gvas_np=np.asarray([0x1000], dtype=np.int64),
+        )
+        task = LayerTransferTask(0, [LayerBlockRange(request, 0, 1)])
+        task.shared_block_data = thread.build_shared_data(task)
+        return thread, [task]
+
+    @staticmethod
+    def _make_recv_thread():
+        store = FakeStore()
+        invalid_block_ids: set[int] = set()
+        get_event = threading.Event()
+        thread = KVCacheStoreLayerRecvingThread(
+            m_store=store,
+            token_database=FakeTokenDatabase(),
+            block_size=16,
+            tp_rank=0,
+            tp_size=1,
+            dcp_size=1,
+            my_key_index=0,
+            num_ranks_per_layer=1,
+            page_size_bytes=32,
+            ready_event=threading.Event(),
+            get_event=get_event,
+            layer_load_finished_events=[threading.Event()],
+            layer_save_finished_events=[threading.Event()],
+            num_layers=1,
+            invalid_block_ids=invalid_block_ids,
+            invalid_block_ids_lock=threading.Lock(),
+        )
+        request = ReqMeta(
+            req_id="r1",
+            block_ids=[3],
+            block_ids_np=np.asarray([3], dtype=np.int64),
+            load_block_gvas_np=np.asarray([0x2000], dtype=np.int64),
+        )
+        task = LayerTransferTask(0, [LayerBlockRange(request, 0, 1)])
+        task.shared_block_data = thread.build_shared_data(task)
+        return thread, LayerLoadTask(None, [task], 0), invalid_block_ids, get_event
+
+    def test_save_exception_finishes_queue_and_request_accounting(self):
+        thread, tasks = self._make_send_thread()
+        thread.add_stored_request("r1")
+        thread.request_queue.put(tasks)
+        thread.layer_batch_builder.build_addrs = MagicMock(side_effect=RuntimeError("probe failed"))
+
+        with patch.object(thread.request_queue, "task_done", wraps=thread.request_queue.task_done) as task_done:
+            thread._handle_request(tasks)
+
+        self.assertEqual(task_done.call_count, 1)
+        self.assertTrue(thread.layer_save_finished_events[0].is_set())
+        self.assertEqual(dict(thread.stored_requests), {})
+        self.assertEqual(thread.get_and_clear_finished_requests(), {"r1"})
+        self.assertEqual(thread.get_kv_events(), [])
+
+    def test_load_exception_finishes_queue_and_marks_blocks_invalid(self):
+        thread, data, invalid_block_ids, get_event = self._make_recv_thread()
+        thread.request_queue.put(data)
+        thread.layer_batch_builder.build_addrs = MagicMock(side_effect=RuntimeError("probe failed"))
+
+        with patch.object(thread.request_queue, "task_done", wraps=thread.request_queue.task_done) as task_done:
+            thread._handle_request(data)
+
+        self.assertEqual(task_done.call_count, 1)
+        self.assertTrue(thread.layer_load_finished_events[0].is_set())
+        self.assertTrue(get_event.is_set())
+        self.assertEqual(invalid_block_ids, {3})
 
 
 class TestKVTransferTpMismatchDispatch(unittest.TestCase):
