@@ -22,7 +22,6 @@ import torch_npu
 
 from vllm_ascend.utils import (
     COMPRESSED_TENSORS_METHOD,
-    get_weight_prefetch_method,
     maybe_trans_nz,
 )
 
@@ -79,14 +78,6 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
         if x.dtype != torch.int8:
-            layer_cls_name = layer.__class__.__name__
-            weight_prefetch_method = get_weight_prefetch_method()
-            # prefetch qkvo_proj.weight preprocess
-            weight_prefetch_method.maybe_prefetch_attn_weight_preprocess(
-                layer_cls_name=layer_cls_name,
-                weight=layer.weight,
-                start_flag=x,
-            )
             try:
                 quant_comm_config = layer._quant_comm_config
             except AttributeError:
@@ -114,12 +105,6 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
                     layer.aclnn_input_scale_reciprocal,
                     layer.aclnn_input_offset,
                 )
-
-            # prefetch qkvo_proj.weight postprocess
-            weight_prefetch_method.maybe_prefetch_attn_weight_postprocess(
-                layer_cls_name=layer_cls_name,
-                stop_flag=x,
-            )
 
         quant_bias = layer.quant_bias if tp_rank == 0 else None
 

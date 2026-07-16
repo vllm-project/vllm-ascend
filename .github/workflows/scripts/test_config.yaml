@@ -214,6 +214,7 @@
   optional: false
   source_file_dependencies:
     - vllm_ascend/distributed
+    - vllm_ascend/memcache_comm_fence.py
   tests:
     - tests/ut/distributed
     - tests/e2e/pull_request/two_card/test_data_parallel.py
@@ -345,7 +346,8 @@
 - name: ops_distributed_inference
   optional: false
   source_file_dependencies:
-    - vllm_ascend/ops/weight_prefetch.py
+    - vllm_ascend/ops/flashcomm2_oshard_manager.py
+    - vllm_ascend/ops/layer_shard_linear.py
   tests:
     - tests/ut/ops
     - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_deepseek_v2_lite_fc1_tp2
@@ -788,7 +790,6 @@ estimated_times:
   tests/ut/kv_offload/a2/test_remote_prefill_lifecycle.py: 60
   tests/ut/ops/a2/test_gdn_chunk_meta.py: 30
   tests/ut/ops/a2/test_token_dispatcher.py: 30
-  tests/ut/ops/a2/test_weight_prefetch.py: 30
   tests/ut/ops/a3_2/test_activation.py: 50
   tests/ut/ops/a3_2/test_select_experts.py: 30
   tests/ut/quantization/methods/a2/test_w4a16.py: 30
