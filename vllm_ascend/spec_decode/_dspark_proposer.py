@@ -60,8 +60,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         # (anchor-first: N query tokens per request, no bonus token, unlike
         # DFlash's 1+N). Overrides dflash:28; v2 derives via num_query_per_req.
         self.max_query_tokens = self.max_batch_size * self.num_speculative_tokens
-        # max_num_tokens + max_query_tokens. Overrides dflash:29; v2 drops it.
-        self.max_positions = self.max_num_tokens + self.max_query_tokens
         # Position ids for the draft query block [max_query_tokens].
         # Overrides dflash:49; v2 uses input_buffers.positions.
         self.positions = torch.zeros(
@@ -75,15 +73,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._slot_mapping_buffer = torch.zeros(
             self.max_query_tokens,
             dtype=torch.int32,
-            device=device,
-        )
-        # Markov block drafting: ``_markov_anchor_tokens`` is the target model's
-        # next token (the seed that starts the Markov chain); ``_markov_draft_tokens``
-        # holds each step's sampled token and feeds it back as the next step's
-        # input. DSpark-only -- DFlash/Eagle sample in parallel without Markov.
-        self._markov_anchor_tokens = torch.zeros(
-            self.max_batch_size,
-            dtype=torch.int64,
             device=device,
         )
         # Per-token -> request index map consumed by the SAS attention op. Sliced
@@ -101,11 +90,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         # self.query_start_loc for Eagle.
         self._dspark_query_start_loc: torch.Tensor | None = None
         self._dspark_seq_lens: torch.Tensor | None = None
-        self._markov_draft_tokens = torch.zeros(
-            (self.max_batch_size, self.num_speculative_tokens),
-            dtype=torch.int64,
-            device=device,
-        )
 
         # TODO simplify these comments
         # block_table / slot_mapping bookkeeping (10 dicts below). v1 self-
@@ -284,10 +268,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         block_tables_by_gid = self._get_draft_block_tables(cad, batch_size)
         self._per_group_block_table_buffers = block_tables_by_gid
         self._context_slots = None
-        self._markov_anchor_tokens[:batch_size].copy_(next_token_ids)
-        if batch_size < self._markov_anchor_tokens.shape[0]:
-            self._markov_anchor_tokens[batch_size:].fill_(0)
-
         self._dflash_num_context = cad.query_start_loc_cpu[batch_size]
         self._dflash_hidden_states[:self._dflash_num_context] = target_hidden_states[:self._dflash_num_context]
 
