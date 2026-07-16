@@ -166,13 +166,12 @@ from vllm_ascend.utils import (
     lmhead_tp_enable,
     oproj_tp_enable,
     set_potential_max_tokens,
-    set_weight_prefetch_method,
     should_skip_allreduce_across_dp_group,
     vllm_version_is,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPAsyncSpecDecodeRebuildResult, PCPManager
-from vllm_ascend.worker.utils import AscendKVBlockZeroer
+from vllm_ascend.worker.utils import AscendKVBlockZeroer, copy_snapshot_to_gpu
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType,
@@ -345,7 +344,6 @@ class NPUModelRunner(GPUModelRunner):
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
-        set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
 
         # Dump / PrecisionDebugger configuration now comes from AscendConfig
         dump_cfg = self.ascend_config.dump_config_path
@@ -853,7 +851,7 @@ class NPUModelRunner(GPUModelRunner):
                 query_start_loc.np[num_reqs_padded + 1] = num_tokens_padded
                 num_reqs_padded = num_reqs_padded + 1
 
-        query_start_loc.copy_to_gpu()
+        copy_snapshot_to_gpu(query_start_loc)
 
         return num_reqs_padded
 
@@ -1063,7 +1061,7 @@ class NPUModelRunner(GPUModelRunner):
 
         self.query_start_loc.np[0] = 0
         self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
-        self.query_start_loc.copy_to_gpu()
+        copy_snapshot_to_gpu(self.query_start_loc)
 
         # Now, query_start_loc is padded.
         # But gdn needs an unpadded one.
@@ -1073,7 +1071,7 @@ class NPUModelRunner(GPUModelRunner):
             self.gdn_query_start_loc.np[0] = 0
             self.gdn_query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
             self.gdn_query_start_loc.np[num_reqs + 1 :].fill(cu_num_tokens[-1])
-            self.gdn_query_start_loc.copy_to_gpu()
+            copy_snapshot_to_gpu(self.gdn_query_start_loc)
 
 
         # Compute optimistic seq_lens (assumes all draft tokens from previous
@@ -3532,10 +3530,10 @@ class NPUModelRunner(GPUModelRunner):
             cum_num_tokens = self._get_cumsum_and_arange(
             num_scheduled_tokens, self.query_pos.np)
             self.query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
-            self.query_start_loc.copy_to_gpu()
+            copy_snapshot_to_gpu(self.query_start_loc)
             if self._has_gdn:
                 self.gdn_query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
-                self.gdn_query_start_loc.copy_to_gpu()
+                copy_snapshot_to_gpu(self.gdn_query_start_loc)
 
             if not profile_cpp:
                 num_reqs_padded = self._pad_query_start_loc_for_fia(
