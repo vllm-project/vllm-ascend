@@ -235,35 +235,10 @@ def _serialize_partial_param_value(
     self: MinimaxM2ToolParser,
     value: str,
     param_types: list[str],
-    *,
-    is_complete: bool,
 ) -> str:
     value = value.strip()
-    if is_complete:
-        converted = _coerce_param_value(value, param_types)
-        return json.dumps(converted, ensure_ascii=False)
-
-    if not value:
-        return ""
-
-    normalized_types = {t.lower() for t in param_types}
-    string_types = {"string", "str", "text"}
-
-    if "null" in normalized_types and not (normalized_types & string_types) and "null".startswith(value.lower()):
-        return value.lower()
-
-    if {"boolean", "bool"} & normalized_types:
-        lower_value = value.lower()
-        if any(candidate.startswith(lower_value) for candidate in ("true", "false")):
-            return lower_value
-
-    if {"integer", "int", "number", "float"} & normalized_types:
-        return value
-
-    if {"object", "array"} & normalized_types and value[:1] in "{[":
-        return value
-
-    return json.dumps(value, ensure_ascii=False)[:-1]
+    converted = _coerce_param_value(value, param_types)
+    return json.dumps(converted, ensure_ascii=False)
 
 
 def _build_partial_arguments(
@@ -297,22 +272,18 @@ def _build_partial_arguments(
             param_value = invoke_body[value_start:]
             search_pos = len(invoke_body)
 
-        if not param_complete and not param_value.strip():
+        if not param_complete:
             break
 
         param_types = _get_param_types_from_config(param_name, param_config)
         serialized_value = self._serialize_partial_param_value(
             param_value,
             param_types,
-            is_complete=param_complete,
         )
         if not serialized_value:
             break
 
         args_parts.append(f"{json.dumps(param_name, ensure_ascii=False)}:{serialized_value}")
-
-        if not param_complete:
-            break
 
     if not args_parts:
         return "{}" if invoke_complete else ""
