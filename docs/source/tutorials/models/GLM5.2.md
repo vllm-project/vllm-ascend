@@ -1296,9 +1296,9 @@ vllm serve <MODEL_PATH> \
   --served-model-name glm-52 \
   --max-model-len 1024000 \
   --max-num-batched-tokens 16384 \
-  --gpu-memory-utilization 0.80 \
+  --gpu-memory-utilization 0.75 \
   ${server_role_args} \
-  --max-num-seqs 32 \
+  --max-num-seqs 8 \
   --data-parallel-size 4 \
   --data-parallel-size-local 2 \
   --data-parallel-start-rank $data_parallel_start_rank \
@@ -1309,7 +1309,7 @@ vllm serve <MODEL_PATH> \
   --prefill-context-parallel-size 1 \
   --decode-context-parallel-size 8 \
   --cp-kv-cache-interleave-size 128 \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 16, 128]}' \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false}' \
   --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
@@ -1357,9 +1357,9 @@ vllm serve <MODEL_PATH> \
   --served-model-name glm-52 \
   --max-model-len 1024000 \
   --max-num-batched-tokens 16384 \
-  --gpu-memory-utilization 0.80 \
+  --gpu-memory-utilization 0.75 \
   ${server_role_args} \
-  --max-num-seqs 32 \
+  --max-num-seqs 8 \
   --data-parallel-size 4 \
   --data-parallel-size-local 2 \
   --data-parallel-start-rank $data_parallel_start_rank \
@@ -1370,9 +1370,9 @@ vllm serve <MODEL_PATH> \
   --prefill-context-parallel-size 1 \
   --decode-context-parallel-size 8 \
   --cp-kv-cache-interleave-size 128 \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 16, 128]}' \
+  --enforce-eager \
   --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false}' \
-  --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
+  --speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
   --enable-expert-parallel \
   --safetensors-load-strategy prefetch \
@@ -1433,7 +1433,7 @@ vllm serve <MODEL_PATH> \
   --served-model-name glm-52 \
   --max-model-len 1024000 \
   --max-num-batched-tokens 16384 \
-  --gpu-memory-utilization 0.80 \
+  --gpu-memory-utilization 0.75 \
   ${server_role_args} \
   --max-num-seqs 32 \
   --data-parallel-size 4 \
@@ -1446,7 +1446,7 @@ vllm serve <MODEL_PATH> \
   --prefill-context-parallel-size 1 \
   --decode-context-parallel-size 8 \
   --cp-kv-cache-interleave-size 128 \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 16, 128]}' \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false}' \
   --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
