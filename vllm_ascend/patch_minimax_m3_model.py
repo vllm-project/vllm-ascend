@@ -41,9 +41,7 @@ def _install_fused_allreduce_norm_fallback() -> None:
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         return norm(hidden_states, residual)
 
-    fallback_module.fused_allreduce_gemma_rms_norm = (
-        fused_allreduce_gemma_rms_norm
-    )
+    fallback_module.fused_allreduce_gemma_rms_norm = fused_allreduce_gemma_rms_norm
     sys.modules[module_name] = fallback_module
 
 
@@ -73,14 +71,10 @@ class AscendMiniMaxM3SparseAttention(AscendMiniMaxM3SparseAttentionBase):
     ) -> None:
         del topk_indices_buffer
         sparse_cfg = config.sparse_attention_config
-        disable_index_value = (
-            sparse_cfg["sparse_disable_index_value"][layer_id] == 1
-        )
+        disable_index_value = sparse_cfg["sparse_disable_index_value"][layer_id] == 1
         rope_parameters = {
             "rope_theta": getattr(config, "rope_theta", 10000),
-            "partial_rotary_factor": getattr(
-                config, "partial_rotary_factor", 1.0
-            ),
+            "partial_rotary_factor": getattr(config, "partial_rotary_factor", 1.0),
         }
         super().__init__(
             hidden_size=config.hidden_size,
@@ -110,17 +104,11 @@ def _forward_minimax_m3_attention(
 ) -> torch.Tensor:
     """Run dense attention without vLLM's CUDA-only fused QK/RoPE op."""
     qkv, _ = self.qkv_proj(hidden_states)
-    q, k, v = qkv.split(
-        [self.q_size, self.kv_size, self.kv_size], dim=-1
-    )
+    q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
     q_shape = q.shape
     k_shape = k.shape
-    q = self.q_norm(
-        q.reshape(-1, self.head_dim).contiguous()
-    ).reshape(q_shape)
-    k = self.k_norm(
-        k.reshape(-1, self.head_dim).contiguous()
-    ).reshape(k_shape)
+    q = self.q_norm(q.reshape(-1, self.head_dim).contiguous()).reshape(q_shape)
+    k = self.k_norm(k.reshape(-1, self.head_dim).contiguous()).reshape(k_shape)
     q, k = self.rotary_emb(positions, q, k)
     attn_output = self.attn(q, k, v.contiguous())
     output, _ = self.o_proj(attn_output)
@@ -138,9 +126,7 @@ def _apply_minimax_m3_vision_rotary_emb(
     """Apply MiniMax vision's partial RoPE with the Ascend rotary op."""
     del seq_len, rotary_segment_lengths
     rotary_dim = rotary_cos.shape[-1] * 2
-    qk_rot = self.apply_rotary_emb(
-        qk_reshaped[..., :rotary_dim], rotary_cos, rotary_sin
-    )
+    qk_rot = self.apply_rotary_emb(qk_reshaped[..., :rotary_dim], rotary_cos, rotary_sin)
     return torch.cat((qk_rot, qk_reshaped[..., rotary_dim:]), dim=-1)
 
 
@@ -176,19 +162,13 @@ def _load_minimax_m3_weights(
         elif "scale_inv" in name:
             name = name.replace("scale_inv", "scale")
 
-        if (
-            ".index_" in name
-            and ".index_q_proj" not in name
-            and ".index_k_proj" not in name
-        ):
+        if ".index_" in name and ".index_q_proj" not in name and ".index_k_proj" not in name:
             if name.endswith(".bias") and name not in params_dict:
                 continue
             if is_pp_missing_parameter(name, self) or name not in params_dict:
                 continue
             param = params_dict[name]
-            weight_loader = getattr(
-                param, "weight_loader", default_weight_loader
-            )
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
             continue
@@ -204,14 +184,10 @@ def _load_minimax_m3_weights(
             if is_pp_missing_parameter(mapped_name, self):
                 continue
             if mapped_name.endswith((".k_scale", ".v_scale")):
-                remapped_name = maybe_remap_kv_scale_name(
-                    mapped_name, params_dict
-                )
+                remapped_name = maybe_remap_kv_scale_name(mapped_name, params_dict)
                 if remapped_name is not None and remapped_name in params_dict:
                     param = params_dict[remapped_name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
+                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     weight_loader(param, loaded_weight)
                     loaded_params.add(remapped_name)
                     break
@@ -260,9 +236,7 @@ def _load_minimax_m3_weights(
                 if is_pp_missing_parameter(name, self) or name not in params_dict:
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 if getattr(weight_loader, "supports_moe_loading", False):
                     if loaded_weight.shape == param.shape:
                         default_weight_loader(param, loaded_weight)
