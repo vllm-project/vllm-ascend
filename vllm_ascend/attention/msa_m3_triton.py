@@ -25,6 +25,7 @@ PREFILL_SCALAR_SCORE_BLOCK_TILE_SIZE = 32
 
 _FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
 
+
 def _as_triton_index_kv_cache(
     index_kv_cache: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
 ) -> torch.Tensor:
@@ -35,15 +36,13 @@ def _as_triton_index_kv_cache(
         index_kv_cache = index_kv_cache[0]
     if index_kv_cache.ndim == 4:
         if index_kv_cache.shape[2] != 1:
-            raise ValueError(
-                f"Unexpected index cache head dim: {tuple(index_kv_cache.shape)}"
-            )
+            raise ValueError(f"Unexpected index cache head dim: {tuple(index_kv_cache.shape)}")
         index_kv_cache = index_kv_cache.squeeze(2)
     if index_kv_cache.ndim != 3:
-        raise ValueError(
-            f"Unexpected index cache ndim: {index_kv_cache.ndim}"
-        )
+        raise ValueError(f"Unexpected index cache ndim: {index_kv_cache.ndim}")
     return index_kv_cache
+
+
 def _split_triton_main_kv_cache(
     kv_cache: torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor],
 ) -> tuple[torch.Tensor, torch.Tensor]:
