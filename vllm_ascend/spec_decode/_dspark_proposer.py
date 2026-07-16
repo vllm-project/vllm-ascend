@@ -76,10 +76,10 @@ class AscendDSparkProposer(AscendDflashProposer):
         # Cached slices of the runner's common_attn_metadata (cad): in
         # set_inputs_first_pass they alias cad.query_start_loc_cpu / cad.seq_lens;
         # in dummy_run/profile_run (no cad available) they are synthesized locally.
-        # Kept under the _dspark_ prefix because llm_base already defines
+        # Kept under the _dummy_ prefix because llm_base already defines
         # self.query_start_loc for Eagle.
-        self._dspark_query_start_loc: torch.Tensor | None = None
-        self._dspark_seq_lens: torch.Tensor | None = None
+        self._dummy_query_start_loc: torch.Tensor | None = None
+        self._dummy_seq_lens: torch.Tensor | None = None
 
         # TODO simplify these comments
         # block_table / slot_mapping bookkeeping (10 dicts below). v1 self-
@@ -201,15 +201,14 @@ class AscendDSparkProposer(AscendDflashProposer):
         # The initial input token of markovHead is the next token
         n = next_token_ids.shape[0]
         self._dspark_seed_buffer[:n].copy_(next_token_ids)
-        if n < self._dspark_seed_buffer.shape[0]:
-            self._dspark_seed_buffer[n:].fill_(0)
+        self._dspark_seed_buffer[n:].fill_(0)
         batch_size = cad.num_reqs
         block_size = self.num_speculative_tokens
         num_query_total = batch_size * block_size
         has_num_rejected = num_rejected_tokens_gpu is not None
         primary_gid = getattr(self, "kv_cache_gid", 0)
-        block_tables_by_gid = {attn_group.kv_cache_group_id: self._per_group_block_tables[attn_group.kv_cache_group_id] for attn_group in self.draft_attn_groups}
-        self._per_group_block_table_buffers = block_tables_by_gid
+        per_group_draft_block_tables = {attn_group.kv_cache_group_id: self._per_group_block_tables[attn_group.kv_cache_group_id] for attn_group in self.draft_attn_groups}
+        self._per_group_block_table_buffers = per_group_draft_block_tables
         self._context_slots = None
         self._dflash_num_context = int(cad.query_start_loc_cpu[batch_size])
         self._dflash_hidden_states[:self._dflash_num_context] = target_hidden_states[:self._dflash_num_context]
@@ -225,10 +224,10 @@ class AscendDSparkProposer(AscendDflashProposer):
         # per kv-cache-group to fill positions / input_ids / query slot_mapping
         # / token_indices (SAMPLE_FROM_ANCHOR: anchor at q_idx=0 is sampled too).
         draft_attn_groups = getattr(self, "draft_attn_groups", [])
-        if block_tables_by_gid and draft_attn_groups:
+        if per_group_draft_block_tables and draft_attn_groups:
             for attn_group in draft_attn_groups:
                 gid = attn_group.kv_cache_group_id
-                gid_block_table = block_tables_by_gid.get(gid)
+                gid_block_table = per_group_draft_block_tables.get(gid)
                 if gid_block_table is None:
                     continue
                 kv_block_size = int(attn_group.kv_cache_spec.block_size)
@@ -279,12 +278,12 @@ class AscendDSparkProposer(AscendDflashProposer):
                     self.input_ids[out_start + 1 : out_end] = self.parallel_drafting_token_id
 
         # to compute self._context_slots
-        if block_tables_by_gid:
-            self._dspark_context_slot_mappings_by_gid = {
+        if per_group_draft_block_tables:
+            per_group_draft_context_slot_mappings = {
                 gid: self._per_group_context_slot_mapping_buffers[gid][:self._dflash_num_context]
-                for gid in block_tables_by_gid
+                for gid in per_group_draft_block_tables
             }
-            self._context_slots = [self._dspark_context_slot_mappings_by_gid[gidx] for gidx in self._layer_group_idx]
+            self._context_slots = [per_group_draft_context_slot_mappings[gidx] for gidx in self._layer_group_idx]
 
         effective_seq_lens = cad.seq_lens
         if has_num_rejected:
@@ -306,9 +305,9 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.max_query_len = block_size
         cad.max_seq_len = cad.max_seq_len + block_size
         cad.slot_mapping = self._slot_mapping_buffer[:num_query_total]
-        if block_tables_by_gid:
+        if per_group_draft_block_tables:
             self._per_group_query_slot_mapping_buffers = {
-                gid: self._per_group_query_slot_mapping_buffers[gid] for gid in block_tables_by_gid
+                gid: self._per_group_query_slot_mapping_buffers[gid] for gid in per_group_draft_block_tables
             }
             if primary_gid in self._per_group_query_slot_mapping_buffers:
                 cad.slot_mapping = self._per_group_query_slot_mapping_buffers[primary_gid][:num_query_total]
@@ -316,10 +315,11 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.causal = False
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
-        self._dspark_query_start_loc = cad.query_start_loc_cpu[: batch_size + 1]
-        self._dspark_seq_lens = cad.seq_lens[:batch_size]
+        self._dummy_query_start_loc = cad.query_start_loc_cpu[: batch_size + 1]
+        self._dummy_seq_lens = cad.seq_lens[:batch_size]
 
         return num_query_total, token_indices_to_sample, cad, None
+
 
     @torch.inference_mode()
     def dummy_run(
