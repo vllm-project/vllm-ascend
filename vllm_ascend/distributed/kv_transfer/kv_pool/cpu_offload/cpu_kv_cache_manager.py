@@ -102,7 +102,7 @@ class CPUKVCacheManager:
             self.req_to_block_hashes[request_id] = block_hashes
         max_cache_hit_length = request.num_tokens - 1
         eagle_kwarg = {"drop_eagle_block": self.use_eagle}
-        computed_blocks = self.single_type_manager.find_longest_cache_hit(
+        computed_blocks, num_computed_tokens = self.single_type_manager.find_longest_cache_hit(
             block_hashes=block_hashes,
             max_length=max_cache_hit_length,
             kv_cache_group_ids=[0],
@@ -111,7 +111,6 @@ class CPUKVCacheManager:
             **eagle_kwarg,
             alignment_tokens=self.block_size,
         )
-        num_computed_tokens = len(computed_blocks[0]) * self.block_size
         self.req_to_computed_blocks[request_id] = computed_blocks[0]
         # We should touch these blocks in the concurrent scenarios.
         self.block_pool.touch(computed_blocks)
@@ -144,6 +143,7 @@ class CPUKVCacheManager:
                 num_tokens=num_tokens,
                 new_computed_blocks=new_computed_blocks,
                 total_computed_tokens=num_local_computed_tokens,
+                num_local_computed_tokens=num_local_computed_tokens,
                 num_tokens_main_model=num_tokens,
             )
             if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():

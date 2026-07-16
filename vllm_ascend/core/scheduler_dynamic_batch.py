@@ -550,6 +550,9 @@ class SchedulerDynamicBatch(Scheduler):
             scheduled_spec_decode_tokens,
             req_to_new_blocks,
         )
+        kv_cache_block_copies, cow_retained_blocks = self.kv_cache_manager.take_kv_cache_block_copies()
+        if kv_cache_block_copies:
+            self._free_cow_retained_blocks(cow_retained_blocks, self.sched_step_seq + 1)
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -564,6 +567,7 @@ class SchedulerDynamicBatch(Scheduler):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
+            kv_cache_block_copies=kv_cache_block_copies or None,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:

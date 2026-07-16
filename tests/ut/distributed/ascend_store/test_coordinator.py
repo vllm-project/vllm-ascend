@@ -86,7 +86,8 @@ class _FakeCompressedManager:
                 break
             for blocks, block in zip(computed, cached):
                 blocks.append(block)
-        return computed
+        hit_length = len(computed[0]) * logical_block_size
+        return computed, hit_length
 
 
 class TestAscendStoreCoordinator(unittest.TestCase):

@@ -212,11 +212,15 @@ class AscendStoreCoordinator:
         *,
         apply_eagle: bool = True,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+        # The upstream fine-grained lookup API resolves hash views through the
+        # block pool. AscendStore uses a duck-typed external pool, so expose the
+        # same granularity metadata before invoking a manager.
+        cached_block_pool.hash_block_size = self.hash_block_size
         eagle_indices = self.eagle_attn_group_indices if apply_eagle else set()
         if len(self.attention_groups) == 1:
             spec, group_ids, manager_cls = self.attention_groups[0]
             hashes = self.block_hashes_for_spec(block_hashes, spec)
-            hit_blocks = _find_longest_cache_hit(
+            hit_blocks, hit_length = _find_longest_cache_hit(
                 manager_cls,
                 block_hashes=hashes,
                 max_length=max_length,
@@ -229,7 +233,7 @@ class AscendStoreCoordinator:
             blocks_by_group: list[list[KVCacheBlock]] = [[] for _ in range(len(self.kv_cache_groups))]
             for group_id, blocks in zip(group_ids, hit_blocks, strict=True):
                 blocks_by_group[group_id] = blocks
-            return tuple(blocks_by_group), len(hit_blocks[0]) * spec.block_size
+            return tuple(blocks_by_group), hit_length
 
         hit_length = max_length
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * len(self.kv_cache_groups)
@@ -252,7 +256,7 @@ class AscendStoreCoordinator:
                 if drop_eagle_block:
                     max_group_length = min(curr_hit_length + spec.block_size, max_length)
                 hashes = self.block_hashes_for_spec(block_hashes, spec)
-                hit_blocks = _find_longest_cache_hit(
+                hit_blocks, new_hit_length = _find_longest_cache_hit(
                     manager_cls,
                     block_hashes=hashes,
                     max_length=max_group_length,
@@ -262,7 +266,6 @@ class AscendStoreCoordinator:
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self.lcm_block_size,
                 )
-                new_hit_length = len(hit_blocks[0]) * spec.block_size
                 if drop_eagle_block:
                     eagle_verified.add(index)
                 elif new_hit_length < curr_hit_length:
@@ -363,7 +366,7 @@ def _get_manager_class(spec: KVCacheSpec) -> type[SingleTypeKVCacheManager]:
 def _find_longest_cache_hit(
     manager_cls: type[SingleTypeKVCacheManager],
     **kwargs: Any,
-) -> tuple[list[KVCacheBlock], ...]:
+) -> tuple[tuple[list[KVCacheBlock], ...], int]:
     try:
         return manager_cls.find_longest_cache_hit(**kwargs)
     except TypeError as exc:

@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    MambaSpec,
     MLAAttentionSpec,
 )
 from vllm.v1.request import Request
@@ -98,7 +99,7 @@ def test_compressed_prefix_cache_uses_logical_block_hash() -> None:
     )[0]
     assert cached_hash == expected_hash
 
-    hit_blocks = CompressAttentionManager.find_longest_cache_hit(
+    hit_blocks, hit_length = CompressAttentionManager.find_longest_cache_hit(
         block_hashes=request_b.block_hashes,
         max_length=logical_block_size,
         kv_cache_group_ids=[0],
@@ -106,9 +107,10 @@ def test_compressed_prefix_cache_uses_logical_block_hash() -> None:
         kv_cache_spec=spec,
         drop_eagle_block=False,
         alignment_tokens=logical_block_size,
-    )[0]
+    )
 
-    assert hit_blocks == []
+    assert hit_blocks == ([],)
+    assert hit_length == 0
 
 
 def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
@@ -125,7 +127,7 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
     )
     manager.cache_blocks(request, num_tokens=logical_block_size)
 
-    hit_blocks = CompressAttentionManager.find_longest_cache_hit(
+    hit_blocks, hit_length = CompressAttentionManager.find_longest_cache_hit(
         block_hashes=request.block_hashes,
         max_length=logical_block_size,
         kv_cache_group_ids=[0],
@@ -133,9 +135,10 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
         kv_cache_spec=spec,
         drop_eagle_block=False,
         alignment_tokens=logical_block_size,
-    )[0]
+    )
 
-    assert hit_blocks == manager.req_to_blocks[request.request_id]
+    assert hit_blocks == (manager.req_to_blocks[request.request_id],)
+    assert hit_length == logical_block_size
 
 
 def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
@@ -196,3 +199,59 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
 
     assert hit_length == 0
     assert hit_blocks == ([], [])
+
+
+def test_hybrid_coordinator_accepts_partial_mamba_prefix_hit() -> None:
+    hash_block_size = 16
+    mamba_block_size = 32
+    full_spec = FullAttentionSpec(
+        block_size=hash_block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    mamba_spec = MambaSpec(
+        block_size=mamba_block_size,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    coordinator = AscendHybridKVCacheCoordinator(
+        kv_cache_config=KVCacheConfig(
+            num_blocks=16,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(["full"], full_spec),
+                KVCacheGroupSpec(["mamba"], mamba_spec),
+            ],
+        ),
+        max_model_len=64,
+        use_eagle=False,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=1,
+        pcp_world_size=1,
+        hash_block_size=hash_block_size,
+        max_num_batched_tokens=64,
+        scheduler_block_size=mamba_block_size,
+    )
+    cached_request = _make_request("cached", list(range(48)), hash_block_size)
+    for manager in coordinator.single_type_managers:
+        manager.allocate_new_blocks(
+            cached_request.request_id,
+            num_tokens=48,
+            num_tokens_main_model=48,
+        )
+    coordinator.cache_blocks(cached_request, num_computed_tokens=48)
+    coordinator.free(cached_request.request_id)
+    coordinator.new_step_starts()
+
+    hit_request = _make_request("hit", list(range(64)), hash_block_size)
+    hit_blocks, hit_length = coordinator.find_longest_cache_hit(
+        hit_request.block_hashes,
+        max_cache_hit_length=64,
+    )
+
+    assert coordinator.enable_partial_hash_hits
+    assert hit_length == 48
+    assert [len(group) for group in hit_blocks] == [3, 2]

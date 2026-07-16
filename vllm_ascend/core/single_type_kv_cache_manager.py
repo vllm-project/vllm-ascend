@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHashList,
-    BlockHashListWithBlockSize,
     KVCacheBlock,
+    resolve_block_hashes,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
@@ -28,6 +28,10 @@ if TYPE_CHECKING:
 
 
 class CompressAttentionManager(FullAttentionManager):
+    # Compressed attention stores one state per logical block and cannot copy
+    # or resume from an interior hash boundary of that logical block.
+    supports_fine_grained_hash_lookup: ClassVar[bool] = False
+
     def __init__(self, kv_cache_spec: "AscendMLAAttentionSpec", block_pool: BlockPool, **kwargs) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
         self.compress_ratio = kv_cache_spec.compress_ratio
@@ -39,6 +43,7 @@ class CompressAttentionManager(FullAttentionManager):
         num_tokens: int,
         new_computed_blocks: Sequence[KVCacheBlock],
         total_computed_tokens: int,
+        num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
     ) -> int:
@@ -54,6 +59,7 @@ class CompressAttentionManager(FullAttentionManager):
             num_tokens,
             new_computed_blocks,
             total_computed_tokens,
+            num_local_computed_tokens,
             num_tokens_main_model,
             apply_admission_cap,
         )
@@ -203,7 +209,7 @@ class CompressAttentionManager(FullAttentionManager):
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
         drop_eagle_block: bool = False,
-    ) -> tuple[list[KVCacheBlock], ...]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         eagle_drop = drop_eagle_block
         # assert isinstance(
         #     kv_cache_spec, Compress4AttentionSpec | Compress128AttentionSpec | C4IndexerSpec
@@ -215,7 +221,13 @@ class CompressAttentionManager(FullAttentionManager):
         if dcp_world_size * pcp_world_size > 1:
             block_size *= dcp_world_size * pcp_world_size
         logical_block_size = block_size * kv_cache_spec.compress_ratio
-        logical_block_hashes = BlockHashListWithBlockSize(block_hashes, block_size, logical_block_size)
+        logical_block_hashes = resolve_block_hashes(
+            block_hashes,
+            block_pool.hash_block_size,
+            logical_block_size,
+            supports_fine_grained_hash_lookup=cls.supports_fine_grained_hash_lookup,
+            alignment_tokens=alignment_tokens,
+        )
         max_num_blocks = max_length // logical_block_size
         for block_hash in itertools.islice(logical_block_hashes, max_num_blocks):
             # block_hashes is a chain of block hashes. If a block hash is not
@@ -237,7 +249,8 @@ class CompressAttentionManager(FullAttentionManager):
         ):
             for computed in computed_blocks:
                 computed.pop()
-        return computed_blocks
+        hit_length = len(computed_blocks[0]) * logical_block_size
+        return computed_blocks, hit_length
 
 
 def get_manager_for_kv_cache_spec(

@@ -284,7 +284,8 @@ class _FakeSingleTypeKVCacheManager:
         if drop_eagle_block and computed and computed[0]:
             for blocks in computed:
                 blocks.pop()
-        return computed
+        hit_length = len(computed[0]) * kv_cache_spec.block_size
+        return computed, hit_length
 
 
 class _FakeSlidingWindowManager(_FakeSingleTypeKVCacheManager):
