@@ -1065,6 +1065,8 @@ def test_prefill_sparse_attention_production_shape(
     head_dim = HEAD_DIM
     sm_scale = head_dim**-0.5
 
+    q_lens: tuple[int, ...]
+    kv_lens: tuple[int, ...]
     if num_reqs == 1:
         q_lens = (64,)
         kv_lens = (4096 + 64,)

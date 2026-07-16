@@ -18,7 +18,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
 )
-from vllm_ascend.patch.platform.patch_minimax_m3_tool_call_parser import (
+from vllm_ascend.patch.platform.patch_minimax_m3_tool_call_parser import (  # type: ignore[import-untyped]
     _ELEMENT_END_START,
     _ELEMENT_START,
     _INVOKE_END,
@@ -325,7 +325,7 @@ class TestFindToolProperties:
 
     def test_tool_without_parameters(self):
         class PlainFunction:
-            pass
+            name: str
 
         class ToolLike:
             function = PlainFunction()
