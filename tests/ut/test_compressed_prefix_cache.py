@@ -98,7 +98,7 @@ def test_compressed_prefix_cache_uses_logical_block_hash() -> None:
     )[0]
     assert cached_hash == expected_hash
 
-    hit_result = CompressAttentionManager.find_longest_cache_hit(
+    hit_blocks, hit_length = CompressAttentionManager.find_longest_cache_hit(
         block_hashes=request_b.block_hashes,
         max_length=logical_block_size,
         kv_cache_group_ids=[0],
@@ -107,9 +107,8 @@ def test_compressed_prefix_cache_uses_logical_block_hash() -> None:
         drop_eagle_block=False,
         alignment_tokens=logical_block_size,
     )
-    hit_blocks = hit_result[0][0]
-
-    assert hit_blocks == []
+    assert hit_blocks == ([],)
+    assert hit_length == 0
 
 
 def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
@@ -126,7 +125,7 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
     )
     manager.cache_blocks(request, num_tokens=logical_block_size)
 
-    hit_result = CompressAttentionManager.find_longest_cache_hit(
+    hit_blocks, hit_length = CompressAttentionManager.find_longest_cache_hit(
         block_hashes=request.block_hashes,
         max_length=logical_block_size,
         kv_cache_group_ids=[0],
@@ -135,9 +134,8 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
         drop_eagle_block=False,
         alignment_tokens=logical_block_size,
     )
-    hit_blocks = hit_result[0][0]
-
-    assert hit_blocks == manager.req_to_blocks[request.request_id]
+    assert hit_blocks == (manager.req_to_blocks[request.request_id],)
+    assert hit_length == logical_block_size
 
 
 def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:

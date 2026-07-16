@@ -50,6 +50,8 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.utils import ConstantList, record_function_or_nullcontext
 
+from vllm_ascend.core.scheduler_utils import take_pending_kv_cache_block_copies
+
 
 @dataclass
 class RecomputeSchedulerConfig(SchedulerConfig):
@@ -884,6 +886,8 @@ class RecomputeScheduler(Scheduler):
         if self.dynamic_sd_lookup is not None and num_scheduled_tokens:
             num_spec_tokens_to_schedule = self.dynamic_sd_lookup[len(num_scheduled_tokens)]
 
+        kv_cache_block_copies = take_pending_kv_cache_block_copies(self)
+
         scheduler_output = RecomputeSchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -901,6 +905,7 @@ class RecomputeScheduler(Scheduler):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
+            kv_cache_block_copies=kv_cache_block_copies,
             preempted_reqs=preempted_req_data,
             recomputed_reqs=recomputed_reqs,
         )
