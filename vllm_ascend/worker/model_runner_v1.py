@@ -3323,13 +3323,13 @@ class NPUModelRunner(GPUModelRunner):
                 attn_metadata_dict = attn_metadata
             else:
                 assert isinstance(attn_metadata, list)
-                logger.info("attn_metadata: %s", attn_metadata)
+                logger.info("attn_metadata111: %s", attn_metadata)
                 attn_metadata_dict = attn_metadata[ubid]
-            logger.info("attn_metadata_dict: %s", attn_metadata_dict)
-            logger.info("attn_group.layer_names: %s", attn_group.layer_names)
+                logger.info("attn_metadata_dict2222: %s", attn_metadata_dict)
+            logger.info("attn_group.layer_names3333: %s", attn_group.layer_names)
             for layer_name in attn_group.layer_names:
                 attn_metadata_dict[layer_name] = attn_metadata_i
-        logger.info("attn_metadata_dict: %s", attn_metadata)
+        logger.info("attn_metadata_dict4444: %s", attn_metadata)
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         prefill_ratio_to_sas_metadata: dict[Any, Any] = {}
