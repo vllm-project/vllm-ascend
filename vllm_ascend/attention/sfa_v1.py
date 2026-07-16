@@ -247,10 +247,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     understand this class
     """
 
-    group_len: torch.Tensor | None = None
-    group_key_idx: torch.Tensor | None = None
-    group_key_cache_idx: torch.Tensor | None = None
-
     def __init__(
         self,
         kv_cache_spec,
@@ -281,6 +277,15 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         self.actual_seq_lengths_key = torch.empty_like(self.actual_seq_lengths_query)
         self.spec_actual_seq_lengths_query: list[torch.Tensor] | None = None
         self.spec_actual_seq_lengths_key: list[torch.Tensor] | None = None
+        # Persistent int32 buffers for store_kv_block_metadata inputs, sized to
+        # max_num_batched_tokens (matches model_runner_v1._make_buffer sizing).
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self.group_len = torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device)
+        self.group_key_idx = torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device)
+        self.group_key_cache_idx = torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device)
+        self.spec_group_len: list[torch.Tensor] | None = None
+        self.spec_group_key_idx: list[torch.Tensor] | None = None
+        self.spec_group_key_cache_idx: list[torch.Tensor] | None = None
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             self.decode_threshold += spec_token_num
@@ -297,17 +302,23 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
                 torch.zeros(max_num_reqs * (spec_token_num + 1) + 1, dtype=torch.int32, device=device)
                 for _ in range(spec_token_num)
             ]
+            self.spec_group_len = [
+                torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device)
+                for _ in range(spec_token_num)
+            ]
+            self.spec_group_key_idx = [
+                torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device)
+                for _ in range(spec_token_num)
+            ]
+            self.spec_group_key_cache_idx = [
+                torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device)
+                for _ in range(spec_token_num)
+            ]
 
         self.reorder_batch_threshold = self.decode_threshold
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
         self.enable_dsa_cp = enable_dsa_cp()
-        # Persistent int32 buffers for store_kv_block_metadata inputs, sized to
-        # max_num_batched_tokens (matches model_runner_v1._make_buffer sizing).
-        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        self.group_len = torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device)
-        self.group_key_idx = torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device)
-        self.group_key_cache_idx = torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device)
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -353,10 +364,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         num_input_tokens = common_attn_metadata.num_input_tokens
-
-        assert self.group_len is not None
-        assert self.group_key_idx is not None
-        assert self.group_key_cache_idx is not None
 
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
@@ -467,9 +474,20 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             )
 
         if get_ascend_config().c8_enable_reshape_optim:
-            actual_group_len = self.group_len[:num_input_tokens]
-            actual_group_key_idx = self.group_key_idx[:num_input_tokens]
-            actual_group_key_cache_idx = self.group_key_cache_idx[:num_input_tokens]
+            if draft_index is not None:
+                assert self.spec_group_len is not None
+                assert self.spec_group_key_idx is not None
+                assert self.spec_group_key_cache_idx is not None
+                group_len = self.spec_group_len[draft_index - 1]
+                group_key_idx = self.spec_group_key_idx[draft_index - 1]
+                group_key_cache_idx = self.spec_group_key_cache_idx[draft_index - 1]
+            else:
+                group_len = self.group_len
+                group_key_idx = self.group_key_idx
+                group_key_cache_idx = self.group_key_cache_idx
+            actual_group_len = group_len[:num_input_tokens]
+            actual_group_key_idx = group_key_idx[:num_input_tokens]
+            actual_group_key_cache_idx = group_key_cache_idx[:num_input_tokens]
             torch.ops._C_ascend.store_kv_block_metadata(
                 slot_mapping,
                 actual_group_len,
