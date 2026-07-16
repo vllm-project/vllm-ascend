@@ -1976,8 +1976,7 @@ class TestAscendMLAImpl(TestBase):
         mock_npu_fused_infer_attention_score_v2.assert_called_once()
 
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
-    @patch("vllm_ascend.attention.mla_v1.get_weight_prefetch_method", return_value=MagicMock())
-    def test_mla_preprocess(self, mock_get_weight_prefetch_method, mock_maybe_all_gather_and_maybe_unpad):
+    def test_mla_preprocess(self, mock_maybe_all_gather_and_maybe_unpad):
         mock_maybe_all_gather_and_maybe_unpad.side_effect = lambda x, label: x
         batch_size = 4
         seq_len = 8
@@ -2031,7 +2030,6 @@ class TestAscendMLAImpl(TestBase):
         self.impl._q_proj_and_k_up_proj = MagicMock()
         self.impl._q_proj_and_k_up_proj.return_value = [MagicMock(), MagicMock()]
         self.impl.num_kv_heads = self.impl.num_heads
-        self.impl.is_kv_producer = False
 
         decode_res, prefill_res = self.impl._mla_preprocess(
             "mock_layer", hidden_states, kv_cache, attn_metadata, need_gather_q_kv=False

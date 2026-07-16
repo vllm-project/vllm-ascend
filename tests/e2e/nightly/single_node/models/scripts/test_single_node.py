@@ -236,9 +236,6 @@ def _extract_features(server_cmd: list[str] | str, envs: dict[str, Any]) -> list
     additional = _parse_json_flag(cmd_list, "--additional-config")
     if additional.get("enable_weight_nz_layout"):
         features.append("weight_nz_layout")
-    wp = additional.get("weight_prefetch_config") or {}
-    if isinstance(wp, dict) and wp.get("enabled"):
-        features.append("weight_prefetch")
     tc = additional.get("torchair_graph_config") or {}
     if isinstance(tc, dict) and tc.get("enabled"):
         features.append("torchair_graph")

@@ -38,6 +38,7 @@ You can use our official docker image to run `DeepSeek-V3.2` directly.
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     docker run --rm \
         --name vllm-ascend \
+        --privileged=true \
         --shm-size=1g \
         --net=host \
         --device /dev/davinci0 \
@@ -78,6 +79,7 @@ You can use our official docker image to run `DeepSeek-V3.2` directly.
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     docker run --rm \
         --name vllm-ascend \
+        --privileged=true \
         --shm-size=1g \
         --net=host \
         --device /dev/davinci0 \

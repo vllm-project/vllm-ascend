@@ -214,6 +214,7 @@
   optional: false
   source_file_dependencies:
     - vllm_ascend/distributed
+    - vllm_ascend/memcache_comm_fence.py
   tests:
     - tests/ut/distributed
     - tests/e2e/pull_request/two_card/test_data_parallel.py
@@ -345,7 +346,8 @@
 - name: ops_distributed_inference
   optional: false
   source_file_dependencies:
-    - vllm_ascend/ops/weight_prefetch.py
+    - vllm_ascend/ops/flashcomm2_oshard_manager.py
+    - vllm_ascend/ops/layer_shard_linear.py
   tests:
     - tests/ut/ops
     - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_deepseek_v2_lite_fc1_tp2
@@ -566,6 +568,7 @@
   tests:
     - tests/ut/worker
     - tests/e2e/pull_request/one_card/model_runner_v2
+    - tests/e2e/pull_request/two_card/model_runner_v2
 
 # XLite
 - name: xlite
@@ -607,7 +610,6 @@
     - vllm_ascend/ascend_forward_context.py
     - vllm_ascend/cpu_binding.py
     - vllm_ascend/envs.py
-    - vllm_ascend/flash_common3_context.py
     - vllm_ascend/logger.py
     - vllm_ascend/meta_registration.py
     - vllm_ascend/platform.py
@@ -620,7 +622,6 @@
     - tests/ut/test_cpu_binding.py
     - tests/ut/test_envs.py
     - tests/ut/test_logger.py
-    - tests/ut/test_flash_common3_context.py
     - tests/ut/test_meta_registration.py
     - tests/ut/test_profiling_config.py
     - tests/ut/test_utils.py
@@ -734,6 +735,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py: 160
   tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py: 510
   tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora_tp.py: 170
+  tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py: 130
   tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 760
   tests/e2e/pull_request/two_card/test_data_parallel.py: 500
   tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 140
@@ -788,7 +790,6 @@ estimated_times:
   tests/ut/kv_offload/a2/test_remote_prefill_lifecycle.py: 60
   tests/ut/ops/a2/test_gdn_chunk_meta.py: 30
   tests/ut/ops/a2/test_token_dispatcher.py: 30
-  tests/ut/ops/a2/test_weight_prefetch.py: 30
   tests/ut/ops/a3_2/test_activation.py: 50
   tests/ut/ops/a3_2/test_select_experts.py: 30
   tests/ut/quantization/methods/a2/test_w4a16.py: 30

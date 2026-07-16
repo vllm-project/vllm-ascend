@@ -14,7 +14,7 @@
     * CANN >= 8.5.0
     * vLLM：main branch
     * vLLM-Ascend：main branch
-    * mooncake：>= 0.3.9
+    * mooncake：>= 0.3.11.post1
 
 ### KV Pool Parameter Description
 
@@ -63,51 +63,16 @@ export PYTHONHASHSEED=0
     * Install Mooncake
 
         Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI.
-        Installation and Compilation Guide: <https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>.
-        First, we need to obtain the Mooncake project. Refer to the following command:
+        The Mooncake wheel requires glibc 2.35 or later. Check the installed glibc version before installation:
 
         ```shell
-        git clone -b v0.3.9 --depth 1 https://github.com/kvcache-ai/Mooncake.git
+        ldd --version
         ```
 
-        (Optional) Replace go install url if the network is poor
+        Install Mooncake with pip:
 
         ```shell
-        cd Mooncake
-        sed -i 's|https://go.dev/dl/|https://golang.google.cn/dl/|g' dependencies.sh
-        ```
-
-        Install mpi
-
-        ```shell
-        apt-get install mpich libmpich-dev -y
-        ```
-
-        Install the relevant dependencies. The installation of Go is not required.
-
-        ```shell
-        bash dependencies.sh -y
-        ```
-
-        Compile and install
-
-        ```shell
-        mkdir build
-        cd build
-        cmake .. -DUSE_ASCEND_DIRECT=ON
-        make -j
-        make install
-        ```
-
-        Set environment variables
-
-        **Note:**
-
-        * Adjust the Python path according to your specific Python installation
-        * Ensure `/usr/local/lib` and `/usr/local/lib64` are in your `LD_LIBRARY_PATH`
-
-        ```shell
-        export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LIBRARY_PATH
+        python3 -m pip install mooncake-transfer-engine-npu==0.3.11.post1 --extra-index-url https://mirrors.aliyun.com/pypi/web/simple
         ```
 
 ### Environment Variables Description
@@ -536,8 +501,14 @@ ock.mmc.local_service.dram.size = 1GB
 
 Starting the MetaService service.
 
+Run `pip show memcache_hybrid` and find the `Location` value in the output. Use that value as `{INSTALL_PATH}` below.
+
 ```shell
-export MMC_META_CONFIG_PATH=/usr/local/memcache_hybrid/latest/config/mmc-meta.conf
+pip show memcache_hybrid
+```
+
+```shell
+export MMC_META_CONFIG_PATH={INSTALL_PATH}/memcache_hybrid/config/mmc-meta.conf
 
 python -c "from memcache_hybrid import MetaService; MetaService.main()"
 ```

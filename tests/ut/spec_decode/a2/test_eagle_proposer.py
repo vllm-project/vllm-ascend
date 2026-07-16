@@ -4058,6 +4058,9 @@ class TestEagleProposerSetInputsFirstPass:
 
         proposer.parallel_drafting_token_id = -2
         parallel_drafting_hs = proposer.parallel_drafting_hidden_state_tensor
+        assert parallel_drafting_hs is not None
+        # Production initializes this from the loaded drafter's mask hidden state.
+        parallel_drafting_hs.fill_(1.0)
 
         mock_kv_cache_spec = MagicMock()
         mock_kv_cache_spec.block_size = block_size
