@@ -2168,7 +2168,9 @@ class NPUModelRunner(GPUModelRunner):
                     should_ubatch,
                     num_tokens_across_dp,
                 )
-                should_ubatch = True
+                # should_ubatch = True
+                ubatch_num = 4
+                should_ubatch = False
                 num_tokens_padded = batch_desc.num_tokens
                 num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
                 logger.info(
@@ -2182,7 +2184,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_scheduled_tokens_np,
                     num_tokens_padded,
                     num_reqs_padded,
-                    4,
+                    ubatch_num,
                 )
                 logger.info(
                     "ubatch_slices: %s, ubatch_slices_padded: %s",
@@ -2252,6 +2254,10 @@ class NPUModelRunner(GPUModelRunner):
 
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
                 ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
+                logger.info(
+                    "ubatch_slices_attn: %s",
+                    ubatch_slices_attn,
+                )
 
                 if (
                     cudagraph_mode == CUDAGraphMode.FULL
@@ -2264,7 +2270,6 @@ class NPUModelRunner(GPUModelRunner):
                     num_reqs_padded = self._pad_query_start_loc_for_fia(
                         num_tokens_padded, num_reqs_padded, num_reqs, cudagraph_mode, batch_desc.num_reqs
                     )
-
                 (attn_metadata, spec_decode_common_attn_metadata) = self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded
                     if not (self.use_cp and self.pcp_manager.pcp_use_hybrid_attn)
@@ -2273,7 +2278,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_reqs=num_reqs,
                     num_reqs_padded=num_reqs_padded,
                     max_query_len=max_num_scheduled_tokens,
-                    ubatch_slices=None,
+                    ubatch_slices=ubatch_slices_attn,
                     logits_indices=logits_indices,
                     use_spec_decode=use_spec_decode,
                     num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
@@ -3834,7 +3839,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # wrap the model with full graph wrapper if needed.
         logger.info("44444444444444444444444444")
-        if (self.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.afd_config is None):
+        if (self.compilation_config.cudagraph_mode.has_full_cudagraphs()):
             logger.info("555555555555555555555555555555555555555555")
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
             self.model = ACLGraphWrapper(
@@ -4807,18 +4812,18 @@ class NPUModelRunner(GPUModelRunner):
             attn_backends_map: dict[AttentionBackend, list[str]], kv_cache_group_id: int
         ) -> list[AttentionGroup]:
             attn_groups: list[AttentionGroup] = []
-            num_metadata_builders = (
-                1 if not self.parallel_config.use_ubatching
-                else self.parallel_config.num_ubatches
-            )
             for (attn_backend, kv_cache_spec), layer_names in attn_backends_map.items():
-                attn_group = AttentionGroup(
-                    attn_backend, layer_names, kv_cache_spec, kv_cache_group_id
+                attn_metadata_builders = []
+                attn_metadata_builders.append(
+                    attn_backend.get_builder_cls()(
+                        kv_cache_spec,
+                        layer_names,
+                        self.vllm_config,
+                        self.device,
+                    )
                 )
-                attn_group.create_metadata_builders(
-                    self.vllm_config,
-                    self.device,
-                    num_metadata_builders=num_metadata_builders,
+                attn_group = AttentionGroup(
+                    attn_backend, layer_names, kv_cache_spec, kv_cache_group_id, attn_metadata_builders
                 )
                 attn_groups.append(attn_group)
             return attn_groups
