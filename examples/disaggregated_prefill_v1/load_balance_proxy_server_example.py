@@ -787,6 +787,47 @@ def auth_headers(request_id: str) -> dict[str, str]:
     }
 
 
+class DecodeUpstreamError(Exception):
+    """Raised when the decode backend returns 4xx/5xx.
+
+    Carries the upstream status code and response body so the proxy can forward
+    the original backend error (e.g. vLLM's ``maximum context length`` message)
+    to the client instead of dropping it into an empty 200 response.
+    """
+
+    def __init__(self, status_code: int, body: bytes):
+        self.status_code = status_code
+        self.body = body
+        super().__init__(f"upstream decode returned {status_code}")
+
+
+def build_error_payload(exc: Exception) -> tuple[int, dict]:
+    """Extract ``(http_status, error_obj)`` from an exception.
+
+    Prefers the upstream backend's original error message when available so the
+    client can act on it (e.g. lower ``max_tokens``).
+    """
+    if isinstance(exc, DecodeUpstreamError):
+        status = exc.status_code
+        err_type = "upstream_error"
+        message = exc.body.decode("utf-8", errors="replace")[:1000]
+        try:
+            data = json.loads(exc.body)
+            if isinstance(data, dict) and isinstance(data.get("error"), dict):
+                err = data["error"]
+                message = err.get("message", "") or json.dumps(err, ensure_ascii=False)
+                err_type = err.get("type", "") or err_type
+            elif isinstance(data, dict) and "message" in data:
+                message = data["message"]
+        except Exception:
+            pass
+    else:
+        status = 502
+        err_type = "proxy_error"
+        message = str(exc) or exc.__class__.__name__
+    return status, {"error": {"message": message, "type": err_type, "code": status}}
+
+
 def build_prefill_request(req_data: dict) -> dict:
     payload = req_data.copy()
     payload["kv_transfer_params"] = {
@@ -844,13 +885,22 @@ async def stream_service_response_with_retry(
     for attempt in range(1, max_retries + 1):
         try:
             async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    # Read the upstream error body so it can be forwarded to the
+                    # client instead of being dropped into an empty 200 response.
+                    body = await response.aread()
+                    raise DecodeUpstreamError(response.status_code, body)
                 first_chunk_sent = False
                 async for chunk in response.aiter_bytes():
                     first_chunk_sent = True
                     yield chunk
                 return
-        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+        except (httpx.RequestError, DecodeUpstreamError) as exc:
+            # 4xx client errors (e.g. prompt + max_tokens exceeding
+            # max_model_len) are deterministic; retrying yields the same result,
+            # so surface them immediately instead of wasting retry budget.
+            if isinstance(exc, DecodeUpstreamError) and 400 <= exc.status_code < 500:
+                raise
             if attempt < max_retries:
                 logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
@@ -1073,12 +1123,24 @@ async def handle_completions_impl(api: str, request: Request):
                 raise
             except Exception as exc:
                 logger.error(
-                    "Error during streaming from decoder %s:%s: %s while handling request %s; releasing prefiller KV",
+                    "Error during streaming from decoder %s:%s: %s while handling request %s; "
+                    "forwarding error to client",
                     instance_info.decoder_host,
                     instance_info.decoder_port,
                     exc,
                     instance_info.request_id,
                 )
+                # StreamingResponse has already sent the 200 response head, so
+                # the status code can no longer be changed. Forward the upstream
+                # error to the client as an SSE error event (streaming) or a JSON
+                # error body (non-streaming), instead of leaving an empty 200 body
+                # that the client cannot distinguish from a successful response.
+                _, error_obj = build_error_payload(exc)
+                if stream_flag:
+                    yield f"data: {json.dumps(error_obj, ensure_ascii=False)}\n\n".encode("utf-8")
+                    yield b"data: [DONE]\n\n"
+                else:
+                    yield (json.dumps(error_obj, ensure_ascii=False) + "\n").encode("utf-8")
             finally:
                 await _finish_instance(runtime, instance_info, release_prefill_kv=not released_kv)
                 released_kv = True
