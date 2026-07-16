@@ -539,7 +539,7 @@ curl http://localhost:8000/v1/completions \
     -d '{
         "model": "qwen3.5",
         "prompt": "The future of AI is",
-        "max_completion_tokens": 50,
+        "max_tokens": 50,
         "temperature": 0
     }'
 ```
