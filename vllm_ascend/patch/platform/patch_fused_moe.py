@@ -47,6 +47,7 @@ if is_310p():
 else:
     from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner as _DefaultAscendMoERunner
 
+
 def _ascend_compute_fused_topk_bias_routing(
     self,
     hidden_states: torch.Tensor,
