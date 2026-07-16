@@ -392,7 +392,7 @@ class UBatchWrapper(GPUUBatchWrapper):
         attn_metadata = forward_context.attn_metadata
         num_tokens = sum(ubatch_slice.num_tokens
                          for ubatch_slice in ubatch_slices)
-        logger.info('_call__ kwargs: %s', kwargs)
+        # logger.info('_call__ kwargs: %s', kwargs)
         input_ids = kwargs['input_ids']
         positions = kwargs['positions']
         intermediate_tensors = kwargs['intermediate_tensors']
@@ -435,7 +435,7 @@ class UBatchWrapper(GPUUBatchWrapper):
             aclgraph_metadata.aclgraph.replay()
             return aclgraph_metadata.outputs
         else:
-            logger.info('_call__ intermediate_tensors: %s', intermediate_tensors)
+            # logger.info('_call__ intermediate_tensors: %s', intermediate_tensors)
             ubatch_metadata = self._make_ubatch_metadata(
                 ubatch_slices=ubatch_slices,
                 attn_metadata=attn_metadata,
