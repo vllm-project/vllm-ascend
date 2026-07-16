@@ -102,7 +102,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._per_group_context_slot_mapping_buffers: dict[int, torch.Tensor] = {}
 
         # per-layer context slot mappings as a flat list
-        self._context_slots: list[torch.Tensor | None] = []
+        self._context_slots: list[torch.Tensor | None] = None
 
 
     def initialize_attn_backend(self, kv_cache_config, kernel_block_sizes=None) -> None:
@@ -321,46 +321,6 @@ class AscendDSparkProposer(AscendDflashProposer):
 
         return num_query_total, token_indices_to_sample, cad, None
 
-    def _prepare_dspark_dummy_standard_inputs(
-        self,
-        num_reqs: int,
-        num_input_tokens: int,
-        model_num_query_tokens: int,
-    ) -> None:
-        """Build dummy paged SWA inputs so dummy_run/profile_run exercises the
-        standard-DSA path (which needs block_table/slot_mapping/indices, unlike
-        the private ring-buffer path). All-zero block tables / slot mappings
-        are fine: profile_run only needs correct shapes, not correct values.
-        """
-        batch_size = max(num_reqs, 1)
-        block_size = self.num_speculative_tokens
-        cache_block_size = int(self.draft_attn_groups[0].kv_cache_spec.block_size)
-        # The dummy SWA block table is captured into the target model's
-        # FULL_DECODE_ONLY aclgraph and reused (contents overwritten in place) at
-        # replay time, so its width must cover the full max_model_len -- not just
-        # the per-step max_positions. A too-small table makes the graph-captured
-        # draft attention gather block_table[req_idx] with absolute
-        # ``position // cache_block_size`` indices that overflow for long
-        # sequences (GatherV3 "Index out of range").
-        num_blocks = (int(self.max_model_len) + cache_block_size - 1) // cache_block_size
-        block_tables_by_gid: dict[int, torch.Tensor] = {}
-        context_slot_mappings_by_gid: dict[int, torch.Tensor] = {}
-        for attn_group in self.draft_attn_groups:
-            gid = attn_group.kv_cache_group_id
-            self._per_group_block_table_buffers[gid] = self._per_group_block_tables[gid][:batch_size]
-            self._per_group_query_slot_mapping_buffers[gid].fill_(-1)
-            context_slot_mappings_by_gid[gid] = torch.zeros(
-                num_input_tokens, dtype=torch.int32, device=self.device
-            )
-        self._dspark_context_slot_mappings_by_gid = context_slot_mappings_by_gid
-        self._context_slots = [self._dspark_context_slot_mappings_by_gid[gidx] for gidx in self._layer_group_idx]
-        self._dspark_query_start_loc = (
-            self.arange_dflash[: batch_size + 1] * block_size
-        ).to(torch.int32)
-        self._dspark_seq_lens = torch.full(
-            (batch_size,), block_size, dtype=torch.int32, device=self.device
-        )
-
     @torch.inference_mode()
     def dummy_run(
         self,
@@ -373,58 +333,30 @@ class AscendDSparkProposer(AscendDflashProposer):
         is_profile=False,
         **kwargs,
     ) -> None:
-        del dummy_compute_logits, kwargs
-        block_size = self.num_speculative_tokens
-        num_query_tokens = min(num_tokens, self.max_query_tokens)
+        # Run dummy_run at full load: the query length of each request is self.num_speculative_tokens
+        # Unlike DFlash, where the query length is self.num_speculative_tokens + 1.
+        # Ensure that the maximum batch token is within the limit of self.max_query_tokens.
+        num_query_per_req = self.num_speculative_tokens
+        num_query_total = num_reqs * num_query_per_req
+        num_query_tokens = min(num_query_total if num_reqs > 0 else num_tokens, self.max_query_tokens)
 
         (
             num_input_tokens,
             num_tokens_across_dp,
             _,
-        ) = self.runner._sync_metadata_across_dp(
-            num_query_tokens,
-            is_draft_model=True,
-        )
+        ) = self.runner._sync_metadata_across_dp(num_query_tokens, is_draft_model=True)
+
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
-        num_query_total = min(num_reqs * block_size, num_query_tokens)
-        model_num_query_tokens = num_input_tokens
+
+        context_positions = self._context_positions_buffer[:num_input_tokens]
+        context_states = self.hidden_states[:num_input_tokens]
+
+        self.token_indices_to_sample.fill_(0)
         self._pad_draft_buffers(num_query_total, num_input_tokens)
 
-        # TODO: Check why standard_ready == False in some cases?
-        standard_ready = (
-            bool(getattr(self, "draft_attn_groups", []))
-            and model_num_query_tokens > 0
-        )
-        if standard_ready:
-            self._prepare_dspark_dummy_standard_inputs(
-                num_reqs, num_input_tokens, model_num_query_tokens
-            )
-
-        multi_steps_attn_metadata = []
-        if standard_ready:
-            dummy_cad = AscendCommonAttentionMetadata(
-                query_start_loc=self._dspark_query_start_loc,
-                query_start_loc_cpu=(
-                    torch.from_numpy(self.token_arange_np[: num_reqs + 1]).clone() * block_size
-                ).to(torch.int32),
-                seq_lens=self._dspark_seq_lens,
-                seq_lens_cpu=torch.full((num_reqs,), block_size, dtype=torch.int32),
-                num_reqs=num_reqs,
-                num_actual_tokens=num_query_total,
-                max_query_len=block_size,
-                max_seq_len=0,
-                slot_mapping=self._slot_mapping_buffer[:num_input_tokens],
-                attn_state=AscendAttentionState.ChunkedPrefill,
-                causal=False,
-                block_table_tensor=self._per_group_block_table_buffers[self.kv_cache_gid][:num_reqs],
-            )
-            multi_steps_attn_metadata, _ = self.build_draft_attn_metadata(
-                dummy_cad, num_input_tokens, num_query_total
-            )
-
         with set_ascend_forward_context(
-            multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
+            None,
             self.vllm_config,
             num_tokens=num_input_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
@@ -433,23 +365,24 @@ class AscendDSparkProposer(AscendDflashProposer):
             batch_descriptor=batch_descriptor,
             aclgraph_runtime_mode=aclgraph_runtime_mode,
             is_draft_model=True,
-            draft_attn_metadatas=multi_steps_attn_metadata,
+            draft_attn_metadatas=[],
         ):
-            self._dflash_num_context = num_input_tokens
-            self.model.precompute_and_store_context_kv(
-                self.hidden_states[:num_input_tokens],
-                self._context_positions_buffer[:num_input_tokens],
-                self._context_slots if standard_ready else None,
-            )
-            if model_num_query_tokens:
+            if is_profile:
+                self.model.precompute_and_store_context_kv(context_states, context_positions)
                 self.model(
-                    input_ids=self.input_ids[:model_num_query_tokens],
-                    positions=self.positions[:model_num_query_tokens],
+                    input_ids=self.input_ids[:num_query_total],
+                    positions=self._get_positions(num_query_total),
+                    inputs_embeds=None,
                 )
-            forward_context = get_forward_context()
-            if (
-                forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
-                and not _EXTRA_CTX.capturing
-                and self.draft_attn_groups
-            ):
-                self._update_full_graph_params(forward_context, num_tokens, [])
+
+            else:
+                self._dflash_num_context = num_input_tokens
+                self._runnable(
+                    num_input_tokens=num_input_tokens,
+                    batch_size=num_reqs,
+                    token_indices_to_sample=self.token_indices_to_sample[: num_reqs * self.num_speculative_tokens],
+                    target_positions=self._get_positions(num_input_tokens),
+                    inputs_embeds=None,
+                    multi_steps_attn_metadata=[],
+                    num_tokens=num_input_tokens,
+                )

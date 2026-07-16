@@ -217,7 +217,7 @@ class DeepseekV4DSparkModel(nn.Module):
         context_positions: torch.Tensor,
         context_slot_mapping: list[torch.Tensor | None] | None = None,
     ) -> None:
-        if context_states.numel() == 0:
+        if context_states.numel() == 0 or context_slot_mapping is None:
             return
         for layer_idx, layer in enumerate(self.layers.values()):
             layer_context_slot_mapping = None if context_slot_mapping is None else context_slot_mapping[layer_idx]
@@ -331,6 +331,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.model(
             input_ids=input_ids,
