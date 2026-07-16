@@ -172,7 +172,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         global_redundant_expert_num: int = 0,
         pertoken_scale: torch.Tensor | None = None,
         mc2_mask: torch.Tensor | None = None,
-        split_lora_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
@@ -289,7 +288,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 # Per-layer MoE LoRA state, set once by AscendFusedMoEWithLoRA
                 # when an adapter wraps this layer; None for non-LoRA layers.
                 lora_context=getattr(layer, "_ascend_moe_lora_context", None),
+<<<<<<< HEAD
                 split_lora_indices=split_lora_indices,
+=======
+>>>>>>> dbcdd0b8 (adapter main)
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
@@ -566,6 +568,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         enable_force_load_balance = _EXTRA_CTX.in_profile_run
 
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> dbcdd0b8 (adapter main)
         # This is only needed in the EP + TP path where tokens are
         # TP-split along the token dimension.  In pure TP (AllGather
         # path) the recovery function reads token_lora_indices directly
@@ -584,6 +589,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 if tp_size > 1:
                     split_lora = torch.tensor_split(token_lora_indices, tp_size, dim=0)
                     split_lora_indices = split_lora[tp_rank]
+<<<<<<< HEAD
 =======
             # This is only needed in the EP + TP path where tokens are
             # TP-split along the token dimension.  In pure TP (AllGather
@@ -604,6 +610,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                         split_lora = torch.tensor_split(token_lora_indices, tp_size, dim=0)
                         split_lora_indices = split_lora[tp_rank]
 >>>>>>> bcccc20e (fix ep tp)
+=======
+>>>>>>> dbcdd0b8 (adapter main)
 
         prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
             hidden_states=hidden_states,
