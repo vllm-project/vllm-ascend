@@ -23,7 +23,14 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_dp_group, get_ep_group, get_tp_group, tensor_model_parallel_all_reduce
+from vllm.distributed import (
+    get_dp_group,
+    get_ep_group,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    get_tp_group,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
@@ -165,6 +172,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         global_redundant_expert_num: int = 0,
         pertoken_scale: torch.Tensor | None = None,
         mc2_mask: torch.Tensor | None = None,
+        split_lora_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
@@ -281,6 +289,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 # Per-layer MoE LoRA state, set once by AscendFusedMoEWithLoRA
                 # when an adapter wraps this layer; None for non-LoRA layers.
                 lora_context=getattr(layer, "_ascend_moe_lora_context", None),
+                # TP-split per-token LoRA indices for AlltoAll + EP paths.
+                split_lora_indices=split_lora_indices,
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
@@ -556,6 +566,32 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # This approach may overlook some extreme scenarios.
         enable_force_load_balance = _EXTRA_CTX.in_profile_run
 
+            # TP-split the per-token LoRA indices so each TP rank carries
+            # only the lora_ids for the tokens it owns.  The split must
+            # happen BEFORE prepare() because prepare() also TP-splits
+            # hidden_states, and the lora indices must follow the same
+            # partition so that the all_to_all exchange in
+            # TokenDispatcherWithAll2AllV stays aligned.
+            split_lora_indices = None
+            lora_context = getattr(
+                self.routed_experts, "_ascend_moe_lora_context", None
+            )
+            if lora_context is not None:
+                token_lora_indices = lora_context.punica_wrapper.token_lora_indices
+                tp_size = get_tensor_model_parallel_world_size()
+                tp_rank = get_tensor_model_parallel_rank()
+                num_tokens = hidden_states.shape[0]
+                pad_size = tp_size - num_tokens
+                if pad_size > 0:
+                    token_lora_indices = F.pad(
+                        token_lora_indices, (0, pad_size), value=-1
+                    )
+                if tp_size > 1:
+                    split_lora = torch.tensor_split(
+                        token_lora_indices, tp_size, dim=0
+                    )
+                    split_lora_indices = split_lora[tp_rank]
+
         prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -569,33 +605,39 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
         pertoken_scale = prepare_output.pertoken_scale
 
-        # Matrix multiply.
-        # apply() expects a RoutedExperts-like layer for weight access
-        # (w13_weight, w2_weight, swiglu_limit, etc.). Pass routed_experts,
-        # not self; the routing params come through the other kwargs.
-        fused_experts_results: FusedExpertsResult = self._quant_method.apply(
-            layer=self.routed_experts,
-            x=hidden_states,
-            router_logits=router_logits,
-            pertoken_scale=pertoken_scale,
-            top_k=self.top_k,
-            renormalize=self.renormalize,
-            use_grouped_topk=self.use_grouped_topk,
-            num_experts=self.moe_config.num_experts,
-            expert_map=self._expert_map,
-            topk_group=self.topk_group,
-            num_expert_group=self.num_expert_group,
-            custom_routing_function=self.custom_routing_function,
-            scoring_func=self.scoring_func,
-            routed_scaling_factor=self._original_routed_scaling_factor,
-            e_score_correction_bias=self.e_score_correction_bias,
-            activation=self.activation,
-            apply_router_weight_on_input=self.apply_router_weight_on_input,
-            enable_force_load_balance=enable_force_load_balance,
-            log2phy=self.log2phy,
-            global_redundant_expert_num=self.global_redundant_expert_num,
-            mc2_mask=mc2_mask,
-        )
+            # Make sure the default stream waits for the gate stream to finish.
+            if self.multistream_overlap_gate:
+                assert AscendMoERunner.gate_stream is not None
+                torch.npu.current_stream().wait_stream(AscendMoERunner.gate_stream)
+
+            # Matrix multiply.
+            # apply() expects a RoutedExperts-like layer for weight access
+            # (w13_weight, w2_weight, swiglu_limit, etc.). Pass routed_experts,
+            # not self; the routing params come through the other kwargs.
+            fused_experts_results: FusedExpertsResult = self._quant_method.apply(
+                layer=self.routed_experts,
+                x=hidden_states,
+                router_logits=router_logits,
+                pertoken_scale=pertoken_scale,
+                top_k=self.top_k,
+                renormalize=self.renormalize,
+                use_grouped_topk=self.use_grouped_topk,
+                num_experts=self.moe_config.num_experts,
+                expert_map=self._expert_map,
+                topk_group=self.topk_group,
+                num_expert_group=self.num_expert_group,
+                custom_routing_function=self.custom_routing_function,
+                scoring_func=self.scoring_func,
+                routed_scaling_factor=self._original_routed_scaling_factor,
+                e_score_correction_bias=self.e_score_correction_bias,
+                activation=self.activation,
+                apply_router_weight_on_input=self.apply_router_weight_on_input,
+                enable_force_load_balance=enable_force_load_balance,
+                log2phy=self.log2phy,
+                global_redundant_expert_num=self.global_redundant_expert_num,
+                mc2_mask=mc2_mask,
+                split_lora_indices=split_lora_indices,
+            )
 
         if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
             expert_tokens = fused_experts_results.expert_tokens

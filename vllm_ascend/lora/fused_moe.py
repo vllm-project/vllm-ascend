@@ -55,26 +55,31 @@ import vllm_ascend.envs as envs_ascend
 
 
 def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
+    # AlltoAll + EP + LoRA is supported (v2).
+    # Other expert-parallel backends (MC2, FusedMC2) are NOT supported.
     if getattr(base_layer, "use_ep", False):
-        raise AssertionError(
-            "Ascend MoE LoRA v1 does not support expert parallelism. "
-            "Launch with `--enable-expert-parallel=false` and use TP only "
-            "(e.g. TP=4 for Qwen3-30B-A3B on 4x64GB)."
-        )
+        from vllm_ascend.ascend_forward_context import MoECommType
+        comm_type = getattr(base_layer, "moe_comm_type", None)
+        if comm_type not in (None, MoECommType.ALL_TO_ALL):
+            raise AssertionError(
+                "Ascend MoE LoRA v2 only supports AlltoAll EP. "
+                f"Got moe_comm_type={comm_type}. "
+                "Disable --enable-expert-parallel or use AlltoAll."
+            )
     if getattr(base_layer, "dynamic_eplb", False):
         raise AssertionError(
-            "Ascend MoE LoRA v1 is incompatible with dynamic EPLB "
+            "Ascend MoE LoRA is incompatible with dynamic EPLB "
             "(expert migration would break the per-expert LoRA layout)."
         )
     if int(envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2) != 0:
         raise AssertionError(
-            "Ascend MoE LoRA v1 cannot patch FusedMC2 path "
+            "Ascend MoE LoRA cannot patch FusedMC2 path "
             "(dispatch_ffn_combine is a single fused C++ op). "
             "Set VLLM_ASCEND_ENABLE_FUSED_MC2=0."
         )
     if getattr(base_layer, "_shared_experts", None) is not None:
         raise AssertionError(
-            "Ascend MoE LoRA v1 does not wrap the shared_experts path "
+            "Ascend MoE LoRA does not wrap the shared_experts path "
             "(it runs outside quant_method.apply). The target model "
             "Qwen3-30B-A3B-Thinking-2507 has no shared experts; models "
             "like DeepSeek-V3 are not yet supported."
@@ -107,6 +112,36 @@ def _recover_moe_lora_routing(lora_context, expanded_row_idx, topk_ids):
     return expert_per_row, lora_per_row
 
 
+def _recover_moe_lora_routing_all2all(
+    lora_context,
+    group_list: torch.Tensor,
+    exchanged_lora_indices: torch.Tensor,
+):
+    """Recover per-row (expert_id, lora_id) for the AlltoAll dispatched tokens.
+
+    In the AlltoAll + EP path, tokens have already been exchanged via
+    all_to_all and sorted by local expert.  ``group_list`` tells us how
+    many tokens belong to each local expert, and ``exchanged_lora_indices``
+    contains the lora_id for each dispatched row (already permuted and
+    exchanged alongside the hidden states).
+
+    Returns:
+        expert_per_row: [num_dispatched_tokens] local expert id (0..E-1)
+        lora_per_row:   [num_dispatched_tokens] lora adapter id (-1 = none)
+    """
+    num_local_experts = lora_context.num_experts
+    group_list_l = group_list.to(torch.int64)
+
+    # Build per-token expert IDs: [0]*n0 + [1]*n1 + ... + [E-1]*n_{E-1}
+    expert_per_row = torch.repeat_interleave(
+        torch.arange(num_local_experts, device=group_list.device),
+        group_list_l,
+    ).to(torch.long)
+
+    lora_per_row = exchanged_lora_indices.to(torch.long)
+    return expert_per_row, lora_per_row
+
+
 def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, expanded_row_idx, topk_ids):
     """Add the w13 LoRA delta into ``gate_up_out`` (in place), before activation.
 
@@ -125,6 +160,26 @@ def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, expanded_row
         token_lora_mapping=lora_per_row,
     )
     return routing
+
+
+def moe_lora_apply_w13_all2all(lora_context, *, gate_up_out, hidden_states, lora_routing):
+    """Add the w13 LoRA delta into ``gate_up_out`` (in place) for the all2all path.
+
+    Unlike ``moe_lora_apply_w13`` which computes per-row routing from
+    expanded_row_idx + topk_ids (AllGather path), this variant accepts a
+    pre-computed ``lora_routing`` tuple of (expert_per_row, lora_per_row)
+    from ``_recover_moe_lora_routing_all2all`` (AlltoAll path).
+    """
+    expert_per_row, lora_per_row = lora_routing
+    lora_context.punica_wrapper.add_lora_fused_moe(
+        y=gate_up_out,
+        x=hidden_states,
+        lora_a_stacked=lora_context.w13_lora_a_stacked,
+        lora_b_stacked=lora_context.w13_lora_b_stacked,
+        expert_ids=expert_per_row,
+        adapter_enabled=lora_context.adapter_enabled,
+        token_lora_mapping=lora_per_row,
+    )
 
 
 def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
