@@ -224,9 +224,7 @@ def build_mlp_compute_input(
         raise ValueError("fused_experts_input.quant.mxfp is required for MXFP quant types.")
 
     expanded_row_idx = getattr(token_dispatch_output.combine_metadata, "expanded_row_idx", None)
-    exchanged_lora_indices = getattr(
-        token_dispatch_output.combine_metadata, "exchanged_lora_indices", None
-    )
+    exchanged_lora_indices = getattr(token_dispatch_output.combine_metadata, "exchanged_lora_indices", None)
 
     return MoEMlpComputeInput(
         hidden_states=token_dispatch_output.hidden_states,

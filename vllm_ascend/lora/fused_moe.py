@@ -59,6 +59,7 @@ def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
     # Other expert-parallel backends (MC2, FusedMC2) are NOT supported.
     if getattr(base_layer, "use_ep", False):
         from vllm_ascend.ascend_forward_context import MoECommType
+
         comm_type = getattr(base_layer, "moe_comm_type", None)
         if comm_type not in (None, MoECommType.ALLTOALL):
             raise AssertionError(
