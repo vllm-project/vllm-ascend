@@ -58,32 +58,6 @@ _CANN_TORCH_FLOAT8_E4M3FN = 24
 _CANN_MEGA_MOE_QUANT_MODE_INT8 = 2
 _CANN_MEGA_MOE_QUANT_MODE_MX = 4
 
-def _infer_intermediate_hidden(weight1: torch.Tensor, weight2: torch.Tensor, hidden: int) -> int:
-    if weight2.dim() >= 2:
-        if weight2.shape[-1] == hidden:
-            return int(weight2.shape[-2])
-        if weight2.shape[-2] == hidden:
-            return int(weight2.shape[-1])
-        # Quantized down-projection weights are stored as
-        # [intermediate, hidden // pack_factor]: int4 packs the contraction
-        # dim (//2 for two-per-int8 storage, //8 for eight-per-int32), so the
-        # last dim no longer equals hidden. The row dim (-2) is the real
-        # intermediate size and is never packed, so prefer it whenever the
-        # last dim evenly divides hidden.
-        if weight2.shape[-1] and hidden % int(weight2.shape[-1]) == 0:
-            return int(weight2.shape[-2])
-    if weight1.dim() < 2:
-        return hidden
-    if weight1.shape[-1] == hidden:
-        combined_intermediate = int(weight1.shape[-2])
-    elif weight1.shape[-2] == hidden:
-        combined_intermediate = int(weight1.shape[-1])
-    else:
-        combined_intermediate = int(weight1.shape[-2])
-    if combined_intermediate > 1 and combined_intermediate % 2 == 0:
-        return combined_intermediate // 2
-    return combined_intermediate
-
 def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int | None, int | None]:
     # Returns (dispatch_quant_mode, dispatch_quant_out_dtype, weight_type).
     # The current custom op package still requires explicit INT4 for W4A8
@@ -362,8 +336,6 @@ class FusedMC2CommImpl(MoECommMethod):
             fused_experts_input.quant.quant_type
         )
         group = get_mc2_group().device_group
-        hidden = int(fused_experts_input.hidden_states.shape[-1])
-        intermediate_hidden = _infer_intermediate_hidden(weight1[0], weight2[0], hidden)
         # The sym buffer is allocated by get_symm_buffer_for_mega_moe, a
         # collective handshake over the EP (mc2) group. Its shape params —
         # especially num_max_tokens_per_rank — MUST be identical on every EP
@@ -389,12 +361,8 @@ class FusedMC2CommImpl(MoECommMethod):
                 f"{rank_invariant_cap!r}"
             )
             num_max_tokens_per_rank = max(1, int(rank_invariant_cap))
-        num_topk = int(topk_ids.shape[-1])
-        redundant_experts = int(fused_experts_input.routing.global_redundant_expert_num)
-        if fused_experts_input.routing.expert_map is not None:
-            num_experts = int(fused_experts_input.routing.expert_map.numel()) + redundant_experts
-        else:
-            num_experts = int(self.moe_config.num_experts) + redundant_experts
+        num_topk = self.moe_config.experts_per_token
+        num_experts=self.moe_config.num_experts
         expert_per_rank = max(1, num_experts // int(self.token_dispatcher.ep_world_size))
         max_recv_token_num = max(
             1,
@@ -413,8 +381,8 @@ class FusedMC2CommImpl(MoECommMethod):
             num_experts,
             num_max_tokens_per_rank,
             num_topk,
-            hidden,
-            intermediate_hidden,
+            hidden=self.moe_config.hidden_dim,
+            intermediate_hidden=2 * self.moe_config.intermediate_size_per_partition,
             max_recv_token_num=max_recv_token_num,
             dispatch_quant_mode=dispatch_quant_mode,
             dispatch_quant_out_dtype=dispatch_quant_out_dtype,
