@@ -170,7 +170,7 @@ Expected result: The version information of `vllm-ascend` is displayed, confirmi
 
 Single-node deployment completes both Prefill and Decode within the same node. `Qwen3.5-2B`, `Qwen3.5-4B`, and `Qwen3.5-9B` can be deployed on Atlas inference products or Atlas 200I Pro.
 
-> **Parallelism note**: These platforms currently support the **TP** scenario. Choose **TP=1** or **TP=2** according to the model size and available devices. On Atlas 200I Pro with a single visible NPU, use **TP=1**.
+> **Parallelism note**: These platforms currently support the **TP** scenario. Choose **TP=1** or **TP=2** according to the available devices. On Atlas 200I Pro with a single visible NPU, use **TP=1**.
 
 The following examples use FP16 weights from ModelScope. Replace `MODEL_PATH` with your local directory if needed.
 
@@ -260,7 +260,7 @@ The following examples use FP16 weights from ModelScope. Replace `MODEL_PATH` wi
 
 Key Parameter Descriptions:
 
-- `--tensor-parallel-size` sets the tensor parallel size. Prefer **TP=1** on Atlas 200I Pro. On Atlas inference products, use **TP=1** for 2B/4B and **TP=2** for 9B as a starting point; adjust according to available devices.
+- `--tensor-parallel-size` sets the tensor parallel size. Prefer **TP=1** on Atlas 200I Pro. On Atlas inference products, **TP=1** and **TP=2** are both supported; choose according to the available devices.
 - `--max-model-len` represents the context length (input plus output for a single request). On Atlas inference products and Atlas 200I Pro, configure this value according to the actual device memory; setting it too high may cause OOM.
 - `--max-num-seqs` indicates the maximum number of requests that can be processed concurrently. On Atlas inference products and Atlas 200I Pro, configure this value according to the actual device memory; setting it too high may cause OOM.
 - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. On Atlas inference products and Atlas 200I Pro, configure this value according to the actual device memory; setting it too high may cause OOM. The default value is `0.9`.
@@ -379,7 +379,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 > **Note**: The following configurations are for reference only. The optimal configuration depends on model size, maximum input/output length, and actual device memory.
 >
-> **Atlas inference products / Atlas 200I Pro**: Currently only the TP scenario is supported. Prefer **TP=1** for Qwen3.5-2B/4B and on Atlas 200I Pro. For Qwen3.5-9B on Atlas inference products, **TP=2** is a reasonable starting point. Configure `--max-model-len`, `--max-num-seqs`, and `--gpu-memory-utilization` based on the actual device memory; setting them too high may cause OOM.
+> **Atlas inference products / Atlas 200I Pro**: Currently only the TP scenario is supported. Prefer **TP=1** on Atlas 200I Pro. On Atlas inference products, **TP=1** and **TP=2** are both supported; choose according to the available devices. Configure `--max-model-len`, `--max-num-seqs`, and `--gpu-memory-utilization` based on the actual device memory; setting them too high may cause OOM.
 
 ### 9.2 Tuning Guidelines
 
