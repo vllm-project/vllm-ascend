@@ -159,9 +159,9 @@ def rejection_random_sample_kernel(
     NO_DRAFT_PROBS: tl.constexpr,
     ENABLE_REDUCE_SAMPLING: tl.constexpr,  # Whether using reduce sampling
     VOCAB_BLOCK_SIZE: tl.constexpr = 512,
+    MAX_BLOCK_SIZE: tl.constexpr = 16,
 ):
     block_idx = tl.program_id(0)
-    MAX_BLOCK_SIZE = 16
     offsets = block_idx * BLOCK_SIZE + tl.arange(0, MAX_BLOCK_SIZE)
     mask = tl.arange(0, MAX_BLOCK_SIZE) < BLOCK_SIZE
     mask = mask & (offsets < vec_len)
