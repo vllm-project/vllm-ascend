@@ -1693,6 +1693,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         *,
         invalid_block_ids: set[int],
         invalid_block_ids_lock: threading.Lock,
+        load_abort_event: threading.Event | None = None,
     ):
         super().__init__(
             m_store,
@@ -1713,6 +1714,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self.max_transfer_bytes = max_transfer_bytes
         self._invalid_block_ids = invalid_block_ids
         self._invalid_block_ids_lock = invalid_block_ids_lock
+        self._load_abort_event = load_abort_event or threading.Event()
+        self._active_load_indices: set[int] | None = None
         self.group_builders: list[LayerBatchBuilder] | None = group_builders
         if group_builders is not None:
             self.layer_batch_builder = group_builders[0]
@@ -1772,6 +1775,66 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         with self._invalid_block_ids_lock:
             self._invalid_block_ids.update(block_ids)
 
+    def _mark_invalid_range_indices(
+        self,
+        req_meta: LayerRangeReqMeta,
+        indices: list[int],
+    ) -> None:
+        with self._invalid_block_ids_lock:
+            self._invalid_block_ids.update(
+                req_meta.block_ids[index] for index in indices
+            )
+
+    def _handle_range_request(
+        self,
+        req_meta: LayerRangeReqMeta,
+        shared: SharedBlockData,
+    ) -> None:
+        layer_id = req_meta.layer_id
+        # Every layer is built from the same SharedBlockData row order, so a
+        # row index identifies one key/local-block destination across layers.
+        if self._active_load_indices is None or layer_id == 0:
+            self._active_load_indices = set(range(len(req_meta.keys)))
+
+        assert self._active_load_indices is not None
+        active_indices = [
+            index
+            for index in range(len(req_meta.keys))
+            if not self._load_abort_event.is_set()
+            and index in self._active_load_indices
+        ]
+        active_keys = [req_meta.keys[index] for index in active_indices]
+        if active_keys:
+            self._stagger_h2d_submit(layer_id)
+            results = require_aligned_batch_results(
+                "batch_copy_get",
+                active_keys,
+                self.m_store.batch_copy_get(
+                    active_keys,
+                    [req_meta.all_buffers[index] for index in active_indices],
+                    [req_meta.all_sizes[index] for index in active_indices],
+                    [req_meta.all_offsets[index] for index in active_indices],
+                ),
+            )
+            failed_indices = [
+                index
+                for index, result in zip(active_indices, results, strict=True)
+                if result < 0
+            ]
+            if failed_indices:
+                self._mark_invalid_range_indices(req_meta, failed_indices)
+                # A negative ranged result belongs to one destination row; it
+                # does not by itself invalidate every row sharing the key.
+                self._active_load_indices.difference_update(failed_indices)
+
+        if layer_id == self.final_layer_id:
+            for req_id, is_last_chunk in zip(
+                req_meta.req_ids, shared.is_last_chunks, strict=True
+            ):
+                if is_last_chunk:
+                    self.set_finished_request(req_id)
+            self._active_load_indices = None
+
     def _finish_layer_load_task(self, data: LayerLoadTask, layer_id: int) -> None:
         if not self.layer_load_finished_events[layer_id].is_set():
             self.layer_load_finished_events[layer_id].set()
@@ -1798,7 +1861,13 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
 
             # Build metadata for every cache group before waiting on the save
             # dependency. A single physical layer may contain multiple groups.
-            task_metas: list[tuple[LayerTransferTask, LayerBatchReqMeta]] = []
+            task_metas: list[
+                tuple[
+                    LayerTransferTask,
+                    SharedBlockData | None,
+                    LayerBatchReqMeta | LayerRangeReqMeta,
+                ]
+            ] = []
             for task in transfer_tasks:
                 shared = task.shared_block_data
                 builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
@@ -1809,9 +1878,9 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                     req_meta = builder.build(task, is_save=False)
                 if req_meta is None:
                     continue
-                if not isinstance(req_meta, LayerBatchReqMeta):
+                if not isinstance(req_meta, (LayerBatchReqMeta, LayerRangeReqMeta)):
                     raise TypeError(f"Expected GVA layer batch metadata, got {type(req_meta).__name__}")
-                task_metas.append((task, req_meta))
+                task_metas.append((task, shared, req_meta))
 
             if not task_metas:
                 return
@@ -1826,13 +1895,31 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 while not attention_start_gate.wait(timeout=10):
                     logger.info("Layerwise %d load waits for attention compute start", layer_id)
 
+            range_metas = [
+                (shared, req_meta)
+                for _, shared, req_meta in task_metas
+                if isinstance(req_meta, LayerRangeReqMeta)
+            ]
+            if range_metas:
+                if len(task_metas) > 1:
+                    raise ValueError(
+                        f"Expected one Mooncake range task, got {len(task_metas)}"
+                    )
+                shared, range_meta = range_metas[0]
+                if shared is None:
+                    raise RuntimeError("Range batch metadata requires shared block data")
+                self._handle_range_request(range_meta, shared)
+                return
+
             all_load_keys: list[str] = []
             all_req_ids: set[str] = set()
             last_chunk_req_ids: set[str] = set()
             all_gvas = []
             all_addrs = []
             all_sizes = []
-            for _, req_meta in task_metas:
+            for _, _, req_meta in task_metas:
+                if not isinstance(req_meta, LayerBatchReqMeta):
+                    raise TypeError(f"Expected GVA layer batch metadata, got {type(req_meta).__name__}")
                 if req_meta.load_keys:
                     all_load_keys.extend(req_meta.load_keys)
                 for req_id, is_last_chunk in zip(req_meta.req_ids, req_meta.is_last_chunks):
@@ -1842,7 +1929,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 all_gvas.append(req_meta.gvas_array)
                 all_addrs.append(req_meta.addr_array)
                 all_sizes.append(req_meta.size_array)
-
             self._stagger_h2d_submit(layer_id)
             gvas_array = np.concatenate(all_gvas) if len(all_gvas) > 1 else all_gvas[0]
             addr_array = np.concatenate(all_addrs) if len(all_addrs) > 1 else all_addrs[0]
@@ -1879,9 +1965,14 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                         self.set_finished_request(req_id)
         except Exception as exc:
             logger.error("Layerwise load handler failed layer=%d error=%s", layer_id, exc)
+            if self._active_load_indices is not None:
+                self._active_load_indices.clear()
             # Publish invalid blocks before the finalizer releases the layer
             # event, so the waiter cannot consume incomplete KV as a hit.
             self._mark_invalid_transfer_task_blocks(data.transfer_tasks)
+            # The receiver only signals abort; KVPoolWorker owns the
+            # exactly-once batch_get_end cleanup for opened read sessions.
+            self._load_abort_event.set()
         finally:
             self._finish_layer_load_task(data, layer_id)
 

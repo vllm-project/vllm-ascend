@@ -55,9 +55,11 @@ class FakeStore:
         self.put_calls = []
         self.get_calls = []
         self.copy_put_calls = []
+        self.copy_get_calls = []
         self.commit_calls = []
         self.revoke_calls = []
         self.copy_put_results: list[list[int]] = []
+        self.copy_get_results: list[list[int]] = []
         self.commit_results: list[list[int]] = []
         self.revoke_results: list[list[int]] = []
         self.commit_error: Exception | None = None
@@ -78,6 +80,10 @@ class FakeStore:
     def batch_copy_put(self, keys, all_buffers, all_sizes, all_offsets):
         self.copy_put_calls.append((list(keys), list(all_buffers), list(all_sizes), list(all_offsets)))
         return self.copy_put_results.pop(0) if self.copy_put_results else [0] * len(keys)
+
+    def batch_copy_get(self, keys, all_buffers, all_sizes, all_offsets):
+        self.copy_get_calls.append((list(keys), list(all_buffers), list(all_sizes), list(all_offsets)))
+        return self.copy_get_results.pop(0) if self.copy_get_results else [0] * len(keys)
 
     def batch_commit(self, keys):
         self.commit_calls.append(list(keys))
@@ -1065,6 +1071,241 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
         self.assertEqual(task.shared_block_data.block_keys, ["key-1"])
         self.assertEqual(store.copy_put_calls[0][0], ["key-1"])
         self.assertEqual(store.commit_calls[0], ["key-1"])
+
+
+class TestKVCacheStoreLayerRecvingThread(unittest.TestCase):
+    @staticmethod
+    def _make_thread(num_layers=2):
+        store = FakeStore()
+        invalid_block_ids: set[int] = set()
+        load_abort_event = threading.Event()
+        get_event = threading.Event()
+        thread = KVCacheStoreLayerRecvingThread(
+            m_store=store,
+            token_database=RangeBatchFakeTokenDatabase(),
+            block_size=16,
+            tp_rank=0,
+            tp_size=1,
+            dcp_size=1,
+            my_key_index=0,
+            num_ranks_per_layer=1,
+            page_size_bytes=96,
+            ready_event=threading.Event(),
+            get_event=get_event,
+            layer_load_finished_events=[threading.Event() for _ in range(num_layers)],
+            layer_save_finished_events=[threading.Event() for _ in range(num_layers)],
+            num_layers=num_layers,
+            invalid_block_ids=invalid_block_ids,
+            invalid_block_ids_lock=threading.Lock(),
+            load_abort_event=load_abort_event,
+        )
+        return thread, store, invalid_block_ids, get_event, load_abort_event
+
+    @staticmethod
+    def _make_load_task(thread, layer_id, block_ids=None, block_keys=None):
+        block_ids = [3, 4] if block_ids is None else block_ids
+        block_keys = ["key-3", "key-4"] if block_keys is None else block_keys
+        request = ReqMeta(
+            req_id="r1",
+            block_ids=block_ids,
+            load_block_keys=block_keys,
+            load_keys=list(dict.fromkeys(block_keys)),
+            is_last_chunk=True,
+        )
+        task = LayerTransferTask(
+            layer_id,
+            [LayerBlockRange(request, 0, len(block_ids))],
+            use_key_major_ranges=True,
+        )
+        task.shared_block_data = thread.build_shared_data(task)
+        return LayerLoadTask(None, [task], layer_id)
+
+    @staticmethod
+    def _make_partial_load_task(thread, include_full_block):
+        block_ids = [3, 42] if include_full_block else [42]
+        full_block_count = 1 if include_full_block else 0
+        request = ReqMeta(
+            req_id="r1",
+            block_ids=block_ids,
+            load_block_keys=["key-3"] if include_full_block else [],
+            load_last_block_key="key-tail",
+            load_keys=["key-3", "key-tail"] if include_full_block else ["key-tail"],
+            is_last_chunk=True,
+        )
+        task = LayerTransferTask(
+            layer_id=0,
+            block_ranges=[
+                LayerBlockRange(
+                    request,
+                    0,
+                    full_block_count,
+                    partial_block_index=len(block_ids) - 1,
+                )
+            ],
+            use_key_major_ranges=True,
+        )
+        task.shared_block_data = thread.build_shared_data(task)
+        return LayerLoadTask(None, [task], 0)
+
+    @staticmethod
+    def _run_task(thread, data):
+        thread.request_queue.put(data)
+        thread._handle_request(data)
+
+    def test_negative_read_marks_exact_block_and_filters_later_layers(self):
+        thread, store, invalid_block_ids, _, load_abort_event = self._make_thread()
+        store.copy_get_results = [[96, -1], [96]]
+
+        for layer_id in range(2):
+            self._run_task(thread, self._make_load_task(thread, layer_id))
+
+        self.assertEqual(store.copy_get_calls[0][0], ["key-3", "key-4"])
+        self.assertEqual(
+            store.copy_get_calls[1],
+            (
+                ["key-3"],
+                [[750, 1300, 2150]],
+                [[32, 64, 32]],
+                [[96, 128, 192]],
+            ),
+        )
+        self.assertEqual(invalid_block_ids, {4})
+        self.assertFalse(load_abort_event.is_set())
+
+    def test_duplicate_remote_key_failure_only_filters_failed_row(self):
+        thread, store, invalid_block_ids, _, load_abort_event = self._make_thread()
+        store.copy_get_results = [[96, -1], [96]]
+
+        for layer_id in range(2):
+            self._run_task(
+                thread,
+                self._make_load_task(
+                    thread,
+                    layer_id,
+                    block_ids=[3, 4],
+                    block_keys=["shared-key", "shared-key"],
+                ),
+            )
+
+        self.assertEqual(
+            store.copy_get_calls[1],
+            (
+                ["shared-key"],
+                [[750, 1300, 2150]],
+                [[32, 64, 32]],
+                [[96, 128, 192]],
+            ),
+        )
+        self.assertEqual(invalid_block_ids, {4})
+        self.assertFalse(load_abort_event.is_set())
+
+    def test_duplicate_remote_key_all_failures_filter_all_rows(self):
+        thread, store, invalid_block_ids, _, load_abort_event = self._make_thread()
+        store.copy_get_results = [[-1, -1]]
+
+        for layer_id in range(2):
+            self._run_task(
+                thread,
+                self._make_load_task(
+                    thread,
+                    layer_id,
+                    block_ids=[3, 4],
+                    block_keys=["shared-key", "shared-key"],
+                ),
+            )
+
+        self.assertEqual(len(store.copy_get_calls), 1)
+        self.assertEqual(invalid_block_ids, {3, 4})
+        self.assertFalse(load_abort_event.is_set())
+
+    def test_malformed_read_results_abort_and_mark_all_blocks(self):
+        for results in ([96], [96, 96, 96], ["invalid", 96]):
+            with self.subTest(results=results):
+                thread, store, invalid_block_ids, get_event, load_abort_event = self._make_thread()
+                store.copy_get_results = [results]
+
+                self._run_task(thread, self._make_load_task(thread, 0))
+
+                self.assertEqual(invalid_block_ids, {3, 4})
+                self.assertTrue(load_abort_event.is_set())
+                self.assertTrue(thread.layer_load_finished_events[0].is_set())
+                self.assertTrue(get_event.is_set())
+
+    def test_copy_get_exception_aborts_and_finishes_layer(self):
+        thread, store, invalid_block_ids, get_event, load_abort_event = self._make_thread()
+        data = self._make_load_task(thread, 0)
+        thread.request_queue.put(data)
+
+        with (
+            patch.object(store, "batch_copy_get", side_effect=RuntimeError("transfer failed")),
+            patch.object(
+                thread.request_queue,
+                "task_done",
+                wraps=thread.request_queue.task_done,
+            ) as task_done,
+        ):
+            thread._handle_request(data)
+
+        self.assertEqual(invalid_block_ids, {3, 4})
+        self.assertTrue(load_abort_event.is_set())
+        self.assertTrue(thread.layer_load_finished_events[0].is_set())
+        self.assertTrue(get_event.is_set())
+        self.assertEqual(task_done.call_count, 1)
+        self.assertEqual(thread._active_load_indices, set())
+
+    def test_exception_fallback_marks_full_and_partial_blocks(self):
+        for include_full_block in (False, True):
+            expected_invalid = {3, 42} if include_full_block else {42}
+            for failure in ("builder", "backend", "malformed"):
+                with self.subTest(
+                    include_full_block=include_full_block,
+                    failure=failure,
+                ):
+                    thread, store, invalid_block_ids, get_event, load_abort_event = self._make_thread()
+                    data = self._make_partial_load_task(thread, include_full_block)
+                    thread.request_queue.put(data)
+                    if failure == "builder":
+                        thread.layer_batch_builder.build_addrs = MagicMock(
+                            side_effect=RuntimeError("metadata failed")
+                        )
+                    elif failure == "backend":
+                        store.batch_copy_get = MagicMock(
+                            side_effect=RuntimeError("transfer failed")
+                        )
+                    else:
+                        store.copy_get_results = [[96] if include_full_block else []]
+
+                    with patch.object(
+                        thread.request_queue,
+                        "task_done",
+                        wraps=thread.request_queue.task_done,
+                    ) as task_done:
+                        thread._handle_request(data)
+
+                    self.assertEqual(invalid_block_ids, expected_invalid)
+                    self.assertTrue(load_abort_event.is_set())
+                    self.assertTrue(thread.layer_load_finished_events[0].is_set())
+                    self.assertTrue(get_event.is_set())
+                    self.assertEqual(task_done.call_count, 1)
+                    self.assertEqual(thread.request_queue.unfinished_tasks, 0)
+
+    def test_duplicate_remote_key_loads_into_both_local_blocks(self):
+        thread, store, invalid_block_ids, _, _ = self._make_thread(num_layers=1)
+        data = self._make_load_task(
+            thread,
+            0,
+            block_ids=[3, 4],
+            block_keys=["shared-key", "shared-key"],
+        )
+
+        self._run_task(thread, data)
+
+        self.assertEqual(store.copy_get_calls[0][0], ["shared-key", "shared-key"])
+        self.assertNotEqual(
+            store.copy_get_calls[0][1][0],
+            store.copy_get_calls[0][1][1],
+        )
+        self.assertEqual(invalid_block_ids, set())
 
 
 class TestKVTransferTpMismatchDispatch(unittest.TestCase):
