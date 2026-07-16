@@ -476,8 +476,19 @@ class RecomputeScheduler(Scheduler):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
+                    _kvtrace_t0 = time.perf_counter()
                     new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(
                         request
+                    )
+                    _kvtrace_elapsed = (time.perf_counter() - _kvtrace_t0) * 1000
+                    logger.info(
+                        "KVTRACE req=%s stage=hbm_lookup elapsed_ms=%.3f "
+                        "prompt_tokens=%d num_tokens=%d local_hit_tokens=%d "
+                        "prefix_caching_enabled=%s",
+                        request.request_id, _kvtrace_elapsed,
+                        request.num_prompt_tokens, request.num_tokens,
+                        num_new_local_computed_tokens,
+                        self.kv_cache_manager.enable_caching
                     )
 
                     # Get externally-cached tokens if using a KVConnector.

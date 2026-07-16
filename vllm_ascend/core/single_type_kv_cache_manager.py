@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+from vllm.logger import logger
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 from collections.abc import Sequence
@@ -153,7 +154,14 @@ class CompressAttentionManager(FullAttentionManager):
             req_blocks.extend(new_blocks)
             return new_blocks
 
-    def cache_blocks(self, request: Request, num_tokens: int) -> None:
+    def cache_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+        retention_interval: int | None = None,
+        alignment_tokens: int | None = None,
+        use_eagle: bool = False,
+    ) -> None:
         """
         Cache the blocks for the request.
 
@@ -161,6 +169,12 @@ class CompressAttentionManager(FullAttentionManager):
             request: The request.
             num_tokens: The total number of tokens that need to be cached
                 (including tokens that are already cached).
+            retention_interval: Sparse local-checkpoint granularity. Compressed
+                MLA groups cache densely and ignore this value.
+            alignment_tokens: The cache-hit alignment used by upstream vLLM
+                main. v0.21.0 does not expose this argument in the base class.
+            use_eagle: Whether the group is used for EAGLE/MTP lookup. Compressed
+                MLA groups ignore this value.
         """
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         logical_block_size = self.block_size * self.compress_ratio
@@ -197,6 +211,8 @@ class CompressAttentionManager(FullAttentionManager):
         # ), (
         #     "CompressAttentionManager can only be used for compressor attention groups"
         # )
+        import time as _kvtrace_time
+        _kvtrace_t0 = _kvtrace_time.perf_counter()
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple([] for _ in range(len(kv_cache_group_ids)))
         block_size = kv_cache_spec.block_size
         if dcp_world_size * pcp_world_size > 1:
@@ -224,6 +240,15 @@ class CompressAttentionManager(FullAttentionManager):
         ):
             for computed in computed_blocks:
                 computed.pop()
+        _kvtrace_elapsed = (_kvtrace_time.perf_counter() - _kvtrace_t0) * 1000
+        logger.info(
+            "KVTRACE stage=hbm_find_longest_cache_hit elapsed_ms=%.3f "
+            "max_length=%d logical_block_size=%d hit_blocks=%d hit_tokens=%d group_ids=%s",
+            _kvtrace_elapsed, max_length, logical_block_size,
+            len(computed_blocks[0]) if computed_blocks else 0,
+            len(computed_blocks[0]) * logical_block_size if computed_blocks else 0,
+            kv_cache_group_ids
+        )
         return computed_blocks
 
 
