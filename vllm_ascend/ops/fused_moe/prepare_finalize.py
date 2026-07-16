@@ -58,6 +58,7 @@ class PrepareAndFinalize(ABC):
         enable_shared_expert_dp: bool = False,
         replace_allreduce: bool = False,
         quant_type: QuantType = QuantType.NONE,
+        token_lora_indices: torch.Tensor | None = None,
     ) -> MoEPrepareOutput:
         """
         Prepare tensors before MoE computation. May involve:
@@ -128,6 +129,7 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         enable_shared_expert_dp: bool = False,
         replace_allreduce: bool = False,
         quant_type=QuantType.NONE,
+        token_lora_indices: torch.Tensor | None = None,
     ) -> MoEPrepareOutput:
         """
         Preparation steps:
@@ -144,13 +146,18 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         self.enable_shared_expert_dp = enable_shared_expert_dp
 
         padded_hidden_states_shape = hidden_states.shape
+        split_lora_indices = None
         if not (self.replace_allreduce or self.enable_shared_expert_dp):
             self.num_tokens, _ = hidden_states.shape
             pad_size = self.tp_size - self.num_tokens  # Pad to TP size (cyclic)
+            if token_lora_indices is not None:
+                token_lora_indices = token_lora_indices[: self.num_tokens]
 
             if pad_size > 0:
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+                if token_lora_indices is not None:
+                    token_lora_indices = nn.functional.pad(token_lora_indices, (0, pad_size), value=-1)
                 padded_hidden_states_shape = hidden_states.shape
 
             if self.tp_size > 1:
@@ -159,6 +166,10 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
 
                 hidden_states = split_hidden_states[self.tp_rank]
                 router_logits = split_router_logits[self.tp_rank]
+                if token_lora_indices is not None:
+                    split_lora_indices = torch.tensor_split(token_lora_indices, self.tp_size, dim=0)[self.tp_rank]
+            else:
+                split_lora_indices = token_lora_indices
 
         return MoEPrepareOutput(
             hidden_states=hidden_states,
@@ -166,6 +177,7 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
             mc2_mask=None,
             padded_hidden_states_shape=padded_hidden_states_shape,
             pertoken_scale=None,
+            split_lora_indices=split_lora_indices,
         )
 
     def pad_and_split_input_ids(
@@ -245,6 +257,7 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         enable_shared_expert_dp: bool = False,
         replace_allreduce: bool = False,
         quant_type=QuantType.NONE,
+        token_lora_indices: torch.Tensor | None = None,
     ) -> MoEPrepareOutput:
         """
         Preparation steps:
@@ -258,6 +271,8 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         Returns:
             MoEPrepareOutput, possibly sliced/padded.
         """
+        if token_lora_indices is not None:
+            raise NotImplementedError("MoE LoRA does not support MC2/FUSED_MC2 communication; use ALLTOALL.")
         self.replace_allreduce = replace_allreduce
         self.enable_shared_expert_dp = enable_shared_expert_dp
         mc2_mask = _EXTRA_CTX.mc2_mask
@@ -339,6 +354,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         enable_shared_expert_dp: bool = False,
         replace_allreduce: bool = False,
         quant_type=QuantType.NONE,
+        token_lora_indices: torch.Tensor | None = None,
     ) -> MoEPrepareOutput:
         """
         Preparation steps:

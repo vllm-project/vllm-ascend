@@ -569,20 +569,14 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # TP-split along the token dimension.  In pure TP (AllGather
         # path) the recovery function reads token_lora_indices directly
         # from lora_context, so skip the split there.
-        split_lora_indices = None
-        if self.moe_config.ep_size > 1:
-            lora_context = getattr(self.routed_experts, "_ascend_moe_lora_context", None)
-            if lora_context is not None:
-                token_lora_indices = lora_context.punica_wrapper.token_lora_indices
-                tp_size = get_tensor_model_parallel_world_size()
-                tp_rank = get_tensor_model_parallel_rank()
-                num_tokens = hidden_states.shape[0]
-                pad_size = tp_size - num_tokens
-                if pad_size > 0:
-                    token_lora_indices = F.pad(token_lora_indices, (0, pad_size), value=-1)
-                if tp_size > 1:
-                    split_lora = torch.tensor_split(token_lora_indices, tp_size, dim=0)
-                    split_lora_indices = split_lora[tp_rank]
+        lora_context = getattr(self.routed_experts, "_ascend_moe_lora_context", None)
+
+        token_lora_indices = None
+        if (
+            lora_context is not None
+            and self.moe_config.ep_size > 1
+        ):
+            token_lora_indices = lora_context.punica_wrapper.token_lora_indices
 
         prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
             hidden_states=hidden_states,
@@ -590,12 +584,14 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             replace_allreduce=_EXTRA_CTX.flash_comm_v1_enabled,
             enable_shared_expert_dp=self.enable_shared_expert_dp,
             quant_type=self.quant_type,
+            token_lora_indices=token_lora_indices,
         )
         hidden_states = prepare_output.hidden_states
         router_logits = prepare_output.router_logits
         mc2_mask = prepare_output.mc2_mask
         padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
         pertoken_scale = prepare_output.pertoken_scale
+        split_lora_indices = prepare_output.split_lora_indices
 
         # Matrix multiply.
         # apply() expects a RoutedExperts-like layer for weight access
