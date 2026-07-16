@@ -100,8 +100,9 @@ from vllm.v1.worker.gpu_model_runner import AsyncGPUModelRunnerOutput, GPUModelR
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     maybe_create_ubatch_slices,
-    split_attn_metadata,
 )
+
+from vllm_ascend.attention.utils import split_attn_metadata
 from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
 # yapf: enable
