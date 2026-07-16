@@ -3326,10 +3326,10 @@ class NPUModelRunner(GPUModelRunner):
                 # logger.info("attn_metadata111: %s", attn_metadata)
                 attn_metadata_dict = attn_metadata[ubid]
             #     logger.info("attn_metadata_dict2222: %s", attn_metadata_dict)
-            # logger.info("attn_group.layer_names3333: %s", attn_group.layer_names)
+            logger.info("attn_group.layer_names3333: %s", attn_group.layer_names)
             for layer_name in attn_group.layer_names:
                 attn_metadata_dict[layer_name] = attn_metadata_i
-            logger.info("attn_metadata_dict4444: %s", attn_metadata)
+            # logger.info("attn_metadata_dict4444: %s", attn_metadata)
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         prefill_ratio_to_sas_metadata: dict[Any, Any] = {}
@@ -3387,7 +3387,7 @@ class NPUModelRunner(GPUModelRunner):
                         prefill_ratio_to_sas_metadata,
                         decode_ratio_to_sas_metadata,
                         common_ratio_to_sas_metadata)
-            logger.info("attn_metadata_dict555555555555: %s", attn_metadata)
+            # logger.info("attn_metadata_dict555555555555: %s", attn_metadata)
         if self.is_mm_prefix_lm:
             req_doc_ranges = {}
             for req_id in self.input_batch.req_ids:
