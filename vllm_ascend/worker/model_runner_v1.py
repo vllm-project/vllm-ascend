@@ -3366,7 +3366,9 @@ class NPUModelRunner(GPUModelRunner):
             if self.enable_hamming_sparse is True:
                 from vllm_ascend.attention.kvcomp_attn.attention_utils import build_kvcomp_metadata
                 build_kvcomp_metadata(self.kvcomp_meta_data, cm)
+            logger.info("cm: %s", cm)
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
+                logger.info("attn_gid: %s", attn_gid)
                 if ubatch_slices is not None:
                     for ubid, _cm in enumerate(split_attn_metadata(ubatch_slices, cm)):
                         logger.info("ubid: %d, _cm: %s", ubid, _cm)
