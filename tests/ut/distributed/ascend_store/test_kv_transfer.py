@@ -54,6 +54,14 @@ class FakeStore:
         self.exists_result = exists_result or []
         self.put_calls = []
         self.get_calls = []
+        self.copy_put_calls = []
+        self.commit_calls = []
+        self.revoke_calls = []
+        self.copy_put_results: list[list[int]] = []
+        self.commit_results: list[list[int]] = []
+        self.revoke_results: list[list[int]] = []
+        self.commit_error: Exception | None = None
+        self.revoke_error: Exception | None = None
 
     def set_device(self):
         pass
@@ -66,6 +74,22 @@ class FakeStore:
 
     def get(self, keys, addrs, sizes):
         self.get_calls.append((list(keys), list(addrs), list(sizes)))
+
+    def batch_copy_put(self, keys, all_buffers, all_sizes, all_offsets):
+        self.copy_put_calls.append((list(keys), list(all_buffers), list(all_sizes), list(all_offsets)))
+        return self.copy_put_results.pop(0) if self.copy_put_results else [0] * len(keys)
+
+    def batch_commit(self, keys):
+        self.commit_calls.append(list(keys))
+        if self.commit_error is not None:
+            raise self.commit_error
+        return self.commit_results.pop(0) if self.commit_results else [0] * len(keys)
+
+    def batch_revoke(self, keys):
+        self.revoke_calls.append(list(keys))
+        if self.revoke_error is not None:
+            raise self.revoke_error
+        return self.revoke_results.pop(0) if self.revoke_results else [0] * len(keys)
 
 
 class FakeKey:
@@ -839,6 +863,208 @@ class TestKVCacheStoreLayerFinalization(unittest.TestCase):
         self.assertTrue(thread.layer_load_finished_events[0].is_set())
         self.assertTrue(get_event.is_set())
         self.assertEqual(invalid_block_ids, {3})
+
+
+class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
+    @staticmethod
+    def _make_thread(num_layers=2):
+        store = FakeStore()
+        started_keys = {"key-1", "key-2"}
+        thread = KVCacheStoreLayerSendingThread(
+            m_store=store,
+            token_database=RangeBatchFakeTokenDatabase(),
+            block_size=16,
+            tp_rank=0,
+            tp_size=1,
+            dcp_size=1,
+            put_step=1,
+            my_key_index=0,
+            num_ranks_per_layer=1,
+            page_size_bytes=96,
+            ready_event=threading.Event(),
+            num_layers=num_layers,
+            layer_save_finished_events=[threading.Event() for _ in range(num_layers)],
+            sync_save_events=[MagicMock() for _ in range(num_layers)],
+            put_started_keys=started_keys,
+            put_started_keys_lock=threading.Lock(),
+        )
+        return thread, store, started_keys
+
+    @staticmethod
+    def _make_task(thread, layer_id):
+        request = ReqMeta(
+            req_id="r1",
+            block_ids=[1, 2],
+            save_block_keys=["key-1", "key-2"],
+            is_last_chunk=True,
+        )
+        task = LayerTransferTask(
+            layer_id,
+            [LayerBlockRange(request, 0, 2)],
+            use_key_major_ranges=True,
+        )
+        task.shared_block_data = thread.build_shared_data(task)
+        return [task]
+
+    @staticmethod
+    def _run_task(thread, tasks):
+        for block_range in tasks[0].block_ranges:
+            thread.add_stored_request(block_range.request.req_id)
+        thread.request_queue.put(tasks)
+        thread._handle_request(tasks)
+
+    def test_positive_results_keep_active_keys_and_commit_on_final_layer(self):
+        thread, store, started_keys = self._make_thread()
+        store.copy_put_results = [[96, -1], [96]]
+        store.revoke_results = [[0]]
+
+        for layer_id in range(2):
+            self._run_task(thread, self._make_task(thread, layer_id))
+
+        self.assertEqual(store.copy_put_calls[0][0], ["key-1", "key-2"])
+        self.assertEqual(store.copy_put_calls[1][0], ["key-1"])
+        self.assertEqual(
+            store.copy_put_calls[1],
+            (
+                ["key-1"],
+                [[650, 1100, 2050]],
+                [[32, 64, 32]],
+                [[96, 128, 192]],
+            ),
+        )
+        self.assertEqual(store.revoke_calls, [["key-2"]])
+        self.assertEqual(store.commit_calls, [["key-1"]])
+        self.assertEqual(started_keys, set())
+
+    def test_malformed_results_revoke_all_keys_and_finish_request(self):
+        for results in ([96], [96, 96, 96], ["invalid", 96]):
+            with self.subTest(results=results):
+                thread, store, started_keys = self._make_thread()
+                store.copy_put_results = [results]
+                store.revoke_results = [[0, 0]]
+                self._run_task(thread, self._make_task(thread, 0))
+
+                self.assertEqual(store.revoke_calls, [["key-1", "key-2"]])
+                self.assertEqual(started_keys, set())
+                self.assertEqual(dict(thread.stored_requests), {})
+                self.assertEqual(thread.get_and_clear_finished_requests(), {"r1"})
+                self.assertEqual(thread.get_kv_events(), [])
+
+    def test_first_layer_exception_revokes_shared_keys_and_stops_later_layers(self):
+        for failure in ("builder", "sync", "backend"):
+            with self.subTest(failure=failure):
+                thread, store, started_keys = self._make_thread()
+                first_layer_tasks = self._make_task(thread, 0)
+
+                if failure == "builder":
+                    with patch.object(
+                        thread.layer_batch_builder,
+                        "build_addrs",
+                        side_effect=RuntimeError("metadata failed"),
+                    ):
+                        self._run_task(thread, first_layer_tasks)
+                elif failure == "sync":
+                    thread.sync_save_events[0].synchronize.side_effect = RuntimeError(
+                        "sync failed"
+                    )
+                    self._run_task(thread, first_layer_tasks)
+                    thread.sync_save_events[0].synchronize.side_effect = None
+                else:
+                    with patch.object(
+                        store,
+                        "batch_copy_put",
+                        side_effect=RuntimeError("transfer failed"),
+                    ):
+                        self._run_task(thread, first_layer_tasks)
+
+                self.assertEqual(store.revoke_calls, [["key-1", "key-2"]])
+                self.assertEqual(started_keys, set())
+                self.assertTrue(thread.layer_save_finished_events[0].is_set())
+                self.assertEqual(thread.request_queue.unfinished_tasks, 0)
+
+                self._run_task(thread, self._make_task(thread, 1))
+
+                self.assertEqual(store.copy_put_calls, [])
+                self.assertEqual(store.commit_calls, [])
+                self.assertEqual(store.revoke_calls, [["key-1", "key-2"]])
+                self.assertTrue(thread.layer_save_finished_events[1].is_set())
+                self.assertEqual(thread.request_queue.unfinished_tasks, 0)
+
+    def test_commit_failure_revokes_only_failed_key(self):
+        thread, store, started_keys = self._make_thread(num_layers=1)
+        store.commit_results = [[0, -1]]
+        store.revoke_results = [[0]]
+
+        self._run_task(thread, self._make_task(thread, 0))
+
+        self.assertEqual(store.commit_calls, [["key-1", "key-2"]])
+        self.assertEqual(store.revoke_calls, [["key-2"]])
+        self.assertEqual(started_keys, set())
+
+    def test_commit_error_results_revoke_all_active_keys_and_clear_tracker(self):
+        cases = (
+            ("raises", None),
+            ("too_short", [0]),
+            ("too_long", [0, 0, 0]),
+            ("non_integer", ["invalid", 0]),
+        )
+        for name, results in cases:
+            with self.subTest(name=name):
+                thread, store, started_keys = self._make_thread(num_layers=1)
+                store.revoke_results = [[0, 0]]
+                if results is None:
+                    store.commit_error = RuntimeError("commit failed")
+                else:
+                    store.commit_results = [results]
+
+                self._run_task(thread, self._make_task(thread, 0))
+
+                self.assertEqual(store.commit_calls, [["key-1", "key-2"]])
+                self.assertEqual(store.revoke_calls, [["key-1", "key-2"]])
+                self.assertEqual(started_keys, set())
+                self.assertTrue(thread.layer_save_finished_events[0].is_set())
+
+    def test_revoke_error_results_remove_attempted_key_and_finish_layer(self):
+        cases = (
+            ("raises", None),
+            ("too_short", []),
+            ("too_long", [0, 0]),
+            ("non_integer", ["invalid"]),
+        )
+        for name, results in cases:
+            with self.subTest(name=name):
+                thread, store, started_keys = self._make_thread()
+                store.copy_put_results = [[96, -1]]
+                if results is None:
+                    store.revoke_error = RuntimeError("revoke failed")
+                else:
+                    store.revoke_results = [results]
+
+                self._run_task(thread, self._make_task(thread, 0))
+
+                self.assertEqual(store.revoke_calls, [["key-2"]])
+                self.assertEqual(started_keys, {"key-1"})
+                self.assertTrue(thread.layer_save_finished_events[0].is_set())
+                self.assertEqual(dict(thread.stored_requests), {})
+                self.assertEqual(thread.get_and_clear_finished_requests(), {"r1"})
+
+    def test_duplicate_save_key_is_written_and_committed_once(self):
+        thread, store, _ = self._make_thread(num_layers=1)
+        first = ReqMeta(req_id="r1", block_ids=[1], save_block_keys=["key-1"])
+        second = ReqMeta(req_id="r2", block_ids=[2], save_block_keys=["key-1"])
+        task = LayerTransferTask(
+            0,
+            [LayerBlockRange(first, 0, 1), LayerBlockRange(second, 0, 1)],
+            use_key_major_ranges=True,
+        )
+        task.shared_block_data = thread.build_shared_data(task)
+
+        self._run_task(thread, [task])
+
+        assert task.shared_block_data is not None
+        self.assertEqual(task.shared_block_data.block_keys, ["key-1"])
+        self.assertEqual(store.copy_put_calls[0][0], ["key-1"])
+        self.assertEqual(store.commit_calls[0], ["key-1"])
 
 
 class TestKVTransferTpMismatchDispatch(unittest.TestCase):

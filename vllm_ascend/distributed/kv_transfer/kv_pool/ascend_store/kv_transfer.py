@@ -13,7 +13,10 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import (
+    Backend,
+    require_aligned_batch_results,
+)
 
 # isort: off
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
@@ -210,6 +213,7 @@ class LayerBatchBuilder:
         req_ids: list[str] = []
         is_last_chunks: list[bool | None] = []
         all_load_keys: list[str] = []
+        seen_save_keys: set[str] = set()
 
         for block_range in task.block_ranges:
             request = block_range.request
@@ -251,9 +255,11 @@ class LayerBatchBuilder:
                 request_keys[key_start:key_end],
                 strict=True,
             ):
-                if key is not None:
+                if key is not None and (not is_save or key not in seen_save_keys):
                     block_ids.append(block_id)
                     block_keys.append(key)
+                    if is_save:
+                        seen_save_keys.add(key)
 
             if block_range.partial_block_index is not None:
                 partial_block_index = block_range.partial_block_index
@@ -262,9 +268,13 @@ class LayerBatchBuilder:
                         f"ReqMeta block metadata does not cover partial block "
                         f"index {partial_block_index}"
                     )
-                if last_block_key is not None:
+                if last_block_key is not None and (
+                    not is_save or last_block_key not in seen_save_keys
+                ):
                     block_ids.append(request_block_ids[partial_block_index])
                     block_keys.append(last_block_key)
+                    if is_save:
+                        seen_save_keys.add(last_block_key)
 
         return SharedBlockData(
             block_ids_arr=np.asarray(block_ids, dtype=np.int64),
@@ -403,7 +413,8 @@ class LayerBatchBuilder:
         shared = self.build_shared(task, is_save)
         if shared is None:
             return None
-        return self.build_addrs(shared, task.layer_idx_in_group)
+        layer_index = task.layer_id if task.use_key_major_ranges else task.layer_idx_in_group
+        return self.build_addrs(shared, layer_index)
 
 
 class KVTransferThread(threading.Thread):
@@ -1404,6 +1415,8 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         max_transfer_blocks: int = 0,
         max_transfer_bytes: int = 0,
         group_builders: list[LayerBatchBuilder] | None = None,
+        put_started_keys: set[str] | None = None,
+        put_started_keys_lock: threading.Lock | None = None,
     ):
         super().__init__(
             m_store,
@@ -1423,6 +1436,9 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self.sync_save_events = sync_save_events
         self.max_transfer_blocks = max_transfer_blocks
         self.max_transfer_bytes = max_transfer_bytes
+        self._put_started_keys = put_started_keys if put_started_keys is not None else set()
+        self._put_started_keys_lock = put_started_keys_lock or threading.Lock()
+        self._active_put_keys: set[str] | None = None
         self.group_builders: list[LayerBatchBuilder] | None = group_builders
         if group_builders is not None:
             self.layer_batch_builder = group_builders[0]
@@ -1463,6 +1479,95 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
     ) -> torch.Tensor:
         self.request_queue.put(req_meta)
 
+    def _remove_started_keys(self, keys: list[str]) -> None:
+        with self._put_started_keys_lock:
+            self._put_started_keys.difference_update(keys)
+
+    def _revoke_range_keys(self, keys: list[str]) -> None:
+        if not keys:
+            return
+        try:
+            results = require_aligned_batch_results(
+                "batch_revoke", keys, self.m_store.batch_revoke(keys)
+            )
+            if any(result != 0 for result in results):
+                logger.error("Layerwise revoke failed keys=%s results=%s", keys, results)
+        except Exception as exc:
+            logger.error("Layerwise revoke raised keys=%s error=%s", keys, exc)
+        finally:
+            # This tracker only gates future put-start calls. Drop keys after a
+            # revoke attempt even when the remote cleanup fails; the Master TTL
+            # owns any remaining PROCESSING session.
+            self._remove_started_keys(keys)
+
+    def _handle_range_request(self, req_meta: LayerRangeReqMeta) -> None:
+        layer_id = req_meta.layer_id
+        if self._active_put_keys is None or layer_id == 0:
+            # This mutable set is scoped to one forward batch. Keep the shared
+            # metadata immutable so later layers can filter failed keys safely.
+            self._active_put_keys = set(req_meta.keys)
+        active_indices = [
+            index
+            for index, key in enumerate(req_meta.keys)
+            if key in self._active_put_keys
+        ]
+        active_keys = [req_meta.keys[index] for index in active_indices]
+        if active_keys:
+            if layer_id < len(self.sync_save_events):
+                self.sync_save_events[layer_id].synchronize()
+            results = require_aligned_batch_results(
+                "batch_copy_put",
+                active_keys,
+                self.m_store.batch_copy_put(
+                    active_keys,
+                    [req_meta.all_buffers[index] for index in active_indices],
+                    [req_meta.all_sizes[index] for index in active_indices],
+                    [req_meta.all_offsets[index] for index in active_indices],
+                ),
+            )
+            failed_keys = [
+                key
+                for key, result in zip(active_keys, results, strict=True)
+                if result < 0
+            ]
+            if failed_keys:
+                # A ranged-write failure only invalidates this key; remaining
+                # active keys continue copying their later layer ranges.
+                self._revoke_range_keys(failed_keys)
+                self._active_put_keys.difference_update(failed_keys)
+
+        if layer_id == self.final_layer_id:
+            # Only keys that completed every layer range may publish COMPLETE.
+            active_keys = [
+                key for key in req_meta.keys if key in self._active_put_keys
+            ]
+            if active_keys:
+                try:
+                    commit_results = require_aligned_batch_results(
+                        "batch_commit",
+                        active_keys,
+                        self.m_store.batch_commit(active_keys),
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Layerwise commit raised keys=%s error=%s",
+                        active_keys,
+                        exc,
+                    )
+                    self._revoke_range_keys(active_keys)
+                else:
+                    failed_commit_keys = [
+                        key
+                        for key, result in zip(
+                            active_keys, commit_results, strict=True
+                        )
+                        if result != 0
+                    ]
+                    if failed_commit_keys:
+                        self._revoke_range_keys(failed_commit_keys)
+                    self._remove_started_keys(active_keys)
+            self._active_put_keys = None
+
     def _finish_layer_save_task(
         self,
         transfer_tasks: list[LayerTransferTask],
@@ -1488,6 +1593,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self, transfer_tasks: list[LayerTransferTask]
     ):
         layer_id = transfer_tasks[0].layer_id if transfer_tasks else 0
+        shared: SharedBlockData | None = None
         try:
             if not transfer_tasks:
                 return
@@ -1499,7 +1605,15 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 if shared is None:
                     continue
                 builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
-                req_meta = builder.build_addrs(shared, task.layer_idx_in_group)
+                layer_index = task.layer_id if task.use_key_major_ranges else task.layer_idx_in_group
+                req_meta = builder.build_addrs(shared, layer_index)
+                if isinstance(req_meta, LayerRangeReqMeta):
+                    if len(transfer_tasks) > 1:
+                        raise ValueError(
+                            f"Expected one Mooncake range task, got {len(transfer_tasks)}"
+                        )
+                    self._handle_range_request(req_meta)
+                    return
                 if not isinstance(req_meta, LayerBatchReqMeta):
                     raise TypeError(f"Expected GVA layer batch metadata, got {type(req_meta).__name__}")
                 all_gvas.append(req_meta.gvas_array)
@@ -1531,6 +1645,26 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 logger.error("Layerwise %d save batch_copy failed with return code %d", layer_id, res)
         except Exception as exc:
             logger.error("Layerwise save handler failed layer=%d error=%s", layer_id, exc)
+            if self._active_put_keys is not None:
+                keys_to_revoke = (
+                    [
+                        key
+                        for key in shared.block_keys
+                        if key in self._active_put_keys
+                    ]
+                    if shared is not None and shared.block_keys is not None
+                    else sorted(self._active_put_keys)
+                )
+            elif shared is not None and shared.block_keys is not None:
+                # build_addrs may fail before the per-batch active set exists,
+                # but PutStart already reserved every shared key.
+                keys_to_revoke = list(dict.fromkeys(shared.block_keys))
+            else:
+                keys_to_revoke = []
+            self._revoke_range_keys(keys_to_revoke)
+            # Keep a failed batch inactive until its final layer is consumed;
+            # otherwise a later layer would repopulate the set from shared data.
+            self._active_put_keys = set()
         finally:
             self._finish_layer_save_task(transfer_tasks, layer_id)
 
@@ -1669,7 +1803,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 shared = task.shared_block_data
                 builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
                 if shared is not None:
-                    req_meta = builder.build_addrs(shared, task.layer_idx_in_group)
+                    layer_index = task.layer_id if task.use_key_major_ranges else task.layer_idx_in_group
+                    req_meta = builder.build_addrs(shared, layer_index)
                 else:
                     req_meta = builder.build(task, is_save=False)
                 if req_meta is None:
