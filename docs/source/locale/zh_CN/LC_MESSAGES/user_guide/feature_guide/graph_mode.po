@@ -94,7 +94,7 @@ msgid ""
 "path for selected model families (see [Using XliteGraph](#using-"
 "xlitegraph))."
 msgstr ""
-"此外，**XliteGraph** 可作为选定模型系列的可选替代图路径（请参阅 [使用 XliteGraph](#使用-XliteGraph)）。"
+"此外，**XliteGraph** 可作为选定模型系列的可选替代图路径（请参阅 [使用 XliteGraph](#使用-xlitegraph)）。"
 
 msgid "## Using ACLGraph"
 msgstr "## 使用 ACLGraph"
