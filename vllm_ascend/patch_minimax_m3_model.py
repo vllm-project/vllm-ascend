@@ -5,7 +5,7 @@
 import sys
 from collections.abc import Iterable
 from types import ModuleType
-from typing import Any
+from typing import Any, cast
 
 import torch
 from transformers import PretrainedConfig
@@ -41,7 +41,7 @@ def _install_fused_allreduce_norm_fallback() -> None:
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         return norm(hidden_states, residual)
 
-    fallback_module.fused_allreduce_gemma_rms_norm = fused_allreduce_gemma_rms_norm
+    cast(Any, fallback_module).fused_allreduce_gemma_rms_norm = fused_allreduce_gemma_rms_norm
     sys.modules[module_name] = fallback_module
 
 
