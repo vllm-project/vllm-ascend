@@ -193,6 +193,12 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         result = list(self.db.process_token_key_strings(40, hashes))
         self.assertEqual(result, expected)
 
+    def test_process_tokens_does_not_round_trip_through_key_strings(self):
+        self.db.process_token_key_strings = MagicMock(side_effect=AssertionError("string path must not be used"))
+        result = list(self.db.process_tokens(32, ["aaa", "bbb"]))
+        self.assertEqual(len(result), 2)
+        self.db.process_token_key_strings.assert_not_called()
+
     def test_process_token_key_strings_with_block_ids_matches_process_tokens(self):
         db = ChunkedTokenDatabase([self.meta], block_size=[16], partitions=None, hash_block_size=8)
         hashes = ["a", "b", "c", "d"]
@@ -236,6 +242,29 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         layer_key = pool_key_result[0][2].split_layers(2)[1]
         self.assertEqual(layer_key.chunk_hash_bytes, direct_key_result[0][3])
         self.assertIn("@group:1@cache_role:kv@cache_family:c2@layer_id:1", layer_key.to_string())
+
+    def test_sparse_store_mask_pre_shards_before_hash_construction(self):
+        hashes = ["a", "b", "c", "d"]
+        result = list(
+            self.db.process_token_key_strings_with_block_ids_sparse_store_mask(
+                64,
+                hashes,
+                [10, 11, 12, 13],
+                [True, False, True, True],
+                shard_rank=1,
+                shard_size=2,
+            )
+        )
+        self.assertEqual([(start, end, block_id) for start, end, _, _, block_id in result], [(32, 48, 12)])
+
+    def test_sparse_store_mask_rejects_short_mask(self):
+        self.assertFalse(
+            self.db.can_use_sparse_store_mask_key_build(
+                64,
+                ["a", "b", "c", "d"],
+                [True, False],
+            )
+        )
 
     def test_get_block_hashes_rehashes_grouped_str_hashes(self):
         result = get_block_hashes(["a", "b", "c", "d"], group_block_size=32, hash_block_size=16)

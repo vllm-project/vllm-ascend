@@ -49,6 +49,19 @@ To guarantee uniform hash generation, it is required to synchronize the PYTHONHA
 export PYTHONHASHSEED=0
 ```
 
+AscendStore also provides the following performance switches. Except for the
+direct key-string path, they are disabled by default so deployments can opt in
+after validating their cache-visibility and retention requirements.
+
+| Environment variable | Default | Description |
+| :--- | :--- | :--- |
+| `VLLM_ASCEND_PUT_KEY_STRING_FAST_PATH` | `1` | Builds backend key strings without allocating intermediate `PoolKey` objects. Layerwise mode keeps using `PoolKey` because it needs per-layer keys. |
+| `VLLM_ASCEND_PUT_SPARSE_STORE_MASK` | `0` | Builds keys only for chunks selected by the hybrid-cache store mask. The implementation falls back automatically when mask and key granularities do not match. |
+| `VLLM_ASCEND_PUT_PRE_SHARD_KEY_BUILD` | `0` | With sparse store-mask key building enabled, builds only the keys owned by the local put shard. |
+| `VLLM_ASCEND_LOOKUP_REACHABLE_MASK` | `0` | Skips hybrid-cache chunks that cannot contribute to an aligned external-cache hit. |
+| `VLLM_ASCEND_PER_REQUEST_SAVE_WAIT` | `0` | Waits only for save jobs belonging to the current request instead of the complete global save queue. |
+| `VLLM_ASCEND_ASYNC_SAVE` | `0` | Returns after enqueueing save jobs. This removes backend save time from the request critical path, but a following identical request can perform lookup before the save becomes visible. Per-request waiting takes precedence when both switches are enabled. |
+
 ## Example of using Mooncake as a KV Pool backend
 
 * Software:

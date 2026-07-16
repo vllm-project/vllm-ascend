@@ -199,6 +199,40 @@ class AscendStoreCoordinator:
             masks.append([True] * num_chunks if mask is None else mask)
         return tuple(masks)
 
+    def lookup_mask(
+        self,
+        aligned_token_len: int,
+    ) -> tuple[list[bool] | None, ...]:
+        """Return chunks that can contribute to an aligned external hit.
+
+        ``None`` means that every chunk in the group is a lookup candidate.
+        The final hit length is still decided by ``find_longest_cache_hit``.
+        """
+        assert aligned_token_len % self.lcm_block_size == 0, (
+            f"aligned_token_len ({aligned_token_len}) must be a multiple of lcm_block_size ({self.lcm_block_size})"
+        )
+        masks: list[list[bool] | None] = []
+        for group_id, spec in enumerate(self.group_effective_specs):
+            num_chunks = aligned_token_len // self.group_effective_block_sizes[group_id]
+            if not _uses_reachable_mask(self.group_cache_families[group_id]):
+                masks.append(None)
+                continue
+            manager_cls = _get_manager_class(_unwrap_spec(self.kv_cache_groups[group_id].kv_cache_spec))
+            mask = _reachable_block_mask(
+                manager_cls,
+                start_block=0,
+                end_block=num_chunks,
+                alignment_tokens=self.lcm_block_size,
+                kv_cache_spec=spec,
+                use_eagle=group_id in self.eagle_reachable_group_ids,
+                retention_interval=None,
+                num_prompt_tokens=None,
+            )
+            if mask is not None:
+                assert len(mask) == num_chunks
+            masks.append(None if mask is None or all(mask) else mask)
+        return tuple(masks)
+
     def block_hashes_for_spec(self, block_hashes: list[BlockHash], spec: KVCacheSpec) -> BlockHashList:
         if spec.block_size == self.hash_block_size:
             return block_hashes

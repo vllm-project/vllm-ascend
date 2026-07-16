@@ -373,6 +373,64 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         keys, _, _ = store.put_calls[0]
         self.assertEqual(len(keys), 1)
 
+    def test_handle_request_skips_known_kvpool_hit_prefix(self):
+        t, store = self._make_thread([0, 0])
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=64,
+            block_ids=[0, 1, 2, 3],
+            block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
+            load_spec=LoadSpec(
+                vllm_cached_tokens=0,
+                kvpool_cached_tokens=31,
+                kvpool_store_skip_tokens=32,
+                can_load=True,
+            ),
+        )
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+        t._handle_request(req)
+        keys, _, _ = store.put_calls[0]
+        self.assertEqual(len(keys), 2)
+        self.assertTrue(keys[0].endswith("@k2"))
+        self.assertTrue(keys[1].endswith("@k3"))
+
+    def test_per_request_save_event_completes_on_success(self):
+        t, _ = self._make_thread([1])
+        t._per_request_save_wait = True
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[0],
+            block_hashes=[b"h0"],  # type: ignore[arg-type]
+        )
+        t.add_stored_request("r1")
+        done = t.prepare_stored_request_done_event("r1")
+        t.request_queue.put(req)
+        t._handle_request(req)
+        self.assertIsNotNone(done)
+        self.assertTrue(done.is_set())  # type: ignore[union-attr]
+        self.assertEqual(t.request_queue.unfinished_tasks, 0)
+
+    def test_save_exception_completes_event_and_queue_lifecycle(self):
+        t, store = self._make_thread([0])
+        t._per_request_save_wait = True
+        store.put = MagicMock(side_effect=RuntimeError("put failed"))
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[0],
+            block_hashes=[b"h0"],  # type: ignore[arg-type]
+        )
+        t.add_stored_request("r1")
+        done = t.prepare_stored_request_done_event("r1")
+        t.request_queue.put(req)
+        t._handle_request(req)
+        self.assertIsNotNone(done)
+        self.assertTrue(done.is_set())  # type: ignore[union-attr]
+        self.assertEqual(t.request_queue.unfinished_tasks, 0)
+        self.assertNotIn("r1", t.stored_requests)
+
 
 class TestKVCacheStoreRecvingThread(unittest.TestCase):
     def test_handle_request(self):

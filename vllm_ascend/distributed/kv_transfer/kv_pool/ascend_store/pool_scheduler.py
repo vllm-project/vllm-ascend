@@ -91,6 +91,8 @@ class KVPoolScheduler:
             "consumer_is_to_put", False
         )
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
+        retention_interval = getattr(envs, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
+        self.retention_interval = retention_interval if isinstance(retention_interval, int) else None
         self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "save_decode_cache", False
         )
@@ -495,14 +497,22 @@ class KVPoolScheduler:
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_load:
             return 0, False
 
+        prompt_token_len = len(request.prompt_token_ids)
+        if (
+            self.retention_interval is not None
+            and not self.use_layerwise
+            and prompt_token_len < 2 * self.retention_interval
+        ):
+            return 0, False
+
         if self.use_gva_layerwise:
-            token_len = len(request.prompt_token_ids)
+            token_len = prompt_token_len
             num_external_hit_tokens = self._get_layerwise_gva_hit_tokens(request, token_len, num_computed_tokens)
         else:
             if self._discard_partial_chunks:
-                token_len = self._floor_to_cache_transfer_granularity(len(request.prompt_token_ids))
+                token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
             else:
-                token_len = len(request.prompt_token_ids)
+                token_len = prompt_token_len
 
             if token_len < self.cache_transfer_granularity:
                 return 0, False
@@ -512,17 +522,21 @@ class KVPoolScheduler:
                     request, token_len, num_computed_tokens, include_layers=True
                 )
             else:
+                if num_computed_tokens >= token_len:
+                    return 0, False
                 if self.client is None:
                     self.client = LookupKeyClient(self.vllm_config)
                 num_external_hit_tokens = self.client.lookup(
                     token_len,
                     request.block_hashes,
                     self.kv_cache_group_ids,
+                    hbm_hit_tokens=num_computed_tokens,
                 )
 
         if num_external_hit_tokens == 0:
             return 0, False
 
+        store_skip_tokens = num_external_hit_tokens
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
 
@@ -550,6 +564,7 @@ class KVPoolScheduler:
             vllm_cached_tokens=num_computed_tokens,
             kvpool_cached_tokens=num_external_hit_tokens,
             can_load=force_layerwise_load,
+            kvpool_store_skip_tokens=store_skip_tokens,
         )
         logger.info(
             "KV pool load spec created req=%s vllm_cached=%d kvpool_cached=%d "
@@ -1096,13 +1111,15 @@ class LookupKeyClient:
         token_len: int,
         block_hashes: list[BlockHash],
         kv_cache_group_ids: list[int] | None = None,
+        hbm_hit_tokens: int = 0,
     ) -> int:
         kv_cache_group_ids = kv_cache_group_ids or [0]
         hash_strs = [h.hex() for h in block_hashes]
         hash_frames = self.encoder.encode(hash_strs)
         kv_group_frames = self.encoder.encode(kv_cache_group_ids)
         token_len_bytes = token_len.to_bytes(4, byteorder="big")
-        all_frames = [token_len_bytes] + list(kv_group_frames) + list(hash_frames)
+        hbm_hit_bytes = hbm_hit_tokens.to_bytes(4, byteorder="big")
+        all_frames = [token_len_bytes] + list(kv_group_frames) + [hbm_hit_bytes] + list(hash_frames)
         self.socket.send_multipart(all_frames, copy=False)
         resp = self.socket.recv()
         result = int.from_bytes(resp, "big")

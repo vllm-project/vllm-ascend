@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -110,16 +111,16 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         cls = self._make_worker_class()
         worker = object.__new__(cls)
         worker.num_kv_cache_groups = 1
+        worker.lookup_reachable_mask = False
         worker.cache_coordinator = MagicMock()
         worker.cache_coordinator.find_longest_cache_hit.return_value = ((), 128)
         worker.m_store = MagicMock()
         worker.m_store.exists.return_value = [1]
 
-        key = MagicMock()
-        key.chunk_hash = "ab" * 32
-        key.to_string.return_value = "key"
         worker.token_database = MagicMock()
-        worker.token_database.process_tokens.return_value = [(0, 128, key)]
+        worker.token_database.get_block_size.return_value = 128
+        worker.token_database.group_cache_families = {"kv": {0: "default"}}
+        worker.token_database.process_token_key_strings.return_value = [(0, 128, "key", "ab" * 32)]
 
         hit = worker._lookup_with_coordinator(
             128,
@@ -132,6 +133,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         self.assertEqual(hit, 128)
         worker.cache_coordinator.find_longest_cache_hit.assert_called_once()
         self.assertFalse(worker.cache_coordinator.find_longest_cache_hit.call_args.kwargs["apply_eagle"])
+        worker.token_database.process_tokens.assert_not_called()
 
 
 class TestKVPoolWorkerInit(unittest.TestCase):
@@ -580,6 +582,8 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
     def test_wait_for_save(self):
         worker = self._make_worker()
         worker.kv_send_thread = MagicMock()
+        worker.kv_send_thread._per_request_save_wait = False
+        worker.kv_send_thread._async_save = False
 
         req = ReqMeta(
             req_id="r1",
@@ -593,6 +597,45 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.wait_for_save(meta)
         worker.kv_send_thread.add_stored_request.assert_called_with("r1")
         worker.kv_send_thread.add_request.assert_called_once()
+        worker.kv_send_thread.request_queue.join.assert_called_once()
+
+    def test_wait_for_save_async_does_not_join_global_queue(self):
+        worker = self._make_worker()
+        worker.kv_send_thread = MagicMock()
+        worker.kv_send_thread._per_request_save_wait = False
+        worker.kv_send_thread._async_save = True
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[0],
+            block_hashes=["h0"],
+            can_save=True,
+        )
+        meta = AscendConnectorMetadata(set(), set())
+        meta.add_request(req)
+        worker.wait_for_save(meta)
+        worker.kv_send_thread.request_queue.join.assert_not_called()
+
+    def test_wait_for_save_per_request_takes_precedence(self):
+        worker = self._make_worker()
+        worker.kv_send_thread = MagicMock()
+        worker.kv_send_thread._per_request_save_wait = True
+        worker.kv_send_thread._async_save = True
+        done = threading.Event()
+        done.set()
+        worker.kv_send_thread.prepare_stored_request_done_event.return_value = done
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[0],
+            block_hashes=["h0"],
+            can_save=True,
+        )
+        meta = AscendConnectorMetadata(set(), set())
+        meta.add_request(req)
+        worker.wait_for_save(meta)
+        worker.kv_send_thread.prepare_stored_request_done_event.assert_called_once_with("r1")
+        worker.kv_send_thread.request_queue.join.assert_not_called()
 
     def test_wait_for_save_skip_non_save(self):
         worker = self._make_worker()
