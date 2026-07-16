@@ -2280,7 +2280,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_reqs=num_reqs,
                     num_reqs_padded=num_reqs_padded,
                     max_query_len=max_num_scheduled_tokens,
-                    ubatch_slices=None,
+                    ubatch_slices=ubatch_slices_attn,
                     logits_indices=logits_indices,
                     use_spec_decode=use_spec_decode,
                     num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
@@ -3367,10 +3367,20 @@ class NPUModelRunner(GPUModelRunner):
                 from vllm_ascend.attention.kvcomp_attn.attention_utils import build_kvcomp_metadata
                 build_kvcomp_metadata(self.kvcomp_meta_data, cm)
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
-                _build_attn_group_metadata(
-                    kv_cache_gid, attn_gid, cm, num_reqs_actual,
-                    prefill_ratio_to_sas_metadata, decode_ratio_to_sas_metadata,
-                    common_ratio_to_sas_metadata)
+                if ubatch_slices is not None:
+                    for ubid, _cm in enumerate(split_attn_metadata(ubatch_slices, cm)):
+                        logger.info("ubid: %d, _cm: %s", ubid, _cm)
+                        _build_attn_group_metadata(
+                            kv_cache_gid, attn_gid, _cm, num_reqs_actual,
+                            prefill_ratio_to_sas_metadata,
+                            decode_ratio_to_sas_metadata,
+                            common_ratio_to_sas_metadata, ubid=ubid)
+                else:
+                    _build_attn_group_metadata(
+                        kv_cache_gid, attn_gid, cm, num_reqs_actual,
+                        prefill_ratio_to_sas_metadata,
+                        decode_ratio_to_sas_metadata,
+                        common_ratio_to_sas_metadata)
         if self.is_mm_prefix_lm:
             req_doc_ranges = {}
             for req_id in self.input_batch.req_ids:
