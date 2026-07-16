@@ -628,6 +628,7 @@
     - tests/ut/test_platform.py
     - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
     - tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py
+    - tests/e2e/pull_request/one_card/test_a5_dispatch_quant.py
 
 # === Features ===
 - name: quantization_gqa_mla_c8
@@ -712,6 +713,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/spec_decode/test_ngram.py: 170
   tests/e2e/pull_request/one_card/spec_decode/test_ngram_npu.py: 170
   tests/e2e/pull_request/one_card/spec_decode/test_suffix.py: 200
+  tests/e2e/pull_request/one_card/test_a5_dispatch_quant.py: 30
   tests/e2e/pull_request/one_card/test_attention_fa3.py: 30
   tests/e2e/pull_request/one_card/test_batch_invariant.py: 700
   tests/e2e/pull_request/one_card/test_camem.py: 150
