@@ -1208,6 +1208,7 @@ Recommended configurations for serving `GLM-5.2` with a 1M context window on Atl
 | ---- | -------- | ----------- | ------- |
 | Single-node co-located | 1 Atlas 800 A3 (64G x 16) | `DP1 PP1 TP16 PCP1 DCP16` | `1024000` |
 | Dual-node co-located | 2 Atlas 800 A3 (64G x 16) | `DP4 PP1 TP8 PCP1 DCP8` | `1024000` |
+| 2P2D PD disaggregation | 2 prefiller A3 nodes + 2 decoder A3 nodes | Prefill `DP4 PP1 TP8 PCP1 DCP8`, Decode `DP4 PP1 TP8 PCP1 DCP8` | `1024000` |
 
 #### Single-Node 1M Deployment
 
@@ -1264,6 +1265,8 @@ Recommended command for both co-located nodes:
 nic_name="<NIC_NAME>"
 local_ip="<CURRENT_NODE_IP>"
 node_0_ip="<NODE0_IP>"
+# Node 0: data_parallel_start_rank=0, server_role_args="--api-server-count 1"
+# Node 1: data_parallel_start_rank=2, server_role_args="--headless"
 data_parallel_start_rank=0
 server_role_args="--api-server-count 1"
 
@@ -1312,6 +1315,175 @@ vllm serve <MODEL_PATH> \
   --quantization ascend \
   --enable-expert-parallel \
   --safetensors-load-strategy prefetch
+```
+
+#### PD Disaggregation 1M Deployment
+
+Recommended command for both prefiller nodes:
+
+```shell
+nic_name="<NIC_NAME>"
+local_ip="<CURRENT_PREFILL_NODE_IP>"
+node_p0_ip="<PREFILL_NODE0_IP>"
+# Prefiller node 0: data_parallel_start_rank=0, server_role_args="--api-server-count 1"
+# Prefiller node 1: data_parallel_start_rank=2, server_role_args="--headless"
+data_parallel_start_rank=0
+server_role_args="--api-server-count 1"
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+
+export VLLM_ASCEND_ENABLE_NZ=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=20
+export HCCL_BUFFSIZE=768
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_SERVER_DEV_MODE=1
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+export ASCEND_ENABLE_USE_FABRIC_MEM=1
+export TASK_QUEUE_ENABLE=1
+export CPU_AFFINITY_CONF=1
+export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
+# Each node uses 2 local DP ranks x TP8 = 16 NPUs. Change the list if needed.
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+
+vllm serve <MODEL_PATH> \
+  --seed 1024 \
+  --host 0.0.0.0 \
+  --port 9081 \
+  --served-model-name glm-52 \
+  --max-model-len 1024000 \
+  --max-num-batched-tokens 16384 \
+  --gpu-memory-utilization 0.80 \
+  ${server_role_args} \
+  --max-num-seqs 32 \
+  --data-parallel-size 4 \
+  --data-parallel-size-local 2 \
+  --data-parallel-start-rank $data_parallel_start_rank \
+  --data-parallel-address $node_p0_ip \
+  --data-parallel-rpc-port 16591 \
+  --pipeline-parallel-size 1 \
+  --tensor-parallel-size 8 \
+  --prefill-context-parallel-size 1 \
+  --decode-context-parallel-size 8 \
+  --cp-kv-cache-interleave-size 128 \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 16, 128]}' \
+  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false}' \
+  --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
+  --quantization ascend \
+  --enable-expert-parallel \
+  --safetensors-load-strategy prefetch \
+  --kv-transfer-config \
+  '{"kv_connector": "MooncakeConnectorV1",
+    "kv_role": "kv_producer",
+    "kv_port": "30000",
+    "engine_id": "0",
+    "kv_connector_extra_config": {
+      "use_ascend_direct": true,
+      "prefill": {
+        "dp_size": 4,
+        "tp_size": 8
+      },
+      "decode": {
+        "dp_size": 4,
+        "tp_size": 8
+      }
+    }
+  }'
+```
+
+Recommended command for both decoder nodes:
+
+```shell
+nic_name="<NIC_NAME>"
+local_ip="<CURRENT_DECODE_NODE_IP>"
+node_d0_ip="<DECODE_NODE0_IP>"
+# Decoder node 0: data_parallel_start_rank=0, server_role_args="--api-server-count 1"
+# Decoder node 1: data_parallel_start_rank=2, server_role_args="--headless"
+data_parallel_start_rank=0
+server_role_args="--api-server-count 1"
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+
+export VLLM_ASCEND_ENABLE_NZ=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=20
+export HCCL_BUFFSIZE=768
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_SERVER_DEV_MODE=1
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+export ASCEND_ENABLE_USE_FABRIC_MEM=1
+export TASK_QUEUE_ENABLE=1
+export CPU_AFFINITY_CONF=1
+export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
+# Each node uses 2 local DP ranks x TP8 = 16 NPUs. Change the list if needed.
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+
+vllm serve <MODEL_PATH> \
+  --seed 1024 \
+  --host 0.0.0.0 \
+  --port 9900 \
+  --served-model-name glm-52 \
+  --max-model-len 1024000 \
+  --max-num-batched-tokens 16384 \
+  --gpu-memory-utilization 0.80 \
+  ${server_role_args} \
+  --max-num-seqs 32 \
+  --data-parallel-size 4 \
+  --data-parallel-size-local 2 \
+  --data-parallel-start-rank $data_parallel_start_rank \
+  --data-parallel-address $node_d0_ip \
+  --data-parallel-rpc-port 16600 \
+  --pipeline-parallel-size 1 \
+  --tensor-parallel-size 8 \
+  --prefill-context-parallel-size 1 \
+  --decode-context-parallel-size 8 \
+  --cp-kv-cache-interleave-size 128 \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 16, 128]}' \
+  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false}' \
+  --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
+  --quantization ascend \
+  --enable-expert-parallel \
+  --safetensors-load-strategy prefetch \
+  --kv-transfer-config \
+  '{"kv_connector": "MooncakeConnectorV1",
+    "kv_role": "kv_consumer",
+    "kv_port": "30100",
+    "engine_id": "1",
+    "kv_connector_extra_config": {
+      "use_ascend_direct": true,
+      "prefill": {
+        "dp_size": 4,
+        "tp_size": 8
+      },
+      "decode": {
+        "dp_size": 4,
+        "tp_size": 8
+      }
+    }
+  }'
+```
+
+Recommended proxy command:
+
+```shell
+unset http_proxy
+unset https_proxy
+
+python load_balance_proxy_server_example.py \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --prefiller-hosts <PREFILL_NODE0_IP> \
+  --prefiller-ports 9081 \
+  --decoder-hosts <DECODE_NODE0_IP> \
+  --decoder-ports 9900
 ```
 
 ## Functional Verification
