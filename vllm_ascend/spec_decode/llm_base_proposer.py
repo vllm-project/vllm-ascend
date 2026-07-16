@@ -913,7 +913,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         common_attn_metadata.num_input_tokens = num_input_tokens
 
         multi_steps_attn_metadata, attn_metadata_i = self.build_draft_attn_metadata(common_attn_metadata, num_input_tokens, num_tokens)
-        self._pad_draft_query_buffers(num_tokens, num_input_tokens)
+        self._pad_draft_buffers(num_tokens, num_input_tokens)
 
         if self.uses_mrope:
             used_update_positions = self.mrope_positions[:, token_indices_to_sample]
@@ -2188,7 +2188,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         attn_metadata_i = per_layer_attn_metadata[self.draft_attn_groups[0].layer_names[0]]
         return multi_steps_attn_metadata, attn_metadata_i
 
-    def _pad_draft_query_buffers(
+    def _pad_draft_buffers(
         self,
         num_actual_tokens: int,
         num_input_tokens: int,
