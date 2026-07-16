@@ -225,7 +225,7 @@ jobs:
     name: Generate hitest recommendations
     needs: lint-and-select-tests
     if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' }}
-    uses: ./.github/workflows/manual-hitest.yaml
+    uses: ./.github/workflows/_manual-hitest.yaml
     secrets: inherit
 
   # Summary gate job — use this single, stable name as the required status check
