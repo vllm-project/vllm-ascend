@@ -344,6 +344,8 @@ class RForkModelLoader(BaseModelLoader):
                     logger.info("RFork uses post-load tensor layout transfer for quantized model.")
                     with _rfork_pre_transfer_weight_processing(model):
                         process_weights_after_loading(model, model_config, target_device)
+                    # Complete async NPU layout conversion before exposing buffers.
+                    torch.npu.synchronize()
 
                 weight_load_start_time = time.perf_counter()
                 if not rfork_worker.pre_transfer(model):
