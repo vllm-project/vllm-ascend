@@ -170,18 +170,19 @@ class AscendDSparkProposer(AscendDflashProposer):
         block_size = self.num_speculative_tokens
         if num_reqs <= 0:
             num_reqs = max(1, min(self.max_graph_batch_size, (num_tokens + block_size - 1) // block_size))
-        num_query_total = min(self._align_dspark_tokens(num_reqs * block_size), self.max_query_tokens)
         num_context = min(num_tokens, self.max_num_tokens)
-        if aclgraph_runtime_mode != CUDAGraphMode.NONE:
+        if aclgraph_runtime_mode != CUDAGraphMode.NONE or self.use_cuda_graph:
             num_query_total = min(self._align_dspark_tokens(num_tokens), self.max_query_tokens)
             num_reqs = num_query_total // block_size
             batch_descriptor = self._make_dspark_batch_descriptor(num_query_total, batch_descriptor)
+        else:
+            num_query_total = min(self._align_dspark_tokens(num_reqs * block_size), self.max_query_tokens)
 
         num_input_tokens, num_tokens_across_dp, _ = self.runner._sync_metadata_across_dp(
             num_query_total, is_draft_model=True
         )
         num_input_tokens = min(self._align_dspark_tokens(num_input_tokens), self.max_query_tokens)
-        if aclgraph_runtime_mode != CUDAGraphMode.NONE:
+        if aclgraph_runtime_mode != CUDAGraphMode.NONE or self.use_cuda_graph:
             batch_descriptor = self._make_dspark_batch_descriptor(num_input_tokens, batch_descriptor)
         if num_tokens_across_dp is not None:
             if not torch.all(num_tokens_across_dp == num_input_tokens):
