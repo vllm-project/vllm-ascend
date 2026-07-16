@@ -122,18 +122,50 @@ def _gather_paged_kv_to_dense(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # npu_fusion_attention consumes dense TND KV, while cached prefill KV is
     # stored by blocks. Gather only valid tokens from the block table.
+    #
+    # Block-aligned variable-length gather: each sequence contributes only the
+    # blocks it owns (ceil(seq_len / block_size)), NOT padded to the batch's
+    # max sequence length. Max-padding used to materialise a (num_seqs,
+    # max_seq_len, num_kv_heads, head_size) dense tensor then discard most of
+    # it via a mask, blowing up both peak memory and gather bandwidth ~Nx when
+    # a batch mixes short and very long sequences (e.g. a 100K-token decode
+    # request alongside short prompts: 24 seqs padded to 109824 tokens each).
+    # Here only <=block_size-1 in-block tail padding per sequence remains.
     block_size = key_cache.shape[1]
-    max_seq_len = max(seq_lens)
-    seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.long, device=key_cache.device)
-    num_blocks = (max_seq_len + block_size - 1) // block_size
-    block_table = block_table[: len(seq_lens), :num_blocks].long()
+    num_seqs = len(seq_lens)
+    device = key_cache.device
+    seq_lens_t = torch.tensor(seq_lens, dtype=torch.long, device=device)
 
-    flat_block_ids = block_table.reshape(-1)
-    max_tokens_padded = num_blocks * block_size
-    dense_shape = (len(seq_lens), max_tokens_padded, num_kv_heads, head_size)
-    gathered_key = key_cache.index_select(0, flat_block_ids).reshape(dense_shape)
-    gathered_value = value_cache.index_select(0, flat_block_ids).reshape(dense_shape)
+    # blocks owned by each sequence (variable, no max-padding)
+    blocks_per_seq = (seq_lens_t + block_size - 1) // block_size  # (num_seqs,)
+    max_blocks_needed = int(blocks_per_seq.max().item())
+    cols = torch.arange(max_blocks_needed, device=device)
+    owned = cols.unsqueeze(0) < blocks_per_seq.unsqueeze(1)  # (num_seqs, max_blocks_needed)
+    flat_block_ids = block_table[:num_seqs, :max_blocks_needed].long()[owned]  # (total_blocks,)
 
-    positions = torch.arange(max_tokens_padded, dtype=torch.long, device=key_cache.device)
-    valid_mask = positions.unsqueeze(0) < seq_lens_tensor.unsqueeze(1)
-    return gathered_key[valid_mask].contiguous(), gathered_value[valid_mask].contiguous()
+    total_tokens = flat_block_ids.shape[0] * block_size
+    token_shape = (total_tokens, num_kv_heads, head_size)
+
+    # Trim the <=block_size-1 in-block tail padding of each sequence: map every
+    # block-aligned token back to its (sequence, position-in-sequence) so tokens
+    # beyond seq_len are masked out.
+    tokens_per_seq = blocks_per_seq * block_size  # (num_seqs,)
+    token_seq = torch.repeat_interleave(torch.arange(num_seqs, device=device), tokens_per_seq)
+    seq_starts = torch.repeat_interleave(
+        torch.cat([
+            torch.zeros(1, device=device, dtype=torch.long),
+            torch.cumsum(tokens_per_seq, dim=0)[:-1],
+        ]),
+        tokens_per_seq,
+    )
+    pos_in_seq = torch.arange(total_tokens, device=device) - seq_starts
+    valid_mask = pos_in_seq < seq_lens_t[token_seq]
+
+    # Gather key and value separately so each per-op gathered intermediate is
+    # freed before the next gather: peak is one gathered + one compacted tensor,
+    # not both gathered tensors alive at once.
+    def _gather_trim(cache: torch.Tensor) -> torch.Tensor:
+        gathered = cache.index_select(0, flat_block_ids).reshape(token_shape)
+        return gathered[valid_mask].contiguous()
+
+    return _gather_trim(key_cache), _gather_trim(value_cache)
