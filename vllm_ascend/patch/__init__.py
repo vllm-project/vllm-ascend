@@ -379,6 +379,18 @@
 #       Remove this patch if upstream exposes a platform allocator capability hook
 #       for sleep mode validation.
 #
+# ** 14. File: platform/patch_scheduler.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.sched.scheduler.Scheduler._update_requests_with_invalid_blocks`
+#    Why:
+#       Upstream vLLM 0.23 assumes one KV cache group when handling invalid blocks from KV load failures.
+#    How:
+#       Scan all KV cache groups and rewind to the earliest invalid token boundary.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/48216
+#    Future Plan:
+#       Remove this patch once the supported upstream vLLM version includes hybrid invalid-block handling.
+#
 # ** 15. File: platform/patch_weight_transfer_engine.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.distributed.weight_transfer.factory.WeightTransferEngineFactory._registry["nccl"]`
