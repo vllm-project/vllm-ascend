@@ -4,10 +4,13 @@ The patch (vllm_ascend.patch.worker.patch_cpu_gpu_buffer) replaces
 ``copy_to_gpu`` with a version that copies through two rotating pinned
 CPU shadow buffers, preventing async-scheduling races where the next
 iteration's CPU writes corrupt an in-flight H2D transfer.
+
+Each shadow is guarded by an NPU event: before reusing a shadow (two
+iterations later), ``synchronize()`` ensures its prior H2D completed.
 """
 
 import torch
-import torch_npu  # noqa: F401  -- required for NPU device
+import torch_npu  # noqa: F401  -- required for NPU device and Event
 
 import vllm_ascend.patch.worker  # noqa: F401  -- triggers patch registration
 from vllm.v1.utils import CpuGpuBuffer
@@ -26,6 +29,13 @@ class TestCpuGpuBufferDoubleBuffer:
             assert shadow.shape == buf.cpu.shape
             assert shadow.dtype == buf.cpu.dtype
         assert buf._shadow_idx == 0
+
+    def test_init_creates_two_events(self):
+        buf = _make_buffer(8, torch.int32, torch.device("npu:0"))
+        assert hasattr(buf, "_shadow_events")
+        assert len(buf._shadow_events) == 2
+        for evt in buf._shadow_events:
+            assert isinstance(evt, torch.npu.Event)
 
     def test_cpu_gpu_np_addresses_stay_fixed(self):
         """The patch must not change cpu/gpu/np addresses (graph + ref safety)."""
@@ -83,6 +93,27 @@ class TestCpuGpuBufferDoubleBuffer:
         assert buf._shadow_buffers[0].tolist() == [10, 10, 10, 10]
         # shadow[1] should hold 20 (iteration 1's snapshot).
         assert buf._shadow_buffers[1].tolist() == [20, 20, 20, 20]
+
+    def test_reuse_shadow_waits_for_prior_h2d(self):
+        """Third call reuses shadow[0]; its data must reflect iteration 2, not 0.
+
+        This verifies the event guard: ``synchronize()`` before reusing
+        shadow[0] ensures iteration 0's H2D has completed, so writing
+        iteration 2's data into shadow[0] is safe.
+        """
+        buf = _make_buffer(4, torch.int32, torch.device("npu:0"))
+        # Iteration 0 -> shadow[0]
+        buf.cpu.fill_(10)
+        buf.copy_to_gpu()
+        # Iteration 1 -> shadow[1]
+        buf.cpu.fill_(20)
+        buf.copy_to_gpu()
+        # Iteration 2 -> shadow[0] (reused)
+        buf.cpu.fill_(30)
+        buf.copy_to_gpu()
+        buf.gpu.npu.stream_synchronize()
+        assert buf.gpu.tolist() == [30, 30, 30, 30]
+        assert buf._shadow_buffers[0].tolist() == [30, 30, 30, 30]
 
     def test_partial_copy_to_gpu(self):
         buf = _make_buffer(8, torch.int32, torch.device("npu:0"))
