@@ -49,9 +49,6 @@ class AscendConfig:
         eplb_config = additional_config.get("eplb_config", {})
         self.eplb_config = EplbConfig(eplb_config)
 
-        weight_prefetch_config = additional_config.get("weight_prefetch_config", {})
-        self.weight_prefetch_config = WeightPrefetchConfig(weight_prefetch_config)
-
         profiling_chunk_config = additional_config.get("profiling_chunk_config", {})
         self.profiling_chunk_config = ProfilingChunkConfig(profiling_chunk_config)
         if self.profiling_chunk_config.enabled:
@@ -169,6 +166,7 @@ class AscendConfig:
             "VLLM_ASCEND_ENABLE_FUSED_MC2",
             ascend_envs.VLLM_ASCEND_ENABLE_FUSED_MC2,
         )
+        assert self.enable_fused_mc2 in (0, 1), f"enable_fused_mc2 must be 0 or 1, got {self.enable_fused_mc2}"
         self.enable_mlapo = self._get_config_value(
             additional_config,
             "enable_mlapo",
@@ -645,25 +643,6 @@ class XliteGraphConfig:
                     "current_block_size=%d, recommended_block_size=128.",
                     vllm_config.cache_config.block_size,
                 )
-
-
-class WeightPrefetchConfig:
-    """
-    Configuration Object for weight_prefetch_config from additional_config
-    """
-
-    prefetch_ratio: dict = {
-        "attn": {
-            "qkv": 1.0,
-            "o": 1.0,
-        },
-        "moe": {"gate_up": 0.8},
-        "mlp": {"gate_up": 1.0, "down": 1.0},
-    }
-
-    def __init__(self, weight_prefetch_config: dict):
-        self.enabled = weight_prefetch_config.get("enabled", False)
-        self.prefetch_ratio = weight_prefetch_config.get("prefetch_ratio", self.prefetch_ratio)
 
 
 class ProfilingChunkConfig:

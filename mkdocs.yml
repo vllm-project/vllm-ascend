@@ -261,7 +261,6 @@ nav:
         - user_guide/feature_guide/Fine_grained_TP.md
         - user_guide/feature_guide/speculative_decoding.md
         - user_guide/feature_guide/context_parallel.md
-        - user_guide/feature_guide/weight_prefetch.md
         - user_guide/feature_guide/sequence_parallelism.md
         - user_guide/feature_guide/batch_invariance.md
         - user_guide/feature_guide/lmcache_ascend_deployment.md

@@ -53,6 +53,7 @@ from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kerne
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
 from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
+from vllm_ascend.worker.utils import copy_snapshot_to_gpu
 
 if not vllm_version_is("0.24.0"):
     from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
@@ -275,30 +276,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_arange_np = np.arange(self.max_num_tokens + 1, dtype=np.int32)
         self.enable_enpu = self.runner.enable_enpu
         self.use_eagle = self.runner.use_eagle
-        # Sliding window attention for draft model
-        self.draft_window_size = getattr(self.speculative_config, "draft_window_size", None)
-        if self.draft_window_size is None and self.vllm_config.additional_config:
-            self.draft_window_size = self.vllm_config.additional_config.get("draft_window_size")
-        else:
-            self.draft_window_size = None
-
-        # Sliding-window draft attention adapter. Reuse ``self.draft_window_size``
-        # resolved above (speculative_config -> additional_config -> None, all
-        # None-guarded). Do NOT re-read additional_config here: it is None in the
-        # proposers used by unit tests, and the unguarded ``.get()`` would crash.
-        if self.draft_window_size is not None:
-            # EAGLE3: seq_lens at apply time is context-only, so the window end
-            # must cover the K draft positions beyond it -> future_offset = K.
-            # DFlash: set_inputs_first_pass already bakes the query stretch
-            # (bonus + mask) into seq_lens -> future_offset = 0.
-            future_offset = 0 if self.method == "dflash" else self.num_speculative_tokens
-            self.sliding_window = SlidingWindowAdapter(
-                self.draft_window_size,
-                self.runner.block_size,
-                self.runner.max_num_reqs,
-                future_offset,
-                self.device,
-            )
+        self.draft_window_size = None
+        self.sliding_window = None
 
     def _raise_if_padded_drafter_batch_disabled_and_full_graph_enabled(self):
         if (
@@ -362,6 +341,24 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.kernel_block_size = (
             draft_attn_layers_dict[self.attn_layer_names[0]].get_attn_backend().get_supported_kernel_block_sizes()[0]
         )
+
+        # Sliding-window draft attention adapter.
+        self.draft_window_size = (
+            self.vllm_config.additional_config.get("draft_window_size") if self.vllm_config.additional_config else None
+        )
+        if self.draft_window_size is not None:
+            # EAGLE3: seq_lens is context-only, K draft positions lie beyond it
+            #   -> future_offset = K.
+            # DFlash: set_inputs_first_pass bakes the query stretch into seq_lens
+            #   -> future_offset = 0.
+            future_offset = 0 if self.method == "dflash" else self.num_speculative_tokens
+            self.sliding_window = SlidingWindowAdapter(
+                self.draft_window_size,
+                self.kernel_block_size,
+                self.runner.max_num_reqs,
+                future_offset,
+                self.device,
+            )
 
         self.piece_all_attn_layer_name = []
         for _ in range(self.num_speculative_tokens):
@@ -607,7 +604,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             # num_reqs is already the padded version
             self.query_start_loc.cpu[: num_reqs + 1].copy_(self.runner.query_start_loc.cpu[: num_reqs + 1])
-            self.query_start_loc.copy_to_gpu()
+            copy_snapshot_to_gpu(self.query_start_loc)
 
             common_attn_metadata = AscendCommonAttentionMetadata(
                 query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
@@ -894,8 +891,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
 
         if self.draft_window_size is not None:
-            # Save original seq_lens and apply sliding window before any CP adjustments.
-            # Guarded so the clone is skipped when the window is disabled.
             self.sliding_window.apply(common_attn_metadata)
 
         if self.supports_mm_inputs:
@@ -1230,7 +1225,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # [batch_size, 1]
                 return draft_token_ids.view(-1, self.num_speculative_tokens)
 
-        if self.pcp_size * self.dcp_size > 1 and is_prefill:
+        if self.pcp_size > 1 and is_prefill:
             draft_token_ids_list = []
             for _ in range(self.num_speculative_tokens):
                 draft_token_ids_list.append(draft_token_ids)

@@ -162,13 +162,12 @@ from vllm_ascend.utils import (
     lmhead_tp_enable,
     oproj_tp_enable,
     set_potential_max_tokens,
-    set_weight_prefetch_method,
     should_skip_allreduce_across_dp_group,
     vllm_version_is,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPAsyncSpecDecodeRebuildResult, PCPManager
-from vllm_ascend.worker.utils import AscendKVBlockZeroer
+from vllm_ascend.worker.utils import AscendKVBlockZeroer, copy_snapshot_to_gpu
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType,
@@ -341,7 +340,6 @@ class NPUModelRunner(GPUModelRunner):
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
-        set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
 
         # Dump / PrecisionDebugger configuration now comes from AscendConfig
         dump_cfg = self.ascend_config.dump_config_path
@@ -848,7 +846,7 @@ class NPUModelRunner(GPUModelRunner):
                 query_start_loc.np[num_reqs_padded + 1] = num_tokens_padded
                 num_reqs_padded = num_reqs_padded + 1
 
-        query_start_loc.copy_to_gpu()
+        copy_snapshot_to_gpu(query_start_loc)
 
         return num_reqs_padded
 
@@ -1058,7 +1056,7 @@ class NPUModelRunner(GPUModelRunner):
 
         self.query_start_loc.np[0] = 0
         self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
-        self.query_start_loc.copy_to_gpu()
+        copy_snapshot_to_gpu(self.query_start_loc)
 
         # Now, query_start_loc is padded.
         # But gdn needs an unpadded one.
@@ -1068,7 +1066,7 @@ class NPUModelRunner(GPUModelRunner):
             self.gdn_query_start_loc.np[0] = 0
             self.gdn_query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
             self.gdn_query_start_loc.np[num_reqs + 1 :].fill(cu_num_tokens[-1])
-            self.gdn_query_start_loc.copy_to_gpu()
+            copy_snapshot_to_gpu(self.gdn_query_start_loc)
 
 
         # Compute optimistic seq_lens (assumes all draft tokens from previous
@@ -1683,6 +1681,8 @@ class NPUModelRunner(GPUModelRunner):
         sample_hidden_states: torch.Tensor = None,
         target_model_batch_desc: BatchDescriptor = None,
     ) -> list[list[int]] | None:
+        self._log_propose_draft_token_ids_entry(spec_decode_metadata, num_scheduled_tokens)
+
         if not self.drafter:
             # Speculative decoding is not enabled.
             draft_token_ids = None
@@ -1917,6 +1917,43 @@ class NPUModelRunner(GPUModelRunner):
             raise ValueError(f"Unknown speculative decoding method: {self.speculative_config.method}")
 
         return draft_token_ids
+
+    def _log_propose_draft_token_ids_entry(
+        self,
+        spec_decode_metadata: SpecDecodeMetadata,
+        num_scheduled_tokens: int,
+    ) -> None:
+        """DFX entry probe for propose_draft_token_ids.
+
+        Records which speculative-decoding sub-path is about to run
+        (ngram / medusa / eagle / extract_hidden_states / ...). When the
+        `Unknown speculative decoding method` ValueError fires further down,
+        or when end-to-end speedup is unexpectedly absent, this tells the
+        operator which drafter object was actually constructed and whether k
+        (num_speculative_tokens) is non-trivial. Type lookups and getattr are
+        host-only; gated by isEnabledFor(DEBUG).
+        """
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        drafter_type = type(self.drafter).__name__ if self.drafter else None
+        spec_meta_state = (
+            "None" if spec_decode_metadata is None
+            else f"max_spec_len={spec_decode_metadata.max_spec_len}"
+        )
+        logger.debug(
+            "[spec/dfx] propose_draft_token_ids entry: "
+            "drafter=%s, method=%s, k=%d, num_reqs=%d, "
+            "num_scheduled_tokens=%d, spec_decode_metadata=%s, "
+            "use_cp=%s, pcp_size=%d",
+            drafter_type,
+            self.speculative_config.method if self.speculative_config else None,
+            self.num_spec_tokens,
+            self.input_batch.num_reqs,
+            num_scheduled_tokens,
+            spec_meta_state,
+            getattr(self, "use_cp", False),
+            getattr(self, "pcp_size", 1),
+        )
 
     def _copy_draft_token_ids_to_cpu(
         self, scheduler_output: "SchedulerOutput", zeros_only: bool = False
@@ -3527,10 +3564,10 @@ class NPUModelRunner(GPUModelRunner):
             cum_num_tokens = self._get_cumsum_and_arange(
             num_scheduled_tokens, self.query_pos.np)
             self.query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
-            self.query_start_loc.copy_to_gpu()
+            copy_snapshot_to_gpu(self.query_start_loc)
             if self._has_gdn:
                 self.gdn_query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
-                self.gdn_query_start_loc.copy_to_gpu()
+                copy_snapshot_to_gpu(self.gdn_query_start_loc)
 
             if not profile_cpp:
                 num_reqs_padded = self._pad_query_start_loc_for_fia(

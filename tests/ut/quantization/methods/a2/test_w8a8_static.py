@@ -47,10 +47,9 @@ class TestAscendW8A8LinearMethod(TestBase):
             elif dtype == torch.float16:
                 self.assertEqual(params["deq_scale"].dtype, torch.int64)
 
-    @patch("vllm_ascend.quantization.methods.w8a8_static.get_weight_prefetch_method")
     @patch("torch.ops.vllm.quantize")
     @patch("torch_npu.npu_quant_matmul")
-    def test_apply_with_x_not_int8(self, mock_npu_quant_matmul, mock_quantize, mock_get_weight_prefetch_method):
+    def test_apply_with_x_not_int8(self, mock_npu_quant_matmul, mock_quantize):
         layer = MagicMock()
         layer.aclnn_input_scale = 0.1
         layer.aclnn_input_offset = 0.2
@@ -58,8 +57,6 @@ class TestAscendW8A8LinearMethod(TestBase):
         layer.deq_scale = 0.3
         quant_bias = torch.zeros(256)
         layer.quant_bias = quant_bias
-
-        mock_get_weight_prefetch_method.return_value = MagicMock()
 
         x = torch.randn(32, 128)
         bias = torch.randn(256)
@@ -167,10 +164,7 @@ class TestAscendW8A8LinearMethodWithNpu(TestBase):
     def tearDown(self):
         self.mock_get_config.stop()
 
-    @patch("vllm_ascend.quantization.methods.w8a8_static.get_weight_prefetch_method")
-    def test_apply_with_npu(self, mock_get_weight_prefetch_method):
-        mock_get_weight_prefetch_method.return_value = MagicMock()
-
+    def test_apply_with_npu(self):
         input_size, output_size = 128, 256
         params_dtype = torch.bfloat16
         layer = create_linear_layer(self.method, input_size, output_size, params_dtype)
