@@ -205,7 +205,6 @@ TITLES = {
     "user_guide/feature_guide/speculative_decoding.md": {"en": "Speculative Decoding", "zh": "推测解码"},
     "user_guide/feature_guide/structured_output.md": {"en": "Structured Output", "zh": "结构化输出"},
     "user_guide/feature_guide/ucm_deployment.md": {"en": "UCM Deployment", "zh": "UCM 部署"},
-    "user_guide/feature_guide/weight_prefetch.md": {"en": "Weight Prefetch", "zh": "权重预取"},
     "user_guide/index.md": {"en": "Overview", "zh": "概览"},
     "user_guide/release_notes.md": {"en": "Release Notes", "zh": "发布说明"},
     "user_guide/support_matrix/feature_matrix.md": {"en": "Feature Matrix", "zh": "功能矩阵"},
