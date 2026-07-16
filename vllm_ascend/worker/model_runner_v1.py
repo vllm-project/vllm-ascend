@@ -3217,6 +3217,10 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_cpu = None
             num_computed_tokens_cpu = None
 
+        rswa_prefix_lens = None
+        if getattr(self.model_config, "rswa_window", None) is not None:
+            rswa_prefix_lens = num_prompt_tokens_cpu
+
         cm_base = AscendCommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
@@ -3250,6 +3254,7 @@ class NPUModelRunner(GPUModelRunner):
             group_len = self.group_len.gpu[:num_reqs_padded],
             group_key_idx = self.group_key_idx.gpu[:num_reqs_padded],
             group_key_cache_idx = self.group_key_cache_idx.gpu[:num_reqs_padded],
+            rswa_prefix_lens=rswa_prefix_lens,
         )
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:

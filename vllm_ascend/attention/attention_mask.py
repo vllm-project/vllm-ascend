@@ -57,6 +57,43 @@ class AttentionMaskBuilder:
             )
         return self.chunked_prefill_attn_mask
 
+    def get_rswa_attn_mask(
+        self,
+        prefix_lens: torch.Tensor,
+        seq_lens: torch.Tensor,
+        query_lens: torch.Tensor,
+        max_kv_len: int,
+        max_query_len: int,
+        rswa_window: int,
+    ) -> torch.Tensor:
+        prefix_lens = prefix_lens.to(device="cpu", dtype=torch.int64)
+        seq_lens = seq_lens.to(device="cpu", dtype=torch.int64)
+        query_lens = query_lens.to(device="cpu", dtype=torch.int64)
+        num_reqs = prefix_lens.numel()
+        attn_mask = torch.ones(
+            (num_reqs, 1, max_query_len, max_kv_len),
+            dtype=torch.int8,
+            device="cpu",
+        )
+        kv_positions = torch.arange(max_kv_len, dtype=torch.int64)
+        for req_idx in range(num_reqs):
+            query_len = int(query_lens[req_idx].item())
+            if query_len <= 0:
+                continue
+            seq_len = int(seq_lens[req_idx].item())
+            prefix_len = int(prefix_lens[req_idx].item())
+            q_positions = torch.arange(
+                seq_len - query_len,
+                seq_len,
+                dtype=torch.int64,
+            ).unsqueeze(1)
+            causal = kv_positions.unsqueeze(0) <= q_positions
+            in_prefix = kv_positions.unsqueeze(0) < prefix_len
+            in_window = (q_positions - kv_positions.unsqueeze(0)) < rswa_window
+            keep = causal & (in_prefix | in_window)
+            attn_mask[req_idx, 0, :query_len, :] = (~keep).to(torch.int8)
+        return attn_mask.to(self.device, non_blocking=True)
+
     def get_mla_mask(self, dtype: torch.dtype) -> torch.Tensor:
         if self.mla_mask is None or self.mla_mask.dtype != dtype:
             if dtype == torch.float16:
