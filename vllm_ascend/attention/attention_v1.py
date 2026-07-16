@@ -687,6 +687,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         actual_seq_lengths_q = metadata.actual_seq_lengths_q
                         block_tables = metadata.block_tables
                         attn_state = metadata.attn_state
+                        max_query_len = metadata.max_query_len
                         attn_count = attn_count + 1
                         if not metadata.causal:
                             sparse_mode = 0
@@ -695,6 +696,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         seq_lens = attn_metadata[metadata_key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[metadata_key].actual_seq_lengths_q
                         attn_state = attn_metadata[metadata_key].attn_state
+                        max_query_len = attn_metadata[metadata_key].max_query_len
                         # NOTE:
                         # For models with sliding-window attention on the FIA full-graph replay path,
                         # rebinding `block_tables` to the latest metadata tensor causes corrupted /
@@ -727,8 +729,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         }
                         input_layout = "BNSD"
                         sparse_mode = 0
-                    is_decode = attn_state == AscendAttentionState.DecodeOnly
-                    update_attn_mask, update_sparse_mode = (None, 0) if is_decode else (attn_mask, sparse_mode)
+                    is_single_token_decode = attn_state == AscendAttentionState.DecodeOnly and max_query_len == 1
+                    update_attn_mask, update_sparse_mode = (
+                        (None, 0) if is_single_token_decode else (attn_mask, sparse_mode)
+                    )
                     torch_npu.npu_fused_infer_attention_score.out(
                         query=query,
                         key=key_cache,
@@ -785,8 +789,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         input_layout = "TND"
-        is_decode = attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-        if is_decode:
+        is_single_token_decode = (
+            attn_metadata.attn_state == AscendAttentionState.DecodeOnly and attn_metadata.max_query_len == 1
+        )
+        if is_single_token_decode:
             attn_mask = None
             sparse_mode = 0
         else:
@@ -1209,8 +1215,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     sparse_mode=0,
                 )
             elif self.sliding_window is not None:
-                is_decode = attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-                attn_mask, sparse_mode = (None, 0) if is_decode else (attn_metadata.attn_mask, 4)
+                is_single_token_decode = (
+                    attn_metadata.attn_state == AscendAttentionState.DecodeOnly and attn_metadata.max_query_len == 1
+                )
+                attn_mask, sparse_mode = (None, 0) if is_single_token_decode else (attn_metadata.attn_mask, 4)
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
@@ -1229,8 +1237,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     sparse_mode=sparse_mode,
                 )
             else:
-                is_decode = attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-                attn_mask, sparse_mode = (None, 0) if is_decode else (attn_metadata.attn_mask, 3)
+                is_single_token_decode = (
+                    attn_metadata.attn_state == AscendAttentionState.DecodeOnly and attn_metadata.max_query_len == 1
+                )
+                attn_mask, sparse_mode = (None, 0) if is_single_token_decode else (attn_metadata.attn_mask, 3)
                 attn_output, _ = DeviceOperator.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
