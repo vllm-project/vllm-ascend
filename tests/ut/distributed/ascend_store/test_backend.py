@@ -571,9 +571,7 @@ class TestMemcacheBackendMethods(unittest.TestCase):
             # Set internal state to avoid lazy init logic during tests
             backend._lazy_init = False
             backend._store_initialized = True
-            backend._is_a2 = False
-            backend._registered_buffers = None
-            backend._buffers_registered = False
+            backend._pending_buffers = None
             return backend
 
     def test_exists(self):
@@ -583,7 +581,6 @@ class TestMemcacheBackendMethods(unittest.TestCase):
 
     def test_register_buffer(self):
         b = self._make_backend()
-        b._is_a2 = True
         b.register_buffer([100], [200])
         b.store.register_buffer.assert_called_once()
 
