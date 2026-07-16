@@ -3323,11 +3323,13 @@ class NPUModelRunner(GPUModelRunner):
                 attn_metadata_dict = attn_metadata
             else:
                 assert isinstance(attn_metadata, list)
+                logger.info("attn_metadata: %s", attn_metadata)
                 attn_metadata_dict = attn_metadata[ubid]
-
+            logger.info("attn_metadata_dict: %s", attn_metadata_dict)
+            logger.info("attn_group.layer_names: %s", attn_group.layer_names)
             for layer_name in attn_group.layer_names:
                 attn_metadata_dict[layer_name] = attn_metadata_i
-
+        logger.info("attn_metadata_dict: %s", attn_metadata)
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         prefill_ratio_to_sas_metadata: dict[Any, Any] = {}
@@ -3368,6 +3370,7 @@ class NPUModelRunner(GPUModelRunner):
                 from vllm_ascend.attention.kvcomp_attn.attention_utils import build_kvcomp_metadata
                 build_kvcomp_metadata(self.kvcomp_meta_data, cm)
             logger.info("cm: %s", cm)
+            logger.info("len(self.attn_groups[kv_cache_gid]): %s", len(self.attn_groups[kv_cache_gid]))
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
                 logger.info("attn_gid: %s", attn_gid)
                 if ubatch_slices is not None:
