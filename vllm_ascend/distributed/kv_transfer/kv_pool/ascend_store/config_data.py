@@ -1175,7 +1175,7 @@ class LayerMultiBlockReqMeta:
     ends: list[int]
     block_ids_by_group: list[list[int]]
     layer_id: int
-    block_hashes: list[Any] = field(default_factory=list)
+    block_hashes: Sequence[Any] = field(default_factory=list)
     is_last_chunk: bool | None = True
     current_event: torch.npu.Event | None = None
     token_ids: list[int] | None = None
@@ -1195,7 +1195,7 @@ class LayerMultiBlockReqMeta:
         block_ids: list[int] | list[list[int]] | None = None,
         token_ids: list[int] | None = None,
         original_block_size: list[int] | int | None = None,
-        block_hashes: list[Any] | None = None,
+        block_hashes: Sequence[Any] | None = None,
         kv_cache_group_id: int = 0,
     ) -> None:
         self.req_id = req_id

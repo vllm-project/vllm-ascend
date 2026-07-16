@@ -1612,12 +1612,12 @@ class KVPoolWorker:
                         starts.append(start)
                         ends.append(end)
                 else:
-                    for start, end, key, _ in self.token_database.process_token_key_strings(
+                    for start, end, key_string, _ in self.token_database.process_token_key_strings(
                         token_len,
                         block_hashes,
                         kv_cache_group_id=group_id,
                     ):
-                        keys.append(key)
+                        keys.append(key_string)
                         starts.append(start)
                         ends.append(end)
 
@@ -1807,12 +1807,12 @@ class KVPoolWorker:
                         starts.append(start)
                         ends.append(end)
                 else:
-                    for start, end, key, _ in self.token_database.process_token_key_strings(
+                    for start, end, key_string, _ in self.token_database.process_token_key_strings(
                         token_len,
                         block_hashes,
                         kv_cache_group_id=group_id,
                     ):
-                        keys.append(key)
+                        keys.append(key_string)
                         starts.append(start)
                         ends.append(end)
 
