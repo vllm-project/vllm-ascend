@@ -1,0 +1,11 @@
+name: Test Shanghai Runner
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/test_shanghai_runner.yml'
+jobs:
+  test-runner:
+    runs-on: linux-aarch64-950dt-8
+    steps:
+      - name: Hello Shanghai
+        run: echo "Shanghai-001 runner is alive! $(uname -m)"
