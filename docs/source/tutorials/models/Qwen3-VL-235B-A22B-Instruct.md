@@ -22,10 +22,10 @@ The support matrix records the maximum verified capability for this model family
 
 ### 3.1 Model Weight
 
-- `Qwen3-VL-235B-A22B-Instruct` (BF16 version): requires 1 Atlas 800 A3 (64G x 16) node or 2 Atlas 800 A2 (64G x 8) nodes. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-Instruct/).
-- `Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot` (quantized version used by single-node validation): requires 1 Atlas 800 A3 (64G x 16) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot).
+- `Qwen3-VL-235B-A22B-Instruct` (BF16 version): requires 1 Atlas 800 A3 (64G x 16) node or 2 Atlas 800 A2 (64G x 8) nodes. [Model Weight](https://modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-Instruct/).
+- `Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot` (quantized version used by single-node validation): requires 1 Atlas 800 A3 (64G x 16) node. [Model Weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot).
 
-It is recommended to download the model weight to a shared directory across multiple nodes, such as `/root/.cache/`, so that all serving nodes can load the same path.
+It is recommended to download the model weight to a shared directory across multiple nodes.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -35,48 +35,83 @@ If you want to deploy the model in a multi-node environment, verify the communic
 
 ### 4.1 Docker Image Installation
 
-**A3 series:**
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-    For example, using images `quay.io/ascend/vllm-ascend:v0.11.0rc2`(for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.11.0rc2-a3`(for Atlas 800 A3).
+=== "A3 series"
 
-    Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+    Start the docker image on each node.
 
     ```bash
-      # Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
-      # Update the vllm-ascend image according to your environment.
-      # Note you should download the weight to /root/.cache in advance.
-      # Update the vllm-ascend image
-      export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
-      export NAME=vllm-ascend
 
-      # Run the container using the defined variables
-      # Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
-      docker run --rm \
-      --name $NAME \
-      --net=host \
-      --privileged=true \
-      --shm-size=500g \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      --device /dev/davinci_manager \
-      --device /dev/devmm_svm \
-      --device /dev/hisi_hdc \
-      -v /usr/local/dcmi:/usr/local/dcmi \
-      -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
-      -it $IMAGE bash
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=512g \
+        --net=host \
+        --privileged=true \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci8 \
+        --device /dev/davinci9 \
+        --device /dev/davinci10 \
+        --device /dev/davinci11 \
+        --device /dev/davinci12 \
+        --device /dev/davinci13 \
+        --device /dev/davinci14 \
+        --device /dev/davinci15 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /etc/hccn.conf:/etc/hccn.conf \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
     ```
 
-**Installation Verification:**
+=== "A2 series"
+
+    Start the docker image on each node.
+
+    ```bash
+
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=512g \
+        --net=host \
+        --privileged=true \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /etc/hccn.conf:/etc/hccn.conf \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
 After starting the container, run the following command to verify the installation:
 
@@ -174,7 +209,7 @@ vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,24,32]}'
 ```
 
-Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [Public FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
 **Key parameters:**
 
@@ -193,7 +228,7 @@ Common Issues Tip: If the service fails to start, HBM is insufficient, or reques
 
 Multi-node MP deployment uses vLLM data parallelism across nodes and tensor parallelism within each node. It is recommended for the BF16 model on 2 Atlas 800 A2 (64G x 8) nodes, or for long-context validation where one node does not provide enough HBM headroom.
 
-Assume you have 2 Atlas 800 A2 nodes and want to deploy `Qwen3-VL-235B-A22B-Instruct` across them. Replace `nic_name`, `local_ip`, and `node0_ip` with the actual network interface and IP addresses in your environment.
+Assume you have 2 Atlas 800 A2 nodes and want to deploy `Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot` across them. Replace `nic_name`, `local_ip`, and `node0_ip` with the actual network interface and IP addresses in your environment.
 
 Run the following script on node 0.
 
@@ -322,13 +357,13 @@ INFO:     Application startup complete.
 - `--tensor-parallel-size 8` maps one TP group to the 8 NPUs on each A2 node.
 - `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` bind HCCL, Gloo, and TP communication to the selected network.
 
-### 5.3 Prefill-Decode Disaggregation
+### 5.3 Multi-Node PD Separation Deployment
 
 PD disaggregation separates Prefill and Decode into different service groups. Prefill nodes process large prompt chunks, Decode nodes serve token generation, and a proxy forwards requests between them. This mode is suitable for production serving scenarios where prefill and decode resource ratios need to be tuned separately.
 
 We recommend using Mooncake for deployment. Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow and request forwarding setup.
 
-The following example matches the validated A3 two-node topology for `Qwen3-VL-235B-A22B-Instruct`:
+The following example matches the validated A3 two-node topology for `Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot`:
 
 - 1 Prefill node: 1 Atlas 800 A3 (64G x 16), DP2 + TP8 + EP.
 - 1 Decode node: 1 Atlas 800 A3 (64G x 16), DP4 + TP4 + EP + full decode ACLGraph.
@@ -455,23 +490,16 @@ Expected result: the HTTP status is 200 and the JSON response contains a `choice
 
 ## 7 Accuracy Evaluation
 
-Here are two accuracy evaluation methods.
-
-### 7.1 Using AISBench
+### Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
-2. After execution, you can get the result. The following results for `Qwen3-VL-235B-A22B-Instruct` are for reference only.
+
+2. After execution, you can get the result.
 
 | dataset | version | metric | mode | vllm-api-general-chat |
 | ------- | ------- | ------ | ---- | --------------------- |
 | textvqa-lite | - | accuracy | gen | 83 |
 | aime2024 | - | accuracy | gen | 93 |
-
-### 7.2 Using Language Model Evaluation Harness
-
-Refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for installation and usage details. For multimodal datasets, enable the model chat template so that Qwen3-VL image placeholders are inserted correctly.
-
-When using online serving, set the evaluation endpoint to the server or proxy started in Section 5, and make sure the `model` value matches `--served-model-name`.
 
 ## 8 Performance Evaluation
 
@@ -515,13 +543,13 @@ After several minutes, you can get the performance evaluation result. This rando
 
 #### Table 1: Scenario Overview
 
-> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs).
-
-| Scenario | Deployment Mode | Total NPUs | Weight Version | Key Considerations |
+| Scenario | Deployment Mode | *Total NPUs | Weight Version | Key Considerations |
 | -------- | --------------- | ---------- | -------------- | ------------------ |
 | Functional validation | Single-node online serving | 16 A3 NPUs | W8A8 | Use shorter context, disable video, and set `--mm-processor-cache-gb 0` to reduce memory pressure. |
 | Long context | Multi-node MP | 16 A3 NPUs | W8A8 | Use TP across each node and DP across nodes. Lower image count or context length if OOM occurs. |
 | Low latency | 1P1D PD disaggregation | 32 A3 NPUs | W8A8 | Separate prefill and decode resources and enable full decode ACLGraph on decode nodes. |
+
+> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs).
 
 #### Table 2: Detailed Node Configuration
 
