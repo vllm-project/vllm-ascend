@@ -1012,6 +1012,21 @@ class AscendDSACPImpl(DSAAttentionImpl):
             self.compressor_norm = self.compressor.norm
             self.compressor_norm_eps = self.compressor.norm_eps
 
+        # IndexCache: skip_topk indicates this layer reuses topk from a previous
+        # indexer-bearing layer; use_index_cache marks whether the buffer must
+        # be kept fresh on non-skip layers so downstream skip layers can read.
+        # In CP, every rank holds its own model replica (and thus its own
+        # topk_indices_buffer), and each rank processes a single contiguous
+        # local token shard per step, so the buffer is always accessed at
+        # offset 0 for compress_topk_idxs.shape[0] rows.
+        self.skip_topk = kwargs.get("skip_topk", False)
+        self.topk_indices_buffer = kwargs.get("topk_indices_buffer")
+        self.use_index_cache = self.skip_topk or getattr(
+            self.vllm_config.model_config.hf_config,
+            "use_index_cache",
+            False,
+        )
+
     def _compute_compressor_metadata(
         self,
         metadata: AscendDSAReqMetadata,
@@ -1041,6 +1056,25 @@ class AscendDSACPImpl(DSAAttentionImpl):
             metadata.num_compressed_tokens,
             metadata.num_reqs_actual,
         )
+
+    def _get_indexcache_topk_indices(self, num_tokens: int, offset: int = 0) -> torch.Tensor:
+        if self.topk_indices_buffer is None:
+            raise RuntimeError("IndexCache requires topk_indices_buffer when skip_topk is enabled.")
+        topk_indices = self.topk_indices_buffer[offset : offset + num_tokens]
+        if topk_indices.dim() == 2:
+            topk_indices = topk_indices.unsqueeze(1)
+        return topk_indices
+
+    def _update_indexcache_topk_indices(self, topk_indices: torch.Tensor, offset: int = 0) -> None:
+        if self.topk_indices_buffer is None:
+            return
+        num_tokens = topk_indices.shape[0]
+        topk_tokens = topk_indices.shape[-1]
+        topk_indices_buffer = self.topk_indices_buffer[offset : offset + num_tokens, :topk_tokens]
+        if topk_indices.dim() == 3 and topk_indices_buffer.dim() == 2:
+            assert topk_indices.shape[1] == 1
+            topk_indices = topk_indices.squeeze(1)
+        topk_indices_buffer.copy_(topk_indices)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         if self.attn_sink.numel() != self.num_heads:
@@ -1377,23 +1411,31 @@ class AscendDSACPImpl(DSAAttentionImpl):
             assert compressor_attn_metadata.req_metadata is not None
             assert compressor_kv_state_metadata.req_metadata is not None
             if self.compress_ratio == 4:
-                self._update_indexer_cache(
-                    x=hidden_states_cache,
-                    kv_cache=kv_cache,
-                    attn_metadata=attn_metadata,
-                    actual_seq_lengths_query=actual_seq_lengths_query,
-                )
-                compress_topk_idxs = self._indexer_select_topk(
-                    x=hidden_states_local,
-                    qr=qr_local,
-                    kv_cache=kv_cache,
-                    attn_metadata=attn_metadata,
-                    cos=local_cos,
-                    sin=local_sin,
-                    actual_seq_lengths_query=local_seq_lengths_query,
-                    actual_seq_lengths_key=local_seq_lengths_key,
-                    qr_pertoken_scale=qr_pertoken_scale_local,
-                )
+                # IndexCache: on skip layers reuse the topk from a previous
+                # indexer layer and bypass the indexer update/select entirely.
+                # CP processes one contiguous local shard per step, so the
+                # shared buffer is always read at offset 0 for num_tokens rows.
+                local_num_tokens = hidden_states_local.shape[0]
+                if self.skip_topk:
+                    compress_topk_idxs = self._get_indexcache_topk_indices(local_num_tokens, offset=0)
+                else:
+                    self._update_indexer_cache(
+                        x=hidden_states_cache,
+                        kv_cache=kv_cache,
+                        attn_metadata=attn_metadata,
+                        actual_seq_lengths_query=actual_seq_lengths_query,
+                    )
+                    compress_topk_idxs = self._indexer_select_topk(
+                        x=hidden_states_local,
+                        qr=qr_local,
+                        kv_cache=kv_cache,
+                        attn_metadata=attn_metadata,
+                        cos=local_cos,
+                        sin=local_sin,
+                        actual_seq_lengths_query=local_seq_lengths_query,
+                        actual_seq_lengths_key=local_seq_lengths_key,
+                        qr_pertoken_scale=qr_pertoken_scale_local,
+                    )
 
             coff = 2 if self.compressor_overlap else 1
             compress_cos, compress_sin, compress_slot_mapping = self._compute_compressor_metadata(
@@ -1423,6 +1465,10 @@ class AscendDSACPImpl(DSAAttentionImpl):
             if compressed_kv.numel() == 0:
                 compressed_kv = None
             DeviceOperator.dsa_kv_compress_scatter(compress_kv_cache, compressed_kv, compress_slot_mapping)
+
+            # IndexCache: keep the topk buffer fresh for downstream skip layers.
+            if self.compress_ratio == 4 and self.use_index_cache and compress_topk_idxs is not None:
+                self._update_indexcache_topk_indices(compress_topk_idxs, offset=0)
 
         attn_op = DeviceOperator.get_dsa_sparse_attn_op()
         extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()
