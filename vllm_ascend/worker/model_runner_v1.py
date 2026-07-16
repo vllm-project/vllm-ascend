@@ -4849,7 +4849,7 @@ class NPUModelRunner(GPUModelRunner):
 
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
-
+        logger.info("self.attn_groups: %s", self.attn_groups)
         # Calculate reorder batch threshold (if needed)
         self.calculate_reorder_batch_threshold()
 
