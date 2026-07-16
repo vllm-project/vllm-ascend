@@ -37,7 +37,7 @@ from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import WeightPrefetchConfig, get_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -57,8 +57,6 @@ ACL_FORMAT_FRACTAL_NZ = 29
 _CUSTOM_OP_ENABLED = None
 _DEVICE_PRINT_OP_REGISTERED = False
 _CURRENT_STREAM = None
-_PREFETCH_STREAM = None
-_WEIGHT_PREFETCH_METHOD = None
 _GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
 _CP_CHUNKEDPREFILL_COMM_STREAM = None
@@ -504,28 +502,6 @@ def current_stream() -> torch.npu.Stream:
     return _CURRENT_STREAM
 
 
-def prefetch_stream() -> torch.npu.Stream:
-    global _PREFETCH_STREAM
-    if _PREFETCH_STREAM is None:
-        # when this function is called before any stream is set,
-        # we return the default stream.
-        _PREFETCH_STREAM = torch_npu.npu.Stream()
-    return _PREFETCH_STREAM
-
-
-def set_weight_prefetch_method(weight_prefetch_config: WeightPrefetchConfig):
-    global _WEIGHT_PREFETCH_METHOD
-    if _WEIGHT_PREFETCH_METHOD is None:
-        from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
-
-        _WEIGHT_PREFETCH_METHOD = WeightPrefetchMethod(weight_prefetch_config)
-    return _WEIGHT_PREFETCH_METHOD
-
-
-def get_weight_prefetch_method():
-    return _WEIGHT_PREFETCH_METHOD
-
-
 def global_stream() -> torch.npu.Stream:
     global _GLOBAL_STREAM
     if _GLOBAL_STREAM is None:
@@ -758,11 +734,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
         "BailingMoELinearAttention": AscendBailingMoELinearAttention,
     }
-    if vllm_version_is("0.23.0"):
-        from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
-
-        REGISTERED_ASCEND_OPS["FusedMoE"] = AscendFusedMoE
-
     if vllm_config is None:
         try:
             from vllm.config import get_current_vllm_config
@@ -807,11 +778,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "MRotaryEmbedding": AscendMRotaryEmbedding310,
             }
         )
-        if vllm_version_is("0.23.0"):
-            from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310
-
-            REGISTERED_ASCEND_OPS["FusedMoE"] = AscendFusedMoE310
-
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
 

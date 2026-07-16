@@ -53,8 +53,9 @@ from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kerne
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
 from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
+from vllm_ascend.worker.utils import copy_snapshot_to_gpu
 
-if not vllm_version_is("0.23.0"):
+if not vllm_version_is("0.24.0"):
     from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
 else:
     Qwen3DSparkForCausalLM = None
@@ -607,7 +608,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             # num_reqs is already the padded version
             self.query_start_loc.cpu[: num_reqs + 1].copy_(self.runner.query_start_loc.cpu[: num_reqs + 1])
-            self.query_start_loc.copy_to_gpu()
+            copy_snapshot_to_gpu(self.query_start_loc)
 
             common_attn_metadata = AscendCommonAttentionMetadata(
                 query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
@@ -1230,7 +1231,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # [batch_size, 1]
                 return draft_token_ids.view(-1, self.num_speculative_tokens)
 
-        if self.pcp_size * self.dcp_size > 1 and is_prefill:
+        if self.pcp_size > 1 and is_prefill:
             draft_token_ids_list = []
             for _ in range(self.num_speculative_tokens):
                 draft_token_ids_list.append(draft_token_ids)
