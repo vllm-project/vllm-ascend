@@ -157,6 +157,9 @@ def test_installer_cleans_main_registry_before_model_patch(monkeypatch):
     def patch_loader(module: Any) -> None:
         calls.append(("loader", module))
 
+    def patch_prompt_updates(module: Any) -> None:
+        calls.append(("prompt_updates", module))
+
     monkeypatch.setattr(compat, "vllm_version_is", lambda _version: False)
     monkeypatch.setattr(
         compat,
@@ -169,13 +172,57 @@ def test_installer_cleans_main_registry_before_model_patch(monkeypatch):
         "_patch_hunyuan_processor_loader",
         patch_loader,
     )
+    monkeypatch.setattr(
+        compat,
+        "_patch_main_prompt_updates",
+        patch_prompt_updates,
+    )
     compat.install_hunyuan_vl_processor_compat()
 
     assert calls == [
         "registry",
         ("loader", hunyuan_vision),
+        ("prompt_updates", hunyuan_vision),
     ]
-    assert FakeMultiModalProcessor._get_prompt_updates is native_get_prompt_updates
+
+
+def test_main_prompt_updates_replace_only_the_image_token():
+    from vllm.multimodal.processing import PromptReplacement
+
+    class FakeMultiModalProcessor:
+        pass
+
+    hunyuan_vision = SimpleNamespace(
+        HunYuanVLMultiModalProcessor=FakeMultiModalProcessor,
+    )
+    compat._patch_main_prompt_updates(hunyuan_vision)
+
+    hf_processor = SimpleNamespace(image_token_id=42)
+    image_processor = SimpleNamespace(merge_size=2)
+    processor = SimpleNamespace(
+        info=SimpleNamespace(
+            get_hf_processor=lambda **_kwargs: hf_processor,
+            get_image_processor=lambda **_kwargs: image_processor,
+        )
+    )
+    out_mm_kwargs = {
+        "image": [
+            {"image_grid_thw": SimpleNamespace(data=(1, 4, 6))},
+        ],
+    }
+
+    get_prompt_updates = vars(FakeMultiModalProcessor)["_get_prompt_updates"]
+    updates = get_prompt_updates(processor, None, {}, out_mm_kwargs)
+
+    assert len(updates) == 1
+    update = updates[0]
+    assert isinstance(update, PromptReplacement)
+    assert update.modality == "image"
+    # The target is the bare image token: the surrounding start/end wrapper
+    # already present in the prompt must be preserved on the apply path.
+    assert update.target == [42]
+    # (4 // 2) * (6 // 2 + 1) + 2 = 10 image tokens, no start/end tokens.
+    assert update.replacement(0) == [42] * 10
 
 
 def test_registers_hunyuan_tokenizer_schema_without_changing_ids():

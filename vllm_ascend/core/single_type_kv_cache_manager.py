@@ -42,23 +42,51 @@ class CompressAttentionManager(FullAttentionManager):
         new_computed_blocks: Sequence[KVCacheBlock],
         total_computed_tokens: int,
         num_tokens_main_model: int,
-        apply_admission_cap: bool = False,
+        *args,
+        **kwargs,
     ) -> int:
         # Allocate extra `num_speculative_blocks` blocks for
         # speculative decoding (MTP/EAGLE) with linear attention.
         # assert isinstance(self.kv_cache_spec, (CompressAttentionSpec, C4IndexerSpec))
 
+        # On vLLM main the coordinator inserts ``num_local_computed_tokens``
+        # as a new positional arg between ``total_computed_tokens`` and
+        # ``num_tokens_main_model``.  It binds to the ``num_tokens_main_model``
+        # parameter here while the caller's real ``num_tokens_main_model``
+        # lands in ``*args`` (and ``apply_admission_cap`` in ``**kwargs``).
+        # Swap them back for the rest of the method.
+        on_main = not vllm_version_is("0.24.0")
+        apply_admission_cap = kwargs.get("apply_admission_cap", False)
+        if on_main:
+            num_local_computed_tokens = num_tokens_main_model
+            num_tokens_main_model = args[0] if args else 0
+        else:
+            num_local_computed_tokens = 0
+
         num_tokens //= self.compress_ratio
         num_tokens_main_model //= self.compress_ratio
+        if on_main:
+            num_local_computed_tokens //= self.compress_ratio
 
-        return super().get_num_blocks_to_allocate(
-            request_id,
-            num_tokens,
-            new_computed_blocks,
-            total_computed_tokens,
-            num_tokens_main_model,
-            apply_admission_cap,
-        )
+        if vllm_version_is("0.24.0"):
+            return super().get_num_blocks_to_allocate(
+                request_id,
+                num_tokens,
+                new_computed_blocks,
+                total_computed_tokens,
+                num_tokens_main_model,
+                apply_admission_cap,
+            )
+        else:
+            return super().get_num_blocks_to_allocate(
+                request_id,
+                num_tokens,
+                new_computed_blocks,
+                total_computed_tokens,
+                num_local_computed_tokens,
+                num_tokens_main_model,
+                apply_admission_cap,
+            )
 
     def allocate_new_computed_blocks(
         self,
@@ -239,7 +267,10 @@ class CompressAttentionManager(FullAttentionManager):
         ):
             for computed in computed_blocks:
                 computed.pop()
-        return computed_blocks
+        hit_length = len(computed_blocks[0]) * logical_block_size
+        if vllm_version_is("0.24.0"):
+            return computed_blocks
+        return computed_blocks, hit_length
 
 
 def get_manager_for_kv_cache_spec(

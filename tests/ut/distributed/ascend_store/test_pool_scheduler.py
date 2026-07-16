@@ -85,6 +85,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         config.parallel_config.world_size = 1
         config.cache_config.block_size = block_size
         config.cache_config.hash_block_size = block_size
+        config.cache_config.prefix_match_unit = block_size
         # Concrete model_config values so KVPoolScheduler.__init__ int math
         # (num_kv_head < tp_size, get_num_layers, model name split, ...) works.
         config.model_config.model = "org/llama-7b"
@@ -287,6 +288,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         config.parallel_config.world_size = 1
         config.cache_config.block_size = block_size
         config.cache_config.hash_block_size = block_size
+        config.cache_config.prefix_match_unit = block_size
         # Concrete model_config values so KVPoolScheduler.__init__ int math
         # (num_kv_head < tp_size, get_num_layers, model name split, ...) works.
         config.model_config.model = "org/llama-7b"
@@ -461,6 +463,7 @@ class TestKVPoolSchedulerGenerateKeys(unittest.TestCase):
         config.parallel_config.world_size = 1
         config.cache_config.block_size = 16
         config.cache_config.hash_block_size = 16
+        config.cache_config.prefix_match_unit = 16
         # Concrete model_config values so KVPoolScheduler.__init__ int math
         # (num_kv_head < tp_size, get_num_layers, model name split, ...) works.
         config.model_config.model = "org/llama-7b"
@@ -512,6 +515,7 @@ class TestKVPoolSchedulerStoreQueryKeys(unittest.TestCase):
         config.parallel_config.world_size = 1
         config.cache_config.block_size = 16
         config.cache_config.hash_block_size = 16
+        config.cache_config.prefix_match_unit = 16
         # Concrete model_config values so KVPoolScheduler.__init__ int math
         # (num_kv_head < tp_size, get_num_layers, model name split, ...) works.
         config.model_config.model = "org/llama-7b"
@@ -563,6 +567,7 @@ class TestKVPoolSchedulerGetStoreLookupHitTokens(unittest.TestCase):
         config.parallel_config.world_size = 1
         config.cache_config.block_size = 16
         config.cache_config.hash_block_size = 16
+        config.cache_config.prefix_match_unit = 16
         # Concrete model_config values so KVPoolScheduler.__init__ int math
         # (num_kv_head < tp_size, get_num_layers, model name split, ...) works.
         config.model_config.model = "org/llama-7b"
@@ -664,6 +669,7 @@ class TestKVPoolSchedulerFloorGranularity(unittest.TestCase):
         config.parallel_config.world_size = 1
         config.cache_config.block_size = 16
         config.cache_config.hash_block_size = 16
+        config.cache_config.prefix_match_unit = 16
         # Concrete model_config values so KVPoolScheduler.__init__ int math
         # (num_kv_head < tp_size, get_num_layers, model name split, ...) works.
         config.model_config.model = "org/llama-7b"
@@ -696,6 +702,7 @@ class TestKVPoolSchedulerGetSwClippedBlocks(unittest.TestCase):
         config.parallel_config.world_size = 1
         config.cache_config.block_size = 16
         config.cache_config.hash_block_size = 16
+        config.cache_config.prefix_match_unit = 16
         # Concrete model_config values so KVPoolScheduler.__init__ int math
         # (num_kv_head < tp_size, get_num_layers, model name split, ...) works.
         config.model_config.model = "org/llama-7b"
@@ -723,6 +730,7 @@ class TestKVPoolSchedulerGetSwClippedBlocks(unittest.TestCase):
         config.parallel_config.world_size = 1
         config.cache_config.block_size = 16
         config.cache_config.hash_block_size = 16
+        config.cache_config.prefix_match_unit = 16
         # Concrete model_config values so KVPoolScheduler.__init__ int math
         # (num_kv_head < tp_size, get_num_layers, model name split, ...) works.
         config.model_config.model = "org/llama-7b"
@@ -752,6 +760,7 @@ class TestKVPoolSchedulerGetSwClippedBlocks(unittest.TestCase):
         config.parallel_config.world_size = 1
         config.cache_config.block_size = 16
         config.cache_config.hash_block_size = 16
+        config.cache_config.prefix_match_unit = 16
         # Concrete model_config values so KVPoolScheduler.__init__ int math
         # (num_kv_head < tp_size, get_num_layers, model name split, ...) works.
         config.model_config.model = "org/llama-7b"
@@ -783,6 +792,7 @@ class TestKVPoolSchedulerGetSendingEventId(unittest.TestCase):
         config.parallel_config.world_size = 1
         config.cache_config.block_size = 16
         config.cache_config.hash_block_size = 16
+        config.cache_config.prefix_match_unit = 16
         # Concrete model_config values so KVPoolScheduler.__init__ int math
         # (num_kv_head < tp_size, get_num_layers, model name split, ...) works.
         config.model_config.model = "org/llama-7b"
@@ -815,6 +825,7 @@ class TestKVPoolSchedulerUpdateFinished(unittest.TestCase):
         config.parallel_config.world_size = 1
         config.cache_config.block_size = 16
         config.cache_config.hash_block_size = 16
+        config.cache_config.prefix_match_unit = 16
         # Concrete model_config values so KVPoolScheduler.__init__ int math
         # (num_kv_head < tp_size, get_num_layers, model name split, ...) works.
         config.model_config.model = "org/llama-7b"
@@ -867,6 +878,7 @@ class TestKVPoolSchedulerBindBlockPool(unittest.TestCase):
         config.parallel_config.world_size = 1
         config.cache_config.block_size = 16
         config.cache_config.hash_block_size = 16
+        config.cache_config.prefix_match_unit = 16
         # Concrete model_config values so KVPoolScheduler.__init__ int math
         # (num_kv_head < tp_size, get_num_layers, model name split, ...) works.
         config.model_config.model = "org/llama-7b"
@@ -899,6 +911,7 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
         config.parallel_config.world_size = 1
         config.cache_config.block_size = 16
         config.cache_config.hash_block_size = 16
+        config.cache_config.prefix_match_unit = 16
         # Concrete model_config values so KVPoolScheduler.__init__ int math
         # (num_kv_head < tp_size, get_num_layers, model name split, ...) works.
         config.model_config.model = "org/llama-7b"
@@ -986,6 +999,7 @@ class TestKVPoolSchedulerRequestFinishedAllGroups(unittest.TestCase):
         config.parallel_config.decode_context_parallel_size = 1
         config.cache_config.block_size = 16
         config.cache_config.hash_block_size = 16
+        config.cache_config.prefix_match_unit = 16
         config.parallel_config.tensor_parallel_size = 1
         config.parallel_config.pipeline_parallel_size = 1
         config.parallel_config.rank = 0
@@ -1063,6 +1077,7 @@ class TestKVPoolSchedulerInferMambaGroups(unittest.TestCase):
         config.parallel_config.world_size = 1
         config.cache_config.block_size = 16
         config.cache_config.hash_block_size = 16
+        config.cache_config.prefix_match_unit = 16
         # Concrete model_config values so KVPoolScheduler.__init__ int math
         # (num_kv_head < tp_size, get_num_layers, model name split, ...) works.
         config.model_config.model = "org/llama-7b"
@@ -1092,6 +1107,7 @@ class TestKVPoolSchedulerGetLayerwiseGvaHitTokens(unittest.TestCase):
         config.parallel_config.world_size = 1
         config.cache_config.block_size = 16
         config.cache_config.hash_block_size = 16
+        config.cache_config.prefix_match_unit = 16
         # Concrete model_config values so KVPoolScheduler.__init__ int math
         # (num_kv_head < tp_size, get_num_layers, model name split, ...) works.
         config.model_config.model = "org/llama-7b"
@@ -1166,6 +1182,7 @@ class TestKVPoolSchedulerUpdateStateAfterAllocBranches(unittest.TestCase):
         config.parallel_config.decode_context_parallel_size = 1
         config.cache_config.block_size = 16
         config.cache_config.hash_block_size = 16
+        config.cache_config.prefix_match_unit = 16
         config.parallel_config.tensor_parallel_size = 1
         config.parallel_config.pipeline_parallel_size = 1
         config.parallel_config.rank = 0

@@ -1187,6 +1187,10 @@
 #       Preserve the bundled v0.23.0 processor protocol, translate its image
 #       processor registration to Transformers 5.13, and complete the native
 #       processor registry, loader, and tokenizer schema on the main ref.
+#       On the main ref, also restore the image-token-only prompt replacement:
+#       upstream's full start/image/end replacement duplicates the wrapper on
+#       the cached-processor path (prompts already carry the wrapper from
+#       `get_placeholder_str()`), breaking XD-RoPE position initialization.
 #    Related PR:
 #       1. https://github.com/vllm-project/vllm/pull/47872
 #       2. https://github.com/vllm-project/vllm/pull/47867

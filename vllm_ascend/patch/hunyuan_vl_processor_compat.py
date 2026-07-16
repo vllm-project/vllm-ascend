@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import sys
 from collections.abc import Mapping
+from functools import partial
 from types import ModuleType
 from typing import Any, cast
 
@@ -171,6 +172,52 @@ def _patch_hunyuan_processor_loader(hunyuan_vision: Any) -> None:
     hunyuan_vision.HunYuanVLProcessingInfo.get_hf_processor = get_hf_processor
 
 
+def _patch_main_prompt_updates(hunyuan_vision: Any) -> None:
+    """Restore the image-token-only prompt replacement on vLLM main.
+
+    Upstream main's ``_get_prompt_updates`` emits a full
+    start/image/end wrapper. On the cached-processor path
+    (``enable_hf_prompt_update=False``) vLLM applies that replacement to the
+    bare image token, which prompts built from ``get_placeholder_str()``
+    already wrap with start/end — duplicating the wrappers. The duplicate
+    ``image_start`` tokens then break XD-RoPE position init
+    (IndexError: more image_start tokens than image_grid_thw entries).
+    Replacing only the image token keeps the existing wrapper intact and
+    matches the HF processor's expansion on the uncached path.
+    """
+    from vllm.multimodal.processing import PromptReplacement
+
+    def get_prompt_updates(
+        self: Any,
+        mm_items: Any,
+        hf_processor_mm_kwargs: Mapping[str, Any],
+        out_mm_kwargs: Any,
+    ) -> Any:
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
+
+        image_token_id = hf_processor.image_token_id
+        merge_size = image_processor.merge_size
+
+        def get_replacement_hunyuan_vl(item_idx: int, modality: str) -> list[int]:
+            out_item = out_mm_kwargs[modality][item_idx]
+            grid_thw = out_item[f"{modality}_grid_thw"].data
+            _, grid_h, grid_w = grid_thw
+            num_tokens = (int(grid_h) // merge_size) * (int(grid_w) // merge_size + 1) + 2
+            return [image_token_id] * num_tokens
+
+        return [
+            PromptReplacement(
+                modality=modality,
+                target=[image_token_id],
+                replacement=partial(get_replacement_hunyuan_vl, modality=modality),
+            )
+            for modality in ("image",)
+        ]
+
+    hunyuan_vision.HunYuanVLMultiModalProcessor._get_prompt_updates = get_prompt_updates
+
+
 def _patch_v024_processor_methods(hunyuan_vision: Any) -> None:
     """Backport the Transformers 5.13 call protocol from vLLM PR #47872."""
 
@@ -198,9 +245,10 @@ def _patch_v024_processor_methods(hunyuan_vision: Any) -> None:
 
 def install_hunyuan_vl_processor_compat() -> None:
     """Align both supported vLLM refs with Transformers 5.13 Hunyuan APIs."""
-    # Keep each target's native, image-token-only prompt replacement. The
-    # cached processor path applies it inside an existing start/image/end
-    # wrapper; using a full-wrapper replacement here would duplicate wrappers.
+    # Keep the image-token-only prompt replacement on every ref. The cached
+    # processor path applies it inside an existing start/image/end wrapper;
+    # a full-wrapper replacement there would duplicate wrappers. v0.24.0 is
+    # already image-token-only natively; main needs _patch_main_prompt_updates.
     if vllm_version_is("0.24.0"):
         v024_hunyuan_vision = _import_v024_hunyuan_vision()
         _remove_stale_registry_entries()
@@ -208,8 +256,11 @@ def install_hunyuan_vl_processor_compat() -> None:
         _patch_v024_processor_methods(v024_hunyuan_vision)
         return
 
-    if not _remove_stale_registry_entries():
-        return
+    # Upstream main removed the stale registry entries itself (vLLM PR #47867),
+    # so the cleanup may be a no-op — the native-processor loader patch must
+    # still be installed so the tokenizer special tokens get registered.
+    _remove_stale_registry_entries()
     from vllm.model_executor.models import hunyuan_vision as main_hunyuan_vision
 
     _patch_hunyuan_processor_loader(main_hunyuan_vision)
+    _patch_main_prompt_updates(main_hunyuan_vision)

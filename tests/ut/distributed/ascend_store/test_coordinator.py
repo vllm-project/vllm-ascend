@@ -104,7 +104,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         _, hit_length = coord.find_longest_cache_hit(
             block_hashes,
             128 * 128,
-            ExternalCachedBlockPool({(0, bytes(grouped_hash))}),
+            ExternalCachedBlockPool(hash_block_size=128, exists={(0, bytes(grouped_hash))}),
         )
 
         self.assertEqual(hit_length, 128 * 128)
@@ -128,7 +128,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
             _, hit_length = coord.find_longest_cache_hit(
                 block_hashes,
                 128 * 128,
-                ExternalCachedBlockPool({(0, bytes(grouped_hash))}),
+                ExternalCachedBlockPool(exists={(0, bytes(grouped_hash))}),
             )
 
         self.assertEqual(coord.group_effective_specs[0].compress_ratio, 1)
@@ -151,7 +151,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         _, hit_length = coord.find_longest_cache_hit(
             block_hashes,
             128 * 128,
-            ExternalCachedBlockPool(c1_exists),
+            ExternalCachedBlockPool(hash_block_size=128, exists=c1_exists),
         )
 
         self.assertEqual(hit_length, 0)
