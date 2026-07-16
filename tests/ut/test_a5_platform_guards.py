@@ -12,36 +12,33 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""Guards for A5 (Ascend 950) platform-level safety behavior.
+"""Unit tests for the A5 (Ascend 950) platform guards.
 
-A5 HDK has an ACL graph capture-size incompatibility (see the TODO in
-``vllm_ascend/platform.py``) and does not support SFA DCP with sparse C8 yet.
-Both guards live in ``vllm_ascend/platform.py`` and are A5-only; because there
-is no A5 CI runner yet, removing them during refactoring would let A5
-regressions slip through silently.
+This UT layer keeps only what is genuinely unit-testable on CPU:
 
-The capture-size guard (``prune_capture_sizes_for_950``) is a standalone
-function and is verified behaviorally here, including the empty / at-limit /
-over-limit boundaries. The SFA-DCP guard is an inline ``raise`` inside
-``NPUPlatform.check_and_update_config``; rather than grepping source text (which
-would pass even for dead code / comments), we drive the real code path with a
-mocked config so the ``NotImplementedError`` must actually fire on A5.
+* ``prune_capture_sizes_for_950`` -- a pure function with no A5-runtime
+  dependency inside; its pruning contract (empty / at-limit / over-limit) is
+  verified behaviorally here.
+* An AST structural drift guard for the inline SFA-DCP ``NotImplementedError``
+  that lives inside ``NPUPlatform.check_and_update_config``. That raise is an
+  A5-runtime behavior, so its *firing* is validated by the e2e single-card A5
+  suite, not mocked here. This UT only asserts the raise stays *wired to the
+  A5 branch* in source -- a text grep cannot prove that (it would pass for a
+  comment or dead code), but an AST walk can.
 """
 
+import ast
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-import pytest
-
 from vllm_ascend.platform import (
     MAX_CAPTURE_SIZES_FOR_950,
-    NPUPlatform,
     prune_capture_sizes_for_950,
 )
-from vllm_ascend.utils import AscendDeviceType
 
 # ---------------------------------------------------------------------------
-# prune_capture_sizes_for_950 — behavior + boundary coverage
+# prune_capture_sizes_for_950 -- pure-function behavior + boundaries
 # ---------------------------------------------------------------------------
 
 
@@ -68,7 +65,6 @@ def test_prune_is_noop_at_exact_limit():
     with mock.patch("vllm_ascend.platform.update_cudagraph_capture_sizes") as mocked_update:
         prune_capture_sizes_for_950(cfg)
     mocked_update.assert_not_called()
-    # The original list is left untouched.
     assert cfg.compilation_config.cudagraph_capture_sizes == sizes
 
 
@@ -97,103 +93,67 @@ def test_prune_samples_down_to_limit_preserving_endpoints():
 
     mocked_update.assert_called_once()
     pruned = captured["sizes"]
-    # Cardinality contract.
     assert len(pruned) == MAX_CAPTURE_SIZES_FOR_950
-    # Endpoints preserved so the smallest / largest batch sizes stay captured.
     assert pruned[0] == sizes[0]
     assert pruned[-1] == sizes[-1]
-    # Sampling without replacement, preserving ascending order.
     assert pruned == sorted(pruned)
     assert len(set(pruned)) == len(pruned)
     assert set(pruned).issubset(set(sizes))
 
 
 # ---------------------------------------------------------------------------
-# SFA-DCP sparse-C8 guard — behavior-level (replaces source string grep)
+# SFA-DCP A5 raise -- AST structural drift guard
 # ---------------------------------------------------------------------------
 
 
-def _sfa_dcp_vllm_config():
-    """A config that routes ``check_and_update_config`` to the SFA-DCP block.
+def _raised_exception_name(exc) -> str | None:
+    """Return the exception class name raised by an ``ast.Raise`` exc node."""
+    node = exc
+    # raise X(...) -> exc is a Call; unwrap to the callable
+    if isinstance(node, ast.Call):
+        node = node.func
+    if isinstance(node, ast.Name):
+        return node.id
+    return None
 
-    Concrete integers are used wherever the platform code does arithmetic or
-    comparisons on the parallel config (``> 1``, ``*``, ``!=``), so the heavy
-    branches are skipped deterministically and execution reaches the A5 raise.
+
+def _references_a5(node) -> bool:
+    """True if an AST node's text references ``AscendDeviceType.A5``."""
+    return any(isinstance(n, ast.Attribute) and n.attr == "A5" for n in ast.walk(node))
+
+
+def test_sfa_dcp_a5_raise_guard_is_wired_in_check_and_update_config():
+    """AST guard: the SFA-DCP ``NotImplementedError`` must stay wired to the
+    A5 branch of ``NPUPlatform.check_and_update_config``.
+
+    The raise firing on real A5 is validated by the e2e single-card A5 suite.
+    Here we only assert, via AST (not text grep), that the raise still exists
+    *inside* an A5-gated ``if``. Removing the guard or unwiring it from the A5
+    condition fails this test; a comment/dead-code string would not satisfy it.
     """
-    vllm_config = mock.MagicMock()
-    # Skip the device-type early return.
-    vllm_config.device_config = None
-    vllm_config.model_config = mock.MagicMock()
-    vllm_config.model_config.enforce_eager = True
-    vllm_config.model_config.is_encoder_decoder = False
-    vllm_config.model_config.enable_sleep_mode = True
-    vllm_config.model_config.hf_text_config = SimpleNamespace()  # no index_topk
-    vllm_config.kv_transfer_config = None
-    vllm_config.speculative_config = None
-    vllm_config.additional_config = {"enable_sparse_c8": True}
+    import vllm_ascend.platform as platform_mod
 
-    pc = vllm_config.parallel_config
-    pc.tensor_parallel_size = 1
-    pc.decode_context_parallel_size = 1
-    pc.prefill_context_parallel_size = 1
-    pc.worker_cls = "NPUWorker"
+    tree = ast.parse(Path(platform_mod.__file__).read_text(encoding="utf-8"))
 
-    from vllm.config.compilation import CUDAGraphMode
+    method = next(
+        (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "check_and_update_config"),
+        None,
+    )
+    assert method is not None, "check_and_update_config not found in platform.py"
 
-    cc = vllm_config.compilation_config
-    cc.cudagraph_mode = CUDAGraphMode.NONE
-    return vllm_config
+    found = False
+    for node in ast.walk(method):
+        if not (isinstance(node, ast.If) and _references_a5(node.test)):
+            continue
+        # Is there a `raise NotImplementedError` within this A5-gated branch?
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Raise) and _raised_exception_name(sub.exc) == "NotImplementedError":
+                found = True
+                break
+        if found:
+            break
 
-
-def _sfa_dcp_ascend_config():
-    """A mock AscendConfig whose optional branches all stay disabled."""
-    ascend_config = mock.MagicMock()
-    # Skip the additional_config setdefault/update branches.
-    ascend_config.ascend_fusion_config = None
-    # xlite_graph_config.enabled must be falsy to avoid overwriting cudagraph_mode.
-    ascend_config.xlite_graph_config.enabled = False
-    ascend_config.enable_balance_scheduling = False
-    ascend_config.short_request_first_config.enabled = False
-    ascend_config.recompute_scheduler_enable = False
-    ascend_config.SLO_limits_for_dynamic_batch = -1  # concrete int (compared != -1)
-    ascend_config.profiling_chunk_config.enabled = False
-    return ascend_config
-
-
-def test_sfa_dcp_sparse_c8_raises_not_implemented_on_a5():
-    """A5 + SFA-DCP replicated indexer + sparse C8 must raise NotImplementedError.
-
-    This drives the real ``NPUPlatform.check_and_update_config`` path (heavy
-    dependencies mocked) so the guard must actually fire on A5. Deleting or
-    bypassing the inline ``raise`` makes this test fail (no NotImplementedError),
-    which is the regression signal a bare string-grep could not give.
-    """
-    vllm_config = _sfa_dcp_vllm_config()
-
-    with (
-        mock.patch(
-            "vllm_ascend.platform.init_ascend_config",
-            return_value=_sfa_dcp_ascend_config(),
-        ),
-        mock.patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization"),
-        mock.patch.object(NPUPlatform, "_validate_layer_sharding_config"),
-        mock.patch.object(NPUPlatform, "_validate_draft_decode_context_parallel_config"),
-        mock.patch.object(NPUPlatform, "_validate_parallel_config"),
-        mock.patch.object(NPUPlatform, "_fix_incompatible_config"),
-        mock.patch.object(NPUPlatform, "_validate_kv_load_failure_policy"),
-        mock.patch("vllm_ascend.logger.configure_ascend_file_logging"),
-        mock.patch("vllm_ascend.logger.configure_ascend_logging"),
-        mock.patch("vllm_ascend.platform.refresh_block_size"),
-        mock.patch("vllm_ascend.platform.model_uses_sfa_sparse", return_value=True),
-        mock.patch(
-            "vllm_ascend.platform.enable_sfa_dcp_replicated_indexer",
-            return_value=True,
-        ),
-        mock.patch(
-            "vllm_ascend.platform.get_ascend_device_type",
-            return_value=AscendDeviceType.A5,
-        ),
-        mock.patch("vllm_ascend.platform.enable_sp", return_value=False),
-        pytest.raises(NotImplementedError, match="not supported on A5"),
-    ):
-        NPUPlatform.check_and_update_config(vllm_config)
+    assert found, (
+        "SFA-DCP NotImplementedError guard is missing or no longer wired to the "
+        "A5 branch in NPUPlatform.check_and_update_config"
+    )
