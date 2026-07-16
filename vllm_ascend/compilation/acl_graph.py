@@ -387,9 +387,6 @@ def clear_graph_params_for_recapture() -> None:
             params.workspaces[size] = None
             params.handles[size] = []
             params.attn_params[size] = []
-            params.conv1d_params[size] = []
-            params.conv1d_handles[size] = []
-            params.conv1d_events[size] = []
 
 
 def clear_all_aclgraph_entries():
