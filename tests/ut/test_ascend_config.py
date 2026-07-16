@@ -221,7 +221,7 @@ class TestAscendConfig(TestBase):
             os.environ,
             {
                 "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "1",
-                "VLLM_ASCEND_ENABLE_FUSED_MC2": "1",
+                "VLLM_ASCEND_ENABLE_FUSED_MC2": "2",
                 "VLLM_ASCEND_ENABLE_MLAPO": "0",
                 "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
                 "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": "2",
@@ -233,7 +233,7 @@ class TestAscendConfig(TestBase):
             ascend_config = init_ascend_config(test_vllm_config)
 
         self.assertTrue(ascend_config.enable_matmul_allreduce)
-        self.assertEqual(ascend_config.enable_fused_mc2, 1)
+        self.assertEqual(ascend_config.enable_fused_mc2, 2)
         self.assertFalse(ascend_config.enable_mlapo)
         self.assertTrue(ascend_config.enable_flashcomm1)
         self.assertEqual(ascend_config.enable_flashcomm2_parallel_size, 2)
@@ -285,7 +285,7 @@ class TestAscendConfig(TestBase):
             os.environ,
             {
                 "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "1",
-                "VLLM_ASCEND_ENABLE_FUSED_MC2": "1",
+                "VLLM_ASCEND_ENABLE_FUSED_MC2": "2",
                 "VLLM_ASCEND_ENABLE_MLAPO": "0",
                 "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
                 "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": "2",

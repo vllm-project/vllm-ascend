@@ -430,7 +430,7 @@ vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
     --no-enable-prefix-caching \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+    --additional-config '{"enable_flashcomm1": true, "enable_fused_mc2": 2}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
@@ -495,7 +495,7 @@ vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
     --no-enable-prefix-caching \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+    --additional-config '{"enable_flashcomm1": true, "enable_fused_mc2": 2}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
@@ -900,6 +900,10 @@ Use yarn rope-scaling. For vLLM >= v0.12.0: `--hf-overrides '{"rope_parameters":
 ### Q: When should I use PD disaggregation vs single-node deployment?
 
 Single-node deployment is simpler and recommended when the model fits within a single node. PD disaggregation separates Prefill and Decode across nodes, enabling higher throughput for large-scale serving. For Qwen3-235B-A22B, three A3 nodes with PD disaggregation can achieve ~3× the throughput of single-node deployment.
+
+### Q: What is the difference between `enable_fused_mc2=1` and `=2`?
+
+Value `1` enables the base MoE fused operator, suitable for typical EP configurations. Value `2` enables an alternative fusion strategy optimized for large-scale EP (e.g., EP32 in PD disaggregation scenarios). Both are experimental and currently only support W8A8 quantization on Atlas A3 servers.
 
 ### Q: When should I use Expert Parallelism?
 
