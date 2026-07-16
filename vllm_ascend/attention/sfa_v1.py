@@ -302,6 +302,15 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         self.actual_seq_lengths_key = torch.empty_like(self.actual_seq_lengths_query)
         self.spec_actual_seq_lengths_query: list[torch.Tensor] | None = None
         self.spec_actual_seq_lengths_key: list[torch.Tensor] | None = None
+        # Persistent int32 buffers for store_kv_block_metadata inputs, sized to
+        # max_num_batched_tokens (matches model_runner_v1._make_buffer sizing).
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self.group_len = torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device)
+        self.group_key_idx = torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device)
+        self.group_key_cache_idx = torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device)
+        self.spec_group_len: list[torch.Tensor] | None = None
+        self.spec_group_key_idx: list[torch.Tensor] | None = None
+        self.spec_group_key_cache_idx: list[torch.Tensor] | None = None
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             self.decode_threshold += spec_token_num
@@ -317,6 +326,15 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             self.spec_actual_seq_lengths_key = [
                 torch.zeros(max_num_reqs * (spec_token_num + 1) + 1, dtype=torch.int32, device=device)
                 for _ in range(spec_token_num)
+            ]
+            self.spec_group_len = [
+                torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device) for _ in range(spec_token_num)
+            ]
+            self.spec_group_key_idx = [
+                torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device) for _ in range(spec_token_num)
+            ]
+            self.spec_group_key_cache_idx = [
+                torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device) for _ in range(spec_token_num)
             ]
 
         self.reorder_batch_threshold = self.decode_threshold
@@ -478,13 +496,31 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             )
 
         if get_ascend_config().c8_enable_reshape_optim:
+            if draft_index is not None:
+                assert self.spec_group_len is not None
+                assert self.spec_group_key_idx is not None
+                assert self.spec_group_key_cache_idx is not None
+                group_len = self.spec_group_len[draft_index - 1]
+                group_key_idx = self.spec_group_key_idx[draft_index - 1]
+                group_key_cache_idx = self.spec_group_key_cache_idx[draft_index - 1]
+            else:
+                group_len = self.group_len
+                group_key_idx = self.group_key_idx
+                group_key_cache_idx = self.group_key_cache_idx
+            actual_group_len = group_len[:num_input_tokens]
+            actual_group_key_idx = group_key_idx[:num_input_tokens]
+            actual_group_key_cache_idx = group_key_cache_idx[:num_input_tokens]
             torch.ops._C_ascend.store_kv_block_metadata(
                 slot_mapping,
-                common_attn_metadata.group_len,
-                common_attn_metadata.group_key_idx,
-                common_attn_metadata.group_key_cache_idx,
+                actual_group_len,
+                actual_group_key_idx,
+                actual_group_key_cache_idx,
                 block_size,
             )
+        else:
+            actual_group_len = None
+            actual_group_key_idx = None
+            actual_group_key_cache_idx = None
 
         return self.metadata_cls(  # type: ignore
             num_input_tokens=common_attn_metadata.num_input_tokens,
@@ -501,9 +537,9 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             cos=cos[:num_input_tokens],
             dsa_cp_context=dsa_cp_context,
             block_size=block_size,
-            group_len=common_attn_metadata.group_len,
-            group_key_idx=common_attn_metadata.group_key_idx,
-            group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
+            group_len=actual_group_len,
+            group_key_idx=actual_group_key_idx,
+            group_key_cache_idx=actual_group_key_cache_idx,
         )
 
     def build_for_graph_capture(
