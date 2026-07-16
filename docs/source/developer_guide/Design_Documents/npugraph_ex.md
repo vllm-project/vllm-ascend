@@ -4,7 +4,7 @@
 
 This is an optimization based on FX graphs, which can be considered an acceleration solution for the aclgraph mode.
 
-You can get its code [code](https://gitcode.com/Ascend/torchair)
+You can get its code [torchair source code repository](https://gitcode.com/Ascend/torchair)
 
 ## Default FX Graph Optimization
 

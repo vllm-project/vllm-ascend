@@ -166,8 +166,6 @@ There are two ways to start vLLM on Ascend NPU:
 
     ```bash
     Prompt: 'Hello, my name is', Generated text: ' Lucy and I am an 8 year old who loves to draw and write stories'
-    Prompt: 'The president of the United States is', Generated text: " a key leader in the federal government, and the president's role in the executive"
-    Prompt: 'The capital of France is', Generated text: ' a city. What is the capital of France? The capital of France is Paris'
     Prompt: 'The future of AI is', Generated text: ' a topic that is being discussed in various contexts. In the business world, AI'
     ```
 

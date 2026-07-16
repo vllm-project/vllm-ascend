@@ -29,8 +29,8 @@ msgid ""
 "acceleration solution for the aclgraph mode."
 msgstr "这是一种基于FX图的优化，可视为aclgraph模式的加速方案。"
 
-msgid "You can get its code [code](https://gitcode.com/Ascend/torchair)"
-msgstr "您可获取其代码：[代码](https://gitcode.com/Ascend/torchair)"
+msgid "You can get its code [torchair source code repository](https://gitcode.com/Ascend/torchair)"
+msgstr "您可获取其代码：[torchair 源码仓库](https://gitcode.com/Ascend/torchair)"
 
 msgid "## Default FX Graph Optimization"
 msgstr "## 默认FX图优化"

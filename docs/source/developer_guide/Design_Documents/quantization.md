@@ -81,11 +81,11 @@ packed_modules_model_mapping = {
         "qkv_proj": [
             "q_proj",
             "k_proj",
-            "v_proj",
+            "v_proj"
         ],
         "gate_up_proj": [
             "gate_proj",
-            "up_proj",
+            "up_proj"
         ],
         "experts":
         ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
