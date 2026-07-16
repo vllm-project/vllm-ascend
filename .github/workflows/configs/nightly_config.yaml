@@ -30,12 +30,6 @@ a2:
       - name: gemma4-31b-dense
         os: linux-aarch64-a2b3-4
         config_file_path: Gemma4-31B-Dense.yaml
-      - name: gemma4-e2b
-        os: linux-aarch64-a2b3-1
-        config_file_path: gemma4-E2B.yaml
-      - name: gemma4-e4b
-        os: linux-aarch64-a2b3-1
-        config_file_path: gemma4-E4B.yaml
   multi_node:
     test_config:
       - name: multi-node-qwen3-235b-dp
@@ -170,6 +164,12 @@ a3:
       - name: qwen3-vl-235b-a22b-instruct-w8a8
         os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3-VL-235B-A22B-Instruct-W8A8.yaml
+      - name: gemma4-e2b
+        os: linux-aarch64-nightly-a3-2
+        config_file_path: gemma4-E2B.yaml
+      - name: gemma4-e4b
+        os: linux-aarch64-nightly-a3-2
+        config_file_path: gemma4-E4B.yaml
   multi_card:
     test_config:
       # pytest-driven tests
