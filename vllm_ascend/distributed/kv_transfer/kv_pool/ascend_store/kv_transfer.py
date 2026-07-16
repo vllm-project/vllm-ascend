@@ -25,7 +25,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     LayerTransferTask,
     ReqMeta,
     SharedBlockData,
-    get_block_hashes,
 )
 # isort: on
 
@@ -553,6 +552,42 @@ class KVTransferThread(threading.Thread):
 
         return iter_with_legacy_process_tokens()
 
+    def _process_token_key_strings_with_block_ids(
+        self,
+        token_len: int,
+        block_hashes,
+        block_ids: list[int],
+        mask_num: int = 0,
+        kv_cache_group_id: int = 0,
+        skip_null_blocks: bool = False,
+        cache_role: str = "kv",
+    ):
+        process_key_strings = getattr(self.token_database, "process_token_key_strings_with_block_ids", None)
+        if process_key_strings is not None:
+            return process_key_strings(
+                token_len,
+                block_hashes,
+                block_ids,
+                mask_num=mask_num,
+                kv_cache_group_id=kv_cache_group_id,
+                skip_null_blocks=skip_null_blocks,
+                cache_role=cache_role,
+            )
+
+        def iter_with_pool_keys():
+            for start, end, key, block_id in self._process_tokens_with_block_ids(
+                token_len,
+                block_hashes,
+                block_ids,
+                mask_num,
+                kv_cache_group_id=kv_cache_group_id,
+                skip_null_blocks=skip_null_blocks,
+                cache_role=cache_role,
+            ):
+                yield start, end, key.to_string(), getattr(key, "chunk_hash_bytes", key.chunk_hash), block_id
+
+        return iter_with_pool_keys()
+
     def _prepare_value(
         self,
         start: int,
@@ -683,13 +718,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 key_block_ids = []
                 block_ids = req_meta.block_ids_by_group[group_id]
                 group_block_size = self._get_block_size(group_id)
-                group_block_hashes = get_block_hashes(
-                    req_meta.block_hashes,
-                    group_block_size,
-                    getattr(self.token_database, "hash_block_size", group_block_size),
-                )
 
-                for start, end, key, block_id in self._process_tokens_with_block_ids(
+                for start, end, key, block_hash, block_id in self._process_token_key_strings_with_block_ids(
                     token_len,
                     req_meta.block_hashes,
                     block_ids,
@@ -700,8 +730,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         continue
                     starts.append(start)
                     ends.append(end)
-                    keys.append(key.to_string())
-                    block_hashes.append(group_block_hashes[start // group_block_size])
+                    keys.append(key)
+                    block_hashes.append(block_hash)
                     key_block_ids.append(block_id)
 
                 if (
@@ -853,7 +883,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 // group_block_size
                 * group_block_size
             )
-            for start, end, key, block_id in self._process_tokens_with_block_ids(
+            for start, end, key, _block_hash, block_id in self._process_token_key_strings_with_block_ids(
                 token_len,
                 req_meta.block_hashes,
                 block_ids,
@@ -870,7 +900,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     kv_cache_group_id=group_id,
                     block_id=block_id,
                 )
-                key_list.append(key.to_string())
+                key_list.append(key)
                 addr_list.append(addr)
                 size_list.append(size)
                 block_id_list.append(block_id)

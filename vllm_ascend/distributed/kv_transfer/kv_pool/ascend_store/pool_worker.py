@@ -802,7 +802,13 @@ class KVPoolWorker:
                 group_block_size = self.grouped_block_size[group_id]
                 mask_num = load_spec.vllm_cached_tokens // group_block_size * group_block_size
                 skip_null = group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
-                for start, end, key, block_id in self.token_database.process_tokens_with_block_ids(
+                for (
+                    start,
+                    end,
+                    key,
+                    _block_hash,
+                    block_id,
+                ) in self.token_database.process_token_key_strings_with_block_ids(
                     token_len,
                     request.block_hashes,
                     block_ids,
@@ -819,7 +825,7 @@ class KVPoolWorker:
                         kv_cache_group_id=group_id,
                         block_id=block_id,
                     )
-                    key_list.append(key.to_string())
+                    key_list.append(key)
                     addr_list.append(addr)
                     size_list.append(size)
                     block_id_list.append(block_id)
@@ -1593,19 +1599,27 @@ class KVPoolWorker:
                 keys = []
                 starts = []
                 ends = []
-                for start, end, key in self.token_database.process_tokens(
-                    token_len,
-                    block_hashes,
-                    kv_cache_group_id=group_id,
-                ):
-                    if use_layerwise:
+                if use_layerwise:
+                    token_iter = self.token_database.process_tokens(
+                        token_len,
+                        block_hashes,
+                        kv_cache_group_id=group_id,
+                    )
+                    for start, end, key in token_iter:
                         keys_multi_layer = key.split_layers(self.num_layers)
                         for item in keys_multi_layer:
                             keys.append(item.to_string())
-                    else:
-                        keys.append(key.to_string())
-                    starts.append(start)
-                    ends.append(end)
+                        starts.append(start)
+                        ends.append(end)
+                else:
+                    for start, end, key, _ in self.token_database.process_token_key_strings(
+                        token_len,
+                        block_hashes,
+                        kv_cache_group_id=group_id,
+                    ):
+                        keys.append(key)
+                        starts.append(start)
+                        ends.append(end)
 
                 if not keys:
                     hits.append(0)
@@ -1780,19 +1794,27 @@ class KVPoolWorker:
                 keys = []
                 starts = []
                 ends = []
-                for start, end, key in self.token_database.process_tokens(
-                    token_len,
-                    block_hashes,
-                    kv_cache_group_id=group_id,
-                ):
-                    if use_layerwise:
+                if use_layerwise:
+                    token_iter = self.token_database.process_tokens(
+                        token_len,
+                        block_hashes,
+                        kv_cache_group_id=group_id,
+                    )
+                    for start, end, key in token_iter:
                         keys_multi_layer = key.split_layers(self.num_layers)
                         for item in keys_multi_layer:
                             keys.append(item.to_string())
-                    else:
-                        keys.append(key.to_string())
-                    starts.append(start)
-                    ends.append(end)
+                        starts.append(start)
+                        ends.append(end)
+                else:
+                    for start, end, key, _ in self.token_database.process_token_key_strings(
+                        token_len,
+                        block_hashes,
+                        kv_cache_group_id=group_id,
+                    ):
+                        keys.append(key)
+                        starts.append(start)
+                        ends.append(end)
 
                 if not keys:
                     return 0
