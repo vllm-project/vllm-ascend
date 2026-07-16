@@ -578,6 +578,7 @@
   tests:
     - tests/ut/xlite
     - tests/e2e/pull_request/one_card/test_xlite.py
+    - tests/e2e/pull_request/two_card/test_xlite.py
 
 # Batch Invariant
 - name: batch_invariant
@@ -756,6 +757,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_shared_expert_dp.py: 400
   tests/e2e/pull_request/two_card/test_sp_pass.py: 260
   tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py: 110
+  tests/e2e/pull_request/two_card/test_xlite.py: 180
   tests/e2e/pull_request/four_card/_310p/test_dense_model_310p.py: 410
   tests/e2e/pull_request/four_card/_310p/test_moe_model_310p.py: 510
   tests/e2e/pull_request/four_card/_310p/test_vl_model_310p.py: 360
