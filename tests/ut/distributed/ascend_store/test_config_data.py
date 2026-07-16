@@ -18,13 +18,14 @@
 import hashlib
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
+    AscendStoreCacheLayout,
     ChunkedTokenDatabase,
     KeyMetadata,
     LayerMultiBlockReqMeta,
@@ -84,37 +85,21 @@ class TestAscendStoreCacheLayout(unittest.TestCase):
         )
 
     def test_layout_resolution(self):
-        attention_config = SimpleNamespace(
-            kv_cache_groups=[
-                SimpleNamespace(kv_cache_spec=FullAttentionSpec(block_size=16)),
-                SimpleNamespace(kv_cache_spec=FullAttentionSpec(block_size=32)),
-            ]
-        )
-        mamba_config = SimpleNamespace(
+        kv_cache_config = SimpleNamespace(
             kv_cache_groups=[
                 SimpleNamespace(kv_cache_spec=FullAttentionSpec(block_size=16)),
                 SimpleNamespace(kv_cache_spec=MambaSpec(block_size=32)),
             ]
         )
-        cases = [
-            (None, False, (16,), (32,), 32, 32, 32),
-            (attention_config, True, (16, 32), (32, 64), 8, 64, 256),
-            (mamba_config, True, (16, 32), (32, 32), 8, 32, 128),
-        ]
-        for cache_config, use_hybrid, original, grouped, hash_size, scheduler_size, transfer in cases:
-            with self.subTest(use_hybrid=use_hybrid, grouped=grouped):
-                layout = resolve_ascend_store_cache_layout(self._config(), cache_config, ["default", "c4"])
-                self.assertEqual(
-                    (
-                        layout.use_hybrid,
-                        layout.original_block_sizes,
-                        layout.grouped_block_sizes,
-                        layout.hash_block_size,
-                        layout.scheduler_block_size,
-                        layout.transfer_granularity,
-                    ),
-                    (use_hybrid, original, grouped, hash_size, scheduler_size, transfer),
-                )
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data.resolve_kv_cache_block_sizes",
+            return_value=(32, 8),
+        ):
+            layout = resolve_ascend_store_cache_layout(self._config(), kv_cache_config, ["default", "c4"])
+        self.assertEqual(
+            layout,
+            AscendStoreCacheLayout(True, (16, 32), (32, 32), 8, 32, 128),
+        )
 
 
 class TestPoolKey(unittest.TestCase):

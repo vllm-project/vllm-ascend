@@ -212,36 +212,26 @@ def resolve_ascend_store_cache_layout(
     cache_families: Sequence[str],
 ) -> AscendStoreCacheLayout:
     """Resolve vLLM block sizes and AscendStore transfer granularity."""
-    use_hybrid = kv_cache_config is not None and len(kv_cache_config.kv_cache_groups) > 1
-
-    if use_hybrid:
-        cp_scale = _as_positive_int(vllm_config.parallel_config.prefill_context_parallel_size, 1) * _as_positive_int(
-            vllm_config.parallel_config.decode_context_parallel_size, 1
-        )
-        original_block_sizes: list[int] = []
-        grouped_block_sizes: list[int] = []
-        for group in kv_cache_config.kv_cache_groups:
-            spec = group.kv_cache_spec
-            original_block_sizes.append(spec.block_size)
-            grouped_block_sizes.append(
-                spec.block_size * cp_scale if isinstance(spec, AttentionSpec) else spec.block_size
-            )
-    else:
-        original_block_sizes = [vllm_config.cache_config.block_size]
-        grouped_block_sizes = []
-
+    cache_config = vllm_config.cache_config
+    parallel_config = vllm_config.parallel_config
+    cp_scale = _as_positive_int(parallel_config.prefill_context_parallel_size, 1) * _as_positive_int(
+        parallel_config.decode_context_parallel_size, 1
+    )
+    groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else ()
+    use_hybrid = len(groups) > 1
     if kv_cache_config is None:
-        scheduler_block_size = (
-            vllm_config.cache_config.block_size
-            * _as_positive_int(vllm_config.parallel_config.prefill_context_parallel_size, 1)
-            * _as_positive_int(vllm_config.parallel_config.decode_context_parallel_size, 1)
-        )
+        scheduler_block_size = cache_config.block_size * cp_scale
         hash_block_size = scheduler_block_size
     else:
         scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
 
-    if not grouped_block_sizes:
-        grouped_block_sizes = [scheduler_block_size]
+    specs = [group.kv_cache_spec for group in groups]
+    original_block_sizes = [spec.block_size for spec in specs] if use_hybrid else [cache_config.block_size]
+    grouped_block_sizes = (
+        [spec.block_size * cp_scale if isinstance(spec, AttentionSpec) else spec.block_size for spec in specs]
+        if use_hybrid
+        else [scheduler_block_size]
+    )
     granularities = [scheduler_block_size]
     for group_id, group_block_size in enumerate(grouped_block_sizes):
         cache_family = cache_families[group_id] if group_id < len(cache_families) else "default"
