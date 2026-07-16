@@ -19,6 +19,7 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAMetadataBuilder,
     DCPContext,
     DCPGatherContext,
+    DSACPContext,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enabling_mlapo, split_decodes_and_prefills
 from vllm_ascend.device.device_op import DeviceOperator
@@ -1115,79 +1116,84 @@ class AscendSFADCPImpl(AscendSFAImpl):
         _, pack_order = torch.sort(pack_keys, dim=-1)
         return torch.gather(remapped_indices, dim=-1, index=pack_order.to(torch.int32))
 
-    def _merge_dsa_cp_dcp_outputs(
+    def _all_to_all_dcp_tensor(
         self,
-        sfa_output: torch.Tensor,
-        softmax_lse: torch.Tensor,
+        tensor: torch.Tensor,
+        scatter_dim: int,
     ) -> torch.Tensor:
-        # DSA-CP keeps the head dimension replicated/full.  Only DCP shards KV,
-        # so merge the per-DCP partial outputs explicitly instead of using the
-        # common CP helper, which assumes DCP also shards heads.
-        num_tokens, num_heads, head_size = sfa_output.shape
-        assert self.dcp_group is not None
-        out_flat = self.dcp_group.all_gather(sfa_output.contiguous(), dim=0)
-        lse_flat = self.dcp_group.all_gather(softmax_lse.contiguous(), dim=0)
-        out_flat = out_flat.view(
-            self.dcp_size,
-            num_tokens,
-            num_heads,
-            head_size,
-        )
-        lse_flat = lse_flat.view(
-            self.dcp_size,
-            num_tokens,
-            num_heads,
-            1,
-        )
-        out_flat = out_flat.to(torch.float32).flatten(1, 2)
-        lse_flat = lse_flat.to(torch.float32).flatten(1, -1)
-        output, _ = torch_npu.npu_attention_update(lse_flat.unbind(0), out_flat.unbind(0), 0)
-        return output.view(num_tokens, num_heads, head_size)
+        assert self.dcp_group is not None, "DCP output All2All requires dcp_group when dcp_size > 1."
+        scatter_size = tensor.shape[scatter_dim]
+        if scatter_size % self.dcp_size != 0:
+            raise RuntimeError(
+                "DCP output All2All requires the scatter dimension to be divisible "
+                f"by dcp_size, got shape={tuple(tensor.shape)}, scatter_dim={scatter_dim}, "
+                f"and dcp_size={self.dcp_size}."
+            )
+
+        local_scatter_size = scatter_size // self.dcp_size
+        send = tensor.movedim(scatter_dim, 0).contiguous()
+        recv = torch.empty_like(send)
+        dist.all_to_all_single(recv, send, group=self.dcp_group.device_group)
+        recv = recv.view(self.dcp_size, local_scatter_size, *send.shape[1:])
+        return recv
 
     @staticmethod
     def _merge_dcp_outputs_with_torch(
         output_recv: torch.Tensor,
         lse_recv: torch.Tensor,
+        token_dim: int,
     ) -> torch.Tensor:
-        lse_recv = lse_recv.masked_fill(torch.isnan(lse_recv) | torch.isinf(lse_recv), float("-inf"))
-        lse_max = torch.amax(lse_recv, dim=0)
-        lse_max = lse_max.masked_fill(lse_max == float("-inf"), 0.0)
-        weights = torch.exp(lse_recv - lse_max.unsqueeze(0))
-        weights = weights.masked_fill(torch.isnan(weights), 0.0)
-        weights = weights / weights.sum(dim=0, keepdim=True).clamp_min(1e-10)
+        if output_recv.ndim != 4 or lse_recv.ndim != 3 or output_recv.shape[:3] != lse_recv.shape:
+            raise RuntimeError(
+                "DCP output merge expects matching rank/token/head dimensions, "
+                f"got {tuple(output_recv.shape)} and {tuple(lse_recv.shape)}."
+            )
+        if token_dim not in (1, 2):
+            raise RuntimeError(f"DCP output merge token_dim must be 1 or 2, got {token_dim}.")
+        lse_recv = lse_recv.masked_fill(~torch.isfinite(lse_recv), float("-inf"))
+        weights = torch.softmax(lse_recv, dim=0)
+        weights = torch.nan_to_num(weights, nan=0.0)
 
-        output = (output_recv.to(torch.float32) * weights.unsqueeze(-1)).sum(dim=0)
-        return output.permute(1, 0, 2).contiguous()
+        output = (output_recv.to(lse_recv.dtype) * weights.unsqueeze(-1)).sum(dim=0)
+        return output.movedim(token_dim - 1, 0).contiguous()
 
     def _merge_dcp_outputs(
         self,
         sfa_output: torch.Tensor,
         softmax_lse: torch.Tensor,
+        dsa_cp_context: DSACPContext | None = None,
     ) -> torch.Tensor:
-        assert self.dcp_group is not None, "DCP output merge requires dcp_group when dcp_size > 1."
-        num_tokens, num_heads, head_size = sfa_output.shape
-        assert num_heads % self.dcp_size == 0
-        local_num_heads = num_heads // self.dcp_size
+        scatter_dim = 1
+        token_dim = 2
+        if dsa_cp_context is not None:
+            # DSA-CP keeps heads replicated and shards tokens. The All2All
+            # destination must match the token range assigned to this rank.
+            num_tokens = sfa_output.shape[0]
+            if num_tokens != dsa_cp_context.num_tokens_pad:
+                raise RuntimeError(
+                    "DSA-CP DCP All2All expects the SFA token count to match "
+                    f"num_tokens_pad, got {num_tokens} and {dsa_cp_context.num_tokens_pad}."
+                )
+            if num_tokens % self.dcp_size != 0:
+                raise RuntimeError(
+                    f"DSA-CP DCP All2All requires {num_tokens} tokens to be divisible by dcp_size={self.dcp_size}."
+                )
+            local_num_tokens = num_tokens // self.dcp_size
+            expected_local_start = self.dcp_rank * local_num_tokens
+            actual_local_num_tokens = dsa_cp_context.local_end_with_pad - dsa_cp_context.local_start
+            if dsa_cp_context.local_start != expected_local_start or actual_local_num_tokens != local_num_tokens:
+                raise RuntimeError(
+                    "DSA-CP token shards must follow DCP rank order for the output All2All, "
+                    f"but rank {self.dcp_rank} expects [{expected_local_start}, "
+                    f"{expected_local_start + local_num_tokens}) and metadata provides "
+                    f"[{dsa_cp_context.local_start}, {dsa_cp_context.local_end_with_pad})."
+                )
+            scatter_dim = 0
+            token_dim = 1
 
-        output_send = sfa_output.permute(1, 0, 2).contiguous()
-        output_recv = torch.empty_like(output_send)
-        dist.all_to_all_single(
-            output_recv,
-            output_send,
-            group=self.dcp_group.device_group,
-        )
-        output_recv = output_recv.view(self.dcp_size, local_num_heads, num_tokens, head_size)
-
-        lse_send = softmax_lse.to(torch.float32).permute(1, 0, 2).contiguous()
-        lse_recv = torch.empty_like(lse_send)
-        dist.all_to_all_single(
-            lse_recv,
-            lse_send,
-            group=self.dcp_group.device_group,
-        )
-        lse_recv = lse_recv.view(self.dcp_size, local_num_heads, num_tokens)
-
-        return self._merge_dcp_outputs_with_torch(output_recv, lse_recv)
+        output_recv = self._all_to_all_dcp_tensor(sfa_output, scatter_dim)
+        lse_recv = self._all_to_all_dcp_tensor(softmax_lse, scatter_dim).squeeze(-1)
+        return self._merge_dcp_outputs_with_torch(output_recv, lse_recv, token_dim)
 
     def _start_dcp_query_gather(
         self,
@@ -1308,11 +1314,5 @@ class AscendSFADCPImpl(AscendSFAImpl):
         softmax_lse = softmax_max + torch.log(softmax_sum)
         softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
         output_dtype = sfa_output.dtype
-        if self.enable_dsa_cp:
-            output = self._merge_dsa_cp_dcp_outputs(sfa_output, softmax_lse)
-            assert attn_metadata.dsa_cp_context is not None, "DSA-CP DCP output selection requires dsa_cp_context."
-            dsa_cp_context = attn_metadata.dsa_cp_context
-            output = output[dsa_cp_context.local_start : dsa_cp_context.local_end_with_pad]
-            return output.to(output_dtype)
-        output = self._merge_dcp_outputs(sfa_output, softmax_lse)
+        output = self._merge_dcp_outputs(sfa_output, softmax_lse, attn_metadata.dsa_cp_context)
         return output.to(output_dtype)
