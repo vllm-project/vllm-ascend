@@ -68,7 +68,7 @@ test_cases:
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--compilation-config"
-      - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8]}'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY","custom_ops":["none"],"cudagraph_capture_sizes":[1,2,4,8]}'
     test_content:
       - "chat_completion"
     benchmarks:
