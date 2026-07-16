@@ -351,7 +351,7 @@ class DeepseekV4MoE(nn.Module):
                                          router_logits=hidden_states)
         else:
             # router_logits: (num_tokens, n_experts)
-            router_logits = F.linear(hidden_states.float(), self.gate.weight)
+            router_logits = F.linear(hidden_states, self.gate.weight)
             fused_moe_out = self.experts(hidden_states=hidden_states,
                                          router_logits=router_logits)
 
