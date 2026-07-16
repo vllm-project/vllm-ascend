@@ -332,7 +332,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--fail-confirm-retries", type=int, default=1)
     p.add_argument("--no-verify-good", action="store_true")
     p.add_argument("--no-verify-bad", action="store_true")
-    p.add_argument("--trial-timeout-s", type=float, default=5400.0)
+    p.add_argument("--trial-timeout-s", type=float, default=7200.0)
     p.add_argument(
         "--force-initial-build",
         action="store_true",
