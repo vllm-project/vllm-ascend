@@ -57,7 +57,6 @@ from vllm_ascend.spec_decode.utils import (
 )
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_rc_device, lmhead_tp_enable
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-from vllm_ascend.worker.utils import copy_snapshot_to_gpu
 
 _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN = 1
 _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
@@ -228,7 +227,7 @@ class NPUModelRunner310(NPUModelRunner):
             query_start_loc.np[num_reqs_padded + 1] = num_tokens_padded
             num_reqs_padded = num_reqs_padded + 1
 
-        copy_snapshot_to_gpu(query_start_loc)
+        query_start_loc.copy_to_gpu()
         return num_reqs_padded
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens, num_valid_tokens):
@@ -452,13 +451,13 @@ class NPUModelRunner310(NPUModelRunner):
         self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
         if is_rc_device():
             self.query_start_loc.np[num_reqs + 1 :].fill(-1)
-        copy_snapshot_to_gpu(self.query_start_loc)
+        self.query_start_loc.copy_to_gpu()
 
         if self._has_gdn:
             self.gdn_query_start_loc.np[0] = 0
             self.gdn_query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
             self.gdn_query_start_loc.np[num_reqs + 1 :].fill(cu_num_tokens[-1])
-            copy_snapshot_to_gpu(self.gdn_query_start_loc)
+            self.gdn_query_start_loc.copy_to_gpu()
 
         torch.add(
             self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],

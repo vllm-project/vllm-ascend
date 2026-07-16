@@ -52,8 +52,7 @@ from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
-from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
-from vllm_ascend.worker.utils import copy_snapshot_to_gpu
+from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
 
 if not vllm_version_is("0.24.0"):
     from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
@@ -608,7 +607,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             # num_reqs is already the padded version
             self.query_start_loc.cpu[: num_reqs + 1].copy_(self.runner.query_start_loc.cpu[: num_reqs + 1])
-            copy_snapshot_to_gpu(self.query_start_loc)
+            self.query_start_loc.copy_to_gpu()
 
             common_attn_metadata = AscendCommonAttentionMetadata(
                 query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
