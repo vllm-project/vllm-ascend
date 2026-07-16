@@ -30,7 +30,6 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
-from vllm_ascend.ops.dspark_attention import build_dspark_swa_indices
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
@@ -371,34 +370,59 @@ def get_dspark_sparse_sas_window(vllm_config: Any) -> tuple[int, int]:
     return window_size + block_size - 1, 0
 
 
-def _build_dspark_swa_metadata_for_drafting(
-    vllm_config: VllmConfig,
-    common_attn_metadata: AscendCommonAttentionMetadata,
-    slot_mapping: torch.Tensor | None,
-    cache_block_size: int,
-) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-    block_table = getattr(common_attn_metadata, "block_table_tensor", None)
-    if block_table is None:
-        return None, None
+def _aligned_dspark_index_width(window_size: int, block_size: int, alignment: int = 128) -> int:
+    min_width = int(window_size) + int(block_size)
+    return ((min_width + alignment - 1) // alignment) * alignment
 
-    num_reqs = int(getattr(common_attn_metadata, "num_reqs", 0) or 0)
-    positions = common_attn_metadata.positions[: getattr(common_attn_metadata, "num_input_tokens", 0)]
-    if positions.numel() == 0 and getattr(common_attn_metadata, "num_input_tokens", 0) == 0:
-        positions = common_attn_metadata.positions[: getattr(common_attn_metadata, "num_actual_tokens", 0)]
-    if slot_mapping is not None:
-        slot_mapping = slot_mapping[: positions.numel()]
 
-    return build_dspark_swa_indices(
-        block_table[:num_reqs],
-        positions,
-        slot_mapping,
-        vllm_config.speculative_config.num_speculative_tokens,
-        int(vllm_config.model_config.hf_config.sliding_window),
-        int(cache_block_size),
-        query_start_loc=common_attn_metadata.query_start_loc[: num_reqs + 1],
-        seq_lens=common_attn_metadata.seq_lens[:num_reqs],
-        token_to_req_indices=getattr(common_attn_metadata, "token_to_req_indices", None),
-    )
+def build_dspark_swa_indices(
+    block_table: torch.Tensor,
+    num_speculative_tokens: int,
+    window_size: int,
+    block_size: int,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    index_width: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build DSpark non-causal visible slot ids for a paged SWA cache.
+
+    Each token in a draft block sees the trailing context window plus the
+    whole current draft block. Invalid/paddedrows get lens=0 and -1 slots.
+    """
+    if index_width is None:
+        index_width = _aligned_dspark_index_width(window_size, num_speculative_tokens)
+    min_width = int(window_size) + int(num_speculative_tokens)
+    if index_width < min_width:
+        raise ValueError(
+            "DSpark SWA index_width must cover window_size + block_size: "
+            f"index_width={index_width}, required={min_width}"
+        )
+    if query_start_loc is None or seq_lens is None:
+        raise ValueError("DSpark SWA query_start_loc and seq_lens must both be provided")
+
+    query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    prefix_lens = seq_lens - query_lens
+    start_pos = (prefix_lens - int(window_size)).clamp(min=0)
+    visible_lens = seq_lens - start_pos
+
+    # Per-request visible-position grid [req_count, index_width]. Columns
+    # j >= visible_len are out of range and masked to -1 below.
+    cols = torch.arange(index_width, device=start_pos.device)
+    col_mask = cols[None, :] < visible_lens[:, None]
+    pos = start_pos[:, None] + cols[None, :]
+    block_nums = pos // block_size
+    # Clamp to valid block-table columns so gather never goes OOB on the
+    # out-of-range columns (their results are discarded by col_mask anyway).
+    safe_nums = block_nums.clamp(min=0, max=int(block_table.shape[1]) - 1)
+    block_offsets = pos % block_size
+    block_ids = torch.gather(block_table, 1, safe_nums)
+    slot_ids = (block_ids * block_size + block_offsets).to(torch.int32)
+    slot_ids = slot_ids.where(col_mask, torch.full_like(slot_ids, -1))
+
+    per_token_slots = torch.repeat_interleave(slot_ids, query_lens, dim=0).unsqueeze(1)
+    per_token_lens = torch.repeat_interleave(visible_lens, query_lens, dim=0)
+
+    return per_token_slots, per_token_lens
 
 
 class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
@@ -1240,18 +1264,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         cos, sin = get_cos_and_sin_dsa(prefill_input_positions)
 
         prefill_slot_mapping = self.spec_slot_mapping[draft_index - 1][tokens_start : tokens_start + num_prefill_tokens]
+        block_table = common_attn_metadata.block_table_tensor[: common_attn_metadata.num_reqs]
         dspark_swa_indices = None
         ori_win_left, ori_win_right = self.model_config.hf_config.sliding_window - 1, 0
-        if not common_attn_metadata.causal:
-            dspark_swa_indices, _ = _build_dspark_swa_metadata_for_drafting(
-                self.vllm_config,
-                common_attn_metadata,
-                self.spec_slot_mapping[draft_index - 1],
-                self.block_size,
-            )
-            dspark_swa_indices = dspark_swa_indices[tokens_start : tokens_start + num_prefill_tokens]
-            ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
-        block_table = common_attn_metadata.block_table_tensor[: common_attn_metadata.num_reqs]
 
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
         metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
@@ -1336,16 +1351,18 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         slot_mapping = self.spec_slot_mapping[draft_index - 1][:num_decode_tokens_typed]  # type: ignore[index]
         dspark_swa_indices = None
         ori_win_left, ori_win_right = self.model_config.hf_config.sliding_window - 1, 0
+        block_table = common_attn_metadata.block_table_tensor
         if not common_attn_metadata.causal:
-            dspark_swa_indices, _ = _build_dspark_swa_metadata_for_drafting(
-                self.vllm_config,
-                common_attn_metadata,
-                self.spec_slot_mapping[draft_index - 1],
+            dspark_swa_indices, _ = build_dspark_swa_indices(
+                block_table[:num_decodes],
+                self.speculative_config.num_speculative_tokens,
+                self.model_config.hf_config.sliding_window,
                 self.block_size,
+                query_start_loc[: num_decodes + 1],
+                seq_lens[:num_decodes],
             )
             dspark_swa_indices = dspark_swa_indices[:num_decode_tokens_typed]
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
-        block_table = common_attn_metadata.block_table_tensor
 
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
         metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)

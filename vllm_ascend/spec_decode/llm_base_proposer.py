@@ -2150,8 +2150,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             base_cm.num_actual_tokens = num_actual_tokens
             base_cm.causal = False
             base_cm.attn_state = AscendAttentionState.ChunkedPrefill
-            if hasattr(base_cm, "token_to_req_indices"):
-                base_cm.token_to_req_indices = base_cm.token_to_req_indices[:num_input_tokens]
 
         per_layer_attn_metadata: dict[str, Any] = {}
         for attn_group in self.draft_attn_groups:

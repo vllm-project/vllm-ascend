@@ -75,14 +75,6 @@ class AscendDSparkProposer(AscendDflashProposer):
             dtype=torch.int32,
             device=device,
         )
-        # Per-token -> request index map consumed by the SAS attention op. Sliced
-        # to num_query_total for real query tokens; padding slots in
-        # [num_actual_tokens, num_input_tokens) are filled with -1.
-        self.token_to_req_indices_buffer = torch.zeros(
-            self.max_query_tokens,
-            dtype=torch.int32,
-            device=device,
-        )
         # Cached slices of the runner's common_attn_metadata (cad): in
         # set_inputs_first_pass they alias cad.query_start_loc_cpu / cad.seq_lens;
         # in dummy_run/profile_run (no cad available) they are synthesized locally.
@@ -344,13 +336,6 @@ class AscendDSparkProposer(AscendDflashProposer):
             }
             self._context_slots = [self._dspark_context_slot_mappings_by_gid[gidx] for gidx in self._layer_group_idx]
 
-        # token_to_req: per-token request index (vectorized; equivalent to
-        # token_to_req_indices[req*block:(req+1)*block] = req per req).
-        self.token_to_req_indices_buffer[:num_query_total] = (
-            torch.arange(num_query_total, device=self.device, dtype=torch.int32) // block_size
-        )
-        self.token_to_req_indices_buffer[num_query_total:].fill_(-1)
-
         effective_seq_lens = cad.seq_lens
         if has_num_rejected:
             effective_seq_lens = effective_seq_lens - num_rejected_tokens_gpu
@@ -381,7 +366,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.causal = False
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
-        cad.token_to_req_indices = self.token_to_req_indices_buffer[:num_query_total]
         self._dspark_query_start_loc = cad.query_start_loc_cpu[: batch_size + 1]
         self._dspark_seq_lens = cad.seq_lens[:batch_size]
 
@@ -429,11 +413,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._dspark_seq_lens = torch.full(
             (batch_size,), block_size, dtype=torch.int32, device=self.device
         )
-        req_ids = (
-            torch.arange(model_num_query_tokens, device=self.device, dtype=torch.int32) // block_size % batch_size
-        )
-        self.token_to_req_indices_buffer[:model_num_query_tokens].copy_(req_ids)
-        self.token_to_req_indices_buffer[model_num_query_tokens:].fill_(-1)
 
     @torch.inference_mode()
     def dummy_run(
