@@ -43,6 +43,7 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedEx
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.quantization.methods.base import get_moe_num_logical_experts
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     maybe_trans_nz,
@@ -803,13 +804,10 @@ else:
             if self.is_internal_router:
                 gate = self.gate
                 assert gate is not None
-                # NOTE(Angazenn): To make this cast explicitly, the hbm usage might
-                # increase with extra hidden states. We also assume that all gate
-                # linear is unquantized so that we the weight is pre-casted in
-                # process_weights_after_loading of AscendUnquantizedLinearMethod.
-                hidden_states_fp32 = hidden_states.float()
                 before_routed_experts = torch.npu.current_stream().record_event()
-                router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
+                router_logits = DeviceOperator.compute_gate_logits(
+                    hidden_states, gate.weight, gate.weight_fp32
+                )
                 after_routed_experts = torch.npu.current_stream().record_event()
             else:
                 before_routed_experts = torch.npu.current_stream().record_event()
