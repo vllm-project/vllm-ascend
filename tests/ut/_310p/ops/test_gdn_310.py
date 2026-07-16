@@ -18,11 +18,12 @@
 from types import SimpleNamespace
 
 import torch
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
 from vllm_ascend._310p.ops.fla.gdn_310 import (
     AscendGatedDeltaNetAttention310,
     _mask_padded_recurrent_accepted_tokens,
+    _pad_spec_conv1d_host_args_shape_consistent_dummy_310p,
     _zero_padded_tokens,
 )
 from vllm_ascend._310p.ops.gdn_attn_builder_310 import (
@@ -58,6 +59,20 @@ def test_mask_padded_recurrent_accepted_tokens_zeros_dummy_requests():
     assert masked.tolist() == [2, 0, 4]
 
 
+def test_pad_spec_conv1d_host_args_adds_shape_consistent_dummy_requests():
+    qsl_host, cidx_host, accepted_host = _pad_spec_conv1d_host_args_shape_consistent_dummy_310p(
+        qsl_host=(0, 4, 8),
+        cidx_host=(11,),
+        num_accepted_host=(2,),
+        cap_x_dim0=14,
+        q_per_seq=4,
+    )
+
+    assert qsl_host == (0, 4, 8, 12, 14)
+    assert cidx_host == (11, PAD_SLOT_ID, PAD_SLOT_ID, PAD_SLOT_ID)
+    assert accepted_host == (2, 0, 0, 0)
+
+
 def test_builder310_pads_spec_decode_metadata_with_dummy_requests():
     builder = object.__new__(AscendGDNAttentionMetadataBuilder310)
     builder.spec_state_indices_tensor = torch.full((4, 2), -1, dtype=torch.int32)
@@ -66,11 +81,7 @@ def test_builder310_pads_spec_decode_metadata_with_dummy_requests():
     builder.spec_token_indx = torch.empty(8, dtype=torch.int32)
     builder.spec_query_start_loc = torch.empty(5, dtype=torch.int32)
     builder.num_accepted_tokens = torch.empty(4, dtype=torch.int32)
-    builder.spec_actual_seq_lengths = torch.empty(5, dtype=torch.int32)
-    builder.use_full_cuda_graph = True
     attn_metadata = SimpleNamespace(
-        num_prefills=0,
-        num_decodes=0,
         num_spec_decodes=2,
         spec_state_indices_tensor=torch.tensor(
             [[3, 30], [4, 40]],
@@ -94,8 +105,3 @@ def test_builder310_pads_spec_decode_metadata_with_dummy_requests():
     assert attn_metadata.spec_sequence_masks.tolist() == [True, True, False, False]
     assert attn_metadata.spec_query_start_loc.tolist() == [0, 4, 8, 8, 8]
     assert attn_metadata.num_accepted_tokens.tolist() == [2, 3, 0, 0]
-    spec_meta = attn_metadata.spec_decode_metadata.spec_causal_conv1d
-    assert spec_meta.query_start_loc.data_ptr() == attn_metadata.spec_query_start_loc.data_ptr()
-    assert spec_meta.cache_indices.data_ptr() == attn_metadata.spec_state_indices_tensor.data_ptr()
-    assert spec_meta.num_accepted_tokens.data_ptr() == attn_metadata.num_accepted_tokens.data_ptr()
-    assert attn_metadata.spec_decode_metadata.actual_seq_lengths.tolist() == [0, 4, 4, 0, 0]

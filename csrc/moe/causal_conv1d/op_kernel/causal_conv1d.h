@@ -41,7 +41,6 @@
  
  inline constexpr int32_t INIT_STATE_SYNCALL_NEED_SIZE = 8;
  inline constexpr int32_t INIT_STATE_SYNCALL_MAX_BLOCKS = 64;
- inline constexpr int64_t INT32_MAX_VALUE = 2147483647LL;
  
  struct SeqTaskWindow {
      bool valid = false;
@@ -147,10 +146,6 @@
                                                  int32_t &len) const;
      template <int32_t kWindowMode>
      __aicore__ inline bool ResolveSeqTaskWindowByMode(int32_t seq, int32_t seqLen, int32_t &start, int32_t &len) const;
-     __aicore__ inline int32_t ReadQueryStartLocValue(int32_t index) const;
-     __aicore__ inline int64_t ReadCacheIndexValue(int32_t seq) const;
-     __aicore__ inline bool ReadInitialStateModeValue(int32_t seq) const;
-     __aicore__ inline int32_t ReadNumAcceptedTokensValue(int32_t seq) const;
      __aicore__ inline bool ResolveSeqCacheIndex(int32_t seq, bool hasCacheIndices, int32_t &cacheIdx) const;
      __aicore__ inline bool ResolveSeqHasInit(int32_t seq, bool hasInitialStateMode) const;
      __aicore__ inline void MaybeWriteBackSeqSplitTailChunk(int32_t chunkStart, int32_t chunkLen, int32_t seqStart,
@@ -199,15 +194,10 @@
      GlobalTensor<T> weightGm;
      GlobalTensor<T> biasGm;
      GlobalTensor<T> convStatesGm;
-     GlobalTensor<int32_t> queryStartLocGmInt32;
-     GlobalTensor<int64_t> queryStartLocGmInt64;
-     GlobalTensor<int32_t> cacheIndicesGmInt32;
-     GlobalTensor<int64_t> cacheIndicesGmInt64;
-     GlobalTensor<bool> initialStateModeGmBool;
-     GlobalTensor<int32_t> initialStateModeGmInt32;
-     GlobalTensor<int64_t> initialStateModeGmInt64;
-     GlobalTensor<int32_t> numAcceptedTokensGmInt32;
-     GlobalTensor<int64_t> numAcceptedTokensGmInt64;
+     GlobalTensor<int64_t> queryStartLocGm;
+     GlobalTensor<int64_t> cacheIndicesGm;
+     GlobalTensor<int64_t> initialStateModeGm;
+     GlobalTensor<int64_t> numAcceptedTokensGm;
      GlobalTensor<T> yGm;
      GlobalTensor<int32_t> initStateSyncGm_;
      GlobalTensor<T> initStateWorkspaceGm_;
@@ -850,11 +840,8 @@
  {
      SeqTaskWindow window;
      if constexpr (kWindowMode == SEQ_TASK_WINDOW_MODE_VARLEN) {
-         const int32_t startVal = ReadQueryStartLocValue(seq);
-         const int32_t endVal = ReadQueryStartLocValue(seq + 1);
-         if (startVal < 0 || endVal < startVal || endVal > tilingData_->cuSeqlen) {
-             return false;
-         }
+         const int32_t startVal = queryStartLocGm.GetValue(seq);
+         const int32_t endVal = queryStartLocGm.GetValue(seq + 1);
          window = BuildSeqTaskWindowVarlen(startVal, endVal);
      } else if constexpr (kWindowMode == SEQ_TASK_WINDOW_MODE_DECODE2D) {
          window = BuildSeqTaskWindowDecode2D(seq);
@@ -869,58 +856,7 @@
      len = window.len;
      return true;
  }
-
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline int32_t CAUSAL_CONV1D_CLASS::ReadQueryStartLocValue(int32_t index) const
- {
-     if (tilingData_->queryStartLocUseInt64 != 0) {
-         const int64_t value = queryStartLocGmInt64.GetValue(index);
-         if (value < 0 || value > INT32_MAX_VALUE) {
-             return -1;
-         }
-         return static_cast<int32_t>(value);
-     }
-     return queryStartLocGmInt32.GetValue(index);
- }
-
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline int64_t CAUSAL_CONV1D_CLASS::ReadCacheIndexValue(int32_t seq) const
- {
-     const int32_t offset = seq * static_cast<int32_t>(tilingData_->cacheIndicesStride);
-     if (tilingData_->cacheIndicesUseInt64 != 0) {
-         return cacheIndicesGmInt64.GetValue(offset);
-     }
-     return static_cast<int64_t>(cacheIndicesGmInt32.GetValue(offset));
- }
-
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline bool CAUSAL_CONV1D_CLASS::ReadInitialStateModeValue(int32_t seq) const
- {
-     if (tilingData_->initialStateModeDtype == 2) {
-         return initialStateModeGmInt64.GetValue(seq) != 0;
-     }
-     if (tilingData_->initialStateModeDtype == 1) {
-         return initialStateModeGmInt32.GetValue(seq) != 0;
-     }
-     return initialStateModeGmBool.GetValue(seq);
- }
-
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline int32_t CAUSAL_CONV1D_CLASS::ReadNumAcceptedTokensValue(int32_t seq) const
- {
-     if (tilingData_->numAcceptedTokensUseInt64 != 0) {
-         const int64_t value = numAcceptedTokensGmInt64.GetValue(seq);
-         if (value <= 0) {
-             return 0;
-         }
-         if (value > INT32_MAX_VALUE) {
-             return static_cast<int32_t>(INT32_MAX_VALUE);
-         }
-         return static_cast<int32_t>(value);
-     }
-     return numAcceptedTokensGmInt32.GetValue(seq);
- }
-
+ 
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
  __aicore__ inline bool CAUSAL_CONV1D_CLASS::ResolveSeqCacheIndex(int32_t seq, bool hasCacheIndices,
                                                                   int32_t &cacheIdx) const
@@ -930,11 +866,8 @@
          return true;
      }
  
-     const int64_t cacheIdx64 = ReadCacheIndexValue(seq);
+     const int64_t cacheIdx64 = cacheIndicesGm.GetValue(seq);
      if (cacheIdx64 == tilingData_->padSlotId) {
-         return false;
-     }
-     if (cacheIdx64 < 0 || cacheIdx64 >= tilingData_->numCacheLines) {
          return false;
      }
      cacheIdx = static_cast<int32_t>(cacheIdx64);
@@ -944,7 +877,7 @@
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
  __aicore__ inline bool CAUSAL_CONV1D_CLASS::ResolveSeqHasInit(int32_t seq, bool hasInitialStateMode) const
  {
-     return hasInitialStateMode ? ReadInitialStateModeValue(seq) : false;
+     return hasInitialStateMode ? (initialStateModeGm.GetValue(seq) != 0) : false;
  }
  
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
@@ -1008,7 +941,7 @@
  
          int32_t stateTokenOffset = 0;
          if (isSpecDecodingGlobal) {
-             int32_t accepted = ReadNumAcceptedTokensValue(seq);
+             int32_t accepted = static_cast<int32_t>(numAcceptedTokensGm.GetValue(seq));
              stateTokenOffset = accepted - 1;
              const int32_t maxOffset = static_cast<int32_t>(tilingData_->stateLen - (width - 1));
              if (stateTokenOffset < 0) {

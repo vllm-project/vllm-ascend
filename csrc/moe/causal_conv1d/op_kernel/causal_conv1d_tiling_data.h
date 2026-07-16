@@ -49,14 +49,8 @@ struct CausalConv1dTilingData {
     int64_t baseDim;
     int64_t baseDimCnt;
     int64_t hasNumAcceptedTokens;
-    int64_t hasQueryStartLoc;
     int64_t hasCacheIndices;
     int64_t hasInitialStateMode;
-    int64_t queryStartLocUseInt64;
-    int64_t cacheIndicesStride;
-    int64_t cacheIndicesUseInt64;
-    int64_t initialStateModeDtype;
-    int64_t numAcceptedTokensUseInt64;
     int64_t tokenBlockSize;
     int64_t tokenBlockCnt;
     int64_t hasExplicitTokenSeqRanges;

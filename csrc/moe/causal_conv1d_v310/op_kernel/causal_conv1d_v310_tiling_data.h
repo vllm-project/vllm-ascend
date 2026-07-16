@@ -43,13 +43,7 @@ struct CausalConv1dTilingData {
 
     int64_t hasNumAcceptedTokens;
 
-    int64_t hasQueryStartLoc;
     int64_t hasCacheIndices;
     int64_t hasInitialStateMode;
-    int64_t queryStartLocUseInt64;
-    int64_t cacheIndicesStride;
-    int64_t cacheIndicesUseInt64;
-    int64_t initialStateModeDtype;
-    int64_t numAcceptedTokensUseInt64;
 };
 #endif  // CAUSAL_CONV1D_V310_TILING_DATA_H_
