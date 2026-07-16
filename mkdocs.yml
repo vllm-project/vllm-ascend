@@ -291,6 +291,7 @@ nav:
         - developer_guide/Design_Documents/KV_Cache_Pool_Guide.md
         - developer_guide/Design_Documents/add_custom_aclnn_op.md
         - developer_guide/Design_Documents/context_parallel.md
+        - developer_guide/Design_Documents/moe_comm_method.md
         - developer_guide/Design_Documents/balance_schedule_refactor.md
         - developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md
         - developer_guide/Design_Documents/quantization.md

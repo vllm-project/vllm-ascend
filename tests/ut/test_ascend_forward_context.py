@@ -3,16 +3,39 @@ from types import SimpleNamespace
 import pytest
 
 from vllm_ascend import ascend_forward_context as afc
+from vllm_ascend import utils as ascend_utils
 from vllm_ascend.ascend_forward_context import MoECommType
 
 
 @pytest.fixture(autouse=True)
-def reset_mc2_tokens_capacity(monkeypatch):
+def reset_selector_globals(monkeypatch):
     monkeypatch.setattr(afc, "_mc2_tokens_capacity", None)
+    monkeypatch.setattr(afc, "_reserved_mc2_mask", None)
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=0),
+        lambda: _make_ascend_config(),
+    )
+    for cache_name in (
+        "_IS_MOE_MODEL",
+        "_IS_DRAFTER_MOE_MODEL",
+        "_IS_VL_MODEL",
+        "_HAS_LAYER_IDX",
+        "_HAS_ROPE",
+    ):
+        monkeypatch.setattr(ascend_utils, cache_name, None)
+
+
+def _make_ascend_config(
+    *,
+    enable_prefill_mc2: bool = False,
+    enable_fused_mc2: int = 0,
+    mega_moe_max_tokens: int = 65536,
+):
+    return SimpleNamespace(
+        enable_prefill_mc2=enable_prefill_mc2,
+        enable_fused_mc2=enable_fused_mc2,
+        mega_moe_max_tokens=mega_moe_max_tokens,
     )
 
 
@@ -29,6 +52,7 @@ def _make_vllm_config(
     cudagraph_capture_sizes: list[int] | None = None,
     max_cudagraph_capture_size: int = 0,
     max_num_batched_tokens: int = 0,
+    kv_transfer_config=None,
 ):
     hf_text_config_attrs: dict[str, object] = {"top_k_experts": top_k_experts}
     if quant_type is not None:
@@ -56,6 +80,7 @@ def _make_vllm_config(
         parallel_config=parallel_config,
         compilation_config=compilation_config,
         scheduler_config=scheduler_config,
+        kv_transfer_config=kv_transfer_config,
     )
 
 
@@ -66,6 +91,7 @@ def _patch_select_moe_comm_method_deps(
     capacity: int = 128,
     ep_world_size: int = 8,
     enable_fused_mc2: int = 0,
+    mega_moe_max_tokens: int = 65536,
     is_moe: bool = True,
     spec_decode_enabled: bool = False,
 ):
@@ -73,7 +99,14 @@ def _patch_select_moe_comm_method_deps(
     monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: capacity)
     monkeypatch.setattr(afc, "get_ascend_device_type", lambda: device_type)
     monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=ep_world_size))
-    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2))
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: _make_ascend_config(
+            enable_fused_mc2=enable_fused_mc2,
+            mega_moe_max_tokens=mega_moe_max_tokens,
+        ),
+    )
     monkeypatch.setattr(
         afc,
         "speculative_enable_dispatch_gmm_combine_decode",
@@ -105,7 +138,7 @@ def test_set_mc2_tokens_capacity_prefill_mc2_uses_max_num_batched_tokens(monkeyp
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_prefill_mc2=True, enable_fused_mc2=0),
+        lambda: _make_ascend_config(enable_prefill_mc2=True),
     )
     vllm_config = _make_vllm_config(tensor_parallel_size=8, max_num_batched_tokens=513)
 
@@ -191,13 +224,60 @@ def test_select_moe_comm_method_a3_enable_fused_mc2_mode_1(
     assert afc.select_moe_comm_method(num_tokens, _make_vllm_config()) == expected
 
 
+def test_select_moe_comm_method_a3_mode_1_does_not_use_draft_model(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A3,
+        capacity=128,
+        ep_world_size=8,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(
+        afc,
+        "speculative_enable_dispatch_gmm_combine_decode",
+        lambda _: pytest.fail("mode 1 must not use speculative decode checks"),
+    )
+
+    vllm_config = _make_vllm_config(quant_type="w8a8_dynamic")
+
+    assert afc.select_moe_comm_method(128, vllm_config, is_draft_model=False) == MoECommType.FUSED_MC2
+    assert afc.select_moe_comm_method(128, vllm_config, is_draft_model=True) == MoECommType.FUSED_MC2
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "expected"),
+    [
+        (128, MoECommType.FUSED_MC2),
+        (129, MoECommType.FUSED_MC2),
+        (257, MoECommType.ALLTOALL),
+    ],
+)
+def test_select_moe_comm_method_a3_mode_1_uses_mega_moe_capacity(
+    monkeypatch,
+    num_tokens,
+    expected,
+):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A3,
+        capacity=128,
+        ep_world_size=8,
+        enable_fused_mc2=1,
+        mega_moe_max_tokens=256,
+    )
+
+    vllm_config = _make_vllm_config(quant_type="w8a8_dynamic")
+
+    assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
+
+
 @pytest.mark.parametrize(
     ("num_tokens", "quant_type", "spec_decode_enabled", "expected"),
     [
         (128, "w8a8_dynamic", True, MoECommType.FUSED_MC2),
         (128, "w8a8_dynamic", False, MoECommType.MC2),
         (128, "w4a8", True, MoECommType.MC2),
-        (129, "w8a8_dynamic", True, MoECommType.ALLTOALL),
+        (129, "w8a8_dynamic", True, MoECommType.FUSED_MC2),
     ],
 )
 def test_select_moe_comm_method_a3_enable_fused_mc2_mode_2(
@@ -217,6 +297,56 @@ def test_select_moe_comm_method_a3_enable_fused_mc2_mode_2(
     vllm_config = _make_vllm_config(quant_type=quant_type)
 
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "expected"),
+    [
+        (128, MoECommType.FUSED_MC2),
+        (256, MoECommType.FUSED_MC2),
+        (257, MoECommType.ALLTOALL),
+    ],
+)
+def test_select_moe_comm_method_a3_mode_2_uses_dispatch_gmm_capacity(
+    monkeypatch,
+    num_tokens,
+    expected,
+):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A3,
+        capacity=128,
+        enable_fused_mc2=2,
+        spec_decode_enabled=True,
+    )
+    vllm_config = _make_vllm_config(quant_type="w8a8_dynamic")
+
+    assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
+
+
+@pytest.mark.parametrize(
+    "kv_transfer_config",
+    [
+        None,
+        SimpleNamespace(is_kv_producer=True, is_kv_consumer=False),
+        SimpleNamespace(is_kv_producer=False, is_kv_consumer=True),
+        SimpleNamespace(is_kv_producer=True, is_kv_consumer=True),
+    ],
+)
+def test_select_moe_comm_method_a3_does_not_depend_on_kv_role(monkeypatch, kv_transfer_config):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A3,
+        capacity=128,
+        enable_fused_mc2=2,
+        spec_decode_enabled=True,
+    )
+    vllm_config = _make_vllm_config(
+        quant_type="w8a8_dynamic",
+        kv_transfer_config=kv_transfer_config,
+    )
+
+    assert afc.select_moe_comm_method(128, vllm_config) == MoECommType.FUSED_MC2
 
 
 @pytest.mark.parametrize(
