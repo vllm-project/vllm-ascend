@@ -50,11 +50,7 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
     for i in range(len(EXPECTED_LORA_OUTPUT)):
-        # Case-insensitive comparison: EP and TP paths have different
-        # floating-point aggregation order (AlltoAll vs AllGather), which
-        # can flip adjacent logit values. SQL keywords may differ in case
-        # but are semantically equivalent.
-        assert generated_texts[i].lower().startswith(EXPECTED_LORA_OUTPUT[i].lower())
+        assert generated_texts[i].startswith(EXPECTED_LORA_OUTPUT[i])
 
 
 def test_qwen3moe_lora_tp(qwen3moe_lora_files):
@@ -136,10 +132,10 @@ def test_qwen3moe_lora_multi_id_ep(qwen3moe_lora_files):
         "<think>\n\n</think>\n\nSELECT poll_source FROM candidate GROUP BY poll_source ORDER BY count(*) DESC LIMIT 1"  # noqa: E501
     )
 
-    assert generated_texts[0].lower().startswith(expected_lora_0.lower()), (
+    assert generated_texts[0].startswith(expected_lora_0), (
         f"Prompt 0 (LoRA id=1): expected {expected_lora_0!r}, got {generated_texts[0]!r}"
     )
-    assert generated_texts[2].lower().startswith(expected_lora_2.lower()), (
+    assert generated_texts[2].startswith(expected_lora_2), (
         f"Prompt 2 (LoRA id=2): expected {expected_lora_2!r}, got {generated_texts[2]!r}"
     )
 
