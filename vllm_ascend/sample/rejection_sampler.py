@@ -175,7 +175,11 @@ class AscendRejectionSampler(RejectionSampler):
                 Contains the final output token IDs and their logprobs if
                 requested.
         """
-        assert metadata.max_spec_len <= MAX_SPEC_LEN
+        assert metadata.max_spec_len <= MAX_SPEC_LEN, (
+            f"rejection_sampler.forward: max_spec_len={metadata.max_spec_len} "
+            f"exceeds MAX_SPEC_LEN={MAX_SPEC_LEN}; rejection sampling cannot "
+            "proceed."
+        )
 
         self._log_rejection_sampler_entry(logits, metadata)
         bonus_logits_indices = metadata.bonus_logits_indices
@@ -248,6 +252,71 @@ class AscendRejectionSampler(RejectionSampler):
         return SamplerOutput(
             sampled_token_ids=output_token_ids,
             logprobs_tensors=logprobs_tensors,
+        )
+
+    def _log_rejection_sampler_entry(
+        self,
+        logits: torch.Tensor,
+        metadata: SpecDecodeMetadata,
+    ) -> None:
+        """DFX entry probe for rejection sampling.
+
+        Captures the shape/dtype baseline at the rejection-sampling boundary
+        so that mismatches between the target-model output and the spec decode
+        metadata can be diagnosed without re-running the workload. All payload
+        fields are host scalars / tuple shapes -- no device sync. Gated by
+        isEnabledFor(DEBUG) so production builds pay only one integer compare.
+        """
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        logger.debug(
+            "[spec/dfx] rejection_sampler entry: "
+            "logits.shape=%s, logits.dtype=%s, max_spec_len=%d, "
+            "num_total_drafts=%d, num_reqs=%d, "
+            "logprobs_mode=%s(processed=%s), top_k=%s",
+            tuple(logits.shape),
+            logits.dtype,
+            metadata.max_spec_len,
+            int(metadata.num_draft_tokens.sum().item())
+            if torch.is_tensor(metadata.num_draft_tokens)
+            else sum(metadata.num_draft_tokens),
+            metadata.cu_num_draft_tokens.shape[0],
+            self.sampler.logprobs_mode,
+            self.is_processed_logprobs_mode,
+            self.top_k,
+        )
+
+    def _log_rejection_sampler_exit(
+        self,
+        output_token_ids: torch.Tensor,
+        metadata: SpecDecodeMetadata,
+    ) -> None:
+        """DFX exit probe (acceptance signal) for rejection sampling.
+
+        Reports placeholder fill rate and an approximate acceptance ratio so
+        operators can tell at a glance whether the draft/target pairing is
+        healthy. The .ne()/.sum() calls force a host sync and only run when
+        DEBUG is on; production paths return early.
+        """
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        valid_mask = output_token_ids.ne(PLACEHOLDER_TOKEN_ID)
+        num_accepted = int(valid_mask.sum().item())
+        num_slots = int(output_token_ids.numel())
+        num_total_drafts = (
+            int(metadata.num_draft_tokens.sum().item())
+            if torch.is_tensor(metadata.num_draft_tokens)
+            else sum(metadata.num_draft_tokens)
+        )
+        logger.debug(
+            "[spec/dfx] rejection_sampler done: "
+            "accepted=%d/%d (slot_fill=%.1f%%), drafted=%d, "
+            "approx_accept_rate=%.1f%%",
+            num_accepted,
+            num_slots,
+            100.0 * num_accepted / max(num_slots, 1),
+            num_total_drafts,
+            100.0 * num_accepted / max(num_total_drafts + output_token_ids.shape[0], 1),
         )
 
 
@@ -399,7 +468,14 @@ def rejection_sample(
     assert draft_probs is None or draft_probs.is_contiguous()
     assert target_logits.is_contiguous()
     assert bonus_token_ids.is_contiguous()
-    assert target_logits.shape[0] == num_tokens
+    assert target_logits.shape[0] == num_tokens, (
+        "rejection_sample: target/draft row mismatch - "
+        f"target_logits.shape[0]={target_logits.shape[0]} != "
+        f"num_tokens(draft_token_ids)={num_tokens} "
+        f"(batch_size={batch_size}, max_spec_len={max_spec_len}). "
+        "Target output does not align with draft tokens; spec decode "
+        "results will be incorrect."
+    )
 
     # Block verify requires enable_block_verify config and max_spec_len >= 3.
     using_block_verify = max_spec_len >= 3 and bool(get_ascend_config().rejection_sampler_config.enable_block_verify)
