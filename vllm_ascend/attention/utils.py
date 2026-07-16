@@ -8,6 +8,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.worker.ubatch_utils import UBatchSlice, UBatchSlices
 
 from vllm_ascend.utils import AscendDeviceType, get_ascend_config, get_ascend_device_type
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
