@@ -304,7 +304,7 @@
   tests:
     - tests/ut/ops
     - tests/e2e/pull_request/quarter_card/test_qwen3_0_6b.py
-    - tests/e2e/pull_request/quarter_card/test_minicpm.py
+    - tests/e2e/pull_request/half_card/test_minicpm.py
 
 - name: ops_moe
   optional: false
@@ -701,7 +701,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/lora/test_olmoe_lora.py: 330
   tests/e2e/pull_request/half_card/lora/test_qwen35_densemodel_lora.py: 300
   tests/e2e/pull_request/quarter_card/lora/test_qwen3_multi_loras.py: 180
-  tests/e2e/pull_request/quarter_card/lora/test_qwen3_reranker_lora.py: 340
+  tests/e2e/pull_request/half_card/lora/test_qwen3_reranker_lora.py: 340
   tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py: 1310
   tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py: 30
   tests/e2e/pull_request/half_card/pooling/test_classification.py: 250
@@ -723,7 +723,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_cpu_offloading.py: 30
   tests/e2e/pull_request/quarter_card/test_cpu_weight_offload.py: 870
   tests/e2e/pull_request/quarter_card/test_guided_decoding.py: 600
-  tests/e2e/pull_request/quarter_card/test_minicpm.py: 320
+  tests/e2e/pull_request/half_card/test_minicpm.py: 320
   tests/e2e/pull_request/quarter_card/test_multi_instance.py: 150
   tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py: 330
   tests/e2e/pull_request/one_card/test_npu_ipc_weight_transfer.py: 190
@@ -833,7 +833,7 @@ runner_mapping:
   tests/ut/.+/a3_2:
     default: a3_x2
   tests/ut/.+/a2:
-    default: a2_x1
+    default: a2_quarter_x1
 
 # === Partition Configuration ===
 # Controls how tests are split across parallel runners of the same type.
@@ -843,8 +843,8 @@ runner_mapping:
 partition:
   310p_x1: 1
   310p_x4: 1
-  a2_half_x1: 2
-  a2_quarter_x1: 4
+  a2_half_x1: 4
+  a2_quarter_x1: 8
   a2_x1: 5
   a3_x2: 3
   a3_x4: 3

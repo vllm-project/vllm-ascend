@@ -138,16 +138,16 @@ def test_collect_paths_and_basic_path_helpers():
 
 def test_route_helpers():
     # Use a controlled runner_mapping that covers all convention directories
-    # documented in test_config.yaml (a2_2, a2, a3_4, a3_2, 310p). The real
-    # config only defines a subset because the corresponding test directories
-    # don't exist in the repo today, but the routing logic supports all of them.
+    # documented in test_config.yaml (a2_2, a2, a3_4, a3_2, 310p). A2 UTs use
+    # the quarter-card vNPU; the other synthetic entries exercise routing keys
+    # whose corresponding directories don't exist in the repo today.
     select_tests._load_runner_mapping(
         {
             "runner_mapping": {
                 "tests/e2e/pull_request/quarter_card": {"default": "a2_quarter_x1"},
                 "tests/e2e/pull_request/half_card": {"default": "a2_half_x1"},
                 "tests/ut/.+/a2_2": {"default": "a2_x2"},
-                "tests/ut/.+/a2": {"default": "a2_x1"},
+                "tests/ut/.+/a2": {"default": "a2_quarter_x1"},
                 "tests/ut/.+/a3_4": {"default": "a3_x4"},
                 "tests/ut/.+/a3_2": {"default": "a3_x2"},
                 "tests/ut/.+/310p": {"default": "310p_x1"},
@@ -161,7 +161,18 @@ def test_route_helpers():
     assert select_tests._pytest_node_file_path("tests/e2e/test_x.py::TestCase::test_a") == "tests/e2e/test_x.py"
     assert select_tests._route_ut_dir("tests/ut/mod/a2_2/test_x.py") == (2, select_tests.NpuType.A2)
     assert select_tests._route_ut_dir("tests/ut/mod/a2_2/test_x.py::test_case") == (2, select_tests.NpuType.A2)
-    assert select_tests._route_ut_dir("tests/ut/mod/a2/test_x.py") == (1, select_tests.NpuType.A2)
+    assert select_tests._route_ut_dir("tests/ut/mod/a2/test_x.py") == (
+        1,
+        select_tests.NpuType.A2_QUARTER,
+    )
+    assert select_tests._route_ut_dir("tests/ut/mod/a2") == (
+        1,
+        select_tests.NpuType.A2_QUARTER,
+    )
+    assert select_tests._route_ut_dir("tests/ut/mod/a2/test_x.py::test_case") == (
+        1,
+        select_tests.NpuType.A2_QUARTER,
+    )
     assert select_tests._route_ut_dir("tests/ut/mod/a3_4/test_x.py") == (4, select_tests.NpuType.A3)
     assert select_tests._route_ut_dir("tests/ut/mod/a3_2/test_x.py") == (2, select_tests.NpuType.A3)
     assert select_tests._route_ut_dir("tests/ut/mod/310p/test_x.py") == (1, select_tests.NpuType._310P)
