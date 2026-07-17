@@ -14,13 +14,25 @@ class _ContextRecorder:
         self.slot_mapping = slot_mapping.clone()
 
 
+class _GraphRecorder:
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self, hidden_states, positions, slot_mapping):
+        self.calls += 1
+        self.hidden_states = hidden_states
+        self.positions = positions
+        self.slot_mapping = slot_mapping
+        return hidden_states
+
+
 def _make_proposer():
     hidden_states = torch.arange(64, dtype=torch.float32).reshape(16, 4)
     positions = torch.zeros(16, dtype=torch.int32)
     positions[:3] = torch.tensor([10, 11, 12], dtype=torch.int32)
     slots = torch.zeros(16, dtype=torch.int32)
     slots[:3] = torch.tensor([110, -1, 112], dtype=torch.int32)
-    return SimpleNamespace(
+    proposer = SimpleNamespace(
         _dflash_num_context=3,
         _dflash_hidden_states=hidden_states,
         _context_positions_buffer=positions,
@@ -29,9 +41,20 @@ def _make_proposer():
         positions=torch.zeros(16, dtype=torch.int32),
         model=_ContextRecorder(),
         use_cuda_graph=True,
+        max_query_tokens=16,
+        _dspark_query_tokens_per_req=8,
+        _dspark_context_kv_graph=None,
         _dspark_context_kv_precomputed=False,
         _precompute_live_context_kv=lambda: None,
     )
+    proposer._use_dspark_context_kv_bucket_graph = lambda _: False
+    proposer._get_dspark_context_kv_bucket = lambda num_context: (
+        AscendDsparkProposer._get_dspark_context_kv_bucket(
+            proposer,
+            num_context,
+        )
+    )
+    return proposer
 
 
 def _bind_live_context_precompute(proposer):
@@ -97,6 +120,73 @@ def test_dspark_graph_precomputes_context_before_query_replay():
     )
     assert proposer._dspark_context_kv_precomputed
     assert proposer.model.hidden_states.shape[0] == 2
+
+
+def test_dspark_context_kv_bucket_uses_query_block_width():
+    proposer = _make_proposer()
+
+    assert AscendDsparkProposer._get_dspark_context_kv_bucket(proposer, 1) == 8
+    assert AscendDsparkProposer._get_dspark_context_kv_bucket(proposer, 9) == 16
+    assert AscendDsparkProposer._get_dspark_context_kv_bucket(proposer, 16) == 16
+
+
+def test_dspark_context_kv_bucket_rejects_unsupported_shape():
+    proposer = _make_proposer()
+
+    assert AscendDsparkProposer._get_dspark_context_kv_bucket(proposer, 0) is None
+    assert AscendDsparkProposer._get_dspark_context_kv_bucket(proposer, 17) is None
+
+
+def test_dspark_bucket_graph_uses_bucket_and_restores_query_descriptor():
+    proposer = _make_proposer()
+    graph = _GraphRecorder()
+    query_descriptor = object()
+    proposer._dspark_context_kv_graph = graph
+    forward_context = SimpleNamespace(batch_descriptor=query_descriptor)
+
+    assert AscendDsparkProposer._precompute_context_kv_bucket_graph(
+        proposer,
+        forward_context,
+    )
+    assert graph.calls == 1
+    assert graph.hidden_states.shape[0] == 8
+    assert graph.positions.shape[0] == 8
+    assert graph.slot_mapping.shape[0] == 8
+    assert forward_context.batch_descriptor is query_descriptor
+    assert proposer._dspark_context_kv_precomputed
+
+
+def test_dspark_graph_initializes_only_graph_visible_padding(monkeypatch):
+    monkeypatch.setenv(
+        "VLLM_ASCEND_ENABLE_GLM_DSPARK_CONTEXT_KV_BUCKET_GRAPH",
+        "1",
+    )
+    proposer = _make_proposer()
+    proposer.parallel_drafting_token_id = 99
+    proposer._dflash_hidden_states.fill_(1)
+    proposer._context_positions_buffer.fill_(1)
+    proposer._context_slot_mapping_buffer.fill_(1)
+    proposer.input_ids.fill_(1)
+    proposer.positions.fill_(1)
+    proposer._slot_mapping_buffer = torch.ones(16, dtype=torch.int32)
+
+    AscendDsparkProposer._initialize_graph_padding(
+        proposer,
+        num_context=3,
+        num_query_total=8,
+    )
+
+    assert torch.all(proposer._dflash_hidden_states[:3] == 1)
+    assert torch.all(proposer._dflash_hidden_states[3:8] == 0)
+    assert torch.all(proposer._dflash_hidden_states[8:] == 1)
+    assert torch.all(proposer._context_positions_buffer[3:8] == 0)
+    assert torch.all(proposer._context_slot_mapping_buffer[3:8] == -1)
+    assert torch.all(proposer.input_ids[:8] == 1)
+    assert torch.all(proposer.input_ids[8:] == 99)
+    assert torch.all(proposer.positions[:8] == 1)
+    assert torch.all(proposer.positions[8:] == 0)
+    assert torch.all(proposer._slot_mapping_buffer[:8] == 1)
+    assert torch.all(proposer._slot_mapping_buffer[8:] == -1)
 
 
 def test_dspark_context_precompute_is_not_split_from_eager_query():
