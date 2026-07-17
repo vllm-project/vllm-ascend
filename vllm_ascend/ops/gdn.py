@@ -15,8 +15,6 @@
 # limitations under the License.
 #
 
-from typing import TYPE_CHECKING
-
 import torch
 from einops import rearrange
 from vllm.distributed import get_pcp_group
@@ -36,10 +34,8 @@ from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_s
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 
-if TYPE_CHECKING:
-    from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
-elif vllm_version_is("0.24.0"):
-    from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
+if vllm_version_is("0.24.0"):
+    from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd  # type: ignore[import-not-found]
 else:
     from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 

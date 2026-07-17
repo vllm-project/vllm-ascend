@@ -15,18 +15,13 @@
 # limitations under the License.
 # from collections.abc import Iterable
 # mypy: ignore-errors
-from typing import TYPE_CHECKING
-
 import torch
 
 from vllm_ascend.utils import vllm_version_is
 
-if TYPE_CHECKING:
-    from vllm.third_party.flash_linear_attention.ops.index import prepare_lens
-    from vllm.third_party.flash_linear_attention.ops.utils import tensor_cache
-elif vllm_version_is("0.24.0"):
-    from vllm.model_executor.layers.fla.ops.index import prepare_lens
-    from vllm.model_executor.layers.fla.ops.utils import tensor_cache
+if vllm_version_is("0.24.0"):
+    from vllm.model_executor.layers.fla.ops.index import prepare_lens  # type: ignore[import-not-found]
+    from vllm.model_executor.layers.fla.ops.utils import tensor_cache  # type: ignore[import-not-found]
 else:
     from vllm.third_party.flash_linear_attention.ops.index import prepare_lens
     from vllm.third_party.flash_linear_attention.ops.utils import tensor_cache
