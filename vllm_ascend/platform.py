@@ -689,6 +689,17 @@ class NPUPlatform(Platform):
             )
             import vllm_ascend.patch.platform.patch_profiling_chunk  # noqa
 
+        # Extend original scheduler_config to use BatchJobAwareScheduler.
+        if scheduler_extension_config.batch_job_sched_config.enabled:
+            if vllm_config.scheduler_config.async_scheduling:
+                vllm_config.scheduler_config.scheduler_cls = (
+                    "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareAsyncScheduler"
+                )
+            else:
+                vllm_config.scheduler_config.scheduler_cls = (
+                    "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareScheduler"
+                )
+
         cp_size = parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size
         use_sparse = model_uses_sfa_sparse(model_config)
         sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(vllm_config)

@@ -151,6 +151,7 @@ The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, 
 | `recompute_scheduler_enable` | bool | `False` | Whether to enable the recompute scheduler. **Only valid on PD-disaggregated D nodes** (`kv_role` is `kv_consumer`). **Do not enable on P nodes or in PD-mixed mode** (no `kv_transfer_config`, `kv_role` is `kv_producer`, or `kv_role` is `kv_both`); startup will fail with a clear error. |
 | `profiling_chunk_config` | dict | `{}` | Configuration options for dynamic chunked pipeline parallel. See [Dynamic Chunked Pipeline Parallel](../feature_guide/dynamic_chunk_pipeline_parallel.md) for details. |
 | `short_request_first_config` | dict | `{}` | Configuration options for ShortRequestFirst prefill scheduling on the PD prefill (P) node. Used with `recompute_scheduler_enable=true`. |
+| `batch_job_sched_config` | dict | `{}` | Configuration options for the batch-job-aware scheduler. See [Batch-Job-Aware Scheduler](../feature_guide/batch_job_aware_scheduler.md) for details. |
 
 **scheduler_config.profiling_chunk_config**
 
@@ -182,6 +183,17 @@ ShortRequestFirst is a waiting-queue policy wired through the recompute schedule
 | `enabled`                | bool  | `False` | Whether to enable ShortRequestFirst scheduling. |
 | `threshold`              | int   | `256`   | Prompt-length threshold (tokens). Requests with `num_prompt_tokens <= threshold` are treated as short prefills and prioritized over long prefills. |
 | `long_max_wait_ms`       | float | `0.0`   | Maximum time a long prefill may wait behind short prefills before it can be promoted ahead of them. `0` disables long-request promotion and keeps strict short-request priority. |
+
+**scheduler_config.batch_job_sched_config**
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enabled` | bool | `false` | Enable the batch-job-aware scheduler. |
+| `max_jobs` | int | `20` | Maximum number of tracked jobs. `0` means unlimited. |
+| `reserve_margin_blocks` | int | `2` | Extra block margin added to the KV cache reserve as safety buffer. |
+| `reserve_max_blocks` | int | `8` | Maximum number of blocks that can be reserved. |
+| `low_available_tokens_threshold` | int | `4096` | Threshold for prioritising long vs short decode jobs. When available tokens > threshold, long decode jobs are prioritised; when ≤ threshold, short decode jobs are prioritised. |
+| `short_decode_token_threshold` | int | `32` | Threshold for classifying a job as "short decode". |
 
 ### Example
 
