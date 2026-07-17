@@ -272,9 +272,6 @@ def _load_minimax_m3_weights(
     return loaded_params
 
 
-# vLLM's hardware-isolated entry point currently selects the NVIDIA module for
-# every non-ROCm platform. Keep the native model and replace only the pieces
-# that are hardware-specific on Ascend.
 minimax_m3_model.MiniMAXGemmaRMSNorm = GemmaRMSNorm
 minimax_m3_model.MiniMaxM3Attention.forward = _forward_minimax_m3_attention
 minimax_m3_model.MiniMaxM3Model._maybe_add_hidden_state = (
