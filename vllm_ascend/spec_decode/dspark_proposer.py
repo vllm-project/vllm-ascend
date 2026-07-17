@@ -41,6 +41,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             )
         self._dspark_seed_buffer = torch.zeros(self.max_batch_size, dtype=torch.int64, device=device)
         # DSpark is not supported in vllm v1, so related property needs to be reset here.
+        del self.hidden_size, self.hidden_states, self._dflash_hidden_states
         self.hidden_size = vllm_config.speculative_config.draft_model_config.get_hidden_size()
         self.hidden_states = torch.zeros(
             (self.max_num_tokens, self.hidden_size),
@@ -73,13 +74,6 @@ class AscendDSparkProposer(AscendDflashProposer):
             dtype=torch.int32,
             device=device,
         )
-        # Cached slices of the runner's common_attn_metadata (cad): in
-        # set_inputs_first_pass they alias cad.query_start_loc_cpu / cad.seq_lens;
-        # in dummy_run/profile_run (no cad available) they are synthesized locally.
-        # Kept under the _dummy_ prefix because llm_base already defines
-        # self.query_start_loc for Eagle.
-        self._dummy_query_start_loc: torch.Tensor | None = None
-        self._dummy_seq_lens: torch.Tensor | None = None
 
         # TODO simplify these comments
         # block_table / slot_mapping bookkeeping (10 dicts below). v1 self-
@@ -280,7 +274,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         # to compute self._context_slots
         if per_group_draft_block_tables:
             per_group_draft_context_slot_mappings = {
-                gid: self._per_group_context_slot_mapping_buffers[gid][:self._dflash_num_context]
+                gid: self._per_group_context_slot_mapping_buffers[gid]
                 for gid in per_group_draft_block_tables
             }
             self._context_slots = [per_group_draft_context_slot_mappings[gidx] for gidx in self._layer_group_idx]
@@ -315,8 +309,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.causal = False
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
-        self._dummy_query_start_loc = cad.query_start_loc_cpu[: batch_size + 1]
-        self._dummy_seq_lens = cad.seq_lens[:batch_size]
 
         return num_query_total, token_indices_to_sample, cad, None
 

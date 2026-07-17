@@ -257,10 +257,17 @@ class AscendDflashProposer(AscendEagleProposer):
     ) -> dict[str, Any]:
         num_context = self._dflash_num_context
 
+        if _context_slots is None:
+            _context_slots = None
+        elif isinstance(_context_slots, list):
+            _context_slots = [_one_context_slots[:num_context] for _one_context_slots in _context_slots]
+        else:
+            _context_slots = _context_slots[:num_context]
+
         self.model.precompute_and_store_context_kv(
             self._dflash_hidden_states[:num_context],
             self._context_positions_buffer[:num_context],
-            _context_slots if hasattr(self, "_layer_group_idx") else _context_slots[:num_context],
+            _context_slots,
         )
 
     def _raise_if_multimodal(self):
