@@ -141,8 +141,12 @@ def _dspark_post_init(self):
     if self.use_dspark():
         draft_model_config = getattr(self, "draft_model_config", None)
         draft_hf_config = getattr(draft_model_config, "hf_config", None)
+        # deepseekv4 dspark
         if getattr(draft_hf_config, "ptd_token_id", None) is None:
             draft_hf_config.ptd_token_id = getattr(draft_hf_config, "dspark_noise_token_id", None)
+        # qwen3 dspark
+        if getattr(draft_hf_config, "ptd_token_id", None) is None:
+            draft_hf_config.ptd_token_id = getattr(draft_hf_config, "mask_token_id", None)
 
 
 SpeculativeConfig.hf_config_override = hf_config_override
