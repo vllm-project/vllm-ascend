@@ -289,7 +289,7 @@ Key configuration parameters:
 
 5. **`shared_storage_path`**: Directory where hidden states will be saved as `.safetensors` files (one per request).
 
-## Block Verify and Entropy Verify
+## Block Verify and Entropy Verify {#block-verify-and-entropy-verify}
 
 vLLM Ascend provides two optional optimizations for the rejection sampler in speculative decoding: **Block Verify** and **Entropy Verify**. These features trade a small amount of output precision for improved inference throughput.
 
