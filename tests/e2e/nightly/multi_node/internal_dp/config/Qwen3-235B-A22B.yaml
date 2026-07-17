@@ -3,7 +3,6 @@ model: "Qwen/Qwen3-235B-A22B"
 num_nodes: 2
 npu_per_node: 16
 env_common: &env_common
-  HCCL_OP_EXPANSION_MODE: AIV
   TASK_QUEUE_ENABLE: 1
   VLLM_USE_MODELSCOPE: true
   OMP_PROC_BIND: false
