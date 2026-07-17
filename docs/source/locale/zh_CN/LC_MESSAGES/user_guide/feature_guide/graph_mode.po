@@ -286,8 +286,8 @@ msgstr ""
 "有关 Npugraph_ex 的更多详细信息，请参阅 [npugraph_ex "
 "指南](https://www.hiascend.com/document/detail/zh/Pytorch/2600/modthirdparty/torchairuseguide/docs/zh/overview.md)。"
 
-msgid "## Using XliteGraph {#using-xlitegraph}"
-msgstr "## 使用 XliteGraph {#using-xlitegraph}"
+msgid "## Using XliteGraph {: #using-xlitegraph}"
+msgstr "## 使用 XliteGraph {: #using-xlitegraph}"
 
 msgid ""
 "XliteGraph is an optional path for Llama, Qwen dense series models, Qwen MoE"

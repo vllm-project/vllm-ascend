@@ -221,7 +221,7 @@ This confirms that compilation has been triggered. The absence of this message m
 
 For more details about Npugraph_ex, see the [npugraph_ex guide](https://www.hiascend.com/document/detail/zh/Pytorch/2600/modthirdparty/torchairuseguide/docs/zh/overview.md).
 
-## Using XliteGraph {#using-xlitegraph}
+## Using XliteGraph {: #using-xlitegraph}
 
 XliteGraph is an optional path for Llama, Qwen dense series models, Qwen MoE series models, and Qwen3-VL. It requires Xlite to be installed and configured through `xlite_graph_config`.
 
