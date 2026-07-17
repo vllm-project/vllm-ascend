@@ -141,9 +141,9 @@ pip show vllm vllm-ascend
 
 Expected result: The version information for both packages is displayed, confirming a successful installation.
 
-!!! note
-
-    If deploying a multi-node environment, set up the environment on each node.
+:::{note}
+If deploying a multi-node environment, set up the environment on each node.
+:::
 
 For more details, please refer to the [Installation Guide](../../installation.md).
 
