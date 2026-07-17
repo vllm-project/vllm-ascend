@@ -226,7 +226,7 @@ The following examples use FP16 weights from ModelScope. Replace `MODEL_PATH` wi
     --mamba-ssm-cache-dtype float16 \
     --dtype float16 \
     --speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}' \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}' \
     --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
     ```
 
@@ -245,7 +245,7 @@ The following examples use FP16 weights from ModelScope. Replace `MODEL_PATH` wi
     vllm serve $MODEL_PATH \
     --host 127.0.0.1 \
     --port 1025 \
-    --tensor-parallel-size 2 \
+    --tensor-parallel-size 1 \
     --served-model-name qwen3.5 \
     --max-num-seqs 32 \
     --max-model-len 16384 \
@@ -254,7 +254,7 @@ The following examples use FP16 weights from ModelScope. Replace `MODEL_PATH` wi
     --mamba-ssm-cache-dtype float16 \
     --dtype float16 \
     --speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}' \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}' \
     --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
     ```
 
