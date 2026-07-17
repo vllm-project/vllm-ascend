@@ -255,7 +255,6 @@ nav:
         - user_guide/feature_guide/kv_pool.md
         - user_guide/feature_guide/kv_cache_cpu_offload.md
         - user_guide/feature_guide/recompute_cpu_offload.md
-        - user_guide/feature_guide/external_dp.md
         - user_guide/feature_guide/large_scale_ep.md
         - user_guide/feature_guide/ucm_deployment.md
         - user_guide/feature_guide/Fine_grained_TP.md
