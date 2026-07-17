@@ -114,7 +114,6 @@ docker run --rm \
 ::::
 ::::{tab-item} Atlas inference products
 
-
 ```{code-block} bash
 :substitutions:
 
@@ -164,6 +163,7 @@ For Atlas inference products, source installation may pull in `triton` and `trit
 ```bash
 pip uninstall -y triton-ascend triton
 ```
+
 :::
 
 ## 5 Online Service Deployment

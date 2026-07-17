@@ -215,6 +215,7 @@ For Atlas inference products, source installation may pull in `triton` and `trit
 ```bash
 pip uninstall -y triton-ascend triton
 ```
+
 :::
 
 To verify the source installation:
