@@ -319,8 +319,8 @@ Startup Command:
 # Load model from ModelScope to speed up download
 export VLLM_USE_MODELSCOPE=True
 
-# Model weight path; can be a ModelScope model id or a local directory path
-export MODEL_PATH=/home/data/Qwen3.5-27B-W8A8/
+# Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.5-27B-w8a8-mtp) or a local directory path
+export MODEL_PATH=Eco-Tech/Qwen3.5-27B-w8a8-mtp
 
 vllm serve $MODEL_PATH \
 --host 127.0.0.1 \
@@ -349,8 +349,8 @@ Startup Command:
 # Load model from ModelScope to speed up download
 export VLLM_USE_MODELSCOPE=True
 
-# Model weight path; can be a ModelScope model id or a local directory path
-export MODEL_PATH=/home/data/Qwen3.6-27B-W8A8/
+# Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.6-27B-w8a8) or a local directory path
+export MODEL_PATH=Eco-Tech/Qwen3.6-27B-w8a8
 
 vllm serve $MODEL_PATH \
 --host 127.0.0.1 \
