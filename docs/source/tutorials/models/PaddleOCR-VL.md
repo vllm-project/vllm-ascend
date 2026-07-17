@@ -92,10 +92,6 @@ If you don't want to use the docker image as above, you can also build all from 
 
 - Install `vllm-ascend` from source, refer to [installation](../../installation.md).
 
-:::{note}
-If you are using Atlas inference products, you may need to uninstall `triton-ascend` to avoid dependency conflicts.
-:::
-
 ## 5 Online Service Deployment
 
 ### 5.1 Single-Node Online Deployment
@@ -409,7 +405,3 @@ For common environment, installation, and general parameter issues, please refer
 - **Q: What are the deployment requirements for Atlas inference products?**
 
   A: On Atlas inference products, only `float16` dtype is supported. Graph compilation (`--compilation-config`) requires **CANN version >= 9.0.0**; if your CANN version is lower, use `--enforce-eager` instead.
-
-- **Q: What should I do if I encounter dependency conflicts during installation on Atlas inference products?**
-
-  A: You may need to uninstall `triton-ascend` to avoid dependency conflicts. See [Section 4.2](#42-source-code-installation) for details.
