@@ -1,10 +1,8 @@
 # Single source of truth for the Nightly-A2 / Nightly-A3 / Nightly-A3-560T test matrix.
 # SOC differentiation: A2 runs on a2b3 runners and -a2 images, A3 runs on
-# a3 runners and -a3 images, A3-560T runs on cn12-001-labeled a3 runners and
-# reuses -a3 images. Adding a new test case is just appending a `- name: ...`
-# entry under the matching section. PRs that add entries here can be exercised
-# via `/nightly <name>` (or `/nightly <name> --a3-560t` for the 560T cluster)
-# without merging to main.
+# a3 runners and -a3 images. Adding a new test case is just appending a
+# `- name: ...` entry under the matching section. PRs that add entries
+# here can be exercised via `/nightly <name>` without merging to main.
 
 a2:
   single_node:
@@ -32,6 +30,9 @@ a2:
       - name: gemma4-31b-dense
         os: linux-aarch64-a2b3-4
         config_file_path: Gemma4-31B-Dense.yaml
+      - name: MiniMax-M2.5-w8a8-QuaRot-A2
+        os: linux-aarch64-a2b3-8
+        config_file_path: MiniMax-M2.5-w8a8-QuaRot-A2.yaml
   multi_node:
     test_config:
       - name: multi-node-qwen3-235b-dp
