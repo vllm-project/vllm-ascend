@@ -1027,7 +1027,7 @@ vllm serve <MODEL_PATH> \
     "multistream_overlap_shared_expert": true,
     "enable_dsa_cp": true
   }' \
-  --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager": true}'
+  --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp", "enforce_eager": true}'
 ```
 
 `run_dp_template.sh` for the decode nodes:
