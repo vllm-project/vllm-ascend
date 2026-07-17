@@ -80,7 +80,7 @@ jobs:
 
           - chip_type: a5
             os: ubuntu
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a5-ubuntu22.04-py3.12
             soc_version: ascend950dt_9582
 
           - chip_type: 310p
@@ -100,7 +100,7 @@ jobs:
   
           - chip_type: a5
             os: openeuler
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-openeuler24.03-py3.12
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a5-openeuler24.03-py3.12
             soc_version: ascend950dt_9582
             
           - chip_type: 310p
