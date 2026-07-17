@@ -7,3 +7,4 @@ jobs:
     runs-on: linux-aarch64-950dt-8
     steps:
       - run: /usr/local/sbin/npu-smi info
+# v2
