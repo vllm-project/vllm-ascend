@@ -34,32 +34,47 @@ class LayerTransferArrayBuilder:
         group_id: int = 0,
     ) -> None:
         self._block_len_np = np.asarray(token_database.group_block_len[group_id], dtype=np.int64)
-        self.page_size_bytes = int(self._block_len_np.sum()) // num_layers
         self._kv_caches_base_addr_np = np.asarray(
             token_database.group_kv_caches_base_addr[group_id],
             dtype=np.int64,
         )
         group_block_stride = token_database.group_block_stride.get(group_id, token_database.group_block_len[group_id])
         self._block_stride_np = np.asarray(group_block_stride, dtype=np.int64)
-        self._caches_per_layer = max(1, self._block_len_np.shape[0] // max(1, num_layers))
-        layer_shape = (-1, self._caches_per_layer)
-        self._layer_block_len_np = self._block_len_np.reshape(layer_shape)
-        self._layer_base_addr_np = self._kv_caches_base_addr_np.reshape(layer_shape)
-        self._layer_block_stride_np = self._block_stride_np.reshape(layer_shape)
-        self._layer_inner_offsets_np = np.zeros_like(self._layer_block_len_np)
-        if self._caches_per_layer > 1:
-            self._layer_inner_offsets_np[:, 1:] = np.cumsum(
-                self._layer_block_len_np[:, :-1],
-                axis=1,
-                dtype=np.int64,
-            )
-        self._rank_layer_offsets_np = (
-            np.arange(
-                self._layer_block_len_np.shape[0],
-                dtype=np.int64,
-            )
-            * self.page_size_bytes
+        offsets_by_group = getattr(token_database, "group_layer_offsets", None)
+        layer_offsets = offsets_by_group.get(group_id) if isinstance(offsets_by_group, dict) else None
+        if layer_offsets is None:
+            if num_layers <= 0 or self._block_len_np.size % num_layers:
+                raise ValueError(
+                    f"Cannot infer a uniform layerwise layout: legs={self._block_len_np.size}, layers={num_layers}"
+                )
+            caches_per_layer = self._block_len_np.size // num_layers
+            layer_offsets = np.arange(num_layers + 1, dtype=np.int64) * caches_per_layer
+        else:
+            layer_offsets = np.asarray(layer_offsets, dtype=np.int64)
+            if (
+                layer_offsets.size != num_layers + 1
+                or layer_offsets[0] != 0
+                or layer_offsets[-1] != self._block_len_np.size
+                or np.any(layer_offsets[1:] <= layer_offsets[:-1])
+            ):
+                raise ValueError(
+                    f"Invalid layerwise offsets for group {group_id}: "
+                    f"offsets={layer_offsets.tolist()}, legs={self._block_len_np.size}, layers={num_layers}"
+                )
+        self._layer_offsets_np = layer_offsets
+
+        # The flat buffers are layer-major. Their byte prefix therefore gives
+        # both each layer's compact GVA offset and each leg's inner-layer offset.
+        byte_prefix = np.empty(self._block_len_np.size + 1, dtype=np.int64)
+        byte_prefix[0] = 0
+        np.cumsum(self._block_len_np, out=byte_prefix[1:])
+        self._layer_gva_offsets_np = byte_prefix[self._layer_offsets_np[:-1]]
+        leg_counts = np.diff(self._layer_offsets_np)
+        self._leg_inner_offsets_np = byte_prefix[:-1] - np.repeat(
+            self._layer_gva_offsets_np,
+            leg_counts,
         )
+        self.page_size_bytes = int(np.diff(byte_prefix[self._layer_offsets_np]).max())
 
     def _build_transfer_arrays(
         self,
@@ -67,18 +82,20 @@ class LayerTransferArrayBuilder:
         base_gvas_arr: np.ndarray,
         layer_id: int,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        layer_base_addrs = self._layer_base_addr_np[layer_id]
-        layer_block_len = self._layer_block_len_np[layer_id]
-        layer_block_stride = self._layer_block_stride_np[layer_id]
-        layer_inner_offsets = self._layer_inner_offsets_np[layer_id]
-        rank_layer_offset = self._rank_layer_offsets_np[layer_id]
+        leg_start = int(self._layer_offsets_np[layer_id])
+        leg_end = int(self._layer_offsets_np[layer_id + 1])
+        layer_base_addrs = self._kv_caches_base_addr_np[leg_start:leg_end]
+        layer_block_len = self._block_len_np[leg_start:leg_end]
+        layer_block_stride = self._block_stride_np[leg_start:leg_end]
+        layer_inner_offsets = self._leg_inner_offsets_np[leg_start:leg_end]
+        rank_layer_offset = self._layer_gva_offsets_np[layer_id]
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
-                "[KVPOOL] build_transfer layer=%d page_size=%d caches_per_layer=%d "
+                "[KVPOOL] build_transfer layer=%d page_size=%d cache_legs=%d "
                 "rank_layer_offset=%d layer_block_len=%s layer_inner_offsets=%s base_gvas=%s",
                 layer_id,
                 self.page_size_bytes,
-                self._caches_per_layer,
+                leg_end - leg_start,
                 rank_layer_offset,
                 layer_block_len.tolist(),
                 layer_inner_offsets.tolist(),

@@ -335,8 +335,8 @@ class KVPoolWorker:
         # Build mapping: physical_layer -> [(group_id, layer_idx_in_group), ...]
         # layer_idx_in_group is the index of the physical layer within the
         # group (not the index in layer_names). Multiple layer_names at the
-        # same physical layer (e.g. indexer.k_cache + attn) are treated as
-        # multiple cache tensors of ONE layer (caches_per_layer > 1).
+        # same physical layer (e.g. indexer.k_cache + attn) are bundled as the
+        # cache legs of that layer.
         self.physical_layer_to_group_layers: dict[int, list[tuple[int, int]]] = {}
 
         if self.kv_cache_config is not None and self.num_kv_cache_groups > 1:
@@ -358,11 +358,10 @@ class KVPoolWorker:
                         existing.append(entry)
 
                 logger.info(
-                    "layerwise group %d: %d layer_names, %d unique physical layers, caches_per_layer=%d",
+                    "layerwise group %d: %d cache names, %d unique physical layers",
                     group_id,
                     len(group_spec.layer_names),
                     len(phys_to_layer_idx),
-                    len(group_spec.layer_names) // max(1, len(phys_to_layer_idx)),
                 )
 
         self.layer_load_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
@@ -663,23 +662,40 @@ class KVPoolWorker:
         group_addrs: list[int] = []
         group_block_lens: list[int] = []
         group_block_strides: list[int] = []
-        physical_layers = set()
+        layer_names_by_physical: dict[int, list[str]] = {}
         for layer_name in layer_names:
             phys = self._extract_physical_layer_index(layer_name)
             if phys >= self.num_layers and self.num_kv_cache_groups > 1:
                 continue
-            physical_layers.add(phys)
-            cache_or_caches = self.kv_caches[layer_name]
-            for cache in self._as_cache_tuple(cache_or_caches):
-                base_addr = cache.data_ptr()
-                block_len, block_stride, _, _ = self._get_cache_block_metadata(cache)
-                group_addrs.append(base_addr)
-                group_block_lens.append(block_len)
-                group_block_strides.append(block_stride)
+            layer_names_by_physical.setdefault(phys, []).append(layer_name)
+
+        layer_offsets = [0]
+        # A single group uses physical layer ids directly. Multi-group tasks
+        # use each group's existing layer-name order for layer_idx_in_group.
+        physical_layer_order = (
+            sorted(layer_names_by_physical) if self.num_kv_cache_groups == 1 else layer_names_by_physical
+        )
+        for phys in physical_layer_order:
+            # Keep the main KV tuple ahead of the optional indexer tuple. The
+            # stable sort preserves the original order within either category.
+            physical_layer_names = sorted(
+                layer_names_by_physical[phys],
+                key=lambda name: "indexer" in name,
+            )
+            for layer_name in physical_layer_names:
+                cache_or_caches = self.kv_caches[layer_name]
+                for cache in self._as_cache_tuple(cache_or_caches):
+                    base_addr = cache.data_ptr()
+                    block_len, block_stride, _, _ = self._get_cache_block_metadata(cache)
+                    group_addrs.append(base_addr)
+                    group_block_lens.append(block_len)
+                    group_block_strides.append(block_stride)
+            layer_offsets.append(len(group_addrs))
         self.group_kv_caches_base_addr[group_id] = group_addrs
         self.group_block_len[group_id] = group_block_lens
         self.group_block_stride[group_id] = group_block_strides
-        self.group_num_layers[group_id] = len(physical_layers)
+        self.group_layer_offsets[group_id] = layer_offsets
+        self.group_num_layers[group_id] = len(layer_names_by_physical)
 
     def _align_kv_ptrs(self, registered_regions: dict[int, tuple[int, int]]):
         """
@@ -720,6 +736,7 @@ class KVPoolWorker:
         self.group_kv_caches_base_addr: dict[int, list[int]] = {}
         self.group_block_len: dict[int, list[int]] = {}
         self.group_block_stride: dict[int, list[int]] = {}
+        self.group_layer_offsets: dict[int, list[int]] = {}
         self.kv_caches = kv_caches
         self.group_kv_cache_families: dict[int, str] = {
             group_id: self._get_group_family(self.kv_cache_group_families, group_id)
@@ -808,6 +825,7 @@ class KVPoolWorker:
             cache_role="kv",
             group_cache_families=self.group_kv_cache_families,
             group_num_layers=self.group_num_layers,
+            group_layer_offsets=self.group_layer_offsets,
         )
 
         if self.tp_mismatch:
