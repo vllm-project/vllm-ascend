@@ -22,6 +22,14 @@ def test_dspark_aux_layers_prefer_capture_layer_ids():
     assert runner._get_eagle3_aux_layers_from_config() == (8, 23, 39, 55, 70)
 
 
+def test_dspark_aux_layers_accept_speculators_field():
+    runner = _runner_with_draft_config(
+        aux_hidden_state_layer_ids=[8, 23, 39, 55, 70],
+    )
+
+    assert runner._get_eagle3_aux_layers_from_config() == (8, 23, 39, 55, 70)
+
+
 def test_dspark_aux_layers_convert_legacy_target_layer_ids():
     runner = _runner_with_draft_config(
         target_layer_ids=[7, 22, 38, 54, 69],

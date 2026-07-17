@@ -95,7 +95,6 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid(
     HAS_NUM_REJECTED: tl.constexpr = False,
     SAMPLE_FROM_ANCHOR: tl.constexpr = False,
     RECOMPUTE_CONTEXT_SLOTS: tl.constexpr = False,
-    MASK_REJECTED_CONTEXT_SLOTS: tl.constexpr = True,
 ):
     for req_idx in range(0, batch_size):
         ctx_start = tl.load(query_start_loc_ptr + req_idx)
@@ -125,8 +124,7 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid(
                     + block_num_ctx
                 ).to(tl.int64)
                 slot = block_id_ctx * block_size + (pos % block_size)
-                if MASK_REJECTED_CONTEXT_SLOTS:
-                    slot = tl.where(ctx_pos_idx < valid_ctx_end, slot, -1)
+                slot = tl.where(ctx_pos_idx < valid_ctx_end, slot, -1)
             else:
                 slot = tl.load(context_slot_mapping_ptr + ctx_pos_idx)
             tl.store(out_context_slot_mapping_ptr + ctx_pos_idx, slot)

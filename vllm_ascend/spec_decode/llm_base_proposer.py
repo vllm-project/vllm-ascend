@@ -866,6 +866,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # is run in eager mode currently, which means `_pad_query_start_loc_for_fia` is not called,
             # while draft model is run in graph model, which means we should pad the `query_start_loc`.
             # Need to be fixed in the future.
+            actual_num_reqs = common_attn_metadata.num_reqs
             num_reqs = common_attn_metadata.query_start_loc.shape[0]
             self.query_start_loc.gpu[:num_reqs].copy_(common_attn_metadata.query_start_loc)
             self.query_start_loc.cpu[:num_reqs].copy_(common_attn_metadata.query_start_loc_cpu)
@@ -886,8 +887,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.block_table_tensor = self._adjust_tensor(
                 common_attn_metadata.block_table_tensor, slicing_length
             )
-            if self.method == "dflash":
+            if self.method in ("dflash", "dspark"):
                 common_attn_metadata.seq_lens = self._adjust_tensor(common_attn_metadata.seq_lens, num_reqs_padded)
+                stabilize_padded_metadata = getattr(
+                    self,
+                    "_stabilize_padded_graph_metadata",
+                    None,
+                )
+                if callable(stabilize_padded_metadata):
+                    stabilize_padded_metadata(
+                        common_attn_metadata,
+                        actual_num_reqs,
+                        num_reqs_padded,
+                    )
             else:
                 common_attn_metadata.seq_lens = self._adjust_tensor(self.runner.seq_lens, num_reqs_padded)
                 common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
@@ -1060,13 +1072,43 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             }
             runnable = cast(Callable[..., Any], self._runnable)
             run_draft: Callable[[], Any] = partial(runnable, **model_inputs)
+            prepare_context_kv = getattr(
+                self,
+                "prepare_dspark_context_kv_for_graph",
+                None,
+            )
+            context_kv_precomputed = (
+                prepare_context_kv(forward_context)
+                if callable(prepare_context_kv)
+                else False
+            )
 
-            if self.enable_enpu:
-                self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
-                draft_token_ids = run_draft()
-            else:
-                draft_token_ids = run_draft()
-                self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
+            try:
+                # DSpark rewrites cross-attention sequence lengths and slots
+                # every verifier iteration. Update graph parameters before
+                # replay so the draft query observes the current rollback
+                # state instead of the previous iteration's metadata.
+                update_graph_params_before_run = self.enable_enpu or (
+                    self.method == "dspark"
+                    and forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
+                )
+                if update_graph_params_before_run:
+                    self._update_full_graph_params_if_needed(
+                        forward_context,
+                        num_input_tokens,
+                        multi_steps_attn_metadata,
+                    )
+                    draft_token_ids = run_draft()
+                else:
+                    draft_token_ids = run_draft()
+                    self._update_full_graph_params_if_needed(
+                        forward_context,
+                        num_input_tokens,
+                        multi_steps_attn_metadata,
+                    )
+            finally:
+                if context_kv_precomputed:
+                    self._dspark_context_kv_precomputed = False
         return draft_token_ids
 
     def compute_draft_token_ids(self, hidden_states: torch.Tensor):
