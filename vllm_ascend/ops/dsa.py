@@ -183,11 +183,11 @@ def dsa_forward(
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    # if forward_context.attn_metadata:
-    #     attn_metadata = filter_metadata(forward_context.attn_metadata, self.prefix)
-    # else:
-    #     attn_metadata = forward_context.attn_metadata
-    attn_metadata = forward_context.attn_metadata
+    if forward_context.attn_metadata:
+        attn_metadata = filter_metadata(forward_context.attn_metadata, self.prefix)
+    else:
+        attn_metadata = forward_context.attn_metadata
+
     if attn_metadata is None:
         output.fill_(0)
         return
