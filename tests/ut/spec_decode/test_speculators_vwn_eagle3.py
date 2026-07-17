@@ -141,9 +141,6 @@ def _mock_npu_env():
         olora_tensor_parallel_size=0,
         mlp_tensor_parallel_size=0,
     )
-
-    _prefetch_mock = MagicMock()
-
     with (
         patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=_mock),
         patch("vllm.distributed.parallel_state.get_tp_group", return_value=_mock),
@@ -161,7 +158,6 @@ def _mock_npu_env():
             side_effect=_cpu_add_rms_norm_bias,
             create=True,
         ),
-        patch("vllm_ascend.ops.layernorm.get_weight_prefetch_method", return_value=_prefetch_mock),
         # enable_cp() reads parallel_config.*_context_parallel_size and runs `> 1`.
         # On MagicMock these fields yield TypeError on Python 3.12, so short-circuit
         # the check everywhere it's imported.

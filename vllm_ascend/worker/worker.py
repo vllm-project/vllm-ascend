@@ -758,7 +758,9 @@ class NPUWorker(WorkerBase):
                 f"memory, or `--kv-cache-memory={suggested_to_gpu_limit}` "
                 f"({format_gib(suggested_to_gpu_limit)} GiB) to fully utilize NPU "
                 f"free memory. Current KV cache memory: "
-                f"{format_gib(self.available_kv_cache_memory_bytes)} GiB."
+                f"{format_gib(self.available_kv_cache_memory_bytes)} GiB. "
+                f"After warmup: torch reserved memory {format_gib(torch.npu.memory_reserved())} GiB, "
+                f"torch allocated memory {format_gib(torch.npu.memory_allocated())} GiB."
             )
             logger.info(msg)
 

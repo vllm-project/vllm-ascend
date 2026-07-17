@@ -81,7 +81,7 @@ You can use the official all-in-one Docker image. For the available image tags a
 
     !!! note
 
-        A3 has 16 NPUs with dual-die design (`/dev/davinci[0-15]`).
+        A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
         If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
 
 === "A2 series"
@@ -373,10 +373,10 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --max-num-batched-tokens 16384 \
     --max-num-seqs 64 \
     --trust-remote-code \
-    --gpu-memory-utilization 0.85 \
+    --gpu-memory-utilization 0.75 \
     --quantization ascend \
     --enforce-eager \
-    --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 3}' \
+    --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 1}' \
     --additional-config '{"enable_cpu_binding":true}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
@@ -436,7 +436,7 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --max-num-seqs 16 \
     --trust-remote-code \
     --no-enable-prefix-caching \
-    --gpu-memory-utilization 0.85 \
+    --gpu-memory-utilization 0.75 \
     --quantization ascend \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \

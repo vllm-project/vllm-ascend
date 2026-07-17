@@ -37,7 +37,7 @@ from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import WeightPrefetchConfig, get_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -57,8 +57,6 @@ ACL_FORMAT_FRACTAL_NZ = 29
 _CUSTOM_OP_ENABLED = None
 _DEVICE_PRINT_OP_REGISTERED = False
 _CURRENT_STREAM = None
-_PREFETCH_STREAM = None
-_WEIGHT_PREFETCH_METHOD = None
 _GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
 _CP_CHUNKEDPREFILL_COMM_STREAM = None
@@ -504,28 +502,6 @@ def current_stream() -> torch.npu.Stream:
     return _CURRENT_STREAM
 
 
-def prefetch_stream() -> torch.npu.Stream:
-    global _PREFETCH_STREAM
-    if _PREFETCH_STREAM is None:
-        # when this function is called before any stream is set,
-        # we return the default stream.
-        _PREFETCH_STREAM = torch_npu.npu.Stream()
-    return _PREFETCH_STREAM
-
-
-def set_weight_prefetch_method(weight_prefetch_config: WeightPrefetchConfig):
-    global _WEIGHT_PREFETCH_METHOD
-    if _WEIGHT_PREFETCH_METHOD is None:
-        from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
-
-        _WEIGHT_PREFETCH_METHOD = WeightPrefetchMethod(weight_prefetch_config)
-    return _WEIGHT_PREFETCH_METHOD
-
-
-def get_weight_prefetch_method():
-    return _WEIGHT_PREFETCH_METHOD
-
-
 def global_stream() -> torch.npu.Stream:
     global _GLOBAL_STREAM
     if _GLOBAL_STREAM is None:
@@ -953,29 +929,6 @@ def is_drafter_moe_model(vllm_config: VllmConfig):
         if "Step3p5MTP" in model_configs["architectures"]:
             _IS_DRAFTER_MOE_MODEL = False
     return _IS_DRAFTER_MOE_MODEL
-
-
-def speculative_enable_dispatch_gmm_combine_decode(vllm_config: VllmConfig) -> bool:
-    """When draft contains MOE Arch and non-w8a8, disable dispatch_gmm_combine_decode."""
-    if vllm_config.speculative_config is None:
-        return True
-    speculative_method = getattr(vllm_config.speculative_config, "method", None)
-    if speculative_method in [None, "ngram", "suffix"]:
-        return True
-    if speculative_method in ["eagle", "eagle3"]:
-        if is_drafter_moe_model(vllm_config):
-            draft_model_config = vllm_config.speculative_config.draft_model_config
-            hf_text_config = draft_model_config.hf_text_config
-            quant_type = getattr(hf_text_config, "moe_quantize", None)
-            if quant_type is None:
-                quant_type = getattr(hf_text_config, "quantize", None)
-            return quant_type == "w8a8_dynamic"
-        else:
-            return True
-    if speculative_method == "mtp":
-        mtp_quant_type = getattr(vllm_config.model_config.hf_text_config, "mtp_quantize", None)
-        return mtp_quant_type == "w8a8_dynamic"
-    return False
 
 
 def _is_contain_expert(config: Any):
