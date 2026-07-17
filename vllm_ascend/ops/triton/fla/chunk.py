@@ -38,6 +38,7 @@ def chunk_gated_delta_rule_fwd(
     output_final_state: bool,
     cu_seqlens: torch.LongTensor | None = None,
     prebuilt_meta=None,
+    skip_pcp_all_gather: bool = False,
 ):
     forward_context = get_forward_context()
     num_decodes = 0
@@ -135,7 +136,7 @@ def chunk_gated_delta_rule_fwd(
         _fs_full[keep_meta] = final_state
         final_state = _fs_full
 
-    if get_pcp_group().world_size > 1:
+    if get_pcp_group().world_size > 1 and not skip_pcp_all_gather:
         # When integrating mtp, since `mix_qkv` has been split, `num_decode`
         # cannot be directly obtained from the metadata and needs to be recalculated.
         actual_num_decodes = getattr(prebuilt_meta, "num_decodes", None)
@@ -202,7 +203,7 @@ def chunk_gated_delta_rule_fwd(
         scale,
         g=g_ascendc,
         g_gamma=None,
-        cu_seqlens=cu_seqlens_host,
+        cu_seqlens=cu_seqlens_kern,
         chunk_indices=chunk_indices_chunk64_host,
         chunk_size=64,
         transpose_state_layout=False,
@@ -234,6 +235,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         cu_seqlens: torch.LongTensor | None = None,
         prebuilt_meta=None,
         use_qk_l2norm_in_kernel: bool = False,
+        skip_pcp_all_gather: bool = False,
     ):
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q)
@@ -249,6 +251,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
             prebuilt_meta=prebuilt_meta,
+            skip_pcp_all_gather=skip_pcp_all_gather,
         )
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
@@ -272,6 +275,7 @@ def chunk_gated_delta_rule(
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
     core_attn_out: torch.Tensor | None = None,
+    skip_pcp_all_gather: bool = False,
 ):
     r"""
     Args:
@@ -380,6 +384,7 @@ def chunk_gated_delta_rule(
         cu_seqlens,
         prebuilt_meta,
         use_qk_l2norm_in_kernel,
+        skip_pcp_all_gather,
     )
     if head_first:
         o = rearrange(o, "b t h ... -> b h t ...")

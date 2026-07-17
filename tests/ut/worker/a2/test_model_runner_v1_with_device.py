@@ -123,13 +123,14 @@ def model_runner():
 
 
 @pytest.mark.parametrize(
-    "num_computed_tokens, num_scheduled_tokens, num_tokens, num_reqs, "
+    "num_computed_tokens, num_scheduled_tokens, num_prompt_tokens, num_tokens, num_reqs, "
     "max_num_scheduled_tokens, use_cascade_attn, force_eager, "
     "force_uniform_decode, spec_decode_tokens",
     [
         # ---- force_eager=True: bypass cudagraph dispatch ----
         pytest.param(
             [0, 0, 0],
+            [10, 10, 10],
             [10, 10, 10],
             30,
             3,
@@ -143,6 +144,7 @@ def model_runner():
         pytest.param(
             [5, 10, 15],
             [1, 1, 1],
+            [5, 10, 15],
             3,
             3,
             1,
@@ -155,6 +157,7 @@ def model_runner():
         pytest.param(
             [0, 5, 10],
             [10, 1, 1],
+            [10, 5, 10],
             12,
             3,
             10,
@@ -168,6 +171,7 @@ def model_runner():
         pytest.param(
             [0, 0, 0],
             [10, 10, 10],
+            [10, 10, 10],
             30,
             3,
             10,
@@ -180,6 +184,7 @@ def model_runner():
         pytest.param(
             [5, 10, 15],
             [1, 1, 1],
+            [5, 10, 15],
             3,
             3,
             1,
@@ -192,6 +197,7 @@ def model_runner():
         pytest.param(
             [0, 5, 10],
             [10, 1, 1],
+            [10, 5, 10],
             12,
             3,
             10,
@@ -203,6 +209,7 @@ def model_runner():
         ),
         pytest.param(
             [0],
+            [50],
             [50],
             50,
             1,
@@ -216,6 +223,7 @@ def model_runner():
         pytest.param(
             [100],
             [1],
+            [100],
             1,
             1,
             1,
@@ -228,6 +236,7 @@ def model_runner():
         # ---- cascade attention ----
         pytest.param(
             [0, 0, 0],
+            [10, 10, 10],
             [10, 10, 10],
             30,
             3,
@@ -242,6 +251,7 @@ def model_runner():
         pytest.param(
             [5, 10, 15],
             [1, 1, 1],
+            [5, 10, 15],
             3,
             3,
             1,
@@ -254,6 +264,7 @@ def model_runner():
         pytest.param(
             [5, 10, 15],
             [1, 1, 1],
+            [5, 10, 15],
             3,
             3,
             1,
@@ -267,6 +278,7 @@ def model_runner():
         pytest.param(
             [5, 10, 15],
             [4, 4, 4],
+            [5, 10, 15],
             12,
             3,
             4,
@@ -278,6 +290,7 @@ def model_runner():
         ),
         pytest.param(
             [0, 0, 0],
+            [4, 4, 4],
             [4, 4, 4],
             12,
             3,
@@ -291,6 +304,7 @@ def model_runner():
         pytest.param(
             [0, 5, 10],
             [4, 4, 4],
+            [4, 5, 10],
             12,
             3,
             4,
@@ -303,6 +317,7 @@ def model_runner():
         # ---- large batch ----
         pytest.param(
             [0, 0, 0, 0, 0],
+            [20, 20, 20, 20, 20],
             [20, 20, 20, 20, 20],
             100,
             5,
@@ -319,6 +334,7 @@ def test_determine_batch_execution_and_padding(
     model_runner,
     num_computed_tokens,
     num_scheduled_tokens,
+    num_prompt_tokens,
     num_tokens,
     num_reqs,
     max_num_scheduled_tokens,
@@ -341,6 +357,10 @@ def test_determine_batch_execution_and_padding(
 
     try:
         runner.input_batch.num_computed_tokens_cpu[:num_reqs] = num_computed_tokens
+        # Set num_prompt_tokens to distinguish prefill from decode:
+        # - Prefill: num_computed < num_prompt (still prefilling)
+        # - Decode: num_computed >= num_prompt (prompt fully computed)
+        runner.input_batch.num_prompt_tokens[:num_reqs] = num_prompt_tokens
         num_scheduled_tokens_np = np.array(num_scheduled_tokens, dtype=np.int32)
 
         kwargs = dict(
