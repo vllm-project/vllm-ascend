@@ -600,6 +600,7 @@ class NPUModelRunner(GPUModelRunner):
             | AscendSuffixDecodingProposer
             | AscendMedusaProposer
             | AscendExtractHiddenStatesProposer
+            | AscendDSparkProposer
             | None
         ) = None
         self.actual_seq_lengths_q: list[int] = []
@@ -4870,7 +4871,7 @@ class NPUModelRunner(GPUModelRunner):
         ):
             assert isinstance(
                 self.drafter,
-                AscendEagleProposer | AscendExtractHiddenStatesProposer,
+                AscendEagleProposer | AscendExtractHiddenStatesProposer | AscendDSparkProposer,
             )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 

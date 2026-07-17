@@ -17,7 +17,6 @@ from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.llm_base_proposer import greedy_sample
 from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample
 
-
 DSPARK_REQUEST_SEED_STRIDE = 9973
 
 
@@ -34,8 +33,12 @@ class AscendDSparkProposer(AscendDflashProposer):
         draft_hf_config = vllm_config.speculative_config.draft_model_config.hf_config
         target_layer_ids = getattr(draft_hf_config, "dspark_target_layer_ids", None)
         if target_layer_ids:
-            self.hidden_size = vllm_config.speculative_config.draft_model_config.get_hidden_size() * len(target_layer_ids)
-            self.hidden_states = torch.zeros((self.max_num_tokens, self.hidden_size), dtype=self.dtype, device=self.device)
+            self.hidden_size = vllm_config.speculative_config.draft_model_config.get_hidden_size() * len(
+                target_layer_ids
+            )
+            self.hidden_states = torch.zeros(
+                (self.max_num_tokens, self.hidden_size), dtype=self.dtype, device=self.device
+            )
         self._dflash_hidden_states = self.hidden_states
         self.method = "dflash"
         self.parallel_drafting = True
@@ -54,9 +57,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         self.positions = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
         self._slot_mapping_buffer = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
         self._request_slots_buffer = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
-        self._context_request_slots_buffer = torch.zeros(
-            self.max_num_tokens, dtype=torch.int32, device=self.device
-        )
+        self._context_request_slots_buffer = torch.zeros(self.max_num_tokens, dtype=torch.int32, device=self.device)
         self._dspark_sampling_seed_buffer = torch.zeros(
             self.max_graph_batch_size, dtype=torch.int64, device=self.device
         )
@@ -69,7 +70,9 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._dspark_block_table_buffer: torch.Tensor | None = None
         self._dspark_block_table_tensor: torch.Tensor | None = None
         scheduler_config = getattr(vllm_config, "scheduler_config", None)
-        self._dspark_max_request_slots = max(1, int(getattr(scheduler_config, "max_num_seqs", self.max_batch_size) or self.max_batch_size))
+        self._dspark_max_request_slots = max(
+            1, int(getattr(scheduler_config, "max_num_seqs", self.max_batch_size) or self.max_batch_size)
+        )
         self._dspark_req_id_to_slot: dict[str, int] = {}
         self._dspark_free_slots = list(range(self._dspark_max_request_slots))
         self._dspark_slots_to_reset: list[int] = []
@@ -81,7 +84,16 @@ class AscendDSparkProposer(AscendDflashProposer):
         self.use_cuda_graph = self.use_cuda_graph and not self._dspark_probabilistic
         self._dspark_confidence_threshold = float(getattr(draft_hf_config, "dspark_confidence_threshold", 0.0) or 0.0)
         if not 0.0 <= self._dspark_confidence_threshold <= 1.0:
-            raise ValueError(f"dspark_confidence_threshold must be in [0.0, 1.0], got {self._dspark_confidence_threshold}")
+            raise ValueError(
+                f"dspark_confidence_threshold must be in [0.0, 1.0], got {self._dspark_confidence_threshold}"
+            )
+        handoff_warmup_steps = getattr(
+            draft_hf_config,
+            "dspark_handoff_warmup_steps",
+            0,
+        )
+        self._dspark_pd_handoff_warmup_steps = max(0, int(handoff_warmup_steps or 0))
+        self._dspark_pd_handoff_warmup_remaining: dict[str, int] = {}
         self._runnable = self._run_dspark_draft
 
     def _get_graph_runnable(self):
@@ -132,11 +144,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         if draft_probs is None:
             return None
 
-        req_id_to_idx = (
-            {req_id: idx for idx, req_id in enumerate(draft_req_ids)}
-            if draft_req_ids is not None
-            else None
-        )
+        req_id_to_idx = {req_id: idx for idx, req_id in enumerate(draft_req_ids)} if draft_req_ids is not None else None
         rows: list[torch.Tensor] = []
         for req_idx, (req_id, num_tokens) in enumerate(zip(req_ids, num_draft_tokens)):
             if num_tokens <= 0:
@@ -169,11 +177,56 @@ class AscendDSparkProposer(AscendDflashProposer):
             return None
         return list(req_ids[:batch_size])
 
+    def _is_kv_consumer(self) -> bool:
+        if bool(getattr(self.runner, "is_kv_consumer", False)):
+            return True
+        kv_transfer_config = getattr(self.vllm_config, "kv_transfer_config", None)
+        return bool(kv_transfer_config is not None and getattr(kv_transfer_config, "is_kv_consumer", False))
+
+    @staticmethod
+    def _request_id(request) -> str | None:
+        return getattr(request, "req_id", getattr(request, "request_id", None))
+
+    def _register_pd_handoff_warmup(
+        self,
+        scheduler_output: SchedulerOutput | None,
+        batch_size: int,
+    ) -> None:
+        if scheduler_output is None or not self._is_kv_consumer() or self._dspark_pd_handoff_warmup_steps <= 0:
+            return
+        current_req_ids = set(self._current_req_ids(batch_size) or [])
+        for request in getattr(scheduler_output, "scheduled_new_reqs", []) or []:
+            req_id = self._request_id(request)
+            if req_id is None or (current_req_ids and req_id not in current_req_ids):
+                continue
+            self._dspark_pd_handoff_warmup_remaining.setdefault(
+                req_id,
+                self._dspark_pd_handoff_warmup_steps,
+            )
+
+    def _consume_pd_handoff_warmup(self, batch_size: int) -> bool:
+        if not self._dspark_pd_handoff_warmup_remaining:
+            return False
+        active_req_ids = set(self._current_req_ids(batch_size) or [])
+        pending_active_req_ids = (
+            active_req_ids & set(self._dspark_pd_handoff_warmup_remaining)
+            if active_req_ids
+            else set(self._dspark_pd_handoff_warmup_remaining)
+        )
+        for req_id in list(self._dspark_pd_handoff_warmup_remaining):
+            if active_req_ids and req_id not in active_req_ids:
+                self._dspark_pd_handoff_warmup_remaining.pop(req_id, None)
+                continue
+            remaining = self._dspark_pd_handoff_warmup_remaining[req_id] - 1
+            if remaining <= 0:
+                self._dspark_pd_handoff_warmup_remaining.pop(req_id, None)
+            else:
+                self._dspark_pd_handoff_warmup_remaining[req_id] = remaining
+        return bool(pending_active_req_ids)
+
     def initialize_attn_backend(self, kv_cache_config, kernel_block_sizes=None) -> None:
         del kernel_block_sizes
-        cache_layer_names = sorted(
-            name for name in self._draft_attn_layer_names if name.endswith(".swa_cache")
-        )
+        cache_layer_names = sorted(name for name in self._draft_attn_layer_names if name.endswith(".swa_cache"))
         expected_num_layers = self.model.model.num_dspark_layers
         if len(cache_layer_names) != expected_num_layers:
             raise ValueError(
@@ -188,8 +241,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         }
         if len(matching_group_ids) != 1:
             raise ValueError(
-                "DSpark SWA caches must belong to one KV cache group, got "
-                f"group ids {sorted(matching_group_ids)}"
+                f"DSpark SWA caches must belong to one KV cache group, got group ids {sorted(matching_group_ids)}"
             )
         self.kv_cache_gid = matching_group_ids.pop()
         cache_group = kv_cache_config.kv_cache_groups[self.kv_cache_gid]
@@ -197,9 +249,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         if hasattr(cache_spec, "kv_cache_specs"):
             cache_spec = cache_spec.kv_cache_specs[cache_layer_names[0]]
         kernel_block_size = None
-        runner_kernel_block_sizes = getattr(
-            getattr(self, "runner", None), "kernel_block_sizes", None
-        )
+        runner_kernel_block_sizes = getattr(getattr(self, "runner", None), "kernel_block_sizes", None)
         if runner_kernel_block_sizes is not None:
             kernel_block_size = runner_kernel_block_sizes[self.kv_cache_gid]
             while isinstance(kernel_block_size, list):
@@ -347,6 +397,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         stale_req_ids = [req_id for req_id in self._dspark_req_id_to_slot if req_id not in active_req_ids]
         for req_id in stale_req_ids:
             slot = self._dspark_req_id_to_slot.pop(req_id)
+            self._dspark_pd_handoff_warmup_remaining.pop(req_id, None)
             if slot not in self._dspark_free_slots:
                 self._dspark_free_slots.append(slot)
         self._dspark_free_slots.sort()
@@ -362,18 +413,31 @@ class AscendDSparkProposer(AscendDflashProposer):
             slots.append(self._dspark_req_id_to_slot[req_id])
         return slots
 
-    def _copy_dspark_block_table(self, block_table: torch.Tensor | None) -> None:
+    def _copy_dspark_block_table(
+        self,
+        block_table: torch.Tensor | None,
+        seq_lens: torch.Tensor | None = None,
+    ) -> None:
         block_table_buffer = self._dspark_block_table_buffer
         if block_table_buffer is None:
             self._dspark_block_table_tensor = block_table
             return
-        block_table_buffer.zero_()
+        block_table_buffer.fill_(-1)
         if block_table is not None:
             num_rows = min(block_table.shape[0], block_table_buffer.shape[0])
             num_cols = min(block_table.shape[1], block_table_buffer.shape[1])
-            block_table_buffer[:num_rows, :num_cols].copy_(
-                block_table[:num_rows, :num_cols]
-            )
+            block_table_buffer[:num_rows, :num_cols].copy_(block_table[:num_rows, :num_cols])
+            if seq_lens is not None and num_rows > 0:
+                valid_block_counts = torch.div(
+                    seq_lens[:num_rows].to(device=block_table_buffer.device, dtype=torch.long)
+                    + self.kernel_block_size
+                    - 1,
+                    self.kernel_block_size,
+                    rounding_mode="floor",
+                )
+                block_indices = torch.arange(num_cols, device=block_table_buffer.device).view(1, -1)
+                invalid_blocks = block_indices >= valid_block_counts.view(-1, 1)
+                block_table_buffer[:num_rows, :num_cols].masked_fill_(invalid_blocks, -1)
         self._dspark_block_table_tensor = block_table_buffer
 
     def set_inputs_first_pass(
@@ -390,9 +454,12 @@ class AscendDSparkProposer(AscendDflashProposer):
         num_decode_reqs=0,
     ) -> tuple[int, torch.Tensor | None, CommonAttentionMetadata, tuple[Any, Any] | None]:
         del req_scheduled_tokens, long_seq_metadata
-        is_prefill = (num_decode_reqs == 0 and num_prefill_reqs > 0)
+        is_prefill = num_decode_reqs == 0 and num_prefill_reqs > 0
         batch_size = cad.num_reqs
-        self._copy_dspark_block_table(getattr(cad, "block_table_tensor", None))
+        self._copy_dspark_block_table(
+            getattr(cad, "block_table_tensor", None),
+            getattr(cad, "seq_lens", None),
+        )
         block_size = self.num_speculative_tokens
         num_query_total = batch_size * block_size
         request_slots = self._assign_request_slots(batch_size)
@@ -471,7 +538,9 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.seq_lens = effective_seq_lens + block_size
         if max_model_len > 0:
             cad.seq_lens = cad.seq_lens.clamp(max=max_model_len)
-        cad.query_start_loc_cpu = (torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone() * block_size).to(torch.int32)
+        cad.query_start_loc_cpu = (torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone() * block_size).to(
+            torch.int32
+        )
         if hasattr(cad, "actual_seq_lengths_q"):
             cad.actual_seq_lengths_q = [block_size] * batch_size
         if hasattr(cad, "decode_token_per_req"):
@@ -533,7 +602,9 @@ class AscendDSparkProposer(AscendDflashProposer):
             return runner_idx_mapping[:num_reqs].to(device=device, dtype=torch.long).contiguous()
         return None
 
-    def _get_draft_sampling_temperature(self, sampling_metadata: SamplingMetadata, num_reqs: int, device: torch.device) -> torch.Tensor:
+    def _get_draft_sampling_temperature(
+        self, sampling_metadata: SamplingMetadata, num_reqs: int, device: torch.device
+    ) -> torch.Tensor:
         temperature = sampling_metadata.temperature
         if temperature is None:
             default = 0.0 if sampling_metadata.all_greedy else 1.0
@@ -545,7 +616,9 @@ class AscendDSparkProposer(AscendDflashProposer):
             return temperature.to(device=device, dtype=torch.float32).contiguous()
         return temperature[:num_reqs].to(device=device, dtype=torch.float32).contiguous()
 
-    def _get_draft_sampling_seeds(self, sampling_metadata: SamplingMetadata, num_reqs: int, device: torch.device) -> torch.Tensor:
+    def _get_draft_sampling_seeds(
+        self, sampling_metadata: SamplingMetadata, num_reqs: int, device: torch.device
+    ) -> torch.Tensor:
         runner = getattr(self, "runner", None)
         sampler = getattr(runner, "sampler", None)
         sampling_states = getattr(sampler, "sampling_states", None)
@@ -553,7 +626,9 @@ class AscendDSparkProposer(AscendDflashProposer):
         if isinstance(runner_seeds, torch.Tensor):
             runner_idx_mapping = self._get_runner_idx_mapping(num_reqs, runner_seeds.device)
             if runner_idx_mapping is not None and runner_seeds.shape[0] > num_reqs:
-                return runner_seeds.index_select(0, runner_idx_mapping).to(device=device, dtype=torch.int64).contiguous()
+                return (
+                    runner_seeds.index_select(0, runner_idx_mapping).to(device=device, dtype=torch.int64).contiguous()
+                )
             return runner_seeds[:num_reqs].to(device=device, dtype=torch.int64).contiguous()
         seeds = self._dspark_sampling_seed_buffer[:num_reqs]
         model_config = getattr(getattr(self, "vllm_config", None), "model_config", None)
@@ -583,8 +658,14 @@ class AscendDSparkProposer(AscendDflashProposer):
         base_logits = self.model.compute_logits(head_hidden)
         vocab_size = base_logits.shape[-1]
         base_logits = base_logits.view(num_reqs, block_size, vocab_size)
-        use_probabilistic = sampling_metadata is not None and self._dspark_probabilistic and not sampling_metadata.all_greedy
-        draft_logits = torch.empty((num_reqs, block_size, vocab_size), dtype=torch.float32, device=base_logits.device) if use_probabilistic else None
+        use_probabilistic = (
+            sampling_metadata is not None and self._dspark_probabilistic and not sampling_metadata.all_greedy
+        )
+        draft_logits = (
+            torch.empty((num_reqs, block_size, vocab_size), dtype=torch.float32, device=base_logits.device)
+            if use_probabilistic
+            else None
+        )
         self._dspark_last_draft_logits = None
         self._dspark_last_draft_probs = None
         self._dspark_last_confidence = None
@@ -595,9 +676,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         if use_probabilistic:
             assert sampling_metadata is not None
             draft_idx_mapping = self._get_draft_idx_mapping(num_reqs, base_logits.device)
-            draft_temperature = self._get_draft_sampling_temperature(
-                sampling_metadata, num_reqs, base_logits.device
-            )
+            draft_temperature = self._get_draft_sampling_temperature(sampling_metadata, num_reqs, base_logits.device)
             draft_seeds = self._get_draft_sampling_seeds(sampling_metadata, num_reqs, base_logits.device)
             gumbel_positions = (
                 self.positions[:num_sample]
@@ -645,22 +724,23 @@ class AscendDSparkProposer(AscendDflashProposer):
         num_reqs: int,
         sampling_metadata: SamplingMetadata | None,
     ) -> torch.Tensor:
+        confidence = self._dspark_last_confidence
+        if confidence is not None:
+            confidence = confidence[:num_reqs]
         proposal_len = self._dspark_confident_prefix_length(
-            self._dspark_last_confidence,
+            confidence,
             self.num_speculative_tokens,
         )
         use_probabilistic = (
-            sampling_metadata is not None
-            and self._dspark_probabilistic
-            and not sampling_metadata.all_greedy
+            sampling_metadata is not None and self._dspark_probabilistic and not sampling_metadata.all_greedy
         )
         draft_logits = self._dspark_last_draft_logits
         self._dspark_last_draft_logits = None
         if use_probabilistic and proposal_len > 0:
             assert draft_logits is not None
-            self._dspark_last_draft_probs = draft_logits[
-                :num_reqs, :proposal_len, :
-            ].softmax(dim=-1, dtype=torch.float32).contiguous()
+            self._dspark_last_draft_probs = (
+                draft_logits[:num_reqs, :proposal_len, :].softmax(dim=-1, dtype=torch.float32).contiguous()
+            )
             self._dspark_last_req_ids = self._current_req_ids(num_reqs)
         return draft_token_ids[:num_reqs, :proposal_len]
 
@@ -704,12 +784,11 @@ class AscendDSparkProposer(AscendDflashProposer):
     ) -> torch.Tensor:
         del (
             mm_embed_inputs,
-            scheduler_output,
             num_scheduled_tokens,
             target_model_batch_desc,
             token_indices_to_sample,
         )
-        is_prefill = (num_decode_reqs == 0 and num_prefill_reqs > 0)
+        is_prefill = num_decode_reqs == 0 and num_prefill_reqs > 0
         num_tokens, _, _, _ = self.set_inputs_first_pass(
             target_token_ids,
             next_token_ids,
@@ -782,9 +861,14 @@ class AscendDSparkProposer(AscendDflashProposer):
             if forward_context is not None:
                 forward_context.moe_layer_index = 0
             self._prepare_dspark_context_cache()
+            self._register_pd_handoff_warmup(scheduler_output, actual_num_reqs)
             if is_prefill:
-                return common_attn_metadata.num_reqs.new_zeros(
-                    common_attn_metadata.num_reqs, 0, dtype=torch.long
+                return common_attn_metadata.num_reqs.new_zeros(common_attn_metadata.num_reqs, 0, dtype=torch.long)
+            if self._consume_pd_handoff_warmup(actual_num_reqs):
+                return torch.empty(
+                    (actual_num_reqs, 0),
+                    dtype=torch.long,
+                    device=self.device,
                 )
             else:
                 run_kwargs = dict(
