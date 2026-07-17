@@ -134,7 +134,6 @@ export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p
 docker run --rm \
     --name vllm-ascend \
     --shm-size=1g \
-    --net=host \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \
@@ -306,7 +305,7 @@ Key Parameter Descriptions:
 
 ::::::{tab-item} Atlas inference products
 
-Currently only the **TP** scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. With **TP=4**, `--max-model-len` can support **128K** and **256K** long-sequence scenarios; configure `--max-num-seqs` as needed—setting it too high may cause OOM. Replace `MODEL_PATH` with a ModelScope model id or a local directory path.
+Currently only the **TP** scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. Replace `MODEL_PATH` with a ModelScope model id or a local directory path. The quantized versions need to start with the `--quantization ascend` parameter.
 
 :::::{tab-set}
 

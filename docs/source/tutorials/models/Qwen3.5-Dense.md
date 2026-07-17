@@ -46,7 +46,6 @@ export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p
 docker run --rm \
     --name vllm-ascend \
     --shm-size=1g \
-    --net=host \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \
