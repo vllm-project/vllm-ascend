@@ -126,7 +126,7 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_config import (
     get_gva_layerwise_config,
-    get_layerwise_kv_cache_reuse_layers,
+    get_layerwise_physical_layer_index,
     get_layerwise_storage_indices,
 )
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
@@ -3892,13 +3892,6 @@ class NPUModelRunner(GPUModelRunner):
         extra_config = get_gva_layerwise_config(self.vllm_config.kv_transfer_config)
         if extra_config is None:
             return
-        if len(kv_cache_config.kv_cache_groups) != 1:
-            num_layers = self.model_config.get_num_layers(self.parallel_config)
-            if get_layerwise_kv_cache_reuse_layers(num_layers, extra_config) is not None:
-                raise NotImplementedError(
-                    "GVA layerwise KV cache reuse does not support multiple KV cache groups."
-                )
-            return
 
         old_tensors = kv_cache_config.kv_cache_tensors
         if len(old_tensors) <= 1:
@@ -3908,10 +3901,24 @@ class NPUModelRunner(GPUModelRunner):
                 "GVA layerwise KV cache reuse requires one KV cache tensor descriptor per layer."
             )
 
-        layer_names = [tensor.shared_by[0] for tensor in old_tensors]
-        actual_layers = len(layer_names)
-        if get_layerwise_kv_cache_reuse_layers(actual_layers, extra_config) is None:
+        layer_specs = self._get_layer_kv_cache_specs(kv_cache_config)
+        layer_layout, storage_slots = self._build_layerwise_reuse_layout(
+            layer_specs,
+            extra_config,
+        )
+        actual_layers = len(layer_layout)
+        if len(storage_slots) >= actual_layers:
             return
+
+        indexer_specs = [
+            spec for spec in layer_specs.values() if isinstance(spec, AscendSFAIndexerCacheSpec)
+        ]
+        has_sparse_c8_indexer = any(spec.cache_sparse_c8 for spec in indexer_specs)
+        if len(kv_cache_config.kv_cache_groups) != 1 and not has_sparse_c8_indexer:
+            raise NotImplementedError(
+                "GVA layerwise KV cache reuse only supports multiple KV cache groups "
+                "for separated sparse-C8 SFA indexer caches."
+            )
 
         base_layers = self.model_config.get_num_layers(self.parallel_config)
         if actual_layers < base_layers:
@@ -3928,27 +3935,74 @@ class NPUModelRunner(GPUModelRunner):
                 actual_layers - base_layers,
             )
 
-        storage_indices = get_layerwise_storage_indices(actual_layers, extra_config)
-        new_tensors = []
-        for slot in storage_indices:
-            slot_sizes = {old_tensors[index].size for index in slot}
-            if len(slot_sizes) != 1:
-                raise ValueError(
-                    "Layers assigned to one layerwise reuse slot must have equal KV cache tensor sizes."
+        tensors_by_name = {tensor.shared_by[0]: tensor for tensor in old_tensors}
+        new_tensors: list[KVCacheTensor] = []
+        slot_by_layer_name: dict[str, int] = {}
+        for slot_id, physical_layers in enumerate(storage_slots):
+            for component in ("main", "indexer"):
+                shared_by = [
+                    layer_layout[layer][component]
+                    for layer in physical_layers
+                    if component in layer_layout[layer]
+                ]
+                if not shared_by:
+                    continue
+                component_tensors = [tensors_by_name[layer_name] for layer_name in shared_by]
+                slot_sizes = {tensor.size for tensor in component_tensors}
+                if len(slot_sizes) != 1:
+                    raise ValueError(
+                        f"Layers assigned to one layerwise reuse slot must have equal "
+                        f"{component} KV cache tensor sizes."
+                    )
+                new_tensors.append(
+                    KVCacheTensor(
+                        shared_by=shared_by,
+                        size=component_tensors[0].size,
+                    )
                 )
-            new_tensors.append(
-                KVCacheTensor(
-                    shared_by=[layer_names[index] for index in slot],
-                    size=old_tensors[slot[0]].size,
-                )
-            )
+                slot_by_layer_name.update((layer_name, slot_id) for layer_name in shared_by)
 
         kv_cache_config.kv_cache_tensors = new_tensors
+        self._layerwise_reuse_slot_by_layer_name = slot_by_layer_name
+        self._layerwise_reuse_num_slots = len(storage_slots)
         logger.info(
-            "Layerwise KV cache reuse merged %d tensor descriptors into %d shared slots.",
+            "Layerwise KV cache reuse merged %d tensor descriptors into %d descriptors "
+            "across %d physical slots.",
             len(old_tensors),
             len(new_tensors),
+            len(storage_slots),
         )
+
+    def _build_layerwise_reuse_layout(
+        self,
+        layer_specs: dict[str, KVCacheSpec],
+        extra_config: dict[str, Any],
+    ) -> tuple[dict[int, dict[str, str]], list[list[int]]]:
+        """Group main/indexer cache names into physical reuse slots."""
+        base_layers = self.model_config.get_num_layers(self.parallel_config)
+        layer_layout: dict[int, dict[str, str]] = {}
+        for layer_name, layer_spec in layer_specs.items():
+            physical_layer = get_layerwise_physical_layer_index(
+                layer_name,
+                base_layers,
+            )
+            component = "indexer" if isinstance(layer_spec, AscendSFAIndexerCacheSpec) else "main"
+            components = layer_layout.setdefault(physical_layer, {})
+            if component in components:
+                raise NotImplementedError(
+                    f"Layerwise reuse found multiple {component} cache descriptors "
+                    f"for physical layer {physical_layer}."
+                )
+            components[component] = layer_name
+
+        physical_layers = sorted(layer_layout)
+        if any("main" not in layer_layout[layer] for layer in physical_layers):
+            raise RuntimeError("Every physical layer must provide a main KV cache for layerwise reuse.")
+        storage_slots = [
+            [physical_layers[index] for index in slot]
+            for slot in get_layerwise_storage_indices(len(physical_layers), extra_config)
+        ]
+        return layer_layout, storage_slots
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -4172,6 +4226,38 @@ class NPUModelRunner(GPUModelRunner):
 
         return dsa_k_tensor, dsa_k_scale_tensor
 
+    def _allocate_sfa_indexer_raw_cache(
+        self,
+        spec: AscendSFAIndexerCacheSpec,
+        num_blocks: int,
+        alignment: int,
+    ) -> tuple[torch.Tensor, ...]:
+        k_tensor_size = (
+            num_blocks
+            * spec.sfa_dcp_replicated_indexer_size
+            * spec.block_size
+            * spec.num_kv_heads
+            * spec.head_size
+            * get_dtype_size(spec.dtype)
+        )
+        if not spec.scale_dim:
+            return (self._allocate_int8_cache_tensor(k_tensor_size, alignment),)
+
+        scale_tensor_size = (
+            num_blocks
+            * spec.sfa_dcp_replicated_indexer_size
+            * spec.block_size
+            * spec.num_kv_heads
+            * spec.scale_dim
+            * get_dtype_size(spec.scale_dtype)
+        )
+        return self._allocate_sparse_c8_indexer_tensors(
+            dsa_k_tensor_size=k_tensor_size,
+            dsa_k_scale_tensor_size=scale_tensor_size,
+            alignment=alignment,
+            scale_dtype=spec.scale_dtype,
+        )
+
     def _allocate_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         """
         Initializes the KV cache buffer with the correct size. The buffer needs
@@ -4193,6 +4279,29 @@ class NPUModelRunner(GPUModelRunner):
         # prefill disaggregation need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
+        slot_by_layer_name = getattr(self, "_layerwise_reuse_slot_by_layer_name", {})
+        num_reuse_slots = getattr(self, "_layerwise_reuse_num_slots", 0)
+        c8_indexer_specs = [
+            spec
+            for spec in layer_kv_cache_spec.values()
+            if isinstance(spec, AscendSFAIndexerCacheSpec) and spec.cache_sparse_c8
+        ]
+        self._layerwise_c8_indexer_slot_buffers: list[tuple[torch.Tensor, ...]] = []
+        if num_reuse_slots and c8_indexer_specs:
+            indexer_page_sizes = {spec.page_size_bytes for spec in c8_indexer_specs}
+            if len(indexer_page_sizes) != 1:
+                raise ValueError(
+                    "Sparse-C8 layerwise reuse requires uniform indexer cache page sizes."
+                )
+            indexer_spec = c8_indexer_specs[0]
+            self._layerwise_c8_indexer_slot_buffers = [
+                self._allocate_sfa_indexer_raw_cache(
+                    indexer_spec,
+                    kv_cache_config.num_blocks,
+                    alignment,
+                )
+                for _ in range(num_reuse_slots)
+            ]
         # If some tensors are shared by linear layers and attention layers,
         # the same tensor format must be maintained even if some layers
         # have only linear or attention layers, for example, the mtp layer.
@@ -4242,38 +4351,23 @@ class NPUModelRunner(GPUModelRunner):
                     and layer_name not in kv_cache_raw_tensors
                 ):
                     current_kv_cache_spec = layer_kv_cache_spec[layer_name]
-                    raw_cache: tuple[torch.Tensor, ...]
                     num_blocks = kv_cache_tensor.size // current_kv_cache_spec.page_size_bytes
-                    k_tensor_size = (
-                        num_blocks
-                        * current_kv_cache_spec.sfa_dcp_replicated_indexer_size
-                        * current_kv_cache_spec.block_size
-                        * current_kv_cache_spec.num_kv_heads
-                        * current_kv_cache_spec.head_size
-                        * get_dtype_size(current_kv_cache_spec.dtype)
-                    )
-                    if current_kv_cache_spec.scale_dim:
-                        scale_tensor_size = (
-                            num_blocks
-                            * current_kv_cache_spec.sfa_dcp_replicated_indexer_size
-                            * current_kv_cache_spec.block_size
-                            * current_kv_cache_spec.num_kv_heads
-                            * current_kv_cache_spec.scale_dim
-                            * get_dtype_size(current_kv_cache_spec.scale_dtype)
-                        )
-                        k_tensor, scale_tensor = self._allocate_sparse_c8_indexer_tensors(
-                            dsa_k_tensor_size=k_tensor_size,
-                            dsa_k_scale_tensor_size=scale_tensor_size,
-                            alignment=alignment,
-                            scale_dtype=current_kv_cache_spec.scale_dtype,
-                        )
-                        raw_cache = (k_tensor, scale_tensor)
+                    if current_kv_cache_spec.cache_sparse_c8 and self._layerwise_c8_indexer_slot_buffers:
+                        slot_ids = {
+                            slot_by_layer_name[layer_name_inner]
+                            for layer_name_inner in kv_cache_tensor.shared_by
+                        }
+                        if len(slot_ids) != 1:
+                            raise RuntimeError(
+                                "One shared indexer descriptor cannot span multiple layerwise reuse slots."
+                            )
+                        raw_cache = self._layerwise_c8_indexer_slot_buffers[slot_ids.pop()]
                     else:
-                        k_tensor = self._allocate_int8_cache_tensor(
-                            k_tensor_size,
+                        raw_cache = self._allocate_sfa_indexer_raw_cache(
+                            current_kv_cache_spec,
+                            num_blocks,
                             alignment,
                         )
-                        raw_cache = (k_tensor,)
 
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         kv_cache_raw_tensors[layer_name_inner] = raw_cache

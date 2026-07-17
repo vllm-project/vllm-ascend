@@ -1,3 +1,4 @@
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -9,6 +10,18 @@ _EXTRA_CONFIG_KEY_INDEPENDENT_LAYERS = "layerwise_independent_layers"
 # Prefetching farther than the number of shared buffers cannot improve the
 # reuse pipeline. Cap the automatic value to avoid a large layer-0 burst.
 _DEFAULT_MAX_PREFETCH_LAYERS = 8
+
+
+def get_layerwise_physical_layer_index(layer_name: str, base_layers: int) -> int:
+    """Extract the physical transformer layer index from a cache name."""
+    match = re.search(r"layers\.(\d+)", layer_name)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"mtp\.(\d+)", layer_name)
+    if match:
+        return base_layers + int(match.group(1))
+    match = re.search(r"(\d+)", layer_name)
+    return int(match.group(1)) if match else 0
 
 
 @dataclass(frozen=True)

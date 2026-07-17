@@ -375,8 +375,6 @@ class KVPoolWorker:
         self.prefetch_layer_map: dict[int, int] = {}
         if self.use_gva_layerwise:
             layerwise_config = get_layerwise_config(self.num_layers, self._extra_config)
-            if layerwise_config.has_layer_reuse and self.num_kv_cache_groups != 1:
-                raise NotImplementedError("GVA layerwise KV cache reuse does not support multiple KV cache groups.")
             self.layerwise_offload = layerwise_config.has_layer_reuse
             self.independent_layers = layerwise_config.independent_layers
             self.prefetch_layer_map = layerwise_config.prefetch_layer_map
@@ -800,8 +798,6 @@ class KVPoolWorker:
 
         if self.use_gva_layerwise:
             layerwise_config = get_layerwise_config(self.num_layers, self._extra_config)
-            if layerwise_config.has_layer_reuse and self.num_kv_cache_groups != 1:
-                raise NotImplementedError("GVA layerwise KV cache reuse does not support multiple KV cache groups.")
             self.layerwise_offload = layerwise_config.has_layer_reuse
             self.independent_layers = layerwise_config.independent_layers
             self.prefetch_layer_map = layerwise_config.prefetch_layer_map
