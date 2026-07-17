@@ -56,6 +56,7 @@ patch(
     "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_pcp_group", return_value=_mock_pcp_group
 ).start()
 patch("vllm.distributed.parallel_state._DCP", _mock_dcp_group).start()
+patch("torch.npu.set_device").start()
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # noqa: E402
     MAX_REQUESTS_PER_PEER_HANDLER,
@@ -83,6 +84,11 @@ for _k, _v in _saved_modules.items():
 
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
+
+
+def make_mock_kv_caches() -> dict[str, Any]:
+    kv_cache = MagicMock(device=torch.device("npu:0"))
+    return {"layer_0": (kv_cache, kv_cache)}
 
 
 def make_agent_metadata(**overrides: Any) -> MooncakeAgentMetadata:
@@ -549,7 +555,7 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
         self.engine = MagicMock()
         self.ready_event = threading.Event()
         self.vllm_config = MockVllmConfig()
-        self.kv_caches: dict[str, Any] = {}
+        self.kv_caches = make_mock_kv_caches()
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
@@ -780,7 +786,7 @@ class TestSocketManagement(unittest.TestCase):
         self.engine = MagicMock()
         self.ready_event = threading.Event()
         self.vllm_config = MockVllmConfig()
-        self.kv_caches: dict[str, Any] = {}
+        self.kv_caches = make_mock_kv_caches()
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
@@ -836,7 +842,7 @@ class TestCoreFunctionality(unittest.TestCase):
         self.ready_event = threading.Event()
         self.mock_queue = MagicMock()
         self.vllm_config = MockVllmConfig()
-        self.kv_caches: dict[str, Any] = {"layer_0": (MagicMock(), MagicMock())}
+        self.kv_caches = make_mock_kv_caches()
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
@@ -1043,7 +1049,7 @@ class TestMetadataHandling(unittest.TestCase):
         self.engine = MagicMock()
         self.ready_event = threading.Event()
         self.vllm_config = MockVllmConfig()
-        self.kv_caches: dict[str, Any] = {}
+        self.kv_caches = make_mock_kv_caches()
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
@@ -1111,7 +1117,7 @@ class TestMainThreadLoop(unittest.TestCase):
         self.engine = MagicMock()
         self.ready_event = threading.Event()
         self.vllm_config = MockVllmConfig()
-        self.kv_caches: dict[str, Any] = {}
+        self.kv_caches = make_mock_kv_caches()
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
