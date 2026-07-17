@@ -657,9 +657,8 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 133120 \
-            --additional-config '{"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_c8": true,"c8_enable_reshape_optim":True}' \
+            --additional-config '{"recompute_scheduler_enable" : false, "enable_dsa_cp":true,"enable_sparse_c8": true,"c8_enable_reshape_optim":True}' \
             --max-num-batched-tokens 8192 \
-
             --trust-remote-code \
             --max-num-seqs 64 \
             --quantization ascend \
@@ -728,7 +727,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 133120 \
-            --additional-config '{"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_c8": true,"c8_enable_reshape_optim":True}' \
+            --additional-config '{"recompute_scheduler_enable" : false,"enable_dsa_cp":true,"enable_sparse_c8": true,"c8_enable_reshape_optim":True}' \
             --max-num-batched-tokens 8192 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -797,7 +796,7 @@ Before you start, please
             --max-num-batched-tokens 164 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
-            --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_sparse_c8": true}' \
+            --additional-config '{"recompute_scheduler_enable":true,"enable_sparse_c8": true}' \
             --trust-remote-code \
             --max-num-seqs 32 \
             --gpu-memory-utilization 0.92 \
@@ -865,7 +864,7 @@ Before you start, please
             --max-num-batched-tokens 164 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
-            --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_sparse_c8": true}' \
+            --additional-config '{"recompute_scheduler_enable":true,"enable_sparse_c8": true}' \
             --trust-remote-code \
             --max-num-seqs 32 \
             --gpu-memory-utilization 0.92 \
