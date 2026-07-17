@@ -4892,10 +4892,10 @@ class NPUModelRunner(GPUModelRunner):
         if (
             self.speculative_config
             and self.drafter is not None
-            and not isinstance(self.drafter, AscendDSparkProposer)
             and (
                 self.speculative_config.use_eagle()
                 or self.speculative_config.uses_extract_hidden_states()
+                or isinstance(self.drafter, AscendDSparkProposer)
             )
         ):
             assert isinstance(

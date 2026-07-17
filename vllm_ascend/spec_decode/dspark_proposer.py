@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from copy import copy
 from typing import Any
 
 import torch
@@ -8,6 +9,7 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.sample.metadata import SamplingMetadata
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
@@ -44,19 +46,33 @@ class AscendDSparkProposer(AscendDflashProposer):
             getattr(draft_hf_config, "dspark_noise_token_id", 0),
         )
         block_size = self.num_speculative_tokens
-        max_cudagraph_size = vllm_config.compilation_config.max_cudagraph_capture_size
-        aligned_max = ((max_cudagraph_size + block_size - 1) // block_size) * block_size
-        self.max_query_tokens = max(self.max_batch_size * block_size, aligned_max)
-        self.max_graph_batch_size = max(self.max_batch_size, self.max_query_tokens // block_size)
+        self.max_graph_batch_size = self.max_batch_size
+        self.max_dspark_graph_tokens = self.max_graph_batch_size * block_size
+        self.max_query_tokens = self.max_dspark_graph_tokens
         self.max_positions = self.max_num_tokens + self.max_query_tokens
-        self.positions = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=device)
-        self._slot_mapping_buffer = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=device)
-        self._request_slots_buffer = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=device)
-        self._context_request_slots_buffer = torch.zeros(self.max_num_tokens, dtype=torch.int32, device=device)
-        self._dspark_seed_buffer = torch.zeros(self.max_graph_batch_size, dtype=torch.int64, device=device)
-        self._dspark_sampling_seed_buffer = torch.zeros(self.max_graph_batch_size, dtype=torch.int64, device=device)
-        self._dspark_idx_mapping_buffer = torch.arange(self.max_graph_batch_size, dtype=torch.int32, device=device)
-        self._dspark_draft_buffer = torch.zeros((self.max_graph_batch_size, self.num_speculative_tokens), dtype=torch.int64, device=device)
+        self.input_ids = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
+        self.token_indices_to_sample = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
+        self.positions = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
+        self._slot_mapping_buffer = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
+        self._request_slots_buffer = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
+        self._context_request_slots_buffer = torch.zeros(
+            self.max_num_tokens, dtype=torch.int32, device=self.device
+        )
+        self._dspark_seed_buffer = torch.zeros(
+            self.max_graph_batch_size, dtype=torch.int64, device=self.device
+        )
+        self._dspark_sampling_seed_buffer = torch.zeros(
+            self.max_graph_batch_size, dtype=torch.int64, device=self.device
+        )
+        self._dspark_idx_mapping_buffer = torch.arange(
+            self.max_graph_batch_size, dtype=torch.int32, device=self.device
+        )
+        self._dspark_draft_buffer = torch.zeros(
+            (self.max_graph_batch_size, self.num_speculative_tokens),
+            dtype=torch.int64,
+            device=self.device,
+        )
+        self._dspark_capture_sizes: list[int] = []
         scheduler_config = getattr(vllm_config, "scheduler_config", None)
         self._dspark_max_request_slots = max(1, int(getattr(scheduler_config, "max_num_seqs", self.max_batch_size) or self.max_batch_size))
         self._dspark_req_id_to_slot: dict[str, int] = {}
@@ -89,6 +105,41 @@ class AscendDSparkProposer(AscendDflashProposer):
                 use_eagle=self.use_eagle,
                 enable_enpu=self.enable_enpu,
             )
+
+    def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
+        if not self.use_cuda_graph or not cudagraph_mode.has_full_cudagraphs():
+            self.cudagraph_dispatcher.initialize_cudagraph_keys(CUDAGraphMode.NONE)
+            return
+
+        assert self.runner is not None
+        block_size = self.num_speculative_tokens
+        self._dspark_capture_sizes = sorted(
+            {
+                desc.num_reqs * block_size
+                for runtime_mode, descriptors in self.runner.cudagraph_dispatcher.get_capture_descs()
+                if runtime_mode == CUDAGraphMode.FULL
+                for desc in descriptors
+                if desc.uniform and desc.num_reqs is not None
+            }
+        )
+        if not self._dspark_capture_sizes:
+            self.cudagraph_dispatcher.initialize_cudagraph_keys(CUDAGraphMode.NONE)
+            return
+
+        draft_vllm_config = copy(self.vllm_config)
+        draft_compilation_config = copy(self.vllm_config.compilation_config)
+        draft_compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        draft_compilation_config.cudagraph_capture_sizes = self._dspark_capture_sizes
+        draft_compilation_config.max_cudagraph_capture_size = self._dspark_capture_sizes[-1]
+        draft_compilation_config.compile_sizes = []
+        draft_vllm_config.compilation_config = draft_compilation_config
+
+        self.cudagraph_dispatcher = CudagraphDispatcher(draft_vllm_config)
+        self.cudagraph_dispatcher.uniform_decode_query_len = block_size
+        self.cudagraph_dispatcher.initialize_cudagraph_keys(
+            CUDAGraphMode.FULL_DECODE_ONLY,
+            block_size,
+        )
 
     def take_last_draft_logits(self) -> torch.Tensor | None:
         draft_logits = self._dspark_last_draft_logits
@@ -172,18 +223,21 @@ class AscendDSparkProposer(AscendDflashProposer):
             num_reqs = max(1, min(self.max_graph_batch_size, (num_tokens + block_size - 1) // block_size))
         num_context = min(num_tokens, self.max_num_tokens)
         if aclgraph_runtime_mode != CUDAGraphMode.NONE or self.use_cuda_graph:
-            num_query_total = min(self._align_dspark_tokens(num_tokens), self.max_query_tokens)
-            num_reqs = num_query_total // block_size
-            batch_descriptor = self._make_dspark_batch_descriptor(num_query_total, batch_descriptor)
+            num_reqs = min(num_reqs, self.max_graph_batch_size)
+            num_query_total = num_reqs * block_size
+            batch_descriptor = self._make_dspark_batch_descriptor(num_reqs, batch_descriptor)
         else:
-            num_query_total = min(self._align_dspark_tokens(num_reqs * block_size), self.max_query_tokens)
+            num_query_total = min(num_reqs * block_size, self.max_query_tokens)
 
         num_input_tokens, num_tokens_across_dp, _ = self.runner._sync_metadata_across_dp(
             num_query_total, is_draft_model=True
         )
-        num_input_tokens = min(self._align_dspark_tokens(num_input_tokens), self.max_query_tokens)
+        num_input_tokens = min(num_input_tokens, self.max_query_tokens)
         if aclgraph_runtime_mode != CUDAGraphMode.NONE or self.use_cuda_graph:
-            batch_descriptor = self._make_dspark_batch_descriptor(num_input_tokens, batch_descriptor)
+            batch_descriptor = self._make_dspark_batch_descriptor(
+                num_input_tokens // block_size,
+                batch_descriptor,
+            )
         if num_tokens_across_dp is not None:
             if not torch.all(num_tokens_across_dp == num_input_tokens):
                 num_tokens_across_dp = num_tokens_across_dp.clone()
@@ -254,27 +308,24 @@ class AscendDSparkProposer(AscendDflashProposer):
             return
         super()._update_full_graph_params(forward_context, num_tokens, draft_attn_metadatas)
 
-    def _align_dspark_tokens(self, num_tokens: int) -> int:
-        block_size = self.num_speculative_tokens
-        return ((num_tokens + block_size - 1) // block_size) * block_size
-
     def _make_dspark_batch_descriptor(
         self,
-        num_tokens: int,
+        num_reqs: int,
         base_descriptor: BatchDescriptor | None,
     ) -> BatchDescriptor | None:
         if base_descriptor is None:
             return None
         return BatchDescriptor(
-            num_tokens=num_tokens,
-            num_reqs=num_tokens // self.num_speculative_tokens,
+            num_tokens=num_reqs * self.num_speculative_tokens,
+            num_reqs=num_reqs,
             uniform=False,
             has_lora=base_descriptor.has_lora,
             num_active_loras=base_descriptor.num_active_loras,
         )
 
     def get_aclgraph_capture_sizes(self, capture_sizes: list[int]) -> list[int]:
-        return sorted({self._align_dspark_tokens(size) for size in capture_sizes})
+        del capture_sizes
+        return self._dspark_capture_sizes
 
     def _assign_request_slots(self, batch_size: int) -> list[int]:
         if self.runner is None or not hasattr(self.runner, "input_batch"):
@@ -612,7 +663,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         num_scheduled_tokens: int = 0,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        del mm_embed_inputs, scheduler_output, num_scheduled_tokens
+        del mm_embed_inputs, scheduler_output, num_scheduled_tokens, target_model_batch_desc
         is_prefill = (num_decode_reqs == 0 and num_prefill_reqs > 0)
         num_tokens, _, _, _ = self.set_inputs_first_pass(
             target_token_ids,
@@ -634,33 +685,42 @@ class AscendDSparkProposer(AscendDflashProposer):
         block_size = self.num_speculative_tokens
         use_cuda_graph = self.use_cuda_graph and not is_prefill
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
-        uniform_decode = target_model_batch_desc.uniform
         if use_cuda_graph:
-            aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
+            _, batch_descriptor = self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
-                uniform_decode=uniform_decode,
+                uniform_decode=True,
                 has_lora=has_lora,
             )
-            num_input_tokens = self._align_dspark_tokens(batch_descriptor.num_tokens)
-            batch_descriptor = self._make_dspark_batch_descriptor(num_input_tokens, batch_descriptor)
+            num_input_tokens = batch_descriptor.num_tokens
         else:
-            aclgraph_runtime_mode = CUDAGraphMode.NONE
-            batch_descriptor = None
             num_input_tokens = num_tokens
 
         num_input_tokens, num_tokens_across_dp, _ = self.runner._sync_metadata_across_dp(
             num_input_tokens,
             is_draft_model=True,
         )
-        num_input_tokens = self._align_dspark_tokens(num_input_tokens)
 
         if use_cuda_graph:
-            batch_descriptor = self._make_dspark_batch_descriptor(num_input_tokens, batch_descriptor)
+            aclgraph_runtime_mode, batch_descriptor = self.cudagraph_dispatcher.dispatch(
+                num_tokens=num_input_tokens,
+                uniform_decode=True,
+                has_lora=has_lora,
+            )
+            num_input_tokens = batch_descriptor.num_tokens
+            if aclgraph_runtime_mode == CUDAGraphMode.NONE:
+                batch_descriptor = None
+            else:
+                batch_descriptor = self._make_dspark_batch_descriptor(
+                    num_input_tokens // block_size,
+                    batch_descriptor,
+                )
             self._pad_dspark_decode_inputs(num_tokens, num_input_tokens)
             if num_tokens_across_dp is not None:
                 num_tokens_across_dp = num_tokens_across_dp.clone()
                 num_tokens_across_dp[:] = num_input_tokens
         else:
+            aclgraph_runtime_mode = CUDAGraphMode.NONE
+            batch_descriptor = None
             if num_tokens_across_dp is not None:
                 num_tokens_across_dp = num_tokens_across_dp.clone()
                 num_tokens_across_dp[:] = num_input_tokens
