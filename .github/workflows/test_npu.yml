@@ -6,4 +6,4 @@ jobs:
   npu:
     runs-on: linux-aarch64-950dt-8
     steps:
-      - run: npu-smi info
+      - run: /usr/local/sbin/npu-smi info
