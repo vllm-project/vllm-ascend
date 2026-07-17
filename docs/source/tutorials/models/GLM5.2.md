@@ -119,7 +119,7 @@ export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=0
+export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
 vllm serve /mnt/weight/GLM-5.2-W4A8C8-0713-MTP \
 --host 0.0.0.0 \
@@ -412,6 +412,7 @@ export ACL_OP_INIT_MODE=1
 export TASK_QUEUE_ENABLE=1
 export CPU_AFFINITY_CONF=1
 export VLLM_ENGINE_READY_TIMEOUT_S=1200
+export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
 export VLLM_VERSION=0.21.0
 
@@ -470,6 +471,7 @@ export ACL_OP_INIT_MODE=1
 export TASK_QUEUE_ENABLE=1
 export CPU_AFFINITY_CONF=1
 export VLLM_ENGINE_READY_TIMEOUT_S=1200
+export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
 export VLLM_VERSION=0.21.0
 
@@ -655,7 +657,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 133120 \
-            --additional-config '{"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_c8": true,"c8_enable_reshape_optim":false}' \
+            --additional-config '{"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_c8": true,"c8_enable_reshape_optim":True}' \
             --max-num-batched-tokens 8192 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -725,7 +727,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 133120 \
-            --additional-config '{"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_c8": true,"c8_enable_reshape_optim":false}' \
+            --additional-config '{"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_c8": true,"c8_enable_reshape_optim":True}' \
             --max-num-batched-tokens 8192 \
             --trust-remote-code \
             --max-num-seqs 64 \
