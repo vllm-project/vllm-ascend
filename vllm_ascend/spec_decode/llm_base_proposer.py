@@ -2162,7 +2162,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self._slot_mapping_buffer[num_actual_tokens:num_input_tokens].fill_(-1)
             base_cm = common_attn_metadata
             base_cm.positions = self.positions[:num_input_tokens]
-            base_cm.slot_mapping = self._slot_mapping_buffer[:num_input_tokens]
+            if self.use_compress:
+                base_cm.slot_mapping = self._slot_mapping_buffer[:num_input_tokens]
+            else:
+                # DSpark per-group path fills _per_group_query_slot_mapping_buffers
+                # (not the dflash single _slot_mapping_buffer, which stays zero here).
+                # Use the primary group's query slot mapping so the draft attention
+                # reads/writes KV at the correct paged slots.
+                base_cm.slot_mapping = self._per_group_query_slot_mapping_buffers[
+                    self.kv_cache_gid][:num_input_tokens]
             base_cm.num_input_tokens = num_input_tokens
             base_cm.num_actual_tokens = num_actual_tokens
             base_cm.causal = False
@@ -2179,7 +2187,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     common_ratio_to_sas_metadata=dict(),
                     block_size=attn_group.kv_cache_spec.block_size,
                 )
-            if hasattr(self, "_per_group_block_table_buffers"):
                 gid = attn_group.kv_cache_group_id
                 common_attn_metadata = copy.copy(base_cm)
                 block_table = getattr(self, "_per_group_block_table_buffers", {}).get(gid)

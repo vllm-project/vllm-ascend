@@ -22,7 +22,7 @@ from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 
 # TODO: merge it with AscendDsparkProposer in dspark_proposer
-from vllm_ascend.spec_decode._dspark_proposer import AscendDSparkProposer
+from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
