@@ -20,6 +20,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import dataclass
+from vllm.logger import logger
 
 import torch
 from torch import nn
@@ -184,6 +185,8 @@ def dsa_forward(
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     if forward_context.attn_metadata:
+        logger.info("dsa_forward forward_context.attn_metadata: %s", forward_context.attn_metadata)
+        logger.info("self.prefix: %s", self.prefix)
         attn_metadata = filter_metadata(forward_context.attn_metadata, self.prefix)
     else:
         attn_metadata = forward_context.attn_metadata

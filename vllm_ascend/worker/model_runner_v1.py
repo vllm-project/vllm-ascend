@@ -3385,7 +3385,7 @@ class NPUModelRunner(GPUModelRunner):
                         prefill_ratio_to_sas_metadata,
                         decode_ratio_to_sas_metadata,
                         common_ratio_to_sas_metadata)
-            # logger.info("attn_metadata_dict555555555555: %s", attn_metadata)
+            logger.info("attn_metadata_dict555555555555: %s", attn_metadata)
         if self.is_mm_prefix_lm:
             req_doc_ranges = {}
             for req_id in self.input_batch.req_ids:
@@ -4834,7 +4834,7 @@ class NPUModelRunner(GPUModelRunner):
         #         )
         #         attn_groups.append(attn_group)
         #     return attn_groups
-        
+
         def create_attn_groups(
             attn_backends_map: dict[AttentionBackend, list[str]], kv_cache_group_id: int
         ) -> list[AttentionGroup]:
