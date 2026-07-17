@@ -27,7 +27,7 @@
       "skip_plugin_validation": true
     },
     {
-      "variant_label": "a5",
+      "variant_label": "950",
       "properties": [
         "ascend :: npu_type :: 950"
       ],
