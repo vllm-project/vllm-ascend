@@ -2891,13 +2891,10 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
         # A one-token chunk can still be a prefill, notably at a PD handoff.
         # Dispatch a decode graph only after every prompt is fully computed.
-        is_all_decode = np.all(
-            self.input_batch.num_computed_tokens_cpu[:num_reqs]
-            >= self.input_batch.num_prompt_tokens[:num_reqs]
-        )
+        is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
         uniform_decode = (
             (
-                is_all_decode
+                (is_all_decode if self.speculative_config else True)
                 and (max_num_scheduled_tokens == self.uniform_decode_query_len)
                 and (num_tokens == max_num_scheduled_tokens * num_reqs)
             )
