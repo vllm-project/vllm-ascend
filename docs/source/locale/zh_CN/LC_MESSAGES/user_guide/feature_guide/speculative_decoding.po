@@ -79,10 +79,10 @@ msgstr "**在线服务** — 将 `--speculative-config`（或 `-sc`）作为 JSO
 
 msgid ""
 "> [!NOTE]\n"
-"> On Ascend NPUs, the `npu_fused_infer_attention_score` operator supports a maximum of 16 tokens per decode round. Therefore, `(num_speculative_tokens + 1)` must be ≤ 15."
+"> On Ascend NPUs, the `npu_fused_infer_attention_score` operator supports a maximum of 16 tokens per decode round. Therefore, `(num_speculative_tokens + 1)` must be ≤ 16."
 msgstr ""
 "> [!NOTE]\n"
-"> 在 Ascend NPU 上，`npu_fused_infer_attention_score` 算子每轮解码最多支持 16 个令牌。因此，`(num_speculative_tokens + 1)` 必须 ≤ 15。"
+"> 在 Ascend NPU 上，`npu_fused_infer_attention_score` 算子每轮解码最多支持 16 个令牌。因此，`(num_speculative_tokens + 1)` 必须 ≤ 16。"
 
 msgid "## Speculating by matching n-grams in the prompt"
 msgstr "## 通过匹配提示中的 n-gram 进行推测"
