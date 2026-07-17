@@ -3424,6 +3424,7 @@ class NPUModelRunner(GPUModelRunner):
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
         profile_cpp: bool = False,
+        respect_num_active_loras: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # only support eager mode and piecewise graph now
         assert cudagraph_runtime_mode is None or cudagraph_runtime_mode.valid_runtime_modes()
@@ -3471,6 +3472,13 @@ class NPUModelRunner(GPUModelRunner):
         self.query_lens = torch.from_numpy(num_scheduled_tokens)
         num_tokens_unpadded = int(num_scheduled_tokens.sum())
         num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
+        dummy_num_active_loras = (
+            num_active_loras
+            if is_graph_capturing or respect_num_active_loras
+            else self.lora_config.max_loras
+            if self.lora_config is not None
+            else num_active_loras
+        )
         _cudagraph_mode, batch_desc, _, num_tokens_across_dp, _ = self._determine_batch_execution_and_padding(
             num_tokens=num_tokens_unpadded,
             num_reqs=num_reqs,
@@ -3487,8 +3495,8 @@ class NPUModelRunner(GPUModelRunner):
             # `force_has_lora` is used for cudagraph capture; because LoRA is
             # activated later in the context manager, but we need to know the
             # LoRA state when determining the batch descriptor for capture
-            force_has_lora=num_active_loras > 0,
-            force_num_active_loras=num_active_loras,
+            force_has_lora=dummy_num_active_loras > 0,
+            force_num_active_loras=dummy_num_active_loras,
         )
         if self.use_cp:
             self.pcp_manager.init_batch_info(
@@ -3608,8 +3616,22 @@ class NPUModelRunner(GPUModelRunner):
             # TODO: The next line is a temporary workaround
             # to fix the accuracy issue of test_llama32_lora.py,
             # which is introduced by vllm-project/vllm#32005
-            num_active_loras=(self.lora_config.max_loras if self.lora_config is not None else num_active_loras),
+            num_active_loras=dummy_num_active_loras,
         ):
+            if respect_num_active_loras and dummy_num_active_loras == 0:
+                # The dummy mapping update does not reliably refresh this
+                # Python state before the pre-capture compile. Keep Punica's
+                # branch state aligned with the base BatchDescriptor.
+                seen_punica_wrappers: set[int] = set()
+                for module in self.model.modules():
+                    punica_wrapper = getattr(module, "punica_wrapper", None)
+                    if (
+                        punica_wrapper is not None
+                        and id(punica_wrapper) not in seen_punica_wrappers
+                    ):
+                        punica_wrapper.no_lora = True
+                        seen_punica_wrappers.add(id(punica_wrapper))
+
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
             if self.supports_mm_inputs and not self.model_config.is_encoder_decoder or self.enable_prompt_embeds:
@@ -5037,6 +5059,28 @@ class NPUModelRunner(GPUModelRunner):
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""
         parent_module_name = _get_gpu_model_runner_module_name(self)
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
+            if (
+                self.lora_config is not None
+                and self.compilation_config.cudagraph_specialize_lora
+            ):
+                # Dynamo must compile the no-LoRA guard variant before entering
+                # torch.npu.graph(). The Ascend compiler synchronizes the device,
+                # which is illegal while a stream is being captured.
+                self._dummy_run(
+                    num_tokens=self.max_num_tokens,
+                    is_profile=True,
+                    num_active_loras=0,
+                    respect_num_active_loras=True,
+                )
+                # Backed dynamic shapes specialize 0/1 dimensions. Compile the
+                # singleton base variant separately before graph capture.
+                self._dummy_run(
+                    num_tokens=1,
+                    is_profile=True,
+                    num_active_loras=0,
+                    respect_num_active_loras=True,
+                )
+                torch.npu.synchronize()
             cuda_graph_size = GPUModelRunner.capture_model(self)
 
         mgr = self.encoder_cudagraph_manager

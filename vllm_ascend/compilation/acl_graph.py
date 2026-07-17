@@ -270,10 +270,10 @@ class ACLGraphWrapper:
 def weak_ref_workspaces(params):
     if params is None:
         return
-    for num_tokens in params.workspaces:
-        if params.workspaces[num_tokens] is None:
+    for graph_key, workspace in list(dict.items(params.workspaces)):
+        if workspace is None:
             continue
-        params.workspaces[num_tokens] = weak_ref_tensors(params.workspaces[num_tokens])
+        dict.__setitem__(params.workspaces, graph_key, weak_ref_tensors(workspace))
 
 
 def update_full_graph_params(
@@ -300,10 +300,57 @@ def update_full_graph_params(
 
 @dataclass
 class GraphParams:
-    events: dict[int, list[torch.npu.ExternalEvent]]
-    workspaces: dict[int, torch.Tensor]
-    handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
-    attn_params: dict[int, list[tuple]]
+    events: dict[Any, list[torch.npu.ExternalEvent]]
+    workspaces: dict[Any, torch.Tensor | None]
+    handles: dict[Any, list[torch_npu._C._NPUTaskGroupHandle]]
+    attn_params: dict[Any, list[tuple]]
+
+
+class _GraphParamStore(dict):
+    """Resolve token-count lookups to the active full-graph descriptor.
+
+    vLLM can capture separate base and LoRA graphs with the same token count.
+    Ascend graph task parameters used to be keyed only by token count, causing
+    the two graphs to share attention handles, events, and workspaces. Keep the
+    existing integer API for attention backends while isolating each concrete
+    full graph by its BatchDescriptor.
+    """
+
+    def __init__(self, capture_sizes: list[int], default_factory: Callable[[], Any]):
+        super().__init__((size, default_factory()) for size in capture_sizes)
+        self.default_factory = default_factory
+
+    @staticmethod
+    def _resolve_key(key):
+        if not isinstance(key, int):
+            return key
+        try:
+            forward_context = get_forward_context()
+        except (AssertionError, LookupError, RuntimeError):
+            return key
+        batch_descriptor = forward_context.batch_descriptor
+        if (
+            forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
+            and batch_descriptor is not None
+            and batch_descriptor.num_tokens == key
+        ):
+            return batch_descriptor
+        return key
+
+    def __contains__(self, key):
+        return dict.__contains__(self, self._resolve_key(key))
+
+    def __getitem__(self, key):
+        resolved_key = self._resolve_key(key)
+        if not dict.__contains__(self, resolved_key):
+            dict.__setitem__(self, resolved_key, self.default_factory())
+        return dict.__getitem__(self, resolved_key)
+
+    def __setitem__(self, key, value):
+        dict.__setitem__(self, self._resolve_key(key), value)
+
+    def get(self, key, default=None):
+        return dict.get(self, self._resolve_key(key), default)
 
 
 _graph_params: GraphParams | None = None
@@ -314,10 +361,10 @@ def set_graph_params(aclgraph_capture_sizes: list[int]):
     if _graph_params is not None:
         raise ValueError("Graph parameters have already been set!")
     _graph_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
+        _GraphParamStore(aclgraph_capture_sizes, list),
+        _GraphParamStore(aclgraph_capture_sizes, lambda: None),
+        _GraphParamStore(aclgraph_capture_sizes, list),
+        _GraphParamStore(aclgraph_capture_sizes, list),
     )
 
 
@@ -339,10 +386,10 @@ def set_draft_graph_params(aclgraph_capture_sizes: list[int]):
     if _draft_graph_params is not None:
         raise ValueError("DraftGraph parameters have already been set!")
     _draft_graph_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
+        _GraphParamStore(aclgraph_capture_sizes, list),
+        _GraphParamStore(aclgraph_capture_sizes, lambda: None),
+        _GraphParamStore(aclgraph_capture_sizes, list),
+        _GraphParamStore(aclgraph_capture_sizes, list),
     )
 
 
@@ -364,10 +411,10 @@ def set_draft_graph_prefill_params(aclgraph_capture_sizes: list[int]):
     if _draft_graph_prefill_params is not None:
         raise ValueError("DraftGraph preill parameters have already been set!")
     _draft_graph_prefill_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
+        _GraphParamStore(aclgraph_capture_sizes, list),
+        _GraphParamStore(aclgraph_capture_sizes, lambda: None),
+        _GraphParamStore(aclgraph_capture_sizes, list),
+        _GraphParamStore(aclgraph_capture_sizes, list),
     )
 
 

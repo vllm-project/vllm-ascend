@@ -299,6 +299,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             lora_a_stacked (Tuple[torch.Tensor, ...]): lora_a's weights
             scale (float): Scaling factor for the operation
         """
+        if self.no_lora:
+            return
 
         x = x.view(-1, x.shape[-1])
         # TODO fuse these kernels
@@ -332,6 +334,9 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             offset_start (int): The starting position of y, defaults to 0
             add_inputs (bool):  Defaults to True.
         """
+        if self.no_lora:
+            return
+
         y_org = y
         y = y.view(-1, y.shape[-1])
         offset_left = offset_start
@@ -362,6 +367,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             lora_b_stacked (torch.Tensor): lora_b's weights.
             add_inputs (bool): Default to True.
         """
+        if self.no_lora:
+            return
 
         # Embedding layer only need expand op
         expand_fun: Callable = self._expand_prefill if self.is_prefill else self._expand_decode
@@ -402,6 +409,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             output_slices (Tuple[int, ...]): Every slice's size.
             buffer (Optional[Tuple[torch.Tensor, ...]]): Defaults to None.
         """
+        if self.no_lora:
+            return
 
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
 
@@ -459,6 +468,9 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         inactive rows get a zero delta for free -- no Python-level branching
         needed.
         """
+        if self.no_lora:
+            return
+
         del sorted_token_ids, num_tokens_post_padded, max_lora_rank
         del shrink_config, expand_config, fully_sharded
         assert top_k_num == 1, "Ascend MoE LoRA v1 expects pre-expanded rows (top_k_num=1)."
@@ -529,6 +541,9 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             scale (float): Scaling factor.
             buffer (Optional[torch.Tensor]):Default to None.
         """
+        if self.no_lora:
+            return
+
         y_org = y
         y = y.view(-1, y.shape[-1])
         x = x.view(-1, x.shape[-1])

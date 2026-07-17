@@ -366,6 +366,11 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         # `create_lora_weights`) so `create_dummy_lora`'s n_slices fallback
         # matches `lora_a_stacked` length under EP.
         self.n_slices = self.local_num_experts * (self._w13_slices + 1)
+        # vLLM resolves shared-expert LoRA targets through the replacement
+        # wrapper after this module takes the base FusedMoE layer's place.
+        shared_experts = getattr(base_layer, "_shared_experts", None)
+        if shared_experts is not None:
+            self._shared_experts = shared_experts
 
     # ------------------------------------------------------------------
     # Mapping
