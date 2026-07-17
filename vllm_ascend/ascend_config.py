@@ -70,6 +70,10 @@ class AscendConfig:
                 "or disable profiling_chunk_config."
             )
 
+        # batch job aware scheduler configuration
+        batch_job_sched_config = additional_config.get("batch_job_sched_config", {})
+        self.batch_job_sched_config = BatchJobSchedConfig(batch_job_sched_config)
+
         from vllm_ascend import envs as ascend_envs
 
         self.enable_balance_scheduling = self._get_config_value(
@@ -683,6 +687,65 @@ class ProfilingChunkConfig:
             raise ValueError(f"profiling_chunk_config.min_chunk must be positive, got {self.min_chunk}")
         if self.max_fit_chunk <= 5:
             raise ValueError(f"Recommend to use at least 30 data points for fitting, got {self.max_fit_chunk}")
+
+
+class BatchJobSchedConfig:
+    """Configuration for batch-job-aware scheduler.
+
+    All parameters can be configured via ``additional_config.batch_job_sched_config``
+    in the vLLM config.
+
+    Usage (offline)::
+
+        llm = LLM(model, additional_config={"batch_job_sched_config": {"enabled": true}})
+    """
+
+    def __init__(self, config: dict | None = None):
+        if config is None:
+            config = {}
+
+        # Enable batch-job-aware scheduler
+        self.enabled: bool = config.get("enabled", False)
+
+        # Maximum number of tracked jobs (0 = unlimited)
+        self.max_jobs: int = int(config.get("max_jobs", 20))
+
+        # Extra block margin added to the reserve as safety buffer
+        self.reserve_margin_blocks: int = int(config.get("reserve_margin_blocks", 2))
+
+        # Maximum number of blocks that can be reserved
+        self.reserve_max_blocks: int = int(config.get("reserve_max_blocks", 8))
+
+        # Threshold for prioritizing long vs short decode jobs
+        self.low_available_tokens_threshold: int = int(config.get("low_available_tokens_threshold", 4096))
+
+        # Threshold for identifying short decoding jobs
+        self.short_decode_token_threshold: int = int(config.get("short_decode_token_threshold", 32))
+
+        self._validate()
+
+    def _validate(self) -> None:
+        """Validate the validity of configuration parameters."""
+        if self.max_jobs < 0:
+            raise ValueError(f"batch_job_sched_config.max_jobs must be non-negative, got {self.max_jobs}")
+        if self.reserve_margin_blocks < 0:
+            raise ValueError(
+                f"batch_job_sched_config.reserve_margin_blocks must be non-negative, got {self.reserve_margin_blocks}"
+            )
+        if self.reserve_max_blocks <= 0:
+            raise ValueError(
+                f"batch_job_sched_config.reserve_max_blocks must be positive, got {self.reserve_max_blocks}"
+            )
+        if self.low_available_tokens_threshold <= 0:
+            raise ValueError(
+                f"batch_job_sched_config.low_available_tokens_threshold must be positive, "
+                f"got {self.low_available_tokens_threshold}"
+            )
+        if self.short_decode_token_threshold <= 0:
+            raise ValueError(
+                f"batch_job_sched_config.short_decode_token_threshold must be positive, "
+                f"got {self.short_decode_token_threshold}"
+            )
 
 
 class RejectionSamplerConfig:
