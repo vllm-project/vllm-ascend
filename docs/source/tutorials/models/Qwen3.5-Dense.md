@@ -266,7 +266,7 @@ Key Parameter Descriptions:
 - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. On Atlas inference products and Atlas 200I Pro, configure this value according to the actual device memory; setting it too high may cause OOM. The default value is `0.9`.
 - `--dtype float16` must be set on Atlas inference products and Atlas 200I Pro. These devices only support the FP16 data type.
 - `--mamba-ssm-cache-dtype` sets the data type of the Mamba SSM cache. On Atlas inference products and Atlas 200I Pro, only `float16` is supported.
-- `--speculative-config` uses `qwen3_5_mtp` for Qwen3.5 Dense models that include an MTP head.
+- `--speculative-config` uses `qwen3_5_mtp` for Qwen3.5 Dense models that include an MTP head. It is recommended to set `num_speculative_tokens` to `1`.
 - `--compilation-config` contains configurations related to the aclgraph graph mode:
     - `"cudagraph_mode"`: `"FULL_DECODE_ONLY"` is recommended.
     - `"cudagraph_capture_sizes"`: when tensor parallelism (TP) is enabled, hardware event-id constraints allow at most two capture sizes (for example, `[1, 8]`).
