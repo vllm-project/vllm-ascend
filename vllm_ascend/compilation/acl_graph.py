@@ -48,7 +48,7 @@ def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
 
 
 def _raise_stream_resource_capture_error(exc: RuntimeError) -> None:
-    raise RuntimeError(f"{_STREAM_RESOURCE_GUIDANCE}nOriginal error:n{exc}") from exc
+    raise RuntimeError(f"{_STREAM_RESOURCE_GUIDANCE}\nOriginal error:\n{exc}") from exc
 
 
 @dataclasses.dataclass

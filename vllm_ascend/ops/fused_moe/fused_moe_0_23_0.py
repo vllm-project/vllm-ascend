@@ -23,7 +23,7 @@ vllm_ascend.ops.fused_moe.fused_moe only.
 
 from __future__ import annotations
 
-import os
+import vllm.envs as envs
 
 from vllm_ascend.ops.fused_moe.fused_moe import (
     _EXTRA_CTX,
@@ -287,7 +287,7 @@ class AscendFusedMoE(FusedMoE):
 
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
-        if os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") != "1":
+        if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
             setup_moe_comm_method(self.moe_config)
         self.quant_type = self._get_quant_type()
 

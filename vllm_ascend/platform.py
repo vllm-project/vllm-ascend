@@ -1256,33 +1256,9 @@ class NPUPlatform(Platform):
         timeout: timedelta,
     ) -> ProcessGroup:
         """
-        Initialize a stateless HCCL process group for Ascend NPU.
-        This method creates a ProcessGroup with the specified backend configuration,
-        typically used for NPU communication via HCCL. It sets up the necessary
-        backend options and registers the backend with the process group.
-        Args:
-            backend: The distributed backend to use. Currently only 'hccl' is
-                supported for Ascend NPUs.
-            prefix_store: The prefix store for distributed coordination.
-            group_rank: The rank of the current process within the group.
-            group_size: The total number of processes in the group.
-            timeout: Maximum time to wait for the operation to complete.
-        Warning:
-            Uses internal PyTorch NPU API (torch_npu._C._distributed_c10d.ProcessGroupHCCL)
-            which may change in future PyTorch / torch_npu versions. Compatibility
-            should be verified with each upgrade.
-        Compatibility Risk:
-            - High risk of breakage in future PyTorch / torch_npu releases.
-            - No semantic versioning guarantees for internal APIs.
-            - Requires testing with new PyTorch / torch_npu releases.
-        Returns:
-            A ProcessGroup object configured with the specified backend.
+        Create a stateless HCCL ProcessGroup for Ascend NPU.
+        Uses internal torch_npu API (ProcessGroupHCCL) which may break on upgrade.
         """
-
-        # INTERNAL API USAGE - COMPATIBILITY RISK
-        # This internal import is necessary for stateless process group functionality
-        # but carries compatibility risks. Monitor PyTorch release notes for changes.
-        # TODO: Migrate to public API when available in future PyTorch versions
         from torch_npu._C._distributed_c10d import ProcessGroupHCCL
         import uuid
 

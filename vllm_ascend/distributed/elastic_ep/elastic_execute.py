@@ -1,41 +1,11 @@
-# NOTE:
-# This file is adapted from vLLM's elastic_execute.py
-#
-# Key differences:
-# 1. Device-specific adaptations: Replaces CUDA-specific operations with NPU (Ascend) equivalents
-#    - Uses `torch_npu` instead of CUDA APIs
-#    - Replaces `torch.accelerator.synchronize()` with `torch.npu.synchronize()`
-#    - Replaces `torch.accelerator.empty_cache()` with `torch.npu.empty_cache()`
-#    - Uses `ACLGraphWrapper` instead of `CUDAGraphWrapper` for graph management
-#
-# 2. Custom weight transfer implementation: Implements `ascend_batch_transfer_weights()`
-#    - Adds support for quantized weight names (aclnn_input_scale, aclnn_input_scale_reciprocal, aclnn_input_offset)
-#    - Uses threading lock (`_PATCH_LOCK`) for thread-safe weight transfer patching
-#
-# 3. Enhanced broadcast_expert_mapping: Simplified signature and implementation
-#    - Removed `physical_to_logical`, `num_local_physical_experts`, `num_logical_experts` parameters
-#    - Uses `expert_maps` tensor directly for broadcasting
-#
-# 4. Extended AscendElasticEPScalingExecutor class:
-#    - Adds `_use_ascend_transfer_impl()` context manager for patching weight transfer
-#    - Implements `_release_acl_graphs()` to clear ACL graphs instead of CUDA graphs
-#    - Adds `_replace_ascend_active_groups()` calls for Ascend-specific group management
-#    - Integrates with `create_ascend_standby_groups()` and `pop_ascend_standby_groups()`
-#    - Adds support for Ascend-specific MoE modules (AscendFusedMoE, AscendSharedFusedMoE)
-#    - Handles Ascend-specific quantization method (AscendW8A8DynamicFusedMoEMethod)
-#    - Integrates with `get_mc2_group()` and `get_dynamic_eplb_group()` for Ascend communication
-#    - Adds `setup_moe_comm_method()` calls for MoE communication setup
-#
-# 5. EPLB (Expert Parallel Load Balancing) adaptations:
-#    - Uses `eplb_loader`, `eplb_adaptor`, `eplb_updator` from model_runner
-#    - Implements `_perform_eplb_reshuffle()` with expert resharding logic
-#    - Handles dynamic EPLB configuration via `get_ascend_config().eplb_config`
-#
+# NOTE: Adapted from vLLM's elastic_execute.py.
+# Key changes: CUDA→NPU/ACL, custom weight transfer for quantized weights,
+# simplified broadcast_expert_mapping, Ascend-specific comm groups (mc2/
+# dynamic_eplb/fc3_quant_x), and EPLB via eplb_manager.
 # ============================================================
 
 import copy
 import gc
-import os
 import threading
 from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
@@ -43,6 +13,7 @@ from unittest.mock import patch
 
 import torch
 import torch.nn as nn
+import vllm.envs as envs
 from torch.distributed import P2POp
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import reset_compile_wrapper
@@ -78,6 +49,7 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     set_graph_params,
 )
+from vllm_ascend.distributed.elastic_ep.eplb_manager import ElasticEplbManager, generate_expert_maps_file
 from vllm_ascend.distributed.elastic_ep.standby_state import (
     create_ascend_standby_groups,
     pop_ascend_standby_groups,
@@ -90,8 +62,6 @@ from vllm_ascend.distributed.utils import use_stateless_pg_with_world_registrati
 from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
 from vllm_ascend.quantization.methods import AscendW4A8DynamicFusedMoEMethod
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod
-
-from .eplb_manager import ElasticEplbManager, generate_expert_maps_file
 
 _PATCH_LOCK = threading.Lock()
 
@@ -146,13 +116,12 @@ def ascend_batch_transfer_weights(
         handle_sub_module(module, module_name)
 
     expert_map_params = []
-    if not get_ascend_config().eplb_config.dynamic_eplb:
-        for module_name, module in model.named_modules():
-            if (expert_map := getattr(module, "expert_map", None)) is not None:
-                if isinstance(expert_map, torch.Tensor):
-                    expert_map_params.append((expert_map.npu(), expert_map))
-                    all_params_name.append(module_name + "." + "expert_map")
-        all_params.extend([npu_tensor for npu_tensor, _ in expert_map_params])
+    for module_name, module in model.named_modules():
+        if (expert_map := getattr(module, "expert_map", None)) is not None:
+            if isinstance(expert_map, torch.Tensor):
+                expert_map_params.append((expert_map.npu(), expert_map))
+                all_params_name.append(module_name + "." + "expert_map")
+    all_params.extend([npu_tensor for npu_tensor, _ in expert_map_params])
 
     if is_sender:
         tcp_store_group.send_obj(all_params_name, dst=peer_rank)
@@ -231,8 +200,7 @@ def setup_moe_comm_and_quant_method(module: nn.Module) -> None:
 class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
     def __init__(self, worker):
         super().__init__(worker)
-        self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
-        if not self.dynamic_eplb and os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH", "0") != "1":
+        if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
             get_ascend_config().eplb_config.expert_map_path = generate_expert_maps_file()
         self._eplb_manager: ElasticEplbManager | None = None
         self.old_ep_size = None
@@ -263,11 +231,8 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
         new_ep_size = get_ep_group().world_size
         n_redundant = new_ep_size * num_local_experts - num_logical_experts
         get_ascend_config().eplb_config.num_redundant_experts = n_redundant
-        if self.dynamic_eplb:
-            self.worker.model_runner.shared_dict["expert_maps"] = expert_maps
-        else:
-            with set_current_vllm_config(self.worker.vllm_config):
-                get_ascend_config().eplb_config.expert_map_path = generate_expert_maps_file()
+        with set_current_vllm_config(self.worker.vllm_config):
+            get_ascend_config().eplb_config.expert_map_path = generate_expert_maps_file()
         self.old_ep_size = old_ep_size
         self.worker.load_model(load_dummy_weights=True)
         self.eplb_manager.expert_maps = expert_maps
@@ -297,10 +262,7 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
 
     def transfer_weights(self, old_dp_size: int, new_dp_size: int) -> None:
         model = self.worker.model_runner.get_model()
-        if self.dynamic_eplb:
-            model.expert_weights = [item[1] for item in self.worker.model_runner.eplb_adaptor.param_dict.items()]
-        else:
-            model.expert_weights = []
+        model.expert_weights = []
         get_standby_dp_group().barrier()
         get_tp_group().barrier()
         with _PATCH_LOCK, self._use_ascend_transfer_impl():
@@ -369,8 +331,6 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
         parallel_config.data_parallel_master_ip = reconfig_request.new_data_parallel_master_ip
         parallel_config.data_parallel_master_port = reconfig_request.new_data_parallel_master_port
         self.worker.model_runner.dp_size = new_dp_size
-        self.eplb_manager.reset_eplb_updator()
-        self.eplb_manager.set_new_comm_group()
 
         # Reconfigure MoE modules with new EP size
         moe_modules = [module for module in self.worker.model_runner.model.modules() if isinstance(module, FusedMoE)]
@@ -441,10 +401,7 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
 
     def receive_weights(self) -> None:
         model = self.worker.model_runner.get_model()
-        if self.dynamic_eplb:
-            model.expert_weights = [item[1] for item in self.worker.model_runner.eplb_adaptor.param_dict.items()]
-        else:
-            model.expert_weights = []
+        model.expert_weights = []
         get_dp_group().barrier()
         get_tp_group().barrier()
         with _PATCH_LOCK, self._use_ascend_transfer_impl():

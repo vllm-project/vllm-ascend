@@ -235,7 +235,8 @@ class EplbWorker:
     def update_expert_map(self, expert_maps):
         self.shared_dict["expert_maps"] = expert_maps
 
-    def global2local(self, placement: torch.Tensor, E_local: int) -> tuple[torch.Tensor, torch.Tensor]:
+    @staticmethod
+    def global2local(placement: torch.Tensor, E_local: int) -> tuple[torch.Tensor, torch.Tensor]:
         L, G, _ = placement.shape
         device = placement.device
 
@@ -250,7 +251,8 @@ class EplbWorker:
 
         return pt_local
 
-    def local2global(self, placement_local: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def local2global(placement_local: torch.Tensor) -> torch.Tensor:
         L, G, E_local = placement_local.shape
         device = placement_local.device
 

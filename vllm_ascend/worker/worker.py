@@ -136,6 +136,11 @@ class NPUWorker(WorkerBase):
 
         self.elastic_ep_executor: AscendElasticEPScalingExecutor | None = None
         if self.parallel_config.enable_elastic_ep:
+            if get_ascend_config().eplb_config.dynamic_eplb:
+                raise RuntimeError(
+                    "Elastic EP with dynamic_eplb=True is temporarily unsupported. "
+                    "Set dynamic_eplb=False in eplb_config to use Elastic EP."
+                )
             self.elastic_ep_executor = AscendElasticEPScalingExecutor(self)
 
         if self.cache_config.cache_dtype == "auto":

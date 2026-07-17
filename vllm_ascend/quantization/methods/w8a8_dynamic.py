@@ -15,18 +15,18 @@
 # limitations under the License.
 #
 
-import os
 from collections.abc import Callable
 from typing import Any
 
 import torch
 import torch_npu
+import vllm.envs as envs
 from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
-from vllm_ascend.distributed.parallel_state import get_mc2_group
+from vllm_ascend.distributed.parallel_state import get_group_name, get_mc2_group
 from vllm_ascend.flash_common3_context import get_flash_common3_context
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
@@ -173,19 +173,13 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         self.in_dtype = vllm_config.model_config.dtype
         self.supports_eplb = True
 
-        if os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") != "1":
-            try:
-                device_group = get_mc2_group().device_group
-                # TODO: Try local_rank = ep_group.rank_in_group
-                local_rank = torch.distributed.get_rank(group=device_group)
-                backend = device_group._get_backend(torch.device("npu"))
-                self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
-            except AttributeError:
+        if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+            self.moe_all_to_all_group_name = get_group_name(get_mc2_group())
+            if not self.moe_all_to_all_group_name:
                 logger.warning_once(
                     "[vllm-ascend/W8A8_DYNAMIC] MC2 group metadata unavailable, "
                     "falling back to empty moe_all_to_all_group_name."
                 )
-                self.moe_all_to_all_group_name = ""
 
     def get_weight(
         self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
