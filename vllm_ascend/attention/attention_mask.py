@@ -66,15 +66,9 @@ class AttentionMaskBuilder:
         max_query_len: int,
         rswa_window: int,
     ) -> torch.Tensor:
-        prefix_lens = prefix_lens.to(
-            device=self.device, dtype=torch.int64, non_blocking=True
-        ).view(-1, 1, 1)
-        seq_lens = seq_lens.to(
-            device=self.device, dtype=torch.int64, non_blocking=True
-        ).view(-1, 1, 1)
-        query_lens = query_lens.to(
-            device=self.device, dtype=torch.int64, non_blocking=True
-        ).view(-1, 1, 1)
+        prefix_lens = prefix_lens.to(device=self.device, dtype=torch.int64, non_blocking=True).view(-1, 1, 1)
+        seq_lens = seq_lens.to(device=self.device, dtype=torch.int64, non_blocking=True).view(-1, 1, 1)
+        query_lens = query_lens.to(device=self.device, dtype=torch.int64, non_blocking=True).view(-1, 1, 1)
 
         query_offsets = torch.arange(
             max_query_len,
@@ -93,9 +87,7 @@ class AttentionMaskBuilder:
         causal = kv_positions <= query_positions
         in_prefix = kv_positions < prefix_lens
         in_window = (query_positions - kv_positions) < rswa_window
-        keep = (
-            valid_queries & valid_keys & causal & (in_prefix | in_window)
-        )
+        keep = valid_queries & valid_keys & causal & (in_prefix | in_window)
 
         return (~keep).to(torch.int8).unsqueeze(1).contiguous()
 
