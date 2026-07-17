@@ -126,10 +126,10 @@ a3:
         os: linux-aarch64-nightly-a3-16
         config_file_path: DeepSeek-R1-0528-W8A8.yaml
       - name: MiniMax-M3-BF16-A3
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: MiniMax-M3-BF16-A3.yaml
       - name: MiniMax-M3-W8A8-A3
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: MiniMax-M3-W8A8-A3.yaml
       - name: MiniMax-M2.5-w8a8-QuaRot-A3
         os: linux-aarch64-nightly-a3-16
