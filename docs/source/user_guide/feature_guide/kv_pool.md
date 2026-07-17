@@ -12,8 +12,8 @@
 
 * Software:
     * CANN >= 8.5.0
-    * vLLM：main branch
-    * vLLM-Ascend：main branch
+    * vLLM: main branch
+    * vLLM-Ascend: main branch
     * mooncake: >= 0.3.11.post1
 
 ### KV Pool Parameter Description
