@@ -166,7 +166,7 @@ msgstr "`prefill` 节点："
 msgid "The content of the multi_producer.sh script:"
 msgstr "multi_producer.sh 脚本的内容："
 
-msgid "`decode` Node："
+msgid "`decode` Node:"
 msgstr "`decode` 节点："
 
 msgid "The content of multi_consumer.sh:"

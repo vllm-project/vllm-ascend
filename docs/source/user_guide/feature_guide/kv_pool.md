@@ -210,7 +210,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     }'
 ```
 
-`decode` Node: 
+`decode` Node:
 
 ```shell
 bash multi_consumer.sh

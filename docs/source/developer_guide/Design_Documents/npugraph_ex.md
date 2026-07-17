@@ -19,7 +19,7 @@ npugraph_ex now provides some operator fusion passes, and more will be added in 
 
 Operator combinations that meet the replacement rules can be replaced with the corresponding fused operators.
 
-You can get the default [fusion pass list](https://www.hiascend.com/document/detail/zh/Pytorch/2600/modthirdparty/torchairuseguide/docs/zh/npugraph_ex/basic/pattern_fusion_pass.md#功能简介)
+You can get the default [fusion pass list](https://www.hiascend.com/document/detail/zh/Pytorch/latest/modthirdparty/torchairuseguide/docs/zh/npugraph_ex/basic/pattern_fusion_pass.md#功能简介)
 
 ## Custom fusion pass
 
