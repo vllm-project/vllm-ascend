@@ -49,7 +49,9 @@ jobs:
       has_tests: ${{ steps.full-scope.outputs.has_tests }}
       test_groups: ${{ steps.full-scope.outputs.test_groups }}
       matched_modules: ${{ steps.full-scope.outputs.matched_modules }}
+      csrc_cache_target_ids: ${{ steps.full-scope.outputs.csrc_cache_target_ids }}
       vllm_ascend_ref: ${{ steps.resolve-refs.outputs.vllm_ascend_ref }}
+      base_sha: ${{ steps.resolve-refs.outputs.base_sha }}
       main_commit: ${{ steps.resolve-refs.outputs.main_commit }}
       release_tag: ${{ steps.resolve-refs.outputs.release_tag }}
     steps:
@@ -62,11 +64,11 @@ jobs:
       - name: Resolve refs
         id: resolve-refs
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "vllm_ascend_ref=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "vllm_ascend_ref=${{ inputs.vllm_ascend_ref || 'main' }}" >> "$GITHUB_OUTPUT"
-          fi
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git fetch origin main
+          echo "vllm_ascend_ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_OUTPUT"
           main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
           release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
           [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
@@ -91,8 +93,18 @@ jobs:
             --changed-files vllm_ascend/dummy.py \
             --run-all-modules
 
-  run-full-tests:
+  ensure-csrc-cache:
     needs: select-full-tests
+    if: ${{ needs.select-full-tests.outputs.has_tests == 'true' }}
+    uses: ./.github/workflows/_ensure_csrc_cache.yaml
+    with:
+      target_ids: ${{ needs.select-full-tests.outputs.csrc_cache_target_ids }}
+      source_ref: ${{ needs.select-full-tests.outputs.vllm_ascend_ref }}
+      base_ref: main
+      base_sha: ${{ needs.select-full-tests.outputs.base_sha }}
+
+  run-full-tests:
+    needs: [select-full-tests, ensure-csrc-cache]
     if: ${{ needs.select-full-tests.outputs.has_tests == 'true' }}
     strategy:
       fail-fast: false
@@ -103,6 +115,8 @@ jobs:
     with:
       vllm: ${{ matrix.vllm_version }}
       ref: ${{ needs.select-full-tests.outputs.vllm_ascend_ref }}
+      base_ref: main
+      base_sha: ${{ needs.select-full-tests.outputs.base_sha }}
       test_groups: ${{ needs.select-full-tests.outputs.test_groups }}
       enable-coverage: true
     secrets:

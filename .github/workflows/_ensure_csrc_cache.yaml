@@ -1,0 +1,258 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Ensure csrc Cache
+
+on:
+  workflow_call:
+    inputs:
+      target_ids:
+        type: string
+        required: true
+        description: 'JSON array of csrc cache target IDs.'
+      source_ref:
+        type: string
+        required: true
+        description: 'Immutable vllm-ascend source commit.'
+      repository:
+        type: string
+        required: false
+        default: ''
+        description: 'Source repository. Defaults to the current repository.'
+      base_ref:
+        type: string
+        required: false
+        default: ''
+        description: 'Base ref containing the fixed base commit.'
+      base_repository:
+        type: string
+        required: false
+        default: ''
+        description: 'Base repository. Defaults to the source repository.'
+      base_sha:
+        type: string
+        required: false
+        default: ''
+        description: 'Fixed base commit to rebase onto.'
+
+jobs:
+  prepare-cache-checks:
+    name: Prepare csrc cache checks
+    runs-on: linux-amd64-cpu-2-hk
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:lint
+    outputs:
+      targets: ${{ steps.targets.outputs.targets }}
+      has_targets: ${{ steps.targets.outputs.has_targets }}
+      csrc_hash: ${{ steps.hash.outputs.csrc_hash }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+
+      - name: Checkout cache workflow helpers
+        uses: actions/checkout@v7
+        with:
+          path: .csrc-cache-workflow
+          sparse-checkout: |
+            .github/workflows/configs/csrc_cache_targets.json
+            .github/workflows/scripts/resolve_csrc_cache_targets.py
+          sparse-checkout-cone-mode: false
+
+      - name: Prepare source snapshot
+        if: inputs.base_sha != ''
+        env:
+          SOURCE_REPOSITORY: ${{ inputs.repository || github.repository }}
+          BASE_REPOSITORY: ${{ inputs.base_repository || inputs.repository || github.repository }}
+          BASE_REF: ${{ inputs.base_ref }}
+          BASE_SHA: ${{ inputs.base_sha }}
+        run: |
+          if [ -z "$BASE_REF" ]; then
+            echo "::error::base_ref is required when base_sha is set."
+            exit 1
+          fi
+
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git config user.name "vllm-ascend-ci"
+          git config user.email "vllm-ascend-ci@users.noreply.github.com"
+
+          BASE_REMOTE=origin
+          if [ "$BASE_REPOSITORY" != "$SOURCE_REPOSITORY" ]; then
+            BASE_REMOTE=csrc-base
+            git remote add "$BASE_REMOTE" "https://github.com/${BASE_REPOSITORY}.git"
+          fi
+          git fetch "$BASE_REMOTE" "$BASE_REF"
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git rebase "$BASE_SHA"
+
+      - name: Calculate csrc hash
+        id: hash
+        run: |
+          CSRC_HASH=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake \
+            | sha256sum | awk '{print $1}')
+          echo "csrc_hash=$CSRC_HASH" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve requested cache targets
+        id: targets
+        env:
+          TARGET_IDS: ${{ inputs.target_ids }}
+        run: |
+          python3 .csrc-cache-workflow/.github/workflows/scripts/resolve_csrc_cache_targets.py \
+            --target-ids "$TARGET_IDS"
+
+  lookup-caches:
+    name: Lookup csrc cache (${{ matrix.target.id }})
+    needs: prepare-cache-checks
+    if: needs.prepare-cache-checks.outputs.has_targets == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.prepare-cache-checks.outputs.targets) }}
+    runs-on: linux-amd64-cpu-2-hk
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:lint
+    steps:
+      - name: Install csrc cache dependencies
+        run: |
+          apt-get update -y
+          apt-get install -y zstd
+
+      - name: Look up csrc cache
+        id: cache
+        uses: runs-on/cache/restore@v5
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v1-${{ matrix.target.cache_arch }}-${{ matrix.target.image_tag }}-${{ needs.prepare-cache-checks.outputs.csrc_hash }}
+          lookup-only: 'true'
+
+      - name: Write lookup result
+        env:
+          TARGET: ${{ toJSON(matrix.target) }}
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          mkdir -p lookup-result
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          result = json.loads(os.environ["TARGET"])
+          result["cache_hit"] = os.environ["CACHE_HIT"] == "true"
+          Path(f"lookup-result/{result['id']}.json").write_text(
+              json.dumps(result, separators=(",", ":")),
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload lookup result
+        uses: actions/upload-artifact@v7
+        with:
+          name: csrc-cache-lookup-${{ matrix.target.id }}
+          path: lookup-result/*.json
+          retention-days: 1
+
+  summarize-cache-results:
+    name: Summarize csrc cache results
+    needs: [prepare-cache-checks, lookup-caches]
+    if: >-
+      ${{
+        always() &&
+        needs.prepare-cache-checks.result == 'success' &&
+        (needs.lookup-caches.result == 'success' || needs.lookup-caches.result == 'skipped')
+      }}
+    runs-on: linux-amd64-cpu-2-hk
+    outputs:
+      missing_targets: ${{ steps.misses.outputs.missing_targets }}
+      has_missing: ${{ steps.misses.outputs.has_missing }}
+    steps:
+      - name: Download lookup results
+        if: needs.prepare-cache-checks.outputs.has_targets == 'true'
+        uses: actions/download-artifact@v7
+        with:
+          pattern: csrc-cache-lookup-*
+          path: lookup-results
+          merge-multiple: true
+
+      - name: Summarize csrc cache results
+        id: misses
+        env:
+          HAS_TARGETS: ${{ needs.prepare-cache-checks.outputs.has_targets }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          results = []
+          missing = []
+          if os.environ["HAS_TARGETS"] == "true":
+              for result_path in sorted(Path("lookup-results").glob("*.json")):
+                  result = json.loads(result_path.read_text(encoding="utf-8"))
+                  cache_hit = result.pop("cache_hit")
+                  results.append((result["id"], cache_hit))
+                  if not cache_hit:
+                      missing.append(result)
+
+          hits = [target_id for target_id, cache_hit in results if cache_hit]
+          misses = [target_id for target_id, cache_hit in results if not cache_hit]
+          print(f"csrc cache hits ({len(hits)}): {', '.join(hits) or 'none'}")
+          print(f"csrc cache misses ({len(misses)}): {', '.join(misses) or 'none'}")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              print("### csrc cache lookup results", file=summary)
+              if results:
+                  print("| Target | Result |", file=summary)
+                  print("| --- | --- |", file=summary)
+                  for target_id, cache_hit in results:
+                      status = "Hit" if cache_hit else "Miss"
+                      print(f"| `{target_id}` | {status} |", file=summary)
+              else:
+                  print("No csrc cache targets were requested.", file=summary)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(
+                  "missing_targets=" + json.dumps(missing, separators=(",", ":")),
+                  file=output,
+              )
+              print(f"has_missing={str(bool(missing)).lower()}", file=output)
+          PY
+
+  build-missing-caches:
+    name: Build csrc cache (${{ matrix.target.id }})
+    needs: [prepare-cache-checks, summarize-cache-results]
+    if: needs.summarize-cache-results.outputs.has_missing == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.summarize-cache-results.outputs.missing_targets) }}
+    uses: ./.github/workflows/_build_csrc_cache.yaml
+    with:
+      target: ${{ toJSON(matrix.target) }}
+      csrc_hash: ${{ needs.prepare-cache-checks.outputs.csrc_hash }}
+      source_ref: ${{ inputs.source_ref }}
+      repository: ${{ inputs.repository }}
+      base_repository: ${{ inputs.base_repository }}
+      base_ref: ${{ inputs.base_ref }}
+      base_sha: ${{ inputs.base_sha }}
