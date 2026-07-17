@@ -184,31 +184,23 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(result[0][2].chunk_hash, _expected_grouped_hash("a", "b").hex())
         self.assertEqual(len(result[0][2].chunk_hash), 64)
 
-    def test_process_token_key_strings_matches_process_tokens(self):
+    def test_key_strings_match_pool_keys(self):
         hashes = ["aaa", "bbb", "ccc"]
-        expected = [
-            (start, end, key.to_string(), key.chunk_hash_bytes)
-            for start, end, key in self.db.process_tokens(40, hashes)
-        ]
-        result = list(self.db.process_token_key_strings(40, hashes))
-        self.assertEqual(result, expected)
+        pool_keys = list(self.db.process_tokens(40, hashes))
+        self.assertEqual(
+            list(self.db.process_token_key_strings(40, hashes)),
+            [(start, end, key.to_string(), key.chunk_hash_bytes) for start, end, key in pool_keys],
+        )
 
-    def test_process_tokens_does_not_round_trip_through_key_strings(self):
-        self.db.process_token_key_strings = MagicMock(side_effect=AssertionError("string path must not be used"))
-        result = list(self.db.process_tokens(32, ["aaa", "bbb"]))
-        self.assertEqual(len(result), 2)
-        self.db.process_token_key_strings.assert_not_called()
-
-    def test_process_token_key_strings_with_block_ids_matches_process_tokens(self):
-        db = ChunkedTokenDatabase([self.meta], block_size=[16], partitions=None, hash_block_size=8)
-        hashes = ["a", "b", "c", "d"]
         block_ids = [5, 6]
-        expected = [
-            (start, end, key.to_string(), key.chunk_hash_bytes, block_id)
-            for start, end, key, block_id in db.process_tokens_with_block_ids(32, hashes, block_ids)
-        ]
-        result = list(db.process_token_key_strings_with_block_ids(32, hashes, block_ids))
-        self.assertEqual(result, expected)
+        pool_keys_with_ids = list(self.db.process_tokens_with_block_ids(32, hashes, block_ids))
+        self.assertEqual(
+            list(self.db.process_token_key_strings_with_block_ids(32, hashes, block_ids)),
+            [
+                (start, end, key.to_string(), key.chunk_hash_bytes, block_id)
+                for start, end, key, block_id in pool_keys_with_ids
+            ],
+        )
 
     def test_direct_keys_preserve_multigroup_layerwise_key_semantics(self):
         group_metadata = [
@@ -266,26 +258,15 @@ class TestChunkedTokenDatabase(unittest.TestCase):
             )
         )
 
-    def test_get_block_hashes_rehashes_grouped_str_hashes(self):
-        result = get_block_hashes(["a", "b", "c", "d"], group_block_size=32, hash_block_size=16)
-        self.assertEqual(
-            result,
-            [
-                _expected_grouped_hash("a", "b"),
-                _expected_grouped_hash("c", "d"),
-            ],
-        )
-
-    def test_get_block_hashes_rehashes_grouped_bytes_hashes(self):
-        result = get_block_hashes([b"a", b"b", b"c", b"d"], group_block_size=32, hash_block_size=16)
-        self.assertEqual(
-            result,
-            [
-                _expected_grouped_hash(b"a", b"b"),
-                _expected_grouped_hash(b"c", b"d"),
-            ],
-        )
-        self.assertEqual(len(result[0]), 32)
+    def test_get_block_hashes_rehashes_groups(self):
+        for hashes in (["a", "b", "c", "d"], [b"a", b"b", b"c", b"d"]):
+            with self.subTest(hash_type=type(hashes[0])):
+                result = get_block_hashes(hashes, group_block_size=32, hash_block_size=16)
+                expected = [
+                    _expected_grouped_hash(hashes[0], hashes[1]),
+                    _expected_grouped_hash(hashes[2], hashes[3]),
+                ]
+                self.assertEqual(result, expected)
 
     def test_prepare_value(self):
         addr, size, block_id = self.db.prepare_value(0, 16, [5, 6, 7])

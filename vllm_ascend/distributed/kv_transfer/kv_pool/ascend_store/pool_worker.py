@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib
 import math
-import os
 import threading
 from collections.abc import Generator
 from typing import Any
@@ -160,7 +159,6 @@ class KVPoolWorker:
         self.h2d_stagger_us = int(extra_config.get("h2d_stagger_us", 0))
         self.layerwise_max_transfer_blocks = int(extra_config.get("layerwise_max_transfer_blocks", 0))
         self.layerwise_max_transfer_bytes = int(extra_config.get("layerwise_max_transfer_bytes", 0))
-        self.lookup_reachable_mask = os.getenv("VLLM_ASCEND_LOOKUP_REACHABLE_MASK", "0") == "1"
 
         logger.info(
             "use_hybrid: %s, use_mamba: %s, num_kv_cache_groups: %s, hash_block_size: %s, lcm_block_size: %s",
@@ -1371,44 +1369,20 @@ class KVPoolWorker:
 
     def wait_for_save(self, connector_metadata: AscendConnectorMetadata):
         current_event = None
-        has_save_request = False
-        save_done_events: list[threading.Event] = []
         assert self.kv_send_thread is not None
         send_thread = self.kv_send_thread
-        per_request_save_wait = getattr(send_thread, "_per_request_save_wait", False)
-        async_save = getattr(send_thread, "_async_save", False)
-        for request in connector_metadata.requests:
-            can_save = request.can_save
-            if can_save is None or not can_save:
-                continue
-            current_event = torch.npu.Event()
-            current_event.record()
-            break
 
         for request in connector_metadata.requests:
             can_save = request.can_save
             if can_save is None or not can_save:
                 continue
-
+            if current_event is None:
+                current_event = torch.npu.Event()
+                current_event.record()
             request.skip_null_blocks_by_group = self.group_uses_align_state
             request.current_event = current_event
             send_thread.add_stored_request(request.req_id)
-            if per_request_save_wait:
-                event = send_thread.prepare_stored_request_done_event(request.req_id)  # type: ignore[attr-defined]
-                if event is not None:
-                    save_done_events.append(event)
             send_thread.add_request(request)
-            has_save_request = True
-
-        if has_save_request:
-            if per_request_save_wait:
-                for event in save_done_events:
-                    if not event.wait(timeout=300):
-                        logger.warning("Timed out waiting for an AscendStore request save")
-            elif not async_save:
-                # Default consistency barrier: make stores visible before the
-                # request is reported as finished.
-                send_thread.request_queue.join()
 
     def retrieve_layer(
         self,
@@ -1748,16 +1722,13 @@ class KVPoolWorker:
                 for chunk_id in range(min(num_hbm_chunks, len(grouped_hashes))):
                     exists.add((group_id, self._chunk_hash_to_bytes(grouped_hashes[chunk_id])))
 
-        lookup_masks = None
-        store_masks = None
-        if self.lookup_reachable_mask:
-            aligned_len = (
-                (token_len + self.cache_coordinator.lcm_block_size - 1)
-                // self.cache_coordinator.lcm_block_size
-                * self.cache_coordinator.lcm_block_size
-            )
-            lookup_masks = self.cache_coordinator.lookup_mask(aligned_len)
-            store_masks = self.cache_coordinator.store_mask(aligned_len, None)
+        aligned_len = (
+            (token_len + self.cache_coordinator.lcm_block_size - 1)
+            // self.cache_coordinator.lcm_block_size
+            * self.cache_coordinator.lcm_block_size
+        )
+        lookup_masks = self.cache_coordinator.lookup_mask(aligned_len)
+        store_masks = self.cache_coordinator.store_mask(aligned_len, None)
 
         for group_id in kv_cache_group_ids:
             keys: list[str] = []
