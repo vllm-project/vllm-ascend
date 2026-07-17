@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""Adapt vLLM's native MiniMax-M3 model to the Ascend backend."""
 
 import sys
 from collections.abc import Iterable
@@ -12,10 +11,7 @@ from transformers import PretrainedConfig
 from vllm.config import CacheConfig
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import is_pp_missing_parameter
 
 
@@ -48,9 +44,6 @@ def _install_fused_allreduce_norm_fallback() -> None:
 
 _install_fused_allreduce_norm_fallback()
 
-from vllm.models.minimax_m3.common.vision_tower import (  # noqa: E402
-    MiniMaxVLAttention,
-)
 from vllm.models.minimax_m3.nvidia import model as minimax_m3_model  # noqa: E402
 
 from vllm_ascend.attention.msa_m3 import (  # noqa: E402
@@ -58,40 +51,36 @@ from vllm_ascend.attention.msa_m3 import (  # noqa: E402
 )
 
 
-class AscendMiniMaxM3SparseAttention(AscendMiniMaxM3SparseAttentionBase):
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        layer_id: int,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-        cache_config: CacheConfig | None = None,
-        topk_indices_buffer: Any | None = None,
-    ) -> None:
-        del topk_indices_buffer
-        sparse_cfg = config.sparse_attention_config
-        disable_index_value = sparse_cfg["sparse_disable_index_value"][layer_id] == 1
-        rope_parameters = {
+def _make_ascend_minimax_m3_sparse_attention(
+    config: PretrainedConfig,
+    layer_id: int,
+    quant_config: QuantizationConfig | None = None,
+    prefix: str = "",
+    cache_config: CacheConfig | None = None,
+    topk_indices_buffer: Any | None = None,
+) -> AscendMiniMaxM3SparseAttentionBase:
+    del topk_indices_buffer
+    sparse_cfg = config.sparse_attention_config
+    return AscendMiniMaxM3SparseAttentionBase(
+        hidden_size=config.hidden_size,
+        num_heads=config.num_attention_heads,
+        num_kv_heads=config.num_key_value_heads,
+        rotary_dim=config.rotary_dim,
+        rope_parameters={
             "rope_theta": getattr(config, "rope_theta", 10000),
             "partial_rotary_factor": getattr(config, "partial_rotary_factor", 1.0),
-        }
-        super().__init__(
-            hidden_size=config.hidden_size,
-            num_heads=config.num_attention_heads,
-            num_kv_heads=config.num_key_value_heads,
-            rotary_dim=config.rotary_dim,
-            rope_parameters=rope_parameters,
-            max_position_embeddings=config.max_position_embeddings,
-            head_dim=config.head_dim,
-            rms_norm_eps=config.rms_norm_eps,
-            qkv_bias=getattr(config, "attention_bias", False),
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=prefix,
-            sparse_cfg=sparse_cfg,
-            disable_index_value=disable_index_value,
-            reduce_results=False,
-        )
+        },
+        max_position_embeddings=config.max_position_embeddings,
+        head_dim=config.head_dim,
+        rms_norm_eps=config.rms_norm_eps,
+        qkv_bias=getattr(config, "attention_bias", False),
+        cache_config=cache_config,
+        quant_config=quant_config,
+        prefix=prefix,
+        sparse_cfg=sparse_cfg,
+        disable_index_value=sparse_cfg["sparse_disable_index_value"][layer_id] == 1,
+        reduce_results=False,
+    )
 
 
 def _forward_minimax_m3_attention(
@@ -101,28 +90,12 @@ def _forward_minimax_m3_attention(
 ) -> torch.Tensor:
     qkv, _ = self.qkv_proj(hidden_states)
     q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-    q_shape = q.shape
-    k_shape = k.shape
-    q = self.q_norm(q.reshape(-1, self.head_dim).contiguous()).reshape(q_shape)
-    k = self.k_norm(k.reshape(-1, self.head_dim).contiguous()).reshape(k_shape)
+    q = self.q_norm(q.reshape(-1, self.head_dim).contiguous()).reshape_as(q)
+    k = self.k_norm(k.reshape(-1, self.head_dim).contiguous()).reshape_as(k)
     q, k = self.rotary_emb(positions, q, k)
     attn_output = self.attn(q, k, v.contiguous())
     output, _ = self.o_proj(attn_output)
     return output
-
-
-def _apply_minimax_m3_vision_rotary_emb(
-    self: Any,
-    qk_reshaped: torch.Tensor,
-    rotary_cos: torch.Tensor,
-    rotary_sin: torch.Tensor,
-    seq_len: int,
-    rotary_segment_lengths: list[int] | None,
-) -> torch.Tensor:
-    del seq_len, rotary_segment_lengths
-    rotary_dim = rotary_cos.shape[-1] * 2
-    qk_rot = self.apply_rotary_emb(qk_reshaped[..., :rotary_dim], rotary_cos, rotary_sin)
-    return torch.cat((qk_rot, qk_reshaped[..., rotary_dim:]), dim=-1)
 
 
 def _load_minimax_m3_weights(
@@ -149,10 +122,6 @@ def _load_minimax_m3_weights(
             name = name[len("model.") :]
         if "mtp." in name or "rotary_emb.inv_freq" in name:
             continue
-        if "weight_scale_inv" in name:
-            name = name.replace("weight_scale_inv", "weight_scale")
-        elif "scale_inv" in name:
-            name = name.replace("scale_inv", "scale")
 
         if (
             ".index_" in name
@@ -179,14 +148,6 @@ def _load_minimax_m3_weights(
                 continue
             if is_pp_missing_parameter(mapped_name, self):
                 continue
-            if mapped_name.endswith((".k_scale", ".v_scale")):
-                remapped_name = maybe_remap_kv_scale_name(mapped_name, params_dict)
-                if remapped_name is not None and remapped_name in params_dict:
-                    param = params_dict[remapped_name]
-                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                    weight_loader(param, loaded_weight)
-                    loaded_params.add(remapped_name)
-                    break
             if mapped_name not in params_dict:
                 continue
             param = params_dict[mapped_name]
@@ -226,9 +187,6 @@ def _load_minimax_m3_weights(
                     continue
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    continue
                 if is_pp_missing_parameter(name, self) or name not in params_dict:
                     continue
                 param = params_dict[name]
@@ -251,6 +209,5 @@ def _load_minimax_m3_weights(
 
 minimax_m3_model.MiniMAXGemmaRMSNorm = GemmaRMSNorm
 minimax_m3_model.MiniMaxM3Attention.forward = _forward_minimax_m3_attention
-minimax_m3_model.MiniMaxM3SparseAttention = AscendMiniMaxM3SparseAttention
+minimax_m3_model.MiniMaxM3SparseAttention = _make_ascend_minimax_m3_sparse_attention
 minimax_m3_model.MiniMaxM3Model.load_weights = _load_minimax_m3_weights
-MiniMaxVLAttention._apply_rotary_emb = _apply_minimax_m3_vision_rotary_emb
