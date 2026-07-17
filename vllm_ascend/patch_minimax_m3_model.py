@@ -20,7 +20,6 @@ from vllm.model_executor.models.utils import is_pp_missing_parameter
 
 
 def _install_fused_allreduce_norm_fallback() -> None:
-    """Avoid importing vLLM's FlashInfer-only fusion module on Ascend."""
     module_name = "vllm.model_executor.layers.fused_allreduce_gemma_rms_norm"
     if module_name in sys.modules:
         return
@@ -41,7 +40,9 @@ def _install_fused_allreduce_norm_fallback() -> None:
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         return norm(hidden_states, residual)
 
-    cast(Any, fallback_module).fused_allreduce_gemma_rms_norm = fused_allreduce_gemma_rms_norm
+    cast(Any, fallback_module).fused_allreduce_gemma_rms_norm = (
+        fused_allreduce_gemma_rms_norm
+    )
     sys.modules[module_name] = fallback_module
 
 
@@ -58,8 +59,6 @@ from vllm_ascend.attention.msa_m3 import (  # noqa: E402
 
 
 class AscendMiniMaxM3SparseAttention(AscendMiniMaxM3SparseAttentionBase):
-    """Translate vLLM 0.24's MiniMax-M3 constructor to the Ascend backend."""
-
     def __init__(
         self,
         config: PretrainedConfig,
@@ -91,8 +90,6 @@ class AscendMiniMaxM3SparseAttention(AscendMiniMaxM3SparseAttentionBase):
             prefix=prefix,
             sparse_cfg=sparse_cfg,
             disable_index_value=disable_index_value,
-            # The native decoder performs the tensor-parallel all-reduce
-            # together with the following Gemma RMSNorm.
             reduce_results=False,
         )
 
@@ -102,7 +99,6 @@ def _forward_minimax_m3_attention(
     positions: torch.Tensor,
     hidden_states: torch.Tensor,
 ) -> torch.Tensor:
-    """Run dense attention without vLLM's CUDA-only fused QK/RoPE op."""
     qkv, _ = self.qkv_proj(hidden_states)
     q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
     q_shape = q.shape
@@ -123,7 +119,6 @@ def _apply_minimax_m3_vision_rotary_emb(
     seq_len: int,
     rotary_segment_lengths: list[int] | None,
 ) -> torch.Tensor:
-    """Apply MiniMax vision's partial RoPE with the Ascend rotary op."""
     del seq_len, rotary_segment_lengths
     rotary_dim = rotary_cos.shape[-1] * 2
     qk_rot = self.apply_rotary_emb(qk_reshaped[..., :rotary_dim], rotary_cos, rotary_sin)
@@ -134,13 +129,10 @@ def _load_minimax_m3_weights(
     self: Any,
     weights: Iterable[tuple[str, torch.Tensor]],
 ) -> set[str]:
-    """Load both fused and split Ascend sparse-indexer projections."""
     stacked_params_mapping: list[tuple[str, str, int | str]] = [
         (".qkv_proj", ".q_proj", "q"),
         (".qkv_proj", ".k_proj", "k"),
         (".qkv_proj", ".v_proj", "v"),
-        # W8A8 can require a separately quantized indexer projection. Try it
-        # before the fused QKV-indexer layout used by the native CUDA model.
         (".indexer_proj", ".index_q_proj", "index_q"),
         (".indexer_proj", ".index_k_proj", "index_k"),
         (".qkv_proj", ".index_q_proj", "index_q"),
@@ -162,7 +154,11 @@ def _load_minimax_m3_weights(
         elif "scale_inv" in name:
             name = name.replace("scale_inv", "scale")
 
-        if ".index_" in name and ".index_q_proj" not in name and ".index_k_proj" not in name:
+        if (
+            ".index_" in name
+            and ".index_q_proj" not in name
+            and ".index_k_proj" not in name
+        ):
             if name.endswith(".bias") and name not in params_dict:
                 continue
             if is_pp_missing_parameter(name, self) or name not in params_dict:
@@ -253,9 +249,6 @@ def _load_minimax_m3_weights(
     return loaded_params
 
 
-# vLLM's hardware-isolated entry point currently selects the NVIDIA module for
-# every non-ROCm platform. Keep the native model and replace only the pieces
-# that are hardware-specific on Ascend.
 minimax_m3_model.MiniMAXGemmaRMSNorm = GemmaRMSNorm
 minimax_m3_model.MiniMaxM3Attention.forward = _forward_minimax_m3_attention
 minimax_m3_model.MiniMaxM3SparseAttention = AscendMiniMaxM3SparseAttention
