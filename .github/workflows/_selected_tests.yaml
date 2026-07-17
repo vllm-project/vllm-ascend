@@ -36,7 +36,32 @@ on:
         type: string
         required: false
         default: 'main'
-        description: 'The base branch to rebase onto (e.g. main, v0.8.x).'
+        description: 'The base branch to rebase onto; empty keeps the checked-out ref unchanged.'
+      require_prebuilt_csrc_cache:
+        type: boolean
+        required: false
+        default: false
+        description: 'Fail instead of compiling on the test runner when the csrc cache is missing.'
+      csrc_cache_key:
+        type: string
+        required: false
+        default: ''
+        description: 'Exact prebuilt csrc cache key; empty uses the legacy key.'
+      a2_csrc_cache_key:
+        type: string
+        required: false
+        default: ''
+        description: 'Exact A2 cache key, shared by full-card and fractional-card tests.'
+      a3_csrc_cache_key:
+        type: string
+        required: false
+        default: ''
+        description: 'Exact A3 cache key.'
+      csrc_310p_cache_key:
+        type: string
+        required: false
+        default: ''
+        description: 'Exact 310P cache key.'
       upload_timing:
         type: boolean
         required: false
@@ -128,6 +153,7 @@ jobs:
           submodules: recursive
 
       - name: Rebase on latest ${{ inputs.base_ref }}
+        if: ${{ inputs.base_ref != '' }}
         run: |
           git config user.name "vllm-ascend-ci"
           git config user.email "vllm-ascend-ci@users.noreply.github.com"
@@ -162,6 +188,32 @@ jobs:
               - 'CMakeLists.txt'
               - 'cmake/**'
 
+      - name: Select csrc cache key
+        id: select-csrc-cache-key
+        if: ${{ matrix.group.npu_type != 'cpu' }}
+        env:
+          NPU_TYPE: ${{ matrix.group.npu_type }}
+          DEFAULT_CACHE_KEY: ${{ inputs.csrc_cache_key }}
+          A2_CACHE_KEY: ${{ inputs.a2_csrc_cache_key }}
+          A3_CACHE_KEY: ${{ inputs.a3_csrc_cache_key }}
+          CACHE_310P_KEY: ${{ inputs.csrc_310p_cache_key }}
+        run: |
+          case "$NPU_TYPE" in
+            a2|a2_half|a2_quarter)
+              CACHE_KEY="$A2_CACHE_KEY"
+              ;;
+            a3)
+              CACHE_KEY="$A3_CACHE_KEY"
+              ;;
+            310p)
+              CACHE_KEY="$CACHE_310P_KEY"
+              ;;
+            *)
+              CACHE_KEY="$DEFAULT_CACHE_KEY"
+              ;;
+          esac
+          echo "cache_key=${CACHE_KEY:-$DEFAULT_CACHE_KEY}" >> "$GITHUB_OUTPUT"
+
       - name: Restore vllm-ascend csrc cache
         id: cache-csrc
         if: ${{ matrix.group.npu_type != 'cpu' }}
@@ -172,7 +224,21 @@ jobs:
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.group.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          key: ${{ steps.select-csrc-cache-key.outputs.cache_key || format('vllm-ascend-build-v1-{0}-{1}-{2}', steps.get_arch.outputs.arch, matrix.group.image_tag, steps.get_csrc_hash.outputs.CSRC_HASH) }}
+
+      - name: Verify required prebuilt csrc cache
+        if: ${{ matrix.group.npu_type != 'cpu' && inputs.require_prebuilt_csrc_cache }}
+        env:
+          CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
+        run: |
+          if [ "$CACHE_HIT" != "true" ]; then
+            echo "::error::Required CPU-built csrc cache was not restored."
+            exit 1
+          fi
+          if ! find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+            echo "::error::The restored csrc cache does not contain a top-level shared library."
+            exit 1
+          fi
 
       - name: Install Mooncake wheel
         if: ${{ matrix.group.npu_type != 'cpu' }}
@@ -197,11 +263,11 @@ jobs:
         run: |
           case "${{ matrix.group.npu_type }}" in
             a2_half)
-              export SOC_VERSION=ascend910b3
+              export SOC_VERSION=ascend910b1
               export MAX_JOBS=11
               ;;
             a2_quarter)
-              export SOC_VERSION=ascend910b3
+              export SOC_VERSION=ascend910b1
               export MAX_JOBS=6
               ;;
             *)
@@ -215,13 +281,16 @@ jobs:
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
             echo "CSRC cache hit: .so files found, skip kernel compilation"
             COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
+          elif [ "${{ inputs.require_prebuilt_csrc_cache }}" = "true" ]; then
+            echo "::error::Required CPU-built csrc cache files are missing."
+            exit 1
           else
             echo "CSRC cache miss: no .so files found, compile kernels"
             uv pip install -e . --no-build-isolation
           fi
 
       - name: Save vllm-ascend csrc cache
-        if: ${{ matrix.group.npu_type != 'cpu' && steps.csrc-filter.outputs.csrc == 'true' && steps.cache-csrc.outputs.cache-hit != 'true' }}
+        if: ${{ matrix.group.npu_type != 'cpu' && steps.select-csrc-cache-key.outputs.cache_key == '' && steps.csrc-filter.outputs.csrc == 'true' && steps.cache-csrc.outputs.cache-hit != 'true' }}
         uses: runs-on/cache/save@v5
         with:
           path: |
