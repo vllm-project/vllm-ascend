@@ -66,33 +66,38 @@ class AttentionMaskBuilder:
         max_query_len: int,
         rswa_window: int,
     ) -> torch.Tensor:
-        prefix_lens = prefix_lens.to(device="cpu", dtype=torch.int64)
-        seq_lens = seq_lens.to(device="cpu", dtype=torch.int64)
-        query_lens = query_lens.to(device="cpu", dtype=torch.int64)
-        num_reqs = prefix_lens.numel()
-        attn_mask = torch.ones(
-            (num_reqs, 1, max_query_len, max_kv_len),
-            dtype=torch.int8,
-            device="cpu",
+        prefix_lens = prefix_lens.to(
+            device=self.device, dtype=torch.int64, non_blocking=True
+        ).view(-1, 1, 1)
+        seq_lens = seq_lens.to(
+            device=self.device, dtype=torch.int64, non_blocking=True
+        ).view(-1, 1, 1)
+        query_lens = query_lens.to(
+            device=self.device, dtype=torch.int64, non_blocking=True
+        ).view(-1, 1, 1)
+
+        query_offsets = torch.arange(
+            max_query_len,
+            device=self.device,
+            dtype=torch.int64,
+        ).view(1, -1, 1)
+        kv_positions = torch.arange(
+            max_kv_len,
+            device=self.device,
+            dtype=torch.int64,
+        ).view(1, 1, -1)
+        query_positions = seq_lens - query_lens + query_offsets
+
+        valid_queries = query_offsets < query_lens
+        valid_keys = kv_positions < seq_lens
+        causal = kv_positions <= query_positions
+        in_prefix = kv_positions < prefix_lens
+        in_window = (query_positions - kv_positions) < rswa_window
+        keep = (
+            valid_queries & valid_keys & causal & (in_prefix | in_window)
         )
-        kv_positions = torch.arange(max_kv_len, dtype=torch.int64)
-        for req_idx in range(num_reqs):
-            query_len = int(query_lens[req_idx].item())
-            if query_len <= 0:
-                continue
-            seq_len = int(seq_lens[req_idx].item())
-            prefix_len = int(prefix_lens[req_idx].item())
-            q_positions = torch.arange(
-                seq_len - query_len,
-                seq_len,
-                dtype=torch.int64,
-            ).unsqueeze(1)
-            causal = kv_positions.unsqueeze(0) <= q_positions
-            in_prefix = kv_positions.unsqueeze(0) < prefix_len
-            in_window = (q_positions - kv_positions.unsqueeze(0)) < rswa_window
-            keep = causal & (in_prefix | in_window)
-            attn_mask[req_idx, 0, :query_len, :] = (~keep).to(torch.int8)
-        return attn_mask.to(self.device, non_blocking=True)
+
+        return (~keep).to(torch.int8).unsqueeze(1).contiguous()
 
     def get_mla_mask(self, dtype: torch.dtype) -> torch.Tensor:
         if self.mla_mask is None or self.mla_mask.dtype != dtype:
