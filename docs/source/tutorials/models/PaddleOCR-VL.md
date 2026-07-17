@@ -405,3 +405,11 @@ For common environment, installation, and general parameter issues, please refer
 - **Q: What are the deployment requirements for Atlas inference products?**
 
   A: On Atlas inference products, only `float16` dtype is supported. Graph compilation (`--compilation-config`) requires **CANN version >= 9.0.0**; if your CANN version is lower, use `--enforce-eager` instead.
+
+- **Q: What should I do if I encounter dependency conflicts during installation on Atlas inference products?**
+
+  A: Uninstall `triton` and `triton-ascend` before starting the service:
+
+  ```bash
+  pip uninstall -y triton triton-ascend
+  ```
