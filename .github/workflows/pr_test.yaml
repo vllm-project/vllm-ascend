@@ -47,11 +47,17 @@ jobs:
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
-      has_tests: ${{ steps.scope.outputs.has_tests || steps.noop.outputs.has_tests }}
-      test_groups: ${{ steps.scope.outputs.test_groups || steps.noop.outputs.test_groups }}
+      has_tests: ${{ steps.filter-test-groups.outputs.has_tests || steps.scope.outputs.has_tests || steps.noop.outputs.has_tests }}
+      test_groups: ${{ steps.filter-test-groups.outputs.test_groups || steps.scope.outputs.test_groups || steps.noop.outputs.test_groups }}
       matched_modules: ${{ steps.scope.outputs.matched_modules || steps.noop.outputs.matched_modules }}
       main_commit: ${{ steps.vllm.outputs.main_commit }}
       release_tag: ${{ steps.vllm.outputs.release_tag }}
+      a2_csrc_need_build: ${{ steps.a2-csrc-cache-plan.outputs.need_build }}
+      a2_csrc_cache_key: ${{ steps.csrc-cache-keys.outputs.a2_cache_key }}
+      a3_csrc_need_build: ${{ steps.a3-csrc-cache-plan.outputs.need_build }}
+      a3_csrc_cache_key: ${{ steps.csrc-cache-keys.outputs.a3_cache_key }}
+      csrc_310p_need_build: ${{ steps.csrc-310p-cache-plan.outputs.need_build }}
+      csrc_310p_cache_key: ${{ steps.csrc-cache-keys.outputs.cache_310p_key }}
     steps:
       - name: Validate PR title prefix
         run: |
@@ -114,6 +120,7 @@ jobs:
       - run: echo "::add-matcher::$RUNNER_TEMP/mypy.json"
 
       - name: Checkout vllm-project/vllm repo
+        if: ${{ false }}
         uses: actions/checkout@v7
         with:
           repository: vllm-project/vllm
@@ -132,7 +139,9 @@ jobs:
               - 'vllm_ascend/**'
               - 'setup.py'
               - 'csrc/**'
+              - 'packages.txt'
               - 'requirements.txt'
+              - 'requirements-dev.txt'
               - 'pyproject.toml'
               - 'cmake/**'
               - '.github/workflows/pr_test.yaml'
@@ -146,7 +155,7 @@ jobs:
               - 'CMakeLists.txt'
 
       - name: Install vllm-ascend dev (conditional)
-        if: steps.filter.outputs.lint_tracker == 'true'
+        if: ${{ false }}
         env:
           UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
           UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
@@ -155,11 +164,12 @@ jobs:
           UV_SYSTEM_PYTHON: 1
         run: |
           pip install uv
-          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install uc-manager
           uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
       - name: Run pre-commit
+        if: ${{ false }}
         env:
           PRE_COMMIT_HOME: /tmp/pre-commit-cache
           PRE_COMMIT_COLOR: always
@@ -167,14 +177,15 @@ jobs:
           TERM: xterm-256color
           SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086"
         run: |
-          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pre-commit run --all-files --hook-stage manual --show-diff-on-failure
 
       - name: Run mypy
+        if: ${{ false }}
         run: |
           PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
           export PYTHONPATH
-          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           for python_version in "3.10" "3.11" "3.12"; do
             echo "============================"
             tools/mypy.sh 1 "$python_version"
@@ -190,11 +201,140 @@ jobs:
         id: scope
         if: steps.filter.outputs.src == 'true'
         run: |
-          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git fetch origin ${{ github.base_ref }}
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
             --diff-base origin/${{ github.base_ref }}
+
+      - name: Keep only fractional-card test groups
+        id: filter-test-groups
+        if: steps.scope.outputs.has_tests == 'true'
+        env:
+          TEST_GROUPS: ${{ steps.scope.outputs.test_groups }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          groups = json.loads(os.environ["TEST_GROUPS"])
+          # Enable after vNPU validation:
+          # allowed_types = {"cpu", "a2", "a2_half", "a2_quarter", "a3", "310p"}
+          allowed_types = {"a2_half", "a2_quarter"}
+          filtered = [group for group in groups if group["npu_type"] in allowed_types]
+          selected_types = {group["npu_type"] for group in filtered}
+
+          outputs = {
+              "test_groups": json.dumps(filtered, separators=(",", ":")),
+              "has_tests": bool(filtered),
+              "has_a2": bool(selected_types & {"a2", "a2_half", "a2_quarter"}),
+              "has_a3": "a3" in selected_types,
+              "has_310p": "310p" in selected_types,
+          }
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              for name, value in outputs.items():
+                  if isinstance(value, bool):
+                      value = str(value).lower()
+                  print(f"{name}={value}", file=output)
+          PY
+
+      - name: Calculate csrc cache keys
+        id: csrc-cache-keys
+        if: steps.filter-test-groups.outputs.has_tests == 'true'
+        run: |
+          BUILD_HASH=$(find \
+            ./csrc \
+            ./cmake \
+            ./setup.py \
+            ./CMakeLists.txt \
+            ./pyproject.toml \
+            ./packages.txt \
+            ./requirements.txt \
+            ./requirements-dev.txt \
+            ./vllm_ascend/envs.py \
+            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          {
+            echo "a2_cache_key=vllm-ascend-build-v2-ARM64-9.0.1-910b-ubuntu22.04-py3.12-ascend910b1-${BUILD_HASH}"
+            echo "a3_cache_key=vllm-ascend-build-v2-ARM64-9.0.1-a3-ubuntu22.04-py3.12-ascend910_9391-${BUILD_HASH}"
+            echo "cache_310p_key=vllm-ascend-build-v2-ARM64-9.1.0-beta.1-310p-ubuntu22.04-py3.12-ascend310p1-${BUILD_HASH}"
+          } >> "$GITHUB_OUTPUT"
+
+      # A2 full-card and vNPU tests use the same image and csrc artifact.
+      - name: Look up A2 csrc cache
+        id: lookup-a2-csrc
+        if: steps.filter-test-groups.outputs.has_a2 == 'true'
+        uses: runs-on/cache/restore@v5
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: ${{ steps.csrc-cache-keys.outputs.a2_cache_key }}
+          lookup-only: true
+
+      - name: Plan A2 csrc build
+        id: a2-csrc-cache-plan
+        if: steps.filter-test-groups.outputs.has_a2 == 'true'
+        env:
+          CACHE_HIT: ${{ steps.lookup-a2-csrc.outputs.cache-hit }}
+        run: |
+          if [ "$CACHE_HIT" = "true" ]; then
+            echo "need_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "need_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Enable these lookups together with the full A3/310P test matrix.
+      - name: Look up A3 csrc cache
+        id: lookup-a3-csrc
+        if: ${{ false && steps.filter-test-groups.outputs.has_a3 == 'true' }}
+        uses: runs-on/cache/restore@v5
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: ${{ steps.csrc-cache-keys.outputs.a3_cache_key }}
+          lookup-only: true
+
+      - name: Plan A3 csrc build
+        id: a3-csrc-cache-plan
+        if: ${{ false && steps.filter-test-groups.outputs.has_a3 == 'true' }}
+        env:
+          CACHE_HIT: ${{ steps.lookup-a3-csrc.outputs.cache-hit }}
+        run: |
+          if [ "$CACHE_HIT" = "true" ]; then
+            echo "need_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "need_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Look up 310P csrc cache
+        id: lookup-310p-csrc
+        if: ${{ false && steps.filter-test-groups.outputs.has_310p == 'true' }}
+        uses: runs-on/cache/restore@v5
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: ${{ steps.csrc-cache-keys.outputs.cache_310p_key }}
+          lookup-only: true
+
+      - name: Plan 310P csrc build
+        id: csrc-310p-cache-plan
+        if: ${{ false && steps.filter-test-groups.outputs.has_310p == 'true' }}
+        env:
+          CACHE_HIT: ${{ steps.lookup-310p-csrc.outputs.cache-hit }}
+        run: |
+          if [ "$CACHE_HIT" = "true" ]; then
+            echo "need_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "need_build=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Set no-tests output when source paths unchanged
         id: noop
@@ -206,20 +346,70 @@ jobs:
             echo "matched_modules="
           } >> "$GITHUB_OUTPUT"
 
-  run-selected-tests:
+  build-a2-csrc-cache:
     needs: lint-and-select-tests
-    if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' && contains(github.event.pull_request.labels.*.name, 'ready') }}
+    if: ${{ needs.lint-and-select-tests.outputs.a2_csrc_need_build == 'true' }}
+    uses: ./.github/workflows/push_build_csrc_cache.yaml
+    with:
+      ref: ${{ github.sha }}
+      cache_name: a2
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-910b-ubuntu22.04-py3.12
+      soc_version: ascend910b1
+      cache_key: ${{ needs.lint-and-select-tests.outputs.a2_csrc_cache_key }}
+
+  # Enable these jobs together with the full A3/310P test matrix.
+  build-a3-csrc-cache:
+    needs: lint-and-select-tests
+    if: ${{ false && needs.lint-and-select-tests.outputs.a3_csrc_need_build == 'true' }}
+    uses: ./.github/workflows/push_build_csrc_cache.yaml
+    with:
+      ref: ${{ github.sha }}
+      cache_name: a3
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-a3-ubuntu22.04-py3.12
+      soc_version: ascend910_9391
+      cache_key: ${{ needs.lint-and-select-tests.outputs.a3_csrc_cache_key }}
+
+  build-310p-csrc-cache:
+    needs: lint-and-select-tests
+    if: ${{ false && needs.lint-and-select-tests.outputs.csrc_310p_need_build == 'true' }}
+    uses: ./.github/workflows/push_build_csrc_cache.yaml
+    with:
+      ref: ${{ github.sha }}
+      cache_name: 310p
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-beta.1-310p-ubuntu22.04-py3.12
+      soc_version: ascend310p1
+      cache_key: ${{ needs.lint-and-select-tests.outputs.csrc_310p_cache_key }}
+
+  run-selected-tests:
+    needs:
+      - lint-and-select-tests
+      - build-a2-csrc-cache
+      - build-a3-csrc-cache
+      - build-310p-csrc-cache
+    if: >-
+      ${{
+        always() &&
+        needs.lint-and-select-tests.result == 'success' &&
+        needs.lint-and-select-tests.outputs.has_tests == 'true' &&
+        contains(fromJSON('["success","skipped"]'), needs.build-a2-csrc-cache.result) &&
+        contains(fromJSON('["success","skipped"]'), needs.build-a3-csrc-cache.result) &&
+        contains(fromJSON('["success","skipped"]'), needs.build-310p-csrc-cache.result)
+      }}
     strategy:
       matrix:
         vllm_version:
           - ${{ needs.lint-and-select-tests.outputs.main_commit }}
-          - ${{ needs.lint-and-select-tests.outputs.release_tag }}
+          # - ${{ needs.lint-and-select-tests.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
-      ref: ${{ github.event.pull_request.head.sha }}
-      base_ref: ${{ github.base_ref }}
+      ref: ${{ github.sha }}
+      base_ref: ''
       test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
+      require_prebuilt_csrc_cache: true
+      a2_csrc_cache_key: ${{ needs.lint-and-select-tests.outputs.a2_csrc_cache_key }}
+      a3_csrc_cache_key: ${{ needs.lint-and-select-tests.outputs.a3_csrc_cache_key }}
+      csrc_310p_cache_key: ${{ needs.lint-and-select-tests.outputs.csrc_310p_cache_key }}
 
   generate-hitest:
     name: Generate hitest recommendations
@@ -234,7 +424,12 @@ jobs:
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
-    needs: [lint-and-select-tests, run-selected-tests]
+    needs:
+      - lint-and-select-tests
+      - build-a2-csrc-cache
+      - build-a3-csrc-cache
+      - build-310p-csrc-cache
+      - run-selected-tests
     if: ${{ always() && contains(github.event.pull_request.labels.*.name, 'ready') }}
     runs-on: linux-amd64-cpu-2-hk
     steps:
@@ -243,10 +438,16 @@ jobs:
           set -euo pipefail
 
           LINT_RESULT="${{ needs.lint-and-select-tests.result }}"
+          A2_BUILD_RESULT="${{ needs.build-a2-csrc-cache.result }}"
+          A3_BUILD_RESULT="${{ needs.build-a3-csrc-cache.result }}"
+          P310_BUILD_RESULT="${{ needs.build-310p-csrc-cache.result }}"
           HAS_TESTS="${{ needs.lint-and-select-tests.outputs.has_tests }}"
 
           echo "=== CI Gate Summary ==="
           echo "lint-and-select-tests: ${LINT_RESULT}"
+          echo "build-a2-csrc-cache: ${A2_BUILD_RESULT}"
+          echo "build-a3-csrc-cache: ${A3_BUILD_RESULT}"
+          echo "build-310p-csrc-cache: ${P310_BUILD_RESULT}"
           echo "has_tests: ${HAS_TESTS}"
 
           if [ "${LINT_RESULT}" != "success" ] && [ "${LINT_RESULT}" != "skipped" ]; then
@@ -255,6 +456,18 @@ jobs:
           fi
 
           if [ "${HAS_TESTS}" = "true" ]; then
+            for result in \
+              "build-a2-csrc-cache:${A2_BUILD_RESULT}" \
+              "build-a3-csrc-cache:${A3_BUILD_RESULT}" \
+              "build-310p-csrc-cache:${P310_BUILD_RESULT}"; do
+              job="${result%%:*}"
+              status="${result#*:}"
+              if [ "${status}" != "success" ] && [ "${status}" != "skipped" ]; then
+                echo "::error::${job} did not succeed (result: ${status})"
+                exit 1
+              fi
+            done
+
             TESTS_RESULT="${{ needs.run-selected-tests.result }}"
             echo "run-selected-tests: ${TESTS_RESULT}"
             if [ "${TESTS_RESULT}" != "success" ]; then

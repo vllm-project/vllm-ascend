@@ -29,13 +29,35 @@ on:
       - .github/workflows/push_build_csrc_cache.yaml
       - 'pyproject.toml'
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
+        description: 'Exact vllm-ascend ref to build.'
+      cache_name:
+        type: string
+        required: true
+        description: 'Short chip name used in the job and concurrency group.'
+      image:
+        type: string
+        required: true
+        description: 'Build container image.'
+      soc_version:
+        type: string
+        required: true
+        description: 'SOC_VERSION used to compile csrc.'
+      cache_key:
+        type: string
+        required: true
+        description: 'Exact cache key supplied by the caller.'
 
 defaults:
   run:
     shell: bash -el {0}
 
 concurrency:
-  group: ascend-csrc-build-${{ github.workflow }}-${{ github.ref }}
+  group: ascend-csrc-build-${{ github.workflow }}-${{ github.ref }}-${{ inputs.cache_name || 'scheduled' }}
   cancel-in-progress: true
 
 env:
@@ -49,6 +71,7 @@ env:
 
 jobs:
   build-cache:
+    if: inputs.cache_name == ''
     name: build-${{ matrix.chip_type }}-${{ matrix.runner }}-${{ matrix.os }}-cache
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -193,6 +216,64 @@ jobs:
           # NOTE: indexes (ascend repo for triton-ascend + pytorch cpu whl) come from
           # UV_EXTRA_INDEX_URL. Do not pass --extra-index-url on the CLI here: it overrides
           # (does not append to) the env var and would drop the ascend repo.
+          uv pip install -r requirements-dev.txt
+          uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
+          uv pip install -e .
+
+  build-pr-cache:
+    if: inputs.cache_name != ''
+    name: build-${{ inputs.cache_name }}-arm64-ubuntu-cache
+    runs-on: linux-arm64-cpu-16
+    container:
+      image: ${{ inputs.image }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Configure mirrors
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt-get install -y git zstd
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+
+      - name: Install build dependencies
+        run: |
+          xargs apt-get -y install < packages.txt
+          apt-get -y install gcc g++ cmake libnuma-dev zstd clang-15
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
+
+      - name: Cache vllm-ascend csrc
+        id: cache-csrc
+        uses: runs-on/cache@v5
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: ${{ inputs.cache_key }}
+
+      - name: Build vllm-ascend for ${{ inputs.cache_name }}
+        if: steps.cache-csrc.outputs.cache-hit != 'true'
+        env:
+          SOC_VERSION: ${{ inputs.soc_version }}
+          MAX_JOBS: "16"
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          source /usr/local/Ascend/nnal/atb/set_env.sh
+          arch=$(uname -i)
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/${arch}-linux/devlib
+
+          pip install uc-manager
           uv pip install -r requirements-dev.txt
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
           uv pip install -e .

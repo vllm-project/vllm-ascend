@@ -68,8 +68,8 @@
     - vllm_ascend/attention/kvcomp_attn/
   tests:
     - tests/ut/attention/
-    - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
-    - tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py
+    - tests/e2e/pull_request/quarter_card/test_qwen3_0_6b.py
+    - tests/e2e/pull_request/quarter_card/test_qwen3_5_0_8b.py
 
 - name: attention_gqa
   optional: false
@@ -83,7 +83,7 @@
   source_file_dependencies:
     - vllm_ascend/attention/fa3_v1.py
   tests:
-    - tests/e2e/pull_request/one_card/test_attention_fa3.py
+    - tests/e2e/pull_request/quarter_card/test_attention_fa3.py
 
 - name: attention_mla
   optional: false
@@ -147,7 +147,7 @@
     - vllm_ascend/compilation/passes/base_pattern.py
   tests:
     - tests/ut/compilation
-    - tests/e2e/pull_request/one_card/compile/
+    - tests/e2e/pull_request/quarter_card/compile/
 
 - name: compilation_norm_quant_fusion_pass
   optional: false
@@ -155,8 +155,8 @@
     - vllm_ascend/compilation/passes/norm_quant_fusion_pass.py
   tests:
     - tests/ut/compilation
-    - tests/e2e/pull_request/one_card/compile/test_norm_quant_fusion.py
-    - tests/e2e/pull_request/one_card/compile/test_graphex_norm_quant_fusion.py
+    - tests/e2e/pull_request/quarter_card/compile/test_norm_quant_fusion.py
+    - tests/e2e/pull_request/quarter_card/compile/test_graphex_norm_quant_fusion.py
 
 - name: compilation_graphex_qknorm_rope_fusion_pass
   optional: false
@@ -164,7 +164,7 @@
     - vllm_ascend/compilation/passes/qknorm_rope_fusion_pass.py
   tests:
     - tests/ut/compilation
-    - tests/e2e/pull_request/one_card/compile/test_graphex_qknorm_rope_fusion.py
+    - tests/e2e/pull_request/quarter_card/compile/test_graphex_qknorm_rope_fusion.py
 
 - name: compilation_sp_pass_pass
   optional: false
@@ -207,7 +207,7 @@
     - vllm_ascend/device_allocator
   tests:
     - tests/ut/device_allocator
-    - tests/e2e/pull_request/one_card/test_camem.py
+    - tests/e2e/pull_request/quarter_card/test_camem.py
 
 # Distributed
 - name: distributed
@@ -259,6 +259,8 @@
   tests:
     - tests/ut/lora
     - tests/e2e/pull_request/one_card/lora
+    - tests/e2e/pull_request/half_card/lora
+    - tests/e2e/pull_request/quarter_card/lora
     - tests/e2e/pull_request/two_card/lora
 
 # CPU Weight Offloading
@@ -269,7 +271,7 @@
     - vllm_ascend/worker/model_runner_v1.py
     - vllm_ascend/compilation/acl_graph.py
   tests:
-    - tests/e2e/pull_request/one_card/test_cpu_weight_offload.py
+    - tests/e2e/pull_request/quarter_card/test_cpu_weight_offload.py
 
 # Model Loader
 - name: model_loader
@@ -301,7 +303,7 @@
     - vllm_ascend/ops/register_custom_ops.py
   tests:
     - tests/ut/ops
-    - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
+    - tests/e2e/pull_request/quarter_card/test_qwen3_0_6b.py
     - tests/e2e/pull_request/one_card/test_minicpm.py
 
 - name: ops_moe
@@ -311,7 +313,7 @@
     - vllm_ascend/ops/fused_moe
     - vllm_ascend/ops/mla.py
   tests:
-    - tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py
+    - tests/e2e/pull_request/quarter_card/test_qwen3_5_0_8b.py
     - tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py
     - tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py
     - tests/e2e/pull_request/two_card/test_shared_expert_dp.py
@@ -392,8 +394,8 @@
   tests:
     - tests/ut/patch
     - tests/ut/test_compressed_prefix_cache.py
-    - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
-    - tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py
+    - tests/e2e/pull_request/quarter_card/test_qwen3_0_6b.py
+    - tests/e2e/pull_request/quarter_card/test_qwen3_5_0_8b.py
     - tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py
 
 - name: patch_mamba_utils_310p
@@ -418,7 +420,7 @@
     - vllm_ascend/quantization
   tests:
     - tests/ut/quantization
-    - tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py
+    - tests/e2e/pull_request/half_card/test_qwen3_8b_w8a8.py
     - tests/e2e/pull_request/two_card/test_qwen3_5_35b_a3b_w8a8.py
 
 # Sample
@@ -429,7 +431,7 @@
     - vllm_ascend/worker/v2/sample
   tests:
     - tests/ut/sample
-    - tests/e2e/pull_request/one_card/test_sampler.py
+    - tests/e2e/pull_request/quarter_card/test_sampler.py
 
 - name: simple_kv_offload
   optional: false
@@ -437,7 +439,7 @@
     - vllm_ascend/simple_kv_offload
     - vllm_ascend/distributed/kv_transfer/kv_pool/simple_cpu_offload
   tests:
-    - tests/e2e/pull_request/one_card/test_simple_cpu_offload.py
+    - tests/e2e/pull_request/quarter_card/test_simple_cpu_offload.py
 
 # Spec Decode
 - name: spec_decode_base
@@ -542,13 +544,15 @@
     - vllm_ascend/worker/v2
   tests:
     - tests/ut/worker
-    - tests/e2e/pull_request/one_card/test_qwen3_embedding_0_6b.py
-    - tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py
-    - tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py
+    - tests/e2e/pull_request/quarter_card/test_qwen3_embedding_0_6b.py
+    - tests/e2e/pull_request/quarter_card/test_qwen3_5_0_8b.py
+    - tests/e2e/pull_request/half_card/test_qwen3_8b_w8a8.py
     - tests/e2e/pull_request/one_card/pooling
-    - tests/e2e/pull_request/one_card/test_completion_with_prompt_embeds.py
-    - tests/e2e/pull_request/one_card/test_guided_decoding.py
-    - tests/e2e/pull_request/one_card/test_multi_instance.py
+    - tests/e2e/pull_request/half_card/pooling
+    - tests/e2e/pull_request/quarter_card/pooling
+    - tests/e2e/pull_request/quarter_card/test_completion_with_prompt_embeds.py
+    - tests/e2e/pull_request/quarter_card/test_guided_decoding.py
+    - tests/e2e/pull_request/quarter_card/test_multi_instance.py
     - tests/e2e/pull_request/one_card/model_runner_v2
     - tests/e2e/pull_request/two_card/test_external_launcher.py
     - tests/e2e/pull_request/two_card/test_offline_weight_load.py
@@ -577,7 +581,7 @@
     - vllm_ascend/xlite
   tests:
     - tests/ut/xlite
-    - tests/e2e/pull_request/one_card/test_xlite.py
+    - tests/e2e/pull_request/quarter_card/test_xlite.py
 
 # Batch Invariant
 - name: batch_invariant
@@ -626,8 +630,8 @@
     - tests/ut/test_profiling_config.py
     - tests/ut/test_utils.py
     - tests/ut/test_platform.py
-    - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
-    - tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py
+    - tests/e2e/pull_request/quarter_card/test_qwen3_0_6b.py
+    - tests/e2e/pull_request/quarter_card/test_qwen3_5_0_8b.py
 
 # === Features ===
 - name: quantization_gqa_mla_c8
@@ -688,49 +692,49 @@ estimated_times:
   tests/e2e/pull_request/one_card/_310p/test_spec_decode_mtp_310p.py: 290
   tests/e2e/pull_request/one_card/_310p/test_vl_model_310p.py: 420
   tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_batch_invariant.py: 550
-  tests/e2e/pull_request/one_card/compile/test_graphex_norm_quant_fusion.py: 160
-  tests/e2e/pull_request/one_card/compile/test_graphex_qknorm_rope_fusion.py: 190
-  tests/e2e/pull_request/one_card/compile/test_norm_quant_fusion.py: 190
-  tests/e2e/pull_request/one_card/lora/test_ilama_lora.py: 220
-  tests/e2e/pull_request/one_card/lora/test_llama32_lora.py: 370
-  tests/e2e/pull_request/one_card/lora/test_lora_with_spec_decode.py: 620
-  tests/e2e/pull_request/one_card/lora/test_olmoe_lora.py: 300
-  tests/e2e/pull_request/one_card/lora/test_qwen35_densemodel_lora.py: 300
-  tests/e2e/pull_request/one_card/lora/test_qwen3_multi_loras.py: 240
-  tests/e2e/pull_request/one_card/lora/test_qwen3_reranker_lora.py: 320
-  tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py: 1370
+  tests/e2e/pull_request/quarter_card/compile/test_graphex_norm_quant_fusion.py: 140
+  tests/e2e/pull_request/quarter_card/compile/test_graphex_qknorm_rope_fusion.py: 170
+  tests/e2e/pull_request/quarter_card/compile/test_norm_quant_fusion.py: 170
+  tests/e2e/pull_request/quarter_card/lora/test_ilama_lora.py: 230
+  tests/e2e/pull_request/half_card/lora/test_llama32_lora.py: 360
+  tests/e2e/pull_request/half_card/lora/test_lora_with_spec_decode.py: 680
+  tests/e2e/pull_request/one_card/lora/test_olmoe_lora.py: 330
+  tests/e2e/pull_request/half_card/lora/test_qwen35_densemodel_lora.py: 300
+  tests/e2e/pull_request/quarter_card/lora/test_qwen3_multi_loras.py: 180
+  tests/e2e/pull_request/one_card/lora/test_qwen3_reranker_lora.py: 340
+  tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py: 1310
   tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py: 30
-  tests/e2e/pull_request/one_card/pooling/test_classification.py: 250
-  tests/e2e/pull_request/one_card/pooling/test_embedding.py: 550
-  tests/e2e/pull_request/one_card/pooling/test_scoring.py: 770
-  tests/e2e/pull_request/one_card/spec_decode/test_dflash.py: 300
-  tests/e2e/pull_request/one_card/spec_decode/test_dspark.py: 360
-  tests/e2e/pull_request/one_card/spec_decode/test_draft_parallel.py: 260
-  tests/e2e/pull_request/one_card/spec_decode/test_eagle.py: 440
-  tests/e2e/pull_request/one_card/spec_decode/test_extract_hidden_states.py: 490
-  tests/e2e/pull_request/one_card/spec_decode/test_mtp_eagle_correctness.py: 210
-  tests/e2e/pull_request/one_card/spec_decode/test_ngram.py: 230
+  tests/e2e/pull_request/half_card/pooling/test_classification.py: 250
+  tests/e2e/pull_request/quarter_card/pooling/test_embedding.py: 580
+  tests/e2e/pull_request/quarter_card/pooling/test_scoring.py: 700
+  tests/e2e/pull_request/one_card/spec_decode/test_dflash.py: 310
+  tests/e2e/pull_request/one_card/spec_decode/test_dspark.py: 30
+  tests/e2e/pull_request/one_card/spec_decode/test_draft_parallel.py: 270
+  tests/e2e/pull_request/one_card/spec_decode/test_eagle.py: 420
+  tests/e2e/pull_request/one_card/spec_decode/test_extract_hidden_states.py: 450
+  tests/e2e/pull_request/one_card/spec_decode/test_mtp_eagle_correctness.py: 200
+  tests/e2e/pull_request/one_card/spec_decode/test_ngram.py: 170
   tests/e2e/pull_request/one_card/spec_decode/test_ngram_npu.py: 170
-  tests/e2e/pull_request/one_card/spec_decode/test_suffix.py: 180
-  tests/e2e/pull_request/one_card/test_attention_fa3.py: 30
-  tests/e2e/pull_request/one_card/test_batch_invariant.py: 730
-  tests/e2e/pull_request/one_card/test_camem.py: 140
-  tests/e2e/pull_request/one_card/test_completion_with_prompt_embeds.py: 200
+  tests/e2e/pull_request/one_card/spec_decode/test_suffix.py: 200
+  tests/e2e/pull_request/quarter_card/test_attention_fa3.py: 30
+  tests/e2e/pull_request/one_card/test_batch_invariant.py: 700
+  tests/e2e/pull_request/quarter_card/test_camem.py: 150
+  tests/e2e/pull_request/quarter_card/test_completion_with_prompt_embeds.py: 190
   tests/e2e/pull_request/one_card/test_cpu_offloading.py: 30
-  tests/e2e/pull_request/one_card/test_cpu_weight_offload.py: 830
-  tests/e2e/pull_request/one_card/test_guided_decoding.py: 610
-  tests/e2e/pull_request/one_card/test_minicpm.py: 330
-  tests/e2e/pull_request/one_card/test_multi_instance.py: 140
-  tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py: 340
+  tests/e2e/pull_request/quarter_card/test_cpu_weight_offload.py: 870
+  tests/e2e/pull_request/quarter_card/test_guided_decoding.py: 600
+  tests/e2e/pull_request/one_card/test_minicpm.py: 320
+  tests/e2e/pull_request/quarter_card/test_multi_instance.py: 150
+  tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py: 330
   tests/e2e/pull_request/one_card/test_npu_ipc_weight_transfer.py: 190
-  tests/e2e/pull_request/one_card/test_qwen3_0_6b.py: 220
-  tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py: 330
-  tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py: 410
-  tests/e2e/pull_request/one_card/test_qwen3_embedding_0_6b.py: 200
-  tests/e2e/pull_request/one_card/test_sampler.py: 300
-  tests/e2e/pull_request/one_card/test_simple_cpu_offload.py: 220
-  tests/e2e/pull_request/one_card/test_vlm.py: 860
-  tests/e2e/pull_request/one_card/test_xlite.py: 170
+  tests/e2e/pull_request/quarter_card/test_qwen3_0_6b.py: 220
+  tests/e2e/pull_request/quarter_card/test_qwen3_5_0_8b.py: 400
+  tests/e2e/pull_request/half_card/test_qwen3_8b_w8a8.py: 350
+  tests/e2e/pull_request/quarter_card/test_qwen3_embedding_0_6b.py: 170
+  tests/e2e/pull_request/quarter_card/test_sampler.py: 300
+  tests/e2e/pull_request/quarter_card/test_simple_cpu_offload.py: 220
+  tests/e2e/pull_request/one_card/test_vlm.py: 820
+  tests/e2e/pull_request/quarter_card/test_xlite.py: 160
   tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py: 20
   tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py: 150
   tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py: 510
@@ -814,6 +818,10 @@ estimated_times:
 # for files whose name contains ``_310p``.
 # Patterns are evaluated longest first (most specific wins).
 runner_mapping:
+  tests/e2e/pull_request/quarter_card:
+    default: a2_quarter_x1
+  tests/e2e/pull_request/half_card:
+    default: a2_half_x1
   tests/e2e/pull_request/one_card:
     default: a2_x1
     310p: 310p_x1
@@ -825,7 +833,7 @@ runner_mapping:
   tests/ut/.+/a3_2:
     default: a3_x2
   tests/ut/.+/a2:
-    default: a2_x1
+    default: a2_quarter_x1
 
 # === Partition Configuration ===
 # Controls how tests are split across parallel runners of the same type.
@@ -835,8 +843,9 @@ runner_mapping:
 partition:
   310p_x1: 1
   310p_x4: 1
+  a2_half_x1: 5
+  a2_quarter_x1: 6
   a2_x1: 5
   a3_x2: 3
   a3_x4: 3
   cpu_x0: 1
-
