@@ -26,11 +26,16 @@ It is recommended to download the model weight to the shared directory of multip
 
 You can use our official docker image to run GLM-5.2 directly.
 
-::::{tab-set} A3 series :sync:A3
+::::{tab-set}
+:sync-group: install
 
-    Start the docker image on your each node.
+::::{tab-item} A3 series
+:sync: A3
 
-    ```shell
+Start the docker image on your each node.
+
+```{code-block} bash
+   :substitutions:
 
     export IMAGE=quay.io/ascend/vllm-ascend:glm5.2-a3
     export NAME=vllm-ascend
@@ -69,13 +74,15 @@ You can use our official docker image to run GLM-5.2 directly.
     -v /root/.cache:/root/.cache \
     -it $IMAGE bash
     ```
+
 ::::
+::::{tab-item} A2 series
+:sync: A2
 
-::::{tab-set} A2 series :sync:A2
+Start the docker image on each of your nodes.
 
-    Start the docker image on each of your nodes.
-
-    ```shell
+```{code-block} bash
+   :substitutions:
 
     export IMAGE=quay.io/ascend/vllm-ascend:glm5.2
     docker run --rm \
@@ -103,6 +110,7 @@ You can use our official docker image to run GLM-5.2 directly.
         -it $IMAGE bash
     ```
 ::::
+:::::
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
@@ -114,7 +122,8 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 Run the following script to execute online inference.
 
-```shell
+```{code-block} bash
+   :substitutions:
 export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
@@ -161,7 +170,11 @@ The parameters are explained as follows:
 
 If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
 
-::::{tab-set} A3 series :sync:A3
+:::::{tab-set}
+:sync-group: install
+
+::::{tab-item} A3 series
+:sync: A3
 
     - `glm-5.2-w8a8`: can be deployed on 2 Atlas 800 A3 (64G × 16).
 
@@ -169,7 +182,8 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     **node 0**
 
-    ```shell
+```{code-block} bash
+    :substitutions:
     # this obtained through ifconfig
     # nic_name is the network interface name corresponding to local_ip of the current node
     nic_name="xxx"
@@ -218,7 +232,8 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     **node 1**
 
-    ```shell
+```{code-block} bash
+    :substitutions:
     # this obtained through ifconfig
     # nic_name is the network interface name corresponding to local_ip of the current node
     nic_name="xxx"
@@ -264,15 +279,17 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --additional-config '{"enable_dsa_cp": true,"enable_sparse_c8": true,"enable_balance_scheduling": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
-::::
 
-::::{tab-set} A2 series :sync:A3
+::::
+::::{tab-item} A2 series
+:sync: A2
 
     - `glm-5.2-w8a8`: can be deployed on 2 Atlas 800 A2 (64G × 32).
 
     **node 0**
 
-    ```shell
+```{code-block} bash
+    :substitutions:
     # this obtained through ifconfig
     # nic_name is the network interface name corresponding to local_ip of the current node
     nic_name="xxx"
@@ -328,7 +345,8 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     **node 1**
 
-    ```shell
+```{code-block} bash
+   :substitutions:
     # this obtained through ifconfig
     # nic_name is the network interface name corresponding to local_ip of the current node
     nic_name="xxx"
@@ -383,6 +401,8 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 ::::
+:::::
+
 ### Co-located Deployment on 4 Nodes (200k context)
 
 In a co-located (mixed) deployment, prefill and decode run together on the same nodes, in contrast to the disaggregated setup below. The following templates deploy `GLM-5.2` across 4 nodes with `DP4 TP8` (`data-parallel-size-local=1` per node), a 200k context window, and MTP (`num_speculative_tokens=5`). Node 0 hosts the API server and is the DP master; Node 1 to Node 3 run with `--headless`. Prefix caching is disabled (`--no-enable-prefix-caching`) in this configuration. All IPs, NIC names, ports and weight paths are placeholders.
