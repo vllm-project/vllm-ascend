@@ -331,7 +331,7 @@ jobs:
         OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
       steps:
         - name: Checkout vllm-ascend source code
-          uses: actions/checkout@v6
+          uses: actions/checkout@v7
           with:
             ref: ${{ inputs.ref || github.ref }}
 

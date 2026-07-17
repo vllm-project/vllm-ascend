@@ -134,11 +134,11 @@ jobs:
           } >> $GITHUB_OUTPUT
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Checkout PR code
         if: github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != ''
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.vllm_ascend_ref }}
           sparse-checkout: .github/workflows/configs/
