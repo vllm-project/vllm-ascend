@@ -26,10 +26,12 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import enable_dsa_cp
 
 from .deepseek_v4 import (
+    DSV4_STACKED_PARAMS_MAPPING,
     DeepseekV2DecoderLayer,
     DeepseekV2MixtureOfExperts,
     DeepseekV4MoE,
     get_spec_layer_idx_from_weight_name,
+    _normalize_dsv4_layer_weight_name,
 )
 
 
@@ -252,10 +254,6 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         rocm_aiter_moe_shared_expert_enabled = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
         rocm_aiter_moe_shared_expert_enabled = getattr(get_ascend_config(), "mix_placement", False)
-        stacked_params_mapping = [
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
 
         expert_params_mapping = FusedMoE.make_expert_params_mapping(
             model=self.model,
@@ -299,16 +297,6 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
             else:
                 name = name.replace("mtp.0.", "model.layers.0.mtp_block.")
 
-            if ".w1." in name:
-                name = name.replace(".w1.", ".gate_proj.")
-            if ".w2." in name:
-                name = name.replace(".w2.", ".down_proj.")
-            if ".w3." in name:
-                name = name.replace(".w3.", ".up_proj.")
-
-            if name.endswith(".scale"):
-                name = name.replace(".scale", ".weight_scale")
-
             if ".head." in name:
                 name = name.replace(".head.", ".shared_head.head.")
 
@@ -318,17 +306,7 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
             if ".emb.tok_emb." in name:
                 name = name.replace(".emb.tok_emb.", ".embed_tokens.")
 
-            if "attn" in name and "self_attn" not in name:
-                name = name.replace(".attn.", ".self_attn.")
-            if ".ffn." in name:
-                name = name.replace(".ffn.", ".mlp.")
-            if ".ffn_norm." in name:
-                name = name.replace(".ffn_norm.", ".post_attention_layernorm.")
-            if ".attn_norm." in name:
-                name = name.replace(".attn_norm.", ".input_layernorm.")
-
-            if ".gate.bias" in name:
-                name = name.replace(".gate.bias", ".gate.e_score_correction_bias")
+            name = _normalize_dsv4_layer_weight_name(name)
 
             if "sink" in name:
                 param = params_dict[name]
@@ -342,7 +320,7 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                 continue
 
             is_fusion_moe_shared_experts_layer = rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
-            for param_name, weight_name, shard_id in stacked_params_mapping:
+            for param_name, weight_name, shard_id in DSV4_STACKED_PARAMS_MAPPING:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
                     continue

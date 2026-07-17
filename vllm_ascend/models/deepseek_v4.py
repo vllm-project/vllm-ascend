@@ -86,6 +86,31 @@ from vllm_ascend.utils import (
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 
 
+DSV4_STACKED_PARAMS_MAPPING = (
+    ("gate_up_proj", "gate_proj", 0),
+    ("gate_up_proj", "up_proj", 1),
+)
+
+
+def _normalize_dsv4_layer_weight_name(
+    name: str,
+    *,
+    preserve_wo_a_scale: bool = False,
+) -> str:
+    name = name.replace(".w1.", ".gate_proj.")
+    name = name.replace(".w2.", ".down_proj.")
+    name = name.replace(".w3.", ".up_proj.")
+    name = name.replace(".attn.", ".self_attn.")
+    name = name.replace(".ffn_norm.", ".post_attention_layernorm.")
+    name = name.replace(".attn_norm.", ".input_layernorm.")
+    name = name.replace(".ffn.", ".mlp.")
+    if name.endswith(".scale") and not (
+        preserve_wo_a_scale and name.endswith(".self_attn.wo_a.scale")
+    ):
+        name = name.removesuffix(".scale") + ".weight_scale"
+    return name.replace(".gate.bias", ".gate.e_score_correction_bias")
+
+
 def _make_deepseek_v4_expert_params_mapping(
     model: nn.Module,
     num_experts: int,
@@ -995,15 +1020,13 @@ class DeepseekV2DecoderLayer(nn.Module):
         topk_indices_buffer: torch.Tensor | None = None,
         is_draft_layer: bool = False,
         attn_cls: type[nn.Module] | None = None,
-        quant_config_override: QuantizationConfig | None = None,
-        use_quant_config_override: bool = False,
     ) -> None:
         super().__init__()
 
         if config is None:
             config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
-        quant_config = quant_config_override if use_quant_config_override else vllm_config.quant_config
+        quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
 
         self.hidden_size = config.hidden_size
@@ -1068,16 +1091,33 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        return self._forward_hc_blocks(
+            positions,
+            hidden_states,
+            llama_4_scaling=llama_4_scaling,
+        )
+
+    def _forward_hc_blocks(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        *,
+        llama_4_scaling: torch.Tensor | None = None,
+        input_ids: torch.Tensor | None = None,
+        extra_attn_kwargs: dict[str, torch.Tensor | None] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         residual = hidden_states.clone()
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
         hidden_states = self.input_layernorm(hidden_states)
         attn_kwargs = {"positions": positions, "hidden_states": hidden_states, "llama_4_scaling": llama_4_scaling}
+        if extra_attn_kwargs is not None:
+            attn_kwargs.update(extra_attn_kwargs)
         hidden_states = self.self_attn(**attn_kwargs)
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
         residual = hidden_states.clone()
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states, input_ids)
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
 
         return hidden_states, residual
@@ -1168,6 +1208,7 @@ class DeepseekV4Model(nn.Module):
             device=self.device,
         )
         self._dspark_target_layer_ids = list(getattr(config, "dspark_target_layer_ids", []) or [])
+        self._dspark_target_layer_id_set = frozenset(self._dspark_target_layer_ids)
         if self._dspark_target_layer_ids:
             self._dspark_hidden_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
@@ -1215,10 +1256,9 @@ class DeepseekV4Model(nn.Module):
         if get_pp_group().is_first_rank:
             hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)  # (b, s, h) -> (b, s, c, h)
         dspark_hiddens: list[torch.Tensor] = []
-        dspark_target_ids = set(self._dspark_target_layer_ids)
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
-            if layer.layer_idx in dspark_target_ids:
+            if layer.layer_idx in self._dspark_target_layer_id_set:
                 dspark_hiddens.append(hidden_states.mean(dim=1))
 
         # Stash pre-hc_head residual for the MTP draft (captured copy_).
@@ -1395,11 +1435,6 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         rocm_aiter_moe_shared_expert_enabled = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
         rocm_aiter_moe_shared_expert_enabled = getattr(get_ascend_config(), "mix_placement", False)
-        stacked_params_mapping = [
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         expert_params_mapping = FusedMoE.make_expert_params_mapping(
@@ -1431,34 +1466,16 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
             if not name.startswith("model"):
                 name = f"model.{name}"
 
-            if ".w1." in name:
-                name = name.replace(".w1.", ".gate_proj.")
-            if ".w2." in name:
-                name = name.replace(".w2.", ".down_proj.")
-            if ".w3." in name:
-                name = name.replace(".w3.", ".up_proj.")
-
             if "model.head." in name and "model.lm_head." not in name:
                 name = name.replace("model.head.", "lm_head.")
             if "model.lm_head." in name:
                 name = name.replace("model.lm_head.", "lm_head.")
             if "embed." in name and "embed_token." not in name:
                 name = name.replace("embed.", "embed_tokens.")
-            if "attn" in name and "self_attn" not in name:
-                name = name.replace(".attn.", ".self_attn.")
-            if ".ffn." in name:
-                name = name.replace(".ffn.", ".mlp.")
-            if ".ffn_norm." in name:
-                name = name.replace(".ffn_norm.", ".post_attention_layernorm.")
-            if ".attn_norm." in name:
-                name = name.replace(".attn_norm.", ".input_layernorm.")
-            if name.endswith(".scale"):
-                name = name.replace(".scale", ".weight_scale")
+            name = _normalize_dsv4_layer_weight_name(name)
 
             if "rotary_emb.inv_freq" in name:
                 continue
-            if ".gate.bias" in name:
-                name = name.replace(".gate.bias", ".gate.e_score_correction_bias")
 
             if "sink" in name:
                 if is_pp_missing_parameter(name, self):
@@ -1475,7 +1492,7 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
 
             is_fusion_moe_shared_experts_layer = rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
 
-            for param_name, weight_name, shard_id in stacked_params_mapping:
+            for param_name, weight_name, shard_id in DSV4_STACKED_PARAMS_MAPPING:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
                     continue

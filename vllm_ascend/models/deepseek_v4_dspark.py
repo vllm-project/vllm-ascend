@@ -7,7 +7,6 @@ from collections.abc import Iterable
 import torch
 import torch.nn as nn
 import torch_npu
-from torch.nn import Parameter
 from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -26,6 +25,7 @@ from vllm.sequence import IntermediateTensors
 from vllm_ascend.utils import enable_dsa_cp
 
 from .deepseek_v4 import (
+    DSV4_STACKED_PARAMS_MAPPING,
     DeepseekV2DecoderLayer,
     DeepseekV2MixtureOfExperts,
     DeepseekV4Attention,
@@ -35,6 +35,7 @@ from .deepseek_v4 import (
     _hc_head_torch,
     _linear_output,
     _make_deepseek_v4_expert_params_mapping,
+    _normalize_dsv4_layer_weight_name,
     _wo_a_weight_for_eager_projection,
 )
 
@@ -48,9 +49,9 @@ FP8_E4M3_MAX_VALUE = 448.0
 DSPARK_FP8_AMAX_EPS = 1e-4
 DSPARK_NOPE_QDQ_BLOCK_SIZE = 64
 DSPARK_WO_A_DEQUANT_BLOCK_SIZE = 128
-
-def _draft_quant_config(vllm_config: VllmConfig):
-    return vllm_config.quant_config
+DSPARK_DEFAULT_BLOCK_SIZE = 5
+DSPARK_DEFAULT_NUM_LAYERS = 3
+DSPARK_CACHE_INVALID_POSITION = -1
 
 
 def _dequant_dspark_wo_a_weight(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
@@ -71,7 +72,7 @@ def _get_dspark_num_layers(config: PretrainedConfig) -> int:
         value = getattr(config, attr, None)
         if value:
             return int(value)
-    return 3
+    return DSPARK_DEFAULT_NUM_LAYERS
 
 
 def _dspark_cache_capacity(vllm_config: VllmConfig, block_size: int, window_size: int) -> int:
@@ -125,21 +126,6 @@ def _dspark_qdq_nope_dims(kv: torch.Tensor, nope_head_dim: int) -> torch.Tensor:
     return torch.cat([kv_nope, kv[..., nope_head_dim:]], dim=-1)
 
 
-def _dspark_small_ops_attention(
-    q: torch.Tensor,
-    packed_kv: torch.Tensor,
-    attn_sink: torch.Tensor,
-    softmax_scale: float,
-) -> torch.Tensor:
-    scores = torch.einsum("qhd,kd->qhk", q.float(), packed_kv.float()) * softmax_scale
-    sink_scores = attn_sink[: q.shape[1]].to(scores.dtype).view(1, q.shape[1], 1)
-    scores_max = torch.maximum(scores.max(dim=-1, keepdim=True).values, sink_scores)
-    exp_scores = torch.exp(scores - scores_max)
-    denom = exp_scores.sum(dim=-1, keepdim=True) + torch.exp(sink_scores - scores_max)
-    weights = exp_scores / denom
-    return torch.einsum("qhk,kd->qhd", weights.to(packed_kv.dtype), packed_kv).to(q.dtype)
-
-
 class DeepseekV4DSparkAttention(DeepseekV4Attention):
     def __init__(self, *args, **kwargs) -> None:
         vllm_config = kwargs["vllm_config"]
@@ -147,23 +133,37 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         super().__init__(*args, **kwargs)
         self.compress_ratio = 0
         self.dsa_attn.compress_ratio = 0
-        self.block_size = int(getattr(config, "dspark_block_size", getattr(config, "n_predict", 5)) or 5)
+        self.block_size = int(
+            getattr(config, "dspark_block_size", getattr(config, "n_predict", DSPARK_DEFAULT_BLOCK_SIZE))
+            or DSPARK_DEFAULT_BLOCK_SIZE
+        )
         self.window_size = int(self.window_size)
         cache_capacity = _dspark_cache_capacity(vllm_config, self.block_size, self.window_size)
         max_request_slots = _dspark_max_request_slots(vllm_config)
         cache_shape = (max_request_slots, cache_capacity, self.head_dim)
         self.register_buffer("_dspark_kv_cache", torch.empty(cache_shape, dtype=vllm_config.model_config.dtype, device=self.attn_sink.device), persistent=False)
-        self.register_buffer("_dspark_cache_valid", torch.zeros((max_request_slots, cache_capacity), dtype=torch.bool, device=self.attn_sink.device), persistent=False)
-        self.register_buffer("_dspark_cache_positions", torch.full((max_request_slots, cache_capacity), -1, dtype=torch.int32, device=self.attn_sink.device), persistent=False)
+        self.register_buffer(
+            "_dspark_cache_positions",
+            torch.full(
+                (max_request_slots, cache_capacity),
+                DSPARK_CACHE_INVALID_POSITION,
+                dtype=torch.int32,
+                device=self.attn_sink.device,
+            ),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_dspark_window_offsets",
+            torch.arange(self.window_size, device=self.attn_sink.device, dtype=torch.long).view(1, -1),
+            persistent=False,
+        )
         self._dspark_cache_capacity = cache_capacity
-        self._dspark_max_request_slots = max_request_slots
 
     def reset_request_slots(self, request_slots: torch.Tensor | None) -> None:
         if request_slots is None or request_slots.numel() == 0:
             return
-        slots = torch.unique(request_slots.to(device=self._dspark_cache_valid.device, dtype=torch.long))
-        self._dspark_cache_valid[slots] = False
-        self._dspark_cache_positions[slots] = -1
+        slots = torch.unique(request_slots.to(device=self._dspark_cache_positions.device, dtype=torch.long))
+        self._dspark_cache_positions[slots] = DSPARK_CACHE_INVALID_POSITION
 
     def _project_shared_kv(self, hidden_states: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         kv = self.kv_norm(_linear_output(self.wkv, hidden_states))
@@ -188,31 +188,21 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         flat_shared_kv = shared_kv.reshape(-1, shared_kv.shape[-1])[flat_valid]
         self._dspark_kv_cache[flat_slots, flat_cache_indices] = flat_shared_kv
         self._dspark_cache_positions[flat_slots, flat_cache_indices] = safe_positions.to(torch.int32).reshape(-1)[flat_valid]
-        self._dspark_cache_valid[flat_slots, flat_cache_indices] = True
 
-    def _dspark_sparse_attn(
+    def _dspark_attn(
         self,
         q: torch.Tensor,
         kv: torch.Tensor,
-        topk_idxs: torch.Tensor,
+        key_valid: torch.Tensor,
     ) -> torch.Tensor:
-        valid = topk_idxs >= 0
-        safe_topk = torch.where(valid, topk_idxs, torch.zeros_like(topk_idxs))
-        gather_idx = safe_topk.unsqueeze(-1).expand(-1, -1, -1, kv.shape[-1])
-        kv_for_gather = kv.unsqueeze(1).expand(-1, q.shape[1], -1, -1)
-        selected_kv = torch.gather(kv_for_gather, 2, gather_idx)
-
-        scores = (
-            torch.einsum("bshd,bskd->bshk", q.float(), selected_kv.float())
-            * float(self.scale)
-        )
-        scores = scores.masked_fill(~valid.unsqueeze(2), torch.finfo(scores.dtype).min)
+        scores = torch.einsum("bshd,bkd->bshk", q.float(), kv.float()) * float(self.scale)
+        scores = scores.masked_fill(~key_valid[:, None, None, :], torch.finfo(scores.dtype).min)
         sink_scores = self.attn_sink[: q.shape[2]].to(scores.dtype).view(1, 1, q.shape[2], 1)
         scores_max = torch.maximum(scores.max(dim=-1, keepdim=True).values, sink_scores)
         exp_scores = torch.exp(scores - scores_max)
         denom = exp_scores.sum(dim=-1, keepdim=True) + torch.exp(sink_scores - scores_max)
         weights = exp_scores / denom
-        return torch.einsum("bshk,bskd->bshd", weights.to(selected_kv.dtype), selected_kv).to(q.dtype)
+        return torch.einsum("bshk,bkd->bshd", weights.to(kv.dtype), kv).to(q.dtype)
 
     def _dspark_attention_from_cache(
         self,
@@ -223,37 +213,25 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
     ) -> torch.Tensor:
         batch_size, draft_len = q.shape[:2]
         cache_positions = self._dspark_cache_positions
-        cache_valid = self._dspark_cache_valid
 
         block_start = draft_positions[:, :1].to(torch.long)
         context_end = block_start - 1
         context_start = torch.clamp(context_end + 1 - self.window_size, min=0)
-        window_offsets = torch.arange(self.window_size, device=draft_kv.device, dtype=torch.long).view(1, -1)
-        ctx_positions = context_start + window_offsets
+        ctx_positions = context_start + self._dspark_window_offsets
         within_ctx = ctx_positions <= context_end
         cache_indices = ctx_positions.remainder(self._dspark_cache_capacity)
 
         slot_indices = request_slots[:, :1].to(device=draft_kv.device, dtype=torch.long).expand(-1, self.window_size)
         cached_positions = cache_positions[slot_indices, cache_indices].to(torch.long)
-        cached_valid = cache_valid[slot_indices, cache_indices]
-        ctx_valid = within_ctx & cached_valid & (cached_positions == ctx_positions)
+        ctx_valid = within_ctx & (cached_positions == ctx_positions)
         ctx_kv = self._dspark_kv_cache[slot_indices, cache_indices]
 
-        ctx_topk = (
-            torch.arange(self.window_size, device=draft_kv.device, dtype=torch.long)
-            .view(1, -1)
-            .expand(batch_size, -1)
-        )
-        draft_topk = (
-            self.window_size + torch.arange(draft_len, device=draft_kv.device, dtype=torch.long)
-        ).view(1, -1).expand(batch_size, -1)
-        topk = torch.cat([ctx_topk, draft_topk], dim=1)
-        topk_valid = torch.cat([ctx_valid, torch.ones_like(draft_topk, dtype=torch.bool)], dim=1)
-        topk = torch.where(topk_valid, topk, torch.full_like(topk, -1))
-        topk = topk.unsqueeze(1).expand(-1, draft_len, -1)
-
         kv = torch.cat([ctx_kv, draft_kv], dim=1)
-        return self._dspark_sparse_attn(q, kv, topk)
+        key_valid = torch.cat(
+            [ctx_valid, torch.ones((batch_size, draft_len), dtype=torch.bool, device=draft_kv.device)],
+            dim=1,
+        )
+        return self._dspark_attn(q, kv, key_valid)
 
     def forward(
         self,
@@ -265,14 +243,11 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
     ) -> torch.Tensor:
         del llama_4_scaling, slot_mapping
         qr = self.q_norm(_linear_output(self.wq_a, hidden_states))
-        kv = self.kv_norm(_linear_output(self.wkv, hidden_states))
         q = _linear_output(self.wq_b, qr).view(-1, self.n_local_heads, self.head_dim)
         q = self.q_norm_without_weight(q)
         q_nope, q_pe = q.split([self.nope_head_dim, self.rope_head_dim], dim=-1)
-        k_nope, k_pe = kv.split([self.nope_head_dim, self.rope_head_dim], dim=-1)
         q_pe = _apply_dsv4_rope(self.rotary_emb, positions, q_pe)
-        k_pe = _apply_dsv4_rope(self.rotary_emb, positions, k_pe.unsqueeze(1)).squeeze(1)
-        shared_kv = _dspark_qdq_nope_dims(torch.cat([k_nope, k_pe], dim=-1), self.nope_head_dim).contiguous()
+        shared_kv = self._project_shared_kv(hidden_states, positions)
         q = torch.cat([q_nope, q_pe], dim=-1)
         if request_slots is None:
             request_slots = torch.zeros_like(positions, dtype=torch.int32)
@@ -326,8 +301,6 @@ class DeepseekV4DSparkDecoderLayer(DeepseekV2DecoderLayer):
             topk_indices_buffer=None,
             is_draft_layer=True,
             attn_cls=DeepseekV4DSparkAttention,
-            quant_config_override=_draft_quant_config(vllm_config),
-            use_quant_config_override=True,
         )
 
     def forward(
@@ -341,16 +314,15 @@ class DeepseekV4DSparkDecoderLayer(DeepseekV2DecoderLayer):
         slot_mapping: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del residual, llama_4_scaling
-        residual = hidden_states.clone()
-        hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
-        hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(positions, hidden_states, None, request_slots=request_slots, slot_mapping=slot_mapping)
-        hidden_states = self.hc_post(hidden_states, residual, post, comb)
-        residual = hidden_states.clone()
-        hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states, input_ids)
-        hidden_states = self.hc_post(hidden_states, residual, post, comb)
+        hidden_states, _ = self._forward_hc_blocks(
+            positions,
+            hidden_states,
+            input_ids=input_ids,
+            extra_attn_kwargs={
+                "request_slots": request_slots,
+                "slot_mapping": slot_mapping,
+            },
+        )
         return hidden_states
 
 
@@ -390,9 +362,6 @@ class DeepseekV4DSparkModel(nn.Module):
         config = vllm_config.speculative_config.draft_model_config.hf_config
         self.config = config
         self.hc_mult = config.hc_mult
-        self.hidden_size = config.hidden_size
-        self.block_size = int(getattr(config, "dspark_block_size", getattr(config, "n_predict", 5)) or 5)
-        self.noise_token_id = int(getattr(config, "dspark_noise_token_id", getattr(config, "ptd_token_id", 0)) or 0)
         self.target_layer_ids = list(getattr(config, "dspark_target_layer_ids", []) or [])
         self.num_dspark_layers = _get_dspark_num_layers(config)
         self.mtp_start_layer_idx = config.num_hidden_layers
@@ -412,7 +381,7 @@ class DeepseekV4DSparkModel(nn.Module):
             config.hidden_size,
             bias=False,
             return_bias=False,
-            quant_config=_draft_quant_config(vllm_config),
+            quant_config=vllm_config.quant_config,
             prefix=maybe_prefix(prefix, f"layers.{self.mtp_start_layer_idx}.main_proj"),
         )
         self.main_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -471,9 +440,7 @@ class DeepseekV4DSparkModel(nn.Module):
     ) -> torch.Tensor:
         del hidden_states
         if inputs_embeds is None:
-            if self.embed_tokens is None:
-                raise AttributeError("DSpark draft model requires shared target embed_tokens.")
-            inputs_embeds = self.embed_tokens(input_ids)
+            inputs_embeds = self.embed_input_ids(input_ids)
         hidden_states = inputs_embeds.unsqueeze(-2).repeat(1, self.hc_mult, 1)
         for layer in self.layers.values():
             hidden_states = layer(positions=positions, hidden_states=hidden_states, input_ids=input_ids, request_slots=request_slots, slot_mapping=slot_mapping)
@@ -512,7 +479,6 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
         super().__init__()
         assert vllm_config.speculative_config is not None
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
-        self.quant_config = _draft_quant_config(vllm_config)
         self.has_own_embed_tokens = False
         self.model = DeepseekV4DSparkModel(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
         self.lm_head = None
@@ -562,7 +528,6 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
         self.model.reset_request_slots(request_slots)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [("gate_up_proj", "gate_proj", 0), ("gate_up_proj", "up_proj", 1)]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         skipped_params: set[str] = set()
@@ -610,7 +575,7 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                     module_name = base_name.removeprefix("model.")
                     module = self.model.get_submodule(module_name)
                     weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                    new_weight = Parameter(
+                    new_weight = nn.Parameter(
                         torch.empty(param.shape, dtype=dequant_weight.dtype, device=param.device),
                         requires_grad=False,
                     )
@@ -635,7 +600,7 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
             if name.endswith(".scale"):
                 name = name.replace(".scale", ".weight_scale")
 
-            for param_name, weight_name, stacked_shard_id in stacked_params_mapping:
+            for param_name, weight_name, stacked_shard_id in DSV4_STACKED_PARAMS_MAPPING:
                 if ".experts." in name or f".{weight_name}." not in name:
                     continue
                 mapped = name.replace(weight_name, param_name)
@@ -724,18 +689,4 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
         suffix = parts[2]
 
         name = f"model.layers.{layer_idx}.{suffix}"
-        name = name.replace(".attn.", ".self_attn.")
-        name = name.replace(".ffn_norm.", ".post_attention_layernorm.")
-        name = name.replace(".attn_norm.", ".input_layernorm.")
-        name = name.replace(".ffn.", ".mlp.")
-        name = name.replace(".w1.", ".gate_proj.")
-        name = name.replace(".w2.", ".down_proj.")
-        name = name.replace(".w3.", ".up_proj.")
-        if name.endswith(".scale") and not name.endswith(".self_attn.wo_a.scale"):
-            name = name.replace(".scale", ".weight_scale")
-        if ".gate.bias" in name:
-            name = name.replace(".gate.bias", ".gate.e_score_correction_bias")
-        return name
-
-
-DSparkDeepseekV4ForCausalLM = DeepSeekV4DSparkMTP
+        return _normalize_dsv4_layer_weight_name(name, preserve_wo_a_scale=True)

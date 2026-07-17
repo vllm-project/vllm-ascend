@@ -11,16 +11,26 @@ else:
 
     me_quant = LazyLoader("model_executor", globals(), "vllm.model_executor.layers.quantization")
 
+DSPARK_DEFAULT_NUM_LAYERS = 3
+
+
+def _is_dspark_config(hf_config: PretrainedConfig) -> bool:
+    return bool(getattr(hf_config, "dspark_block_size", 0))
+
 
 def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
     initial_architecture = hf_config.architectures[0]
-    if hf_config.model_type == "deepseek_v4" and getattr(hf_config, "dspark_block_size", 0):
+    if hf_config.model_type == "deepseek_v4" and _is_dspark_config(hf_config):
         hf_config.model_type = "deepseek_mtp"
         hf_config.update(
             {
-                "n_predict": getattr(hf_config, "dspark_block_size", None),
+                "n_predict": hf_config.dspark_block_size,
                 "ptd_token_id": getattr(hf_config, "dspark_noise_token_id", None),
-                "dspark_num_mtp_layers": getattr(hf_config, "dspark_num_mtp_layers", 3),
+                "dspark_num_mtp_layers": getattr(
+                    hf_config,
+                    "dspark_num_mtp_layers",
+                    DSPARK_DEFAULT_NUM_LAYERS,
+                ),
                 "architectures": ["DeepSeekV4DSparkMTPModel"],
             }
         )
@@ -147,14 +157,12 @@ def _dspark_post_init(self):
     _orig_post_init(self)
     draft_model_config = getattr(self, "draft_model_config", None)
     draft_hf_config = getattr(draft_model_config, "hf_config", None)
-    if draft_model_config is None or draft_hf_config is None or not getattr(draft_hf_config, "dspark_block_size", 0):
+    if draft_model_config is None or not _is_dspark_config(draft_hf_config):
         return
     self.method = "mtp"
     self.parallel_drafting = True
     if getattr(self, "enforce_eager", None) is not None:
         draft_model_config.enforce_eager = bool(self.enforce_eager)
-    if getattr(draft_hf_config, "ptd_token_id", None) is None:
-        draft_hf_config.ptd_token_id = getattr(draft_hf_config, "dspark_noise_token_id", None)
 
 
 SpeculativeConfig.__post_init__ = _dspark_post_init

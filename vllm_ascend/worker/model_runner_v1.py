@@ -129,13 +129,13 @@ from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
-from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
+from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
@@ -560,8 +560,6 @@ class NPUModelRunner(GPUModelRunner):
         self.query_lens: torch.Tensor | None = None
         self.cpu_slot_mapping = None
         self.sampling_done_event: torch.npu.Event | None = None
-        self._dspark_draft_probs: torch.Tensor | None = None
-        self._dspark_draft_probs_req_ids: list[str] | None = None
 
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
@@ -599,8 +597,6 @@ class NPUModelRunner(GPUModelRunner):
             | AscendNgramProposerNPU
             | AscendEagleProposer
             | AscendDraftModelProposer
-            | AscendDflashProposer
-            | AscendDSparkProposer
             | AscendSuffixDecodingProposer
             | AscendMedusaProposer
             | AscendExtractHiddenStatesProposer
@@ -1662,38 +1658,6 @@ class NPUModelRunner(GPUModelRunner):
             self.valid_sampled_token_count_gpu = valid_sampled_tokens_count # type: ignore[no-redef]
         self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
 
-    def _get_dspark_draft_probs(self, spec_decode_metadata: SpecDecodeMetadata) -> torch.Tensor | None:
-        draft_probs = self._dspark_draft_probs
-        draft_probs_req_ids = self._dspark_draft_probs_req_ids
-        self._dspark_draft_probs = None
-        self._dspark_draft_probs_req_ids = None
-        if draft_probs is None:
-            return None
-
-        req_ids = self.input_batch.req_ids[: len(spec_decode_metadata.num_draft_tokens)]
-        if draft_probs_req_ids is None:
-            ordered_probs = draft_probs
-        else:
-            req_id_to_idx = {req_id: idx for idx, req_id in enumerate(draft_probs_req_ids)}
-            rows_by_req = []
-            for req_id, num_tokens in zip(req_ids, spec_decode_metadata.num_draft_tokens):
-                prev_idx = req_id_to_idx.get(req_id)
-                if prev_idx is None:
-                    if num_tokens > 0:
-                        return None
-                    rows_by_req.append(draft_probs.new_empty((draft_probs.shape[1], draft_probs.shape[2])))
-                else:
-                    rows_by_req.append(draft_probs[prev_idx])
-            ordered_probs = torch.stack(rows_by_req, dim=0) if rows_by_req else draft_probs[:0]
-
-        rows = []
-        for req_idx, num_tokens in enumerate(spec_decode_metadata.num_draft_tokens):
-            if num_tokens > 0:
-                rows.append(ordered_probs[req_idx, :num_tokens])
-        if not rows:
-            return None
-        return torch.cat(rows, dim=0).contiguous()
-
     # TODO: Once the PCP features are complete, it will fully inherit the classes from the VLLM community.
     def propose_draft_token_ids(
         self,
@@ -1921,8 +1885,6 @@ class NPUModelRunner(GPUModelRunner):
                 num_scheduled_tokens=num_scheduled_tokens,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
-            if isinstance(self.drafter, AscendDSparkProposer):
-                self._dspark_draft_probs, self._dspark_draft_probs_req_ids = self.drafter.take_last_draft_probs_by_req_id()
         else:
             raise ValueError(f"Unknown speculative decoding method: {self.speculative_config.method}")
 
@@ -2604,8 +2566,13 @@ class NPUModelRunner(GPUModelRunner):
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
             self.rejection_sampler.prepare_sampling(max_topk)
         draft_probs = None
-        if isinstance(self.drafter, AscendDSparkProposer):
-            draft_probs = self._get_dspark_draft_probs(spec_decode_metadata)
+        if isinstance(self.drafter, AscendSpecDecodeBaseProposer):
+            req_ids = list(
+                self.input_batch.req_ids[: len(spec_decode_metadata.num_draft_tokens)]
+            )
+            draft_probs = self.drafter.take_draft_probs(
+                spec_decode_metadata.num_draft_tokens, req_ids
+            )
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
             draft_probs,
@@ -3280,7 +3247,7 @@ class NPUModelRunner(GPUModelRunner):
                     spec_decode_common_attn_metadata = cm
                 elif isinstance(
                     self.drafter,
-                    AscendEagleProposer | AscendDraftModelProposer | AscendDflashProposer | AscendDSparkProposer,
+                    AscendEagleProposer | AscendDraftModelProposer,
                 ):
                     if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
                         spec_decode_common_attn_metadata = cm
@@ -3792,7 +3759,7 @@ class NPUModelRunner(GPUModelRunner):
         ):
             assert isinstance(
                 self.drafter,
-                AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer | AscendDSparkProposer,
+                AscendEagleProposer | AscendDraftModelProposer,
             )
             block_size = (self.kernel_block_sizes[0] if isinstance(
                 self.kernel_block_sizes, list) else self.kernel_block_sizes)
@@ -4900,7 +4867,7 @@ class NPUModelRunner(GPUModelRunner):
         ):
             assert isinstance(
                 self.drafter,
-                AscendEagleProposer | AscendDflashProposer | AscendDSparkProposer | AscendExtractHiddenStatesProposer,
+                AscendEagleProposer | AscendExtractHiddenStatesProposer,
             )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
@@ -4919,7 +4886,7 @@ class NPUModelRunner(GPUModelRunner):
             set_graph_params(capture_sizes)
             if self.speculative_config:
                 draft_capture_sizes = capture_sizes
-                if self.drafter is not None and hasattr(self.drafter, "get_aclgraph_capture_sizes"):
+                if isinstance(self.drafter, AscendSpecDecodeBaseProposer):
                     draft_capture_sizes = self.drafter.get_aclgraph_capture_sizes(capture_sizes)
                 set_draft_graph_params(draft_capture_sizes)
 
