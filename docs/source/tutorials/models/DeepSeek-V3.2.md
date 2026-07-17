@@ -536,7 +536,7 @@ Before you start, please
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
-            --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
@@ -610,7 +610,7 @@ Before you start, please
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
-            --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
