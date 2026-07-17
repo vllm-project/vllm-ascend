@@ -42,7 +42,94 @@ env:
   
 
 jobs:
+  resolve-source:
+    runs-on: linux-amd64-cpu-4-hk
+    outputs:
+      source_repository: ${{ steps.source.outputs.source_repository }}
+      source_ref: ${{ steps.source.outputs.source_ref }}
+      base_ref: ${{ steps.source.outputs.base_ref }}
+      base_sha: ${{ steps.source.outputs.base_sha }}
+    env:
+      TARGET_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
+      HEAD_FORK: vllm-ascend-ci/vllm-ascend
+    steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v7
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ env.TARGET_COMMIT != '' && env.TARGET_COMMIT || 'main' }}
+          path: vllm-upstream
+          fetch-depth: 0
+
+      - name: Resolve fixed vllm-ascend source
+        id: source
+        run: |
+          set -eu
+          if [ -n "$TARGET_COMMIT" ] && ! echo "$TARGET_COMMIT" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::Invalid target_commit format: $TARGET_COMMIT"
+            exit 1
+          fi
+
+          git config user.name "main2main-bot"
+          git config user.email "main2main-bot@users.noreply.github.com"
+          git fetch origin main
+          UPSTREAM_SHA=$(git rev-parse origin/main)
+          USE_BASELINE=false
+
+          if git fetch "https://github.com/${HEAD_FORK}.git" \
+            "refs/heads/main2main_baseline:refs/remotes/main2main/main2main_baseline" 2>/dev/null; then
+            BASELINE_SHA=$(git rev-parse refs/remotes/main2main/main2main_baseline)
+            BASELINE_VLLM=$(git show "${BASELINE_SHA}:.github/vllm-main-verified.commit" 2>/dev/null || true)
+            TARGET_BEHIND=false
+            if [ -n "$TARGET_COMMIT" ] && [ -n "$BASELINE_VLLM" ] && \
+              git -C vllm-upstream merge-base --is-ancestor "$TARGET_COMMIT" "$BASELINE_VLLM" 2>/dev/null; then
+              TARGET_BEHIND=true
+            fi
+
+            if [ "$TARGET_BEHIND" = false ]; then
+              git checkout --detach "$BASELINE_SHA"
+              if git rebase "$UPSTREAM_SHA"; then
+                USE_BASELINE=true
+              else
+                git rebase --abort
+              fi
+            fi
+          fi
+
+          if [ "$USE_BASELINE" = true ]; then
+            {
+              echo "source_repository=$HEAD_FORK"
+              echo "source_ref=$BASELINE_SHA"
+              echo "base_ref=main"
+              echo "base_sha=$UPSTREAM_SHA"
+            } >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "source_repository=$UPSTREAM_REPO"
+              echo "source_ref=$UPSTREAM_SHA"
+              echo "base_ref="
+              echo "base_sha="
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+  ensure-csrc-cache:
+    needs: resolve-source
+    uses: ./.github/workflows/_ensure_csrc_cache.yaml
+    with:
+      target_ids: '["a2-arm64-ubuntu"]'
+      repository: ${{ needs.resolve-source.outputs.source_repository }}
+      source_ref: ${{ needs.resolve-source.outputs.source_ref }}
+      base_repository: vllm-project/vllm-ascend
+      base_ref: ${{ needs.resolve-source.outputs.base_ref }}
+      base_sha: ${{ needs.resolve-source.outputs.base_sha }}
+
   main2main:
+    needs: [resolve-source, ensure-csrc-cache]
     runs-on: linux-aarch64-a2b1-8
     timeout-minutes: 2880
     concurrency:
@@ -98,8 +185,11 @@ jobs:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
         with:
+          repository: ${{ needs.resolve-source.outputs.source_repository }}
+          ref: ${{ needs.resolve-source.outputs.source_ref }}
           fetch-depth: 0
           submodules: recursive
+          persist-credentials: false
 
       - name: Exclude vllm dir from ascend git
         run: echo "vllm-upstream/" >> .git/info/exclude
@@ -147,7 +237,7 @@ jobs:
           if [ -s "$GITHUB_WORKSPACE/packages.txt" ]; then
             xargs -r apt-get -y install < "$GITHUB_WORKSPACE/packages.txt"
           fi
-          apt-get -y install git curl ca-certificates gcc g++ cmake libnuma-dev clang-15 jq gh shellcheck
+          apt-get -y install git curl ca-certificates gcc g++ cmake libnuma-dev zstd clang-15 jq gh shellcheck
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -235,21 +325,42 @@ jobs:
           fi
           pip install -e "${M2M_FLOW_DIR}"
 
+      - name: Create working branch
+        id: branch
+        working-directory: ${{ github.workspace }}
+        env:
+          FIXED_BASE_REF: ${{ needs.resolve-source.outputs.base_ref }}
+          FIXED_BASE_SHA: ${{ needs.resolve-source.outputs.base_sha }}
+        run: |
+          set -eu
+          BRANCH="main2main_auto_$(date +%Y-%m-%d_%H-%M)"
+          git checkout -B "$BRANCH"
+          if [ -n "$FIXED_BASE_SHA" ]; then
+            git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" || \
+              git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
+            git fetch upstream "$FIXED_BASE_REF"
+            git cat-file -e "${FIXED_BASE_SHA}^{commit}"
+            git rebase "$FIXED_BASE_SHA"
+          fi
+          BASE_SHA=$(git rev-parse HEAD)
+          echo "name=${BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "base_sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"
+
       - name: Get csrc hash
         id: get_csrc_hash
         run: |
-          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
-            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
-          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+          CSRC_HASH=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake \
+            | sha256sum | awk '{print $1}')
+          echo "CSRC_HASH=$CSRC_HASH" >> "$GITHUB_OUTPUT"
 
       - name: Get architecture
         id: get_arch
         run: |
           ARCH=$(uname -m)
           case "$ARCH" in
-            x86_64) echo "arch=X64" >> $GITHUB_OUTPUT ;;
-            aarch64) echo "arch=ARM64" >> $GITHUB_OUTPUT ;;
-            *) echo "arch=$ARCH" >> $GITHUB_OUTPUT ;;
+            x86_64) echo "arch=X64" >> "$GITHUB_OUTPUT" ;;
+            aarch64) echo "arch=ARM64" >> "$GITHUB_OUTPUT" ;;
+            *) echo "arch=$ARCH" >> "$GITHUB_OUTPUT" ;;
           esac
 
       - name: Restore vllm-ascend csrc cache
@@ -262,51 +373,7 @@ jobs:
             vllm_ascend/lib
             vllm_ascend/include
           key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ env.MAIN2MAIN_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-
-      - name: Create working branch
-        id: branch
-        working-directory: ${{ github.workspace }}
-        run: |
-          set -eu
-          BRANCH="main2main_auto_$(date +%Y-%m-%d_%H-%M)"
-          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" || \
-            git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
-          # Attempt incremental: fetch main2main_baseline from the fork,
-          # then rebase it onto the latest upstream/main.  This carries
-          # forward all prior adaptation commits and merges with any
-          # external changes (e.g. PRs merged since the last run).
-          if git fetch "https://github.com/${HEAD_FORK}.git" "refs/heads/main2main_baseline:refs/remotes/origin/main2main_baseline" 2>/dev/null; then
-            git fetch upstream main
-            git checkout -B "${BRANCH}" origin/main2main_baseline
-            if git rebase upstream/main; then
-              # If a specific TARGET_COMMIT was set (e.g. manual dispatch) and
-              # it is older than what the baseline already verified, the
-              # baseline's version guards would be wrong for this older vllm
-              # commit.  Fall back to fresh mode in that case.
-              if [ -n "${TARGET_COMMIT}" ]; then
-                BASELINE_VLLM=$(cat .github/vllm-main-verified.commit 2>/dev/null || echo "")
-                if [ -n "${BASELINE_VLLM}" ] && git -C vllm-upstream merge-base --is-ancestor "${TARGET_COMMIT}" "${BASELINE_VLLM}" 2>/dev/null; then
-                  git checkout -B "${BRANCH}" upstream/main
-                  echo "::warning::target commit ${TARGET_COMMIT} is behind baseline verified commit ${BASELINE_VLLM}, forcing fresh mode"
-                else
-                  echo "::notice::incremental mode: rebased main2main_baseline onto upstream/main"
-                fi
-              else
-                echo "::notice::incremental mode: rebased main2main_baseline onto upstream/main"
-              fi
-            else
-              git rebase --abort
-              git checkout -B "${BRANCH}" upstream/main
-              echo "::warning::rebase conflicts between main2main_baseline and upstream/main, falling back to fresh mode"
-            fi
-          else
-            git fetch upstream main
-            git checkout -B "${BRANCH}" upstream/main
-            echo "::notice::fresh mode: starting from upstream/main (no main2main_baseline found)"
-          fi
-          BASE_SHA=$(git rev-parse HEAD)
-          echo "name=${BRANCH}" >> "$GITHUB_OUTPUT"
-          echo "base_sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"
+          fail-on-cache-miss: true
 
       - name: Install Mooncake wheel
         run: |
@@ -334,24 +401,7 @@ jobs:
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
-            echo "CSRC cache hit: .so files found, skip kernel compilation"
-            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
-          else
-            echo "CSRC cache miss: no .so files found, compile kernels"
-            uv pip install -e . --no-build-isolation
-          fi
-
-      - name: Save vllm-ascend csrc cache
-        if: steps.cache-csrc.outputs.cache-hit != 'true'
-        uses: runs-on/cache/save@v5
-        with:
-          path: |
-            vllm_ascend/_cann_ops_custom
-            vllm_ascend/*.so
-            vllm_ascend/lib
-            vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ env.MAIN2MAIN_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
 
       - name: Run main2main flow
         id: run-main2main

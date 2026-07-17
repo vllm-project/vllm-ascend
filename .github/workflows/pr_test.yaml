@@ -23,7 +23,7 @@ on:
       - opened
       - synchronize
       - reopened
-      - labeled
+      # - labeled  # Temporarily disabled with the ready label gate.
     branches:
       - 'main'
       - '*-dev'
@@ -42,7 +42,7 @@ concurrency:
 
 jobs:
   pre-commit:
-    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' }}
+    # if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -180,11 +180,40 @@ jobs:
       has_tests: ${{ steps.scope.outputs.has_tests || steps.noop.outputs.has_tests }}
       test_groups: ${{ steps.scope.outputs.test_groups || steps.noop.outputs.test_groups }}
       matched_modules: ${{ steps.scope.outputs.matched_modules || steps.noop.outputs.matched_modules }}
+      csrc_cache_target_ids: ${{ steps.cache-targets.outputs.target_ids }}
+      base_sha: ${{ steps.source-snapshot.outputs.base_sha }}
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
+
+      - name: Resolve source snapshot
+        id: source-snapshot
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git config user.name "vllm-ascend-ci"
+          git config user.email "vllm-ascend-ci@users.noreply.github.com"
+          git fetch origin "$BASE_REF"
+          BASE_SHA=$(git rev-parse FETCH_HEAD)
+
+          if ! git diff --quiet "$EVENT_BASE_SHA" "$BASE_SHA" -- \
+            .github/workflows/_ensure_csrc_cache.yaml \
+            .github/workflows/_build_csrc_cache.yaml \
+            .github/workflows/configs/csrc_cache_targets.json \
+            .github/workflows/scripts/resolve_csrc_cache_targets.py; then
+            echo "::error::CSRC build workflows changed on $BASE_REF after this run was created."
+            echo "::error::Trigger a new PR workflow run."
+            exit 1
+          fi
+
+          git rebase "$BASE_SHA"
+          echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
 
       - uses: dorny/paths-filter@v4
         id: filter
@@ -194,11 +223,17 @@ jobs:
               - 'vllm_ascend/**'
               - 'setup.py'
               - 'csrc/**'
+              - 'packages.txt'
               - 'requirements.txt'
+              - 'requirements-dev.txt'
               - 'pyproject.toml'
               - 'cmake/**'
               - '.github/workflows/pr_test.yaml'
               - '.github/workflows/_selected_tests.yaml'
+              - '.github/workflows/_ensure_csrc_cache.yaml'
+              - '.github/workflows/_build_csrc_cache.yaml'
+              - '.github/workflows/configs/csrc_cache_targets.json'
+              - '.github/workflows/scripts/resolve_csrc_cache_targets.py'
               - '.github/workflows/scripts/select_tests.py'
               - '.github/workflows/scripts/run_selected_tests.sh'
               - '.github/workflows/scripts/test_config.yaml'
@@ -217,10 +252,9 @@ jobs:
         if: steps.filter.outputs.src == 'true'
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
-          git fetch origin ${{ github.base_ref }}
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
-            --diff-base origin/${{ github.base_ref }}
+            --diff-base ${{ steps.source-snapshot.outputs.base_sha }}
 
       - name: Set no-tests output when source paths unchanged
         id: noop
@@ -230,11 +264,63 @@ jobs:
             echo "has_tests=false"
             echo "test_groups=[]"
             echo "matched_modules="
+            echo "csrc_cache_target_ids=[]"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Add upstream test cache target
+        id: cache-targets
+        env:
+          SELECTED_TARGET_IDS: ${{ steps.scope.outputs.csrc_cache_target_ids || steps.noop.outputs.csrc_cache_target_ids }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          target_ids = json.loads(os.environ["SELECTED_TARGET_IDS"])
+          target_ids = sorted(set(target_ids) | {"a2-arm64-ubuntu"})
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print("target_ids=" + json.dumps(target_ids, separators=(",", ":")), file=output)
+          PY
+
+  ensure-csrc-cache:
+    needs: select-tests
+    # Ready label gate temporarily disabled:
+    # if: >-
+    #   ${{
+    #     needs.select-tests.result == 'success' &&
+    #     contains(github.event.pull_request.labels.*.name, 'ready')
+    #   }}
+    if: ${{ needs.select-tests.result == 'success' }}
+    uses: ./.github/workflows/_ensure_csrc_cache.yaml
+    with:
+      target_ids: ${{ needs.select-tests.outputs.csrc_cache_target_ids }}
+      source_ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      base_sha: ${{ needs.select-tests.outputs.base_sha }}
+
   run-selected-tests:
-    needs: [pre-commit, select-tests]
-    if: ${{ needs.select-tests.outputs.has_tests == 'true' && contains(github.event.pull_request.labels.*.name, 'ready') }}
+    needs:
+      - pre-commit
+      - select-tests
+      - ensure-csrc-cache
+    # Ready label gate temporarily disabled:
+    # if: >-
+    #   ${{
+    #     always() &&
+    #     needs.pre-commit.result == 'success' &&
+    #     needs.select-tests.result == 'success' &&
+    #     needs.select-tests.outputs.has_tests == 'true' &&
+    #     contains(github.event.pull_request.labels.*.name, 'ready') &&
+    #     needs.ensure-csrc-cache.result == 'success'
+    #   }}
+    if: >-
+      ${{
+        always() &&
+        needs.pre-commit.result == 'success' &&
+        needs.select-tests.result == 'success' &&
+        needs.select-tests.outputs.has_tests == 'true' &&
+        needs.ensure-csrc-cache.result == 'success'
+      }}
     strategy:
       matrix:
         vllm_version:
@@ -245,11 +331,30 @@ jobs:
       vllm: ${{ matrix.vllm_version }}
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
+      base_sha: ${{ needs.select-tests.outputs.base_sha }}
       test_groups: ${{ needs.select-tests.outputs.test_groups }}
-  
+
   run-selected-tests-upstream:
-    needs: [pre-commit, select-tests]
-    if: ${{ contains(github.event.pull_request.labels.*.name, 'ready') }}
+    needs:
+      - pre-commit
+      - select-tests
+      - ensure-csrc-cache
+    # Ready label gate temporarily disabled:
+    # if: >-
+    #   ${{
+    #     always() &&
+    #     needs.pre-commit.result == 'success' &&
+    #     needs.select-tests.result == 'success' &&
+    #     contains(github.event.pull_request.labels.*.name, 'ready') &&
+    #     needs.ensure-csrc-cache.result == 'success'
+    #   }}
+    if: >-
+      ${{
+        always() &&
+        needs.pre-commit.result == 'success' &&
+        needs.select-tests.result == 'success' &&
+        needs.ensure-csrc-cache.result == 'success'
+      }}
     strategy:
       matrix:
         vllm_version:
@@ -260,6 +365,7 @@ jobs:
       vllm: ${{ matrix.vllm_version }}
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
+      base_sha: ${{ needs.select-tests.outputs.base_sha }}
       test_groups: ${{ needs.select-tests.outputs.test_groups }}
 
   generate-hitest:
@@ -351,7 +457,8 @@ jobs:
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
     needs: [pre-commit, select-tests, run-selected-tests]
-    if: ${{ always() && contains(github.event.pull_request.labels.*.name, 'ready') }}
+    # if: ${{ always() && contains(github.event.pull_request.labels.*.name, 'ready') }}
+    if: ${{ always() }}
     runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Check all required jobs
