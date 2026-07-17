@@ -6,4 +6,4 @@ jobs:
   test:
     runs-on: linux-aarch64-950dt-8
     steps:
-      - run: echo DONE
+      - run: npu-smi info
