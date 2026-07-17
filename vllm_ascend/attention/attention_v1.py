@@ -47,17 +47,15 @@ from vllm_ascend.attention.kvcomp_attn.attention_utils import (
     is_enable_hamming_sparse,
     reshape_and_cache_kvcomp,
 )
+from vllm_ascend.attention import kv_sharing
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     PagedAttentionGraphParam,
     cache_graph_workspace,
     enable_cp,
-    maybe_kv_share_prefill,
     maybe_route_512_capture,
-    maybe_skip_reshape_for_kv_share,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
-    should_skip_draft_kv_write,
     split_decodes_and_prefills,
     update_paged_attention_graph_param,
     using_paged_attention,
@@ -1162,19 +1160,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # Draft KV-sharing layers read K/V from the target's paged cache,
             # not their own (empty) cache. Swap to the target impl's
             # key/value_cache and route the per-group block_table, mirroring
-            # _get_shared_kv_from_block_table (utils.py:740-768). Without this
+            # kv_sharing._get_shared_kv_from_block_table. Without this
             # PA reads the draft's empty cache → all-zero attention.
             key_cache = self.key_cache
             value_cache = self.value_cache
             if _EXTRA_CTX.is_draft_model and self.kv_sharing_target_layer_name is not None:
-                _tgt_impl = getattr(self, "_kv_share_target_impl", None)
-                if _tgt_impl is not None and _tgt_impl.key_cache is not None:
-                    key_cache = _tgt_impl.key_cache
-                    value_cache = _tgt_impl.value_cache
-                _my_gid = getattr(self, "_kv_share_gid", None)
-                _per_group_bt = getattr(self, "_per_group_bt_ref", None)
-                if _my_gid is not None and _per_group_bt is not None and _my_gid in _per_group_bt:
-                    block_table = _per_group_bt[_my_gid]
+                _b = kv_sharing.binding_of(self)
+                if _b is not None and _b.target_impl is not None and _b.target_impl.key_cache is not None:
+                    key_cache = _b.target_impl.key_cache
+                    value_cache = _b.target_impl.value_cache
+                if _b is not None and _b.gid is not None and _b.bt_ref is not None and _b.gid in _b.bt_ref:
+                    block_table = _b.bt_ref[_b.gid]
             # MTP verify: expand per-seq to per-query (see expand_paged_kv_to_per_query).
             if attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
                 spec_cfg = self.vllm_config.speculative_config
@@ -1530,7 +1526,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # reshape_and_cache to avoid overwriting shared KV slots. The helper
             # self-gates on kv_sharing_target_layer_name and returns False for
             # non-KV-sharing layers. No config-based gate (see above).
-            if maybe_skip_reshape_for_kv_share(self, attn_metadata):
+            if kv_sharing.maybe_skip_reshape_for_kv_share(self, attn_metadata):
                 if self.is_kv_producer:
                     attn_metadata.reshape_cache_event.record()
                 return query, key, value, output
@@ -1569,7 +1565,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # kv_sharing_target_layer_name and returns None for non-KV-sharing
         # layers to fall through to the normal path. No config-based gate
         # (see above: draft forward misfire).
-        _kv_share_out = maybe_kv_share_prefill(
+        _kv_share_out = kv_sharing.maybe_kv_share_prefill(
             self,
             query,
             key,
@@ -1650,7 +1646,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # to avoid writing dummy K/V back into the shared cache. The helper
         # self-gates on kv_sharing_target_layer_name + is_draft_model. No
         # config-based gate (see above: draft forward misfire).
-        if key is not None and value is not None and not should_skip_draft_kv_write(self):
+        if key is not None and value is not None and not kv_sharing.should_skip_draft_kv_write(self):
             output_padded = output
             query, key, value, output_padded = self.reshape_and_cache(
                 query, key, value, kv_cache, attn_metadata, output

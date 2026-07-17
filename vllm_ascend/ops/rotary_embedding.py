@@ -161,8 +161,8 @@ def rope_forward_oot(
     is_neox_style: bool,
     offsets: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    # NOTE: key is None (Gemma4 MTP Q-only) is handled by the caller
-    # (AscendRotaryEmbedding.forward_oot) via gemma4_q_only_rope; this shared
+    # NOTE: key is None (Q-only attention) is handled by the caller
+    # (AscendRotaryEmbedding.forward_oot) via q_only_rope; this shared
     # op only handles the normal key-is-not-None path.
     query_shape, key_shape = query.shape, key.shape
     if offsets is not None:
@@ -230,6 +230,56 @@ def rope_forward_oot(
     return query.view(query_shape), key.view(key_shape)
 
 
+def q_only_rope(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    head_size: int,
+    rotary_dim: int,
+    is_neox_style: bool,
+) -> torch.Tensor:
+    """Apply RoPE to the query only (Q-only attention layers).
+
+    Q-only attention layers read K/V from a shared cache and therefore pass
+    key=None to RoPE.  ``key is None`` is the sole signal: no normal model
+    ever calls RoPE without a key, so this path is implicitly Q-only-only.
+    Only the query is rotated; the caller discards the (None) key.
+
+    The triton fast path passes a zero-width dummy key so the shared triton
+    RoPE kernel rotates just the query; the non-triton fallback reuses the
+    CANN native op with a throwaway key buffer, mirroring the normal
+    (key is not None) path to avoid hand-rolling cos/sin pairs (easy to get
+    wrong for both neox and interleaved styles).
+    """
+    num_tokens = query.shape[0]
+    if HAS_TRITON:
+        query, _ = rope_forward_triton(
+            query.view(num_tokens, -1, head_size),
+            # Dummy key to satisfy the API; only query is rotated.
+            torch.empty(num_tokens, 0, head_size, dtype=query.dtype, device=query.device),
+            cos_sin_cache=cos_sin_cache,
+            positions=positions,
+            rope_dim=rotary_dim,
+            is_neox_style=is_neox_style,
+        )
+        return query
+    # Non-Triton fallback: reuse the NPU rotary op with a throwaway key buffer
+    # so only the query is rotated.
+    if rotary_dim < head_size:
+        query = query.view(num_tokens, -1, head_size)
+        q_rot = query[..., :rotary_dim]
+        q_pass = query[..., rotary_dim:]
+        q_rot = q_rot.contiguous().view(num_tokens, -1)
+        k_dummy = torch.empty_like(q_rot)
+        torch_npu._npu_rotary_embedding(positions, q_rot, k_dummy, rotary_dim, cos_sin_cache, is_neox_style)
+        q_rot = q_rot.view(num_tokens, -1, rotary_dim)
+        return torch.cat((q_rot, q_pass), dim=-1).flatten(-2, -1)
+    query = query.contiguous().view(num_tokens, -1)
+    k_dummy = torch.empty_like(query)
+    torch_npu._npu_rotary_embedding(positions, query, k_dummy, head_size, cos_sin_cache, is_neox_style)
+    return query.view(num_tokens, -1, head_size).flatten(-2, -1)
+
+
 class AscendRotaryEmbedding(RotaryEmbedding):
     def __init__(
         self,
@@ -258,18 +308,16 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         is_neox_style = self.is_neox_style
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override
-        # Gemma4 MTP Q-only attention passes key=None (K/V come from the
-        # target's KV cache).  key is None is the sole signal: only Gemma4
-        # MTP ever calls RoPE without a key, so this gate is implicitly
-        # Gemma4-only.  Do NOT add a get_current_vllm_config() gate here —
-        # during draft forward the current config is the draft model's config,
-        # which has no speculative_config, so a config-based gate would
-        # wrongly fall through and skip Q-only RoPE (regresses pos1/pos2).
-        # See gemma4_proposer.gemma4_q_only_rope.
+        # Q-only attention layers pass key=None (K/V come from a shared
+        # cache).  key is None is the sole signal: only Q-only layers ever
+        # call RoPE without a key, so this gate is implicitly Q-only-only.
+        # Do NOT add a get_current_vllm_config() gate here — during draft
+        # forward the current config is the draft model's config, which has
+        # no speculative_config, so a config-based gate would wrongly fall
+        # through and skip Q-only RoPE (regresses pos1/pos2).
+        # See ops.rotary_embedding.q_only_rope.
         if key is None:
-            from vllm_ascend.spec_decode.gemma4_proposer import gemma4_q_only_rope
-
-            q = gemma4_q_only_rope(positions, query, self.cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style)
+            q = q_only_rope(positions, query, self.cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style)
             return q, None
         is_draft_model = _EXTRA_CTX.is_draft_model if is_forward_context_available() else False
         flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled if is_forward_context_available() else False
