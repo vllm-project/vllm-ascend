@@ -7,7 +7,7 @@ _ORIGINAL_SCHEDULE = Scheduler.schedule
 
 def _schedule_with_summary(self, *args, **kwargs):
     scheduler_output = _ORIGINAL_SCHEDULE(self, *args, **kwargs)
-    print_scheduler_summary(self)
+    print_scheduler_summary(self, scheduler_output)
     return scheduler_output
 
 

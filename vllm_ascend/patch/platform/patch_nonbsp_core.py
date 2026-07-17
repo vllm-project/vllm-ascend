@@ -16,7 +16,6 @@
 #
 
 import datetime
-import itertools
 
 import numpy as np
 import torch
@@ -261,8 +260,7 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
         ]
         waiting_blks = [
             (len(req.all_token_ids) + blk_size - 1) // blk_size
-            for req in itertools.chain(self.scheduler.waiting,
-                                       self.scheduler.skipped_waiting)
+            for req in self.scheduler.waiting
             if req.status in (RequestStatus.WAITING, RequestStatus.LB_PAUSED)
         ]
 

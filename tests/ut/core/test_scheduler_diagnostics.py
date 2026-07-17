@@ -17,11 +17,14 @@ def test_print_scheduler_summary_includes_waiting_queues(capsys):
         skipped_waiting=[_request(RequestStatus.WAITING_FOR_REMOTE_KVS, 5)],
         block_size=8,
     )
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={"request-1": 1, "request-2": 1}
+    )
 
-    print_scheduler_summary(scheduler)
+    print_scheduler_summary(scheduler, scheduler_output)
 
     output = capsys.readouterr().out
-    assert "schedule() | scheduler req num: [1, 2, 1, 1, 0, 0]" in output
+    assert "schedule() | scheduler req num: [2, 2, 1, 1, 0, 0]" in output
     assert "blk num [3, 2, 1]" in output
 
 
@@ -36,7 +39,7 @@ def test_normal_scheduler_prints_summary(monkeypatch):
     monkeypatch.setattr(
         patch_scheduler,
         "print_scheduler_summary",
-        lambda scheduler: events.append("summary"),
+        lambda scheduler, scheduler_output: events.append("summary"),
     )
 
     assert patch_scheduler._schedule_with_summary(object()) is scheduler_output

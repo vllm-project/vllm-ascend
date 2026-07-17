@@ -80,6 +80,7 @@ def create_vllm_config(
 def create_scheduler(
     vllm_config: VllmConfig,
     num_blocks: int = 10000,
+    scheduler_cls: type[Any] = Scheduler,
 ) -> Scheduler:
     """Initialize Scheduler For Testing."""
     block_size = vllm_config.cache_config.block_size
@@ -94,7 +95,7 @@ def create_scheduler(
     )
     vllm_config.cache_config.num_gpu_blocks = num_blocks
 
-    return Scheduler(
+    return scheduler_cls(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         log_stats=True,

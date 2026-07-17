@@ -5,7 +5,7 @@ from typing import Any
 from vllm.v1.request import RequestStatus
 
 
-def print_scheduler_summary(scheduler: Any) -> None:
+def print_scheduler_summary(scheduler: Any, scheduler_output: Any) -> None:
     waiting_reqs = list(
         itertools.chain(scheduler.waiting, scheduler.skipped_waiting)
     )
@@ -51,7 +51,8 @@ def print_scheduler_summary(scheduler: Any) -> None:
     print(
         f"{datetime.datetime.now()} | schedule() | "
         "scheduler req num: "
-        f"[{len(scheduler.running)}, {len(waiting_reqs)}, {waiting_num}, "
+        f"[{len(scheduler_output.num_scheduled_tokens)}, "
+        f"{len(waiting_reqs)}, {waiting_num}, "
         f"{waiting_for_remote_kvs_num}, {waiting_for_fsm_num}, "
         f"{preempted_num}] | blk num "
         f"[{running_block_num}, {waiting_block_num}, "

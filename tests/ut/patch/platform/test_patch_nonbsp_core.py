@@ -1,6 +1,9 @@
 from unittest.mock import MagicMock
 
-import vllm_ascend.patch.platform.patch_nonbsp_core as nonbsp_core
+import numpy as np
+import torch
+import vllm_ascend.patch.platform.patch_nonbsp_core as nonbsp_core  # noqa: I001
+from vllm.v1.request import RequestStatus
 
 
 def test_dp_engine_core_initializes_ascend_config(monkeypatch, capsys):
@@ -113,3 +116,53 @@ def test_balance_summary_is_suppressed_on_nonzero_dp_rank(capsys):
     )
 
     assert capsys.readouterr().out == ""
+
+
+def test_nonbsp_allgather_uses_only_unified_waiting_queue(monkeypatch):
+    waiting_request = MagicMock(
+        all_token_ids=list(range(17)),
+        status=RequestStatus.WAITING,
+    )
+    skipped_request = MagicMock(
+        all_token_ids=list(range(65)),
+        status=RequestStatus.WAITING,
+    )
+    scheduler = MagicMock()
+    scheduler.block_size = 8
+    scheduler.running = []
+    scheduler.waiting = [waiting_request]
+    scheduler.skipped_waiting = [skipped_request]
+
+    engine_core = object.__new__(nonbsp_core.NonBSPDPEngineCoreProc)
+    engine_core.scheduler = scheduler
+    engine_core.dp_group = MagicMock()
+    engine_core.dp_rank = 0
+    engine_core._lb_max_slots_cached = 4
+    engine_core._lb_dp_size_cached = 1
+    engine_core._lb_max_num_seqs = 2
+    engine_core._lb_threshold = 5.0
+    engine_core._lb_pending_long_req = False
+    engine_core._lb_pending_long_req_blk = 0
+    engine_core._lb_data_np = np.zeros(6, dtype=np.int32)
+    engine_core._lb_data_t = torch.as_tensor(engine_core._lb_data_np)
+    gathered = np.zeros(6, dtype=np.int32)
+    engine_core._lb_all_data_np = [gathered]
+    engine_core._lb_all_data_t_buf = [torch.as_tensor(gathered)]
+
+    def all_gather(output_tensors, input_tensor, group):
+        output_tensors[0].copy_(input_tensor)
+
+    captured = {}
+
+    def balance_load(requests_by_rank, dev_num, max_num_seqs, threshold):
+        captured["requests_by_rank"] = requests_by_rank
+        return [{"out_blk": [], "in_blk": [], "freeze": True}]
+
+    monkeypatch.setattr(nonbsp_core.dist, "all_gather", all_gather)
+    monkeypatch.setattr(nonbsp_core, "balance_load", balance_load)
+    monkeypatch.setattr(nonbsp_core, "_print_requests_by_rank", lambda *args: None)
+    monkeypatch.setattr(nonbsp_core, "_print_modifications", lambda *args: None)
+
+    engine_core._do_lb_allgather()
+
+    assert captured["requests_by_rank"] == [([3, 0, 0, 0], 0)]

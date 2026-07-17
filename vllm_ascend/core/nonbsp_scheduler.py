@@ -183,7 +183,11 @@ class NonBSPScheduler(SchedulerInterface):
             ) from e
         # Priority queues for requests.
         self.waiting = create_request_queue(self.policy)
-        # requests skipped in waiting flow due async deps or constraints.
+        # Compatibility placeholder for v0.22.1 scheduler interfaces and
+        # diagnostics. NonBSP deliberately keeps every persistent waiting
+        # request in self.waiting, matching the v0.13.0 scheduler. Requests
+        # blocked by async dependencies or per-step constraints are moved to a
+        # local queue during schedule() and restored to self.waiting afterward.
         self.skipped_waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
         self.modifications: dict | None = None
@@ -356,7 +360,7 @@ class NonBSPScheduler(SchedulerInterface):
 
         kv_prefetch_limit = 2 * self.max_num_running_reqs - len(self.running)
         kv_prefetch_count = 0
-        for request in itertools.chain(self.waiting, self.skipped_waiting):
+        for request in self.waiting:
             if kv_prefetch_count >= kv_prefetch_limit:
                 break
             kv_prefetch_count += 1
@@ -695,17 +699,16 @@ class NonBSPScheduler(SchedulerInterface):
         ):
             step_skipped_waiting = create_request_queue(self.policy)
 
-            while (self.waiting or self.skipped_waiting) and token_budget > 0:
+            while self.waiting and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
-                request_queue = self._select_waiting_queue_for_scheduling()
-                assert request_queue is not None
+                request_queue = self.waiting
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
 
-                # try to promote blocked statuses while traversing skipped queue.
+                # Try to promote blocked statuses while traversing waiting.
                 if self._is_blocked_waiting_status(
                     request.status
                 ) and not self._try_promote_blocked_waiting_request(request):
@@ -971,16 +974,16 @@ class NonBSPScheduler(SchedulerInterface):
                         if self.ec_connector is not None:
                             self.ec_connector.update_state_after_alloc(request, i)
 
-            # re-queue requests skipped in this pass ahead of older skipped items.
+            # v0.13.0-compatible behavior: requests skipped in this pass stay
+            # in the single persistent waiting queue and are retried next step.
             if step_skipped_waiting:
-                self.skipped_waiting.prepend_requests(step_skipped_waiting)
+                self.waiting.prepend_requests(step_skipped_waiting)
 
         if lb_isolated_reqs:
             self.waiting.prepend_requests(lb_isolated_reqs)
 
         if self._lb_kv_prefetch_enabled:
             self.waiting.sort_by_arrival_time()
-            self.skipped_waiting.sort_by_arrival_time()
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
@@ -1079,7 +1082,7 @@ class NonBSPScheduler(SchedulerInterface):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
-        print_scheduler_summary(self)
+        print_scheduler_summary(self, scheduler_output)
         return scheduler_output
 
     def _build_kv_connector_meta(
@@ -1095,6 +1098,15 @@ class NonBSPScheduler(SchedulerInterface):
         """
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
+        )
+        print(
+            f"[nonbsp] preempt | "
+            f"dp_rank={self.parallel_config.data_parallel_rank} | "
+            f"request_id_suffix={request.request_id[-12:]} | "
+            f"num_computed_tokens={request.num_computed_tokens} | "
+            f"num_tokens={request.num_tokens} | "
+            f"num_preemptions={request.num_preemptions + 1}",
+            flush=True,
         )
         self.kv_cache_manager.free(request)
         self.encoder_cache_manager.free(request)
@@ -1783,22 +1795,10 @@ class NonBSPScheduler(SchedulerInterface):
         )
 
     def _enqueue_waiting_request(self, request: Request) -> None:
-        if self._is_blocked_waiting_status(request.status):
-            self.skipped_waiting.add_request(request)
-        else:
-            self.waiting.add_request(request)
-
-    def _select_waiting_queue_for_scheduling(self) -> RequestQueue | None:
-        if self.policy == SchedulingPolicy.FCFS:
-            return self.skipped_waiting or self.waiting or None
-
-        # PRIORITY mode: compare queue heads when both queues are non-empty.
-        if self.waiting and self.skipped_waiting:
-            waiting_req = self.waiting.peek_request()
-            skipped_req = self.skipped_waiting.peek_request()
-            return self.waiting if waiting_req < skipped_req else self.skipped_waiting
-
-        return self.waiting or self.skipped_waiting or None
+        # Keep a single persistent queue for NonBSP. Blocked requests are
+        # skipped through a per-schedule local queue, so they do not prevent
+        # later schedulable requests from being considered in the same step.
+        self.waiting.add_request(request)
 
     def _handle_stopped_request(self, request: Request) -> bool:
         """Return True if finished (can be False for resumable requests)."""
