@@ -988,7 +988,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 for attn_group in self.draft_attn_groups:
                     common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
                         draft_index,
-                        attn_metadata,
                         common_attn_metadata,
                         batch_size,
                         num_input_tokens,
@@ -1554,7 +1553,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self,
         # `draft_index` must start from `1`, no `0`
         draft_index,
-        old_attn_metadata,
         old_common_metadata,
         batch_size,
         input_batch_size,
