@@ -13,7 +13,11 @@ if not vllm_version_is("0.23.0"):
         allow_module_level=True,
     )
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest  # noqa: E402
+from vllm.entrypoints.openai.chat_completion.protocol import (  # noqa: E402
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
+    FunctionDefinition,
+)
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat  # noqa: E402
 
 # vLLM main removed the ``_WrappedParser`` helper; the base ``Parser``
@@ -70,8 +74,102 @@ def _collect_tool_args(tool_calls):
     return "".join(tc.function.arguments for tc in tool_calls if tc.function.arguments)
 
 
+def _stream_tool_arguments(properties, value_chunks):
+    tools = [
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="run",
+                parameters={
+                    "type": "object",
+                    "properties": properties,
+                },
+            ),
+        ),
+    ]
+    request = ChatCompletionRequest(model="test", messages=[], tools=tools)
+    parser = Glm47MoeModelToolParser(MOCK_TOKENIZER, tools=tools)
+    chunks = [
+        "<tool_call>",
+        "run",
+        "<arg_key>",
+        "value",
+        "</arg_key>",
+        "<arg_value>",
+        *value_chunks,
+        "</arg_value>",
+        "</tool_call>",
+    ]
+
+    current_text = ""
+    argument_fragments = []
+    for chunk in chunks:
+        previous_text = current_text
+        current_text += chunk
+        result = parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=chunk,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=request,
+        )
+        if result is not None and result.tool_calls:
+            argument_fragments.extend(
+                tool_call.function.arguments for tool_call in result.tool_calls if tool_call.function.arguments
+            )
+
+    return "".join(argument_fragments)
+
+
 def _parse_delta(parser, *args, finished=False, **kwargs):
     return parser.parse_delta(*args, finished=finished, **kwargs)
+
+
+def test_glm47_nullable_string_schema_streams_valid_json():
+    properties = {
+        "value": {
+            "anyOf": [
+                {"type": "string"},
+                {"type": "null"},
+            ]
+        }
+    }
+
+    arguments = _stream_tool_arguments(properties, ["P", "ura", "90"])
+
+    assert json.loads(arguments) == {"value": "Pura90"}
+
+
+def test_glm47_ambiguous_string_schema_streams_as_string():
+    properties = {
+        "value": {
+            "anyOf": [
+                {"type": "string"},
+                {"type": "integer"},
+            ]
+        }
+    }
+
+    arguments = _stream_tool_arguments(properties, ["P", "ura", "90"])
+
+    assert json.loads(arguments) == {"value": "Pura90"}
+
+
+@pytest.mark.parametrize("properties", [None, True])
+def test_glm47_unknown_properties_stream_as_strings(properties):
+    arguments = _stream_tool_arguments(properties, ["P", "ura", "90"])
+
+    assert json.loads(arguments) == {"value": "Pura90"}
+
+
+def test_glm47_confirmed_number_waits_for_complete_serialization():
+    arguments = _stream_tool_arguments(
+        {"value": {"type": "number"}},
+        ["1", "e", "3"],
+    )
+
+    assert json.loads(arguments) == {"value": 1000.0}
 
 
 def test_glm47_streaming_inline_zero_arg_tool_call_waits_until_complete():

@@ -189,17 +189,22 @@
 #    Why:
 #       vLLM's GLM47 streaming parser can drop complete inline zero-argument
 #       tool calls such as `<tool_call>get_current_time</tool_call>`, while
-#       non-streaming parses the same output correctly.
+#       non-streaming parses the same output correctly. Ambiguous argument
+#       schemas and partial non-string values can also produce invalid JSON.
 #    How：
 #       Monkey-patch GLM47 tool-call region extraction so complete inline
 #       zero-argument regions are normalized for the existing streaming name
 #       extractor without emitting partial names for incomplete regions.
+#       Treat schemas that may accept strings as strings, default unknown
+#       schemas to strings, and buffer confirmed non-string values until their
+#       closing tag.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/issues/44326
 #       https://github.com/vllm-project/vllm/pull/44327
+#       https://github.com/vllm-project/vllm-ascend/issues/12261
 #    Future Plan:
 #       Remove this patch once the supported vLLM version contains the upstream
-#       GLM47 inline zero-argument streaming parser fix.
+#       GLM47 streaming parser fixes.
 #
 # ** 10a. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
