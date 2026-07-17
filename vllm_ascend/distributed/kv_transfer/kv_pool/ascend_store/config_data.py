@@ -45,7 +45,6 @@ class KeyMetadata:
 class PoolKey:
     key_metadata: KeyMetadata
     chunk_hash: str
-    chunk_hash_bytes: BlockHash | str | None = field(default=None, compare=False, kw_only=True)
 
     def __hash__(self):
         return hash(
@@ -83,7 +82,6 @@ class PoolKey:
                     self.key_metadata,
                     self.chunk_hash,
                     layer_id,
-                    chunk_hash_bytes=self.chunk_hash_bytes,
                 )
             )
         return keys
@@ -256,9 +254,6 @@ class ChunkedTokenDatabase:
             self._key_prefix_cache[cache_key] = prefix
         return prefix
 
-    def set_cache_coordinator(self, cache_coordinator: Any | None) -> None:
-        self.cache_coordinator = cache_coordinator
-
     def store_mask(
         self,
         aligned_token_len: int,
@@ -295,7 +290,6 @@ class ChunkedTokenDatabase:
         kv_cache_group_id: int = 0,
         cache_role: str = "kv",
         cache_family: str | None = None,
-        chunk_hash_bytes: BlockHash | str | None = None,
         layer_id: int | None = None,
     ):
         assert self.metadata is not None
@@ -314,7 +308,6 @@ class ChunkedTokenDatabase:
                 cache_family=cache_family,
             ),
             chunk_hash,
-            chunk_hash_bytes=chunk_hash_bytes,
         )
 
     def get_block_size(self, kv_cache_group_id: int) -> int:
@@ -427,10 +420,11 @@ class ChunkedTokenDatabase:
         kv_cache_group_id: int = 0,
         cache_role: str = "kv",
         cache_family: str | None = None,
-        max_num: int | None = None,
         block_ids: list[int] | None = None,
         skip_null_blocks: bool = False,
         chunk_filter: Callable[[int], bool] | None = None,
+        shard_rank: int | None = None,
+        shard_size: int | None = None,
     ) -> Iterable[tuple[int, int, BlockHash | str, int | None]]:
         if not block_hashes:
             return
@@ -442,13 +436,13 @@ class ChunkedTokenDatabase:
         grouped_hashes = get_block_hashes(block_hashes, effective_block_size, self.hash_block_size)
         if not grouped_hashes:
             return
-        lookup_end = token_len if max_num is None else min(token_len, max_num)
-        num_logical_blocks = min(len(grouped_hashes), cdiv(lookup_end, effective_block_size)) if lookup_end > 0 else 0
+        num_logical_blocks = min(len(grouped_hashes), cdiv(token_len, effective_block_size)) if token_len > 0 else 0
         block_id_offset = max(num_logical_blocks - len(block_ids), 0) if block_ids is not None else 0
+        candidate_index = 0
 
         for chunk_id in range(num_logical_blocks):
             start_token = chunk_id * effective_block_size
-            end_token = min(start_token + effective_block_size, lookup_end)
+            end_token = min(start_token + effective_block_size, token_len)
             if start_token < mask_num:
                 continue
             start_idx = start_token // cache_family_ratio
@@ -465,6 +459,15 @@ class ChunkedTokenDatabase:
                 block_id = block_ids[block_idx]
                 if skip_null_blocks and block_id <= 0:
                     continue
+            shard_allows = (
+                shard_rank is None
+                or shard_size is None
+                or shard_size <= 1
+                or candidate_index % shard_size == shard_rank
+            )
+            candidate_index += 1
+            if not shard_allows:
+                continue
             yield start_idx, end_idx, grouped_hashes[chunk_id], block_id
 
     def process_tokens(
@@ -475,7 +478,6 @@ class ChunkedTokenDatabase:
         kv_cache_group_id: int = 0,
         cache_role: str = "kv",
         cache_family: str | None = None,
-        chunk_filter: Callable[[int], bool] | None = None,
     ) -> Iterable[tuple[int, int, PoolKey]]:
         """Process the tokens and return the corresponding cache engine keys."""
         for start, end, hash_val, _ in self._iter_token_chunks(
@@ -485,7 +487,6 @@ class ChunkedTokenDatabase:
             kv_cache_group_id,
             cache_role,
             cache_family,
-            chunk_filter=chunk_filter,
         ):
             yield (
                 start,
@@ -495,7 +496,6 @@ class ChunkedTokenDatabase:
                     kv_cache_group_id=kv_cache_group_id,
                     cache_role=cache_role,
                     cache_family=cache_family,
-                    chunk_hash_bytes=hash_val,
                 ),
             )
 
@@ -505,61 +505,18 @@ class ChunkedTokenDatabase:
         block_hashes: BlockHashList | list[str],
         mask_num: int = 0,
         kv_cache_group_id: int = 0,
-        cache_role: str = "kv",
-        cache_family: str | None = None,
-        max_num: int | None = None,
         chunk_filter: Callable[[int], bool] | None = None,
     ) -> Iterable[tuple[int, int, str, BlockHash | str]]:
         """Yield cache key strings directly without materializing PoolKey objects."""
-        prefix = self._get_key_prefix(kv_cache_group_id, cache_role, cache_family)
+        prefix = self._get_key_prefix(kv_cache_group_id)
         for start, end, hash_val, _ in self._iter_token_chunks(
             token_len,
             block_hashes,
             mask_num,
             kv_cache_group_id,
-            cache_role,
-            cache_family,
-            max_num=max_num,
             chunk_filter=chunk_filter,
         ):
             yield start, end, prefix + block_hash_to_str(hash_val), hash_val
-
-    def process_tokens_with_block_ids(
-        self,
-        token_len: int,
-        block_hashes: BlockHashList | list[str],
-        block_ids: list[int],
-        mask_num: int = 0,
-        kv_cache_group_id: int = 0,
-        skip_null_blocks: bool = False,
-        cache_role: str = "kv",
-        cache_family: str | None = None,
-        chunk_filter: Callable[[int], bool] | None = None,
-    ) -> Iterable[tuple[int, int, PoolKey, int]]:
-        for start, end, hash_val, block_id in self._iter_token_chunks(
-            token_len,
-            block_hashes,
-            mask_num,
-            kv_cache_group_id,
-            cache_role,
-            cache_family,
-            block_ids=block_ids,
-            skip_null_blocks=skip_null_blocks,
-            chunk_filter=chunk_filter,
-        ):
-            assert block_id is not None
-            yield (
-                start,
-                end,
-                self._make_key_by_hash(
-                    block_hash_to_str(hash_val),
-                    kv_cache_group_id=kv_cache_group_id,
-                    cache_role=cache_role,
-                    cache_family=cache_family,
-                    chunk_hash_bytes=hash_val,
-                ),
-                block_id,
-            )
 
     def process_token_key_strings_with_block_ids(
         self,
@@ -569,138 +526,25 @@ class ChunkedTokenDatabase:
         mask_num: int = 0,
         kv_cache_group_id: int = 0,
         skip_null_blocks: bool = False,
-        cache_role: str = "kv",
-        cache_family: str | None = None,
         chunk_filter: Callable[[int], bool] | None = None,
+        shard_rank: int | None = None,
+        shard_size: int | None = None,
     ) -> Iterable[tuple[int, int, str, BlockHash | str, int]]:
         """Yield cache key strings and resolved block ids without PoolKey allocation."""
-        prefix = self._get_key_prefix(kv_cache_group_id, cache_role, cache_family)
+        prefix = self._get_key_prefix(kv_cache_group_id)
         for start, end, hash_val, block_id in self._iter_token_chunks(
             token_len,
             block_hashes,
             mask_num,
             kv_cache_group_id,
-            cache_role,
-            cache_family,
             block_ids=block_ids,
             skip_null_blocks=skip_null_blocks,
             chunk_filter=chunk_filter,
+            shard_rank=shard_rank,
+            shard_size=shard_size,
         ):
             assert block_id is not None
             yield start, end, prefix + block_hash_to_str(hash_val), hash_val, block_id
-
-    def can_use_sparse_store_mask_key_build(
-        self,
-        token_len: int,
-        block_hashes: BlockHashList | list[str],
-        store_mask: Sequence[bool],
-        kv_cache_group_id: int = 0,
-        cache_role: str = "kv",
-        cache_family: str | None = None,
-    ) -> bool:
-        if not block_hashes or not store_mask:
-            return False
-        base_block_size = self.get_block_size(kv_cache_group_id)
-        if cache_family is None:
-            cache_family = self.group_cache_families.get(cache_role, {}).get(kv_cache_group_id, "default")
-        effective_block_size = base_block_size * max(infer_cache_family_ratio(cache_family), 1)
-        coordinator_sizes = getattr(getattr(self, "cache_coordinator", None), "group_effective_block_sizes", None)
-        coordinator_size = (
-            coordinator_sizes[kv_cache_group_id]
-            if coordinator_sizes is not None and kv_cache_group_id < len(coordinator_sizes)
-            else None
-        )
-        num_logical_blocks = min(
-            len(get_block_hashes(block_hashes, effective_block_size, self.hash_block_size)),
-            cdiv(token_len, effective_block_size) if token_len > 0 else 0,
-        )
-        if coordinator_size is not None and coordinator_size != effective_block_size:
-            logger.warning(
-                "KV pool sparse key build fallback: effective block size mismatch group=%d key_build=%d coordinator=%d",
-                kv_cache_group_id,
-                effective_block_size,
-                coordinator_size,
-            )
-            return False
-        if len(store_mask) < num_logical_blocks:
-            logger.warning(
-                "KV pool sparse key build fallback: mask too short group=%d mask=%d chunks=%d",
-                kv_cache_group_id,
-                len(store_mask),
-                num_logical_blocks,
-            )
-            return False
-        return True
-
-    def process_token_key_strings_with_block_ids_sparse_store_mask(
-        self,
-        token_len: int,
-        block_hashes: BlockHashList | list[str],
-        block_ids: list[int],
-        store_mask: Sequence[bool],
-        mask_num: int = 0,
-        kv_cache_group_id: int = 0,
-        skip_null_blocks: bool = False,
-        cache_role: str = "kv",
-        cache_family: str | None = None,
-        shard_rank: int | None = None,
-        shard_size: int | None = None,
-    ) -> Iterable[tuple[int, int, str, BlockHash | str, int]]:
-        """Build only store-mask and local-shard keys."""
-        if not self.can_use_sparse_store_mask_key_build(
-            token_len,
-            block_hashes,
-            store_mask,
-            kv_cache_group_id=kv_cache_group_id,
-            cache_role=cache_role,
-            cache_family=cache_family,
-        ):
-            return
-        base_block_size = self.get_block_size(kv_cache_group_id)
-        if cache_family is None:
-            cache_family = self.group_cache_families.get(cache_role, {}).get(kv_cache_group_id, "default")
-        cache_family_ratio = max(infer_cache_family_ratio(cache_family), 1)
-        effective_block_size = base_block_size * cache_family_ratio
-        num_logical_blocks = min(
-            len(get_block_hashes(block_hashes, effective_block_size, self.hash_block_size)),
-            cdiv(token_len, effective_block_size) if token_len > 0 else 0,
-        )
-        block_id_offset = max(num_logical_blocks - len(block_ids), 0)
-        prefix = self._get_key_prefix(kv_cache_group_id, cache_role, cache_family)
-        candidate_index = 0
-
-        for chunk_id in range(num_logical_blocks):
-            if not store_mask[chunk_id]:
-                continue
-            start_token = chunk_id * effective_block_size
-            if start_token >= token_len:
-                break
-            end_token = min(start_token + effective_block_size, token_len)
-            if start_token < mask_num:
-                continue
-            start_idx = start_token // cache_family_ratio
-            end_idx = end_token // cache_family_ratio
-            if end_idx <= start_idx:
-                continue
-            block_idx = start_idx // base_block_size - block_id_offset
-            if block_idx < 0 or block_idx >= len(block_ids):
-                continue
-            block_id = block_ids[block_idx]
-            if skip_null_blocks and block_id <= 0:
-                continue
-            shard_allows = (
-                shard_rank is None
-                or shard_size is None
-                or shard_size <= 1
-                or candidate_index % shard_size == shard_rank
-            )
-            candidate_index += 1
-            if not shard_allows:
-                continue
-            hash_val = get_block_hash_at(block_hashes, chunk_id, effective_block_size, self.hash_block_size)
-            if hash_val is None:
-                continue
-            yield start_idx, end_idx, prefix + block_hash_to_str(hash_val), hash_val, block_id
 
     def decode_adaptor_prefill_pp(self, key, addr, size, kv_cache_group_id: int = 0, cache_role: str = "kv"):
         if self.partitions is None or len(self.partitions) == 1:
@@ -752,29 +596,11 @@ def get_block_hashes(
     return _LazyGroupedBlockHashList(block_hashes, group_block_size // hash_block_size)
 
 
-def get_block_hash_at(
-    block_hashes: Sequence[BlockHash | str],
-    chunk_id: int,
-    group_block_size: int,
-    hash_block_size: int,
-) -> BlockHash | str | None:
-    if group_block_size == hash_block_size:
-        return block_hashes[chunk_id] if chunk_id < len(block_hashes) else None
-    assert group_block_size % hash_block_size == 0, "block_size must be divisible by hash_block_size"
-    scale_factor = group_block_size // hash_block_size
-    start = chunk_id * scale_factor
-    end = start + scale_factor
-    if end > len(block_hashes):
-        return None
-    return _rehash_block_hash_group(block_hashes[start:end])
-
-
 class _LazyGroupedBlockHashList(Sequence[BlockHash]):
     def __init__(self, block_hashes: Sequence[BlockHash | str], scale_factor: int) -> None:
         self._block_hashes = block_hashes
         self._scale_factor = scale_factor
         self._length = len(block_hashes) // scale_factor
-        self._cache: dict[int, BlockHash] = {}
 
     def __len__(self) -> int:
         return self._length
@@ -786,16 +612,8 @@ class _LazyGroupedBlockHashList(Sequence[BlockHash]):
             index += self._length
         if index < 0 or index >= self._length:
             raise IndexError(index)
-        cached = self._cache.get(index)
-        if cached is None:
-            start = index * self._scale_factor
-            end = start + self._scale_factor
-            cached = _rehash_block_hash_group(self._block_hashes[start:end])
-            self._cache[index] = cached
-        return cached
-
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, Sequence) and list(self) == list(other)
+        start = index * self._scale_factor
+        return _rehash_block_hash_group(self._block_hashes[start : start + self._scale_factor])
 
 
 def _rehash_block_hash_group(block_hashes: Sequence[BlockHash | str]) -> BlockHash:
@@ -803,7 +621,7 @@ def _rehash_block_hash_group(block_hashes: Sequence[BlockHash | str]) -> BlockHa
     hasher.update(_GROUPED_BLOCK_HASH_DOMAIN)
     hasher.update(len(block_hashes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
     for block_hash in block_hashes:
-        hash_bytes = _block_hash_to_bytes(block_hash)
+        hash_bytes = block_hash_to_bytes(block_hash)
         hasher.update(len(hash_bytes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
         hasher.update(hash_bytes)
     return BlockHash(hasher.digest())
@@ -813,7 +631,7 @@ def block_hash_to_str(block_hash: BlockHash | str) -> str:
     return block_hash if isinstance(block_hash, str) else block_hash.hex()
 
 
-def _block_hash_to_bytes(block_hash: BlockHash | str) -> bytes:
+def block_hash_to_bytes(block_hash: BlockHash | str) -> bytes:
     if isinstance(block_hash, str):
         if len(block_hash) == 64:
             try:
@@ -1017,7 +835,6 @@ class ReqMeta:
     kv_cache_group_ids: list[int] | None = None
     kv_cache_families_by_group: list[str] | None = None
     skip_null_blocks_by_group: list[bool] | None = None
-    disable_tp_key_sharding: bool = False
     num_prompt_tokens: int | None = None
 
     # The following parameters are only used for kv event generation
@@ -1040,7 +857,6 @@ class ReqMeta:
         kv_cache_group_ids: list[int] | None = None,
         kv_cache_families_by_group: list[str] | None = None,
         skip_null_blocks_by_group: list[bool] | None = None,
-        disable_tp_key_sharding: bool = False,
         num_prompt_tokens: int | None = None,
         token_ids: list[int] | None = None,
         original_block_size: list[int] | int | None = None,
@@ -1081,7 +897,6 @@ class ReqMeta:
         self.kv_cache_group_ids = kv_cache_group_ids
         self.kv_cache_families_by_group = kv_cache_families_by_group
         self.skip_null_blocks_by_group = skip_null_blocks_by_group
-        self.disable_tp_key_sharding = disable_tp_key_sharding
         self.num_prompt_tokens = num_prompt_tokens
         self.token_ids = token_ids
         self.original_block_size = original_block_size

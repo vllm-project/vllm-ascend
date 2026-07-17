@@ -155,7 +155,7 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         hashes = [bytes([idx % 251]) * 32 for idx in range(128)]
 
         result = list(
-            db.process_tokens_with_block_ids(
+            db.process_token_key_strings_with_block_ids(
                 128 * 128,
                 hashes,
                 [1000, 1001, 1002, 1003],
@@ -163,11 +163,11 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         )
 
         self.assertEqual(
-            [start for start, _, _, _ in result],
+            [start for start, _, _, _, _ in result],
             [124 * 128, 125 * 128, 126 * 128, 127 * 128],
         )
         self.assertEqual(
-            [block_id for _, _, _, block_id in result],
+            [block_id for _, _, _, _, block_id in result],
             [1000, 1001, 1002, 1003],
         )
 
@@ -189,16 +189,18 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         pool_keys = list(self.db.process_tokens(40, hashes))
         self.assertEqual(
             list(self.db.process_token_key_strings(40, hashes)),
-            [(start, end, key.to_string(), key.chunk_hash_bytes) for start, end, key in pool_keys],
+            [
+                (start, end, key.to_string(), hash_val)
+                for (start, end, key), hash_val in zip(pool_keys, hashes, strict=True)
+            ],
         )
 
         block_ids = [5, 6]
-        pool_keys_with_ids = list(self.db.process_tokens_with_block_ids(32, hashes, block_ids))
         self.assertEqual(
             list(self.db.process_token_key_strings_with_block_ids(32, hashes, block_ids)),
             [
-                (start, end, key.to_string(), key.chunk_hash_bytes, block_id)
-                for start, end, key, block_id in pool_keys_with_ids
+                (start, end, key.to_string(), hash_val, block_id)
+                for (start, end, key), hash_val, block_id in zip(pool_keys[:2], hashes[:2], block_ids, strict=True)
             ],
         )
 
@@ -221,42 +223,26 @@ class TestChunkedTokenDatabase(unittest.TestCase):
 
         self.assertEqual(len(pool_key_result), 1)
         self.assertEqual(
-            direct_key_result,
-            [
-                (
-                    pool_key_result[0][0],
-                    pool_key_result[0][1],
-                    pool_key_result[0][2].to_string(),
-                    pool_key_result[0][2].chunk_hash_bytes,
-                )
-            ],
+            direct_key_result[0][:3],
+            (pool_key_result[0][0], pool_key_result[0][1], pool_key_result[0][2].to_string()),
         )
         layer_key = pool_key_result[0][2].split_layers(2)[1]
-        self.assertEqual(layer_key.chunk_hash_bytes, direct_key_result[0][3])
         self.assertIn("@group:1@cache_role:kv@cache_family:c2@layer_id:1", layer_key.to_string())
 
-    def test_sparse_store_mask_pre_shards_before_hash_construction(self):
+    def test_key_strings_pre_shard_after_filtering(self):
         hashes = ["a", "b", "c", "d"]
+        store_mask = [True, False, True, True]
         result = list(
-            self.db.process_token_key_strings_with_block_ids_sparse_store_mask(
+            self.db.process_token_key_strings_with_block_ids(
                 64,
                 hashes,
                 [10, 11, 12, 13],
-                [True, False, True, True],
+                chunk_filter=lambda start: store_mask[start // 16],
                 shard_rank=1,
                 shard_size=2,
             )
         )
         self.assertEqual([(start, end, block_id) for start, end, _, _, block_id in result], [(32, 48, 12)])
-
-    def test_sparse_store_mask_rejects_short_mask(self):
-        self.assertFalse(
-            self.db.can_use_sparse_store_mask_key_build(
-                64,
-                ["a", "b", "c", "d"],
-                [True, False],
-            )
-        )
 
     def test_get_block_hashes_rehashes_groups(self):
         for hashes in (["a", "b", "c", "d"], [b"a", b"b", b"c", b"d"]):
@@ -266,7 +252,7 @@ class TestChunkedTokenDatabase(unittest.TestCase):
                     _expected_grouped_hash(hashes[0], hashes[1]),
                     _expected_grouped_hash(hashes[2], hashes[3]),
                 ]
-                self.assertEqual(result, expected)
+                self.assertEqual(list(result), expected)
 
     def test_prepare_value(self):
         addr, size, block_id = self.db.prepare_value(0, 16, [5, 6, 7])

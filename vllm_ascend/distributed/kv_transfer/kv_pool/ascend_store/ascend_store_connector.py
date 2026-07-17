@@ -304,13 +304,8 @@ class LookupKeyServer:
                 all_frames = self.socket.recv_multipart(copy=False)
                 token_len = int.from_bytes(all_frames[0], byteorder="big")
                 kv_group_ids = self.decoder.decode([all_frames[1]])
-                if len(all_frames) > 3:
-                    hbm_hit_tokens = int.from_bytes(all_frames[2], byteorder="big")
-                    hash_frames = all_frames[3:]
-                else:
-                    hbm_hit_tokens = 0
-                    hash_frames = all_frames[2:]
-                hashes_str = self.decoder.decode(hash_frames)
+                hbm_hit_tokens = int.from_bytes(all_frames[2], byteorder="big")
+                hashes_str = self.decoder.decode(all_frames[3:])
                 result = self.pool_worker.lookup_scheduler(
                     token_len,
                     hashes_str,

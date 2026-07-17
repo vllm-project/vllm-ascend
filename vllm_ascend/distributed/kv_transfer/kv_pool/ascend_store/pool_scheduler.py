@@ -1117,9 +1117,12 @@ class LookupKeyClient:
         hash_strs = [h.hex() for h in block_hashes]
         hash_frames = self.encoder.encode(hash_strs)
         kv_group_frames = self.encoder.encode(kv_cache_group_ids)
-        token_len_bytes = token_len.to_bytes(4, byteorder="big")
-        hbm_hit_bytes = hbm_hit_tokens.to_bytes(4, byteorder="big")
-        all_frames = [token_len_bytes] + list(kv_group_frames) + [hbm_hit_bytes] + list(hash_frames)
+        all_frames = [
+            token_len.to_bytes(4, byteorder="big"),
+            *kv_group_frames,
+            hbm_hit_tokens.to_bytes(4, byteorder="big"),
+            *hash_frames,
+        ]
         self.socket.send_multipart(all_frames, copy=False)
         resp = self.socket.recv()
         result = int.from_bytes(resp, "big")

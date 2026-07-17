@@ -562,102 +562,6 @@ class KVTransferThread(threading.Thread):
         except TypeError:
             return self.token_database.decode_adaptor_prefill_pp(keys, addrs, sizes)
 
-    def _store_mask(self, req_meta: ReqMeta) -> tuple[list[bool], ...] | None:
-        store_mask = getattr(self.token_database, "store_mask", None)
-        if store_mask is None:
-            return None
-        try:
-            return store_mask(req_meta.token_len_chunk, req_meta.num_prompt_tokens)
-        except AssertionError as exc:
-            logger.debug("Skip AscendStore store mask for unaligned request %s: %s", req_meta.req_id, exc)
-            return None
-
-    def _load_mask(self, req_meta: ReqMeta, token_len: int) -> tuple[list[bool], ...] | None:
-        load_mask = getattr(self.token_database, "load_mask", None)
-        if load_mask is None:
-            return None
-        return load_mask(req_meta.block_hashes, token_len)
-
-    def _mask_allows_chunk(
-        self,
-        masks: tuple[list[bool], ...] | list[list[bool]] | None,
-        group_id: int,
-        start: int,
-    ) -> bool:
-        mask_allows_chunk = getattr(self.token_database, "mask_allows_chunk", None)
-        if mask_allows_chunk is None:
-            return True
-        return mask_allows_chunk(masks, group_id, start)
-
-    def _get_store_granularity(self, group_id: int) -> int:
-        get_store_granularity = getattr(self.token_database, "_get_store_granularity", None)
-        if get_store_granularity is not None:
-            return get_store_granularity(group_id)
-        return self._get_block_size(group_id)
-
-    @staticmethod
-    def _kvpool_hit_skip_range(req_meta: ReqMeta) -> tuple[int, int] | None:
-        load_spec = req_meta.load_spec
-        if load_spec is None:
-            return None
-        skip_end = (
-            load_spec.kvpool_store_skip_tokens
-            if load_spec.kvpool_store_skip_tokens is not None
-            else load_spec.kvpool_cached_tokens
-        )
-        if skip_end <= load_spec.vllm_cached_tokens:
-            return None
-        return load_spec.vllm_cached_tokens, skip_end
-
-    @staticmethod
-    def _should_skip_kvpool_hit_chunk(
-        start: int,
-        end: int,
-        skip_range: tuple[int, int] | None,
-    ) -> bool:
-        if skip_range is None:
-            return False
-        skip_start, skip_end = skip_range
-        return start >= skip_start and end <= skip_end
-
-    def _apply_kvpool_hit_skip_to_store_mask(
-        self,
-        store_mask: list[bool] | None,
-        group_id: int,
-        skip_range: tuple[int, int] | None,
-    ) -> tuple[list[bool] | None, int]:
-        if store_mask is None or skip_range is None:
-            return store_mask, 0
-        granularity = self._get_store_granularity(group_id)
-        adjusted_mask = list(store_mask)
-        skipped = 0
-        for chunk_idx, allowed in enumerate(adjusted_mask):
-            if not allowed:
-                continue
-            start = chunk_idx * granularity
-            if self._should_skip_kvpool_hit_chunk(start, start + granularity, skip_range):
-                adjusted_mask[chunk_idx] = False
-                skipped += 1
-        return adjusted_mask, skipped
-
-    def _chunk_filter_allows_put(
-        self,
-        masks: tuple[list[bool], ...] | list[list[bool]] | None,
-        group_id: int,
-        start: int,
-        skip_range: tuple[int, int] | None,
-    ) -> bool:
-        if not self._mask_allows_chunk(masks, group_id, start):
-            return False
-        base_block_size = self._get_block_size(group_id)
-        granularity = self._get_store_granularity(group_id)
-        chunk_start = start // base_block_size * granularity
-        return not self._should_skip_kvpool_hit_chunk(
-            chunk_start,
-            chunk_start + granularity,
-            skip_range,
-        )
-
 
 class KVCacheStoreSendingThread(KVTransferThread):
     def __init__(
@@ -687,13 +591,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
     def delete_finished_stored_request(self, req_id: str):
         with self.done_task_lock:
-            if req_id in self.stored_requests:
-                del self.stored_requests[req_id]
-
-    def mark_completed_events(self, event_id: int | None) -> None:
-        if event_id is not None:
-            with self.completed_events_lock:
-                self.completed_events[event_id] = 1
+            self.stored_requests.pop(req_id, None)
 
     def get_completed_events(self):
         if not self.completed_events:
@@ -728,28 +626,47 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if tracked_request and remaining == 0:
                 self.delete_finished_stored_request(req_id)
                 self.set_finished_request(req_id)
-            self.mark_completed_events(req_meta.event_id)
+            if req_meta.event_id is not None:
+                with self.completed_events_lock:
+                    self.completed_events[req_meta.event_id] = 1
             self.request_queue.task_done()
 
     def _handle_stored_request(self, req_meta: ReqMeta):
         token_len = req_meta.token_len_chunk
         req_id = req_meta.req_id
         current_event = req_meta.current_event
-        store_masks = self._store_mask(req_meta)
-        mutable_store_masks = [list(mask) for mask in store_masks] if store_masks is not None else None
-        skip_range = self._kvpool_hit_skip_range(req_meta)
+        try:
+            store_masks = self.token_database.store_mask(token_len, req_meta.num_prompt_tokens)
+        except AssertionError as exc:
+            logger.debug("Skip AscendStore store mask for unaligned request %s: %s", req_id, exc)
+            store_masks = None
+        load_spec = req_meta.load_spec
+        skip_start = load_spec.vllm_cached_tokens if load_spec is not None else 0
+        skip_end = (
+            (
+                load_spec.kvpool_store_skip_tokens
+                if load_spec.kvpool_store_skip_tokens is not None
+                else load_spec.kvpool_cached_tokens
+            )
+            if load_spec is not None
+            else 0
+        )
+
+        def should_skip(start: int, end: int) -> bool:
+            return skip_end > skip_start and start >= skip_start and end <= skip_end
 
         for group_id in req_meta.kv_cache_group_ids or [0]:
-            group_store_mask = None
-            if mutable_store_masks is not None and group_id < len(mutable_store_masks):
-                group_store_mask = mutable_store_masks[group_id]
-                group_store_mask, skipped_chunks = self._apply_kvpool_hit_skip_to_store_mask(
-                    group_store_mask,
-                    group_id,
-                    skip_range,
-                )
-                if group_store_mask is not None:
-                    mutable_store_masks[group_id] = group_store_mask
+            group_block_size = self._get_block_size(group_id)
+            group_store_mask = (
+                list(store_masks[group_id]) if store_masks is not None and group_id < len(store_masks) else None
+            )
+            if group_store_mask is not None:
+                skipped_chunks = 0
+                for chunk_id, allowed in enumerate(group_store_mask):
+                    start = chunk_id * group_block_size
+                    if allowed and should_skip(start, start + group_block_size):
+                        group_store_mask[chunk_id] = False
+                        skipped_chunks += 1
                 if skipped_chunks:
                     logger.debug(
                         "KV pool put skipped %d pooled chunks for request %s group %d",
@@ -766,50 +683,32 @@ class KVCacheStoreSendingThread(KVTransferThread):
             block_hashes = []
             key_block_ids: list[int] = []
             block_ids = req_meta.block_ids_by_group[group_id]
-            group_block_size = self._get_block_size(group_id)
             skip_null_blocks = self._skip_null_blocks(req_meta, group_id)
             align_state_group = group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
 
-            def chunk_filter(start: int, group_id=group_id) -> bool:
-                return self._chunk_filter_allows_put(
-                    mutable_store_masks,
-                    group_id,
-                    start,
-                    skip_range,
+            def chunk_filter(
+                start: int,
+                group_block_size=group_block_size,
+                group_store_mask=group_store_mask,
+            ) -> bool:
+                block_idx = start // group_block_size
+                mask_allows = group_store_mask is None or (
+                    block_idx < len(group_store_mask) and group_store_mask[block_idx]
                 )
+                chunk_start = block_idx * group_block_size
+                return mask_allows and not should_skip(chunk_start, chunk_start + group_block_size)
 
-            use_sparse_mask = group_store_mask is not None and self.token_database.can_use_sparse_store_mask_key_build(
+            pre_shard = self.dcp_size <= 1 and not align_state_group
+            iterator = self.token_database.process_token_key_strings_with_block_ids(
                 token_len,
                 req_meta.block_hashes,
-                group_store_mask,
+                block_ids,
                 kv_cache_group_id=group_id,
+                skip_null_blocks=skip_null_blocks,
+                chunk_filter=chunk_filter,
+                shard_rank=self.tp_rank % self.put_step if pre_shard else None,
+                shard_size=self.put_step if pre_shard else None,
             )
-            pre_sharded = (
-                use_sparse_mask
-                and self.dcp_size <= 1
-                and not req_meta.disable_tp_key_sharding
-                and not align_state_group
-            )
-            if use_sparse_mask:
-                iterator = self.token_database.process_token_key_strings_with_block_ids_sparse_store_mask(
-                    token_len,
-                    req_meta.block_hashes,
-                    block_ids,
-                    group_store_mask,
-                    kv_cache_group_id=group_id,
-                    skip_null_blocks=skip_null_blocks,
-                    shard_rank=self.tp_rank % self.put_step if pre_sharded else None,
-                    shard_size=self.put_step if pre_sharded else None,
-                )
-            else:
-                iterator = self.token_database.process_token_key_strings_with_block_ids(
-                    token_len,
-                    req_meta.block_hashes,
-                    block_ids,
-                    kv_cache_group_id=group_id,
-                    skip_null_blocks=skip_null_blocks,
-                    chunk_filter=chunk_filter,
-                )
             for start, end, key, block_hash, block_id in iterator:
                 starts.append(start)
                 ends.append(end)
@@ -817,20 +716,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 if self.enable_kv_event:
                     block_hashes.append(block_hash)
                 key_block_ids.append(block_id)
-
-            if (
-                not pre_sharded
-                and self.dcp_size <= 1
-                and not req_meta.disable_tp_key_sharding
-                and not align_state_group
-            ):
-                shard_start = self.tp_rank % self.put_step
-                starts = starts[shard_start :: self.put_step]
-                ends = ends[shard_start :: self.put_step]
-                keys = keys[shard_start :: self.put_step]
-                if self.enable_kv_event:
-                    block_hashes = block_hashes[shard_start :: self.put_step]
-                key_block_ids = key_block_ids[shard_start :: self.put_step]
 
             if not keys:
                 continue
@@ -935,7 +820,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         key_list = []
         block_id_list: list[int] = []
         group_ids = req_meta.kv_cache_group_ids or [0]
-        load_masks = self._load_mask(req_meta, token_len)
+        load_masks = self.token_database.load_mask(req_meta.block_hashes, token_len)
         for group_id in group_ids:
             block_ids = req_meta.block_ids_by_group[group_id]
             group_block_size = self._get_block_size(group_id)
@@ -946,7 +831,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             )
 
             def chunk_filter(start: int, group_id=group_id) -> bool:
-                return self._mask_allows_chunk(load_masks, group_id, start)
+                return self.token_database.mask_allows_chunk(load_masks, group_id, start)
 
             for start, end, key, _block_hash, block_id in self.token_database.process_token_key_strings_with_block_ids(
                 token_len,
