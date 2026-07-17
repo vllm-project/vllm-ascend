@@ -40,8 +40,8 @@ REGEX_COMPILATION_TIMEOUT_ENV = {"VLLM_REGEX_COMPILATION_TIMEOUT_S": "30"}
 @pytest.fixture(params=[False, True], ids=["v1", "v2"])
 def model_runner_env(request):
     use_v2_model_runner = request.param
-    if use_v2_model_runner and vllm_version_is("0.23.0"):
-        pytest.skip("No need to support v2 model runner for vLLM tag version.")
+    if use_v2_model_runner and vllm_version_is("0.24.0"):
+        pytest.skip("The v2 model runner is not supported on vLLM v0.24.0.")
 
     with patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1" if use_v2_model_runner else "0"}):
         yield
@@ -90,26 +90,9 @@ def test_guided_json_completion_xgrammar(sample_json_schema, request):
     sampling_params = SamplingParams(
         temperature=1.0, max_tokens=500, structured_outputs=StructuredOutputsParams(json=sample_json_schema)
     )
-    if not vllm_version_is("0.23.0"):
-        model_marker = request.node.get_closest_marker("model")
-        model_marker.kwargs["env_vars"] = REGEX_COMPILATION_TIMEOUT_ENV
-        with patch.dict(os.environ, REGEX_COMPILATION_TIMEOUT_ENV, clear=False):
-            vllm_runner = request.getfixturevalue("vllm_runner")
-            prompts = [f"Give an example JSON for an employee profile that fits this schema: {sample_json_schema}"] * 2
-            inputs = vllm_runner.get_inputs(prompts)
-            outputs = vllm_runner.model.generate(inputs, sampling_params=sampling_params)
-
-            assert outputs is not None
-            for output in outputs:
-                assert output is not None
-                assert isinstance(output, RequestOutput)
-                prompt = output.prompt
-                generated_text = output.outputs[0].text
-                assert generated_text is not None
-                print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-                output_json = json.loads(generated_text)
-                jsonschema.validate(instance=output_json, schema=sample_json_schema)
-    else:
+    model_marker = request.node.get_closest_marker("model")
+    model_marker.kwargs["env_vars"] = REGEX_COMPILATION_TIMEOUT_ENV
+    with patch.dict(os.environ, REGEX_COMPILATION_TIMEOUT_ENV, clear=False):
         vllm_runner = request.getfixturevalue("vllm_runner")
         prompts = [f"Give an example JSON for an employee profile that fits this schema: {sample_json_schema}"] * 2
         inputs = vllm_runner.get_inputs(prompts)
@@ -254,26 +237,9 @@ def test_guided_json_completion_outlines(sample_json_schema, request):
     sampling_params = SamplingParams(
         temperature=1.0, max_tokens=500, structured_outputs=StructuredOutputsParams(json=sample_json_schema)
     )
-    if not vllm_version_is("0.23.0"):
-        model_marker = request.node.get_closest_marker("model")
-        model_marker.kwargs["env_vars"] = REGEX_COMPILATION_TIMEOUT_ENV
-        with patch.dict(os.environ, REGEX_COMPILATION_TIMEOUT_ENV, clear=False):
-            vllm_runner = request.getfixturevalue("vllm_runner")
-            prompts = [f"Give an example JSON for an employee profile that fits this schema: {sample_json_schema}"] * 2
-            inputs = vllm_runner.get_inputs(prompts)
-            outputs = vllm_runner.model.generate(inputs, sampling_params=sampling_params)
-
-            assert outputs is not None
-            for output in outputs:
-                assert output is not None
-                assert isinstance(output, RequestOutput)
-                prompt = output.prompt
-                generated_text = output.outputs[0].text
-                assert generated_text is not None
-                print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-                output_json = json.loads(generated_text)
-                jsonschema.validate(instance=output_json, schema=sample_json_schema)
-    else:
+    model_marker = request.node.get_closest_marker("model")
+    model_marker.kwargs["env_vars"] = REGEX_COMPILATION_TIMEOUT_ENV
+    with patch.dict(os.environ, REGEX_COMPILATION_TIMEOUT_ENV, clear=False):
         vllm_runner = request.getfixturevalue("vllm_runner")
         prompts = [f"Give an example JSON for an employee profile that fits this schema: {sample_json_schema}"] * 2
         inputs = vllm_runner.get_inputs(prompts)

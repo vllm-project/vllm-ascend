@@ -162,13 +162,12 @@ from vllm_ascend.utils import (
     lmhead_tp_enable,
     oproj_tp_enable,
     set_potential_max_tokens,
-    set_weight_prefetch_method,
     should_skip_allreduce_across_dp_group,
     vllm_version_is,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPAsyncSpecDecodeRebuildResult, PCPManager
-from vllm_ascend.worker.utils import AscendKVBlockZeroer
+from vllm_ascend.worker.utils import AscendKVBlockZeroer, copy_snapshot_to_gpu
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType,
@@ -285,8 +284,7 @@ class NPUModelRunner(GPUModelRunner):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
-        if not vllm_version_is("0.23.0"):
-            self.pin_memory = PIN_MEMORY
+        self.pin_memory = PIN_MEMORY
 
         # Replace the CUDA PrefetchOffloader set by parent __init__ with NPU version.
         offload_cfg = vllm_config.offload_config
@@ -342,7 +340,6 @@ class NPUModelRunner(GPUModelRunner):
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
-        set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
 
         # Dump / PrecisionDebugger configuration now comes from AscendConfig
         dump_cfg = self.ascend_config.dump_config_path
@@ -463,7 +460,7 @@ class NPUModelRunner(GPUModelRunner):
             if vllm_config.speculative_config
             else None
         )
-        if not vllm_version_is("0.23.0"):
+        if not vllm_version_is("0.24.0"):
             if vllm_config.speculative_config and vllm_config.speculative_config.use_dspark():
                 self.use_aux_hidden_state_outputs = True
         # When True, run update_full_graph_params before self.model (ENPU / graph capture order).
@@ -849,7 +846,7 @@ class NPUModelRunner(GPUModelRunner):
                 query_start_loc.np[num_reqs_padded + 1] = num_tokens_padded
                 num_reqs_padded = num_reqs_padded + 1
 
-        query_start_loc.copy_to_gpu()
+        copy_snapshot_to_gpu(query_start_loc)
 
         return num_reqs_padded
 
@@ -1059,7 +1056,7 @@ class NPUModelRunner(GPUModelRunner):
 
         self.query_start_loc.np[0] = 0
         self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
-        self.query_start_loc.copy_to_gpu()
+        copy_snapshot_to_gpu(self.query_start_loc)
 
         # Now, query_start_loc is padded.
         # But gdn needs an unpadded one.
@@ -1069,7 +1066,7 @@ class NPUModelRunner(GPUModelRunner):
             self.gdn_query_start_loc.np[0] = 0
             self.gdn_query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
             self.gdn_query_start_loc.np[num_reqs + 1 :].fill(cu_num_tokens[-1])
-            self.gdn_query_start_loc.copy_to_gpu()
+            copy_snapshot_to_gpu(self.gdn_query_start_loc)
 
 
         # Compute optimistic seq_lens (assumes all draft tokens from previous
@@ -1684,27 +1681,23 @@ class NPUModelRunner(GPUModelRunner):
         sample_hidden_states: torch.Tensor = None,
         target_model_batch_desc: BatchDescriptor = None,
     ) -> list[list[int]] | None:
+        self._log_propose_draft_token_ids_entry(spec_decode_metadata, num_scheduled_tokens)
+
         if not self.drafter:
             # Speculative decoding is not enabled.
             draft_token_ids = None
         elif isinstance(self.drafter, AscendNgramProposer):
-            if vllm_version_is("0.23.0"):
-                draft_token_ids = self.drafter.propose(valid_sampled_token_ids)
-            else:
-                draft_token_ids = self.drafter.propose(
-                    scheduler_output.num_spec_tokens_to_schedule,
-                    valid_sampled_token_ids,
-                    self.input_batch.num_tokens_no_spec,
-                    self.input_batch.token_ids_cpu,
-                )
+            draft_token_ids = self.drafter.propose(
+                scheduler_output.num_spec_tokens_to_schedule,
+                valid_sampled_token_ids,
+                self.input_batch.num_tokens_no_spec,
+                self.input_batch.token_ids_cpu,
+            )
         elif isinstance(self.drafter, AscendSuffixDecodingProposer):
-            if vllm_version_is("0.23.0"):
-                draft_token_ids = self.drafter.propose(valid_sampled_token_ids)
-            else:
-                draft_token_ids = self.drafter.propose(
-                    valid_sampled_token_ids,
-                    num_speculative_tokens=scheduler_output.num_spec_tokens_to_schedule,
-                )
+            draft_token_ids = self.drafter.propose(
+                valid_sampled_token_ids,
+                num_speculative_tokens=scheduler_output.num_spec_tokens_to_schedule,
+            )
         elif isinstance(self.drafter, AscendNgramProposerNPU):
             batch_size = min(self.input_batch.num_reqs, self.token_ids_gpu_tensor.shape[0])
 
@@ -1768,19 +1761,12 @@ class NPUModelRunner(GPUModelRunner):
             common_attn_metadata = spec_decode_common_attn_metadata
             target_hidden_states = [h[:num_scheduled_tokens] for h in aux_hidden_states]
 
-            if vllm_version_is("0.23.0"):
-                draft_token_ids = self.drafter.propose(
-                    sampled_token_ids=valid_sampled_token_ids,
-                    target_hidden_states=target_hidden_states,
-                    common_attn_metadata=common_attn_metadata,
-                )
-            else:
-                draft_token_ids = self.drafter.propose(
-                    self.speculative_config.num_speculative_tokens,
-                    sampled_token_ids=valid_sampled_token_ids,
-                    target_hidden_states=target_hidden_states,
-                    common_attn_metadata=common_attn_metadata,
-                )
+            draft_token_ids = self.drafter.propose(
+                self.speculative_config.num_speculative_tokens,
+                sampled_token_ids=valid_sampled_token_ids,
+                target_hidden_states=target_hidden_states,
+                common_attn_metadata=common_attn_metadata,
+            )
             next_token_ids, valid_sampled_tokens_count = (
                 self.drafter.prepare_next_token_ids_padded(
                     valid_sampled_token_ids,
@@ -1931,6 +1917,43 @@ class NPUModelRunner(GPUModelRunner):
             raise ValueError(f"Unknown speculative decoding method: {self.speculative_config.method}")
 
         return draft_token_ids
+
+    def _log_propose_draft_token_ids_entry(
+        self,
+        spec_decode_metadata: SpecDecodeMetadata,
+        num_scheduled_tokens: int,
+    ) -> None:
+        """DFX entry probe for propose_draft_token_ids.
+
+        Records which speculative-decoding sub-path is about to run
+        (ngram / medusa / eagle / extract_hidden_states / ...). When the
+        `Unknown speculative decoding method` ValueError fires further down,
+        or when end-to-end speedup is unexpectedly absent, this tells the
+        operator which drafter object was actually constructed and whether k
+        (num_speculative_tokens) is non-trivial. Type lookups and getattr are
+        host-only; gated by isEnabledFor(DEBUG).
+        """
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        drafter_type = type(self.drafter).__name__ if self.drafter else None
+        spec_meta_state = (
+            "None" if spec_decode_metadata is None
+            else f"max_spec_len={spec_decode_metadata.max_spec_len}"
+        )
+        logger.debug(
+            "[spec/dfx] propose_draft_token_ids entry: "
+            "drafter=%s, method=%s, k=%d, num_reqs=%d, "
+            "num_scheduled_tokens=%d, spec_decode_metadata=%s, "
+            "use_cp=%s, pcp_size=%d",
+            drafter_type,
+            self.speculative_config.method if self.speculative_config else None,
+            self.num_spec_tokens,
+            self.input_batch.num_reqs,
+            num_scheduled_tokens,
+            spec_meta_state,
+            getattr(self, "use_cp", False),
+            getattr(self, "pcp_size", 1),
+        )
 
     def _copy_draft_token_ids_to_cpu(
         self, scheduler_output: "SchedulerOutput", zeros_only: bool = False
@@ -3541,10 +3564,10 @@ class NPUModelRunner(GPUModelRunner):
             cum_num_tokens = self._get_cumsum_and_arange(
             num_scheduled_tokens, self.query_pos.np)
             self.query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
-            self.query_start_loc.copy_to_gpu()
+            copy_snapshot_to_gpu(self.query_start_loc)
             if self._has_gdn:
                 self.gdn_query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
-                self.gdn_query_start_loc.copy_to_gpu()
+                copy_snapshot_to_gpu(self.gdn_query_start_loc)
 
             if not profile_cpp:
                 num_reqs_padded = self._pad_query_start_loc_for_fia(
@@ -3929,26 +3952,13 @@ class NPUModelRunner(GPUModelRunner):
             self.init_routed_experts_capturer()
 
     def _bind_routed_experts_capturer(self, capturer=None) -> None:
-        if vllm_version_is("0.23.0"):
-            # Upstream binds via ``module.router.set_capture_fn(...)`` on
-            # FusedMoE layers whose router is a ``BaseRouter``. Ascend's
-            # ``select_experts`` does not go through ``BaseRouter``, so the
-            # upstream hook never fires. Instead, stash the capturer as a
-            # plain attribute on every FusedMoE layer; ``apply()`` reads it
-            # back on the hot path.
-            from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+        # test_qwen3_moe_routing_replay
+        from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 
-            for module in self.compilation_config.static_forward_context.values():
-                if isinstance(module, FusedMoE):
-                    module._ascend_routed_experts_capturer = capturer
-        else:
-            # test_qwen3_moe_routing_replay
-            from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
-
-            for module in self.compilation_config.static_forward_context.values():
-                if isinstance(module, AscendMoERunner):
-                    module._ascend_routed_experts_capturer = capturer
-                    module.routed_experts._ascend_routed_experts_capturer = capturer
+        for module in self.compilation_config.static_forward_context.values():
+            if isinstance(module, AscendMoERunner):
+                module._ascend_routed_experts_capturer = capturer
+                module.routed_experts._ascend_routed_experts_capturer = capturer
 
     def _align_memory(self, tensor: torch.Tensor, alignment: int) -> torch.Tensor:
         data_ptr = tensor.data_ptr()
@@ -5010,7 +5020,7 @@ class NPUModelRunner(GPUModelRunner):
                     min_cg_attn_backend = attn_backend.__name__
 
         with update_pass_config(self):
-            if vllm_version_is("0.23.0"):
+            if vllm_version_is("0.24.0"):
                 cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
                     min_cg_support=min_cg_support,
                     min_cg_attn_backend=min_cg_attn_backend,
