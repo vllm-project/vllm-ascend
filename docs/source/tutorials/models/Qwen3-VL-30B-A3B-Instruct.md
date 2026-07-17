@@ -10,13 +10,9 @@ The `Qwen3-VL-30B-A3B-Instruct` tutorial was introduced for the `vllm-ascend` `v
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
-
-:::{note}
-The support matrix records the maximum verified capability for this model family. The startup examples in this document use practical validation settings for image-only and video-serving scenarios. Adjust `--max-model-len`, `--max-num-seqs`, `--max-num-batched-tokens`, and multimodal limits based on request shape and available KV cache.
-:::
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
 
@@ -178,21 +174,26 @@ export HCCL_BUFFSIZE=1024
 export OMP_NUM_THREADS=1
 export OMP_PROC_BIND=false
 export TASK_QUEUE_ENABLE=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
 vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
   --host 0.0.0.0 \
   --port 8000 \
   --served-model-name qwen3-vl-30b \
+  --data-parallel-size 1 \
   --tensor-parallel-size 2 \
   --enable-expert-parallel \
   --seed 1024 \
-  --max-num-seqs 16 \
-  --max-model-len 128000 \
-  --max-num-batched-tokens 4096 \
-  --gpu-memory-utilization 0.7 \
+  --max-num-seqs 32 \
+  --max-model-len 32768 \
+  --max-num-batched-tokens 16384 \
+  --gpu-memory-utilization 0.9 \
+  --no-enable-prefix-caching \
+  --mm-processor-cache-gb 0 \
   --limit-mm-per-prompt.image 1 \
   --limit-mm-per-prompt.video 0 \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,24,32]}'
 ```
 
 Key Parameter Descriptions:
@@ -212,7 +213,7 @@ Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](htt
 Service Verification:
 
 ```shell
-curl http://<node0_ip>:8000/v1/chat/completions \
+curl http://<server_ip>:<port>/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "qwen3-vl-30b",
@@ -235,8 +236,6 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 
 After the server is started, send a request to verify basic multimodal functionality.
 
-### 6.1 Image Request
-
 ```shell
 curl http://<server_ip>:<port>/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -255,29 +254,6 @@ curl http://<server_ip>:<port>/v1/chat/completions \
 ```
 
 Expected result: the HTTP status is 200 and the JSON response contains a `choices` field with generated text, for example text similar to `TONGYI Qwen`.
-
-### 6.2 Video Request
-
-Start the service with the video command in Section 5.2, and place `test.mp4` under the host directory mounted to `/media`.
-
-```shell
-curl http://<server_ip>:<port>/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "qwen3-vl-30b",
-    "messages": [
-      {"role": "system", "content": "You are a helpful assistant."},
-      {"role": "user", "content": [
-        {"type": "video_url", "video_url": {"url": "file:///media/test.mp4"}},
-        {"type": "text", "text": "What is in this video?"}
-      ]}
-    ],
-    "max_completion_tokens": 100,
-    "temperature": 0
-  }'
-```
-
-Expected result: the HTTP status is 200 and the JSON response contains generated text describing the video.
 
 ## 7 Accuracy Evaluation
 

@@ -10,13 +10,9 @@ The `Qwen3-VL-235B-A22B-Instruct` tutorial was introduced in the vLLM-Ascend val
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
-
-:::{note}
-The support matrix records the maximum verified capability for this model family. The startup examples in this document use practical validation settings for online serving and performance testing. Adjust `--max-model-len`, `--max-num-seqs`, `--max-num-batched-tokens`, and multimodal limits based on your service workload and available KV cache.
-:::
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
 
@@ -185,7 +181,6 @@ export OMP_PROC_BIND=false
 export TASK_QUEUE_ENABLE=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-export VLLM_ASCEND_ENABLE_NZ=2
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 
 vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
@@ -464,6 +459,30 @@ vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
 - `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout.
 - `--no-enable-prefix-caching` disables prefix caching. For PD disaggregation, first validate the service without prefix caching before enabling additional cache features.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` is recommended on decode nodes to reduce decode dispatch overhead.
+  
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+
+Service Verification:
+
+```shell
+curl http://<server_ip>:<port>/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "qwen3-vl-235b",
+        "messages": [
+            {
+                "role": "user",
+                "content": "Who are you?"
+            }
+        ],
+        "max_tokens": 256,
+        "temperature": 0
+    }'
+```
+
+Expected Result:
+
+The service returns HTTP 200 OK with a JSON response containing the `choices` field.
 
 ## 6 Functional Verification
 
