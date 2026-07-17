@@ -66,6 +66,8 @@ class AscendDSparkProposer(AscendDflashProposer):
             device=self.device,
         )
         self._dspark_capture_sizes: list[int] = []
+        self._dspark_block_table_buffer: torch.Tensor | None = None
+        self._dspark_block_table_tensor: torch.Tensor | None = None
         scheduler_config = getattr(vllm_config, "scheduler_config", None)
         self._dspark_max_request_slots = max(1, int(getattr(scheduler_config, "max_num_seqs", self.max_batch_size) or self.max_batch_size))
         self._dspark_req_id_to_slot: dict[str, int] = {}
@@ -168,18 +170,53 @@ class AscendDSparkProposer(AscendDflashProposer):
         return list(req_ids[:batch_size])
 
     def initialize_attn_backend(self, kv_cache_config, kernel_block_sizes=None) -> None:
-        del kv_cache_config
-        kernel_block_size = kernel_block_sizes
-        while isinstance(kernel_block_size, list):
-            kernel_block_size = kernel_block_size[0] if kernel_block_size else None
-        if kernel_block_size is not None:
-            self.kernel_block_size = int(kernel_block_size)
-            self.block_size = int(kernel_block_size)
-        self._draft_attn_layer_names = set()
-        self.attn_layer_names = []
+        del kernel_block_sizes
+        cache_layer_names = sorted(
+            name for name in self._draft_attn_layer_names if name.endswith(".swa_cache")
+        )
+        expected_num_layers = self.model.model.num_dspark_layers
+        if len(cache_layer_names) != expected_num_layers:
+            raise ValueError(
+                "Expected one transferable SWA cache per DSpark layer, got "
+                f"{len(cache_layer_names)} caches for {expected_num_layers} layers"
+            )
+
+        matching_group_ids = {
+            group_id
+            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+            if any(layer_name in group.layer_names for layer_name in cache_layer_names)
+        }
+        if len(matching_group_ids) != 1:
+            raise ValueError(
+                "DSpark SWA caches must belong to one KV cache group, got "
+                f"group ids {sorted(matching_group_ids)}"
+            )
+        self.kv_cache_gid = matching_group_ids.pop()
+        cache_group = kv_cache_config.kv_cache_groups[self.kv_cache_gid]
+        cache_spec = cache_group.kv_cache_spec
+        if hasattr(cache_spec, "kv_cache_specs"):
+            cache_spec = cache_spec.kv_cache_specs[cache_layer_names[0]]
+        kernel_block_size = None
+        runner_kernel_block_sizes = getattr(
+            getattr(self, "runner", None), "kernel_block_sizes", None
+        )
+        if runner_kernel_block_sizes is not None:
+            kernel_block_size = runner_kernel_block_sizes[self.kv_cache_gid]
+            while isinstance(kernel_block_size, list):
+                kernel_block_size = kernel_block_size[0]
+        self.kernel_block_size = int(kernel_block_size or cache_spec.block_size)
+        self.block_size = self.kernel_block_size
+        max_num_blocks = (self.max_model_len + self.kernel_block_size - 1) // self.kernel_block_size
+        self._dspark_block_table_buffer = torch.zeros(
+            (self.max_graph_batch_size, max_num_blocks),
+            dtype=torch.int32,
+            device=self.device,
+        )
+        self._dspark_block_table_tensor = self._dspark_block_table_buffer
+        self._draft_attn_layer_names = set(cache_layer_names)
+        self.attn_layer_names = cache_layer_names
         self.piece_all_attn_layer_name = [[] for _ in range(self.num_speculative_tokens)]
         self.draft_attn_groups = []
-        self.kv_cache_gid = 0
 
     @torch.inference_mode()
     def dummy_run(
@@ -222,9 +259,11 @@ class AscendDSparkProposer(AscendDflashProposer):
         self.positions[:num_input_tokens].copy_(self.arange_dflash[:num_input_tokens])
         self._request_slots_buffer[:num_input_tokens].zero_()
         self._slot_mapping_buffer[:num_input_tokens].copy_(self.arange_dflash[:num_input_tokens])
+        self._copy_dspark_block_table(None)
 
         context_positions = self._context_positions_buffer[:num_context]
         context_positions.copy_(self.arange_dflash[:num_context])
+        self._context_slot_mapping_buffer[:num_context].copy_(self.arange_dflash[:num_context])
         context_request_slots = self._context_request_slots_buffer[:num_context]
         context_request_slots.zero_()
         self._dflash_num_context = num_context
@@ -323,6 +362,20 @@ class AscendDSparkProposer(AscendDflashProposer):
             slots.append(self._dspark_req_id_to_slot[req_id])
         return slots
 
+    def _copy_dspark_block_table(self, block_table: torch.Tensor | None) -> None:
+        block_table_buffer = self._dspark_block_table_buffer
+        if block_table_buffer is None:
+            self._dspark_block_table_tensor = block_table
+            return
+        block_table_buffer.zero_()
+        if block_table is not None:
+            num_rows = min(block_table.shape[0], block_table_buffer.shape[0])
+            num_cols = min(block_table.shape[1], block_table_buffer.shape[1])
+            block_table_buffer[:num_rows, :num_cols].copy_(
+                block_table[:num_rows, :num_cols]
+            )
+        self._dspark_block_table_tensor = block_table_buffer
+
     def set_inputs_first_pass(
         self,
         target_token_ids: torch.Tensor,
@@ -339,6 +392,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         del req_scheduled_tokens, long_seq_metadata
         is_prefill = (num_decode_reqs == 0 and num_prefill_reqs > 0)
         batch_size = cad.num_reqs
+        self._copy_dspark_block_table(getattr(cad, "block_table_tensor", None))
         block_size = self.num_speculative_tokens
         num_query_total = batch_size * block_size
         request_slots = self._assign_request_slots(batch_size)
@@ -377,6 +431,8 @@ class AscendDSparkProposer(AscendDflashProposer):
                     cad.slot_mapping[:num_context].to(self._context_slot_mapping_buffer.dtype),
                     torch.full_like(self._context_slot_mapping_buffer[:num_context], -1),
                 )
+            else:
+                self._context_slot_mapping_buffer[:num_context].fill_(-1)
         if is_prefill:
             return num_query_total, None, cad, None
         model_config = getattr(getattr(self, "vllm_config", None), "model_config", None)
@@ -439,6 +495,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             "inputs_embeds": None,
             "request_slots": self._request_slots_buffer[:num_input_tokens],
             "slot_mapping": self._slot_mapping_buffer[:num_input_tokens],
+            "block_table": self._dspark_block_table_tensor,
         }
 
     def _reset_pending_request_slots(self) -> None:

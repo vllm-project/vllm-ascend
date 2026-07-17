@@ -292,17 +292,22 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         self.block_size = _dsv4_block_sizes()[cache_config.block_size][0][1]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        is_dspark_cache = getattr(self, "is_dspark_cache", False)
+        if get_ascend_device_type() in {AscendDeviceType.A5} and not is_dspark_cache:
             self.dtype = torch.float8_e4m3fn
             vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
-        cached_head_size = self.head_dim + 128 if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_dim
+        cached_head_size = (
+            self.head_dim + 128
+            if get_ascend_device_type() in {AscendDeviceType.A5} and not is_dspark_cache
+            else self.head_dim
+        )
         return SlidingWindowMLASpec(
             block_size=self.block_size,
             num_kv_heads=1,
             head_size=cached_head_size,
             dtype=self.dtype,
             sliding_window=self.window_size,
-            cache_dtype_str=self.cache_config.cache_dtype,
+            cache_dtype_str="auto" if is_dspark_cache else self.cache_config.cache_dtype,
             model_version="deepseek_v4",
             alignment=None,
         )

@@ -60,6 +60,7 @@ from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import g
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     RegisterRegions,
     collect_storage_merged_register_regions,
+    get_dspark_num_kv_cache_layers,
     get_transfer_timeout_value,
     validate_register_region_count,
 )
@@ -500,7 +501,10 @@ class KVCacheRecvingThread(threading.Thread):
 
         self.num_draft_layers = 0
         if self.vllm_config.speculative_config is not None:
-            if self.vllm_config.speculative_config.method == "mtp":
+            dspark_num_layers = get_dspark_num_kv_cache_layers(self.vllm_config)
+            if dspark_num_layers is not None:
+                self.num_draft_layers = dspark_num_layers
+            elif self.vllm_config.speculative_config.method == "mtp":
                 # all MTP layer use the same kv cache layer, so only need to transfer once
                 self.num_draft_layers = 1
             elif (

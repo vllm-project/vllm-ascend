@@ -3244,7 +3244,10 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_gid, total_num_scheduled_tokens_compressed_list)  # type: ignore[arg-type]
             if self.speculative_config and spec_decode_common_attn_metadata is None:
                 if isinstance(self.drafter, AscendDSparkProposer):
-                    spec_decode_common_attn_metadata = cm
+                    # DSpark manually reads and writes its SWA context cache, so
+                    # it must receive the block table for that cache's group.
+                    if self.drafter.kv_cache_gid == kv_cache_gid:
+                        spec_decode_common_attn_metadata = cm
                 elif isinstance(
                     self.drafter,
                     AscendEagleProposer | AscendDraftModelProposer,
