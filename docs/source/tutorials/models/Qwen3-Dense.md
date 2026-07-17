@@ -1,12 +1,12 @@
-# Qwen3-Dense (Qwen3-0.6B/1.7B/4B/8B/14B/32B, W8A8, W4A8, W4A4)
+# Qwen3-Dense (Qwen3-0.6B/1.7B/4B/8B/14B/32B, W8A8, W4A8, W4A4, W8A8SC-310)
 
 ## 1 Introduction
 
-Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models. Built upon extensive training, Qwen3 delivers groundbreaking advancements in reasoning, instruction-following, agent capabilities, and multilingual support. The Dense variants covered in this document include Qwen3-0.6B, 1.7B, 4B, 8B, 14B, and 32B, along with their quantized versions (W8A8, W4A8, W4A4) optimized for Ascend NPU deployment.
+Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models. Built upon extensive training, Qwen3 delivers groundbreaking advancements in reasoning, instruction-following, agent capabilities, and multilingual support. The Dense variants covered in this document include Qwen3-0.6B, 1.7B, 4B, 8B, 14B, and 32B, along with their quantized versions (W8A8, W4A8, W4A4, and W8A8SC-310) optimized for Ascend NPU deployment.
 
 This document will demonstrate the main validation steps for Qwen3 Dense models in the vLLM-Ascend environment, including supported features, environment preparation, model quantization, single-node and multi-node deployment, as well as accuracy and performance evaluation. By tailoring service-level configurations to fit different use cases, you can ensure optimal performance across various scenarios.
 
-The Qwen3 Dense models are first supported in v0.8.4rc2. W8A8 quantization was first supported in v0.8.4rc2, W4A8 quantization is supported since v0.9.1rc2, and W4A4 is supported since v0.11.0rc1. This document is validated and written based on **vLLM-Ascend v0.21.0**. All **v0.21.0 and later versions** can run stably. To use the latest features, it is recommended to use the latest release candidate or official version.
+The Qwen3 Dense models are first supported in v0.8.4rc2. W8A8 quantization was first supported in v0.8.4rc2, W4A8 quantization is supported since v0.9.1rc2, and W4A4 is supported since v0.11.0rc1. Atlas inference products use the W8A8SC-310 quantized weights listed in this tutorial. This document is validated and written based on **vLLM-Ascend v0.21.0**. All **v0.21.0 and later versions** can run stably. To use the latest features, it is recommended to use the latest release candidate or official version.
 
 ## 2 Supported Features
 
@@ -24,20 +24,28 @@ The following model variants are available. It is recommended to download the mo
 
 | Model | Hardware Requirement | Download |
 |-------|---------------------|----------|
-| Qwen3-0.6B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8), or Atlas inference products | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B) |
-| Qwen3-1.7B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8), or Atlas inference products | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B) |
-| Qwen3-4B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8), or Atlas inference products | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-4B) |
-| Qwen3-8B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8), or Atlas inference products | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-8B) |
-| Qwen3-14B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8), or Atlas inference products | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-14B) |
-| Qwen3-32B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8), or Atlas inference products | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-32B) |
+| Qwen3-0.6B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B) |
+| Qwen3-1.7B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B) |
+| Qwen3-4B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-4B) |
+| Qwen3-8B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-8B) |
+| Qwen3-14B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-14B) |
+| Qwen3-32B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-32B) |
 
-**Quantized Versions:**
+**Quantized Versions for Atlas A2/A3 inference products:**
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
-| Qwen3-8B-W4A8 | W4A8 | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8), or Atlas inference products | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8) |
-| Qwen3-32B-W4A4 | W4A4 | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8), or Atlas inference products | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W4A4) |
-| Qwen3-32B-W8A8 | W8A8 | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8), or Atlas inference products | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8) |
+| Qwen3-8B-W4A8 | W4A8 | 1 Atlas A3 inference products (64G × 16) or 1 Atlas A2 inference products (64G × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8) |
+| Qwen3-32B-W4A4 | W4A4 | 1 Atlas A3 inference products (64G × 16) or 1 Atlas A2 inference products (64G × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W4A4) |
+| Qwen3-32B-W8A8 | W8A8 | 1 Atlas A3 inference products (64G × 16) or 1 Atlas A2 inference products (64G × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8) |
+
+**Quantized Versions for Atlas inference products:**
+
+| Model | Quantization | Hardware Requirement | Download |
+|-------|-------------|---------------------|----------|
+| Qwen3-8B-W8A8SC | W8A8SC | Atlas inference products (TP1) | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-8B-w8a8sc-310-vllm) |
+| Qwen3-14B-W8A8SC | W8A8SC | Atlas inference products (TP1) | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-14B-w8a8sc-310-vllm) |
+| Qwen3-32B-W8A8SC | W8A8SC | Atlas inference products (TP4) | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-32B-w8a8sc-310-vllm) |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -281,59 +289,15 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 
 === "Atlas inference products"
 
-    Qwen3-32B-W8A8:
+    Atlas inference products use the W8A8SC-310 quantized weights from the Eco-Tech official ModelScope repository. Keep an explicit `--max-model-len` for 310P deployment to avoid OOM caused by oversized attention mask allocation.
+
+    Qwen3-8B-W8A8SC:
 
     ```bash
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export TASK_QUEUE_ENABLE=1
-    export HCCL_OP_EXPANSION_MODE="AIV"
-
-    vllm serve your_model_path \
-        --host 127.0.0.1 \
-        --port 8080 \
-        --tensor-parallel-size 4 \
-        --gpu-memory-utilization 0.90 \
-        --max-num-seqs 32 \
-        --served-model-name qwen3 \
-        --dtype float16 \
-        --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
-        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [16,32]}' \
-        --quantization ascend \
-        --max-model-len 20480 \
-        --no-enable-prefix-caching
-    ```
-
-    Qwen3-32B-W4A4:
-
-    ```bash
-    export ASCEND_RT_VISIBLE_DEVICES=0,1
-    export VLLM_USE_V1=1
-    export TASK_QUEUE_ENABLE=1
-    export HCCL_BUFFSIZE=1024
-
-    vllm serve your_model_path \
-        --host 127.0.0.1 \
-        --port 8080 \
-        --tensor-parallel-size 2 \
-        --gpu-memory-utilization 0.90 \
-        --max-num-seqs 32 \
-        --served-model-name qwen3 \
-        --dtype float16 \
-        --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
-        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [16,32]}' \
-        --quantization ascend \
-        --max-model-len 20480 \
-        --no-enable-prefix-caching
-    ```
-
-    Qwen3-8B-W4A8:
-
-    ```bash
+    export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    vllm serve your_model_path \
+    vllm serve Eco-Tech/Qwen3-8B-w8a8sc-310-vllm/TP1/Qwen3-8B-w8a8sc-310-vllm-tp1 \
         --host 127.0.0.1 \
         --port 8080 \
         --tensor-parallel-size 1 \
@@ -345,7 +309,52 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32]}' \
         --quantization ascend \
         --max-model-len 16384 \
-        --no-enable-prefix-caching
+        --no-enable-prefix-caching \
+        --load-format sharded_state
+    ```
+
+    Qwen3-14B-W8A8SC:
+
+    ```bash
+    export VLLM_USE_MODELSCOPE=True
+    export ASCEND_RT_VISIBLE_DEVICES=0
+
+    vllm serve Eco-Tech/Qwen3-14B-w8a8sc-310-vllm/TP1/Qwen3-14B-w8a8sc-310-vllm-tp1 \
+        --host 127.0.0.1 \
+        --port 8080 \
+        --tensor-parallel-size 1 \
+        --gpu-memory-utilization 0.90 \
+        --max-num-seqs 16 \
+        --served-model-name qwen3 \
+        --dtype float16 \
+        --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}' \
+        --quantization ascend \
+        --max-model-len 16384 \
+        --no-enable-prefix-caching \
+        --load-format sharded_state
+    ```
+
+    Qwen3-32B-W8A8SC:
+
+    ```bash
+    export VLLM_USE_MODELSCOPE=True
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+
+    vllm serve Eco-Tech/Qwen3-32B-w8a8sc-310-vllm/TP4/Qwen3-32B-w8a8sc-310-vllm-tp4 \
+        --host 127.0.0.1 \
+        --port 8080 \
+        --tensor-parallel-size 4 \
+        --gpu-memory-utilization 0.90 \
+        --max-num-seqs 32 \
+        --served-model-name qwen3 \
+        --dtype float16 \
+        --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [16,32]}' \
+        --quantization ascend \
+        --max-model-len 20480 \
+        --no-enable-prefix-caching \
+        --load-format sharded_state
     ```
 
 !!! note
