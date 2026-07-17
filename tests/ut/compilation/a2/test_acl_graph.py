@@ -20,6 +20,7 @@ import torch
 from vllm.compilation.cuda_graph import CUDAGraphOptions
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, ForwardContext
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import AscendMetadata, AscendMetadataForDecode
@@ -213,6 +214,47 @@ class TestACLGraphWrapper(TestBase):
         # Should call the runnable directly without graph capture
         self.mock_runnable.assert_called_once_with("arg1", "arg2")
         self.assertEqual(result, "test_output")
+
+    @patch("vllm_ascend.compilation.acl_graph.get_forward_context")
+    @patch("vllm_ascend.compilation.acl_graph.current_platform")
+    @patch("vllm_ascend.compilation.acl_graph.envs")
+    def test_full_decode_only_bypasses_graph_for_gdn_prefill(
+        self,
+        mock_envs,
+        mock_current_platform,
+        mock_get_forward_context,
+    ):
+        mock_envs.VLLM_LOGGING_LEVEL = "INFO"
+        mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
+        self.mock_vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        self.mock_forward_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
+        self.mock_forward_context.skip_compiled = False
+        self.mock_forward_context.attn_metadata = {
+            "gdn": GDNAttentionMetadata(
+                num_prefills=1,
+                num_prefill_tokens=1,
+                num_decodes=0,
+                num_decode_tokens=0,
+                num_spec_decodes=0,
+                num_spec_decode_tokens=0,
+                num_actual_tokens=1,
+            )
+        }
+        mock_get_forward_context.return_value = self.mock_forward_context
+        wrapper = ACLGraphWrapper(
+            runnable=self.mock_runnable,
+            vllm_config=self.mock_vllm_config,
+            runtime_mode=CUDAGraphMode.FULL,
+            cudagraph_options=self.mock_cudagraph_options,
+        )
+
+        result = wrapper("arg1", "arg2")
+
+        self.mock_runnable.assert_called_once_with("arg1", "arg2")
+        self.assertEqual(result, "test_output")
+        self.assertEqual(wrapper.concrete_aclgraph_entries, {})
+        self.assertEqual(self.mock_forward_context.cudagraph_runtime_mode, CUDAGraphMode.FULL)
+        self.assertFalse(self.mock_forward_context.skip_compiled)
 
     @patch("vllm_ascend.compilation.acl_graph.torch")
     @patch("vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled")

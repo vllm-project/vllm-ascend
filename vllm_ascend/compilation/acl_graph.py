@@ -19,6 +19,7 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
@@ -49,6 +50,16 @@ def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
 
 def _raise_stream_resource_capture_error(exc: RuntimeError) -> None:
     raise RuntimeError(f"{_STREAM_RESOURCE_GUIDANCE}\nOriginal error:\n{exc}") from exc
+
+
+def _has_gdn_prefill(attn_metadata: Any) -> bool:
+    metadata_groups = attn_metadata if isinstance(attn_metadata, list) else [attn_metadata]
+    return any(
+        isinstance(metadata, GDNAttentionMetadata) and metadata.num_prefills > 0
+        for metadata_group in metadata_groups
+        if isinstance(metadata_group, dict)
+        for metadata in metadata_group.values()
+    )
 
 
 @dataclasses.dataclass
@@ -148,6 +159,24 @@ class ACLGraphWrapper:
             # CUDAGraphWrapper when nesting multiple instances with different
             # runtime modes.
             return self.runnable(*args, **kwargs)
+
+        if (
+            self.runtime_mode == CUDAGraphMode.FULL
+            and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+            and _has_gdn_prefill(forward_context.attn_metadata)
+        ):
+            # Shape-only dispatch can mistake a one-token tail prefill for
+            # decode. Keep its GDN prefill/PCP semantics by bypassing the
+            # decode-only graph for this invocation.
+            previous_runtime_mode = forward_context.cudagraph_runtime_mode
+            previous_skip_compiled = forward_context.skip_compiled
+            forward_context.cudagraph_runtime_mode = CUDAGraphMode.NONE
+            forward_context.skip_compiled = True
+            try:
+                return self.runnable(*args, **kwargs)
+            finally:
+                forward_context.cudagraph_runtime_mode = previous_runtime_mode
+                forward_context.skip_compiled = previous_skip_compiled
 
         if batch_descriptor not in self.concrete_aclgraph_entries:
             # create a new entry for this batch descriptor
