@@ -70,17 +70,17 @@ jobs:
           # chip_type x os → image + soc_version
           - chip_type: a2
             os: ubuntu
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-910b-ubuntu22.04-py3.12
             soc_version: ascend910b1
 
           - chip_type: a3
             os: ubuntu
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-a3-ubuntu22.04-py3.12
             soc_version: ascend910_9391
 
           - chip_type: a5
             os: ubuntu
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-950-ubuntu22.04-py3.12
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-950-ubuntu22.04-py3.12
             soc_version: ascend950dt_9582
 
           - chip_type: 310p
@@ -90,23 +90,23 @@ jobs:
 
           - chip_type: a2
             os: openeuler
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-openeuler24.03-py3.12
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-910b-openeuler24.03-py3.12
             soc_version: ascend910b1
 
           - chip_type: a3
             os: openeuler
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-openeuler24.03-py3.12
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-a3-openeuler24.03-py3.12
             soc_version: ascend910_9391
   
           - chip_type: a5
             os: openeuler
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-950-openeuler24.03-py3.12
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-950-openeuler24.03-py3.12
             soc_version: ascend950dt_9582
-            
+
           - chip_type: 310p
             os: openeuler
             image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-beta.1-310p-openeuler24.03-py3.12
-            soc_version: ascend310p1
+            soc_version: ascend310p
 
     container:
       image: ${{ matrix.image }}
