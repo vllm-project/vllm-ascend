@@ -799,34 +799,58 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_prefill_reqs=num_prefill_reqs,
             num_decode_reqs=num_decode_reqs,
         )
-        assert self.runner is not None
-        pcp_manager = getattr(self.runner, "pcp_manager", None)
-        if pcp_manager is not None:
+        if self.pcp_size * self.dcp_size > 1:
             assert long_seq_args is not None
-            _, ori_token_indices_to_sample = long_seq_args
+            query_lens_d, ori_token_indices_to_sample = long_seq_args
+        assert self.runner is not None
 
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
-        uniform_decode = target_model_batch_desc.uniform
+
+        is_dspark = (
+            self.method == "dspark"
+            or getattr(self, "_is_dspark", False)
+        )
+
+        uniform_decode = bool(target_model_batch_desc.uniform)
+
+        #   IMPORTANT: use the DSPARK proposer/drafter dispatcher.
+        #   DO NOT use the target runner dispatcher here.
+        draft_dispatcher = self.cudagraph_dispatcher
 
         if self.use_cuda_graph:
-            _, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
-                num_tokens=num_tokens, uniform_decode=uniform_decode, has_lora=has_lora
+
+            _, batch_descriptor = draft_dispatcher.dispatch(
+                num_tokens=num_tokens,
+                uniform_decode=uniform_decode,
+                has_lora=has_lora,
             )
-            num_input_tokens = batch_descriptor.num_tokens
+            num_input_tokens = int(batch_descriptor.num_tokens)
         else:
-            num_input_tokens = num_tokens
+            batch_descriptor = None
+            num_input_tokens = int(num_tokens)
 
         (
             num_input_tokens,
             num_tokens_across_dp,
             _,
-        ) = self.runner._sync_metadata_across_dp(num_input_tokens, is_draft_model=True)
+        ) = self.runner._sync_metadata_across_dp(
+            num_input_tokens,
+            is_draft_model=True,
+        )
+
+        num_input_tokens = int(num_input_tokens)
 
         if self.use_cuda_graph:
-            aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
-                num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora
+
+            aclgraph_runtime_mode, batch_descriptor = (
+                draft_dispatcher.dispatch(
+                    num_tokens=num_input_tokens,
+                    uniform_decode=uniform_decode,
+                    has_lora=has_lora,
+                )
             )
-            num_input_tokens = batch_descriptor.num_tokens
+
+            num_input_tokens = int(batch_descriptor.num_tokens)
         else:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
             batch_descriptor = None
@@ -840,14 +864,29 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_reqs = common_attn_metadata.query_start_loc.shape[0]
             self.query_start_loc.gpu[:num_reqs].copy_(common_attn_metadata.query_start_loc)
             self.query_start_loc.cpu[:num_reqs].copy_(common_attn_metadata.query_start_loc_cpu)
+
+            #   DSPARK draft batch descriptor
+            graph_num_reqs = int(batch_descriptor.num_reqs)
+            actual_num_reqs = int(common_attn_metadata.num_reqs)
+
+            if graph_num_reqs < actual_num_reqs:
+                raise RuntimeError(
+                    "FULL draft graph has fewer request slots than the runtime batch: "
+                    f"graph_num_reqs={graph_num_reqs}, "
+                    f"actual_num_reqs={actual_num_reqs}, "
+                    f"num_input_tokens={num_input_tokens}, "
+                    f"batch_descriptor={batch_descriptor}"
+                )
+
             num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
                 self.query_start_loc,
                 num_input_tokens,
-                batch_descriptor.num_reqs if batch_descriptor.num_reqs is not None else common_attn_metadata.num_reqs,
-                common_attn_metadata.num_reqs,
+                graph_num_reqs, #batch_descriptor.num_reqs
+                actual_num_reqs,
                 aclgraph_runtime_mode,
-                batch_descriptor.num_reqs,
+                graph_num_reqs, #batch_descriptor.num_reqs,
             )
+
             common_attn_metadata.num_reqs = num_reqs_padded
             common_attn_metadata.query_start_loc = self.query_start_loc.gpu[: num_reqs_padded + 1]
             common_attn_metadata.query_start_loc_cpu = self.query_start_loc.cpu[: num_reqs_padded + 1]
@@ -857,12 +896,24 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.block_table_tensor = self._adjust_tensor(
                 common_attn_metadata.block_table_tensor, slicing_length
             )
-            if self.method == "dflash":
-                common_attn_metadata.seq_lens = self._adjust_tensor(common_attn_metadata.seq_lens, num_reqs_padded)
+
+            if self.method == "dflash" or is_dspark:
+                #   DFlash/DSpark already prepared draft-specific GPU sequence
+                #   lengths in set_inputs_first_pass().
+                #   DSpark: seq_lens = effective_seq_lens - rejected + K
+
+                common_attn_metadata.seq_lens = self._adjust_tensor(
+                    common_attn_metadata.seq_lens,
+                    num_reqs_padded,
+                )
             else:
-                common_attn_metadata.seq_lens = self._adjust_tensor(self.runner.seq_lens, num_reqs_padded)
+                common_attn_metadata.seq_lens = self._adjust_tensor(
+                    self.runner.seq_lens,
+                    num_reqs_padded,
+                )
                 common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
-                    self.runner.optimistic_seq_lens_cpu, num_reqs_padded
+                    self.runner.optimistic_seq_lens_cpu,
+                    num_reqs_padded,
                 )
                 # Keep the upstream-canonical mirror length-aligned with the
                 # padded subclass field, but only if the caller already
@@ -871,16 +922,26 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # the two fields independent so per-step in-place updates in
                 # ``attn_update_stack_num_spec_norm`` don't double-count.
                 if common_attn_metadata._seq_lens_cpu is not None:
-                    common_attn_metadata._seq_lens_cpu = common_attn_metadata.seq_lens_cpu.clone()
+                    common_attn_metadata._seq_lens_cpu = (
+                        common_attn_metadata.seq_lens_cpu.clone()
+                    )
+
             if common_attn_metadata.num_computed_tokens_cpu is not None:
                 common_attn_metadata.num_computed_tokens_cpu = self._adjust_tensor(
                     common_attn_metadata.num_computed_tokens_cpu, num_reqs_padded
                 )
 
-            if pcp_manager is not None and self.pcp_size > 1:
-                pcp_manager.mask_spec_decode_restore_idx_for_graph(
+            if self.pcp_size > 1:
+                pcp_allgather_restore_idx = (
                     common_attn_metadata.prefill_context_parallel_metadata.pcp_allgather_restore_idx
                 )
+                index = torch.arange(pcp_allgather_restore_idx.shape[0], device=pcp_allgather_restore_idx.device)
+                mask = (index % (self.pcp_size * self.decode_threshold)) >= self.decode_threshold
+                pcp_allgather_restore_idx[mask] = 0
+                self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: pcp_allgather_restore_idx.shape[0]] = (
+                    pcp_allgather_restore_idx
+                )
+                self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[pcp_allgather_restore_idx.shape[0] :] = 0
         else:
             num_reqs_padded = common_attn_metadata.num_reqs
             # In the below scenario, padding has been applied by _pad_query_start_loc_for_fia in the model runner.
@@ -889,9 +950,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.block_table_tensor = self._adjust_tensor(
                     common_attn_metadata.block_table_tensor, num_reqs_padded
                 )
-
-        if self.draft_window_size is not None:
-            self.sliding_window.apply(common_attn_metadata)
 
         if self.supports_mm_inputs:
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
@@ -933,6 +991,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_ratio_to_sas_metadata=dict(),
                 block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
             )
+
         attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args)
 
         if hasattr(attn_metadata, "causal") and not attn_metadata.causal:
@@ -967,53 +1026,86 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         metadata_has_prefill = bool(getattr(attn_metadata_i, "num_prefills", 0))
         is_prefill_batch = num_prefill_reqs > 0 or metadata_has_prefill
-        pcp_mtp_inputs = None
-        draft_cp_kwargs = {
-            "ori_seq_len": None,
-            "ori_seq_len_cpu": None,
-            "slot_indices": None,
-            "mtp_slot_mapping": None,
-        }
-        if pcp_manager is not None:
-            pcp_mtp_inputs = pcp_manager.prepare_spec_decode_mtp_drafting_inputs(
-                common_attn_metadata=common_attn_metadata,
-                attn_metadata=attn_metadata_i,
-                ori_token_indices_to_sample=ori_token_indices_to_sample,
-                batch_size=batch_size,
-                num_decode_reqs=num_decode_reqs,
-                is_prefill_batch=is_prefill_batch,
-                num_speculative_tokens=self.num_speculative_tokens,
-            )
-            if pcp_mtp_inputs is not None:
-                draft_cp_kwargs.update(
-                    ori_seq_len=pcp_mtp_inputs.seq_lens,
-                    ori_seq_len_cpu=pcp_mtp_inputs.seq_lens_cpu,
-                    slot_indices=pcp_mtp_inputs.slot_indices,
-                    mtp_slot_mapping=pcp_mtp_inputs.slot_mapping,
+        if self.pcp_size * self.dcp_size > 1:
+            is_decode_only_batch = num_decode_reqs > 0 and not is_prefill_batch
+            if self.num_speculative_tokens > 1 and is_decode_only_batch:
+                # For pcp/dcp, tokens are split across different cp ranks,
+                # so we can not simply update slot_mapping by += 1.
+                # Instead, we pre-allocate mtp slot_mapping in model_runner
+                # (_generate_pcp_mtp_input), and use updated slot_indices
+                # to get corresponding slot_mapping in each step.
+                num_reject_tokens = (
+                    torch.tensor(self.runner.pcp_manager.cu_num_tokens_pcp_full, dtype=torch.int32).to(self.device)
+                    - ori_token_indices_to_sample
+                    - 1
                 )
+                num_accept_tokens = query_lens_d.to(self.device) - num_reject_tokens
+                ori_seq_len = attn_metadata_i.seq_lens_cpu[:batch_size].clone()
+                mtp_slot_mapping = self.runner.pcp_manager.mtp_slot_pad
 
-        should_update_next_steps = not self.parallel_drafting and (
-            self.pcp_size * self.dcp_size == 1 or pcp_mtp_inputs is not None
-        )
-        if should_update_next_steps:
-            # Copy the old attn_metadata and update
-            for draft_index in range(1, self.num_speculative_tokens):
-                per_layer_attn_metadata = dict()
-                for attn_group in self.draft_attn_groups:
-                    common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
-                        draft_index,
-                        attn_metadata,
-                        common_attn_metadata,
-                        batch_size,
-                        num_input_tokens,
-                        used_update_positions,
-                        aclgraph_runtime_mode,
-                        **draft_cp_kwargs,
-                        attn_group=attn_group,
+                # slot_mapping index base offset:
+                # scheduled tokens + pre-allocated mtp tokens + accepted tokens
+                slot_idx_base = (
+                    torch.cat(
+                        [
+                            torch.tensor([0], dtype=torch.int32, device=self.device),
+                            (torch.cumsum(query_lens_d, dim=0)[:-1] * self.pcp_size).to(self.device),
+                        ]
                     )
-                    for layer_name in self.attn_layer_names:
-                        per_layer_attn_metadata[layer_name] = attn_metadata
-                multi_steps_attn_metadata.append(per_layer_attn_metadata)
+                    + torch.arange(num_decode_reqs, device=self.device)
+                    * (self.num_speculative_tokens - 1)
+                    * self.pcp_size
+                    + (num_accept_tokens - 1) * self.pcp_size
+                )
+                slot_indices_list = []
+                for req_id in range(num_decode_reqs):
+                    slot_indices_list.append(
+                        torch.arange(slot_idx_base[req_id], slot_idx_base[req_id] + self.pcp_size, device=self.device)
+                    )
+                slot_indices = torch.cat(slot_indices_list, dim=0)
+
+                common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor[:batch_size]
+
+                # Copy the old attn_metadata and update
+                if not self.parallel_drafting:
+                    for draft_index in range(1, self.num_speculative_tokens):
+                        per_layer_attn_metadata = dict()
+                        for attn_group in self.draft_attn_groups:
+                            common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
+                                draft_index,
+                                attn_metadata,
+                                common_attn_metadata,
+                                batch_size,
+                                num_input_tokens,
+                                used_update_positions,
+                                aclgraph_runtime_mode,
+                                ori_seq_len,
+                                slot_indices,
+                                mtp_slot_mapping,
+                                attn_group=attn_group,
+                            )
+                            for layer_name in self.attn_layer_names:
+                                per_layer_attn_metadata[layer_name] = attn_metadata
+                        multi_steps_attn_metadata.append(per_layer_attn_metadata)
+        else:
+            # Copy the old attn_metadata and update
+            if not self.parallel_drafting:
+                for draft_index in range(1, self.num_speculative_tokens):
+                    per_layer_attn_metadata = dict()
+                    for attn_group in self.draft_attn_groups:
+                        common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
+                            draft_index,
+                            attn_metadata,
+                            common_attn_metadata,
+                            batch_size,
+                            num_input_tokens,
+                            used_update_positions,
+                            aclgraph_runtime_mode,
+                            attn_group=attn_group,
+                        )
+                        for layer_name in self.attn_layer_names:
+                            per_layer_attn_metadata[layer_name] = attn_metadata
+                    multi_steps_attn_metadata.append(per_layer_attn_metadata)
 
         token_indices_to_sample_len = token_indices_to_sample.shape[0]
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
@@ -1048,8 +1140,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "num_tokens": num_tokens,
                 "is_prefill": is_prefill_batch,
             }
-            runnable = cast(Callable[..., Any], self._runnable)
-            run_draft: Callable[[], Any] = partial(runnable, **model_inputs)
+
+            run_draft = partial(self._runnable, **model_inputs)
 
             if self.enable_enpu:
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
