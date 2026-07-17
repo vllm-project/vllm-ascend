@@ -26,7 +26,7 @@ It is recommended to download the model weight to the shared directory of multip
 
 You can use our official docker image to run GLM-5.2 directly.
 
-::::{tab-set}
+:::::{tab-set}
 :sync-group: install
 
 ::::{tab-item} A3 series
