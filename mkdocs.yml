@@ -251,7 +251,6 @@ nav:
         - user_guide/feature_guide/netloader.md
         - user_guide/feature_guide/rfork.md
         - user_guide/feature_guide/epd_disaggregation.md
-        - user_guide/feature_guide/short_request_first.md
         - user_guide/feature_guide/kv_pool.md
         - user_guide/feature_guide/kv_cache_cpu_offload.md
         - user_guide/feature_guide/recompute_cpu_offload.md
@@ -265,7 +264,9 @@ nav:
         - user_guide/feature_guide/batch_invariance.md
         - user_guide/feature_guide/lmcache_ascend_deployment.md
         - user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md
+        - user_guide/feature_guide/short_request_first.md
         - user_guide/feature_guide/flash_attention.md
+        - user_guide/feature_guide/batch_job_aware_scheduler.md
     - Deployment Guide:
         - user_guide/deployment_guide/index.md
         - user_guide/deployment_guide/using_volcano_kthena.md

@@ -659,6 +659,7 @@ Before you start, please
             --max-model-len 133120 \
             --additional-config '{"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_c8": true,"c8_enable_reshape_optim":True}' \
             --max-num-batched-tokens 8192 \
+
             --trust-remote-code \
             --max-num-seqs 64 \
             --quantization ascend \
@@ -1039,7 +1040,7 @@ vllm serve <MODEL_PATH> \
     "multistream_overlap_shared_expert": true,
     "enable_dsa_cp": true
   }' \
-  --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager": true}'
+  --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp", "enforce_eager": true}'
 ```
 
 `run_dp_template.sh` for the decode nodes:

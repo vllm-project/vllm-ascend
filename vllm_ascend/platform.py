@@ -623,7 +623,8 @@ class NPUPlatform(Platform):
         if get_ascend_device_type() != AscendDeviceType._310P:
             compilation_config.custom_ops = ["all"]
 
-        if ascend_config.enable_balance_scheduling:
+        scheduler_extension_config = ascend_config.scheduler_config
+        if scheduler_extension_config.enable_balance_scheduling:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
             if kv_transfer_config is not None and kv_role != "kv_both":
@@ -635,7 +636,7 @@ class NPUPlatform(Platform):
 
         cls._validate_kv_load_failure_policy(vllm_config)
 
-        short_request_first_config = ascend_config.short_request_first_config
+        short_request_first_config = scheduler_extension_config.short_request_first_config
         enable_short_request_first = short_request_first_config.enabled
         short_request_first_supported_policy = vllm_config.scheduler_config.policy == "fcfs"
         if enable_short_request_first and not short_request_first_supported_policy:
@@ -645,7 +646,7 @@ class NPUPlatform(Platform):
                 vllm_config.scheduler_config.policy,
             )
 
-        if ascend_config.recompute_scheduler_enable:
+        if scheduler_extension_config.recompute_scheduler_enable:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
             if kv_role == "kv_producer":
@@ -655,7 +656,7 @@ class NPUPlatform(Platform):
                     "Please remove it from P-node configs and keep it only on PD-disaggregated D nodes "
                     "(kv_role='kv_consumer')."
                 )
-                ascend_config.recompute_scheduler_enable = False
+                scheduler_extension_config.recompute_scheduler_enable = False
             elif kv_transfer_config is None or kv_role != "kv_consumer":
                 raise ValueError(
                     "recompute_scheduler_enable can only be enabled on PD-disaggregated D nodes "
@@ -682,11 +683,22 @@ class NPUPlatform(Platform):
             )
 
         # Use ProfilingChunkScheduler when profiling-based chunk sizing is on.
-        if ascend_config.profiling_chunk_config.enabled:
+        if scheduler_extension_config.profiling_chunk_config.enabled:
             vllm_config.scheduler_config.scheduler_cls = (
                 "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler"
             )
             import vllm_ascend.patch.platform.patch_profiling_chunk  # noqa
+
+        # Extend original scheduler_config to use BatchJobAwareScheduler.
+        if scheduler_extension_config.batch_job_sched_config.enabled:
+            if vllm_config.scheduler_config.async_scheduling:
+                vllm_config.scheduler_config.scheduler_cls = (
+                    "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareAsyncScheduler"
+                )
+            else:
+                vllm_config.scheduler_config.scheduler_cls = (
+                    "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareScheduler"
+                )
 
         cp_size = parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size
         use_sparse = model_uses_sfa_sparse(model_config)

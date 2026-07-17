@@ -32,7 +32,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | GLM-5.2 | 🔵 |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5](../../tutorials/models/GLM5.2.md) |
 | Gemma4 | 🔵 |  | ✅ | A2/A3/Ascend950 |  | ✅ | ✅ |  |  | ✅ | ✅ |  |  | ✅ |  | ✅ | ✅ |  | [Gemma4](../../tutorials/models/Gemma4.md) |
 | Kimi-K2-Thinking | 🔵 |  |  | A2/A3 |  |  |  |  |  |  |  |  |  |  |  |  |  |  | [Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md) |
-| DeepseekOCR2 | ✅ |  | ✅ | A2/A3 |  | ✅ |  |  |  | ✅ |  |  |  |  |  |  |  |  | [DeepSeekOCR2](../../tutorials/models/DeepSeekOCR2.md) |
+| DeepSeekOCR2 | ✅ |  | ✅ | A2/A3 |  | ✅ |  |  |  | ✅ |  |  |  |  |  |  |  |  | [DeepSeekOCR2](../../tutorials/models/DeepSeekOCR2.md) |
 | MiniMax-M2.5/2.7 | ✅ |  | ✅ | A2/A3/Ascend950 (Ascend950 experimental) | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ | 🟡 | ✅ | 200k | [MiniMax-M2](../../tutorials/models/MiniMax-M2.md) |
 | Qwen2.5-Math-RM-72B | ✅ | vllm-rm, tensor_parallel_size=4, max_model_len=4096 | ✅ | A2 | ✅ | 🟡 | 🟡 | ❌ | 🟡 | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 4096 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |
 
@@ -47,7 +47,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Qwen2-based                   | ✅        |                                                                      | A2/A3 |
 | QwQ-32B                       | ✅        |                                                                      | A2/A3 |
 | Llama2/3/3.1/3.2              | ✅        |                                                                      | A2/A3 |
-| Internlm                      | 🔵        | [#1962](https://github.com/vllm-project/vllm-ascend/issues/1962)     | A2/A3 |
+| InternLM                      | 🔵        | [#1962](https://github.com/vllm-project/vllm-ascend/issues/1962)     | A2/A3 |
 | Baichuan                      | 🔵        |                                                                      | A2/A3 |
 | Baichuan2                     | 🔵        |                                                                      | A2/A3 |
 | Phi-4-mini                    | 🔵        |                                                                      | A2/A3 |
@@ -86,7 +86,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Model | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
 | -------------------------------- | --------------- | ---------------------------------------------------------------------- | ------ | -------------------- | ------ | ----------------- | ------------------------ | ------ | ---------------------- | ------------------ | ----------------- | ------------------- | ----------------- | --------------- | ------------------------------- | -------------------- | -------------------- | --------------- | ----- |
 | Qwen3-VL | ✅ |  |  | A2/A3 |  |  |  |  |  |  | ✅ |  |  |  |  | ✅ | ✅ |  | [Qwen-VL-Dense](../../tutorials/models/Qwen-VL-Dense.md) |
-| Qwen3-VL-MOE | ✅ |  | ✅ | A2/A3 |  | ✅ | ✅ |  |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 256k | [Qwen3-VL-MOE](../../tutorials/models/Qwen3-VL-235B-A22B-Instruct.md) |
+| Qwen3-VL-30B-A3B/Qwen3-VL-235B-A22B | ✅ |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  |  | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 262144 | [Qwen3-VL-30B-A3B](../../tutorials/models/Qwen3-VL-30B-A3B-Instruct.md)/[Qwen3-VL-235B-A22B](../../tutorials/models/Qwen3-VL-235B-A22B-Instruct.md) |
 | Qwen3.5-397B-A17B | ✅ |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 1010000 | [Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md) |
 | Qwen3.5-27B / Qwen3.6-27B | ✅ |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 262144 | [Qwen3.5-27B / Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
 | Qwen3.6-35B-A3B | 🔵 |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | 🔵 | ✅ | ✅ |  | ✅ | ✅ | ❌ | ✅ | ✅ | 262144 | [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |

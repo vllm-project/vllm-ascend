@@ -49,42 +49,41 @@ class AscendConfig:
         eplb_config = additional_config.get("eplb_config", {})
         self.eplb_config = EplbConfig(eplb_config)
 
-        profiling_chunk_config = additional_config.get("profiling_chunk_config", {})
-        self.profiling_chunk_config = ProfilingChunkConfig(profiling_chunk_config)
-        if self.profiling_chunk_config.enabled:
+        from vllm_ascend import envs as ascend_envs
+
+        self.scheduler_config = SchedulerConfig(
+            additional_config,
+            balance_env_value=ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING,
+        )
+        if self.scheduler_config.profiling_chunk_config.enabled:
             max_batched = vllm_config.scheduler_config.max_num_batched_tokens
-            if max_batched < self.profiling_chunk_config.min_chunk:
+            if max_batched < self.scheduler_config.profiling_chunk_config.min_chunk:
                 logger.warning(
                     "max_num_batched_tokens is smaller than profiling_chunk_config.min_chunk. "
                     "max_num_batched_tokens=%d, min_chunk=%d. "
                     "Clamping min_chunk to %d to avoid it being silently ignored.",
                     max_batched,
-                    self.profiling_chunk_config.min_chunk,
+                    self.scheduler_config.profiling_chunk_config.min_chunk,
                     max_batched,
                 )
-                self.profiling_chunk_config.min_chunk = max_batched
-        if self.profiling_chunk_config.enabled and vllm_config.parallel_config.pipeline_parallel_size <= 1:
+                self.scheduler_config.profiling_chunk_config.min_chunk = max_batched
+        if (
+            self.scheduler_config.profiling_chunk_config.enabled
+            and vllm_config.parallel_config.pipeline_parallel_size <= 1
+        ):
             raise ValueError(
                 "profiling_chunk_config requires pipeline parallelism (pp > 1). "
                 "Please set --pipeline-parallel-size to a value greater than 1, "
                 "or disable profiling_chunk_config."
             )
 
-        from vllm_ascend import envs as ascend_envs
-
-        self.enable_balance_scheduling = self._get_config_value(
-            additional_config,
-            "enable_balance_scheduling",
-            "VLLM_ASCEND_BALANCE_SCHEDULING",
-            ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING,
-        )
         self.enable_flashcomm1 = self._get_config_value(
             additional_config,
             "enable_flashcomm1",
             "VLLM_ASCEND_ENABLE_FLASHCOMM1",
             ascend_envs.VLLM_ASCEND_ENABLE_FLASHCOMM1,
         )
-        if self.profiling_chunk_config.enabled and self.enable_balance_scheduling:
+        if self.scheduler_config.profiling_chunk_config.enabled and self.scheduler_config.enable_balance_scheduling:
             raise ValueError(
                 "profiling_chunk_config and balance scheduling (enable_balance_scheduling) "
                 "cannot be enabled at the same time. Please disable one of them."
@@ -126,7 +125,6 @@ class AscendConfig:
                 )
         self.multistream_overlap_shared_expert = additional_config.get("multistream_overlap_shared_expert", False)
         # PD-disaggregated D node only (kv_consumer); invalid on P nodes and in PD-mixed mode.
-        self.recompute_scheduler_enable = additional_config.get("recompute_scheduler_enable", False)
         # DSV4 oproj / embedding fine-grained TP (oproj_tensor_parallel_size /
         # embedding_tensor_parallel_size) use static, graph-stable exchange
         # buffers and run cross-DP HCCL collectives (all_to_all / all_gather /
@@ -139,16 +137,13 @@ class AscendConfig:
         if (
             self.finegrained_tp_config.oproj_tensor_parallel_size > 0
             or self.finegrained_tp_config.embedding_tensor_parallel_size > 0
-        ) and not self.recompute_scheduler_enable:
+        ) and not self.scheduler_config.recompute_scheduler_enable:
             raise AssertionError(
                 "oproj_tensor_parallel_size / embedding_tensor_parallel_size "
                 "require recompute_scheduler_enable=true: their cross-DP HCCL "
                 "collectives need uniform num_tokens across DP ranks, which is "
                 "only guaranteed when the recompute scheduler is enabled."
             )
-        self.short_request_first_config = ShortRequestFirstConfig(
-            additional_config.get("short_request_first_config", {})
-        )
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
         self.enable_sleep_mode_extra_cleanup = additional_config.get("enable_sleep_mode_extra_cleanup", False)
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
@@ -653,11 +648,11 @@ class ProfilingChunkConfig:
 
     Usage (online)::
 
-        vllm serve <model> --additional-config '{"profiling_chunk_config": {"enabled": true}}'
+        vllm serve <model> --additional-config '{"scheduler_config": {"profiling_chunk_config": {"enabled": true}}}'
 
     Usage (offline)::
 
-        llm = LLM(model, additional_config={"profiling_chunk_config": {"enabled": true}})
+        llm = LLM(model, additional_config={"scheduler_config": {"profiling_chunk_config": {"enabled": true}}})
     """
 
     def __init__(self, config: dict | None = None):
@@ -683,6 +678,65 @@ class ProfilingChunkConfig:
             raise ValueError(f"profiling_chunk_config.min_chunk must be positive, got {self.min_chunk}")
         if self.max_fit_chunk <= 5:
             raise ValueError(f"Recommend to use at least 30 data points for fitting, got {self.max_fit_chunk}")
+
+
+class BatchJobSchedConfig:
+    """Configuration for batch-job-aware scheduler.
+
+    All parameters can be configured via ``additional_config.batch_job_sched_config``
+    in the vLLM config.
+
+    Usage (offline)::
+
+        llm = LLM(model, additional_config={"batch_job_sched_config": {"enabled": true}})
+    """
+
+    def __init__(self, config: dict | None = None):
+        if config is None:
+            config = {}
+
+        # Enable batch-job-aware scheduler
+        self.enabled: bool = config.get("enabled", False)
+
+        # Maximum number of tracked jobs (0 = unlimited)
+        self.max_jobs: int = int(config.get("max_jobs", 20))
+
+        # Extra block margin added to the reserve as safety buffer
+        self.reserve_margin_blocks: int = int(config.get("reserve_margin_blocks", 2))
+
+        # Maximum number of blocks that can be reserved
+        self.reserve_max_blocks: int = int(config.get("reserve_max_blocks", 8))
+
+        # Threshold for prioritizing long vs short decode jobs
+        self.low_available_tokens_threshold: int = int(config.get("low_available_tokens_threshold", 4096))
+
+        # Threshold for identifying short decoding jobs
+        self.short_decode_token_threshold: int = int(config.get("short_decode_token_threshold", 32))
+
+        self._validate()
+
+    def _validate(self) -> None:
+        """Validate the validity of configuration parameters."""
+        if self.max_jobs < 0:
+            raise ValueError(f"batch_job_sched_config.max_jobs must be non-negative, got {self.max_jobs}")
+        if self.reserve_margin_blocks < 0:
+            raise ValueError(
+                f"batch_job_sched_config.reserve_margin_blocks must be non-negative, got {self.reserve_margin_blocks}"
+            )
+        if self.reserve_max_blocks <= 0:
+            raise ValueError(
+                f"batch_job_sched_config.reserve_max_blocks must be positive, got {self.reserve_max_blocks}"
+            )
+        if self.low_available_tokens_threshold <= 0:
+            raise ValueError(
+                f"batch_job_sched_config.low_available_tokens_threshold must be positive, "
+                f"got {self.low_available_tokens_threshold}"
+            )
+        if self.short_decode_token_threshold <= 0:
+            raise ValueError(
+                f"batch_job_sched_config.short_decode_token_threshold must be positive, "
+                f"got {self.short_decode_token_threshold}"
+            )
 
 
 class RejectionSamplerConfig:
@@ -820,7 +874,7 @@ class EplbConfig:
 
 
 class ShortRequestFirstConfig:
-    """Configuration object for ``additional_config["short_request_first_config"]``."""
+    """Configuration object for ``additional_config["scheduler_config"]["short_request_first_config"]``."""
 
     _defaults = {
         "enabled": False,
@@ -846,6 +900,80 @@ class ShortRequestFirstConfig:
             raise ValueError(f"short_request_first_config.threshold must be a non-negative int; got {self.threshold}")
         if self.long_max_wait_ms < 0:
             raise ValueError(f"short_request_first_config.long_max_wait_ms must be >= 0; got {self.long_max_wait_ms}")
+
+
+class SchedulerConfig:
+    """Configuration object for ``additional_config[\"scheduler_config\"]``."""
+
+    def __init__(self, additional_config: dict[str, Any], balance_env_value: Any):
+        scheduler_config = additional_config.get("scheduler_config")
+        if scheduler_config is None:
+            scheduler_config = {}
+        elif not isinstance(scheduler_config, dict):
+            raise ValueError(
+                f"additional_config.scheduler_config must be a dict, got {type(scheduler_config).__name__}."
+            )
+        self.enable_balance_scheduling = self._get_config_value(
+            scheduler_config,
+            additional_config,
+            "enable_balance_scheduling",
+            balance_env_value,
+            "VLLM_ASCEND_BALANCE_SCHEDULING",
+        )
+        self.recompute_scheduler_enable = self._get_config_value(
+            scheduler_config,
+            additional_config,
+            "recompute_scheduler_enable",
+            False,
+        )
+        self.short_request_first_config = ShortRequestFirstConfig(
+            self._get_config_value(scheduler_config, additional_config, "short_request_first_config", {})
+        )
+        self.profiling_chunk_config = ProfilingChunkConfig(
+            self._get_config_value(scheduler_config, additional_config, "profiling_chunk_config", {})
+        )
+        self.batch_job_sched_config = BatchJobSchedConfig(
+            self._get_config_value(scheduler_config, additional_config, "batch_job_sched_config", {})
+        )
+
+    @staticmethod
+    def _get_config_value(
+        scheduler_config: dict[str, Any],
+        additional_config: dict[str, Any],
+        config_key: str,
+        default: Any,
+        env_key: str | None = None,
+    ) -> Any:
+        if config_key in scheduler_config:
+            if config_key in additional_config:
+                logger.warning_once(
+                    "additional_config.%s is deprecated and ignored because "
+                    "additional_config.scheduler_config.%s is set.",
+                    config_key,
+                    config_key,
+                )
+            return scheduler_config[config_key]
+
+        if config_key in additional_config:
+            logger.warning_once(
+                "additional_config.%s is deprecated; use additional_config.scheduler_config.%s instead.",
+                config_key,
+                config_key,
+            )
+            return additional_config[config_key]
+
+        if env_key is not None and env_key in os.environ:
+            logger.info_once(
+                "AscendConfig.scheduler_config.%s falls back to environment variable %s with value %s. "
+                "Please use additional_config.scheduler_config.%s instead, because %s will be removed in the "
+                "next release.",
+                config_key,
+                env_key,
+                default,
+                config_key,
+                env_key,
+            )
+        return default
 
 
 _ASCEND_CONFIG: AscendConfig | None = None
