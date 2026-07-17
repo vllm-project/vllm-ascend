@@ -1505,18 +1505,18 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> chunk_gat
     (void)k;
     (void)beta;
     (void)chunk_size;
-    const int64_t B = q.size(0);
-    const int64_t T = q.size(1);
-    const int64_t Hk = q.size(2);
-    const int64_t K = q.size(3);
-    const int64_t Hv = v.size(2);
-    const int64_t V = v.size(3);
+    const c10::SymInt B = q.sym_size(0);
+    const c10::SymInt T = q.sym_size(1);
+    const c10::SymInt Hk = q.sym_size(2);
+    const c10::SymInt K = q.sym_size(3);
+    const c10::SymInt Hv = v.sym_size(2);
+    const c10::SymInt V = v.sym_size(3);
 
-    at::Tensor q_kernel = at::empty({B, Hk, T, K}, q.options());
-    at::Tensor k_kernel = at::empty({B, Hk, T, K}, q.options());
-    at::Tensor w_kernel = at::empty({B, Hv, T, K}, q.options());
-    at::Tensor u_kernel = at::empty({B, Hv, T, V}, v.options());
-    at::Tensor g_kernel = at::empty({B, Hv, T}, g.options().dtype(at::kFloat));
+    at::Tensor q_kernel = at::empty_symint(c10::SymDimVector{B, Hk, T, K}, q.options());
+    at::Tensor k_kernel = at::empty_symint(c10::SymDimVector{B, Hk, T, K}, q.options());
+    at::Tensor w_kernel = at::empty_symint(c10::SymDimVector{B, Hv, T, K}, q.options());
+    at::Tensor u_kernel = at::empty_symint(c10::SymDimVector{B, Hv, T, V}, v.options());
+    at::Tensor g_kernel = at::empty_symint(c10::SymDimVector{B, Hv, T}, g.options().dtype(at::kFloat));
     return std::make_tuple(q_kernel, k_kernel, w_kernel, u_kernel, g_kernel);
 }
 
