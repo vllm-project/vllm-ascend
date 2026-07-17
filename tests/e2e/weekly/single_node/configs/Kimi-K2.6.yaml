@@ -144,8 +144,8 @@ _benchmark_TPOT20_128K_1K_pc90: &_benchmark_TPOT20_128K_1K_pc90
 # ==========================================
 
 test_cases:
-  - name: "Kimi-K2.5-W4A8-Case"
-    model: "Eco-Tech/Kimi-K2.5-W4A8"
+  - name: "Kimi-K2.6-W4A8-Case"
+    model: "Eco-Tech/Kimi-K2.6-w4a8"
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -161,13 +161,13 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_capture_sizes":[48,64,80,96,112,128], "cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--speculative-config"
-      - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}'
+      - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens":3}'
       - "--additional-config"
       - '{"enable_shared_expert_dp":true}'
     benchmarks:
       perf: *_benchmark_TPOT50_3_5k_1_5k
-  - name: "Kimi-K2.5-W4A8-TOPT50-16k-1k"
-    model: "Eco-Tech/Kimi-K2.5-W4A8"
+  - name: "Kimi-K2.6-W4A8-TOPT50-16k-1k"
+    model: "Eco-Tech/Kimi-K2.6-w4a8"
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -183,13 +183,13 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_capture_sizes":[4,8,12,16,20], "cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--speculative-config"
-      - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}'
+      - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens":3}'
       - "--additional-config"
       - '{"enable_shared_expert_dp":true}'
     benchmarks:
       perf: *_benchmark_TPOT50_16K_1K
-  - name: "Kimi-K2.5-W4A8-TOPT20-16k-1k"
-    model: "Eco-Tech/Kimi-K2.5-W4A8"
+  - name: "Kimi-K2.6-W4A8-TOPT20-16k-1k"
+    model: "Eco-Tech/Kimi-K2.6-w4a8"
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -204,7 +204,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_capture_sizes":[8], "cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--speculative-config"
-      - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":7}'
+      - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens":7}'
       - "--tool-call-parser"
       - "kimi_k2"
       - "--reasoning-parser"
@@ -212,8 +212,8 @@ test_cases:
       - "--enable-auto-tool-choice"
     benchmarks:
       perf: *_benchmark_TPOT20_16K_1K
-  - name: "Kimi-K2.5-W4A8-TOPT50-64k-1k-pc90"
-    model: "Eco-Tech/Kimi-K2.5-W4A8"
+  - name: "Kimi-K2.6-W4A8-TOPT50-64k-1k-pc90"
+    model: "Eco-Tech/Kimi-K2.6-w4a8"
     envs:
       <<: *envs
       HCCL_BUFFSIZE: "400"
@@ -238,11 +238,11 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_capture_sizes":[8,12], "cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--speculative-config"
-      - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}'
+      - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens":3}'
     benchmarks:
       perf: *_benchmark_TPOT50_64K_1K_pc90
-  - name: "Kimi-K2.5-W4A8-TOPT20-64k-1k-pc90"
-    model: "Eco-Tech/Kimi-K2.5-W4A8"
+  - name: "Kimi-K2.6-W4A8-TOPT20-64k-1k-pc90"
+    model: "Eco-Tech/Kimi-K2.6-w4a8"
     envs:
       <<: *envs
       HCCL_BUFFSIZE: "400"
@@ -279,15 +279,15 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_capture_sizes":[4,8,16], "cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--speculative-config"
-      - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}'
+      - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens":3}'
       - "--mm-processor-cache-gb"
       - "0"
       - "--mm-encoder-tp-mode"
       - "data"
     benchmarks:
       perf: *_benchmark_TPOT20_64K_1K_pc90
-  - name: "Kimi-K2.5-W4A8-TOPT50-128k-1k-pc90"
-    model: "Eco-Tech/Kimi-K2.5-W4A8"
+  - name: "Kimi-K2.6-W4A8-TOPT50-128k-1k-pc90"
+    model: "Eco-Tech/Kimi-K2.6-w4a8"
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -302,13 +302,13 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_capture_sizes":[4,8,12,16,32], "cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--speculative-config"
-      - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}'
+      - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens":3}'
       - "--additional-config"
       - '{"enable_shared_expert_dp":true}'
     benchmarks:
       perf: *_benchmark_TPOT50_128K_1K_pc90
-  - name: "Kimi-K2.5-W4A8-TOPT20-128k-1k-pc90"
-    model: "Eco-Tech/Kimi-K2.5-W4A8"
+  - name: "Kimi-K2.6-W4A8-TOPT20-128k-1k-pc90"
+    model: "Eco-Tech/Kimi-K2.6-w4a8"
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -323,7 +323,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_capture_sizes":[4,8,12,16,32], "cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--speculative-config"
-      - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}'
+      - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens":3}'
       - "--additional-config"
       - '{"enable_shared_expert_dp":true}'
     benchmarks:
