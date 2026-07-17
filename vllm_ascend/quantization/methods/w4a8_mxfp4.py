@@ -203,7 +203,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
 
         if self.dynamic_eplb:
             # EPLB stores each expert as an independent (N, K) NZ tensor; transpose to (K, N) for
-            # the 单多单 (single-x, multi-weight, single-out) matmul (fp8-fp4 needs a transposed
+            # the single-multi-single (single-x, multi-weight, single-out) matmul (fp8-fp4 needs a transposed
             # weight). The transpose is a view, so the stored tensors stay contiguous for EPLB.
             w1 = [w.transpose(0, 1) for w in layer.w13_weight_list]
             w2 = [w.transpose(0, 1) for w in layer.w2_weight_list]

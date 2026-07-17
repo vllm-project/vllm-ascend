@@ -1027,7 +1027,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
         # W4A8 mxfp
         if mxfp_quant_dtype == QuantType.W4A8MXFP:
-            # weight/scale may be a per-expert list (EPLB 单多单) or a single packed tensor (单单单).
+            # weight/scale may be a per-expert list or a single packed tensor .
             weight_arg = weight if isinstance(weight, list) else [weight]
             scale_arg = weight_scale if isinstance(weight_scale, list) else [weight_scale]
             hidden_states = torch_npu.npu_grouped_matmul(
@@ -1173,7 +1173,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )
         output_dtype = gmm2_kwargs.pop("output_dtype")
 
-        # W4A8MXFP supports a per-expert weight list (EPLB 单多单); other MXFP paths require a
+        # W4A8MXFP supports a per-expert weight list; other MXFP paths require a
         # single tensor.
         if mxfp_quant_dtype != QuantType.W4A8MXFP:
             if isinstance(weight, list) and len(weight) != 1:

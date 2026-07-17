@@ -164,7 +164,7 @@ def quant_apply_mlp(
                 swiglu_limit=swiglu_limit,
             )
         elif use_gmm_swiglu_quant_fusion:
-            # With EPLB, mxfp weights are a per-expert list fed to the 单多单 matmul; otherwise a
+            # With EPLB, mxfp weights are a per-expert list fed to the single-multi-single matmul; otherwise a
             # single packed tensor is required.
             mxfp_expert_list = use_mxfp_quant and dynamic_eplb
             w1_arg = w1 if mxfp_expert_list else _require_single_tensor_for_swiglu_quant(w1, name="w1")
@@ -300,7 +300,7 @@ def quant_apply_mlp(
                 swiglu_limit=swiglu_limit,
             )
         elif use_gmm_swiglu_quant_fusion and activation != MoEActivation.SWIGLUSTEP:
-            # With EPLB, mxfp weights are a per-expert list fed to the 单多单 matmul; otherwise a
+            # With EPLB, mxfp weights are a per-expert list fed to the single-multi-single matmul; otherwise a
             # single packed tensor is required.
             mxfp_expert_list = use_mxfp_quant and dynamic_eplb
             w1_arg = w1 if mxfp_expert_list else _require_single_tensor_for_swiglu_quant(w1, name="w1")
