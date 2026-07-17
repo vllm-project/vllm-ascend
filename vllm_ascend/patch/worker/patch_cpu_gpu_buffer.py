@@ -31,7 +31,7 @@ immediately with zero overhead.
 """
 
 import torch
-import torch_npu
+import torch_npu  # noqa: F401
 from vllm.v1.utils import CpuGpuBuffer
 
 _orig_init = CpuGpuBuffer.__init__
