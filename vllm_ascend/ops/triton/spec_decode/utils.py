@@ -94,19 +94,13 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid(
     batch_size,  # tl.int32
     HAS_NUM_REJECTED: tl.constexpr = False,
     SAMPLE_FROM_ANCHOR: tl.constexpr = False,
+    RECOMPUTE_CONTEXT_SLOTS: tl.constexpr = False,
+    MASK_REJECTED_CONTEXT_SLOTS: tl.constexpr = True,
 ):
     for req_idx in range(0, batch_size):
         ctx_start = tl.load(query_start_loc_ptr + req_idx)
         ctx_end = tl.load(query_start_loc_ptr + req_idx + 1)
         num_ctx = ctx_end - ctx_start
-
-        for j in range(0, num_ctx):
-            ctx_pos_idx = ctx_start + j
-            pos = tl.load(target_positions_ptr + ctx_pos_idx)
-            tl.store(out_context_positions_ptr + ctx_pos_idx, pos)
-
-            slot = tl.load(context_slot_mapping_ptr + ctx_pos_idx)
-            tl.store(out_context_slot_mapping_ptr + ctx_pos_idx, slot)
 
         if HAS_NUM_REJECTED:
             num_rejected = tl.load(num_rejected_tokens_ptr + req_idx)
@@ -115,9 +109,34 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid(
             num_rejected = 0
             valid_ctx_end = ctx_end
 
+        for j in range(0, num_ctx):
+            ctx_pos_idx = ctx_start + j
+            pos = tl.load(target_positions_ptr + ctx_pos_idx)
+            tl.store(out_context_positions_ptr + ctx_pos_idx, pos)
+
+            if RECOMPUTE_CONTEXT_SLOTS:
+                block_num_ctx = tl.maximum(
+                    0,
+                    tl.minimum(pos // block_size, block_table_stride - 1),
+                )
+                block_id_ctx = tl.load(
+                    block_table_ptr
+                    + req_idx * block_table_stride
+                    + block_num_ctx
+                ).to(tl.int64)
+                slot = block_id_ctx * block_size + (pos % block_size)
+                if MASK_REJECTED_CONTEXT_SLOTS:
+                    slot = tl.where(ctx_pos_idx < valid_ctx_end, slot, -1)
+            else:
+                slot = tl.load(context_slot_mapping_ptr + ctx_pos_idx)
+            tl.store(out_context_slot_mapping_ptr + ctx_pos_idx, slot)
+
         seq_len = tl.load(seq_lens_ptr + req_idx)
         effective_seq_len = seq_len - num_rejected
-        last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1)
+        last_pos_idx = valid_ctx_end - 1
+        if RECOMPUTE_CONTEXT_SLOTS:
+            last_pos_idx = tl.maximum(ctx_start, last_pos_idx)
+        last_pos = tl.load(target_positions_ptr + last_pos_idx)
 
         for q_idx in range(0, num_query_per_req):
             query_pos = last_pos + 1 + q_idx
@@ -125,8 +144,16 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid(
 
             tl.store(out_query_positions_ptr + query_out_idx, query_pos)
 
-            query_cache_pos = effective_seq_len + q_idx
+            if RECOMPUTE_CONTEXT_SLOTS:
+                query_cache_pos = query_pos
+            else:
+                query_cache_pos = effective_seq_len + q_idx
             block_num_q = query_cache_pos // block_size
+            if RECOMPUTE_CONTEXT_SLOTS:
+                block_num_q = tl.maximum(
+                    0,
+                    tl.minimum(block_num_q, block_table_stride - 1),
+                )
             block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q).to(tl.int64)
             slot_q = block_id_q * block_size + (query_cache_pos % block_size)
             tl.store(out_query_slot_mapping_ptr + query_out_idx, slot_q)

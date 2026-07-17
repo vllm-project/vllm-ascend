@@ -1,18 +1,16 @@
-import logging
+import json
 import os
 from collections.abc import Iterable
 from pathlib import Path
 
 import torch
 from safetensors.torch import load_file
+from vllm.logger import logger
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     process_eagle_weight,
 )
-
-logger = logging.getLogger(__name__)
-
 
 def get_embedding_tensor(directory_path):
     """
@@ -43,14 +41,26 @@ def get_rotation_path(target_vllm_config):
     """
     Gets the path of the rotation matrix, returns None if the target model is not a quarot model.
     """
-    target_model_path = target_vllm_config.model_config.model
-    try:
-        quant_description = target_vllm_config.quant_config.quant_description
-        rotation_relative_path = quant_description["optional"]["quarot"]["rotation_map"]["global_rotation"]
-    except KeyError:
+    target_model_path = Path(target_vllm_config.model_config.model)
+    quant_config = getattr(target_vllm_config, "quant_config", None)
+    quant_description = getattr(quant_config, "quant_description", None)
+
+    if quant_description is None:
+        description_path = target_model_path / "quant_model_description.json"
+        if not description_path.is_file():
+            return None
+        with description_path.open(encoding="utf-8") as description_file:
+            quant_description = json.load(description_file)
+
+    if not quant_description.get("is_rot_used", True):
         return None
 
-    return Path(target_model_path) / rotation_relative_path
+    try:
+        rotation_relative_path = quant_description["optional"]["quarot"]["rotation_map"]["global_rotation"]
+    except (KeyError, TypeError):
+        return None
+
+    return target_model_path / rotation_relative_path
 
 
 def get_rotataion_matrix(rotation_path):
@@ -70,6 +80,39 @@ def get_rotataion_matrix(rotation_path):
         raise e
 
 
+@torch.inference_mode()
+def transform_quarot_linear_weight(
+    weight: torch.Tensor,
+    rotation: torch.Tensor,
+    target_device: torch.device | str | None = None,
+):
+    """Rotate each hidden-size input block of a draft linear weight."""
+    if weight.ndim != 2:
+        raise ValueError(f"Expected a 2-D weight, got shape={tuple(weight.shape)}")
+    if rotation.ndim != 2 or rotation.shape[0] != rotation.shape[1]:
+        raise ValueError(f"Expected a square rotation matrix, got shape={tuple(rotation.shape)}")
+
+    hidden_size = rotation.shape[0]
+    if weight.shape[1] % hidden_size != 0:
+        raise ValueError(
+            "Linear input width must be a multiple of the QuaRot hidden size: "
+            f"weight={tuple(weight.shape)}, rotation={tuple(rotation.shape)}"
+        )
+
+    device = torch.device(target_device) if target_device is not None else weight.device
+    transformed = torch.empty(weight.shape, dtype=weight.dtype, device=device)
+    rotation_device = rotation.to(device=device, dtype=torch.float32)
+    for start in range(0, weight.shape[1], hidden_size):
+        weight_chunk = weight[:, start : start + hidden_size].to(
+            device=device,
+            dtype=torch.float32,
+        )
+        transformed[:, start : start + hidden_size].copy_(
+            torch.matmul(weight_chunk, rotation_device).to(dtype=weight.dtype)
+        )
+    return transformed
+
+
 def compute_rotataion_matrix3(Q):
     """
     Anti-rotate matrix for 3 layers of hidden_states.
@@ -83,9 +126,29 @@ def patch_load_weights(target_vllm_config):
 
     # if rotation path is not found, then quarot is not in use.
     if rotation_path is None:
+        logger.info("Target model does not use QuaRot; draft weight patch is not needed")
         return
 
     Eagle3LlamaForCausalLM.load_weights = make_load_weights(target_model_path, rotation_path)
+    try:
+        from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
+    except ImportError:
+        logger.info("Qwen3 DSpark model is unavailable; only Eagle3 QuaRot loading was patched")
+        return
+
+    current_load_weights = Qwen3DSparkForCausalLM.load_weights
+    if getattr(current_load_weights, "_vllm_ascend_quarot_wrapper", False):
+        logger.info("Qwen3 DSpark QuaRot weight loader is already patched")
+        return
+
+    Qwen3DSparkForCausalLM.load_weights = make_qwen3_dspark_load_weights(
+        rotation_path,
+        current_load_weights,
+    )
+    logger.warning(
+        "Patched Qwen3 DSpark weight loading for target QuaRot rotation: %s",
+        rotation_path,
+    )
 
 
 def make_load_weights(target_model_path, rotation_path):
@@ -142,4 +205,40 @@ def make_load_weights(target_model_path, rotation_path):
         )
         loader.load_weights(model_weights.items())
 
+    return load_weights
+
+
+def make_qwen3_dspark_load_weights(rotation_path, original_load_weights):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        rotation = get_rotataion_matrix(rotation_path)
+        transformed_fc = False
+
+        def transformed_weights():
+            nonlocal transformed_fc
+            for name, loaded_weight in weights:
+                if name == "fc.weight":
+                    loaded_weight = transform_quarot_linear_weight(
+                        loaded_weight,
+                        rotation,
+                        target_device=self.model.fc.weight.device,
+                    )
+                    transformed_fc = True
+                yield name, loaded_weight
+
+        result = original_load_weights(self, transformed_weights())
+        if transformed_fc:
+            logger.warning(
+                "Applied target QuaRot rotation to Qwen3 DSpark fc.weight: "
+                "shape=%s, rotation=%s",
+                tuple(self.model.fc.weight.shape),
+                rotation_path,
+            )
+        else:
+            logger.warning(
+                "Qwen3 DSpark checkpoint did not provide the expected fc.weight; "
+                "target QuaRot rotation was not applied"
+            )
+        return result
+
+    load_weights._vllm_ascend_quarot_wrapper = True
     return load_weights

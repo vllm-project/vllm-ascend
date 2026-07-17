@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
+import os
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from functools import partial
@@ -142,6 +143,20 @@ def _is_glm_model(model_config) -> bool:
     return "glm" in str(model_type).lower()
 
 
+def _is_dspark_draft_model(model_config) -> bool:
+    if model_config is None:
+        return False
+    hf_config = getattr(model_config, "hf_config", None)
+    if hf_config is None:
+        return False
+    architectures = getattr(hf_config, "architectures", []) or []
+    return (
+        "Qwen3DSparkModel" in architectures
+        or "DSparkDraftModel" in architectures
+        or getattr(hf_config, "speculators_model_type", None) == "dspark"
+    )
+
+
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
 
@@ -208,14 +223,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.use_cuda_graph = self.runner._use_aclgraph() and not self.speculative_config.enforce_eager
         self._raise_if_padded_drafter_batch_disabled_and_full_graph_enabled()
 
-        # GLM series models: speculative decoding does not yet support running
-        # the draft model in graph mode. Force the draft model to always use
-        # eager mode. This is equivalent to the user adding
-        # `"enforce_eager": true` to the `--speculative-config`, and keeps
-        # the target model's graph-mode setting untouched.
-        # TODO(lilinsiman): Remove this code segment after future versions of the GLM
-        # series models support graph input for speculative inference.
-        if _is_glm_model(self.vllm_config.model_config):
+        # Keep the GLM force-eager default. The validated DSpark path can opt
+        # into draft graph capture explicitly without changing other GLM
+        # speculative methods.
+        enable_glm_dspark_draft_graph = (
+            self.method == "dspark"
+            and _is_dspark_draft_model(draft_model_config)
+            and os.getenv("VLLM_ASCEND_ENABLE_GLM_DSPARK_DRAFT_GRAPH", "0").lower()
+            in ("1", "true", "yes", "on")
+        )
+        if (
+            _is_glm_model(self.vllm_config.model_config)
+            and not enable_glm_dspark_draft_graph
+        ):
             if self.use_cuda_graph:
                 logger.warning(
                     "GLM series models with speculative decoding currently do "
@@ -225,6 +245,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     "speculative decoding will be added in a future release. "
                 )
             self.use_cuda_graph = False
+        elif enable_glm_dspark_draft_graph and self.use_cuda_graph:
+            logger.warning(
+                "VLLM_ASCEND_ENABLE_GLM_DSPARK_DRAFT_GRAPH is enabled; "
+                "attempting ACL graph capture for the DSpark draft model."
+            )
 
         # TODO: Remove it when the bug of fx-graph is solved
         self.maybe_eager_context: AbstractContextManager[Any] = nullcontext()
@@ -1175,7 +1200,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # Dspark speculation requires autoregressive applications of MarkovHead and ConfidenceHead.
                 # The MarkovHead performs bias correction on logits.
                 # The ConfidenceHead predicts the expected acceptance length of tokens(Not yet achieved).
-                raw_logits = self.model.compute_logits(last_hidden_states)
+                raw_logits = self.model.compute_logits(sample_hidden_states)
                 logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
                 num_blk = logits.shape[0]
                 draft_token_ids = self._dspark_draft_buffer[:num_blk]
