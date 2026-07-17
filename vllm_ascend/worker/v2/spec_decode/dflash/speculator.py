@@ -84,7 +84,7 @@ class AscendDFlashSpeculator(DFlashSpeculator):
                 num_reqs=num_reqs_padded,
                 num_reqs_padded=num_reqs_padded,
                 num_tokens_padded=num_tokens_padded,
-                causal=self.dflash_causal,
+                causal=self._group_causal,
             )
         return [attn_metadata]
 
