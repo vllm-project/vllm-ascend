@@ -41,7 +41,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.mark.skipif(True, reason="Fix me, it's broken after CANN and trition-ascend are upgraded.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [True])
@@ -61,6 +60,9 @@ def test_qwen3_dense_eager_mode(
     sampling_params = SamplingParams(
         max_tokens=max_tokens,
         temperature=0.5,
+        top_p=0.95,
+        top_k=10,
+        repetition_penalty=1.03,
         logprobs=2,
         prompt_logprobs=2,
         logit_bias={0: -1.0, 1: 0.5},
@@ -73,7 +75,7 @@ def test_qwen3_dense_eager_mode(
         enforce_eager=enforce_eager,
         async_scheduling=True,
     ) as runner:
-        runner.model.generate(prompts, sampling_params)
+        runner.generate(prompts, sampling_params)
 
 
 @pytest.mark.parametrize("model", MAIN_MODELS)
