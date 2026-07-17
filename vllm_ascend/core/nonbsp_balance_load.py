@@ -72,9 +72,7 @@ def balance_load(requests_by_rank, dev_num, max_num_seqs=None, max_iters=1000, t
                 new_avg = target_avg + delta / dev_num
                 new_dist = abs(new_tot - new_avg)
                 run_newly_added = run_item.get("newly_added", False)
-                if new_dist < best_dist or (
-                    new_dist == best_dist and run_newly_added and not best_newly_added
-                ):
+                if new_dist < best_dist or (new_dist == best_dist and run_newly_added and not best_newly_added):
                     best_dist = new_dist
                     best_swap = (run_item, wait_item)
                     best_newly_added = run_newly_added
@@ -87,9 +85,7 @@ def balance_load(requests_by_rank, dev_num, max_num_seqs=None, max_iters=1000, t
             return False
 
         max_blk = max_card["tot_blk"]
-        second_max_blk = max(
-            [c["tot_blk"] for c in cards_data if c["card_idx"] != max_card["card_idx"]] + [0]
-        )
+        second_max_blk = max([c["tot_blk"] for c in cards_data if c["card_idx"] != max_card["card_idx"]] + [0])
         current_latency = 1200 + 19.2 * max_blk
         current_tp = total_reqs / current_latency
         best_drop = None
@@ -101,9 +97,7 @@ def balance_load(requests_by_rank, dev_num, max_num_seqs=None, max_iters=1000, t
             new_latency = 1200 + 19.2 * new_max_blk
             new_tp = (total_reqs - 1) / new_latency
             run_newly_added = run_item.get("newly_added", False)
-            if new_tp > best_tp or (
-                new_tp == best_tp and run_newly_added and not best_newly_added
-            ):
+            if new_tp > best_tp or (new_tp == best_tp and run_newly_added and not best_newly_added):
                 best_tp = new_tp
                 best_drop = run_item
                 best_newly_added = run_newly_added
@@ -131,9 +125,7 @@ def balance_load(requests_by_rank, dev_num, max_num_seqs=None, max_iters=1000, t
                 tot_run_blk += blk_num
             else:
                 waiting.append(req_obj)
-        cards_data.append(
-            {"card_idx": rank, "running": running, "waiting": waiting, "tot_blk": tot_run_blk}
-        )
+        cards_data.append({"card_idx": rank, "running": running, "waiting": waiting, "tot_blk": tot_run_blk})
 
     for card in cards_data:
         fill_running_from_waiting(card)
@@ -183,12 +175,8 @@ def balance_load(requests_by_rank, dev_num, max_num_seqs=None, max_iters=1000, t
                     cancelled_out[out_index] = True
                     cancelled_in[in_index] = True
                     break
-        mod["out_blk"] = [
-            b for b, cancelled in zip(mod["out_blk"], cancelled_out) if not cancelled
-        ]
-        mod["in_blk"] = [
-            b for b, cancelled in zip(mod["in_blk"], cancelled_in) if not cancelled
-        ]
+        mod["out_blk"] = [b for b, cancelled in zip(mod["out_blk"], cancelled_out) if not cancelled]
+        mod["in_blk"] = [b for b, cancelled in zip(mod["in_blk"], cancelled_in) if not cancelled]
 
     for card in cards_data:
         rank = card["card_idx"]

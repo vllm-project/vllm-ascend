@@ -667,12 +667,9 @@ class NPUPlatform(Platform):
                 )
             if scheduler_extension_config.profiling_chunk_config.enabled:
                 raise ValueError(
-                    "NONBSP_ENABLE only supports the normal Scheduler and cannot "
-                    "be used with profiling_chunk_config."
+                    "NONBSP_ENABLE only supports the normal Scheduler and cannot be used with profiling_chunk_config."
                 )
-            vllm_config.scheduler_config.scheduler_cls = (
-                "vllm_ascend.core.nonbsp_scheduler.NonBSPScheduler"
-            )
+            vllm_config.scheduler_config.scheduler_cls = "vllm_ascend.core.nonbsp_scheduler.NonBSPScheduler"
 
         if scheduler_extension_config.recompute_scheduler_enable:
             kv_transfer_config = vllm_config.kv_transfer_config

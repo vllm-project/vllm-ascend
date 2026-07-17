@@ -55,6 +55,31 @@ def test_nonbsp_blocked_statuses_are_enqueued_in_waiting():
     assert not scheduler.skipped_waiting
 
 
+def test_nonbsp_invalid_async_load_scans_persistent_waiting_queue(monkeypatch):
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(
+        vllm_config,
+        scheduler_cls=NonBSPScheduler,
+    )
+    request = create_request(request_id=1)
+    request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.waiting.add_request(request)
+    scanned_requests = []
+
+    def _capture_requests(requests, *args, **kwargs):
+        scanned_requests.append(list(requests))
+        return set(), 0, []
+
+    monkeypatch.setattr(
+        scheduler,
+        "_update_requests_with_invalid_blocks",
+        _capture_requests,
+    )
+
+    assert scheduler._handle_invalid_blocks({1}, {}) == set()
+    assert scanned_requests[0] == [request]
+
+
 def _create_nonbsp_scheduler(async_scheduling: bool):
     vllm_config = create_vllm_config(max_num_seqs=2)
     vllm_config.kv_transfer_config = None

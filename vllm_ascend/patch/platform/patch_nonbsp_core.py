@@ -21,14 +21,16 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import vllm.v1.engine.core as _engine_core_mod
-from vllm.config import ParallelConfig
+import vllm.v1.request as _request_module
 from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc
 
 import vllm_ascend.patch.platform.patch_balance_schedule as _balance_patch
 import vllm_ascend.patch.platform.patch_nonbsp_request_status  # noqa: F401
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.nonbsp_balance_load import balance_load
-from vllm.v1.request import Request, RequestStatus
+
+Request = _request_module.Request
+RequestStatus = _request_module.RequestStatus
 
 
 def _nonbsp_enabled(vllm_config) -> bool:
@@ -73,12 +75,8 @@ def _print_modifications(modifications, dp_rank: int) -> None:
     print("\n" + "=" * 60, flush=True)
     print("[nonbsp] modifications:", flush=True)
     for rank, modification in enumerate(modifications):
-        out_items = ", ".join(
-            f"{block:3d}" for block in modification.get("out_blk", [])
-        )
-        in_items = ", ".join(
-            f"{block:3d}" for block in modification.get("in_blk", [])
-        )
+        out_items = ", ".join(f"{block:3d}" for block in modification.get("out_blk", []))
+        in_items = ", ".join(f"{block:3d}" for block in modification.get("in_blk", []))
         out_str = f"Out: [{out_items}]"
         in_str = f"In: [{in_items}]"
         freeze_str = f"Freeze: {bool(modification.get('freeze', False))}"
@@ -89,29 +87,21 @@ def _print_modifications(modifications, dp_rank: int) -> None:
     print("=" * 60, flush=True)
 
 
-_ORIGINAL_HAS_GLOBAL_UNFINISHED_REQS = (
-    DPEngineCoreProc._has_global_unfinished_reqs
-)
+_ORIGINAL_HAS_GLOBAL_UNFINISHED_REQS = DPEngineCoreProc._has_global_unfinished_reqs
 
 
-def _has_global_unfinished_reqs_with_step_counter(
-    self, local_unfinished: bool
-) -> bool:
+def _has_global_unfinished_reqs_with_step_counter(self, local_unfinished: bool) -> bool:
     print(
-        f"{datetime.datetime.now()} | _has_global_unfinished_reqs | "
-        f"step_counter: {self.step_counter}",
+        f"{datetime.datetime.now()} | _has_global_unfinished_reqs | step_counter: {self.step_counter}",
         flush=True,
     )
     return _ORIGINAL_HAS_GLOBAL_UNFINISHED_REQS(self, local_unfinished)
 
 
-DPEngineCoreProc._has_global_unfinished_reqs = (
-    _has_global_unfinished_reqs_with_step_counter
-)
+DPEngineCoreProc._has_global_unfinished_reqs = _has_global_unfinished_reqs_with_step_counter
 
 
 class NonBSPDPEngineCoreProc(DPEngineCoreProc):
-
     def _init_data_parallel(self, vllm_config):
         super()._init_data_parallel(vllm_config)
 
@@ -120,8 +110,7 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
         self._lb_start_step = int(ascend_config.NONBSP_START_STEP)
         self._lb_end_step = int(ascend_config.NONBSP_END_STEP)
         self._lb_threshold = float(ascend_config.NONBSP_BUBBLE_THRESHOLD)
-        self._lb_long_req_threshold = int(
-            ascend_config.NONBSP_LONG_REQ_BLOCK_THRESHOLD)
+        self._lb_long_req_threshold = int(ascend_config.NONBSP_LONG_REQ_BLOCK_THRESHOLD)
         self._lb_dynamic_max_step = int(ascend_config.NONBSP_DYNAMIC_MAX_STEP)
         self._lb_dynamic_enable = False
         self._lb_dynamic_step = 0
@@ -129,16 +118,11 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
         self._lb_pending_long_req_blk = 0
 
         _print_rank_0(f"NONBSP_ENABLE = {self._lb_enable}", self.dp_rank)
-        _print_rank_0(
-            f"NONBSP_START_STEP = {self._lb_start_step}", self.dp_rank
-        )
+        _print_rank_0(f"NONBSP_START_STEP = {self._lb_start_step}", self.dp_rank)
         _print_rank_0(f"NONBSP_END_STEP = {self._lb_end_step}", self.dp_rank)
+        _print_rank_0(f"NONBSP_BUBBLE_THRESHOLD = {self._lb_threshold}", self.dp_rank)
         _print_rank_0(
-            f"NONBSP_BUBBLE_THRESHOLD = {self._lb_threshold}", self.dp_rank
-        )
-        _print_rank_0(
-            "NONBSP_LONG_REQ_BLOCK_THRESHOLD = "
-            f"{self._lb_long_req_threshold}",
+            f"NONBSP_LONG_REQ_BLOCK_THRESHOLD = {self._lb_long_req_threshold}",
             self.dp_rank,
         )
         _print_rank_0(
@@ -156,12 +140,8 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
         full_len = max_slots + 2
         self._lb_data_np = np.zeros(full_len, dtype=np.int32)
         self._lb_data_t = torch.as_tensor(self._lb_data_np)
-        self._lb_all_data_np = [
-            np.zeros(full_len, dtype=np.int32) for _ in range(dp_size)
-        ]
-        self._lb_all_data_t_buf = [
-            torch.as_tensor(arr) for arr in self._lb_all_data_np
-        ]
+        self._lb_all_data_np = [np.zeros(full_len, dtype=np.int32) for _ in range(dp_size)]
+        self._lb_all_data_t_buf = [torch.as_tensor(arr) for arr in self._lb_all_data_np]
         self._lb_dynamic_flag_np = np.zeros(2, dtype=np.int32)
         self._lb_dynamic_flag_t = torch.as_tensor(self._lb_dynamic_flag_np)
 
@@ -171,8 +151,7 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
             blk_num = (len(request.all_token_ids) + blk_size - 1) // blk_size
             if blk_num > self._lb_long_req_threshold:
                 self._lb_pending_long_req = True
-                self._lb_pending_long_req_blk = max(
-                    self._lb_pending_long_req_blk, blk_num)
+                self._lb_pending_long_req_blk = max(self._lb_pending_long_req_blk, blk_num)
         super().add_request(request, request_wave)
 
     def run_balance_load(self):
@@ -183,9 +162,7 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
         if dynamic_lb_mode and not self._lb_dynamic_enable:
             self._lb_dynamic_flag_np[0] = int(self._lb_pending_long_req)
             self._lb_dynamic_flag_np[1] = self._lb_pending_long_req_blk
-            dist.all_reduce(self._lb_dynamic_flag_t,
-                            op=dist.ReduceOp.MAX,
-                            group=self.dp_group)
+            dist.all_reduce(self._lb_dynamic_flag_t, op=dist.ReduceOp.MAX, group=self.dp_group)
             if self._lb_dynamic_flag_np[0]:
                 self._lb_dynamic_enable = True
                 self._lb_dynamic_step = 0
@@ -201,11 +178,12 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
             self._lb_pending_long_req = False
             self._lb_pending_long_req_blk = 0
 
-        lb_active = ((static_lb_enable or self._lb_dynamic_enable)
-                     and not dynamic_activated_this_step
-                     and self.step_counter >= self._lb_start_step
-                     and (self._lb_end_step < 0
-                          or self.step_counter < self._lb_end_step))
+        lb_active = (
+            (static_lb_enable or self._lb_dynamic_enable)
+            and not dynamic_activated_this_step
+            and self.step_counter >= self._lb_start_step
+            and (self._lb_end_step < 0 or self.step_counter < self._lb_end_step)
+        )
         self.scheduler._lb_kv_prefetch_enabled = lb_active
         if lb_active:
             has_new_long_req = self._do_lb_allgather()
@@ -254,10 +232,7 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
         max_num_seqs = self._lb_max_num_seqs
 
         blk_size = self.scheduler.block_size
-        running_blks = [
-            (len(req.all_token_ids) + blk_size - 1) // blk_size
-            for req in self.scheduler.running
-        ]
+        running_blks = [(len(req.all_token_ids) + blk_size - 1) // blk_size for req in self.scheduler.running]
         waiting_blks = [
             (len(req.all_token_ids) + blk_size - 1) // blk_size
             for req in self.scheduler.waiting
@@ -269,15 +244,13 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
         run_cnt = min(len(running_blks), max_slots)
         wait_cnt = min(len(waiting_blks), max_slots - run_cnt)
         arr[:run_cnt] = running_blks[:run_cnt]
-        arr[run_cnt:run_cnt + wait_cnt] = waiting_blks[:wait_cnt]
+        arr[run_cnt : run_cnt + wait_cnt] = waiting_blks[:wait_cnt]
         arr[max_slots] = run_cnt
         arr[max_slots + 1] = int(self._lb_pending_long_req)
         self._lb_pending_long_req = False
         self._lb_pending_long_req_blk = 0
 
-        dist.all_gather(self._lb_all_data_t_buf,
-                        self._lb_data_t,
-                        group=self.dp_group)
+        dist.all_gather(self._lb_all_data_t_buf, self._lb_data_t, group=self.dp_group)
 
         requests_by_rank = []
         has_new_long_req = False
@@ -287,10 +260,7 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
             requests_by_rank.append((blks, split))
             has_new_long_req = has_new_long_req or bool(rank_np[max_slots + 1])
 
-        modifications = balance_load(requests_by_rank,
-                                     dp_size,
-                                     max_num_seqs=max_num_seqs,
-                                     threshold=self._lb_threshold)
+        modifications = balance_load(requests_by_rank, dp_size, max_num_seqs=max_num_seqs, threshold=self._lb_threshold)
         _print_requests_by_rank(requests_by_rank, self.dp_rank)
         _print_modifications(modifications, self.dp_rank)
         self.scheduler.modifications = modifications[self.dp_rank]
@@ -298,21 +268,19 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
 
 
 _PreviousRunEngineCore = EngineCoreProc.run_engine_core
-_UpstreamRunEngineCore = _balance_patch._ORIGINAL_RUN_ENGINE_CORE
+_UpstreamRunEngineCore = _balance_patch._OriginalRunEngineCore
 _OriginalDPEngineCoreProc = DPEngineCoreProc
 
 
 def _nonbsp_run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
     vllm_config = kwargs.get("vllm_config")
     if not _nonbsp_enabled(vllm_config):
-        return _PreviousRunEngineCore(
-            *args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
+        return _PreviousRunEngineCore(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
 
     _print_rank_0("Enable NonBSP DP load balancing.", dp_rank)
     _engine_core_mod.DPEngineCoreProc = NonBSPDPEngineCoreProc
     try:
-        return _UpstreamRunEngineCore(
-            *args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
+        return _UpstreamRunEngineCore(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
     finally:
         _engine_core_mod.DPEngineCoreProc = _OriginalDPEngineCoreProc
 

@@ -1,8 +1,8 @@
 from types import SimpleNamespace
 
-import vllm_ascend.patch.platform.patch_scheduler as patch_scheduler
 from vllm.v1.request import RequestStatus
 
+import vllm_ascend.patch.platform.patch_scheduler as patch_scheduler
 from vllm_ascend.core.scheduler_diagnostics import print_scheduler_summary
 
 
@@ -17,9 +17,7 @@ def test_print_scheduler_summary_includes_waiting_queues(capsys):
         skipped_waiting=[_request(RequestStatus.WAITING_FOR_REMOTE_KVS, 5)],
         block_size=8,
     )
-    scheduler_output = SimpleNamespace(
-        num_scheduled_tokens={"request-1": 1, "request-2": 1}
-    )
+    scheduler_output = SimpleNamespace(num_scheduled_tokens={"request-1": 1, "request-2": 1})
 
     print_scheduler_summary(scheduler, scheduler_output)
 
@@ -43,4 +41,22 @@ def test_normal_scheduler_prints_summary(monkeypatch):
     )
 
     assert patch_scheduler._schedule_with_summary(object()) is scheduler_output
+    assert events == ["schedule", "summary"]
+
+
+def test_async_scheduler_prints_summary(monkeypatch):
+    events = []
+    scheduler_output = object()
+    monkeypatch.setattr(
+        patch_scheduler,
+        "_ORIGINAL_ASYNC_SCHEDULE",
+        lambda scheduler: events.append("schedule") or scheduler_output,
+    )
+    monkeypatch.setattr(
+        patch_scheduler,
+        "print_scheduler_summary",
+        lambda scheduler, scheduler_output: events.append("summary"),
+    )
+
+    assert patch_scheduler._async_schedule_with_summary(object()) is scheduler_output
     assert events == ["schedule", "summary"]

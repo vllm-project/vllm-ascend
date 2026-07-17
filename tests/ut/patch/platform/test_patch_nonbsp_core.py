@@ -2,8 +2,20 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import torch
-import vllm_ascend.patch.platform.patch_nonbsp_core as nonbsp_core  # noqa: I001
-from vllm.v1.request import RequestStatus
+import vllm.v1.request as request_module
+
+import vllm_ascend.patch.platform.patch_nonbsp_core as nonbsp_core
+
+RequestStatus = request_module.RequestStatus
+
+
+def test_nonbsp_core_uses_extended_request_status():
+    assert nonbsp_core.RequestStatus is request_module.RequestStatus
+    assert hasattr(nonbsp_core.RequestStatus, "LB_PAUSED")
+
+
+def test_nonbsp_uses_main_upstream_engine_core_entrypoint():
+    assert nonbsp_core._UpstreamRunEngineCore is nonbsp_core._balance_patch._OriginalRunEngineCore
 
 
 def test_dp_engine_core_initializes_ascend_config(monkeypatch, capsys):
@@ -97,9 +109,7 @@ def test_nonbsp_dp_core_does_not_duplicate_step_counter(monkeypatch, capsys):
 
 def test_print_balance_summary(capsys):
     nonbsp_core._print_requests_by_rank([([8, 4, 2, 0], 2)], dp_rank=0)
-    nonbsp_core._print_modifications(
-        [{"out_blk": [8], "in_blk": [2], "freeze": False}], dp_rank=0
-    )
+    nonbsp_core._print_modifications([{"out_blk": [8], "in_blk": [2], "freeze": False}], dp_rank=0)
 
     output = capsys.readouterr().out
     assert "DP0 | Run(2): [  8,   4]" in output
@@ -111,9 +121,7 @@ def test_print_balance_summary(capsys):
 
 def test_balance_summary_is_suppressed_on_nonzero_dp_rank(capsys):
     nonbsp_core._print_requests_by_rank([([8, 4, 2, 0], 2)], dp_rank=1)
-    nonbsp_core._print_modifications(
-        [{"out_blk": [8], "in_blk": [2], "freeze": False}], dp_rank=1
-    )
+    nonbsp_core._print_modifications([{"out_blk": [8], "in_blk": [2], "freeze": False}], dp_rank=1)
 
     assert capsys.readouterr().out == ""
 
