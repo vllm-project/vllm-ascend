@@ -142,10 +142,10 @@ msgstr "一些用于优化的配置如下所示："
 
 msgid ""
 "- `VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node. With FlashComm enabled, layer_sharding list cannot include o_proj as an element.\n"
-"- `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable following fused operators: dispatch_gmm_combine_decode and dispatch_ffn_combine operator."
+"- `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable the dispatch_ffn_combine fused operator."
 msgstr ""
 "- `VLLM_ASCEND_ENABLE_FLASHCOMM1`：启用 FlashComm 优化以减少 prefill 节点上的通信和计算开销。启用 FlashComm 后，layer_sharding 列表不能包含 o_proj 作为元素。\n"
-"- `VLLM_ASCEND_ENABLE_FUSED_MC2`：启用以下融合算子：dispatch_gmm_combine_decode 和 dispatch_ffn_combine 算子。"
+"- `VLLM_ASCEND_ENABLE_FUSED_MC2`：启用 dispatch_ffn_combine 融合算子。"
 
 msgid ""
 "Please refer to the following python file for further explanation and "

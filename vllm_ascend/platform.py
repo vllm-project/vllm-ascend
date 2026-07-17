@@ -335,17 +335,6 @@ class NPUPlatform(Platform):
         torch.npu.set_device(device)
 
     @classmethod
-    def _validate_layer_sharding_config(cls, vllm_config: VllmConfig) -> None:
-        additional_config = vllm_config.additional_config or {}
-        layer_sharding = additional_config.get("layer_sharding") or []
-        if not layer_sharding:
-            return
-
-        kv_transfer_config = vllm_config.kv_transfer_config
-        if kv_transfer_config is None or kv_transfer_config.kv_role != "kv_producer":
-            raise ValueError("additional_config.layer_sharding can only be enabled in PD-disaggregated's P node.")
-
-    @classmethod
     def _validate_parallel_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
         if parallel_config.data_parallel_size > 1 and parallel_config.prefill_context_parallel_size > 1:
@@ -436,7 +425,6 @@ class NPUPlatform(Platform):
 
         maybe_auto_detect_quantization(vllm_config)
 
-        cls._validate_layer_sharding_config(vllm_config)
         cls._validate_draft_decode_context_parallel_config(vllm_config)
         cls._validate_parallel_config(vllm_config)
 
@@ -635,7 +623,8 @@ class NPUPlatform(Platform):
         if get_ascend_device_type() != AscendDeviceType._310P:
             compilation_config.custom_ops = ["all"]
 
-        if ascend_config.enable_balance_scheduling:
+        scheduler_extension_config = ascend_config.scheduler_config
+        if scheduler_extension_config.enable_balance_scheduling:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
             if kv_transfer_config is not None and kv_role != "kv_both":
@@ -647,7 +636,7 @@ class NPUPlatform(Platform):
 
         cls._validate_kv_load_failure_policy(vllm_config)
 
-        short_request_first_config = ascend_config.short_request_first_config
+        short_request_first_config = scheduler_extension_config.short_request_first_config
         enable_short_request_first = short_request_first_config.enabled
         short_request_first_supported_policy = vllm_config.scheduler_config.policy == "fcfs"
         if enable_short_request_first and not short_request_first_supported_policy:
@@ -659,7 +648,7 @@ class NPUPlatform(Platform):
 
         recompute_scheduler_cls = None
         recompute_scheduler_kv_role = None
-        if ascend_config.recompute_scheduler_enable:
+        if scheduler_extension_config.recompute_scheduler_enable:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
             if kv_role == "kv_producer":
@@ -669,7 +658,7 @@ class NPUPlatform(Platform):
                     "Please remove it from P-node configs and keep it only on PD-disaggregated D nodes "
                     "(kv_role='kv_consumer')."
                 )
-                ascend_config.recompute_scheduler_enable = False
+                scheduler_extension_config.recompute_scheduler_enable = False
             elif kv_transfer_config is None or kv_role != "kv_consumer":
                 raise ValueError(
                     "recompute_scheduler_enable can only be enabled on PD-disaggregated D nodes "
@@ -697,21 +686,8 @@ class NPUPlatform(Platform):
                 "in additional_config. ShortRequestFirst scheduling will not be activated.",
             )
 
-        # Extend original scheduler_config to use SchedulerDynamicBatch.
-        if ascend_config.SLO_limits_for_dynamic_batch != -1:
-            if enable_short_request_first:
-                logger.warning_once(
-                    "ShortRequestFirst scheduling is ignored because "
-                    "SLO_limits_for_dynamic_batch selects SchedulerDynamicBatch."
-                )
-            vllm_config.scheduler_config.scheduler_cls = (
-                "vllm_ascend.core.scheduler_dynamic_batch.SchedulerDynamicBatch"
-            )
-            vllm_config.scheduler_config.enable_chunked_prefill = True
-            vllm_config.scheduler_config.SLO_limits_for_dynamic_batch = ascend_config.SLO_limits_for_dynamic_batch
-
         # Use ProfilingChunkScheduler when profiling-based chunk sizing is on.
-        if ascend_config.profiling_chunk_config.enabled:
+        if scheduler_extension_config.profiling_chunk_config.enabled:
             vllm_config.scheduler_config.scheduler_cls = (
                 "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler"
             )

@@ -58,5 +58,5 @@ test_cases:
         num_prompts: 50
         max_out_len: 32768
         batch_size: 32
-        baseline: 84
-        threshold: 8
+        baseline: 90
+        threshold: 5
