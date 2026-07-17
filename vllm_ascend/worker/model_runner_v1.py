@@ -2173,7 +2173,7 @@ class NPUModelRunner(GPUModelRunner):
                 is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
                 # Enable ubatch only for decode phase, disable for prefill phase
                 should_ubatch = is_all_decode
-                logger.info("should_ubatch: %s", should_ubatch)
+                logger.info("is_all_decode: %s", should_ubatch)
                 num_tokens_padded = batch_desc.num_tokens
                 num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
                 logger.info(
@@ -3849,7 +3849,9 @@ class NPUModelRunner(GPUModelRunner):
         get_offloader().post_init()
 
         # wrap the model with full graph wrapper if needed.
-        logger.info("44444444444444444444444444")
+        is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
+        logger.info("44444444444444444444444444is_all_decode: %s", is_all_decode)
+
         if (self.compilation_config.cudagraph_mode.has_full_cudagraphs()):
             logger.info("555555555555555555555555555555555555555555")
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
@@ -3860,7 +3862,7 @@ class NPUModelRunner(GPUModelRunner):
                 use_eagle=self.use_eagle,
                 enable_enpu=self.enable_enpu,
             )
-        elif self.afd_config:
+        elif self.afd_config and is_all_decode:
             logger.info("use_ubatching11111111111111111")
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
             if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
