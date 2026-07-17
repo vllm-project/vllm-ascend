@@ -744,7 +744,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                             if block_idx >= len(all_hashes):
                                 continue
                             current_hash = all_hashes[block_idx]
-                            parent_hash = all_hashes[block_idx - 1] if block_idx > 0 else None   
+                            parent_hash = all_hashes[block_idx - 1] if block_idx > 0 else None
                             stored_event = BlockStored(
                                 block_hashes=[current_hash],
                                 parent_block_hash=parent_hash,
