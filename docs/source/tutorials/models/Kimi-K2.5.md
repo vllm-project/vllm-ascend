@@ -503,7 +503,7 @@ Parameter descriptions:
         --enable-auto-tool-choice \
         --tool-call-parser kimi_k2 \
         --reasoning-parser kimi_k2 \
-        --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}' \
+        --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 1}' \
         --additional-config '{"recompute_scheduler_enable":true}' \
         --mm-encoder-tp-mode data \
         --kv-transfer-config \
@@ -584,7 +584,7 @@ Parameter descriptions:
         --enable-auto-tool-choice \
         --tool-call-parser kimi_k2 \
         --reasoning-parser kimi_k2 \
-        --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}' \
+        --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 1}' \
         --additional-config '{"recompute_scheduler_enable":true}' \
         --mm-encoder-tp-mode data \
         --kv-transfer-config \
