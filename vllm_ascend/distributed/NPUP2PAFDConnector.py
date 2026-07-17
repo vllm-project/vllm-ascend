@@ -339,7 +339,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
             # Use async send instead of sync send
             # Use a2e_group for attention -> expert/ffn communication
             # self.current_stream_synchronize(self.backend)
-            dst = (groupEp.rank_in_group + 1) % groupEp.world_size
+            dst = (self.a2e_group.rank_in_group + 1) % self.a2e_group.world_size
             work_list = self._send_tensor_dict_async(
                 intermediate_tensors.tensors,
                 dst=dst,
@@ -363,7 +363,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
         ubatch_idx = kwargs.get('ubatch_idx', 0)
         groupEp = _get_group_ep(ubatch_idx, self.hccl_comm_name, self.hccl_comm_name2, self.hccl_comm_name3)
 
-        src = (groupEp.rank_in_group - 1) % groupEp.world_size
+        src = (self.a2e_group.rank_in_group - 1) % self.a2e_group.world_size
         intermediate_tensors, work_list = self._recv_tensor_dict_async(
             src=src,
             process_group=groupEp,
@@ -412,7 +412,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
                 "hidden_states": hidden_states,
             }
         )
-        dst = (groupEp.rank_in_group + 1) % groupEp.world_size
+        dst = (self.e2a_group.rank_in_group + 1) % self.e2a_group.world_size
         work_list = self._send_tensor_dict_async(
             intermediate_tensors.tensors,
             dst=dst,
@@ -430,7 +430,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
         ubatch_idx = get_forward_context().ubatch_idx
         groupEp = _get_group_ep(ubatch_idx, self.hccl_comm_name, self.hccl_comm_name2, self.hccl_comm_name3)
         # Use e2a_group for expert/ffn -> attention communication
-        src = (groupEp.rank_in_group - 1) % groupEp.world_size
+        src = (self.e2a_group.rank_in_group - 1) % self.e2a_group.world_size
         # Use async receive for tensor_dict
         intermediate_tensors, work_list = self._recv_tensor_dict_async(
             src=src,
