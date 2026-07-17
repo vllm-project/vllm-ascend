@@ -41,7 +41,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._dspark_draft_buffer = torch.zeros((self.max_batch_size, blk), dtype=torch.int64, device=device)
         self._dspark_seed_buffer = torch.zeros(self.max_batch_size, dtype=torch.int64, device=device)
         # DSpark is not supported in vllm v1, so related property needs to be reset here.
-        del self.hidden_size, self.hidden_states, self._dflash_hidden_states
+        del self.hidden_size, self.hidden_states, self._dflash_hidden_states  # type: ignore[has-type]
         self.hidden_size = vllm_config.speculative_config.draft_model_config.get_hidden_size()
         self.hidden_states = torch.zeros(
             (self.max_num_tokens, self.hidden_size),
@@ -96,7 +96,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._per_group_context_slot_mapping_buffers: dict[int, torch.Tensor] = {}
 
         # per-layer context slot mappings as a flat list
-        self._context_slots: list[torch.Tensor | None] = None
+        self._context_slots: list[torch.Tensor | None] | None = None
 
     def initialize_attn_backend(self, kv_cache_config, kernel_block_sizes=None) -> None:
         # Find draft layers (attention layers added by draft model)
@@ -112,11 +112,12 @@ class AscendDSparkProposer(AscendDflashProposer):
                 "DSpark standard-cache path requires the draft model to expose get_draft_kv_cache_layer_names"
             )
 
-        self._draft_attn_layer_names = sorted(self.model.get_draft_kv_cache_layer_names())
+        self._draft_attn_layer_names = set(self.model.get_draft_kv_cache_layer_names())
+        self.attn_layer_names = list(sorted(self._draft_attn_layer_names))
 
         # there are many kv groups other than one
         for kv_cache_gid, kv_cache_group_spec in enumerate(kv_cache_config.kv_cache_groups):
-            draft_layer_names_in_group = set(kv_cache_group_spec.layer_names) & set(self._draft_attn_layer_names)
+            draft_layer_names_in_group = set(kv_cache_group_spec.layer_names) & self._draft_attn_layer_names
             if not draft_layer_names_in_group:
                 continue
 
@@ -152,7 +153,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         if not self.draft_attn_groups:
             raise RuntimeError(
                 "DSpark standard-cache path requires registered draft attention "
-                f"groups. Missing layers: {self._draft_attn_layer_names}"
+                f"groups. Missing layers: {self.attn_layer_names}"
             )
 
         self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
@@ -162,9 +163,9 @@ class AscendDSparkProposer(AscendDflashProposer):
             ln: gid
             for gid, group in enumerate(kv_cache_config.kv_cache_groups)
             for ln in group.layer_names
-            if ln in self._draft_attn_layer_names
+            if ln in self.attn_layer_names
         }
-        self._layer_group_idx = [name_to_gid[name] for name in self._draft_attn_layer_names]
+        self._layer_group_idx = [name_to_gid[name] for name in self.attn_layer_names]
 
         # some buffers need information of groups
         self._per_group_query_slot_mapping_buffers = {

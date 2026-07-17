@@ -254,7 +254,7 @@ class AscendDflashProposer(AscendEagleProposer):
         self,
         num_input_tokens: int,
         _context_slots: torch.Tensor | list[torch.Tensor],
-    ) -> dict[str, Any]:
+    ) -> None:
         num_context = self._dflash_num_context
 
         if _context_slots is None:

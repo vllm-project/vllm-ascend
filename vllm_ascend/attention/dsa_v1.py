@@ -1263,7 +1263,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         prefill_input_positions = input_positions[tokens_start:]
         cos, sin = get_cos_and_sin_dsa(prefill_input_positions)
 
-        prefill_slot_mapping = self.spec_slot_mapping[draft_index - 1][tokens_start : tokens_start + num_prefill_tokens]
+        assert num_prefill_tokens is not None
+        prefill_slot_mapping = self.spec_slot_mapping[draft_index - 1][tokens_start : tokens_start + num_prefill_tokens]  # type: ignore[index]
         block_table = common_attn_metadata.block_table_tensor[: common_attn_metadata.num_reqs]
         dspark_swa_indices = None
         ori_win_left, ori_win_right = self.model_config.hf_config.sliding_window - 1, 0
@@ -1353,6 +1354,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         ori_win_left, ori_win_right = self.model_config.hf_config.sliding_window - 1, 0
         block_table = common_attn_metadata.block_table_tensor
         if not common_attn_metadata.causal:
+            assert num_decodes is not None
             dspark_swa_indices, _ = build_dspark_swa_indices(
                 block_table[:num_decodes],
                 self.speculative_config.num_speculative_tokens,

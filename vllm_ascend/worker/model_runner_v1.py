@@ -653,6 +653,7 @@ class NPUModelRunner(GPUModelRunner):
         dspark_layer_ids = getattr(hf_config, "target_layer_ids", None)
         if dspark_layer_ids:
             return tuple(i + 1 for i in dspark_layer_ids)
+        return None
 
     def _use_aclgraph(self) -> bool:
         return (

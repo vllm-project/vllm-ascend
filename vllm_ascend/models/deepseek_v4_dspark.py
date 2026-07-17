@@ -177,6 +177,7 @@ class DeepseekV4DSparkModel(nn.Module):
         positions: torch.Tensor,
         attn: type[nn.Module] | None = None,
     ) -> torch.Tensor:
+        assert attn is not None
         kv = attn.kv_norm(attn.wkv(hidden_states))
         k_nope, k_pe = kv.split([attn.nope_head_dim, attn.rope_head_dim], dim=-1)
         k_pe = _apply_dsv4_rope(attn.rotary_emb, positions, k_pe.unsqueeze(1)).squeeze(1)
@@ -191,6 +192,7 @@ class DeepseekV4DSparkModel(nn.Module):
         if slot_mapping is None or slot_mapping.numel() == 0:
             return
 
+        assert attn is not None
         swa_cache_layer = attn.dsa_attn.swa_cache_layer
         swa_kv_cache = getattr(swa_cache_layer, "kv_cache", None)
         if swa_kv_cache is None:
