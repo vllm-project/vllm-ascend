@@ -1,8 +1,8 @@
 # Release Notes
 
-## v0.23.0 - 2026.07.17
+## v0.23.0rc1 - 2026.07.17
 
-We're excited to announce the v0.23.0 stable release of vLLM Ascend. This release aligns the plugin with upstream vLLM v0.23.0 and expands model, context-parallel, KV-cache offload, and Ascend 950 support. Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/) to get started.
+We're excited to announce v0.23.0rc1, the first release candidate for the vLLM Ascend v0.23.0 release line. This release aligns the plugin with upstream vLLM v0.23.0 and expands model, context-parallel, KV-cache offload, and Ascend 950 support. Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/v0.23.0rc1/) to get started.
 
 ### Highlights
 
@@ -28,6 +28,7 @@ We're excited to announce the v0.23.0 stable release of vLLM Ascend. This releas
 ### Stability and Bug Fixes
 
 - Fixed PD, PCP, and DCP accuracy regressions in the GDN path. [#12027](https://github.com/vllm-project/vllm-ascend/pull/12027)
+- Fixed the DeepSeek V4 Flash Float8/Bool promotion failure reported in [#11498](https://github.com/vllm-project/vllm-ascend/issues/11498) and backported the correction to the release branch. [#11663](https://github.com/vllm-project/vllm-ascend/pull/11663) [#11718](https://github.com/vllm-project/vllm-ascend/pull/11718)
 - Fixed DCP/DP service hangs and restricted the recompute scheduler to decode nodes. [#12034](https://github.com/vllm-project/vllm-ascend/pull/12034) [#11490](https://github.com/vllm-project/vllm-ascend/pull/11490)
 - Fixed layerwise KV Pool indexing when MTP is enabled and delayed AscendStore initialization until the first real decode request. [#11829](https://github.com/vllm-project/vllm-ascend/pull/11829) [#11673](https://github.com/vllm-project/vllm-ascend/pull/11673)
 - Fixed low MTP acceptance rates for SFA with DSA-CP and multiple speculative tokens. [#10878](https://github.com/vllm-project/vllm-ascend/pull/10878)
@@ -43,16 +44,9 @@ We're excited to announce the v0.23.0 stable release of vLLM Ascend. This releas
 
 ### Known Issues
 
-- The latest main-branch A3 Nightly run completed MiniMax-M3-W8A8 inference but scored 0.0 on GSM8K against a baseline of 95. Owner triage and a release-branch rerun or explicit waiver are required before release. [Nightly run #29553804077](https://github.com/vllm-project/vllm-ascend/actions/runs/29553804077)
-- The current A2 Nightly run fails for MiniMax-M2.5-W8A8-QuaRot because `AscendMoERunner` does not expose `maybe_all_reduce_tensor_model_parallel`; [#10443](https://github.com/vllm-project/vllm-ascend/pull/10443) is the proposed fix and must be merged and cherry-picked before release.
-- DeepSeek V4 can fail with a Float8/Bool dtype mismatch on the v0.23.0 release branch. [#11498](https://github.com/vllm-project/vllm-ascend/issues/11498)
-- A3 DCP deployments can fail at startup with an assertion in the replicated-indexer path. [#12102](https://github.com/vllm-project/vllm-ascend/issues/12102)
-- Sleep/wake cycles can double-transpose MoE weights and produce incorrect output. [#12226](https://github.com/vllm-project/vllm-ascend/issues/12226)
-- PD with PCP can corrupt Function Calling return paths, and DeepSeek V4 Flash A3 PD prefill can stall under high-concurrency 50K-token requests. [#12192](https://github.com/vllm-project/vllm-ascend/issues/12192) [#12179](https://github.com/vllm-project/vllm-ascend/issues/12179)
+- The fix for the A3 DCP replicated-indexer startup assertion is included in [#11981](https://github.com/vllm-project/vllm-ascend/pull/11981), but the exact configuration reported in [#12102](https://github.com/vllm-project/vllm-ascend/issues/12102) still needs verification.
 - The load-balance proxy can swallow decode errors and return an empty HTTP 200 response. [#12166](https://github.com/vllm-project/vllm-ascend/issues/12166)
 - AscendStore can generate an incorrect parent-block hash for partially missing KV blocks. [#12002](https://github.com/vllm-project/vllm-ascend/issues/12002)
-- Qwen3.6 W8A8 can hang after EngineCore and worker loss while the main process remains alive. [#11892](https://github.com/vllm-project/vllm-ascend/issues/11892)
-- Ascend 950 image and wheel publication depends on the pending release-artifact workflow update in [#12024](https://github.com/vllm-project/vllm-ascend/pull/12024); do not publish the release until this PR is merged or the artifact scope is explicitly narrowed.
 
 ## v0.22.1rc1 - 2026.06.30
 
