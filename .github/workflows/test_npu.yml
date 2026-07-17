@@ -1,0 +1,9 @@
+name: Test NPU
+on:
+  pull_request:
+    paths: ['.github/workflows/test_npu.yml']
+jobs:
+  npu:
+    runs-on: linux-aarch64-950dt-8
+    steps:
+      - run: npu-smi info
