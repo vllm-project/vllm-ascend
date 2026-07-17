@@ -1570,17 +1570,17 @@ class KVPoolWorker:
         starts: list[int] = []
         ends: list[int] = []
         if use_layerwise:
-            for start, end, key in self.token_database.process_tokens(
+            for start, end, pool_key in self.token_database.process_tokens(
                 token_len, block_hashes, kv_cache_group_id=group_id
             ):
-                keys.extend(item.to_string() for item in key.split_layers(self.num_layers))
+                keys.extend(item.to_string() for item in pool_key.split_layers(self.num_layers))
                 starts.append(start)
                 ends.append(end)
         else:
-            for start, end, key, _ in self.token_database.process_token_key_strings(
+            for start, end, key_string, _ in self.token_database.process_token_key_strings(
                 token_len, block_hashes, kv_cache_group_id=group_id
             ):
-                keys.append(key)
+                keys.append(key_string)
                 starts.append(start)
                 ends.append(end)
         return keys, starts, ends
