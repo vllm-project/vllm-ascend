@@ -1,5 +1,3 @@
-from typing import TYPE_CHECKING
-
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention
 
 from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
@@ -12,10 +10,8 @@ from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 from vllm_ascend.utils import is_rc_device, vllm_version_is
 
-if TYPE_CHECKING:
-    from vllm.third_party.flash_linear_attention.ops import index as fla_index
-elif vllm_version_is("0.24.0"):
-    from vllm.model_executor.layers.fla.ops import index as fla_index
+if vllm_version_is("0.24.0"):
+    from vllm.model_executor.layers.fla.ops import index as fla_index  # type: ignore[import-not-found]
 else:
     from vllm.third_party.flash_linear_attention.ops import index as fla_index
 
