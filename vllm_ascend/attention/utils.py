@@ -541,6 +541,17 @@ def _make_metadata_with_slice(
             device=positions.device,
         )
         positions = torch.cat([positions, pos_pad])
+    # Handle positions_cpu for Ascend metadata
+    positions_cpu = None
+    if attn_metadata.positions_cpu is not None:
+        positions_cpu = attn_metadata.positions_cpu[token_slice.start:real_token_stop].clone()
+        if num_pad_tokens > 0:
+            pos_cpu_pad = torch.zeros(
+                num_pad_tokens,
+                dtype=positions_cpu.dtype,
+                device="cpu",
+            )
+            positions_cpu = torch.cat([positions_cpu, pos_cpu_pad])
     attn_state = attn_metadata.attn_state
     # if attn_metadata.attn_state != AscendAttentionState.ChunkedPrefill:
     # attn_mask = attn_metadata.attn_mask
@@ -565,6 +576,7 @@ def _make_metadata_with_slice(
         slot_mapping=slot_mapping,
         num_computed_tokens_cpu=num_computed_tokens_cpu,
         positions=positions,
+        positions_cpu=positions_cpu,
         attn_state=attn_state,
         max_query_len=max_query_len,
         decode_token_per_req=attn_metadata.decode_token_per_req,
