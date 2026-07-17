@@ -36,6 +36,25 @@ def test_nonbsp_enabled_reads_nested_scheduler_config(monkeypatch):
     assert nonbsp_core._nonbsp_enabled(vllm_config) is True
 
 
+def test_nonbsp_diagnostics_read_nested_scheduler_config(monkeypatch):
+    monkeypatch.setattr(
+        nonbsp_core,
+        "get_ascend_config",
+        MagicMock(side_effect=RuntimeError("not initialized")),
+    )
+    vllm_config = MagicMock()
+    vllm_config.additional_config = {
+        "scheduler_config": {
+            "nonbsp_config": {
+                "enabled": True,
+                "enable_diagnostics": True,
+            }
+        }
+    }
+
+    assert nonbsp_core._get_nonbsp_config(vllm_config).enable_diagnostics is True
+
+
 def test_nonbsp_enabled_ignores_legacy_top_level_config(monkeypatch):
     monkeypatch.setattr(
         nonbsp_core,
@@ -48,6 +67,13 @@ def test_nonbsp_enabled_ignores_legacy_top_level_config(monkeypatch):
     assert nonbsp_core._nonbsp_enabled(vllm_config) is False
 
 
+def test_default_dp_core_diagnostics_method_is_not_patched():
+    assert (
+        nonbsp_core.DPEngineCoreProc._has_global_unfinished_reqs
+        is not nonbsp_core.NonBSPDPEngineCoreProc._has_global_unfinished_reqs
+    )
+
+
 def test_dp_engine_core_initializes_ascend_config(monkeypatch, capsys):
     vllm_config = MagicMock()
     vllm_config.scheduler_config.max_num_seqs = 4
@@ -55,6 +81,7 @@ def test_dp_engine_core_initializes_ascend_config(monkeypatch, capsys):
     ascend_config = MagicMock()
     nonbsp_config = ascend_config.scheduler_config.nonbsp_config
     nonbsp_config.enabled = True
+    nonbsp_config.enable_diagnostics = True
     nonbsp_config.mode = "static"
     nonbsp_config.start_step = 0
     nonbsp_config.end_step = -1
@@ -85,6 +112,7 @@ def test_dp_engine_core_initializes_ascend_config(monkeypatch, capsys):
 
     output = capsys.readouterr().out
     assert "nonbsp_config.enabled = True" in output
+    assert "nonbsp_config.enable_diagnostics = True" in output
     assert "nonbsp_config.mode = static" in output
     assert "nonbsp_config.start_step = 0" in output
     assert "nonbsp_config.end_step = -1" in output
@@ -109,29 +137,35 @@ def test_balance_load_runs_before_engine_step(monkeypatch):
     assert events == ["balance_load", "engine_step"]
 
 
-def test_dp_core_prints_step_counter_without_nonbsp(monkeypatch, capsys):
+def test_nonbsp_diagnostics_are_disabled_by_default(monkeypatch, capsys):
     monkeypatch.setattr(
-        nonbsp_core,
-        "_ORIGINAL_HAS_GLOBAL_UNFINISHED_REQS",
-        lambda self, local_unfinished: True,
+        nonbsp_core.DPEngineCoreProc,
+        "_has_global_unfinished_reqs",
+        lambda self, local_unfinished: False,
     )
 
-    engine_core = object.__new__(nonbsp_core.DPEngineCoreProc)
+    engine_core = object.__new__(nonbsp_core.NonBSPDPEngineCoreProc)
+    engine_core._lb_enable_diagnostics = False
     engine_core.step_counter = 7
+    engine_core.scheduler = MagicMock()
+    engine_core.scheduler.modifications = {"freeze": True}
+    engine_core.scheduler.lb_freeze = True
 
-    assert engine_core._has_global_unfinished_reqs(True) is True
-    output = capsys.readouterr().out
-    assert output.count("step_counter: 7") == 1
+    assert engine_core._has_global_unfinished_reqs(True) is False
+    assert capsys.readouterr().out == ""
+    assert engine_core.scheduler.modifications is None
+    assert engine_core.scheduler.lb_freeze is False
 
 
-def test_nonbsp_dp_core_does_not_duplicate_step_counter(monkeypatch, capsys):
+def test_nonbsp_diagnostics_print_step_counter_once(monkeypatch, capsys):
     monkeypatch.setattr(
-        nonbsp_core,
-        "_ORIGINAL_HAS_GLOBAL_UNFINISHED_REQS",
+        nonbsp_core.DPEngineCoreProc,
+        "_has_global_unfinished_reqs",
         lambda self, local_unfinished: True,
     )
 
     engine_core = object.__new__(nonbsp_core.NonBSPDPEngineCoreProc)
+    engine_core._lb_enable_diagnostics = True
     engine_core.step_counter = 7
     engine_core.scheduler = MagicMock()
 
@@ -141,8 +175,16 @@ def test_nonbsp_dp_core_does_not_duplicate_step_counter(monkeypatch, capsys):
 
 
 def test_print_balance_summary(capsys):
-    nonbsp_core._print_requests_by_rank([([8, 4, 2, 0], 2)], dp_rank=0)
-    nonbsp_core._print_modifications([{"out_blk": [8], "in_blk": [2], "freeze": False}], dp_rank=0)
+    nonbsp_core._print_requests_by_rank(
+        [([8, 4, 2, 0], 2)],
+        dp_rank=0,
+        enable_diagnostics=True,
+    )
+    nonbsp_core._print_modifications(
+        [{"out_blk": [8], "in_blk": [2], "freeze": False}],
+        dp_rank=0,
+        enable_diagnostics=True,
+    )
 
     output = capsys.readouterr().out
     assert "DP0 | Run(2): [  8,   4]" in output
@@ -153,8 +195,31 @@ def test_print_balance_summary(capsys):
 
 
 def test_balance_summary_is_suppressed_on_nonzero_dp_rank(capsys):
-    nonbsp_core._print_requests_by_rank([([8, 4, 2, 0], 2)], dp_rank=1)
-    nonbsp_core._print_modifications([{"out_blk": [8], "in_blk": [2], "freeze": False}], dp_rank=1)
+    nonbsp_core._print_requests_by_rank(
+        [([8, 4, 2, 0], 2)],
+        dp_rank=1,
+        enable_diagnostics=True,
+    )
+    nonbsp_core._print_modifications(
+        [{"out_blk": [8], "in_blk": [2], "freeze": False}],
+        dp_rank=1,
+        enable_diagnostics=True,
+    )
+
+    assert capsys.readouterr().out == ""
+
+
+def test_balance_summary_is_suppressed_when_diagnostics_are_disabled(capsys):
+    nonbsp_core._print_requests_by_rank(
+        [([8, 4, 2, 0], 2)],
+        dp_rank=0,
+        enable_diagnostics=False,
+    )
+    nonbsp_core._print_modifications(
+        [{"out_blk": [8], "in_blk": [2], "freeze": False}],
+        dp_rank=0,
+        enable_diagnostics=False,
+    )
 
     assert capsys.readouterr().out == ""
 
@@ -178,6 +243,7 @@ def test_nonbsp_allgather_uses_only_unified_waiting_queue(monkeypatch):
     engine_core.scheduler = scheduler
     engine_core.dp_group = MagicMock()
     engine_core.dp_rank = 0
+    engine_core._lb_enable_diagnostics = False
     engine_core._lb_max_slots_cached = 4
     engine_core._lb_dp_size_cached = 1
     engine_core._lb_max_num_seqs = 2

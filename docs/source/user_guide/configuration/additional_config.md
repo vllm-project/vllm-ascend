@@ -174,6 +174,7 @@ dynamic chunk sizing.
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `enabled` | bool | `False` | Whether to enable NonBSP scheduling. |
+| `enable_diagnostics` | bool | `False` | Whether to print NonBSP scheduler, load-balancing, preemption, and engine-step diagnostics. The default Scheduler and DP engine diagnostics paths are not patched. |
 | `mode` | str | `"static"` | Load-balancing mode. Must be `"static"` or `"dynamic"`. |
 | `start_step` | int | `250` | First engine step at which load balancing may run. |
 | `end_step` | int | `-1` | Exclusive end step. `-1` keeps load balancing enabled without an end step. |
@@ -189,6 +190,7 @@ vllm serve <model> \
     "scheduler_config": {
       "nonbsp_config": {
         "enabled": true,
+        "enable_diagnostics": false,
         "mode": "dynamic",
         "start_step": 250,
         "end_step": -1,

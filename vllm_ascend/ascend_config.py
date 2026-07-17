@@ -848,6 +848,7 @@ class NonBSPConfig:
 
     _defaults = {
         "enabled": False,
+        "enable_diagnostics": False,
         "mode": "static",
         "start_step": 250,
         "end_step": -1,
@@ -868,6 +869,10 @@ class NonBSPConfig:
             raise ValueError(f"Unknown nonbsp_config keys: {sorted(unknown)}")
 
         self.enabled = user_config.get("enabled", self._defaults["enabled"])
+        self.enable_diagnostics = user_config.get(
+            "enable_diagnostics",
+            self._defaults["enable_diagnostics"],
+        )
         self.mode = user_config.get("mode", self._defaults["mode"])
         self.start_step = user_config.get("start_step", self._defaults["start_step"])
         self.end_step = user_config.get("end_step", self._defaults["end_step"])
@@ -882,6 +887,10 @@ class NonBSPConfig:
     def _validate_config(self):
         if not isinstance(self.enabled, bool):
             raise ValueError(f"nonbsp_config.enabled must be a bool, got {type(self.enabled).__name__}.")
+        if not isinstance(self.enable_diagnostics, bool):
+            raise ValueError(
+                f"nonbsp_config.enable_diagnostics must be a bool, got {type(self.enable_diagnostics).__name__}."
+            )
         if not isinstance(self.mode, str) or self.mode not in self._valid_modes:
             raise ValueError(f"nonbsp_config.mode must be one of {sorted(self._valid_modes)}, got {self.mode!r}.")
 

@@ -116,6 +116,7 @@ class TestAscendConfig(TestBase):
                 "profiling_chunk_config": {"enabled": False},
                 "nonbsp_config": {
                     "enabled": True,
+                    "enable_diagnostics": True,
                     "mode": "dynamic",
                     "start_step": 100,
                     "end_step": 500,
@@ -134,6 +135,7 @@ class TestAscendConfig(TestBase):
         self.assertEqual(scheduler_config.short_request_first_config.threshold, 512)
         self.assertFalse(scheduler_config.profiling_chunk_config.enabled)
         self.assertTrue(scheduler_config.nonbsp_config.enabled)
+        self.assertTrue(scheduler_config.nonbsp_config.enable_diagnostics)
         self.assertEqual(scheduler_config.nonbsp_config.mode, "dynamic")
         self.assertEqual(scheduler_config.nonbsp_config.start_step, 100)
         self.assertEqual(scheduler_config.nonbsp_config.end_step, 500)
@@ -505,6 +507,7 @@ class TestNonBSPConfig(TestBase):
         config = NonBSPConfig()
 
         self.assertFalse(config.enabled)
+        self.assertFalse(config.enable_diagnostics)
         self.assertEqual(config.mode, "static")
         self.assertEqual(config.start_step, 250)
         self.assertEqual(config.end_step, -1)
@@ -516,6 +519,7 @@ class TestNonBSPConfig(TestBase):
         config = NonBSPConfig(
             {
                 "enabled": True,
+                "enable_diagnostics": True,
                 "mode": "dynamic",
                 "start_step": 100,
                 "end_step": 500,
@@ -526,6 +530,7 @@ class TestNonBSPConfig(TestBase):
         )
 
         self.assertTrue(config.enabled)
+        self.assertTrue(config.enable_diagnostics)
         self.assertEqual(config.mode, "dynamic")
         self.assertEqual(config.start_step, 100)
         self.assertEqual(config.end_step, 500)
@@ -538,6 +543,7 @@ class TestNonBSPConfig(TestBase):
             ([], "must be a dict"),
             ({"unknown": True}, "Unknown nonbsp_config keys"),
             ({"enabled": 1}, "enabled must be a bool"),
+            ({"enable_diagnostics": 1}, "enable_diagnostics must be a bool"),
             ({"mode": "invalid"}, "mode must be one of"),
             ({"start_step": -1}, "start_step must be >= 0"),
             ({"start_step": 10, "end_step": 10}, "end_step must be greater than start_step"),
@@ -592,6 +598,7 @@ class TestSchedulerConfig(TestBase):
                     "profiling_chunk_config": {"enabled": True, "need_timing": False},
                     "nonbsp_config": {
                         "enabled": True,
+                        "enable_diagnostics": True,
                         "mode": "dynamic",
                         "start_step": 100,
                         "end_step": 500,
@@ -609,6 +616,7 @@ class TestSchedulerConfig(TestBase):
         self.assertTrue(config.profiling_chunk_config.enabled)
         self.assertFalse(config.profiling_chunk_config.need_timing)
         self.assertTrue(config.nonbsp_config.enabled)
+        self.assertTrue(config.nonbsp_config.enable_diagnostics)
         self.assertEqual(config.nonbsp_config.mode, "dynamic")
         self.assertEqual(config.nonbsp_config.start_step, 100)
         self.assertEqual(config.nonbsp_config.end_step, 500)

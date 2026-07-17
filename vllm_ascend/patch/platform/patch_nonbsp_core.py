@@ -33,29 +33,33 @@ Request = _request_module.Request
 RequestStatus = _request_module.RequestStatus
 
 
-def _nonbsp_enabled(vllm_config) -> bool:
+def _get_nonbsp_config(vllm_config) -> NonBSPConfig:
     try:
-        return get_ascend_config().scheduler_config.nonbsp_config.enabled
+        return get_ascend_config().scheduler_config.nonbsp_config
     except Exception:
         pass
     additional_config = getattr(vllm_config, "additional_config", None) or {}
     scheduler_config = additional_config.get("scheduler_config") or {}
     if not isinstance(scheduler_config, dict):
-        return False
+        return NonBSPConfig()
     nonbsp_config = scheduler_config.get("nonbsp_config") or {}
     if not isinstance(nonbsp_config, dict):
-        return False
-    return NonBSPConfig(nonbsp_config).enabled
+        return NonBSPConfig()
+    return NonBSPConfig(nonbsp_config)
 
 
-def _print_rank_0(message: str, dp_rank: int) -> None:
-    if dp_rank != 0:
+def _nonbsp_enabled(vllm_config) -> bool:
+    return _get_nonbsp_config(vllm_config).enabled
+
+
+def _print_rank_0(message: str, dp_rank: int, enable_diagnostics: bool) -> None:
+    if not enable_diagnostics or dp_rank != 0:
         return
     print(f"{datetime.datetime.now()} | [nonbsp] {message}", flush=True)
 
 
-def _print_requests_by_rank(requests_by_rank, dp_rank: int) -> None:
-    if dp_rank != 0:
+def _print_requests_by_rank(requests_by_rank, dp_rank: int, enable_diagnostics: bool) -> None:
+    if not enable_diagnostics or dp_rank != 0:
         return
 
     print("\n" + "=" * 85, flush=True)
@@ -74,8 +78,8 @@ def _print_requests_by_rank(requests_by_rank, dp_rank: int) -> None:
     print("=" * 85, flush=True)
 
 
-def _print_modifications(modifications, dp_rank: int) -> None:
-    if dp_rank != 0:
+def _print_modifications(modifications, dp_rank: int, enable_diagnostics: bool) -> None:
+    if not enable_diagnostics or dp_rank != 0:
         return
 
     print("\n" + "=" * 60, flush=True)
@@ -93,26 +97,13 @@ def _print_modifications(modifications, dp_rank: int) -> None:
     print("=" * 60, flush=True)
 
 
-_ORIGINAL_HAS_GLOBAL_UNFINISHED_REQS = DPEngineCoreProc._has_global_unfinished_reqs
-
-
-def _has_global_unfinished_reqs_with_step_counter(self, local_unfinished: bool) -> bool:
-    print(
-        f"{datetime.datetime.now()} | _has_global_unfinished_reqs | step_counter: {self.step_counter}",
-        flush=True,
-    )
-    return _ORIGINAL_HAS_GLOBAL_UNFINISHED_REQS(self, local_unfinished)
-
-
-DPEngineCoreProc._has_global_unfinished_reqs = _has_global_unfinished_reqs_with_step_counter
-
-
 class NonBSPDPEngineCoreProc(DPEngineCoreProc):
     def _init_data_parallel(self, vllm_config):
         super()._init_data_parallel(vllm_config)
 
         ascend_config = init_ascend_config(vllm_config)
         nonbsp_config = ascend_config.scheduler_config.nonbsp_config
+        self._lb_enable_diagnostics = nonbsp_config.enable_diagnostics
         self._lb_mode = nonbsp_config.mode
         self._lb_start_step = nonbsp_config.start_step
         self._lb_end_step = nonbsp_config.end_step
@@ -124,18 +115,41 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
         self._lb_pending_long_req = False
         self._lb_pending_long_req_blk = 0
 
-        _print_rank_0("nonbsp_config.enabled = True", self.dp_rank)
-        _print_rank_0(f"nonbsp_config.mode = {self._lb_mode}", self.dp_rank)
-        _print_rank_0(f"nonbsp_config.start_step = {self._lb_start_step}", self.dp_rank)
-        _print_rank_0(f"nonbsp_config.end_step = {self._lb_end_step}", self.dp_rank)
-        _print_rank_0(f"nonbsp_config.bubble_threshold = {self._lb_threshold}", self.dp_rank)
+        _print_rank_0("nonbsp_config.enabled = True", self.dp_rank, self._lb_enable_diagnostics)
+        _print_rank_0(
+            f"nonbsp_config.enable_diagnostics = {self._lb_enable_diagnostics}",
+            self.dp_rank,
+            self._lb_enable_diagnostics,
+        )
+        _print_rank_0(
+            f"nonbsp_config.mode = {self._lb_mode}",
+            self.dp_rank,
+            self._lb_enable_diagnostics,
+        )
+        _print_rank_0(
+            f"nonbsp_config.start_step = {self._lb_start_step}",
+            self.dp_rank,
+            self._lb_enable_diagnostics,
+        )
+        _print_rank_0(
+            f"nonbsp_config.end_step = {self._lb_end_step}",
+            self.dp_rank,
+            self._lb_enable_diagnostics,
+        )
+        _print_rank_0(
+            f"nonbsp_config.bubble_threshold = {self._lb_threshold}",
+            self.dp_rank,
+            self._lb_enable_diagnostics,
+        )
         _print_rank_0(
             f"nonbsp_config.long_req_block_threshold = {self._lb_long_req_threshold}",
             self.dp_rank,
+            self._lb_enable_diagnostics,
         )
         _print_rank_0(
             f"nonbsp_config.dynamic_max_step = {self._lb_dynamic_max_step}",
             self.dp_rank,
+            self._lb_enable_diagnostics,
         )
 
         max_num_seqs = vllm_config.scheduler_config.max_num_seqs
@@ -182,6 +196,7 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
                     f"current_wave={self.current_wave}, "
                     f"step_counter={self.step_counter}",
                     self.dp_rank,
+                    self._lb_enable_diagnostics,
                 )
             self._lb_pending_long_req = False
             self._lb_pending_long_req_blk = 0
@@ -208,6 +223,7 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
                             f"current_wave={self.current_wave}, "
                             f"step_counter={self.step_counter}",
                             self.dp_rank,
+                            self._lb_enable_diagnostics,
                         )
         else:
             self.scheduler.modifications = None
@@ -221,17 +237,23 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
         return super()._process_engine_step()
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
+        if self._lb_enable_diagnostics:
+            print(
+                f"{datetime.datetime.now()} | _has_global_unfinished_reqs | step_counter: {self.step_counter}",
+                flush=True,
+            )
         result = super()._has_global_unfinished_reqs(local_unfinished)
         if not result:
             self.scheduler.modifications = None
             self.scheduler.lb_freeze = False
-            print(
-                f"{datetime.datetime.now()} | [nonbsp] run_busy_loop() | "
-                "No engines running, step_counter set to 0, "
-                "current_wave incremented to "
-                f"{self.current_wave + 1}.",
-                flush=True,
-            )
+            if self._lb_enable_diagnostics:
+                print(
+                    f"{datetime.datetime.now()} | [nonbsp] run_busy_loop() | "
+                    "No engines running, step_counter set to 0, "
+                    "current_wave incremented to "
+                    f"{self.current_wave + 1}.",
+                    flush=True,
+                )
         return result
 
     def _do_lb_allgather(self) -> bool:
@@ -269,8 +291,16 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
             has_new_long_req = has_new_long_req or bool(rank_np[max_slots + 1])
 
         modifications = balance_load(requests_by_rank, dp_size, max_num_seqs=max_num_seqs, threshold=self._lb_threshold)
-        _print_requests_by_rank(requests_by_rank, self.dp_rank)
-        _print_modifications(modifications, self.dp_rank)
+        _print_requests_by_rank(
+            requests_by_rank,
+            self.dp_rank,
+            self._lb_enable_diagnostics,
+        )
+        _print_modifications(
+            modifications,
+            self.dp_rank,
+            self._lb_enable_diagnostics,
+        )
         self.scheduler.modifications = modifications[self.dp_rank]
         return has_new_long_req
 
@@ -282,10 +312,15 @@ _OriginalDPEngineCoreProc = DPEngineCoreProc
 
 def _nonbsp_run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
     vllm_config = kwargs.get("vllm_config")
-    if not _nonbsp_enabled(vllm_config):
+    nonbsp_config = _get_nonbsp_config(vllm_config)
+    if not nonbsp_config.enabled:
         return _PreviousRunEngineCore(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
 
-    _print_rank_0("Enable NonBSP DP load balancing.", dp_rank)
+    _print_rank_0(
+        "Enable NonBSP DP load balancing.",
+        dp_rank,
+        nonbsp_config.enable_diagnostics,
+    )
     _engine_core_mod.DPEngineCoreProc = NonBSPDPEngineCoreProc
     try:
         return _UpstreamRunEngineCore(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)

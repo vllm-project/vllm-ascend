@@ -9,7 +9,52 @@ from tests.ut.kv_offload.utils import (
     create_scheduler,
     create_vllm_config,
 )
+import vllm_ascend.core.nonbsp_scheduler as nonbsp_scheduler_module
 from vllm_ascend.core.nonbsp_scheduler import NonBSPScheduler
+
+
+def _create_scheduler_with_diagnostics(enable_diagnostics: bool):
+    vllm_config = create_vllm_config()
+    vllm_config.additional_config = {
+        "scheduler_config": {
+            "nonbsp_config": {
+                "enabled": True,
+                "enable_diagnostics": enable_diagnostics,
+            }
+        }
+    }
+    return create_scheduler(
+        vllm_config,
+        scheduler_cls=NonBSPScheduler,
+    )
+
+
+def test_nonbsp_scheduler_diagnostics_are_disabled_by_default(monkeypatch):
+    scheduler = _create_scheduler_with_diagnostics(False)
+    summaries = []
+    monkeypatch.setattr(
+        nonbsp_scheduler_module,
+        "print_scheduler_summary",
+        lambda *args: summaries.append(args),
+    )
+
+    scheduler.schedule()
+
+    assert summaries == []
+
+
+def test_nonbsp_scheduler_diagnostics_can_be_enabled(monkeypatch):
+    scheduler = _create_scheduler_with_diagnostics(True)
+    summaries = []
+    monkeypatch.setattr(
+        nonbsp_scheduler_module,
+        "print_scheduler_summary",
+        lambda *args: summaries.append(args),
+    )
+
+    scheduler.schedule()
+
+    assert len(summaries) == 1
 
 
 def test_nonbsp_uses_single_persistent_waiting_queue():

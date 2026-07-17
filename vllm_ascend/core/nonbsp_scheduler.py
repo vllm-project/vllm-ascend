@@ -65,6 +65,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 import vllm_ascend.patch.platform.patch_nonbsp_request_status  # noqa: F401
+from vllm_ascend.ascend_config import NonBSPConfig
 from vllm_ascend.core.scheduler_diagnostics import print_scheduler_summary
 
 
@@ -104,6 +105,10 @@ class NonBSPScheduler(SchedulerInterface):
         self.kv_events_config = vllm_config.kv_events_config
         self.parallel_config = vllm_config.parallel_config
         self.log_stats = log_stats
+        additional_config = vllm_config.additional_config or {}
+        scheduler_extension_config = additional_config.get("scheduler_config") or {}
+        nonbsp_user_config = scheduler_extension_config.get("nonbsp_config") or {}
+        self._enable_diagnostics = NonBSPConfig(nonbsp_user_config).enable_diagnostics
         self.observability_config = vllm_config.observability_config
         self.kv_metrics_collector: KVCacheMetricsCollector | None = None
         if self.observability_config.kv_cache_metrics:
@@ -1192,7 +1197,8 @@ class NonBSPScheduler(SchedulerInterface):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
-        print_scheduler_summary(self, scheduler_output)
+        if self._enable_diagnostics:
+            print_scheduler_summary(self, scheduler_output)
         return scheduler_output
 
     def _build_kv_connector_meta(
@@ -1207,15 +1213,16 @@ class NonBSPScheduler(SchedulerInterface):
         method.
         """
         assert request.status == RequestStatus.RUNNING, "Only running requests can be preempted"
-        print(
-            f"[nonbsp] preempt | "
-            f"dp_rank={self.parallel_config.data_parallel_rank} | "
-            f"request_id_suffix={request.request_id[-12:]} | "
-            f"num_computed_tokens={request.num_computed_tokens} | "
-            f"num_tokens={request.num_tokens} | "
-            f"num_preemptions={request.num_preemptions + 1}",
-            flush=True,
-        )
+        if self._enable_diagnostics:
+            print(
+                f"[nonbsp] preempt | "
+                f"dp_rank={self.parallel_config.data_parallel_rank} | "
+                f"request_id_suffix={request.request_id[-12:]} | "
+                f"num_computed_tokens={request.num_computed_tokens} | "
+                f"num_tokens={request.num_tokens} | "
+                f"num_preemptions={request.num_preemptions + 1}",
+                flush=True,
+            )
         self._free_request_blocks(request)
         self.encoder_cache_manager.free(request)
         self._inflight_prefills.discard(request)
