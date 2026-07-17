@@ -42,7 +42,7 @@ It is **recommended to use the latest release candidate (rc) version or the late
     export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
     docker run --rm \
         --name vllm-ascend \
-        --shm-size=1g \
+        --shm-size=10g \
         --net=host \
         --device /dev/davinci0 \
         --device /dev/davinci1 \
@@ -56,12 +56,12 @@ It is **recommended to use the latest release candidate (rc) version or the late
         --device /dev/devmm_svm \
         --device /dev/hisi_hdc \
         -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
         -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
         -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
         -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
         -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
+        -p 8080:8080 \
         -it $IMAGE bash
     ```
 

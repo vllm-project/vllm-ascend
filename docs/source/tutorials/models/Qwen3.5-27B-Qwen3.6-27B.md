@@ -134,12 +134,12 @@ It is **recommended to use the latest release candidate (rc) version or the late
         --device /dev/devmm_svm \
         --device /dev/hisi_hdc \
         -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
         -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
         -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
         -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
         -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
+        -p 8080:8080 \
         -it $IMAGE bash
     ```
 
