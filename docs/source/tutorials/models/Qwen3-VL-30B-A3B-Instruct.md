@@ -28,95 +28,90 @@ It is recommended to download the model weight to a shared directory across mult
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-=== "A3 series"
+:::::{tab-set}
+:sync-group: install
 
-    Start the docker image on each node.
+::::{tab-item} A3 series
+:sync: A3
 
-    ```bash
+Start the docker image on each node.
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
-    docker run --rm \
-        --name vllm-ascend \
-        --shm-size=512g \
-        --net=host \
-        --privileged=true \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci8 \
-        --device /dev/davinci9 \
-        --device /dev/davinci10 \
-        --device /dev/davinci11 \
-        --device /dev/davinci12 \
-        --device /dev/davinci13 \
-        --device /dev/davinci14 \
-        --device /dev/davinci15 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
-        -v /etc/hccn.conf:/etc/hccn.conf \
-        -v /root/.cache:/root/.cache \
-        -it $IMAGE bash
-    ```
+```{code-block} bash
+   :substitutions:
 
-=== "A2 series"
-
-    Start the docker image on each node.
-
-    ```bash
-
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
-    docker run --rm \
-        --name vllm-ascend \
-        --shm-size=512g \
-        --net=host \
-        --privileged=true \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
-        -v /etc/hccn.conf:/etc/hccn.conf \
-        -v /root/.cache:/root/.cache \
-        -it $IMAGE bash
-    ```
-
-After starting the container, run the following command to verify the installation:
-
-```bash
-docker ps | grep vllm-ascend
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+docker run --rm \
+    --name vllm-ascend \
+    --shm-size=512g \
+    --net=host \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci8 \
+    --device /dev/davinci9 \
+    --device /dev/davinci10 \
+    --device /dev/davinci11 \
+    --device /dev/davinci12 \
+    --device /dev/davinci13 \
+    --device /dev/davinci14 \
+    --device /dev/davinci15 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /etc/hccn.conf:/etc/hccn.conf \
+    -it $IMAGE bash
 ```
 
-Expected result: The container is listed with status `Up`. You can also verify the vllm-ascend version inside the container:
+::::
+::::{tab-item} A2 series
+:sync: A2
 
-```bash
-pip show vllm-ascend
+Start the docker image on each node.
+
+```{code-block} bash
+   :substitutions:
+
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+docker run --rm \
+    --name vllm-ascend \
+    --shm-size=512g \
+    --net=host \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /etc/hccn.conf:/etc/hccn.conf \
+    -it $IMAGE bash
 ```
 
-Expected result: The version information is displayed, matching the pulled image version.
+::::
+:::::
+
+After a successful docker run, you can verify the running container service by executing the `docker ps` command.
 
 ### 4.2 Source Code Installation
 
