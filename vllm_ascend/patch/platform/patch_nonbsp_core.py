@@ -26,7 +26,7 @@ from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc
 
 import vllm_ascend.patch.platform.patch_balance_schedule as _balance_patch
 import vllm_ascend.patch.platform.patch_nonbsp_request_status  # noqa: F401
-from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.ascend_config import NonBSPConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.core.nonbsp_balance_load import balance_load
 
 Request = _request_module.Request
@@ -35,11 +35,17 @@ RequestStatus = _request_module.RequestStatus
 
 def _nonbsp_enabled(vllm_config) -> bool:
     try:
-        return bool(get_ascend_config().NONBSP_ENABLE)
+        return get_ascend_config().scheduler_config.nonbsp_config.enabled
     except Exception:
         pass
     additional_config = getattr(vllm_config, "additional_config", None) or {}
-    return bool(additional_config.get("NONBSP_ENABLE", 0))
+    scheduler_config = additional_config.get("scheduler_config") or {}
+    if not isinstance(scheduler_config, dict):
+        return False
+    nonbsp_config = scheduler_config.get("nonbsp_config") or {}
+    if not isinstance(nonbsp_config, dict):
+        return False
+    return NonBSPConfig(nonbsp_config).enabled
 
 
 def _print_rank_0(message: str, dp_rank: int) -> None:
@@ -106,27 +112,29 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
         super()._init_data_parallel(vllm_config)
 
         ascend_config = init_ascend_config(vllm_config)
-        self._lb_enable = int(ascend_config.NONBSP_ENABLE)
-        self._lb_start_step = int(ascend_config.NONBSP_START_STEP)
-        self._lb_end_step = int(ascend_config.NONBSP_END_STEP)
-        self._lb_threshold = float(ascend_config.NONBSP_BUBBLE_THRESHOLD)
-        self._lb_long_req_threshold = int(ascend_config.NONBSP_LONG_REQ_BLOCK_THRESHOLD)
-        self._lb_dynamic_max_step = int(ascend_config.NONBSP_DYNAMIC_MAX_STEP)
+        nonbsp_config = ascend_config.scheduler_config.nonbsp_config
+        self._lb_mode = nonbsp_config.mode
+        self._lb_start_step = nonbsp_config.start_step
+        self._lb_end_step = nonbsp_config.end_step
+        self._lb_threshold = nonbsp_config.bubble_threshold
+        self._lb_long_req_threshold = nonbsp_config.long_req_block_threshold
+        self._lb_dynamic_max_step = nonbsp_config.dynamic_max_step
         self._lb_dynamic_enable = False
         self._lb_dynamic_step = 0
         self._lb_pending_long_req = False
         self._lb_pending_long_req_blk = 0
 
-        _print_rank_0(f"NONBSP_ENABLE = {self._lb_enable}", self.dp_rank)
-        _print_rank_0(f"NONBSP_START_STEP = {self._lb_start_step}", self.dp_rank)
-        _print_rank_0(f"NONBSP_END_STEP = {self._lb_end_step}", self.dp_rank)
-        _print_rank_0(f"NONBSP_BUBBLE_THRESHOLD = {self._lb_threshold}", self.dp_rank)
+        _print_rank_0("nonbsp_config.enabled = True", self.dp_rank)
+        _print_rank_0(f"nonbsp_config.mode = {self._lb_mode}", self.dp_rank)
+        _print_rank_0(f"nonbsp_config.start_step = {self._lb_start_step}", self.dp_rank)
+        _print_rank_0(f"nonbsp_config.end_step = {self._lb_end_step}", self.dp_rank)
+        _print_rank_0(f"nonbsp_config.bubble_threshold = {self._lb_threshold}", self.dp_rank)
         _print_rank_0(
-            f"NONBSP_LONG_REQ_BLOCK_THRESHOLD = {self._lb_long_req_threshold}",
+            f"nonbsp_config.long_req_block_threshold = {self._lb_long_req_threshold}",
             self.dp_rank,
         )
         _print_rank_0(
-            f"NONBSP_DYNAMIC_MAX_STEP = {self._lb_dynamic_max_step}",
+            f"nonbsp_config.dynamic_max_step = {self._lb_dynamic_max_step}",
             self.dp_rank,
         )
 
@@ -146,7 +154,7 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
         self._lb_dynamic_flag_t = torch.as_tensor(self._lb_dynamic_flag_np)
 
     def add_request(self, request: Request, request_wave: int = 0):
-        if self._lb_enable == 2:
+        if self._lb_mode == "dynamic":
             blk_size = self.scheduler.block_size
             blk_num = (len(request.all_token_ids) + blk_size - 1) // blk_size
             if blk_num > self._lb_long_req_threshold:
@@ -155,8 +163,8 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
         super().add_request(request, request_wave)
 
     def run_balance_load(self):
-        static_lb_enable = self._lb_enable == 1
-        dynamic_lb_mode = self._lb_enable == 2
+        static_lb_enable = self._lb_mode == "static"
+        dynamic_lb_mode = self._lb_mode == "dynamic"
         dynamic_activated_this_step = False
 
         if dynamic_lb_mode and not self._lb_dynamic_enable:

@@ -70,7 +70,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `finegrained_tp_config`             | dict | `{}`    | Configuration options for module tensor parallelism                                                       |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
 | `eplb_config`                       | dict | `{}`    | Configuration options for eplb |
-| `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, ShortRequestFirst, and dynamic chunked pipeline parallel. |
+| `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, NonBSP, ShortRequestFirst, and dynamic chunked pipeline parallel. |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
 | `dump_config`                       | dict | `None`  | Inline msprobe dump configuration. vLLM-Ascend will materialize it to a temporary JSON file and pass that file to the debugger. |
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump (compatible legacy option).                                      |
@@ -152,6 +152,7 @@ The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, 
 | `recompute_scheduler_enable` | bool | `False` | Whether to enable the recompute scheduler. **Only valid on PD-disaggregated D nodes** (`kv_role` is `kv_consumer`). **Do not enable on P nodes or in PD-mixed mode** (no `kv_transfer_config`, `kv_role` is `kv_producer`, or `kv_role` is `kv_both`); startup will fail with a clear error. |
 | `profiling_chunk_config` | dict | `{}` | Configuration options for dynamic chunked pipeline parallel. See [Dynamic Chunked Pipeline Parallel](../feature_guide/dynamic_chunk_pipeline_parallel.md) for details. |
 | `short_request_first_config` | dict | `{}` | Configuration options for ShortRequestFirst prefill scheduling on the PD prefill (P) node. Used with `recompute_scheduler_enable=true`. |
+| `nonbsp_config` | dict | `{}` | Configuration options for NonBSP load balancing on PD-disaggregated decode nodes. |
 
 **scheduler_config.profiling_chunk_config**
 
@@ -162,6 +163,42 @@ The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, 
 | `min_chunk`     | int   | `4096`  | Minimum chunk size for dynamic calculation. Should be smaller than `max-num-batched-tokens`. |
 | `need_timing` | bool | True | Enable/disable Online Calibration |
 | `max_fit_chunk` | int | 30 | Number of chunk-time data for Online Calibration |
+
+**scheduler_config.nonbsp_config**
+
+NonBSP balances decode requests across data-parallel ranks. It is supported only on
+PD-disaggregated decode nodes (`kv_role="kv_consumer"`) with `data_parallel_size > 1`.
+It cannot be combined with balance scheduling, the recompute scheduler, or profiling-based
+dynamic chunk sizing.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enabled` | bool | `False` | Whether to enable NonBSP scheduling. |
+| `mode` | str | `"static"` | Load-balancing mode. Must be `"static"` or `"dynamic"`. |
+| `start_step` | int | `250` | First engine step at which load balancing may run. |
+| `end_step` | int | `-1` | Exclusive end step. `-1` keeps load balancing enabled without an end step. |
+| `bubble_threshold` | float | `5.0` | Minimum load imbalance required before balancing. |
+| `long_req_block_threshold` | int | `700` | Block-count threshold used to activate dynamic mode. |
+| `dynamic_max_step` | int | `256` | Number of steps without a new long request before dynamic mode is deactivated. |
+
+Example:
+
+```bash
+vllm serve <model> \
+  --additional-config '{
+    "scheduler_config": {
+      "nonbsp_config": {
+        "enabled": true,
+        "mode": "dynamic",
+        "start_step": 250,
+        "end_step": -1,
+        "bubble_threshold": 5.0,
+        "long_req_block_threshold": 700,
+        "dynamic_max_step": 256
+      }
+    }
+  }'
+```
 
 **rejection_sampler_config**
 

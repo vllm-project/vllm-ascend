@@ -88,12 +88,6 @@ class AscendConfig:
                 "profiling_chunk_config and balance scheduling (enable_balance_scheduling) "
                 "cannot be enabled at the same time. Please disable one of them."
             )
-        self.NONBSP_ENABLE = int(additional_config.get("NONBSP_ENABLE", 0))
-        self.NONBSP_START_STEP = int(additional_config.get("NONBSP_START_STEP", 250))
-        self.NONBSP_END_STEP = int(additional_config.get("NONBSP_END_STEP", -1))
-        self.NONBSP_BUBBLE_THRESHOLD = float(additional_config.get("NONBSP_BUBBLE_THRESHOLD", 5.0))
-        self.NONBSP_LONG_REQ_BLOCK_THRESHOLD = int(additional_config.get("NONBSP_LONG_REQ_BLOCK_THRESHOLD", 700))
-        self.NONBSP_DYNAMIC_MAX_STEP = int(additional_config.get("NONBSP_DYNAMIC_MAX_STEP", 256))
 
         # Dump / PrecisionDebugger configuration
         self.dump_config_path = self._resolve_dump_config_path(additional_config)
@@ -849,6 +843,78 @@ class ShortRequestFirstConfig:
             raise ValueError(f"short_request_first_config.long_max_wait_ms must be >= 0; got {self.long_max_wait_ms}")
 
 
+class NonBSPConfig:
+    """Configuration object for ``additional_config["scheduler_config"]["nonbsp_config"]``."""
+
+    _defaults = {
+        "enabled": False,
+        "mode": "static",
+        "start_step": 250,
+        "end_step": -1,
+        "bubble_threshold": 5.0,
+        "long_req_block_threshold": 700,
+        "dynamic_max_step": 256,
+    }
+    _valid_modes = {"static", "dynamic"}
+
+    def __init__(self, user_config: dict | None = None):
+        if user_config is None:
+            user_config = {}
+        elif not isinstance(user_config, dict):
+            raise ValueError(f"nonbsp_config must be a dict, got {type(user_config).__name__}.")
+
+        unknown = set(user_config) - set(self._defaults)
+        if unknown:
+            raise ValueError(f"Unknown nonbsp_config keys: {sorted(unknown)}")
+
+        self.enabled = user_config.get("enabled", self._defaults["enabled"])
+        self.mode = user_config.get("mode", self._defaults["mode"])
+        self.start_step = user_config.get("start_step", self._defaults["start_step"])
+        self.end_step = user_config.get("end_step", self._defaults["end_step"])
+        self.bubble_threshold = user_config.get("bubble_threshold", self._defaults["bubble_threshold"])
+        self.long_req_block_threshold = user_config.get(
+            "long_req_block_threshold",
+            self._defaults["long_req_block_threshold"],
+        )
+        self.dynamic_max_step = user_config.get("dynamic_max_step", self._defaults["dynamic_max_step"])
+        self._validate_config()
+
+    def _validate_config(self):
+        if not isinstance(self.enabled, bool):
+            raise ValueError(f"nonbsp_config.enabled must be a bool, got {type(self.enabled).__name__}.")
+        if not isinstance(self.mode, str) or self.mode not in self._valid_modes:
+            raise ValueError(f"nonbsp_config.mode must be one of {sorted(self._valid_modes)}, got {self.mode!r}.")
+
+        for key in ("start_step", "end_step", "long_req_block_threshold", "dynamic_max_step"):
+            value = getattr(self, key)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ValueError(f"nonbsp_config.{key} must be an int, got {type(value).__name__}.")
+
+        if not isinstance(self.bubble_threshold, (int, float)) or isinstance(self.bubble_threshold, bool):
+            raise ValueError(
+                f"nonbsp_config.bubble_threshold must be a number, got {type(self.bubble_threshold).__name__}."
+            )
+        self.bubble_threshold = float(self.bubble_threshold)
+
+        if self.start_step < 0:
+            raise ValueError(f"nonbsp_config.start_step must be >= 0, got {self.start_step}.")
+        if self.end_step < -1:
+            raise ValueError(f"nonbsp_config.end_step must be -1 or >= 0, got {self.end_step}.")
+        if self.end_step != -1 and self.end_step <= self.start_step:
+            raise ValueError(
+                "nonbsp_config.end_step must be greater than start_step when it is set, "
+                f"got start_step={self.start_step}, end_step={self.end_step}."
+            )
+        if self.bubble_threshold <= 0:
+            raise ValueError(f"nonbsp_config.bubble_threshold must be > 0, got {self.bubble_threshold}.")
+        if self.long_req_block_threshold <= 0:
+            raise ValueError(
+                f"nonbsp_config.long_req_block_threshold must be > 0, got {self.long_req_block_threshold}."
+            )
+        if self.dynamic_max_step <= 0:
+            raise ValueError(f"nonbsp_config.dynamic_max_step must be > 0, got {self.dynamic_max_step}.")
+
+
 class SchedulerConfig:
     """Configuration object for ``additional_config[\"scheduler_config\"]``."""
 
@@ -879,6 +945,7 @@ class SchedulerConfig:
         self.profiling_chunk_config = ProfilingChunkConfig(
             self._get_config_value(scheduler_config, additional_config, "profiling_chunk_config", {})
         )
+        self.nonbsp_config = NonBSPConfig(scheduler_config.get("nonbsp_config"))
 
     @staticmethod
     def _get_config_value(

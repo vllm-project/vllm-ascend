@@ -646,28 +646,26 @@ class NPUPlatform(Platform):
                 vllm_config.scheduler_config.policy,
             )
 
-        if ascend_config.NONBSP_ENABLE:
-            if ascend_config.NONBSP_ENABLE not in (1, 2):
-                raise ValueError("NONBSP_ENABLE must be 0, 1, or 2.")
+        nonbsp_config = scheduler_extension_config.nonbsp_config
+        if nonbsp_config.enabled:
             if scheduler_extension_config.enable_balance_scheduling:
-                raise ValueError("NONBSP_ENABLE cannot be used with enable_balance_scheduling.")
+                raise ValueError("NonBSP cannot be used with enable_balance_scheduling.")
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
             if kv_transfer_config is None or kv_role != "kv_consumer":
                 raise ValueError(
-                    "NONBSP_ENABLE is only supported on PD-disaggregated D nodes "
+                    "NonBSP is only supported on PD-disaggregated D nodes "
                     f"(kv_role='kv_consumer', but got kv_role={kv_role!r})."
                 )
             if parallel_config.data_parallel_size <= 1:
-                raise ValueError("NONBSP_ENABLE requires data_parallel_size > 1.")
+                raise ValueError("NonBSP requires data_parallel_size > 1.")
             if scheduler_extension_config.recompute_scheduler_enable:
                 raise ValueError(
-                    "NONBSP_ENABLE only supports the normal Scheduler and cannot "
-                    "be used with recompute_scheduler_enable."
+                    "NonBSP only supports the normal Scheduler and cannot be used with recompute_scheduler_enable."
                 )
             if scheduler_extension_config.profiling_chunk_config.enabled:
                 raise ValueError(
-                    "NONBSP_ENABLE only supports the normal Scheduler and cannot be used with profiling_chunk_config."
+                    "NonBSP only supports the normal Scheduler and cannot be used with profiling_chunk_config."
                 )
             vllm_config.scheduler_config.scheduler_cls = "vllm_ascend.core.nonbsp_scheduler.NonBSPScheduler"
 

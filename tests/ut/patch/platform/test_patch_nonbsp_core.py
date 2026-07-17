@@ -18,17 +18,49 @@ def test_nonbsp_uses_main_upstream_engine_core_entrypoint():
     assert nonbsp_core._UpstreamRunEngineCore is nonbsp_core._balance_patch._OriginalRunEngineCore
 
 
+def test_nonbsp_enabled_reads_nested_scheduler_config(monkeypatch):
+    monkeypatch.setattr(
+        nonbsp_core,
+        "get_ascend_config",
+        MagicMock(side_effect=RuntimeError("not initialized")),
+    )
+    vllm_config = MagicMock()
+    vllm_config.additional_config = {
+        "scheduler_config": {
+            "nonbsp_config": {
+                "enabled": True,
+            }
+        }
+    }
+
+    assert nonbsp_core._nonbsp_enabled(vllm_config) is True
+
+
+def test_nonbsp_enabled_ignores_legacy_top_level_config(monkeypatch):
+    monkeypatch.setattr(
+        nonbsp_core,
+        "get_ascend_config",
+        MagicMock(side_effect=RuntimeError("not initialized")),
+    )
+    vllm_config = MagicMock()
+    vllm_config.additional_config = {"NONBSP_ENABLE": 1}
+
+    assert nonbsp_core._nonbsp_enabled(vllm_config) is False
+
+
 def test_dp_engine_core_initializes_ascend_config(monkeypatch, capsys):
     vllm_config = MagicMock()
     vllm_config.scheduler_config.max_num_seqs = 4
 
     ascend_config = MagicMock()
-    ascend_config.NONBSP_ENABLE = 1
-    ascend_config.NONBSP_START_STEP = 0
-    ascend_config.NONBSP_END_STEP = -1
-    ascend_config.NONBSP_BUBBLE_THRESHOLD = 5.0
-    ascend_config.NONBSP_LONG_REQ_BLOCK_THRESHOLD = 700
-    ascend_config.NONBSP_DYNAMIC_MAX_STEP = 256
+    nonbsp_config = ascend_config.scheduler_config.nonbsp_config
+    nonbsp_config.enabled = True
+    nonbsp_config.mode = "static"
+    nonbsp_config.start_step = 0
+    nonbsp_config.end_step = -1
+    nonbsp_config.bubble_threshold = 5.0
+    nonbsp_config.long_req_block_threshold = 700
+    nonbsp_config.dynamic_max_step = 256
 
     init_ascend_config = MagicMock(return_value=ascend_config)
     monkeypatch.setattr(nonbsp_core, "init_ascend_config", init_ascend_config)
@@ -48,16 +80,17 @@ def test_dp_engine_core_initializes_ascend_config(monkeypatch, capsys):
     engine_core._init_data_parallel(vllm_config)
 
     init_ascend_config.assert_called_once_with(vllm_config)
-    assert engine_core._lb_enable == 1
+    assert engine_core._lb_mode == "static"
     assert engine_core._lb_dp_size_cached == 2
 
     output = capsys.readouterr().out
-    assert "NONBSP_ENABLE = 1" in output
-    assert "NONBSP_START_STEP = 0" in output
-    assert "NONBSP_END_STEP = -1" in output
-    assert "NONBSP_BUBBLE_THRESHOLD = 5.0" in output
-    assert "NONBSP_LONG_REQ_BLOCK_THRESHOLD = 700" in output
-    assert "NONBSP_DYNAMIC_MAX_STEP = 256" in output
+    assert "nonbsp_config.enabled = True" in output
+    assert "nonbsp_config.mode = static" in output
+    assert "nonbsp_config.start_step = 0" in output
+    assert "nonbsp_config.end_step = -1" in output
+    assert "nonbsp_config.bubble_threshold = 5.0" in output
+    assert "nonbsp_config.long_req_block_threshold = 700" in output
+    assert "nonbsp_config.dynamic_max_step = 256" in output
 
 
 def test_balance_load_runs_before_engine_step(monkeypatch):
