@@ -163,8 +163,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             runner._use_aclgraph() if runner else False,
             device,
         )
-        blk = 1 + self.num_speculative_tokens
-        self._dspark_draft_buffer = torch.zeros((self.max_batch_size, blk), dtype=torch.int64, device=device)
         self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
         self.use_compress = hasattr(self.vllm_config.model_config.hf_config, "compress_ratios")
         self.has_gdn = check_gdn_layer(self.vllm_config)
@@ -1187,13 +1185,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 draft_token_ids = logits.argmax(dim=-1)
         else:
             if self.method == "dspark":
-                if hasattr(self, "_dspark_draft_buffer"):
                 # Dspark speculation requires autoregressive applications of MarkovHead and ConfidenceHead.
                 # The MarkovHead performs bias correction on logits.
                 # The ConfidenceHead predicts the expected acceptance length of tokens(Not yet achieved).
-                    raw_logits = self.model.compute_logits(last_hidden_states)
-                else:
-                    raw_logits = self.model.compute_logits(hidden_states)
+                raw_logits = self.model.compute_logits(last_hidden_states)
                 logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
                 num_blk = logits.shape[0]
                 draft_token_ids = self._dspark_draft_buffer[:num_blk]
@@ -2155,27 +2150,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         ):
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         assert len(self.draft_attn_groups) > 0
-
-        if hasattr(self, "_per_group_block_table_buffers"):
-            if num_input_tokens > num_actual_tokens:
-                self.positions[num_actual_tokens:num_input_tokens].fill_(0)
-                self._slot_mapping_buffer[num_actual_tokens:num_input_tokens].fill_(-1)
-            base_cm = common_attn_metadata
-            base_cm.positions = self.positions[:num_input_tokens]
-            if self.use_compress:
-                base_cm.slot_mapping = self._slot_mapping_buffer[:num_input_tokens]
-            else:
-                # DSpark per-group path fills _per_group_query_slot_mapping_buffers
-                # (not the dflash single _slot_mapping_buffer, which stays zero here).
-                # Use the primary group's query slot mapping so the draft attention
-                # reads/writes KV at the correct paged slots.
-                base_cm.slot_mapping = self._per_group_query_slot_mapping_buffers[
-                    self.kv_cache_gid][:num_input_tokens]
-            base_cm.num_input_tokens = num_input_tokens
-            base_cm.num_actual_tokens = num_actual_tokens
-            base_cm.causal = False
-            base_cm.attn_state = AscendAttentionState.ChunkedPrefill
-
         per_layer_attn_metadata: dict[str, Any] = {}
         for attn_group in self.draft_attn_groups:
             builder = attn_group.get_metadata_builder()
@@ -2187,8 +2161,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     common_ratio_to_sas_metadata=dict(),
                     block_size=attn_group.kv_cache_spec.block_size,
                 )
+            if self.method == 'dspark':
                 gid = attn_group.kv_cache_group_id
-                common_attn_metadata = copy.copy(base_cm)
+                common_attn_metadata = copy.copy(common_attn_metadata)
                 block_table = getattr(self, "_per_group_block_table_buffers", {}).get(gid)
                 if block_table is not None:
                     common_attn_metadata.block_table_tensor = block_table[: common_attn_metadata.num_reqs]
@@ -2198,12 +2173,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 attn_metadata = builder.build_for_drafting(
                     common_attn_metadata,
                     draft_index=1,
-                    block_size=attn_group.kv_cache_spec.block_size,
+                    **extra_attn_metadata_args
                 )
             else:
                 attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args)
-                if hasattr(attn_metadata, "causal") and not attn_metadata.causal:
-                    attn_metadata.attn_mask = None
+            if hasattr(attn_metadata, "causal") and not attn_metadata.causal:
+                attn_metadata.attn_mask = None
 
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata

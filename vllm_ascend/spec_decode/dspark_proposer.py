@@ -39,6 +39,8 @@ class AscendDSparkProposer(AscendDflashProposer):
                 "DSpark probabilistic draft sampling is not supported on the v1 "
                 "model runner; use greedy (the default) instead."
             )
+        blk = 1 + self.num_speculative_tokens
+        self._dspark_draft_buffer = torch.zeros((self.max_batch_size, blk), dtype=torch.int64, device=device)
         self._dspark_seed_buffer = torch.zeros(self.max_batch_size, dtype=torch.int64, device=device)
         # DSpark is not supported in vllm v1, so related property needs to be reset here.
         del self.hidden_size, self.hidden_states, self._dflash_hidden_states
@@ -254,23 +256,6 @@ class AscendDSparkProposer(AscendDflashProposer):
                     HAS_NUM_REJECTED=has_num_rejected,
                     SAMPLE_FROM_ANCHOR=True,
                 )
-        else:
-            # No draft attn groups (profile/dummy without standard path):
-            # fill positions/input_ids only.
-            for req_idx in range(batch_size):
-                ctx_end = int(cad.query_start_loc[req_idx + 1].item())
-                valid_ctx_end = ctx_end
-                if has_num_rejected:
-                    assert num_rejected_tokens_gpu is not None
-                    valid_ctx_end -= int(num_rejected_tokens_gpu[req_idx].item())
-                last_pos = target_positions[valid_ctx_end - 1]
-                out_start = req_idx * block_size
-                out_end = out_start + block_size
-                self.positions[out_start:out_end] = last_pos + 1 + self.arange_dflash[:block_size]
-                self.input_ids[out_start] = next_token_ids[req_idx]
-                if block_size > 1:
-                    self.input_ids[out_start + 1 : out_end] = self.parallel_drafting_token_id
-
         # to compute self._context_slots
         if per_group_draft_block_tables:
             per_group_draft_context_slot_mappings = {
@@ -298,7 +283,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.num_input_tokens = num_query_total
         cad.max_query_len = block_size
         cad.max_seq_len = cad.max_seq_len + block_size
-        cad.slot_mapping = self._slot_mapping_buffer[:num_query_total]
+        cad.slot_mapping = self._per_group_query_slot_mapping_buffers[self.kv_cache_gid][:num_query_total]
         if per_group_draft_block_tables:
             self._per_group_query_slot_mapping_buffers = {
                 gid: self._per_group_query_slot_mapping_buffers[gid] for gid in per_group_draft_block_tables
