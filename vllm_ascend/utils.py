@@ -1108,7 +1108,7 @@ def is_pd_decode_recompute_scheduler_enabled(vllm_config: VllmConfig | None = No
         kv_cfg = vllm_config.kv_transfer_config
         if kv_cfg is None or not kv_cfg.is_kv_consumer or kv_cfg.is_kv_producer:
             return False
-        return get_ascend_config().recompute_scheduler_enable
+        return get_ascend_config().scheduler_config.recompute_scheduler_enable
     except (RuntimeError, AttributeError):
         return False
 
@@ -1176,7 +1176,7 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
     Skipping is applicable for all dense models and for moe models only on ranks
     that act as KV consumers. We skip the DP all-reduce when either:
     - Both the prefill and decode communication methods are MC2 (or FUSED_MC2), or
-    - Decode requires MC2 and ascend_config.recompute_scheduler_enable is True.
+    - Decode requires MC2 and ascend_config.scheduler_config.recompute_scheduler_enable is True.
 
     Skipping means each rank may have a different number of tokens, so MC2 needs
     a non-zero global_bs and must NOT receive mc2_mask.
@@ -1215,7 +1215,9 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
     prefill_must_use_mc2 = needs_mc2(scheduler_config.max_num_batched_tokens)
     # Skip all-reduce if decode requires MC2 and either prefill also
     # requires MC2 or recompute-based scheduler is enabled.
-    return decode_must_use_mc2 and (prefill_must_use_mc2 or get_ascend_config().recompute_scheduler_enable)
+    return decode_must_use_mc2 and (
+        prefill_must_use_mc2 or get_ascend_config().scheduler_config.recompute_scheduler_enable
+    )
 
 
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:

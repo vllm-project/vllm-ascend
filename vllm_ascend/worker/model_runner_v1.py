@@ -1996,13 +1996,13 @@ class NPUModelRunner(GPUModelRunner):
             if self.routed_experts_initialized:
                 self.routed_experts_capturer.clear_buffer()
 
-        if self.ascend_config.profiling_chunk_config.need_timing:
+        if self.ascend_config.scheduler_config.profiling_chunk_config.need_timing:
             # Check if the scheduler signaled that calibration is complete.
             # This flag is set cross-process via scheduler_output because
             # modifying the config singleton in the scheduler process does
             # not affect this worker process.
             if getattr(scheduler_output, "disable_profiling_timing", False):
-                self.ascend_config.profiling_chunk_config.need_timing = False
+                self.ascend_config.scheduler_config.profiling_chunk_config.need_timing = False
             else:
                 self._sync_device()
                 self._execution_start_time = time.perf_counter()
@@ -2605,7 +2605,9 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_stats=cudagraph_stats,
             routed_experts=None,
         )
-        if self.ascend_config.profiling_chunk_config.need_timing and hasattr(self, '_execution_start_time'):
+        if self.ascend_config.scheduler_config.profiling_chunk_config.need_timing and hasattr(
+            self, "_execution_start_time"
+        ):
             self._sync_device()
             model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
 
