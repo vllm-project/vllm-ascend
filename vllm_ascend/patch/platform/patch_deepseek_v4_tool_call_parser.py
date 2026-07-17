@@ -74,6 +74,23 @@ def _partial_tag_overlap(text: str, tag: str) -> int:
     return 0
 
 
+# `[^｜<>]+?` between the two '｜' rules out every DSML marker, whose middle
+# segment is always `DSML` followed by another '｜' before the closing '>'
+# (e.g. `<｜DSML｜tool_calls>` has a second '｜' the class refuses to cross).
+_SPECIAL_TOKEN_RE = re.compile(r"<｜[^｜<>]+?｜>")
+
+
+def _strip_complete_special_tokens(content: str) -> str:
+    return _SPECIAL_TOKEN_RE.sub("", content)
+
+
+def _split_trailing_special_token_partial(content: str) -> tuple[str, str]:
+    partial_start = content.rfind("<｜")
+    if partial_start != -1 and "｜>" not in content[partial_start:]:
+        return content[:partial_start], content[partial_start:]
+    return content, ""
+
+
 def _ensure_streaming_attrs(self: DeepSeekV4ToolParser) -> None:
     if not hasattr(self, "_buffer"):
         self._buffer = ""
@@ -644,15 +661,25 @@ def _process_streaming_buffer(self: DeepSeekV4ToolParser, request: ChatCompletio
                 overlap = _partial_tag_overlap(self._buffer, self.tool_call_start_token)
                 sendable_idx = len(self._buffer) - overlap
                 if sendable_idx > 0:
-                    content = self._buffer[:sendable_idx]
+                    raw_content = self._buffer[:sendable_idx]
                     self._buffer = self._buffer[sendable_idx:]
-                    self._queue_delta_message(DeltaMessage(content=content))
+                    stripped = _strip_complete_special_tokens(raw_content)
+                    safe, holdback = _split_trailing_special_token_partial(stripped)
+                    if holdback:
+                        self._buffer = holdback + self._buffer
+                    if safe:
+                        self._queue_delta_message(DeltaMessage(content=safe))
                 return
 
             if start_idx > 0:
-                content = self._buffer[:start_idx]
+                raw_content = self._buffer[:start_idx]
                 self._buffer = self._buffer[start_idx:]
-                self._queue_delta_message(DeltaMessage(content=content))
+                # The DSML start was already located, so any trailing '<｜' in
+                # `raw_content` cannot grow into a real special token; emit it
+                # as-is after stripping completed `<｜X｜>` tokens.
+                safe = _strip_complete_special_tokens(raw_content)
+                if safe:
+                    self._queue_delta_message(DeltaMessage(content=safe))
                 continue
 
             self._buffer = self._buffer[len(self.tool_call_start_token) :]
@@ -769,6 +796,27 @@ def _patched_extract_tool_calls_streaming(
     _process_streaming_buffer(self, request)
 
     pending_delta = _pop_pending_delta_message(self)
+
+    # Final delta (no more text is coming): flush any visible content the
+    # trailing-partial guard is still holding so it is never dropped. A trailing
+    # ``<｜…`` left here without its closing ``｜>`` is ordinary text — real
+    # special tokens detokenize atomically and so can never be left
+    # half-buffered — while a partial ``<｜DSML｜tool_calls>`` *start* prefix is a
+    # truncated tool call and is dropped.
+    if not delta_text and not self._in_tool_calls and self._buffer:
+        residual = _strip_complete_special_tokens(self._buffer)
+        self._buffer = ""
+        overlap = _partial_tag_overlap(residual, self.tool_call_start_token)
+        if overlap:
+            residual = residual[: len(residual) - overlap]
+        if residual:
+            if pending_delta is None:
+                pending_delta = DeltaMessage(content=residual)
+            elif pending_delta.content:
+                pending_delta.content += residual
+            else:
+                pending_delta.content = residual
+
     if pending_delta is not None:
         return pending_delta
 
