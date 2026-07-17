@@ -173,7 +173,7 @@ def _make_rejection_tensors(
             0,
             vocab_size,
             (num_tokens, prob_vocab),
-            dtype=torch.int64,
+            dtype=torch.int32,
             device=device,
         )
 
@@ -288,7 +288,7 @@ def _warm_rejection_random_sample_kernel(
     )
 
     constexpr_kwargs1 = dict(
-        NO_DRAFT_PROBS=not with_draft_probs,
+        NO_DRAFT_PROBS=with_draft_probs,
         ENABLE_REDUCE_SAMPLING=enable_reduce_sampling,
         BLOCK_SIZE=block_size,
     )
