@@ -60,7 +60,7 @@ vllm serve path/to/target/model \
 ```
 
 > [!NOTE]
-> On Ascend NPUs, the `npu_fused_infer_attention_score` operator supports a maximum of 16 tokens per decode round. Therefore, `(num_speculative_tokens + 1)` must be ≤ 15.
+> On Ascend NPUs, the `npu_fused_infer_attention_score` operator supports a maximum of 16 tokens per decode round. Therefore, `(num_speculative_tokens + 1)` must be ≤ 16.
 
 ## Speculating by matching n-grams in the prompt
 
