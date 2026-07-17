@@ -4,7 +4,6 @@
 import gc
 import time
 from contextlib import contextmanager
-import turtle
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
