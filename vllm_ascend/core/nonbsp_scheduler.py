@@ -246,6 +246,9 @@ class NonBSPScheduler(SchedulerInterface):
                 self.num_lookahead_tokens = self.num_spec_tokens
             if speculative_config.uses_draft_model():
                 self.num_lookahead_tokens = self.num_spec_tokens
+        # Reusable read-only placeholder list for asynchronous speculative
+        # decoding. This mirrors vLLM's AsyncScheduler state.
+        self._spec_token_placeholders: list[int] = [-1] * self.num_spec_tokens
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -1174,6 +1177,28 @@ class NonBSPScheduler(SchedulerInterface):
         # it will also affect the scheduler output.
         self.finished_req_ids = set()
 
+        if not self.scheduler_config.async_scheduling:
+            return
+
+        # Match vLLM's AsyncScheduler semantics. num_computed_tokens has
+        # already advanced above, while the model output has not necessarily
+        # arrived yet. Output placeholders keep decode requests schedulable in
+        # the next engine step instead of making them alternate between one
+        # scheduled step and one num_new_tokens == 0 step.
+        spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
+        for req_id in num_scheduled_tokens:
+            request = self.requests[req_id]
+            if request.is_prefill_chunk:
+                continue
+
+            scheduler_output.pending_structured_output_tokens |= (
+                request.use_structured_output
+                and request.num_output_placeholders > 0
+            )
+            cur_num_spec_tokens = len(spec_decode_tokens.get(req_id, ()))
+            request.num_output_placeholders += 1 + cur_num_spec_tokens
+            request.spec_token_ids = self._spec_token_placeholders
+
     def _update_request_as_session(
         self, session: Request, update: StreamingUpdate
     ) -> None:
@@ -1821,6 +1846,16 @@ class NonBSPScheduler(SchedulerInterface):
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int]
     ) -> tuple[list[int], bool]:
+        if (
+            self.scheduler_config.async_scheduling
+            and request.async_tokens_to_discard > 0
+        ):
+            # reset_prefix_cache() force-preempted this request. Drop stale
+            # in-flight output frames until the recorded count is drained.
+            request.async_tokens_to_discard -= 1
+            return [], False
+
+        status_before_update = request.status
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
         # to return empty token ids for the request.
@@ -1834,6 +1869,18 @@ class NonBSPScheduler(SchedulerInterface):
             if stopped:
                 del new_token_ids[num_new:]  # Trim new tokens if needed.
                 break
+
+        if self.scheduler_config.async_scheduling:
+            request.num_output_placeholders -= len(new_token_ids)
+            assert request.num_output_placeholders >= 0
+
+            # Match AsyncScheduler: true preemption frees the request's KV
+            # blocks, so only cache confirmed tokens while it remains running.
+            if status_before_update == RequestStatus.RUNNING:
+                self.kv_cache_manager.cache_blocks(
+                    request,
+                    request.num_computed_tokens - request.num_output_placeholders,
+                )
         return new_token_ids, stopped
 
     def _free_encoder_inputs(self, request: Request) -> None:
