@@ -2039,6 +2039,60 @@ at::Tensor chunk_fwd_o(
     return o;
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_compute_wy(
+    const at::Tensor & q,
+    const at::Tensor & k,
+    const at::Tensor & v,
+    const at::Tensor & g,
+    const at::Tensor & beta,
+    c10::optional<int64_t> chunk_size)
+{
+    TORCH_CHECK(q.dim() == 4, "q must be [B, T, Hk, K], got ", q.sizes());
+    TORCH_CHECK(k.sizes() == q.sizes(), "k must have the same shape as q, got k=", k.sizes(), " q=", q.sizes());
+    TORCH_CHECK(v.dim() == 4, "v must be [B, T, Hv, V], got ", v.sizes());
+    TORCH_CHECK(g.dim() == 3, "g must be [B, T, Hv], got ", g.sizes());
+    TORCH_CHECK(beta.sizes() == g.sizes(), "beta must have the same shape as g, got beta=", beta.sizes(), " g=", g.sizes());
+    TORCH_CHECK(q.scalar_type() == at::kHalf && k.scalar_type() == at::kHalf &&
+                v.scalar_type() == at::kHalf && beta.scalar_type() == at::kHalf,
+                "q/k/v/beta must be float16 for 310P WY compute.");
+    TORCH_CHECK(g.scalar_type() == at::kFloat, "g must be float32 for 310P WY compute.");
+
+    int64_t chunk_size_ = chunk_size.value_or(64);
+    TORCH_CHECK(chunk_size_ == 64, "chunk_gated_delta_rule_compute_wy only supports chunk_size=64.");
+
+    const int64_t B = q.size(0);
+    const int64_t T = q.size(1);
+    const int64_t Hk = q.size(2);
+    const int64_t K = q.size(3);
+    const int64_t Hv = v.size(2);
+    const int64_t V = v.size(3);
+    TORCH_CHECK(v.size(0) == B && v.size(1) == T, "v must share B/T with q.");
+    TORCH_CHECK(g.size(0) == B && g.size(1) == T && g.size(2) == Hv, "g must match [B, T, Hv].");
+    TORCH_CHECK(Hv % Hk == 0, "Hv must be divisible by Hk, got Hv=", Hv, " Hk=", Hk);
+    TORCH_CHECK(T % chunk_size_ == 0, "T must be padded to a multiple of chunk_size.");
+
+    TORCH_CHECK(K % 16 == 0, "K must be a multiple of 16, got ", K);
+    TORCH_CHECK(V % 16 == 0, "V must be a multiple of 16, got ", V);
+    TORCH_CHECK(K <= 128, "K must be <= 128, got ", K);
+    TORCH_CHECK(V <= 128, "V must be <= 128, got ", V);
+    TORCH_CHECK(B <= 32, "Batch size B must be <= 32, got ", B);
+    TORCH_CHECK(Hv <= 64, "Hv must be <= 64, got ", Hv);
+
+    at::Tensor q_kernel = at::empty({B, Hk, T, K}, q.options());
+    at::Tensor k_kernel = at::empty({B, Hk, T, K}, k.options());
+    at::Tensor w_kernel = at::empty({B, Hv, T, K}, k.options());
+    at::Tensor u_kernel = at::empty({B, Hv, T, V}, v.options());
+    at::Tensor g_kernel = at::empty({B, Hv, T}, g.options().dtype(at::kFloat));
+
+    EXEC_NPU_CMD(
+        aclnnChunkGatedDeltaRuleComputeWy,
+        q, k, v, g, beta, chunk_size_,
+        q_kernel, k_kernel, w_kernel, u_kernel, g_kernel
+    );
+
+    return std::make_tuple(q_kernel, k_kernel, w_kernel, u_kernel, g_kernel);
+}
+
 std::vector<int64_t> get_npu_storage_shape(const at::Tensor& tensor)
 {
     TORCH_CHECK(
@@ -2093,6 +2147,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "chunk_fwd_o(Tensor q, Tensor k, Tensor v, Tensor h, float scale, *, Tensor? g=None, Tensor? g_gamma=None, int[]? cu_seqlens=None, int[]? chunk_indices=None, int? chunk_size=None, bool? transpose_state_layout=False) -> Tensor"
     );
     ops.impl("chunk_fwd_o", torch::kPrivateUse1, &vllm_ascend::chunk_fwd_o);
+
+    ops.def(
+        "chunk_gated_delta_rule_compute_wy(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, int? chunk_size=None) -> (Tensor q_kernel, Tensor k_kernel, Tensor w_kernel, Tensor u_kernel, Tensor g_kernel)"
+    );
+    ops.impl("chunk_gated_delta_rule_compute_wy", torch::kPrivateUse1, &vllm_ascend::chunk_gated_delta_rule_compute_wy);
 }
 #else
 // Pybind on other platform
