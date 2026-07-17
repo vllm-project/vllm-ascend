@@ -117,7 +117,7 @@ sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
 apt-get update -y && apt-get install -y gcc g++ cmake libnuma-dev wget git curl jq
 # Or using yum
 # yum update -y && yum install -y gcc g++ cmake numactl-devel wget git curl jq
-# Config pip mirror,only versions 0.11.0 and earlier are supported, if using a version later than 0.11.0, do not execute this command
+# Config pip mirror, only versions 0.11.0 and earlier are supported, if using a version later than 0.11.0, do not execute this command
 pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 ```
 
@@ -356,7 +356,7 @@ First, check physical layer connectivity, then verify each node, and finally ver
 
 #### Physical Layer Requirements
 
-- The physical machines must be located on the same WLAN, with network connectivity.
+- The physical machines must be located on the same LAN, with network connectivity.
 - All NPUs are connected with optical modules, and the connection status must be normal.
 
 #### Each Node Verification

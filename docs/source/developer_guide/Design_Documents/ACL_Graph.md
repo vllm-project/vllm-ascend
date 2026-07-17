@@ -71,7 +71,7 @@ Ascend currently narrows some generic upstream modes in `vllm_ascend.platform.NP
 - `ASCEND_LAUNCH_BLOCKING=1` is rejected when ACL graph is enabled.
 - Xlite graph mode can disable ACL graph full mode or fall back to `FULL_DECODE_ONLY`, depending on configuration.
 
-These checks document the subset of upstream graph behavior that the current Ascend backend can execute safely. Some of them are long-term platform constraints, while others are clearly transitional in the current implementation.
+These checks document the subset of upstream graph behavior that the current Ascend backend can execute safely.
 
 ## Key Ascend-Specific Mechanisms
 

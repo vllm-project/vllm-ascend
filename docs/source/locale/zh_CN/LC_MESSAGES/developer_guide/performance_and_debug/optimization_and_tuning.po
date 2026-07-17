@@ -75,8 +75,8 @@ msgstr ""
 "**jemalloc** 是一种内存分配器，可提升多线程场景下的性能并减少内存碎片。jemalloc "
 "使用本地线程内存管理器来分配变量，从而避免线程间的锁竞争，大幅优化性能。"
 
-msgid "#### 1.2. Tcmalloc"
-msgstr "#### 1.2. Tcmalloc"
+msgid "#### 1.2. TCMalloc"
+msgstr "#### 1.2. TCMalloc"
 
 msgid ""
 "**TCMalloc (Thread Caching Malloc)** is a universal memory allocator that "

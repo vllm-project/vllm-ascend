@@ -214,10 +214,8 @@ msgstr ""
 
 msgid ""
 "These checks document the subset of upstream graph behavior that the current"
-" Ascend backend can execute safely. Some of them are long-term platform "
-"constraints, while others are clearly transitional in the current "
-"implementation."
-msgstr "这些检查记录了当前Ascend后端能够安全执行的上游图行为的子集。其中一些是长期的平台限制，而另一些在当前实现中显然是过渡性的。"
+" Ascend backend can execute safely."
+msgstr "这些检查记录了当前Ascend后端能够安全执行的上游图行为的子集。"
 
 msgid "## Key Ascend-Specific Mechanisms"
 msgstr "## 关键的Ascend特有机制"

@@ -80,8 +80,8 @@ th {
 
 !!! note
 
-    The datasets mentioned above are all links to datasets on huggingface.
-    The dataset's `dataset-name` should be set to `hf`.
+    Most datasets mentioned above are links to datasets on huggingface.
+    For these datasets, the dataset's `dataset-name` should be set to `hf`.
     For local `dataset-path`, please set `hf-name` to its Hugging Face ID like
 
     ```bash

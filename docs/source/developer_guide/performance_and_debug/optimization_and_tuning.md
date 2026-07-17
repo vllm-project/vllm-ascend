@@ -78,7 +78,7 @@ sudo apt install libjemalloc2
 export LD_PRELOAD=/usr/lib/"$(uname -i)"-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 ```
 
-#### 1.2. Tcmalloc
+#### 1.2. TCMalloc
 
 **TCMalloc (Thread Caching Malloc)** is a universal memory allocator that improves overall performance while ensuring low latency by introducing a multi-level cache structure, reducing mutex contention and optimizing large object processing flow. Find more [details](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html).
 
