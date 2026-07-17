@@ -128,6 +128,48 @@ Start the online serving service with the following command:
 
 For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal deployment, configure this parameter according to the actual request shape. For example, use `--limit-mm-per-prompt '{"image":2}'` for two-image requests, and use `--limit-mm-per-prompt '{"video":1}'` for one-video requests.
 
+### Multimodal and ViT DP
+
+MiniMax-M3 supports image and video inputs on Ascend. The deployment examples above keep `--limit-mm-per-prompt '{"image":1}'` as the default multimodal capacity assumption because the other serving parameters are tuned for the single-image path.
+
+For the ViT / multimodal encoder part, data parallel execution is supported and can be enabled with:
+
+```bash
+--mm-encoder-tp-mode data
+```
+
+This option is not enabled in the default deployment examples because it can increase per-card memory usage. When enabling ViT DP, re-evaluate memory-related parameters such as `--max-model-len`, `--max-num-seqs`, and `--gpu-memory-utilization` for the target workload.
+
+For video or mixed image-video requests, adjust the multimodal limit according to the actual request shape instead of changing the default template blindly:
+
+```bash
+# one video
+--limit-mm-per-prompt '{"video":1}'
+
+# one image and one video
+--limit-mm-per-prompt '{"image":1, "video":1}'
+```
+
+When using local media paths in requests, such as `file:///path/to/video.mp4`, add an explicit allowlist path:
+
+```bash
+--allowed-local-media-path /
+```
+
+If the number of sampled video frames is not specified, vLLM uses its default video sampling policy, which samples 32 frames by default. For quick functional smoke tests, a smaller frame count such as 8 or 16 can be set in the request or evaluation config. For benchmark runs, follow the dataset protocol.
+
+FLASHCOMM1 and language-model-only mode should not be enabled at the same time for MiniMax-M3 serving. FLASHCOMM1 is enabled through `additional_config.enable_flashcomm1`, while language-model-only mode is enabled with `--language-model-only`.
+
+```bash
+# Enable FLASHCOMM1.
+--additional-config '{"enable_flashcomm1": true}'
+
+# Enable language-model-only mode.
+--language-model-only
+```
+
+`VLLM_ASCEND_ENABLE_FLASHCOMM1=1` is kept for compatibility, but `additional_config.enable_flashcomm1` is preferred.
+
 ### A2 Deployment Examples
 
 The examples below use Ascend A2 servers. Update `WEIGHT_PATH`, `EAGLE3_WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `IFNAME` based on the actual environment.
@@ -606,8 +648,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 - Single image
 
-  Replace `${IMAGE_PATH}` with a local image path on the client side.
-  Start the service with image input enabled, for example `--limit-mm-per-prompt '{"image":1}'`.
+  Start the service with image input enabled, for example `--limit-mm-per-prompt '{"image":1}'`. Replace `${IMAGE_PATH}` with a local image path on the client side.
 
   ```bash
   IMAGE_PATH=/path/to/image.jpg
@@ -615,54 +656,27 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
   curl http://127.0.0.1:11223/v1/chat/completions \
     -H "Content-Type: application/json" \
-    -d "{
-      \"model\": \"minimax-m3\",
-      \"messages\": [
-        {
-          \"role\": \"user\",
-          \"content\": [
-            {\"type\": \"image_url\", \"image_url\": {\"url\": \"data:image/jpeg;base64,${IMAGE_BASE64}\"}},
-            {\"type\": \"text\", \"text\": \"请简要描述这张图片。\"}
-          ]
-        }
-      ],
-      \"max_tokens\": 512,
-      \"temperature\": 0
-    }"
-  ```
-
-- Multiple images
-
-  Start the service with a matching image limit. For the following two-image request, use `--limit-mm-per-prompt '{"image":2}'`.
-
-  ```bash
-  IMAGE1_BASE64="$(base64 -w 0 /path/to/image1.jpg)"
-  IMAGE2_BASE64="$(base64 -w 0 /path/to/image2.jpg)"
-
-  curl http://127.0.0.1:11223/v1/chat/completions \
-    -H "Content-Type: application/json" \
-    -d "{
-      \"model\": \"minimax-m3\",
-      \"messages\": [
-        {
-          \"role\": \"user\",
-          \"content\": [
-            {\"type\": \"text\", \"text\": \"请按顺序分别描述这两张图片，并说明它们是否相同。\"},
-            {\"type\": \"image_url\", \"image_url\": {\"url\": \"data:image/jpeg;base64,${IMAGE1_BASE64}\"}},
-            {\"type\": \"image_url\", \"image_url\": {\"url\": \"data:image/jpeg;base64,${IMAGE2_BASE64}\"}}
-          ]
-        }
-      ],
-      \"max_tokens\": 512,
-      \"temperature\": 0
-    }"
+    -d @- <<EOF
+  {
+    "model": "minimax-m3",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,${IMAGE_BASE64}"}},
+          {"type": "text", "text": "请简要描述这张图片。"}
+        ]
+      }
+    ],
+    "max_tokens": 512,
+    "temperature": 0
+  }
+  EOF
   ```
 
 - Single video
 
-  Start the service with video input enabled, for example `--limit-mm-per-prompt '{"video":1}'`.
-
-  vLLM defaults to sampling 32 frames for video input. For regular functional verification, it is recommended to specify a smaller frame count with `media_io_kwargs`, for example 8 or 16 frames.
+  Start the service with video input enabled, for example `--limit-mm-per-prompt '{"video":1}'`. If the request uses `file://` local video paths, also add `--allowed-local-media-path /` or a narrower allowed directory. If `media_io_kwargs.video.num_frames` is not specified, vLLM samples 32 frames by default.
 
   ```bash
   curl http://127.0.0.1:11223/v1/chat/completions \
@@ -686,11 +700,6 @@ curl http://127.0.0.1:8000/v1/chat/completions \
           ]
         }
       ],
-      "media_io_kwargs": {
-        "video": {
-          "num_frames": 8
-        }
-      },
       "max_tokens": 512,
       "temperature": 0
     }'
@@ -698,49 +707,49 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 - Image and video mixed request
 
-  Start the service with both image and video input enabled. For the following request, use `--limit-mm-per-prompt '{"image":1,"video":1}'`.
+  Start the service with both image and video input enabled. For the following request, use `--limit-mm-per-prompt '{"image":1,"video":1}'`. If the request uses `file://` local video paths, also add `--allowed-local-media-path /` or a narrower allowed directory.
 
   ```bash
   IMAGE_BASE64="$(base64 -w 0 /path/to/image.jpg)"
 
   curl http://127.0.0.1:11223/v1/chat/completions \
     -H "Content-Type: application/json" \
-    -d "{
-      \"model\": \"minimax-m3\",
-      \"messages\": [
-        {
-          \"role\": \"user\",
-          \"content\": [
-            {\"type\": \"image_url\", \"image_url\": {\"url\": \"data:image/jpeg;base64,${IMAGE_BASE64}\"}},
-            {\"type\": \"video_url\", \"video_url\": {\"url\": \"file:///path/to/video.mp4\"}},
-            {\"type\": \"text\", \"text\": \"请分别描述图片和视频，并说明二者是否有关联。\"}
-          ]
-        }
-      ],
-      \"media_io_kwargs\": {
-        \"video\": {
-          \"num_frames\": 8
-        }
-      },
-      \"max_tokens\": 512,
-      \"temperature\": 0
-    }"
+    -d @- <<EOF
+  {
+    "model": "minimax-m3",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,${IMAGE_BASE64}"}},
+          {"type": "video_url", "video_url": {"url": "file:///path/to/video.mp4"}},
+          {"type": "text", "text": "请分别描述图片和视频，并说明二者是否有关联。"}
+        ]
+      }
+    ],
+    "max_tokens": 512,
+    "temperature": 0
+  }
+  EOF
   ```
 
 ## Supported Feature
 
-| Model                         | Supported Hardware | BF16 | W8A8 | MXFP8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | Thinking | Tool Call | Image | Video | Max Model Len |
-|-------------------------------|------|--------------------|------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------|-----------------|---------------|-------------------------------|--------------------|--------------------|---------------|---------------|---------------|---------------|---------------|
-| Minimax m3 | A2/A3 | ✅ | ✅ | ✖️ | ✅ | ✅ | - | - | ✅ | ✅ | - | ✅ | ✅ | ✖️ | ✖️ | ✅ | ✅ | ✖️ | ✅ | ✅ | 1M |
+| Model                         | Supported Hardware | BF16 | W8A8 | MXFP8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | Thinking | Tool Call | ViT DP | Image | Video | Max Model Len |
+|-------------------------------|--------------------|------|------|-------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------|-----------------|---------------|-------------------------------|--------------------|--------------------|----------|-----------|--------|-------|-------|---------------|
+| Minimax m3 | A2/A3 | ✅ | ✅ | ✖️ | ✅ | ✅ | - | - | ✅ | ✅ | - | ✅ | ✅ | ✖️ | ✖️ | ✅ | ✅ | ✖️ | ✅ | ✅ | ✅ | 1M |
 
 - 请参阅 [特性指南](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_features.html) 获取特性配置说明。
 - 模型支持最长上下文长度为1M，A3单机BF16权重实测可达42K，A3单机W8A8权重实测可达128K。
+- `ViT DP` 表示多模态 encoder / ViT 部分支持通过 `--mm-encoder-tp-mode data` 使能数据并行。
 
 ## Precision
 
 ### 使用 AISBench
 
-详细步骤请参阅 [使用 AISBench 进行性能评估](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_ais_bench.html#execute-performance-evaluation)。
+详细步骤请参阅 [使用 AISBench 进行精度评估](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_ais_bench.html#execute-performance-evaluation)。
+
+#### Text Evaluation
 
 | Dataset | Hardware | Score | max-model-len | max-num-seqs | max_out_len | batch_size | generation_kwargs |
 |---------|----------|-------|---------------|--------------|-------------|------------|-------------------|
@@ -748,6 +757,39 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | GSM8K   | NPU      | 96.36 | 10240         | 16           | 9500        | 20         | temperature=1.0, top_p=0.95 |
 | AIME2025 | GPU     | 95@repeat4 | -        | -            | -           | -          | -                 |
 | AIME2025 | NPU     | 90    | -             | -            | -           | -          | temperature=1.0, top_p=0.95 |
+
+#### Multimodal Evaluation
+
+MiniMax-M3 multimodal accuracy is evaluated with AISBench. The ViT DP path is optional and can be enabled by adding `--mm-encoder-tp-mode data` to the serving command, but it is not required for all multimodal accuracy runs. For video evaluation, if no frame count is specified in the request or evaluation config, vLLM samples 32 frames by default.
+
+The Video-MME results below are measured on chunk1 and chunk2, not the full dataset.
+
+For Video-MME evaluation, run the vLLM OpenAI-compatible service with video input enabled and use AISBench to send the Video-MME requests. The official AISBench guide may not list Video-MME as a built-in example, so the key MiniMax-M3 settings used here are:
+
+- serve with `--limit-mm-per-prompt '{"video":1}'`;
+- do not set `media_io_kwargs.video.num_frames`, so vLLM uses the default 32 sampled frames;
+- use `max-model-len=90112` and `max_out_len=8192`;
+- evaluate Video-MME chunk1 and chunk2, not the full dataset.
+
+The AISBench command used for the Video-MME chunk1+chunk2 evaluation is:
+
+```bash
+ais_bench \
+  --models vllm_api_general_chat \
+  --datasets videomme_subset_1_2.py \
+  --mode all \
+  --dump-eval-details \
+  --merge-ds
+```
+
+`videomme_subset_1_2.py` is a local AISBench dataset config derived from the original Video-MME config, such as `videomme_gen.py`. It points `path` to the parquet file filtered from the full Video-MME metadata by the locally available chunk1/chunk2 videos, and points `video_path` to the extracted chunk1/chunk2 `.mp4` directory. This keeps the evaluation lightweight while preserving the standard Video-MME request and scoring flow.
+
+| Dataset | Modality | Tool | Hardware | ViT DP | max-model-len | max_out_len | Input Config | generation_kwargs | Score |
+|---------|----------|------|----------|--------|---------------|-------------|--------------|-------------------|-------|
+| TextVQA | Image | AISBench | GPU | disabled | 65536 | 512 | `--limit-mm-per-prompt '{"image":1}'` | temperature=1.0, top_p=0.95 | 70.82 |
+| TextVQA | Image | AISBench | NPU | disabled | 65536 | 512 | `--limit-mm-per-prompt '{"image":1}'` | temperature=1.0, top_p=0.95 | 72.75 |
+| Video-MME chunk1+chunk2 | Video | AISBench | GPU | - | 90112 | 8192 | `--limit-mm-per-prompt '{"video":1}'`, default 32 frames | temperature=1.0, top_p=0.95 | 73.41 |
+| Video-MME chunk1+chunk2 | Video | AISBench | NPU | - | 90112 | 8192 | `--limit-mm-per-prompt '{"video":1}'`, default 32 frames | temperature=1.0, top_p=0.95 | 74.21 |
 
 ## FAQ
 
@@ -803,7 +845,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 - Q: 发送视频请求时，没有指定 `media_io_kwargs.video.num_frames`，请求耗时较长或触发执行超时，怎么办？
 
-  A: vLLM 的视频读取默认抽取 32 帧。MiniMax-M3 每帧会产生较多视觉 token，32 帧视频会显著增加 prefill 计算量。普通功能验证建议显式指定 8 或 16 帧：
+  A: vLLM 的视频读取默认抽取 32 帧。MiniMax-M3 每帧会产生较多视觉 token，32 帧视频会显著增加 prefill 计算量。如果请求耗时较长或触发执行超时，可以通过 `media_io_kwargs.video.num_frames` 显式指定较小的抽帧数，例如 8 或 16 帧：
 
   ```json
   {
@@ -815,28 +857,8 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   }
   ```
 
-  在 vLLM 0.23.0 + vLLM Ascend main 同步后的代码路径下，默认 32 帧请求已验证可在 `FULL_AND_PIECEWISE` graph 模式跑通：
-
-  ```bash
-  --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8]}'
-  ```
-
-  如果使用旧版本代码或仍遇到 32 帧长 prefill 超时，可使用 eager 模式和更小的 batch token 作为排障/兼容配置：
-
-  ```bash
-  export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200
-  export VLLM_ENGINE_ITERATION_TIMEOUT_S=1200
-
-  vllm serve ${WEIGHT_PATH} \
-    ... \
-    --enforce-eager \
-    --max-num-batched-tokens 1024
-  ```
-
-  如果日志中反复出现 `No available shared memory broadcast block found in 60 seconds`，通常表示 EngineCore 正在等待 worker 完成长耗时任务，例如图编译、权重量化、KV cache 量化或大 prefill 执行；它不是视频解码阶段的直接报错。
-
 ## 声明
 
 1）当前仅为尝鲜体验，性能优化中。<br>
-2）该补丁仅用于功能体验，多模态功能未充分验证，不建议直接用于生产环境。<br>
+2）MiniMax-M3 的文本、图像、视频功能已完成基础功能验证，TextVQA 与 Video-MME chunk1/chunk2 已通过 AISBench 评测；生产使用前仍需结合业务场景完成性能、稳定性、并发和长上下文验证。<br>
 3）本代码仓提到的数据集和模型仅作为示例，这些数据集和模型仅供您用于非商业目的，如您使用这些数据集和模型来完成示例，请您特别注意应遵守对应数据集和模型的License，如您因使用数据集或模型而产生侵权纠纷，华为不承担任何责任。<br>
