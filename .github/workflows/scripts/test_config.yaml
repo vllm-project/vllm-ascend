@@ -732,14 +732,14 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_vlm.py: 860
   tests/e2e/pull_request/one_card/test_xlite.py: 170
   tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py: 20
-  tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py: 150
-  tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py: 510
-  tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora.py: 280
-  tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py: 130
-  tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 760
-  tests/e2e/pull_request/two_card/test_data_parallel.py: 500
-  tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 140
-  tests/e2e/pull_request/two_card/test_disaggregated_encoder.py: 200
+  tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora.py: 500
+  tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py: 520
+  tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 740
+  tests/e2e/pull_request/two_card/test_data_parallel.py: 570
+  tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 150
+  tests/e2e/pull_request/two_card/test_disaggregated_encoder.py: 180
+  tests/e2e/pull_request/two_card/test_external_launcher.py: 950
+  tests/e2e/pull_request/two_card/test_flashcomm_distributed.py: 150
   tests/e2e/pull_request/two_card/test_external_launcher.py: 860
   tests/e2e/pull_request/two_card/test_flashcomm_distributed.py: 20
   tests/e2e/pull_request/two_card/test_gpt_oss_distributed.py: 170
