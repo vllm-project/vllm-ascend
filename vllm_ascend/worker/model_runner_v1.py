@@ -2169,9 +2169,11 @@ class NPUModelRunner(GPUModelRunner):
                     should_ubatch,
                     num_tokens_across_dp,
                 )
-                # should_ubatch = True
-                ubatch_num = 4
-                should_ubatch = True
+                # Determine if this is a pure decode batch
+                is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
+                # Enable ubatch only for decode phase, disable for prefill phase
+                should_ubatch = is_all_decode
+                logger.info("should_ubatch: %s", should_ubatch)
                 num_tokens_padded = batch_desc.num_tokens
                 num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
                 logger.info(
@@ -2185,7 +2187,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_scheduled_tokens_np,
                     num_tokens_padded,
                     num_reqs_padded,
-                    ubatch_num,
+                    3,
                 )
                 logger.info(
                     "ubatch_slices: %s, ubatch_slices_padded: %s",
@@ -2194,10 +2196,6 @@ class NPUModelRunner(GPUModelRunner):
                 )
                 ubatch_slices_attn = (
                     ubatch_slices_padded if ubatch_slices is not None else None
-                )
-                logger.info(
-                    "ubatch_slices_attn: %s",
-                    ubatch_slices_attn,
                 )
 
                 if self.dynamic_eplb:
@@ -2289,7 +2287,7 @@ class NPUModelRunner(GPUModelRunner):
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                     num_scheduled_tokens_compressed_list=num_scheduled_tokens_compressed_list,
                 )
-                logger.info("attn_metadata: %s", attn_metadata)
+                # logger.info("attn_metadata: %s", attn_metadata)
                 self._sanitize_placeholder_input_ids_for_forward(
                     scheduler_output,
                     num_tokens_padded
@@ -4825,7 +4823,7 @@ class NPUModelRunner(GPUModelRunner):
             attn_backends_map: dict[AttentionBackend, list[str]], kv_cache_group_id: int
         ) -> list[AttentionGroup]:
             attn_groups: list[AttentionGroup] = []
-            num_metadata_builders = 4
+            num_metadata_builders = 3
             for (attn_backend, kv_cache_spec), layer_names in attn_backends_map.items():
                 attn_group = AttentionGroup(
                     attn_backend, layer_names, kv_cache_spec, kv_cache_group_id
