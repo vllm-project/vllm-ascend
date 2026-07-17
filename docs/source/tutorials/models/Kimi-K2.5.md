@@ -521,7 +521,7 @@ vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
     --no-enable-prefix-caching \
     --gpu-memory-utilization 0.8 \
     --enforce-eager \
-    --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}' \
+    --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 1}' \
     --mm-encoder-tp-mode data \
     --kv-transfer-config \
     '{"kv_connector": "MooncakeConnectorV1",
@@ -601,7 +601,7 @@ vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
     --no-enable-prefix-caching \
     --gpu-memory-utilization 0.8 \
     --enforce-eager \
-    --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}' \
+    --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 1}' \
     --mm-encoder-tp-mode data \
     --kv-transfer-config \
     '{"kv_connector": "MooncakeConnectorV1",
