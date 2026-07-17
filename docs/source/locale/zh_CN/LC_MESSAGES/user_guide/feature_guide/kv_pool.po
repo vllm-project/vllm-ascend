@@ -51,7 +51,7 @@ msgstr ""
 "    * CANN >= 8.5.0\n"
 "    * vLLM：main分支\n"
 "    * vLLM-Ascend：main分支\n"
-"    * mooncake: >= 0.3.11.post1"
+"    * mooncake：>= 0.3.11.post1"
 
 msgid "### KV Pool Parameter Description"
 msgstr "### KV池参数说明"
