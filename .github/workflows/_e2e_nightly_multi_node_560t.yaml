@@ -216,7 +216,7 @@ jobs:
           echo "FAIL_TAG=${fail_tag}" >> $GITHUB_ENV
 
           npu_per_node=16
-          pvc_name=gy005-az5-vllm-ascend
+          pvc_name=nv-action-vllm-benchmarks-v2
 
           benchmark_job_name="${{ steps.vars.outputs.benchmark_job_name }}"
 
