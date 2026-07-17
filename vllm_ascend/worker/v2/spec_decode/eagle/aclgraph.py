@@ -27,8 +27,6 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
 from vllm_ascend.worker.v2.utils import communicator_switch
-from vllm_ascend.worker.v2.aclgraph_utils import model_capture_wrapper
-from vllm_ascend.worker.v2.utils import communicator_switch
 
 
 class PrefillEagleAclGraphManager(PrefillSpeculatorCudaGraphManager):

@@ -20,8 +20,6 @@ from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 
 logger = logging.getLogger(__name__)
 
-logger = logging.getLogger(__name__)
-
 
 class AscendDFlashSpeculator(DFlashSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):

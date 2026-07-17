@@ -306,15 +306,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
         attn_state = common_attn_metadata.attn_state
 
-        # Get attn_mask from singleton AttentionMaskBuilder. The builder always
-        # returns a causal (splitfuse) mask; non-causal attention must not carry
-        # it, otherwise FIA would apply it as a defaultMask (sparse_mode=0) and
-        # wrongly mask out the upper triangle.
-        attn_mask = (
-            self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config)
-            if common_attn_metadata.causal
-            else None
-        )
+        # Get attn_mask from singleton AttentionMaskBuilder
+        attn_mask = self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config)
 
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
