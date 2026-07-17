@@ -113,7 +113,7 @@ jobs:
   setup-vars:
     name: Export global env vars as job outputs
     needs: parse-trigger
-    runs-on: linux-aarch64-a3-0-cn12-001
+    runs-on: linux-amd64-cpu-8-hk
     outputs:
       ascend_log_prefix: ${{ steps.export.outputs.ascend_log_prefix }}
       vllm_ascend_branches: ${{ steps.export.outputs.vllm_ascend_branches }}
