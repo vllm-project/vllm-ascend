@@ -144,14 +144,13 @@ def _make_rejection_tensors(
     draft_token_ids = torch.zeros(num_tokens, dtype=torch.int32, device=device)
     draft_probs = None
     global_vocab = vocab_size
-    if with_draft_probs:
-        global_vocab = max(vocab_size, _WARMUP_VOCAB_SIZE)
-        draft_probs = torch.rand(
-            num_tokens,
-            global_vocab,
-            dtype=torch.float32,
-            device=device,
-        )
+    global_vocab = max(vocab_size, _WARMUP_VOCAB_SIZE)
+    draft_probs = torch.rand(
+        num_tokens,
+        global_vocab,
+        dtype=torch.float32,
+        device=device,
+    )
 
     if enable_reduce_sampling:
         prob_vocab = _WARMUP_SELECTED_VOCAB_SIZE
@@ -328,7 +327,7 @@ def _warm_greedy_rejection_kernels(
         dim=0,
     )
     draft_token_ids = torch.zeros(num_tokens, dtype=torch.int64, device=device)
-    target_argmax = torch.zeros(num_tokens, dtype=torch.int64, device=device)
+    target_argmax = torch.zeros(num_tokens, dtype=torch.int32, device=device)
     bonus_token_ids = torch.zeros(batch_size, 1, dtype=torch.int64, device=device)
 
     output_all_greedy = torch.full(
