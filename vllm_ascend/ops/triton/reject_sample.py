@@ -267,7 +267,7 @@ def rejection_random_sample_kernel(
                 )
 
 
-@triton.jit(do_not_specialize=["replace_from", "replace_to", "vec_len", "output_ptr", "input_ptr"])
+@triton.jit(do_not_specialize=["replace_from", "replace_to", "vec_len", "output_ptr", "input_ptr", "BLOCK_SIZE"])
 def expand_kernel(
     output_ptr,  # [num_tokens]
     input_ptr,  # [batch_size]
@@ -275,12 +275,14 @@ def expand_kernel(
     replace_from,
     replace_to,
     vec_len,
+    BLOCK_SIZE,
     MAX_NUM_TOKENS: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
+    MAX_BLOCK_SIZE: tl.constexpr = 16,
 ):
     req_idx = tl.program_id(0)
-    offset = req_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    len_mask = offset < vec_len
+    offset = req_idx * BLOCK_SIZE + tl.arange(0, MAX_BLOCK_SIZE)
+    mask = tl.arange(0, MAX_BLOCK_SIZE) < BLOCK_SIZE
+    len_mask = mask & (offset < vec_len)
 
     start_idx = tl.where(offset == 0, 0, tl.load(cu_num_tokens_ptr + offset - 1, len_mask))
     end_idx = tl.load(cu_num_tokens_ptr + offset, len_mask)
