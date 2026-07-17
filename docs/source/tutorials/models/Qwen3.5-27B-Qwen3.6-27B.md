@@ -121,7 +121,6 @@ It is **recommended to use the latest release candidate (rc) version or the late
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
-        --net=host \
         --device /dev/davinci0 \
         --device /dev/davinci1 \
         --device /dev/davinci2 \
@@ -292,7 +291,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
 
 === "Atlas inference products"
 
-    Currently only the **TP** scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. With **TP=4**, `--max-model-len` can support **128K** and **256K** long-sequence scenarios; configure `--max-num-seqs` as needed—setting it too high may cause OOM. Replace `MODEL_PATH` with a ModelScope model id or a local directory path.
+    Currently only the **TP** scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. Replace `MODEL_PATH` with a ModelScope model id or a local directory path.The quantized versions need to start with the `--quantization ascend` parameter.
 
     === "Qwen3.5-27B-w8a8"
 

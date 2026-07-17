@@ -43,7 +43,6 @@ It is **recommended to use the latest release candidate (rc) version or the late
     docker run --rm \
         --name vllm-ascend \
         --shm-size=10g \
-        --net=host \
         --device /dev/davinci0 \
         --device /dev/davinci1 \
         --device /dev/davinci2 \
