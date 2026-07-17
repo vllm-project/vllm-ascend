@@ -88,6 +88,18 @@ class AscendConfig:
                 "profiling_chunk_config and balance scheduling (enable_balance_scheduling) "
                 "cannot be enabled at the same time. Please disable one of them."
             )
+        self.NONBSP_ENABLE = int(additional_config.get("NONBSP_ENABLE", 0))
+        self.NONBSP_START_STEP = int(additional_config.get("NONBSP_START_STEP", 250))
+        self.NONBSP_END_STEP = int(additional_config.get("NONBSP_END_STEP", -1))
+        self.NONBSP_BUBBLE_THRESHOLD = float(
+            additional_config.get("NONBSP_BUBBLE_THRESHOLD", 5.0)
+        )
+        self.NONBSP_LONG_REQ_BLOCK_THRESHOLD = int(
+            additional_config.get("NONBSP_LONG_REQ_BLOCK_THRESHOLD", 700)
+        )
+        self.NONBSP_DYNAMIC_MAX_STEP = int(
+            additional_config.get("NONBSP_DYNAMIC_MAX_STEP", 256)
+        )
 
         # Dump / PrecisionDebugger configuration
         self.dump_config_path = self._resolve_dump_config_path(additional_config)
