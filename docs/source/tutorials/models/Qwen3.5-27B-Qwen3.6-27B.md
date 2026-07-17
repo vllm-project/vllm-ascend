@@ -158,13 +158,13 @@ If you don't want to use the docker image as above, you can also build all from 
 
     For the complete installation steps, refer to [installation](../../installation.md).
 
-!!! note
+    !!! note
 
-    On Atlas inference products, you may need to uninstall `triton-ascend` and `triton` to avoid dependency conflicts:
+        On Atlas inference products, you may need to uninstall `triton-ascend` and `triton` to avoid dependency conflicts:
 
-    ```bash
-    pip uninstall -y triton-ascend triton
-    ```
+        ```bash
+        pip uninstall -y triton-ascend triton
+        ```
 
 2. If you want to deploy a multi-node environment, you need to set up the environment on each node.
 
