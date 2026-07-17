@@ -139,9 +139,9 @@ def _make_rejection_tensors(
         dtype=torch.int32,
         device=device,
     )
-    cu_num_draft_tokens = torch.cumsum(num_draft_tokens, dim=0)
+    cu_num_draft_tokens = torch.cumsum(num_draft_tokens, dim=0, dtype=torch.int32)
 
-    draft_token_ids = torch.zeros(num_tokens, dtype=torch.int64, device=device)
+    draft_token_ids = torch.zeros(num_tokens, dtype=torch.int32, device=device)
     draft_probs = None
     global_vocab = vocab_size
     if with_draft_probs:
@@ -178,7 +178,7 @@ def _make_rejection_tensors(
         )
 
     bonus_token_ids = torch.zeros(batch_size, 1, dtype=torch.int64, device=device)
-    recovered_token_ids = torch.zeros(num_tokens, dtype=torch.int64, device=device)
+    recovered_token_ids = torch.zeros(num_tokens, dtype=torch.int32, device=device)
     uniform_probs = torch.full(
         (num_tokens,),
         0.5,
