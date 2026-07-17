@@ -215,16 +215,18 @@ class UBatchWrapper(GPUUBatchWrapper):
         with override_forward_context(None):
             ubatch_threads = []
             for metadata in ubatch_metadata:
-                thread = threading.Thread(target=_ubatch_thread,
-                                          args=(
-                                              results,
-                                              model,
-                                              metadata,
-                                          ))
-                ubatch_threads.append(thread)
-                thread.start()
-            self.ready_barrier.wait()  # Wait for all threads to be ready
-            ubatch_metadata[0].context.cpu_wait_event.set()
+                if metadata.num_tokens > 0:
+                    logger.info(f"metadata.context.id {metadata.context.id} num_tokens {metadata.num_tokens}")
+                    thread = threading.Thread(target=_ubatch_thread,
+                                            args=(results, model, metadata))
+                    ubatch_threads.append(thread)
+                    thread.start()
+                # else:
+                #     # 假设模型输出维度为 (num_tokens, hidden_size) 或 (num_tokens, vocab_size)
+                #     # 此处以 vocab_size 为例，实际需根据模型配置获取
+                #     empty_output = torch.empty((0, model.config.vocab_size), device='npu:0')
+                #     results.append((metadata.context.id, empty_output))
+
             for thread in ubatch_threads:
                 thread.join()
 
