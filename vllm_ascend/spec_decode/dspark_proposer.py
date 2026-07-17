@@ -5,17 +5,15 @@ from typing import Any
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
+from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
+from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 
 
 class AscendDSparkProposer(AscendDflashProposer):
@@ -100,7 +98,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         # per-layer context slot mappings as a flat list
         self._context_slots: list[torch.Tensor | None] = None
 
-
     def initialize_attn_backend(self, kv_cache_config, kernel_block_sizes=None) -> None:
         # Find draft layers (attention layers added by draft model)
         all_attn_layers = get_layers_from_vllm_config(
@@ -109,11 +106,10 @@ class AscendDSparkProposer(AscendDflashProposer):
         )
 
         attention_groups_list: list[dict[tuple[str, str], AttentionGroup]] = []
-        # the draft layers have multiple kv_cahce_groups
+        # the draft layers have multiple kv_cache_groups
         if not hasattr(self.model, "get_draft_kv_cache_layer_names"):
             raise RuntimeError(
-                "DSpark standard-cache path requires the draft model to expose "
-                "get_draft_kv_cache_layer_names"
+                "DSpark standard-cache path requires the draft model to expose get_draft_kv_cache_layer_names"
             )
 
         self._draft_attn_layer_names = sorted(self.model.get_draft_kv_cache_layer_names())
@@ -132,7 +128,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                 if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
                     layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
                 key = (attn_backend.full_cls_name(), layer_kv_cache_spec)
-                
+
                 if key not in attention_groups:
                     attn_group = AttentionGroup(
                         attn_backend,
@@ -147,7 +143,11 @@ class AscendDSparkProposer(AscendDflashProposer):
 
             attention_groups_list.append(attention_groups)
 
-        self.draft_attn_groups = [attention_group for attention_groups in attention_groups_list for attention_group in attention_groups.values()]
+        self.draft_attn_groups = [
+            attention_group
+            for attention_groups in attention_groups_list
+            for attention_group in attention_groups.values()
+        ]
         self.kv_cache_gid = 0
         if not self.draft_attn_groups:
             raise RuntimeError(
@@ -161,14 +161,20 @@ class AscendDSparkProposer(AscendDflashProposer):
         name_to_gid = {
             ln: gid
             for gid, group in enumerate(kv_cache_config.kv_cache_groups)
-            for ln in group.layer_names if ln in self._draft_attn_layer_names
+            for ln in group.layer_names
+            if ln in self._draft_attn_layer_names
         }
         self._layer_group_idx = [name_to_gid[name] for name in self._draft_attn_layer_names]
 
         # some buffers need information of groups
-        self._per_group_query_slot_mapping_buffers = {attn_group.kv_cache_group_id: torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device) for attn_group in self.draft_attn_groups}
-        self._per_group_context_slot_mapping_buffers = {attn_group.kv_cache_group_id: torch.zeros(self.max_num_tokens, dtype=torch.int32, device=self.device) for attn_group in self.draft_attn_groups}
-
+        self._per_group_query_slot_mapping_buffers = {
+            attn_group.kv_cache_group_id: torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
+            for attn_group in self.draft_attn_groups
+        }
+        self._per_group_context_slot_mapping_buffers = {
+            attn_group.kv_cache_group_id: torch.zeros(self.max_num_tokens, dtype=torch.int32, device=self.device)
+            for attn_group in self.draft_attn_groups
+        }
 
     def set_per_group_attn_metadata(
         self,
@@ -178,7 +184,6 @@ class AscendDSparkProposer(AscendDflashProposer):
     ) -> None:
         self._per_group_block_tables[gid] = block_table
         self._per_group_slot_mappings[gid] = slot_mapping
-
 
     def set_inputs_first_pass(
         self,
@@ -203,11 +208,14 @@ class AscendDSparkProposer(AscendDflashProposer):
         num_query_total = batch_size * block_size
         has_num_rejected = num_rejected_tokens_gpu is not None
         primary_gid = getattr(self, "kv_cache_gid", 0)
-        per_group_draft_block_tables = {attn_group.kv_cache_group_id: self._per_group_block_tables[attn_group.kv_cache_group_id] for attn_group in self.draft_attn_groups}
+        per_group_draft_block_tables = {
+            attn_group.kv_cache_group_id: self._per_group_block_tables[attn_group.kv_cache_group_id]
+            for attn_group in self.draft_attn_groups
+        }
         self._per_group_block_table_buffers = per_group_draft_block_tables
         self._context_slots = None
         self._dflash_num_context = int(cad.query_start_loc_cpu[batch_size])
-        self._dflash_hidden_states[:self._dflash_num_context] = target_hidden_states[:self._dflash_num_context]
+        self._dflash_hidden_states[: self._dflash_num_context] = target_hidden_states[: self._dflash_num_context]
 
         # below (SAMPLE_FROM_ANCHOR=True, anchor included) -- not arange here.
         token_indices_to_sample = torch.empty(
@@ -259,8 +267,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         # to compute self._context_slots
         if per_group_draft_block_tables:
             per_group_draft_context_slot_mappings = {
-                gid: self._per_group_context_slot_mapping_buffers[gid]
-                for gid in per_group_draft_block_tables
+                gid: self._per_group_context_slot_mapping_buffers[gid] for gid in per_group_draft_block_tables
             }
             self._context_slots = [per_group_draft_context_slot_mappings[gidx] for gidx in self._layer_group_idx]
 
@@ -296,7 +303,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.attn_state = AscendAttentionState.ChunkedPrefill
 
         return num_query_total, token_indices_to_sample, cad, None
-
 
     @torch.inference_mode()
     def dummy_run(

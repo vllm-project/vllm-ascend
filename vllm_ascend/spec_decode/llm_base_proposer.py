@@ -27,7 +27,6 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
-from vllm_ascend.models.deepseek_v4_dspark import DSparkDeepseekV4ForCausalLM
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
@@ -50,6 +49,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
+from vllm_ascend.models.deepseek_v4_dspark import DSparkDeepseekV4ForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
@@ -927,7 +927,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         common_attn_metadata.num_input_tokens = num_input_tokens
 
-        multi_steps_attn_metadata, attn_metadata_i = self.build_draft_attn_metadata(common_attn_metadata, num_input_tokens, num_tokens)
+        multi_steps_attn_metadata, attn_metadata_i = self.build_draft_attn_metadata(
+            common_attn_metadata, num_input_tokens, num_tokens
+        )
         self._pad_draft_buffers(num_tokens, num_input_tokens)
 
         if self.uses_mrope:
@@ -1079,13 +1081,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if hasattr(self, "_layer_group_idx"):
                 self.build_model_inputs_first_pass(num_input_tokens, self._context_slots)
                 model_kwargs = dict(
-                input_ids=self.input_ids[:num_input_tokens], positions=self.positions[:num_input_tokens]
-            )
+                    input_ids=self.input_ids[:num_input_tokens], positions=self.positions[:num_input_tokens]
+                )
             else:
                 self.build_model_inputs_first_pass(num_input_tokens, self._context_slot_mapping_buffer)
                 model_kwargs = dict(
-                input_ids=self.input_ids[:num_input_tokens], positions=self.positions[:num_input_tokens], inputs_embeds=None
-            )
+                    input_ids=self.input_ids[:num_input_tokens],
+                    positions=self.positions[:num_input_tokens],
+                    inputs_embeds=None,
+                )
         else:
             model_kwargs = {
                 "input_ids": model_input_ids,
@@ -2147,7 +2151,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         common_attn_metadata,
         num_input_tokens,
         num_actual_tokens,
-        ):
+    ):
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         assert len(self.draft_attn_groups) > 0
         per_layer_attn_metadata: dict[str, Any] = {}
@@ -2161,7 +2165,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     common_ratio_to_sas_metadata=dict(),
                     block_size=attn_group.kv_cache_spec.block_size,
                 )
-            if self.method == 'dspark':
+            if self.method == "dspark":
                 gid = attn_group.kv_cache_group_id
                 common_attn_metadata = copy.copy(common_attn_metadata)
                 block_table = getattr(self, "_per_group_block_table_buffers", {}).get(gid)
@@ -2171,12 +2175,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if slot_mapping is not None:
                     common_attn_metadata.slot_mapping = slot_mapping[:num_input_tokens]
                 attn_metadata = builder.build_for_drafting(
-                    common_attn_metadata,
-                    draft_index=1,
-                    **extra_attn_metadata_args
+                    common_attn_metadata, draft_index=1, **extra_attn_metadata_args
                 )
             else:
-                attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args)
+                attn_metadata = builder.build(
+                    0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args
+                )
             if hasattr(attn_metadata, "causal") and not attn_metadata.causal:
                 attn_metadata.attn_mask = None
 
@@ -2203,4 +2207,4 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         for buf in getattr(self, "_per_group_query_slot_mapping_buffers", {}).values():
             buf[num_actual_tokens:num_input_tokens].fill_(-1)
         for buf in getattr(self, "_per_group_context_slot_mapping_buffers", {}).values():
-            buf[self._dflash_num_context:].fill_(-1)
+            buf[self._dflash_num_context :].fill_(-1)
