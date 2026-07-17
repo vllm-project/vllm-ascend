@@ -16,10 +16,9 @@
 #
 
 name: Test NPU A5 (Shanghai)
-
 on:
-  workflow_dispatch:
-
+  pull_request:
+    paths: ['.github/workflows/schedule_npu_check_a5.yaml']
 jobs:
   npu-a5:
     runs-on: linux-aarch64-a5-8
