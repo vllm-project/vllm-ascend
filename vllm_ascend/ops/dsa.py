@@ -185,9 +185,14 @@ def dsa_forward(
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     if forward_context.attn_metadata:
-        logger.info("dsa_forward forward_context.attn_metadata: %s", forward_context.attn_metadata)
-        logger.info("self.prefix: %s", self.prefix)
-        attn_metadata = filter_metadata(forward_context.attn_metadata, self.prefix)
+        attn_metadata = forward_context.attn_metadata
+        # 如果是列表，取第一个元素
+        if isinstance(attn_metadata, list):
+            logger.info("dsa_forward list attn_metadata")
+            attn_metadata = attn_metadata[0]
+        # 然后执行原有过滤逻辑（假定 attn_metadata 是字典）
+        logger.info("dsa_forward dict attn_metadata")
+        attn_metadata = filter_metadata(attn_metadata, self.prefix)
     else:
         attn_metadata = forward_context.attn_metadata
 

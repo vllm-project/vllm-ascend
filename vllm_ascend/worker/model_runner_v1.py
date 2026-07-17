@@ -3385,7 +3385,7 @@ class NPUModelRunner(GPUModelRunner):
                         prefill_ratio_to_sas_metadata,
                         decode_ratio_to_sas_metadata,
                         common_ratio_to_sas_metadata)
-            logger.info("attn_metadata_dict555555555555: %s", attn_metadata)
+            # logger.info("attn_metadata_dict555555555555: %s", attn_metadata)
         if self.is_mm_prefix_lm:
             req_doc_ranges = {}
             for req_id in self.input_batch.req_ids:
