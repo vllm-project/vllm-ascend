@@ -587,6 +587,8 @@ def split_attn_metadata(
     """
     results = []
     for ubatch_slice in ubatch_slices:
+        if ubatch_slice.is_empty():
+            continue
         results.append(
             _make_metadata_with_slice(ubatch_slice, common_attn_metadata, max_num_tokens))
 
