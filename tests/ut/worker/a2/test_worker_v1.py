@@ -249,6 +249,66 @@ class TestNPUWorker(TestBase):
             mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
             worker.sleep_wakeup_manager.wakeup.assert_called_once_with(["test_tag"])
 
+    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_wake_up_uses_backend_loading_view_hook(self, mock_get_config, mock_allocator_class):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        class NativeReloadMethod:
+            def __init__(self):
+                self.loading_view_calls = 0
+
+            def make_weight_loading_view(self, param):
+                self.loading_view_calls += 1
+                loading_param = torch.nn.Parameter(param.transpose(1, 2), requires_grad=False)
+                loading_param.test_loading_view = True
+                return loading_param
+
+        model = torch.nn.Module()
+        model.experts = torch.nn.Module()
+        native_reload_method = NativeReloadMethod()
+        model.experts.quant_method = native_reload_method
+        model.experts.w13_weight = torch.nn.Parameter(torch.randn(2, 3, 4), requires_grad=False)
+        model.experts.w2_weight = torch.nn.Parameter(torch.randn(2, 4, 3), requires_grad=False)
+        original_w13 = model.experts.w13_weight
+        original_w2 = model.experts.w2_weight
+
+        model.legacy_experts = torch.nn.Module()
+        model.legacy_experts.w13_weight = torch.nn.Parameter(torch.randn(2, 3, 4), requires_grad=False)
+        model.legacy_experts.w2_weight = torch.nn.Parameter(torch.randn(2, 4, 3), requires_grad=False)
+        legacy_w13 = model.legacy_experts.w13_weight
+        legacy_w2 = model.legacy_experts.w2_weight
+
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 0
+        mock_config.enable_sleep_mode_extra_cleanup = False
+        mock_get_config.return_value = mock_config
+        mock_allocator_class.get_instance.return_value = MagicMock()
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+        worker.model_runner = MagicMock(model=model)
+        worker.vllm_config = MagicMock()
+        worker.vllm_config.quant_config = None
+        worker.vllm_config.model_config.hf_text_config.hidden_size = 3
+        worker._sleep_saved_buffers = {}
+        worker.sleep_wakeup_manager = MagicMock()
+
+        worker.wake_up(tags=["weights"])
+
+        assert tuple(model.experts.w13_weight.shape) == (2, 4, 3)
+        assert tuple(model.experts.w2_weight.shape) == (2, 3, 4)
+        assert model.experts.w13_weight.test_loading_view is True
+        assert model.experts.w2_weight.test_loading_view is True
+        assert model.experts.w13_weight.untyped_storage().data_ptr() == original_w13.untyped_storage().data_ptr()
+        assert model.experts.w2_weight.untyped_storage().data_ptr() == original_w2.untyped_storage().data_ptr()
+        assert native_reload_method.loading_view_calls == 2
+
+        assert tuple(model.legacy_experts.w13_weight.shape) == (2, 4, 3)
+        assert tuple(model.legacy_experts.w2_weight.shape) == (2, 3, 4)
+        assert model.legacy_experts.w13_weight.untyped_storage().data_ptr() == legacy_w13.untyped_storage().data_ptr()
+        assert model.legacy_experts.w2_weight.untyped_storage().data_ptr() == legacy_w2.untyped_storage().data_ptr()
+
     @patch("vllm_ascend.worker.worker.current_platform")
     @patch("vllm_ascend.worker.worker.MemorySnapshot")
     @patch("vllm_ascend.worker.worker.NPUWorker._init_worker_distributed_environment")
@@ -1388,14 +1448,63 @@ class TestNPUWorkerWeightUpdate(TestBase):
         engine.parse_init_info.assert_called_once_with(init_info)
         engine.init_transfer_engine.assert_called_once_with("typed_init")
 
+    def test_prepare_model_for_native_reload_dispatches_capability(self):
+        worker = self._make_worker(engine=MagicMock())
+        model = torch.nn.Module()
+        model.layer = torch.nn.Module()
+        prepare = MagicMock()
+        model.layer.quant_method = MagicMock(
+            requires_native_layerwise_reload=True,
+            prepare_for_native_layerwise_reload=prepare,
+        )
+
+        worker.prepare_model_for_native_layerwise_reload(model)
+
+        prepare.assert_called_once_with(model.layer)
+
+    def test_prepare_model_for_native_reload_rejects_missing_hook(self):
+        worker = self._make_worker(engine=MagicMock())
+        model = torch.nn.Module()
+        model.layer = torch.nn.Module()
+        model.layer.quant_method = MagicMock(requires_native_layerwise_reload=True)
+        model.layer.quant_method.prepare_for_native_layerwise_reload = None
+
+        with self.assertRaisesRegex(RuntimeError, "does not provide prepare_for_native_layerwise_reload"):
+            worker.prepare_model_for_native_layerwise_reload(model)
+
+    @patch("vllm.model_executor.model_loader.reload.initialize_layerwise_reload")
+    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
+    def test_start_weight_update_rejects_dynamic_eplb_before_initialize(self, mock_init_reload):
+        from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
+
+        worker = self._make_worker(engine=MagicMock())
+        model = torch.nn.Module()
+        model.layer = torch.nn.Module()
+        method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
+        method.dynamic_eplb = True
+        model.layer.quant_method = method
+        model.layer.w13_weight_list = [torch.empty(1)]
+        worker.model_runner.model = model
+
+        with self.assertRaisesRegex(RuntimeError, "dynamic EPLB"):
+            worker.start_weight_update(is_checkpoint_format=True)
+
+        mock_init_reload.assert_not_called()
+        self.assertFalse(worker._weight_update_active)
+
     @patch("vllm.model_executor.model_loader.reload.initialize_layerwise_reload")
     @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
     def test_start_weight_update_checkpoint_format(self, mock_init_reload):
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
+        events = []
+        worker.prepare_model_for_native_layerwise_reload = MagicMock(side_effect=lambda model: events.append("prepare"))
+        mock_init_reload.side_effect = lambda model: events.append("initialize")
 
         worker.start_weight_update(is_checkpoint_format=True)
 
+        self.assertEqual(events, ["prepare", "initialize"])
+        worker.prepare_model_for_native_layerwise_reload.assert_called_once_with(worker.model_runner.model)
         mock_init_reload.assert_called_once_with(worker.model_runner.model)
         self.assertTrue(worker._weight_update_active)
         self.assertTrue(worker._is_checkpoint_format)
@@ -1405,9 +1514,11 @@ class TestNPUWorkerWeightUpdate(TestBase):
     def test_start_weight_update_kernel_format(self, mock_init_reload):
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
+        worker.prepare_model_for_native_layerwise_reload = MagicMock()
 
         worker.start_weight_update(is_checkpoint_format=False)
 
+        worker.prepare_model_for_native_layerwise_reload.assert_not_called()
         mock_init_reload.assert_not_called()
         self.assertTrue(worker._weight_update_active)
         self.assertFalse(worker._is_checkpoint_format)

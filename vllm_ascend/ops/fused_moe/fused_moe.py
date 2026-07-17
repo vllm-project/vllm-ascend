@@ -32,6 +32,7 @@ from vllm.model_executor.layers.fused_moe.layer import (
     MoERunner,
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
+from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
@@ -90,6 +91,9 @@ def mock_true():
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
+    # Native layerwise reload preserves the runtime storage used by ACLGraph.
+    requires_native_layerwise_reload = True
+
     def __init__(self, moe: FusedMoEConfig = None, tid2eid=None):
         super().__init__(moe=moe)
         self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
@@ -104,23 +108,80 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # Do not let upstream modular-kernel initialization replace it.
         return None
 
+    @staticmethod
+    def make_weight_loading_view(param: torch.nn.Parameter) -> torch.nn.Parameter:
+        """Create a tagged checkpoint-layout view for online weight loading."""
+        loading_param = AscendUnquantizedFusedMoEMethod._make_parameter_with_weight_loader(
+            param,
+            param.transpose(1, 2),
+        )
+        loading_param._ascend_moe_checkpoint_layout_view = True
+        return loading_param
+
+    @staticmethod
+    def _make_parameter_with_weight_loader(
+        source: torch.nn.Parameter,
+        data: torch.Tensor,
+    ) -> torch.nn.Parameter:
+        """Create a Parameter that preserves vLLM's weight-loader attribute."""
+        result = torch.nn.Parameter(data, requires_grad=False)
+        weight_loader = getattr(source, "weight_loader", None)
+        if callable(weight_loader):
+            set_weight_attrs(result, {"weight_loader": weight_loader})
+        return result
+
+    def prepare_for_native_layerwise_reload(self, layer: torch.nn.Module) -> bool:
+        """Restore tagged checkpoint-layout views to the runtime layout."""
+        if self.dynamic_eplb and (hasattr(layer, "w13_weight_list") or hasattr(layer, "w2_weight_list")):
+            raise RuntimeError(
+                "Native layerwise reload does not support unquantized FusedMoE after dynamic EPLB "
+                "splits weights into per-expert tensor lists."
+            )
+
+        weights = (layer.w13_weight, layer.w2_weight)
+        loading_view_flags = tuple(
+            getattr(weight, "_ascend_moe_checkpoint_layout_view", False) is True for weight in weights
+        )
+        if not any(loading_view_flags):
+            return False
+        if not all(loading_view_flags):
+            raise RuntimeError("Cannot prepare Ascend FusedMoE with mixed runtime and checkpoint-layout weights.")
+
+        for name in ("w13_weight", "w2_weight"):
+            loading_param = getattr(layer, name)
+            runtime_param = self._make_parameter_with_weight_loader(
+                loading_param,
+                loading_param.transpose(1, 2),
+            )
+            if runtime_param.untyped_storage().data_ptr() != loading_param.untyped_storage().data_ptr():
+                raise RuntimeError(f"Preparing {name} for native reload changed its storage.")
+            setattr(layer, name, runtime_param)
+        return True
+
     def process_weights_after_loading(self, layer):
+        if self.dynamic_eplb and (hasattr(layer, "w13_weight_list") or hasattr(layer, "w2_weight_list")):
+            raise RuntimeError(
+                "Online layerwise reload does not support unquantized FusedMoE after dynamic EPLB "
+                "splits weights into per-expert tensor lists."
+            )
+
         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
+
+        checkpoint_w13 = layer.w13_weight
+        checkpoint_w2 = layer.w2_weight
 
         # vLLM PR #44589 landed after the v0.24 main-line cut point
         # (798185d) and is present in the verified main commit only.
         if not vllm_version_is("0.24.0"):
             w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2)
-            layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
-
             w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2)
-            layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
         else:
             w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()
-            layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
-
             w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
-            layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
+
+        # Keep weight loaders available for subsequent online updates.
+        layer.w13_weight = self._make_parameter_with_weight_loader(checkpoint_w13, w13_data)
+        layer.w2_weight = self._make_parameter_with_weight_loader(checkpoint_w2, w2_data)
 
         # TODO: Current dispatch_ffn_combine fusion operator ONLY supports NZ format.
         # Therefore, we must cast weights to NZ when fusion is enabled.
