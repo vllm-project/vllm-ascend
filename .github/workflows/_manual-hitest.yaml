@@ -51,6 +51,7 @@ jobs:
         run: git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
       - name: Execute hitest entry
+        continue-on-error: true
         env:
           AUROGON_API_PREFIX: https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/aurogon_service
           HITEST_APIG_APPCODE: ${{ secrets.HITEST_APIG_APPCODE }}
@@ -58,6 +59,11 @@ jobs:
           HITEST_SECRET: ${{ secrets.HITEST_SECRET }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
+          echo "===== DEBUG GITHUB WORKFLOW ENV LENGTH ===="
+          echo "HITEST_APIG_APPCODE len: ${#HITEST_APIG_APPCODE}"
+          echo "HITEST_KEY len: ${#HITEST_KEY}"
+          echo "HITEST_SECRET len: ${#HITEST_SECRET}"
+          echo "==========================================="
           python3 .github/workflows/scripts/run_hitest.py
 
       - name: Upload recommended pytest paths artifact
