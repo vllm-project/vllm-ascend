@@ -94,7 +94,7 @@ vllm serve /data/Qwen3-32B \
   --max-num-batched-tokens 40960 \
   --speculative-config '{"method": "suffix", "num_speculative_tokens": 3}' \
   --gpu-memory-utilization 0.9 \
-  --additional-config '{"weight_prefetch_config":{"enable":true}}' \
+  --additional-config '{"pa_shape_list":[48,64,72,80], "weight_prefetch_config":{"enable":true}}' \
   --port 8011
 ```
 
