@@ -97,7 +97,7 @@ class TestAscendRowParallelLinear(BaseLinearTest):
     )
     def test_mlp_optimize(self, mock_enable_sp, mock_get_current_vllm_config):
         ascend_config._ASCEND_CONFIG = MagicMock()
-        ascend_config._ASCEND_CONFIG.recompute_scheduler_enable = False
+        ascend_config._ASCEND_CONFIG.scheduler_config.recompute_scheduler_enable = False
         ascend_config._ASCEND_CONFIG.finegrained_tp_config.mlp_tensor_parallel_size = 2
         ascend_config._ASCEND_CONFIG.ascend_scheduler_config.enabled = False
 
@@ -119,7 +119,7 @@ class TestAscendRowParallelLinear(BaseLinearTest):
     )
     def test_oproj_tp(self, mock_enable_sp, mock_get_current_vllm_config):
         ascend_config._ASCEND_CONFIG = MagicMock()
-        ascend_config._ASCEND_CONFIG.recompute_scheduler_enable = False
+        ascend_config._ASCEND_CONFIG.scheduler_config.recompute_scheduler_enable = False
         ascend_config._ASCEND_CONFIG.finegrained_tp_config.oproj_tensor_parallel_size = 2
         ascend_config._ASCEND_CONFIG.ascend_scheduler_config.enabled = False
 
@@ -137,7 +137,7 @@ class TestAscendRowParallelLinear(BaseLinearTest):
 class TestAscendMergedColumnParallelLinear(BaseLinearTest):
     def test_merged_mlp_tp_init(self):
         ascend_config._ASCEND_CONFIG = MagicMock()
-        ascend_config._ASCEND_CONFIG.recompute_scheduler_enable = False
+        ascend_config._ASCEND_CONFIG.scheduler_config.recompute_scheduler_enable = False
         ascend_config._ASCEND_CONFIG.finegrained_tp_config.mlp_tensor_parallel_size = 2
         ascend_config._ASCEND_CONFIG.ascend_scheduler_config.enabled = False
 

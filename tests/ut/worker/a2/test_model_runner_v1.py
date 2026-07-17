@@ -581,7 +581,9 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         runner = self._build_runner(MagicMock(spec=["start", "stop", "step"]))
         runner.vllm_config = MagicMock()
         runner.vllm_config.model_config.enable_return_routed_experts = False
-        runner.ascend_config = SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=False))
+        runner.ascend_config = SimpleNamespace(
+            scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=False))
+        )
         runner.execute_model_state = None
         runner.speculative_config = None
         runner.use_async_scheduling = False
@@ -617,7 +619,9 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         runner = self._build_runner(MagicMock(spec=["start", "stop", "step"]))
         runner.vllm_config = MagicMock()
         runner.vllm_config.model_config.enable_return_routed_experts = False
-        runner.ascend_config = SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=False))
+        runner.ascend_config = SimpleNamespace(
+            scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=False))
+        )
         runner.execute_model_state = None
         runner.speculative_config = None
         runner.use_async_scheduling = False

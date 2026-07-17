@@ -14,15 +14,17 @@ Keep it disabled if the workload is mostly uniform, or if FCFS ordering is more 
 
 ## Configuration
 
-Add `short_request_first_config` to the prefill (P) node's `additional_config` in a PD-disaggregated deployment. Because ShortRequestFirst is wired through the recompute scheduler, keep `recompute_scheduler_enable=true` in the same P-node config:
+Add `short_request_first_config` to the prefill (P) node's `scheduler_config` in a PD-disaggregated deployment. Because ShortRequestFirst is wired through the recompute scheduler, keep `recompute_scheduler_enable=true` in the same P-node configuration:
 
 ```json
 {
-  "recompute_scheduler_enable": true,
-  "short_request_first_config": {
-    "enabled": true,
-    "threshold": 256,
-    "long_max_wait_ms": 2000
+  "scheduler_config": {
+    "recompute_scheduler_enable": true,
+    "short_request_first_config": {
+      "enabled": true,
+      "threshold": 256,
+      "long_max_wait_ms": 2000
+    }
   }
 }
 ```
@@ -105,22 +107,9 @@ ShortRequestFirst only changes the waiting-queue policy and is wired into the re
 
 ## Minimal examples
 
-P-node `additional_config` example:
-
-```json
-{
-  "recompute_scheduler_enable": true,
-  "short_request_first_config": {
-    "enabled": true,
-    "threshold": 256,
-    "long_max_wait_ms": 2000
-  }
-}
-```
-
 Disable it explicitly:
 
 ```bash
 vllm serve <model> \
-  --additional-config '{"short_request_first_config": {"enabled": false}}'
+  --additional-config '{"scheduler_config": {"short_request_first_config": {"enabled": false}}}'
 ```

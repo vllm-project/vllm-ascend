@@ -42,6 +42,8 @@ import inspect
 import subprocess
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -74,8 +76,53 @@ _UPSTREAM_SCHED_FILE = _upstream_sched_mod.__file__
 from vllm_ascend.patch.platform.patch_balance_schedule import (  # noqa: E402
     BalanceScheduler,
     _balance_run_engine_core,
+    _balance_scheduling_enabled,
     _OriginalRunEngineCore,
 )
+
+# ---------------------------------------------------------------------------
+# Scheduler config compatibility
+# ---------------------------------------------------------------------------
+
+
+def test_balance_config_uses_initialized_scheduler_config():
+    ascend_config = SimpleNamespace(scheduler_config=SimpleNamespace(enable_balance_scheduling=True))
+    vllm_config = SimpleNamespace(additional_config={"scheduler_config": {"enable_balance_scheduling": False}})
+
+    with patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config):
+        assert _balance_scheduling_enabled(vllm_config) is True
+
+
+def test_balance_config_fallback_prefers_nested_config():
+    vllm_config = SimpleNamespace(
+        additional_config={
+            "scheduler_config": {"enable_balance_scheduling": False},
+            "enable_balance_scheduling": True,
+        }
+    )
+
+    with patch("vllm_ascend.ascend_config.get_ascend_config", side_effect=RuntimeError):
+        assert _balance_scheduling_enabled(vllm_config) is False
+
+
+def test_balance_config_fallback_ignores_non_dict_nested_config():
+    vllm_config = SimpleNamespace(
+        additional_config={
+            "scheduler_config": None,
+            "enable_balance_scheduling": True,
+        }
+    )
+
+    with patch("vllm_ascend.ascend_config.get_ascend_config", side_effect=RuntimeError):
+        assert _balance_scheduling_enabled(vllm_config) is True
+
+
+def test_balance_config_fallback_accepts_legacy_top_level_config():
+    vllm_config = SimpleNamespace(additional_config={"enable_balance_scheduling": True})
+
+    with patch("vllm_ascend.ascend_config.get_ascend_config", side_effect=RuntimeError):
+        assert _balance_scheduling_enabled(vllm_config) is True
+
 
 # ---------------------------------------------------------------------------
 # Helpers

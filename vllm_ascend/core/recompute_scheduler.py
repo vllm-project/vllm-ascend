@@ -109,7 +109,7 @@ class RecomputeScheduler(ShortRequestFirstSchedulerMixin, Scheduler):
             and self.vllm_config.kv_transfer_config.is_kv_consumer
         )
         self.is_kv_producer = self.vllm_config.kv_transfer_config and self.vllm_config.kv_transfer_config.is_kv_producer
-        if get_ascend_config().short_request_first_config.enabled:
+        if get_ascend_config().scheduler_config.short_request_first_config.enabled:
             self._init_short_request_first_waiting_queue()
 
     def _pop_waiting_request(

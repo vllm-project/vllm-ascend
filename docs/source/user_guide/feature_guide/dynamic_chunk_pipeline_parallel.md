@@ -66,7 +66,7 @@ vllm serve Qwen/Qwen3-30B-A3B \
     --max-num-batched-tokens 32768 \
     --enable-prefix-caching \
     --no-async-scheduling \
-    --additional-config '{"profiling_chunk_config": {"enabled": true}}' \
+    --additional-config '{"scheduler_config": {"profiling_chunk_config": {"enabled": true}}}' \
     --kv-transfer-config \
     '{
         "kv_connector": "MooncakeConnectorV1",
