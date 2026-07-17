@@ -151,7 +151,7 @@ vllm serve /mnt/weight/GLM-5.2-W4A8C8-0713-MTP \
 --gpu-memory-utilization 0.92 \
 --quantization ascend \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"enable_dsa_cp": true,"enable_sparse_c8": true,"enable_balance_scheduling": true,"multistream_overlap_shared_expert":true}' \
+--additional-config '{"enable_dsa_cp": true,"enable_sparse_c8": true,"enable_balance_scheduling": true}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 
 ```
@@ -226,7 +226,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --gpu-memory-utilization 0.92 \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_dsa_cp": true,"enable_sparse_c8": true,"enable_balance_scheduling": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true}' \
+    --additional-config '{"enable_dsa_cp": true,"enable_sparse_c8": true,"enable_balance_scheduling": true,"fuse_muls_add":true}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
 
@@ -276,7 +276,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --gpu-memory-utilization 0.92 \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_dsa_cp": true,"enable_sparse_c8": true,"enable_balance_scheduling": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true}' \
+    --additional-config '{"enable_dsa_cp": true,"enable_sparse_c8": true,"enable_balance_scheduling": true,"fuse_muls_add":true}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
 
