@@ -1,10 +1,18 @@
 import gc
+from typing import TYPE_CHECKING
 
 import torch
-from vllm.model_executor.layers.fla.ops import fused_recurrent_gated_delta_rule
 
 from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_sigmoid_gating_delta_rule_update
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
+from vllm_ascend.utils import vllm_version_is
+
+if TYPE_CHECKING:
+    from vllm.third_party.flash_linear_attention.ops import fused_recurrent_gated_delta_rule
+elif vllm_version_is("0.24.0"):
+    from vllm.model_executor.layers.fla.ops import fused_recurrent_gated_delta_rule
+else:
+    from vllm.third_party.flash_linear_attention.ops import fused_recurrent_gated_delta_rule
 
 
 def test_triton_fusion_ops():

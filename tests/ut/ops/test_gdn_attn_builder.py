@@ -2,12 +2,12 @@
 
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
-from vllm.model_executor.layers.fla.ops import index as _fla_index
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import MambaSpec
 
@@ -31,6 +31,14 @@ from vllm_ascend.ops.triton.fla.utils import (
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets as runtime_prepare_update_chunk_offsets,
 )
+from vllm_ascend.utils import vllm_version_is
+
+if TYPE_CHECKING:
+    from vllm.third_party.flash_linear_attention.ops import index as _fla_index
+elif vllm_version_is("0.24.0"):
+    from vllm.model_executor.layers.fla.ops import index as _fla_index
+else:
+    from vllm.third_party.flash_linear_attention.ops import index as _fla_index
 
 
 @pytest.fixture(autouse=True)
