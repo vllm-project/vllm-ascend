@@ -89,7 +89,9 @@ def make_agent_metadata(**overrides: Any) -> MooncakeAgentMetadata:
     metadata: dict[str, Any] = {
         "engine_id": "engine1",
         "te_rpc_port": 9090,
-        "kv_group2layeridx": {0: ({"kv_cache_spec_type": "FullAttentionSpec"}, [0])},
+        "kv_group2layeridx": {
+            0: ({"kv_cache_spec_type": "FullAttentionSpec", "layer_names": ["model.layers.0.self_attn"]}, [0])
+        },
         "block_size": 16,
         "kv_caches_base_addr": [[12345678]],
         "block_size_scale": [[1]],
@@ -773,7 +775,7 @@ class TestCoreFunctionality(unittest.TestCase):
         self.ready_event = threading.Event()
         self.mock_queue = MagicMock()
         self.vllm_config = MockVllmConfig()
-        self.kv_caches: dict[str, Any] = {"layer_0": (MagicMock(), MagicMock())}
+        self.kv_caches: dict[str, Any] = {"model.layers.0.self_attn": (MagicMock(), MagicMock())}
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
@@ -804,7 +806,10 @@ class TestCoreFunctionality(unittest.TestCase):
             "all_task_done": True,
             "remote_block_size": 16,
         }
-        self.thread.kv_group2layeridx = {0: ({"kv_cache_spec_type": "FullAttentionSpec"}, [0])}
+        self.thread.kv_group2layeridx = {
+            0: ({"kv_cache_spec_type": "FullAttentionSpec", "layer_names": ["model.layers.0.self_attn"]}, [0])
+        }
+        self.thread.remote_kv_group2layeridx["remote_engine"][6666] = self.thread.kv_group2layeridx
         self.thread.group_compress_ratios = {0: 1}
         self.thread.block_size_scale = [[1]]
         self.thread.task_tracker = MagicMock()
@@ -872,12 +877,14 @@ class TestCoreFunctionality(unittest.TestCase):
             0: (
                 {
                     "kv_cache_spec_type": "UniformTypeKVCacheSpecs",
-                    "kv_cache_spec": {"layer_0": {"compress_ratio": "4"}},
+                    "layer_names": ["model.layers.0.self_attn"],
+                    "kv_cache_spec": {"model.layers.0.self_attn": {"compress_ratio": "4"}},
                 },
                 [0],
             )
         }
         self.thread.group_compress_ratios = {0: 4}
+        self.thread.remote_kv_group2layeridx["remote_engine"][6666] = self.thread.kv_group2layeridx
 
         req["remote_block_ids"] = [[6, 7]]
         with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config") as mock_config:
@@ -939,6 +946,90 @@ class TestCoreFunctionality(unittest.TestCase):
         self.assertEqual(call_args[1], [0x1000 + 1 * 2048, 0x1000 + 2 * 2048])
         self.assertEqual(call_args[2], [0x3000 + 3 * 4096, 0x3000 + 4 * 4096])
         self.assertEqual(call_args[3], [1024, 1024])
+        mock_get_meta.assert_not_called()
+
+    def _configure_mtp_draft_transfer(self):
+        layer_name = "model.layers.0.mtp.self_attn"
+        local_layer_idx = 32
+        remote_layer_idx = 40
+        remote_wrong_layer_idx = local_layer_idx
+
+        self.thread._prefill_pp_size = 2
+        self.thread.pp_layer_indices = {0: (0, 16), 1: (16, 32)}
+        self.thread.num_draft_layers = 1
+        self.thread.vllm_config.speculative_config = types.SimpleNamespace(method="mtp", num_speculative_tokens=1)
+        self.thread.kv_group2layeridx = {
+            0: (
+                {"kv_cache_spec_type": "FullAttentionSpec", "layer_names": [layer_name]},
+                [local_layer_idx],
+            )
+        }
+        self.thread.remote_kv_group2layeridx["remote_engine"][6666] = {
+            0: (
+                {"kv_cache_spec_type": "FullAttentionSpec", "layer_names": [layer_name]},
+                [remote_layer_idx],
+            )
+        }
+        self.thread.group_compress_ratios = {0: 1}
+
+        local_base_addrs = [[0] for _ in range(local_layer_idx + 1)]
+        local_base_addrs[local_layer_idx] = [0x320000]
+        remote_base_addrs = [[0] for _ in range(remote_layer_idx + 1)]
+        remote_base_addrs[remote_wrong_layer_idx] = [0xBAD000]
+        remote_base_addrs[remote_layer_idx] = [0x400000]
+        self.thread.kv_caches_base_addr["local_engine"][5555] = local_base_addrs
+        self.thread.kv_caches_base_addr["remote_engine"] = {6666: remote_base_addrs}
+
+        self.thread.block_len_per_addr = [[1024] for _ in range(local_layer_idx + 1)]
+        self.thread.block_stride_per_addr = [[4096] for _ in range(local_layer_idx + 1)]
+        self.thread.block_size_scale = [[1] for _ in range(local_layer_idx + 1)]
+        self.thread.remote_block_size_scale["remote_engine"] = {6666: [[1] for _ in range(remote_layer_idx + 1)]}
+        self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [[8192] for _ in range(remote_layer_idx + 1)]
+        return local_layer_idx, remote_layer_idx
+
+    def _make_mtp_draft_transfer_request(self, prefill_pp_rank: int):
+        req = dict(self.test_req)
+        req["local_block_ids"] = [[2]]
+        req["remote_block_ids"] = [[5]]
+        req["group_pulls"] = [
+            GroupPull(
+                group_id=0,
+                remote_tp_offset=0,
+                num_group_pulls=1,
+                prefill_pp_rank=prefill_pp_rank,
+                is_group_transfer_end=True,
+            )
+        ]
+        return req
+
+    @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
+    def test_transfer_mtp_draft_cache_skips_non_last_prefill_pp_rank(self, mock_get_meta):
+        self._configure_mtp_draft_transfer()
+        req = self._make_mtp_draft_transfer_request(prefill_pp_rank=0)
+
+        with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config") as mock_config:
+            mock_config.return_value.enable_kv_nz = False
+            self.thread._transfer_kv_cache_all_groups(req)
+
+        self.engine.batch_transfer_sync_read.assert_not_called()
+        mock_get_meta.assert_not_called()
+
+    @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
+    def test_transfer_mtp_draft_cache_uses_remote_layer_index_by_name(self, mock_get_meta):
+        self._configure_mtp_draft_transfer()
+        req = self._make_mtp_draft_transfer_request(prefill_pp_rank=1)
+
+        with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config") as mock_config:
+            mock_config.return_value.enable_kv_nz = False
+            self.thread._transfer_kv_cache_all_groups(req)
+
+        self.engine.batch_transfer_sync_read.assert_called_once()
+        call_args, _ = self.engine.batch_transfer_sync_read.call_args
+        self.assertEqual(call_args[0], "localhost:7777")
+        self.assertEqual(call_args[1], [0x320000 + 2 * 4096])
+        self.assertEqual(call_args[2], [0x400000 + 5 * 8192])
+        self.assertEqual(call_args[3], [1024])
+        self.assertNotEqual(call_args[2], [0xBAD000 + 5 * 8192])
         mock_get_meta.assert_not_called()
 
     def test_append_mamba_transfer_meta_uses_block_stride_for_block_offsets(self):
@@ -1153,6 +1244,41 @@ class MockKVCacheConfig:
     def __init__(self, kv_cache_groups=None, num_blocks=10):
         self.kv_cache_groups = kv_cache_groups or [MockKVCacheGroup()]
         self.num_blocks = num_blocks
+
+
+class TestMooncakeConnectorWorkerMetadata(unittest.TestCase):
+    def test_build_kv_group2layeridx_assigns_unique_indices_across_hybrid_groups(self):
+        worker = object.__new__(MooncakeConnectorWorker)
+        worker.vllm_config = MockVllmConfig()
+        worker.total_layers = 4
+        worker.kv_cache_config = MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(["model.layers.0.self_attn.attn"]),
+                MockKVCacheGroup(["model.layers.0.self_attn.compressor.state_cache"]),
+                MockKVCacheGroup(["model.layers.0.self_attn.swa_cache"]),
+            ]
+        )
+
+        group2layeridx = worker._build_kv_group2layeridx()
+
+        self.assertEqual(group2layeridx[0][1], [0])
+        self.assertEqual(group2layeridx[1][1], [4])
+        self.assertEqual(group2layeridx[2][1], [5])
+
+    def test_get_group_kv_caches_filters_by_group_layer_names(self):
+        thread = object.__new__(KVCacheRecvingThread)
+        thread.kv_group2layeridx = {
+            0: ({"layer_names": ["layer.attn", "layer.compressor"]}, [0, 4]),
+            1: ({"layer_names": ["layer.swa"]}, [5]),
+        }
+        thread.kv_caches = {
+            "layer.attn": "attn-cache",
+            "layer.compressor": "compressor-cache",
+            "layer.swa": "swa-cache",
+        }
+
+        self.assertEqual(thread._get_group_kv_caches(0, [4]), {"layer.compressor": "compressor-cache"})
+        self.assertEqual(thread._get_group_kv_caches(1), {"layer.swa": "swa-cache"})
 
 
 class TestKVCacheTaskTracker(unittest.TestCase):
@@ -1800,6 +1926,7 @@ class TestUtils(unittest.TestCase):
         mock_socket.recv.side_effect = zmq.ZMQError("Receive timeout")  # type: ignore
         with self.assertRaises(RuntimeError):
             ensure_zmq_recv(mock_socket, "tcp://localhost:1234", max_retries=2)
+        self.assertEqual(mock_socket.recv.call_count, 2)
 
 
 class MockMooncakeAgentMetadata:
@@ -2389,7 +2516,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             0: (
                 {
                     "kv_cache_spec_type": "UniformTypeKVCacheSpecs",
-                    "kv_cache_spec": {"layer_0": {"compress_ratio": 4}},
+                    "kv_cache_spec": {"model.layers.0.self_attn": {"compress_ratio": 4}},
                 },
                 [0],
             )

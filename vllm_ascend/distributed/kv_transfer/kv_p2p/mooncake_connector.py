@@ -764,19 +764,52 @@ class KVCacheRecvingThread(threading.Thread):
         length_list: list[int] = []
         attention_group_reformat_block_ids: list[tuple[tuple[int, list[list[int]], int, list[int]], bool]] = []
 
-        def pp_layer_indices(layer_indices: list[int], prefill_pp_rank: int) -> list[int]:
+        def layer_partition_index(layer_name: str, layer_idx: int) -> int:
+            if "mtp" in layer_name:
+                return layer_idx
+            num_attn_module = 2 if self.vllm_config.model_config.hf_text_config.model_type == "longcat_flash" else 1
+            from vllm.v1.worker.utils import extract_layer_index
+
+            try:
+                return extract_layer_index(layer_name, num_attn_module)
+            except (AssertionError, IndexError) as e:
+                raise RuntimeError(
+                    f"Failed to extract PP layer index from layer_name={layer_name}, layer_idx={layer_idx}."
+                ) from e
+
+        def pp_layer_pairs(group_idx: int, prefill_pp_rank: int) -> list[tuple[int, int]]:
+            local_group_spec, local_layer_indices = self.kv_group2layeridx[group_idx]
+            remote_group2layeridx = self.remote_kv_group2layeridx[remote_engine_id][remote_handshake_port]
+            if group_idx not in remote_group2layeridx:
+                raise RuntimeError(
+                    f"Missing remote kv group metadata for group_idx={group_idx}, "
+                    f"remote_engine_id={remote_engine_id}, remote_handshake_port={remote_handshake_port}."
+                )
+            remote_group_spec, remote_layer_indices = remote_group2layeridx[group_idx]
+            remote_layer_by_name = dict(zip(remote_group_spec["layer_names"], remote_layer_indices))
+
             first_layer_index, end_layer_index = self.pp_layer_indices[prefill_pp_rank]
             if self.vllm_config.speculative_config is not None and prefill_pp_rank == self._prefill_pp_size - 1:
                 end_layer_index += self.num_draft_layers
-            return [layer_idx for layer_idx in layer_indices if first_layer_index <= layer_idx < end_layer_index]
+
+            layer_pairs: list[tuple[int, int]] = []
+            for layer_name, local_layer_idx in zip(local_group_spec["layer_names"], local_layer_indices):
+                partition_idx = layer_partition_index(layer_name, local_layer_idx)
+                if not (first_layer_index <= partition_idx < end_layer_index):
+                    continue
+                remote_layer_idx = remote_layer_by_name.get(layer_name)
+                if remote_layer_idx is not None:
+                    layer_pairs.append((local_layer_idx, remote_layer_idx))
+            return layer_pairs
 
         for group_pull in group_pulls:
             group_idx = group_pull.group_id
-            group_spec, layer_indices = self.kv_group2layeridx[group_idx]
+            group_spec, _ = self.kv_group2layeridx[group_idx]
             kv_cache_group_id = group_spec.get("kv_cache_group_id", group_idx)
-            layer_indices = pp_layer_indices(layer_indices, group_pull.prefill_pp_rank)
-            if not layer_indices:
+            layer_pairs = pp_layer_pairs(group_idx, group_pull.prefill_pp_rank)
+            if not layer_pairs:
                 continue
+            local_layer_indices = [local_layer_idx for local_layer_idx, _ in layer_pairs]
             tp_num_need_pulls = group_pull.num_group_pulls
             inner_offset = group_pull.remote_tp_offset
             is_mamba_group = group_spec["kv_cache_spec_type"] == "MambaSpec"
@@ -800,7 +833,7 @@ class KVCacheRecvingThread(threading.Thread):
                     grouped_local_block_ids = [[block_id] for block_id in kernel_local_block_ids]
                 attention_group_reformat_block_ids.append(
                     (
-                        (group_idx, grouped_local_block_ids, tp_num_need_pulls, layer_indices),
+                        (group_idx, grouped_local_block_ids, tp_num_need_pulls, local_layer_indices),
                         is_group_transfer_end,
                     )
                 )
@@ -812,18 +845,18 @@ class KVCacheRecvingThread(threading.Thread):
                 grouped_local_block_ids = [[local_group_block_ids[0]]]
 
             if is_mamba_group:
-                for layer_idx in layer_indices:
+                for local_layer_idx, remote_layer_idx in layer_pairs:
                     start_meta_idx = len(src_list)
                     self._append_mamba_transfer_meta(
                         src_list,
                         dst_list,
                         length_list,
                         group_spec=group_spec,
-                        src_layer_base_addr=local_kv_caches_base_addrs[layer_idx],
-                        dst_layer_base_addr=remote_kv_caches_base_addrs[layer_idx],
-                        block_len=self.block_len_per_addr[layer_idx],
-                        block_stride=self.block_stride_per_addr[layer_idx],
-                        remote_block_stride=remote_block_stride_per_addr[layer_idx],
+                        src_layer_base_addr=local_kv_caches_base_addrs[local_layer_idx],
+                        dst_layer_base_addr=remote_kv_caches_base_addrs[remote_layer_idx],
+                        block_len=self.block_len_per_addr[local_layer_idx],
+                        block_stride=self.block_stride_per_addr[local_layer_idx],
+                        remote_block_stride=remote_block_stride_per_addr[remote_layer_idx],
                         remote_block_id=grouped_remote_block_ids[0][0],
                         local_block_id=grouped_local_block_ids[0][0],
                         tp_num_need_pulls=tp_num_need_pulls,
@@ -834,12 +867,13 @@ class KVCacheRecvingThread(threading.Thread):
                             src_list[start_meta_idx:], dst_list[start_meta_idx:], length_list[start_meta_idx:]
                         ):
                             logger.debug(
-                                "Mooncake mamba transfer meta: request_id=%s group_idx=%s layer_idx=%s "
-                                "local_block_id=%s remote_block_id=%s tp_num_need_pulls=%s "
-                                "remote_tp_offset=%s  session_id=%s",
+                                "Mooncake mamba transfer meta: request_id=%s group_idx=%s "
+                                "local_layer_idx=%s remote_layer_idx=%s local_block_id=%s remote_block_id=%s "
+                                "tp_num_need_pulls=%s remote_tp_offset=%s  session_id=%s",
                                 remote_request_id,
                                 group_idx,
-                                layer_idx,
+                                local_layer_idx,
+                                remote_layer_idx,
                                 grouped_local_block_ids[0][0],
                                 grouped_remote_block_ids[0][0],
                                 tp_num_need_pulls,
@@ -848,13 +882,13 @@ class KVCacheRecvingThread(threading.Thread):
                             )
                 continue
 
-            for layer_idx in layer_indices:
-                for cache_idx in range(len(local_kv_caches_base_addrs[layer_idx])):
-                    src_layer_base_addr = local_kv_caches_base_addrs[layer_idx][cache_idx]
-                    dst_layer_base_addr = remote_kv_caches_base_addrs[layer_idx][cache_idx]
-                    block_len = self.block_len_per_addr[layer_idx][cache_idx]
-                    block_stride = self.block_stride_per_addr[layer_idx][cache_idx]
-                    remote_block_stride = remote_block_stride_per_addr[layer_idx][cache_idx]
+            for local_layer_idx, remote_layer_idx in layer_pairs:
+                for cache_idx in range(len(local_kv_caches_base_addrs[local_layer_idx])):
+                    src_layer_base_addr = local_kv_caches_base_addrs[local_layer_idx][cache_idx]
+                    dst_layer_base_addr = remote_kv_caches_base_addrs[remote_layer_idx][cache_idx]
+                    block_len = self.block_len_per_addr[local_layer_idx][cache_idx]
+                    block_stride = self.block_stride_per_addr[local_layer_idx][cache_idx]
+                    remote_block_stride = remote_block_stride_per_addr[remote_layer_idx][cache_idx]
                     inner_block_len = block_len // tp_num_need_pulls
                     transfer_remote_block_ids, transfer_local_block_ids = split_if_not_byte_contiguous(
                         grouped_remote_block_ids,
@@ -871,11 +905,13 @@ class KVCacheRecvingThread(threading.Thread):
                         dst_list.append(dst)
                         length_list.append(length)
                     logger.debug(
-                        "Mooncake kv transfer meta: request_id=%s group_idx=%s layer_idx=%s local_block_ids=%s "
-                        "remote_block_ids=%s tp_num_need_pulls=%s remote_tp_offset=%s session_id=%s",
+                        "Mooncake kv transfer meta: request_id=%s group_idx=%s "
+                        "local_layer_idx=%s remote_layer_idx=%s local_block_ids=%s remote_block_ids=%s "
+                        "tp_num_need_pulls=%s remote_tp_offset=%s session_id=%s",
                         remote_request_id,
                         group_idx,
-                        layer_idx,
+                        local_layer_idx,
+                        remote_layer_idx,
                         grouped_local_block_ids,
                         grouped_remote_block_ids,
                         tp_num_need_pulls,
@@ -1096,19 +1132,19 @@ class KVCacheRecvingThread(threading.Thread):
         length_list.append(remote_ssm_len)
 
     def _get_group_kv_caches(self, group_idx: int, layer_indices: list[int] | None = None) -> dict[str, Any]:
+        group_spec, group_layer_indices = self.kv_group2layeridx[group_idx]
         if layer_indices is None:
-            _, layer_indices = self.kv_group2layeridx[group_idx]
+            layer_indices = group_layer_indices
         layer_index_set = set(layer_indices)
-        num_attn_module = 2 if self.vllm_config.model_config.hf_text_config.model_type == "longcat_flash" else 1
-        from vllm.v1.worker.utils import extract_layer_index
-
-        def layer_in_group(layer_name: str) -> bool:
-            if "mtp" in layer_name:
-                return any(layer_idx >= self.num_layers for layer_idx in layer_index_set)
-            return extract_layer_index(layer_name, num_attn_module) in layer_index_set
-
+        selected_layer_names = {
+            layer_name
+            for layer_name, layer_idx in zip(group_spec["layer_names"], group_layer_indices)
+            if layer_idx in layer_index_set
+        }
         return {
-            layer_name: layer_cache for layer_name, layer_cache in self.kv_caches.items() if layer_in_group(layer_name)
+            layer_name: layer_cache
+            for layer_name, layer_cache in self.kv_caches.items()
+            if layer_name in selected_layer_names
         }
 
     @staticmethod
@@ -1284,10 +1320,15 @@ class KVCacheRecvingThread(threading.Thread):
                 f"Conflict engine id {engine_id} with local engine id {self.local_engine_id}."
             )
             if agent_meta.kv_group2layeridx != self.kv_group2layeridx:
-                logger.warning(
-                    "Remote kv_group2layeridx is inconsistent with local. remote=%s, local=%s. ",
-                    agent_meta.kv_group2layeridx,
-                    self.kv_group2layeridx,
+                remote_layers = sum(len(layer_indices) for _, layer_indices in agent_meta.kv_group2layeridx.values())
+                local_layers = sum(len(layer_indices) for _, layer_indices in self.kv_group2layeridx.values())
+                logger.debug(
+                    "Remote kv_group2layeridx differs from local: remote_groups=%d local_groups=%d "
+                    "remote_layers=%d local_layers=%d.",
+                    len(agent_meta.kv_group2layeridx),
+                    len(self.kv_group2layeridx),
+                    remote_layers,
+                    local_layers,
                 )
             with self.remote_metadata_lock:
                 self.remote_kv_group2layeridx[engine_id][remote_handshake_port] = agent_meta.kv_group2layeridx
@@ -2075,6 +2116,8 @@ class MooncakeConnectorWorker:
         num_attn_module = 2 if self.vllm_config.model_config.hf_text_config.model_type == "longcat_flash" else 1
         next_mtp_layer_idx = self.total_layers
         transfer_group_id = 0
+        layer_name_to_idx: dict[str, int] = {}
+        assigned_indices: set[int] = set()
         for kv_cache_group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
             layer_entries: list[tuple[str, int]] = []
             # For eagle3 method there is no "mtp" in layer names, and upstream model initiation assigns the layer id
@@ -2082,16 +2125,18 @@ class MooncakeConnectorWorker:
             # Here we determine whether the current layer is an eagle layer based on whether the layer id has been
             # assigned to previous layers. If the layer id has been assigned, we treat the current layer as
             # an eagle layer and assign a new layer id starting from total_layers.
-            assigned_indices: set[int] = set()
             for layer_name in group_spec.layer_names:
-                if "mtp" in layer_name:
+                if layer_name in layer_name_to_idx:
+                    layer_idx = layer_name_to_idx[layer_name]
+                elif "mtp" in layer_name:
                     layer_idx = next_mtp_layer_idx
                     next_mtp_layer_idx += 1
                 else:
                     layer_idx = extract_layer_index(layer_name, num_attn_module)
-                    if assigned_indices and layer_idx < min(assigned_indices) or layer_idx in assigned_indices:
+                    if layer_idx in assigned_indices:
                         layer_idx = next_mtp_layer_idx
                         next_mtp_layer_idx += 1
+                layer_name_to_idx[layer_name] = layer_idx
                 assigned_indices.add(layer_idx)
                 layer_entries.append((layer_name, layer_idx))
 
