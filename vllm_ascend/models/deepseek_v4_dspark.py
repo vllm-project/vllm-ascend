@@ -281,12 +281,6 @@ class DeepseekV4DSparkModel(nn.Module):
             num_redundant_experts=0,
         )
 
-    def finalize_mega_moe_weights(self) -> None:
-        for layer in self.layers.values():
-            finalize = getattr(layer.mlp, "finalize_mega_moe_weights", None)
-            if finalize is not None:
-                finalize()
-
 
 @support_torch_compile
 class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
@@ -466,7 +460,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
 
-        self.model.finalize_mega_moe_weights()
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
 

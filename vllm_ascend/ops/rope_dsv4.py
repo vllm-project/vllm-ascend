@@ -188,8 +188,11 @@ class ComplexExpRotaryEmbedding(nn.Module):
 
             _ROPE_STATE.full_rope_cache[config_key] = (cos.unsqueeze(1).unsqueeze(1), sin.unsqueeze(1).unsqueeze(1))
 
-        # dspark is considered here, take care
-        use_eagle = vllm_config is not None and vllm_config.speculative_config is not None
+        use_eagle = (
+            vllm_config is not None
+            and vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.use_eagle()
+        )
         num_speculative_tokens = vllm_config.speculative_config.num_speculative_tokens if use_eagle else None
 
         if config_key not in _ROPE_STATE.runtime_buffer:
