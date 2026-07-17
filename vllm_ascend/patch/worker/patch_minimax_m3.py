@@ -44,9 +44,6 @@ def _install_fused_allreduce_norm_fallback() -> None:
 
 _install_fused_allreduce_norm_fallback()
 
-from vllm.models.minimax_m3.common.vision_tower import (  # noqa: E402
-    MiniMaxVLAttention,
-)
 from vllm.models.minimax_m3.nvidia import model as minimax_m3_model  # noqa: E402
 
 from vllm_ascend.attention.msa_m3 import (  # noqa: E402
@@ -132,21 +129,6 @@ def _maybe_add_minimax_m3_hidden_state(
     return _ORIGINAL_MINIMAX_M3_MAYBE_ADD_HIDDEN_STATE(
         self, aux_hidden_states, layer_idx, hidden_states, residual
     )
-
-
-def _apply_minimax_m3_vision_rotary_emb(
-    self: Any,
-    qk_reshaped: torch.Tensor,
-    rotary_cos: torch.Tensor,
-    rotary_sin: torch.Tensor,
-    seq_len: int,
-    rotary_segment_lengths: list[int] | None,
-) -> torch.Tensor:
-    """Apply MiniMax vision's partial RoPE with the Ascend rotary op."""
-    del seq_len, rotary_segment_lengths
-    rotary_dim = rotary_cos.shape[-1] * 2
-    qk_rot = self.apply_rotary_emb(qk_reshaped[..., :rotary_dim], rotary_cos, rotary_sin)
-    return torch.cat((qk_rot, qk_reshaped[..., rotary_dim:]), dim=-1)
 
 
 def _load_minimax_m3_weights(
@@ -279,4 +261,3 @@ minimax_m3_model.MiniMaxM3Model._maybe_add_hidden_state = (
 )
 minimax_m3_model.MiniMaxM3SparseAttention = AscendMiniMaxM3SparseAttention
 minimax_m3_model.MiniMaxM3Model.load_weights = _load_minimax_m3_weights
-MiniMaxVLAttention._apply_rotary_emb = _apply_minimax_m3_vision_rotary_emb
