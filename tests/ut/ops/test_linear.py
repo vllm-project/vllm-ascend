@@ -214,7 +214,6 @@ class TestRowParallelOpDispatch(unittest.TestCase):
             patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
             patch("vllm_ascend.ops.linear_op.enable_sp", return_value=False),
             patch("vllm_ascend.ops.linear_op.is_moe_layer", return_value=False),
-            patch("vllm_ascend.ops.linear_op.matmul_allreduce_enable", return_value=False),
             patch("vllm_ascend.ops.linear_op.flashcomm2_enable", return_value=False),
         ]
         for p in self._patches:

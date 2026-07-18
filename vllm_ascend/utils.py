@@ -856,10 +856,6 @@ def mlp_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 0
 
 
-def matmul_allreduce_enable() -> bool:
-    return get_ascend_config().enable_matmul_allreduce
-
-
 def enable_sp_by_pass():
     return get_ascend_config().enable_sp_by_pass
 

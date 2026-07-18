@@ -409,7 +409,6 @@ class TestEagleProposerLoadModel(TestBase):
         mock_ascend_config.enable_flashcomm2_parallel_size = 0
         mock_ascend_config.enable_context_parallel = False
         mock_ascend_config.enable_flashcomm1 = False
-        mock_ascend_config.enable_matmul_allreduce = False
         mock_ascend_config.weight_nz_mode = 1
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_fused_mc2 = 0
@@ -572,7 +571,6 @@ class TestEagleProposerDummyRun(TestBase):
         mock_ascend_config.enable_flashcomm2_parallel_size = 0
         mock_ascend_config.enable_context_parallel = False
         mock_ascend_config.enable_flashcomm1 = False
-        mock_ascend_config.enable_matmul_allreduce = False
         mock_ascend_config.weight_nz_mode = 1
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_fused_mc2 = 0
@@ -1007,7 +1005,6 @@ class TestEagleProposerPropose:
         mock_ascend_config.enable_flashcomm2_parallel_size = 0
         mock_ascend_config.enable_context_parallel = False
         mock_ascend_config.enable_flashcomm1 = False
-        mock_ascend_config.enable_matmul_allreduce = False
         mock_ascend_config.weight_nz_mode = 1
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_fused_mc2 = 0
