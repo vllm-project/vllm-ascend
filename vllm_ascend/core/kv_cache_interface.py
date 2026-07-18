@@ -26,66 +26,71 @@ def _get_c8_k_scale_cache_dtype() -> torch.dtype:
 
 @dataclass(frozen=True, kw_only=True)
 class AscendMLAAttentionSpec(MLAAttentionSpec):
-    """MLAAttentionSpec extended to support DSA models, with optional Sparse C8 support.
+    """Ascend MLA cache layout for DSA models.
 
-    When Sparse C8 is enabled, the KV cache tuple changes from
-    (kv_cache[0]: bfloat16, kv_cache[1]: bfloat16, kv_cache[2]: bfloat16)
-    to
-    (kv_cache[0]: bfloat16, kv_cache[1]: bfloat16, kv_cache[2]: int8, kv_cache[3]: float16).
+    SFA C8 independently packs the MLA latent, RoPE key, and quantization
+    metadata into the first tensor. LI C8 independently quantizes the
+    LightningIndexer key cache and adds a scale tensor. With an indexer, the
+    four supported tuple layouts are therefore:
 
-    The semantic meaning of each native KV cache entry is as follows:
-    1. kv_cache[0] stores kv_lora.
-    2. kv_cache[1] stores k_rope.
-    3. kv_cache[2] stores the key tensor from the indexer module.
-    4. kv_cache[3] stores the key scale tensor from the indexer module,
-       and exists only when Sparse C8 is enabled.
-
-    With SFA KV-quant sparse attention, kv_lora, k_rope, and per-tile
-    quantization scales are packed into kv_cache[0]. The resulting cache is
-    (packed_kv, indexer_k) or (packed_kv, indexer_k, indexer_scale) when
-    Sparse C8 indexer cache is enabled.
-
-    The main changes are as follows:
-    1. The key tensor from the indexer module stored in kv_cache[2] is
-       converted from bf16 to int8 to reduce memory usage. It is then
-       processed with int8 precision in Lightning_indexer computation
-       to improve computational efficiency.
-    2. The quantization scale of the key tensor in the indexer module
-       must also be stored for the Lightning_indexer_quant operator,
-       and is therefore saved in kv_cache[3].
+    - neither: ``(kv_lora, k_rope, indexer_k)``
+    - SFA only: ``(packed_kv, indexer_k)``
+    - LI only: ``(kv_lora, k_rope, indexer_k, indexer_scale)``
+    - both: ``(packed_kv, indexer_k, indexer_scale)``
     """
 
     scale_dim: int = 0
     scale_dtype: torch.dtype = torch.int8
     sparse_head_dim: tuple[int, ...] | None = None
-    cache_sparse_c8: bool = False
+    cache_sparse_sfa_c8: bool = False
+    cache_sparse_li_c8: bool = False
     c8_k_cache_dtype: torch.dtype = field(default_factory=_get_c8_k_cache_dtype)
     c8_k_scale_cache_dtype: torch.dtype = field(default_factory=_get_c8_k_scale_cache_dtype)
     sfa_dcp_replicated_indexer_size: int = 1
 
     @property
     def page_size_bytes(self) -> int:
-        if self.cache_sparse_c8:
+        if self.cache_sparse_sfa_c8:
             assert self.sparse_head_dim is not None
             assert len(self.sparse_head_dim) == 3
-            num_heads_per_page = self.block_size * self.num_kv_heads
 
-            ckv_head_dim, qk_rope_head_dim, index_head_dim = self.sparse_head_dim
+            packed_kv_head_dim, qk_rope_head_dim, index_head_dim = self.sparse_head_dim
             assert qk_rope_head_dim == 0
+            num_heads_per_page = self.block_size * self.num_kv_heads
+            packed_kv_bytes = num_heads_per_page * packed_kv_head_dim * get_dtype_size(self.c8_k_cache_dtype)
+            if index_head_dim == 0:
+                return packed_kv_bytes
 
-            ckv_bytes = num_heads_per_page * ckv_head_dim * get_dtype_size(self.c8_k_cache_dtype)
-            qli_bytes = (
+            index_dtype = self.c8_k_cache_dtype if self.cache_sparse_li_c8 else self.dtype
+            indexer_bytes = (
+                num_heads_per_page * index_head_dim * self.sfa_dcp_replicated_indexer_size * get_dtype_size(index_dtype)
+            )
+            if not self.cache_sparse_li_c8:
+                return packed_kv_bytes + indexer_bytes
+
+            indexer_scale_bytes = (
+                num_heads_per_page * self.sfa_dcp_replicated_indexer_size * get_dtype_size(self.c8_k_scale_cache_dtype)
+            )
+            return packed_kv_bytes + indexer_bytes + indexer_scale_bytes
+
+        if self.cache_sparse_li_c8:
+            assert self.sparse_head_dim is not None
+            assert len(self.sparse_head_dim) == 3
+
+            k_head_dim, v_head_dim, index_head_dim = self.sparse_head_dim
+            assert index_head_dim > 0
+            num_heads_per_page = self.block_size * self.num_kv_heads
+            kv_bytes = num_heads_per_page * (k_head_dim + v_head_dim) * get_dtype_size(self.dtype)
+            indexer_bytes = (
                 num_heads_per_page
                 * index_head_dim
                 * self.sfa_dcp_replicated_indexer_size
                 * get_dtype_size(self.c8_k_cache_dtype)
             )
-            qli_scale_bytes = (
+            indexer_scale_bytes = (
                 num_heads_per_page * self.sfa_dcp_replicated_indexer_size * get_dtype_size(self.c8_k_scale_cache_dtype)
-                if index_head_dim > 0
-                else 0
             )
-            return ckv_bytes + qli_bytes + qli_scale_bytes
+            return kv_bytes + indexer_bytes + indexer_scale_bytes
 
         if (
             self.sparse_head_dim is not None
@@ -124,43 +129,50 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
         assert self.sparse_head_dim is not None
 
-        if self.cache_sparse_c8:
-            ckv_head_dim, qk_rope_head_dim, index_k_head_dim = self.sparse_head_dim
+        if self.cache_sparse_sfa_c8:
+            packed_kv_head_dim, qk_rope_head_dim, index_head_dim = self.sparse_head_dim
             assert qk_rope_head_dim == 0
 
-            ckv_virtual = ckv_head_dim * get_dtype_size(self.c8_k_cache_dtype)
-            if index_k_head_dim == 0:
-                return (
-                    1.0,  # kv_cache[0]: ckv / packed_kv
-                    None,  # kv_cache[1] does not exist without indexer cache
-                    None,  # kv_cache[2] does not exist without indexer cache
-                    None,  # kv_cache[3] does not exist for Sparse C8
-                )
+            packed_kv_bytes = packed_kv_head_dim * get_dtype_size(self.c8_k_cache_dtype)
+            if index_head_dim == 0:
+                return (1.0, None, None, None)
 
-            qli_virtual = (
-                index_k_head_dim * self.sfa_dcp_replicated_indexer_size * get_dtype_size(self.c8_k_cache_dtype)
+            index_dtype = self.c8_k_cache_dtype if self.cache_sparse_li_c8 else self.dtype
+            indexer_bytes = index_head_dim * self.sfa_dcp_replicated_indexer_size * get_dtype_size(index_dtype)
+            indexer_scale_bytes = (
+                self.sfa_dcp_replicated_indexer_size * get_dtype_size(self.c8_k_scale_cache_dtype)
+                if self.cache_sparse_li_c8
+                else 0
             )
-            scale_virtual = self.sfa_dcp_replicated_indexer_size * get_dtype_size(self.c8_k_scale_cache_dtype)
-            total_virtual_head_dim = ckv_virtual + qli_virtual + scale_virtual
-
+            total_bytes = packed_kv_bytes + indexer_bytes + indexer_scale_bytes
             return (
-                total_virtual_head_dim / ckv_virtual,  # kv_cache[0]: ckv / packed_kv
-                total_virtual_head_dim / qli_virtual,  # kv_cache[1]: qli
-                total_virtual_head_dim / scale_virtual,  # kv_cache[2]: qli_scale
-                None,  # kv_cache[3] does not exist for Sparse C8
+                total_bytes / packed_kv_bytes,
+                total_bytes / indexer_bytes,
+                total_bytes / indexer_scale_bytes if indexer_scale_bytes > 0 else None,
+                None,
             )
 
         k_head_dim, v_head_dim, index_head_dim = self.sparse_head_dim
         replicated_index_head_dim = index_head_dim * self.sfa_dcp_replicated_indexer_size
-        total_virtual_head_dim = k_head_dim + v_head_dim + replicated_index_head_dim
+        if self.cache_sparse_li_c8:
+            indexer_bytes = replicated_index_head_dim * get_dtype_size(self.c8_k_cache_dtype)
+            indexer_scale_bytes = self.sfa_dcp_replicated_indexer_size * get_dtype_size(self.c8_k_scale_cache_dtype)
+            k_bytes = k_head_dim * get_dtype_size(self.dtype)
+            v_bytes = v_head_dim * get_dtype_size(self.dtype)
+            total_bytes = k_bytes + v_bytes + indexer_bytes + indexer_scale_bytes
+            return (
+                total_bytes / k_bytes,
+                total_bytes / v_bytes,
+                total_bytes / indexer_bytes,
+                total_bytes / indexer_scale_bytes,
+            )
 
+        total_head_dim = k_head_dim + v_head_dim + replicated_index_head_dim
         return (
-            total_virtual_head_dim / k_head_dim,  # kv_cache[0]
-            total_virtual_head_dim / v_head_dim,  # kv_cache[1]
-            (
-                total_virtual_head_dim / replicated_index_head_dim if replicated_index_head_dim > 0 else None
-            ),  # kv_cache[2]
-            None,  # kv_cache[3] does not exist
+            total_head_dim / k_head_dim,
+            total_head_dim / v_head_dim,
+            total_head_dim / replicated_index_head_dim if replicated_index_head_dim > 0 else None,
+            None,
         )
 
     @classmethod
@@ -187,9 +199,13 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         assert len(cache_dtype_str_set) == 1, (
             "All attention layers in the same KV cache group must use the same quantization method."
         )
-        cache_sparse_c8_set = set(spec.cache_sparse_c8 for spec in specs)
-        assert len(cache_sparse_c8_set) == 1, (
-            "All attention layers in the same KV cache group must use the same sparse C8 setting."
+        cache_sparse_sfa_c8_set = set(spec.cache_sparse_sfa_c8 for spec in specs)
+        assert len(cache_sparse_sfa_c8_set) == 1, (
+            "All attention layers in the same KV cache group must use the same sparse SFA C8 setting."
+        )
+        cache_sparse_li_c8_set = set(spec.cache_sparse_li_c8 for spec in specs)
+        assert len(cache_sparse_li_c8_set) == 1, (
+            "All attention layers in the same KV cache group must use the same sparse LI C8 setting."
         )
         sfa_dcp_replicated_indexer_size_set = set(spec.sfa_dcp_replicated_indexer_size for spec in specs)
         assert len(sfa_dcp_replicated_indexer_size_set) == 1, (
@@ -205,7 +221,8 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             sparse_head_dim=specs[0].sparse_head_dim,
             dtype=specs[0].dtype,
             cache_dtype_str=cache_dtype_str_set.pop(),
-            cache_sparse_c8=specs[0].cache_sparse_c8,
+            cache_sparse_sfa_c8=specs[0].cache_sparse_sfa_c8,
+            cache_sparse_li_c8=specs[0].cache_sparse_li_c8,
             sfa_dcp_replicated_indexer_size=sfa_dcp_replicated_indexer_size_set.pop(),
         )
 

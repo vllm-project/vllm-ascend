@@ -356,6 +356,18 @@ class NPUPlatform(Platform):
                 f"prefill_context_parallel_size={parallel_config.prefill_context_parallel_size}. "
                 "Please set either --data-parallel-size 1 or --prefill-context-parallel-size 1."
             )
+        additional_config = vllm_config.additional_config or {}
+        enable_any_sparse_c8 = additional_config.get("enable_sparse_sfa_c8", False) or additional_config.get(
+            "enable_sparse_li_c8", False
+        )
+        if (
+            parallel_config.prefill_context_parallel_size > 1
+            and enable_any_sparse_c8
+            and model_uses_sfa_sparse(vllm_config.model_config)
+        ):
+            raise NotImplementedError(
+                "Sparse SFA and LightningIndexer C8 caches are not supported with SFA prefill context parallelism."
+            )
 
     @classmethod
     def _validate_draft_decode_context_parallel_config(
@@ -715,6 +727,7 @@ class NPUPlatform(Platform):
 
         cp_size = parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size
         use_sparse = model_uses_sfa_sparse(model_config)
+        enable_any_sparse_c8 = ascend_config.enable_sparse_sfa_c8 or ascend_config.enable_sparse_li_c8
         sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(vllm_config)
         if sfa_dcp_replicated_indexer:
             if parallel_config.decode_context_parallel_size != parallel_config.tensor_parallel_size:
@@ -722,11 +735,10 @@ class NPUPlatform(Platform):
                     f"DCP for SFA is only supported when dcp_size({parallel_config.decode_context_parallel_size}) "
                     f"== tp_size({parallel_config.tensor_parallel_size})."
                 )
-            enable_sparse_c8 = vllm_config.additional_config.get("enable_sparse_c8", False) and use_sparse
-            if enable_sparse_c8 and get_ascend_device_type() == AscendDeviceType.A5:
+            if enable_any_sparse_c8 and get_ascend_device_type() == AscendDeviceType.A5:
                 raise NotImplementedError(
-                    "SFA DCP with sparse C8 LightningIndexer cache is not supported on A5 yet. "
-                    "A5 uses the fused CKV quant sparse attention path, which needs a separate DCP LSE merge."
+                    "SFA DCP with sparse SFA or LightningIndexer C8 cache is not supported on A5 yet. "
+                    "The A5 C8 paths require a separate DCP LSE merge."
                 )
 
         if (
