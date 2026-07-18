@@ -217,7 +217,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
             if tensor.numel() == 0:
                 # Skip empty tensors
                 continue
-            num = torch.distributed.send(tensor, dst=process_group.ranks[dst], group=process_group)
+            num = torch.distributed.send(tensor, dst=process_group.ranks[dst], group=process_group.device_group)
             work_list.append(num)
         return work_list
 
@@ -258,7 +258,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
                     # Skip empty tensors
                     tensor_dict[key] = tensor
                     continue
-                work = torch.distributed.recv(tensor, src=process_group.ranks[src], group=process_group)
+                work = torch.distributed.recv(tensor, src=process_group.ranks[src], group=process_group.device_group)
                 work_list.append(work)
                 tensor_dict[key] = tensor
             else:
