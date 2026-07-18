@@ -147,7 +147,6 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
         -it $IMAGE bash
     ```
 
-
 !!! tip
     The mounts above are the minimum required for NPU driver access. Add additional `-v` mounts (e.g., model weight paths, datasets) as needed for your environment.
 
@@ -247,6 +246,7 @@ vllm serve your_model_path \
     --port 8000 \
     --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "draft_tensor_parallel_size": 1, "num_speculative_tokens": 3}'
 ```
+
 === "Atlas inference products"
 
     ```shell
