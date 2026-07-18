@@ -522,6 +522,15 @@ class AscendModelSlimConfig(QuantizationConfig):
         """
         if self._mapper_applied and self.hf_to_vllm_mapper is hf_to_vllm_mapper:
             return
+        vllm_config = get_current_vllm_config()
+        model_type = vllm_config.model_config.hf_config.model_type
+
+        if model_type == "qwen3_omni_moe":
+            hf_to_vllm_mapper.orig_to_new_prefix = {
+                **hf_to_vllm_mapper.orig_to_new_prefix,
+                "model.": "language_model.model.",
+                "lm_head.": "language_model.lm_head.",
+            }
 
         self.hf_to_vllm_mapper = hf_to_vllm_mapper
         self._mapper_applied = True
@@ -652,6 +661,13 @@ class AscendModelSlimConfig(QuantizationConfig):
             logger.debug("Select AscendFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
             return AscendFusedMoEMethod(scheme, layer.moe_config, tid2eid)
         elif isinstance(layer, VocabParallelEmbedding):
+            if not self._has_quant_weight(prefix,self.packed_modules_mapping):
+                logger.debug(
+                    "No ModelSlim quant entry for %s; "
+                    "select UnquantizedEmbeddingMethod",
+                    prefix,
+                )
+                return UnquantizedEmbeddingMethod()
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 logger.debug("Select UnquantizedEmbeddingMethod for %s (layer=%s)", prefix, "VocabParallelEmbedding")
                 return UnquantizedEmbeddingMethod()
