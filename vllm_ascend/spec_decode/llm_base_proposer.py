@@ -298,7 +298,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             getattr(draft_load_config, "load_format", None),
             getattr(self.speculative_config.draft_model_config, "model", None),
         )
-        with set_model_tag("eagle_head"):
+        with self.maybe_eager_context, set_model_tag("eagle_head"):
             model = get_model(
                 vllm_config=draft_vllm_config,
                 model_config=self.speculative_config.draft_model_config,
@@ -311,8 +311,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         target_attn_layer_names = set(get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys())
 
-        with self.maybe_eager_context:
-            self.model = self._get_model()
+        self.model = self._get_model()
 
         # Find draft layers (attention layers added by draft model)
         all_attn_layers = get_layers_from_vllm_config(

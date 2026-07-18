@@ -18,12 +18,14 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
-from vllm.config import CUDAGraphMode
+from vllm.config import CompilationMode, CUDAGraphMode
 
-from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
+from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer, _maybe_eager_context
 
 # CUDAGraphMode values whose ``has_full_cudagraphs()`` is True: FULL plus the
 # two composite modes that mix FULL with NONE / PIECEWISE.
@@ -38,6 +40,34 @@ NON_FULL_CUDAGRAPH_MODES = [
     CUDAGraphMode.NONE,
     CUDAGraphMode.PIECEWISE,
 ]
+
+
+def test_draft_config_is_created_before_entering_eager_context():
+    compilation_config = SimpleNamespace(mode=CompilationMode.VLLM_COMPILE)
+    vllm_config = SimpleNamespace(compilation_config=compilation_config)
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.method = "mtp"
+    proposer.speculative_config = SimpleNamespace(
+        draft_load_config=None,
+        draft_model_config=SimpleNamespace(model="draft"),
+    )
+    proposer.maybe_eager_context = _maybe_eager_context(vllm_config)
+
+    observed_modes = []
+    proposer._create_draft_vllm_config = lambda: observed_modes.append(compilation_config.mode) or vllm_config
+
+    def load_model(**kwargs):
+        observed_modes.append(compilation_config.mode)
+        return object()
+
+    with (
+        patch("vllm.compilation.backends.set_model_tag", return_value=nullcontext()),
+        patch("vllm_ascend.spec_decode.llm_base_proposer.get_model", side_effect=load_model),
+    ):
+        proposer._get_model()
+
+    assert observed_modes == [CompilationMode.VLLM_COMPILE, CompilationMode.NONE]
+    assert compilation_config.mode == CompilationMode.VLLM_COMPILE
 
 
 class TestDisablePaddedDrafterBatchWithFullGraph:
