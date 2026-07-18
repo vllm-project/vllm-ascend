@@ -102,7 +102,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "lightning_indexer"
         "sparse_flash_attention"
         "kv_quant_sparse_flash_attention"
-        "matmul_allreduce_add_rmsnorm"
         "moe_init_routing_custom"
         "moe_gating_top_k"
         "moe_gating_top_k_hash"

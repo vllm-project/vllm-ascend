@@ -242,7 +242,6 @@ class TestAscendConfig(TestBase):
         with patch.dict(
             os.environ,
             {
-                "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "1",
                 "VLLM_ASCEND_ENABLE_FUSED_MC2": "1",
                 "VLLM_ASCEND_ENABLE_MLAPO": "0",
                 "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
@@ -254,7 +253,6 @@ class TestAscendConfig(TestBase):
         ):
             ascend_config = init_ascend_config(test_vllm_config)
 
-        self.assertTrue(ascend_config.enable_matmul_allreduce)
         self.assertEqual(ascend_config.enable_fused_mc2, 1)
         self.assertFalse(ascend_config.enable_mlapo)
         self.assertTrue(ascend_config.enable_flashcomm1)
@@ -294,7 +292,6 @@ class TestAscendConfig(TestBase):
     def test_migrated_config_overrides_envs(self, mock_fix_incompatible_config, mock_info_once):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
-            "enable_matmul_allreduce": False,
             "enable_fused_mc2": 0,
             "enable_mlapo": True,
             "enable_flashcomm1": False,
@@ -306,7 +303,6 @@ class TestAscendConfig(TestBase):
         with patch.dict(
             os.environ,
             {
-                "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "1",
                 "VLLM_ASCEND_ENABLE_FUSED_MC2": "1",
                 "VLLM_ASCEND_ENABLE_MLAPO": "0",
                 "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
@@ -318,7 +314,6 @@ class TestAscendConfig(TestBase):
         ):
             ascend_config = init_ascend_config(test_vllm_config)
 
-        self.assertFalse(ascend_config.enable_matmul_allreduce)
         self.assertEqual(ascend_config.enable_fused_mc2, 0)
         self.assertTrue(ascend_config.enable_mlapo)
         self.assertFalse(ascend_config.enable_flashcomm1)
