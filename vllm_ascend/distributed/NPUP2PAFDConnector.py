@@ -174,7 +174,8 @@ class NPUP2PAFDConnector(AFDConnectorBase):
                                                        self.local_rank,
                                                        backend=self.backend,
                                                        group_name="e2a")
-
+        logger.info(f"a2e_group ranks: {self.a2e_group.ranks}")
+        logger.info(f"e2a_group ranks: {self.e2a_group.ranks}")
         logger.info("p2p connector initialized")
 
         self._initialized = True
@@ -216,7 +217,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
             if tensor.numel() == 0:
                 # Skip empty tensors
                 continue
-            num = torch.distributed.send(tensor, dst=p2p_group.ranks[dst], group=p2p_group)
+            num = torch.distributed.send(tensor, dst=process_group.ranks[dst], group=process_group)
             work_list.append(num)
         return work_list
 
@@ -257,7 +258,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
                     # Skip empty tensors
                     tensor_dict[key] = tensor
                     continue
-                work = torch.distributed.recv(tensor, src=p2p_group.ranks[src], group=p2p_group)
+                work = torch.distributed.recv(tensor, src=process_group.ranks[src], group=process_group)
                 work_list.append(work)
                 tensor_dict[key] = tensor
             else:
