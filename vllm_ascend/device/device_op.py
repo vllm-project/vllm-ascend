@@ -700,27 +700,37 @@ class BaseDeviceAdaptor:
         return_lse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         query = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
-        result = torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention(
-            query=query,
-            key=kv,
-            value=kv,
-            sparse_indices=topk_indices,
-            scale_value=sfa_impl.scale,
-            sparse_block_size=1,
-            block_table=block_table,
-            actual_seq_lengths_query=actual_seq_lengths_query,
-            actual_seq_lengths_kv=actual_seq_lengths_key,
-            layout_query="TND",
-            layout_kv="PA_BSND",
-            sparse_mode=sparse_mode,
-            attention_mode=2,
-            quant_scale_repo_mode=1,
-            tile_size=getattr(sfa_impl, "sfa_qsfa_tile_size", 128),
-            key_quant_mode=2,
-            value_quant_mode=2,
-            rope_head_dim=getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]),
-            return_softmax_lse=True,
-        )
+        common_kwargs = {
+            "query": query,
+            "key": kv,
+            "value": kv,
+            "sparse_indices": topk_indices,
+            "scale_value": sfa_impl.scale,
+            "sparse_block_size": 1,
+            "block_table": block_table,
+            "actual_seq_lengths_query": actual_seq_lengths_query,
+            "actual_seq_lengths_kv": actual_seq_lengths_key,
+            "layout_query": "TND",
+            "layout_kv": "PA_BSND",
+            "sparse_mode": sparse_mode,
+            "attention_mode": 2,
+            "quant_scale_repo_mode": 1,
+            "tile_size": getattr(sfa_impl, "sfa_qsfa_tile_size", 128),
+            "key_quant_mode": 2,
+            "value_quant_mode": 2,
+            "rope_head_dim": getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]),
+        }
+        if return_lse:
+            # The torch_npu C8 SFA binding used by current images only returns
+            # attention_out and rejects return_softmax_lse.  DCP needs the
+            # softmax max/sum tensors to build LSE, so use the vllm-ascend
+            # custom op added with LSE-capable C8 SFA only on that path.
+            result = torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention(
+                **common_kwargs,
+                return_softmax_lse=True,
+            )
+        else:
+            result = torch_npu.npu_kv_quant_sparse_flash_attention(**common_kwargs)
         if not isinstance(result, tuple):
             if return_lse:
                 raise RuntimeError("C8 sparse flash attention did not return softmax max/sum for DCP LSE merge.")
