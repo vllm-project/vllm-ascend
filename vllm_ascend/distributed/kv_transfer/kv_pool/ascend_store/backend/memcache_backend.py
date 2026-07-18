@@ -154,9 +154,9 @@ class MemcacheBackend(Backend):
         assert self.store is not None
         return self.store.batch_remove_lease(keys)
 
-    def batch_put_end(self, keys: list[str], results: list[int]) -> list[int]:
+    def batch_write_finish(self, keys: list[str], results: list[int]) -> list[int]:
         assert self.store is not None
-        return self.store.batch_put_end(keys, results)
+        return self.store.batch_write_finish(keys, results)
 
     def get(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
         if self._lazy_init and not self._store_initialized:
