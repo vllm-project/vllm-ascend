@@ -138,7 +138,10 @@ run_pytest_target() {
   else
     test_results+=("${target}|FAILED|${log_file}")
     failed_logs+=("${target}|${log_file}")
-    overall_status="${status}"
+    if [ "${record_timing}" != true ]; then
+      print_summary
+      exit "${status}"
+    fi
   fi
 }
 
@@ -177,7 +180,10 @@ run_pytest_batch() {
   else
     test_results+=("${target}|FAILED|${log_file}")
     failed_logs+=("${target}|${log_file}")
-    overall_status="${status}"
+    if [ "${record_timing}" != true ]; then
+      print_summary
+      exit "${status}"
+    fi
   fi
 }
 
