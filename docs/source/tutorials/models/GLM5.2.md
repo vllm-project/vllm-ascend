@@ -941,7 +941,6 @@ Before you start, please
     # change ip to your own
     python launch_online_dp.py --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 4 --dp-address $node_d0_ip --dp-rpc-port 16600 --vllm-start-port 9900
     ```
-
         
 **Notice:**
 The parameters are explained as follows:
@@ -1511,7 +1510,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more details.
 
 **Notice:**
-`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#deployment)** chapter.
+`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **Deployment** chapter.
 
 ## FAQ
 
