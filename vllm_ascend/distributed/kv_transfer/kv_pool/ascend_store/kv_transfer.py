@@ -1315,6 +1315,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self.sync_save_events = sync_save_events
         self.max_transfer_blocks = max_transfer_blocks
         self.max_transfer_bytes = max_transfer_bytes
+        self.write_results: dict[str, int] = {}
         self.group_builders: list[LayerBatchBuilder] | None = group_builders
         if group_builders is not None:
             self.layer_batch_builder = group_builders[0]
@@ -1405,9 +1406,13 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 )
             if res != 0:
                 logger.error("Layerwise %d save batch_copy failed with return code %d", physical_layer, res)
-            if physical_layer == self.final_layer_id and all_save_keys:
+            if all_save_keys:
                 save_keys = list(dict.fromkeys(all_save_keys))
-                self.m_store.batch_write_finish(save_keys, [res] * len(save_keys))
+                for key in save_keys:
+                    self.write_results[key] = self.write_results.get(key, 0) or res
+                if physical_layer == self.final_layer_id:
+                    results = [self.write_results.pop(key) for key in save_keys]
+                    self.m_store.batch_write_finish(save_keys, results)
             for req_id in all_req_ids:
                 if self.try_finish_and_delete_stored_request(req_id):
                     self.set_finished_request(req_id)
