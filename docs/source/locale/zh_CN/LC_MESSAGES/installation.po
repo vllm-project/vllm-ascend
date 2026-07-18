@@ -219,7 +219,7 @@ msgstr ""
 "    关于批量不变性特性的使用指南，请参见 <https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/feature_guide/batch_invariance.md>"
 
 msgid "## Set up using Docker {: #set-up-using-docker }"
-msgstr "## 使用 Docker 进行设置"
+msgstr "## 使用 Docker 进行设置 {: #set-up-using-docker }"
 
 msgid ""
 "`vllm-ascend` offers Docker images for deployment. You can just pull the "
