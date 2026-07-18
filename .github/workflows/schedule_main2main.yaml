@@ -171,18 +171,21 @@ jobs:
             cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info || true
           fi
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          architecture: arm64
+          mirror: https://repo.huaweicloud.com/nodejs
+          registry-url: https://repo.huaweicloud.com/repository/npm/
+          package-manager-cache: false
+
       - name: Install opencode + main2main-flow
         run: |
           set -eu
           set -o pipefail
 
-          # Install through Huawei Cloud's domestic npm mirror. The official
-          # installer first queries GitHub for the latest release and then
-          # downloads the binary from GitHub, which is slow from this runner.
-          npm install --global \
-            --prefix "$HOME/.opencode" \
-            --registry https://repo.huaweicloud.com/repository/npm/ \
-            opencode-ai
+          npm install --global --prefix "$HOME/.opencode" opencode-ai
           # configure opencode auth
           mkdir -p ~/.local/share/opencode
           cat > ~/.local/share/opencode/auth.json <<EOF
