@@ -178,7 +178,6 @@
   optional: false
   source_file_dependencies:
     - vllm_ascend/compilation/passes/allgather_chunk_noop_pass.py
-    - vllm_ascend/compilation/passes/allreduce_rmsnorm_fusion_pass.py
     - vllm_ascend/compilation/passes/muls_add_pass.py
     - vllm_ascend/compilation/passes/noop_elimination.py
   tests: []
