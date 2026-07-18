@@ -136,7 +136,7 @@ def set_ascend_forward_context(
         forward_context.flashcomm_v2_enabled = False
 
         forward_context.pad_size = 0
-        if forward_context.flash_comm_v1_enabled or forward_context.flashcomm_v2_enabled:
+        if forward_context.flash_comm_v1_enabled:
             pad_size = (tp_world_size - (num_tokens % tp_world_size)) % tp_world_size
             forward_context.pad_size = pad_size
 
