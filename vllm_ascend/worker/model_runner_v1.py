@@ -2187,7 +2187,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_scheduled_tokens_np,
                     num_tokens_padded,
                     num_reqs_padded,
-                    3,
+                    1,
                 )
                 logger.info(
                     "ubatch_slices: %s, ubatch_slices_padded: %s",
@@ -2357,7 +2357,7 @@ class NPUModelRunner(GPUModelRunner):
                 input_ids=input_ids,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
                 afd_metadata=afd_metadata,
-                ubatch_slices=ubatch_slices_padded,
+                ubatch_slices=ubatch_slices_attn,
                 afd_comm_stream=self.afd_comm_stream,
             ),
             self.maybe_get_kv_connector_output(
@@ -2383,7 +2383,7 @@ class NPUModelRunner(GPUModelRunner):
                         "is_warmup: %s, "
                         "cudagraph_mode: %s, "
                         "ubatch_slices: %s",
-                        dp_metadata_list, False, cudagraph_mode, ubatch_slices)
+                        dp_metadata_list, False, cudagraph_mode, ubatch_slices_attn)
                 dist.barrier(group=get_dp_group().cpu_group)
             if self.cache_config.mamba_cache_mode == "align":
                 mamba_utils.do_mamba_copy_block(preprocess_bufs)
