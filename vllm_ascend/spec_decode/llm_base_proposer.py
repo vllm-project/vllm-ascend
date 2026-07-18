@@ -44,7 +44,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, get_host_seq_lens
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
@@ -1851,14 +1851,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         device = common_attn_metadata.query_start_loc.device
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_actual_reqs + 1]
-        # Prefer the upstream-canonical ``_seq_lens_cpu``; fall back to the
-        # Ascend subclass field. In async-spec mode the model runner only
-        # populates ``_seq_lens_cpu`` (optimistic_seq_lens_cpu) and leaves
-        # ``seq_lens_cpu`` as None, so an unguarded read here would crash.
-        if common_attn_metadata._seq_lens_cpu is not None:
-            seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_actual_reqs]
-        else:
-            seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_actual_reqs]
+        seq_lens_cpu = get_host_seq_lens(common_attn_metadata, num_actual_reqs)
         new_seq_lens_cpu = seq_lens_cpu - num_rejected_tokens
 
         # [0, q1, q1 + q2, q1 + q2 + q3] -> [q1, q2, q3]

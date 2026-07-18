@@ -192,6 +192,34 @@ class AscendPrefillContextParallelMetadata:
     dcp_mtp_attn_mask: torch.Tensor = None
 
 
+def get_host_seq_lens(
+    common_attn_metadata: CommonAttentionMetadata,
+    num_reqs: int | None = None,
+) -> torch.Tensor:
+    """Return host-side sequence lengths, preferring CPU mirrors over a D2H sync.
+
+    Preference order:
+    1. ``_seq_lens_cpu`` — upstream field; Ascend model runner always fills it
+       from ``optimistic_seq_lens_cpu`` and updates it during draft iterations.
+    2. ``seq_lens_cpu`` — Ascend subclass field; ``None`` in async spec decode.
+    3. ``seq_lens.to("cpu")`` — last resort; triggers an NPU→CPU sync.
+
+    Args:
+        common_attn_metadata: Shared attention metadata for the batch.
+        num_reqs: If set, return only the first ``num_reqs`` entries.
+    """
+    if common_attn_metadata._seq_lens_cpu is not None:
+        seq_lens_cpu = common_attn_metadata._seq_lens_cpu
+    elif common_attn_metadata.seq_lens_cpu is not None:
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+    else:
+        seq_lens_cpu = common_attn_metadata.seq_lens.to("cpu")
+
+    if num_reqs is not None:
+        return seq_lens_cpu[:num_reqs]
+    return seq_lens_cpu
+
+
 @dataclass
 class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     """
