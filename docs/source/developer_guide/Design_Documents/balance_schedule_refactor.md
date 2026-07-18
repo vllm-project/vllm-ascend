@@ -171,8 +171,7 @@ probing to two fallbacks (AscendConfig → additional_config) and **removes the
 direct environment-variable read** — `VLLM_ASCEND_BALANCE_SCHEDULING` is still
 parsed centrally by `AscendConfig` (as a deprecated fallback for
 `additional_config`), but `_balance_scheduling_enabled` no longer reads it
-itself, bypassing `AscendConfig`. Details in
-[Phased rollout](#phased-rollout).
+itself, bypassing `AscendConfig`. Details in [Phased rollout](#phased-rollout).
 
 ### Step 1 — Hook gather onto `_has_global_unfinished_reqs` and delete the EngineCore copies
 
@@ -407,9 +406,7 @@ deviation is a bug.
 
 After this round (Phase 1 + 2A + 3), the key structure is as follows. The
 `schedule()` body is a verbatim copy of release tag `v0.24.0` (cannot be
-deleted before Phase 2B), with three documented deltas (disabled-path early
-return + the `balance_flag` gate in the WAITING loop + `if request_queue is
-None: break`):
+deleted before Phase 2B), with three documented deltas (disabled-path early return + the `balance_flag` gate in the WAITING loop + `if request_queue is None: break`):
 
 ```python
 # vllm_ascend/patch/platform/patch_balance_schedule.py
@@ -554,7 +551,7 @@ first inside `schedule()`, then inside `_process_engine_step`; now after
    (unavoidable, since this value drives host-side control flow). Profile to
    confirm the refactor introduces **no** extra sync beyond the current one.
 
-## Phased rollout
+## Phased rollout {: #phased-rollout}
 
 | Phase | Scope                                                                                                                  | Risk | Depends on     | Status        |
 |-------|------------------------------------------------------------------------------------------------------------------------|------|----------------|---------------|

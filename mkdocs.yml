@@ -230,10 +230,10 @@ nav:
     - faqs.md
   - User Guide:
     - user_guide/index.md
-    - user_guide/support_matrix/index.md
-    - user_guide/support_matrix/supported_models.md
-    - user_guide/support_matrix/supported_features.md
-    - user_guide/support_matrix/feature_matrix.md
+    - support_matrix:
+        - user_guide/support_matrix/supported_models.md
+        - user_guide/support_matrix/supported_features.md
+        - user_guide/support_matrix/feature_matrix.md
     - Configuration:
         - user_guide/configuration/index.md
         - user_guide/configuration/env_vars.md

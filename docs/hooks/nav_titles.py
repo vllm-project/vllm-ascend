@@ -79,7 +79,7 @@ TITLES = {
     "faqs.md": {"en": "FAQs", "zh": "常见问题"},
     "getting_started.md": {"en": "Overview", "zh": "概览"},
     "index.md": {"en": "Home", "zh": "首页"},
-    "installation.md": {"en": "Installation", "zh": "安装"},
+    "installation.md": {"en": "Installation", "zh": "安装指南"},
     "quick_start.md": {"en": "Quick Start", "zh": "快速开始"},
     "tutorials/features/dynamic_chunked_pipeline_parallel.md": {
         "en": "Dynamic Chunked Pipeline Parallel",
@@ -222,7 +222,7 @@ SECTION_TITLES = {
     "Hardware Tutorials": {"en": "Hardware Tutorials", "zh": "硬件教程"},
     "User Guide": {"en": "User Guide", "zh": "用户指南"},
     "Configuration": {"en": "Configuration", "zh": "配置"},
-    "Feature Guide": {"en": "Feature Guide", "zh": "功能指南"},
+    "Feature Guide": {"en": "Feature Guide", "zh": "特性指南"},
     "Deployment Guide": {"en": "Deployment Guide", "zh": "部署指南"},
     "Developer Guide": {"en": "Developer Guide", "zh": "开发者指南"},
     "Contribution": {"en": "Contribution", "zh": "贡献"},

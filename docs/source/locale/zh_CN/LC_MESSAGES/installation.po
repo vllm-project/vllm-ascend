@@ -218,7 +218,7 @@ msgstr ""
 "要启用批量不变性特性，请在构建 vllm-ascend 前设置 `VLLM_BATCH_INVARIANT=1`，以便在安装过程中安装批量不变性自定义算子库。\n"
 "    关于批量不变性特性的使用指南，请参见 <https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/feature_guide/batch_invariance.md>"
 
-msgid "## Set up using Docker"
+msgid "## Set up using Docker {: #set-up-using-docker }"
 msgstr "## 使用 Docker 进行设置"
 
 msgid ""
@@ -287,7 +287,7 @@ msgstr "此部分显示进程在离线推理后退出，不影响实际推理：
 msgid "## Multi-node Deployment"
 msgstr "## 多节点部署"
 
-msgid "### Verify Multi-Node Communication"
+msgid "### Verify Multi-Node Communication {: #verify-multi-node-communication } "
 msgstr "### 验证多节点通信"
 
 msgid ""
