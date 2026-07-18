@@ -35,11 +35,9 @@ def mock_distributed():
         patch("torch.distributed.get_world_size", return_value=16),
         patch("torch.distributed.get_backend", return_value="nccl"),
         patch("vllm_ascend.distributed.parallel_state.get_world_group") as mock_group,
-        patch("vllm_ascend.distributed.parallel_state.get_tp_group") as mock_tp_group,
     ):
         mock_group.return_value.local_rank = 0
         mock_group.return_value.device_group = MagicMock()
-        mock_tp_group.return_value.world_size = 4
         yield
 
 
