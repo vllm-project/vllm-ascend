@@ -19,15 +19,22 @@
 
 import torch
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
-    _compute_global_logsumexp as _compute_global_lse,
+from vllm.v1.worker.gpu.spec_decode import (
+    rejection_sampler_utils as upstream_rejection_sampler_utils,
 )
-from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
-    _compute_local_logits_stats_kernel as _compute_block_stats_kernel,
+
+from vllm_ascend.worker.v2.spec_decode.compat import (
+    resolve_rejection_sampler_helpers,
 )
-from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+
+# vLLM v0.23/v0.24 releases use the legacy names, while newer main commits
+# renamed and substantially extended these private Triton helpers. Select by
+# capability instead of treating every non-v0.23 build as newer main.
+(
+    _compute_global_lse,
+    _compute_block_stats_kernel,
     _insert_resampled_kernel,
-)
+) = resolve_rejection_sampler_helpers(upstream_rejection_sampler_utils)
 
 
 @triton.jit
