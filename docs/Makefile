@@ -30,7 +30,7 @@ serve:
 	mkdocs serve
 
 serve-zh:
-	DOCS_LANG=zh mkdocs serve
+	DOCS_LANG=zh DOCS_BETTEREM_SMART_ENABLE=none mkdocs serve
 
 build:
 	SITE_DIR=$(CURDIR)/$(BUILDDIR) bash tools/rtd_build.sh

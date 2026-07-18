@@ -112,7 +112,10 @@ markdown_extensions:
   - pymdownx.arithmatex:
       generic: true
   - pymdownx.betterem:
-      smart_enable: all
+      # Chinese text does not use spaces between words, so smart emphasis
+      # treats valid constructs such as ``中文**加粗**文本`` as intraword
+      # markup. The Chinese build overrides this value with ``none``.
+      smart_enable: !ENV [DOCS_BETTEREM_SMART_ENABLE, all]
   - pymdownx.caret
   - pymdownx.details
   - pymdownx.emoji:
