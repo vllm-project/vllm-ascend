@@ -106,8 +106,6 @@ def _extract_features(server_cmd: list[str] | str, envs: dict[str, Any]) -> list
         val = str(envs.get(env_key, "0"))
         if val not in ("0", "", "false", "False"):
             features.append(feature_name)
-    if int(envs.get("VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE", 0)) > 0:
-        features.append("flashcomm2")
 
     return features
 

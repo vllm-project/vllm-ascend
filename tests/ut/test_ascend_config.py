@@ -28,7 +28,7 @@ from vllm_ascend.ascend_config import (
     get_ascend_config,
     init_ascend_config,
 )
-from vllm_ascend.utils import clear_enable_sp, enable_sp, get_flashcomm2_config_and_validate
+from vllm_ascend.utils import clear_enable_sp, enable_sp
 
 
 class TestAscendConfig(TestBase):
@@ -245,7 +245,6 @@ class TestAscendConfig(TestBase):
                 "VLLM_ASCEND_ENABLE_FUSED_MC2": "1",
                 "VLLM_ASCEND_ENABLE_MLAPO": "0",
                 "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
-                "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": "2",
                 "MSMONITOR_USE_DAEMON": "1",
                 "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": "0",
                 "VLLM_ASCEND_ENABLE_NZ": "2",
@@ -256,7 +255,6 @@ class TestAscendConfig(TestBase):
         self.assertEqual(ascend_config.enable_fused_mc2, 1)
         self.assertFalse(ascend_config.enable_mlapo)
         self.assertTrue(ascend_config.enable_flashcomm1)
-        self.assertEqual(ascend_config.enable_flashcomm2_parallel_size, 2)
         self.assertTrue(ascend_config.msmonitor_use_daemon)
         self.assertFalse(ascend_config.enable_transpose_kv_cache_by_block)
         self.assertEqual(ascend_config.weight_nz_mode, 2)
@@ -295,7 +293,6 @@ class TestAscendConfig(TestBase):
             "enable_fused_mc2": 0,
             "enable_mlapo": True,
             "enable_flashcomm1": False,
-            "enable_flashcomm2_parallel_size": 0,
             "msmonitor_use_daemon": False,
             "enable_transpose_kv_cache_by_block": True,
             "weight_nz_mode": 1,
@@ -306,7 +303,6 @@ class TestAscendConfig(TestBase):
                 "VLLM_ASCEND_ENABLE_FUSED_MC2": "1",
                 "VLLM_ASCEND_ENABLE_MLAPO": "0",
                 "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
-                "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": "2",
                 "MSMONITOR_USE_DAEMON": "1",
                 "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": "0",
                 "VLLM_ASCEND_ENABLE_NZ": "2",
@@ -317,7 +313,6 @@ class TestAscendConfig(TestBase):
         self.assertEqual(ascend_config.enable_fused_mc2, 0)
         self.assertTrue(ascend_config.enable_mlapo)
         self.assertFalse(ascend_config.enable_flashcomm1)
-        self.assertEqual(ascend_config.enable_flashcomm2_parallel_size, 0)
         self.assertFalse(ascend_config.msmonitor_use_daemon)
         self.assertTrue(ascend_config.enable_transpose_kv_cache_by_block)
         self.assertEqual(ascend_config.weight_nz_mode, 1)
@@ -344,31 +339,6 @@ class TestAscendConfig(TestBase):
             patch("vllm.config.get_current_vllm_config", side_effect=AssertionError),
         ):
             self.assertTrue(enable_sp())
-
-    @_clean_up_ascend_config
-    @patch("vllm_ascend.utils.logger.warning_once")
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_flashcomm2_warning_uses_enable_flashcomm1_config(self, mock_check_and_update_config, mock_warning_once):
-        test_vllm_config = VllmConfig()
-        test_vllm_config.parallel_config.tensor_parallel_size = 4
-        test_vllm_config.kv_transfer_config = None
-        ascend_config = type(
-            "MockAscendConfig",
-            (),
-            {
-                "enable_flashcomm2_parallel_size": 2,
-                "enable_flashcomm1": True,
-                "finegrained_tp_config": type("MockFinegrainedTPConfig", (), {"oproj_tensor_parallel_size": 0})(),
-            },
-        )()
-
-        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "0"}):
-            self.assertEqual(get_flashcomm2_config_and_validate(ascend_config, test_vllm_config), 2)
-
-        flashcomm1_warning = (
-            "It is recommended to enable FLASHCOMM1 simultaneously when starting FLASHCOMM2 for optimal performance."
-        )
-        self.assertNotIn(flashcomm1_warning, [call.args[0] for call in mock_warning_once.call_args_list])
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

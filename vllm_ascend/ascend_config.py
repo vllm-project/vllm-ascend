@@ -168,12 +168,6 @@ class AscendConfig:
             "VLLM_ASCEND_ENABLE_MLAPO",
             ascend_envs.VLLM_ASCEND_ENABLE_MLAPO,
         )
-        self.enable_flashcomm2_parallel_size = self._get_config_value(
-            additional_config,
-            "enable_flashcomm2_parallel_size",
-            "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE",
-            ascend_envs.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE,
-        )
         self.msmonitor_use_daemon = self._get_config_value(
             additional_config,
             "msmonitor_use_daemon",
@@ -215,9 +209,6 @@ class AscendConfig:
 
             if self.pd_tp_ratio == 0:
                 raise AssertionError("Only support P node tp size lagger then D node tp size")
-        from vllm_ascend.utils import get_flashcomm2_config_and_validate
-
-        self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_config_and_validate(self, vllm_config)
         # Weight NZ mode configuration.
         # 0: disabled, 1: only quant case enable nz (default), 2: BF16/FP16 also enable nz
         self.weight_nz_mode = self._get_config_value(
