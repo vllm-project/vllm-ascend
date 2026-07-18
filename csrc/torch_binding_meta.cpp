@@ -744,6 +744,33 @@ std::tuple<at::Tensor, at::Tensor> npu_fused_gdn_gating_meta(
     return std::make_tuple(g, beta_output);
 }
 
+std::tuple<at::Tensor, at::Tensor> npu_recompute_wu_fwd_meta(
+    const at::Tensor& k,
+    const at::Tensor& v,
+    const at::Tensor& beta,
+    const at::Tensor& a,
+    const at::Tensor& g,
+    c10::optional<at::IntArrayRef> cu_seqlens,
+    c10::optional<at::IntArrayRef> chunk_indices,
+    int64_t chunk_size)
+{
+    (void)beta;
+    (void)a;
+    (void)g;
+    (void)cu_seqlens;
+    (void)chunk_indices;
+    (void)chunk_size;
+    at::SmallVector<c10::SymInt, 4> w_size = {
+        v.sym_size(0),
+        v.sym_size(1),
+        v.sym_size(2),
+        k.sym_size(3),
+    };
+    at::Tensor w = at::empty_symint(c10::SymIntArrayRef(w_size), k.options());
+    at::Tensor u = at::empty_symint(v.sym_sizes(), v.options());
+    return std::make_tuple(w, u);
+}
+
 std::vector<at::Tensor> moe_grouped_matmul_meta(
     at::Tensor x,
     at::Tensor weight,
@@ -1660,7 +1687,7 @@ void store_kv_block(
 {
     return;
 
-} 
+}
 
 } // namespace meta
 } // namespace vllm_ascend
@@ -1777,6 +1804,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("store_kv_block", &vllm_ascend::meta::store_kv_block);
     // npu_fused_gdn_gating
     ops.impl("npu_fused_gdn_gating", &vllm_ascend::meta::npu_fused_gdn_gating_meta);
+    // npu_recompute_wu_fwd
+    ops.impl("npu_recompute_wu_fwd", &vllm_ascend::meta::npu_recompute_wu_fwd_meta);
 }
 }
 #endif
