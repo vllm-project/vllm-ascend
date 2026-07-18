@@ -44,6 +44,9 @@ class Backend(ABC):
     def batch_remove_lease(self, keys: list[str]) -> int:
         raise NotImplementedError(f"{type(self).__name__} does not support batch_remove_lease")
 
+    def batch_put_end(self, keys: list[str]) -> list[int]:
+        raise NotImplementedError(f"{type(self).__name__} does not support batch_put_end")
+
     @abstractmethod
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         pass
