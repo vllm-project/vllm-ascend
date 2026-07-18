@@ -63,14 +63,14 @@ The following features and optimizations are planned for deprecation in a future
 - KV offload in KV Pool.
 - Fused MC2 mode 2 (`enable_fused_mc2=2`).
 - Paged attention and `pa_shape_list`.
-- Environment-variable configuration for plugin options; affected options are being migrated to `--additional-config`. See [Environment Variables](configuration/env_vars.md) for migration guidance.
+- Selected plugin environment variables; their configuration will be migrated to equivalent `--additional-config` options.
 
 ### Known Issues
 
 - The combination of pipeline parallelism (PP) and prefill context parallelism (PCP) is not supported in v0.23.0. Support for this combination is deferred to a later release.
 - The load-balance proxy can swallow decode errors and return an empty HTTP 200 response. [#12166](https://github.com/vllm-project/vllm-ascend/issues/12166)
 - Qwen3-30B-A3B floating-point serving can show a 1-2 ms TPOT regression at batch size 1 in the reported TP4 full-graph configuration. [#12337](https://github.com/vllm-project/vllm-ascend/issues/12337)
-- Repeated benchmark rounds in a P/D-disaggregated deployment can place an extra worker process from another card on an NPU device. [#12338](https://github.com/vllm-project/vllm-ascend/issues/12338)
+- In the reported DeepSeek V4 Flash W8A8 MTP P/D-disaggregated deployment, the second aisbench round can cause a worker process from another card to appear on an NPU device. [#12338](https://github.com/vllm-project/vllm-ascend/issues/12338)
 - On Ascend 950, Qwen3.5-397B-W8A8-MXFP8-FULL_QUANT in a P/D-disaggregated deployment without MTP can alternate between correct and incorrect outputs. [#12339](https://github.com/vllm-project/vllm-ascend/issues/12339)
 - DeepSeek V4 Pro on A3 and A5 can show continuously increasing memory usage in both P/D-disaggregated and co-located deployments, eventually causing OOM or service instability. [#12345](https://github.com/vllm-project/vllm-ascend/issues/12345)
 
