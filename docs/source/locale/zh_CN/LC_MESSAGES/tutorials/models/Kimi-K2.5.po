@@ -139,7 +139,7 @@ msgid ""
 msgstr "如果要部署多节点环境，需要在每个节点上进行环境配置。"
 
 msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
-msgstr "## 5 在线服务部署"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"
 
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
