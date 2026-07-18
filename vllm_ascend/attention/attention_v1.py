@@ -42,11 +42,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.context_parallel.common_cp import AscendMetadataForDecode, AscendMetadataForPrefill
-from vllm_ascend.attention.kvcomp_attn.attention_utils import (
-    get_kvcomp_decode_params,
-    is_enable_hamming_sparse,
-    reshape_and_cache_kvcomp,
-)
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     cache_graph_workspace,
@@ -65,7 +60,6 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.utils import weak_ref_tensors
-from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -208,8 +202,6 @@ class AscendMetadata:
     model_runner_type: str = ""
     # prefill reshape_and_cache event
     reshape_cache_event: torch.npu.Event = None
-
-    kvcomp_metadata: KVCompMetaData | None = None
 
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
@@ -365,7 +357,6 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             num_decodes=num_decodes,
             causal=common_attn_metadata.causal,
             model_runner_type=self.model_config.runner_type,
-            kvcomp_metadata=common_attn_metadata.kvcomp_metadata,
         )
         return attn_metadata
 
@@ -436,7 +427,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self._use_max_workspace_for_fia_graph = self._use_layer_aware_fia_graph_replay
         self.sinks = sinks
         self.layerIndex = 0
-        self.enable_hamming_sparse = is_enable_hamming_sparse(self.enable_c8_quant)
         # Some mixed-attention models cannot rely on the iteration order of
         # attn_metadata during graph replay. Record the captured layer name only
         # for that path.
@@ -701,14 +691,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         # Keep the captured block_tables tensor on this affected path.
                         # Non-SWA models preserve the original behavior and continue to refresh
                         # block_tables from attn_metadata.
-                        obj = attn_metadata[key]
-                        if (
-                            hasattr(obj, "kvcomp_metadata")
-                            and hasattr(obj.kvcomp_metadata, "seq_lens_from_hamming")
-                            and obj.kvcomp_metadata.hashk_caches[layer_count] is not None
-                        ):
-                            seq_lens = obj.kvcomp_metadata.seq_lens_from_hamming
-                        elif not hasattr(vllm_config.model_config.hf_text_config, "sliding_window"):
+                        if not hasattr(vllm_config.model_config.hf_text_config, "sliding_window"):
                             block_tables = attn_metadata[metadata_key].block_tables
                     layer_count += 1
 
@@ -761,14 +744,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
         layer=None,
     ) -> torch.Tensor:
-        passed_key = key
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
-        if self.enable_hamming_sparse and attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
-            reshape_and_cache_kvcomp(attn_metadata.kvcomp_metadata, self.layerIndex, passed_key)
-        elif self.enable_hamming_sparse:
-            block_table, actual_seq_lengths_kv = get_kvcomp_decode_params(
-                self.layerIndex, attn_metadata.kvcomp_metadata, query, passed_key, block_table, actual_seq_lengths_kv
-            )
 
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         if _EXTRA_CTX.is_draft_model:
@@ -1137,17 +1113,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
-        passed_key = key
         passed_value = value
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
             key, value, attn_metadata, kv_cache
         )
-        if self.enable_hamming_sparse and attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
-            reshape_and_cache_kvcomp(attn_metadata.kvcomp_metadata, self.layerIndex, passed_key)
-        elif self.enable_hamming_sparse:
-            block_table, actual_seq_lengths_kv = get_kvcomp_decode_params(
-                self.layerIndex, attn_metadata.kvcomp_metadata, query, passed_key, block_table, actual_seq_lengths_kv
-            )
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         query = query[:num_tokens]
         if (
@@ -1234,7 +1203,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     scale=self.scale,
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
-                    current_key=passed_key,
+                    current_key=key,
                     current_value=passed_value,
                     attn_metadata=attn_metadata,
                     is_prefill_no_cache=attn_metadata.attn_state == AscendAttentionState.PrefillNoCache,
@@ -1360,8 +1329,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
-        if self.enable_hamming_sparse:
-            self.layerIndex = int(layer.layer_name.split(".")[2])
         if self._use_layer_aware_fia_graph_replay:
             self._layer_name = layer.layer_name
 

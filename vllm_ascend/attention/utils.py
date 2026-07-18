@@ -16,7 +16,6 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     is_pd_decode_recompute_scheduler_enabled,
 )
-from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 SFA_QSFA_TILE_SIZE = 128
 
@@ -233,7 +232,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
 
     # Metadata for Prefill Context Parallelism (PCP) operations.
     prefill_context_parallel_metadata: AscendPrefillContextParallelMetadata | None = None
-    kvcomp_metadata: KVCompMetaData | None = None
     group_len: torch.Tensor = None
     group_key_idx: torch.Tensor = None
     group_key_cache_idx: torch.Tensor = None

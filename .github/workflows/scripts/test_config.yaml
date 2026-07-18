@@ -65,7 +65,6 @@
     - vllm_ascend/attention/abstract.py
     - vllm_ascend/attention/attention_mask.py
     - vllm_ascend/attention/utils.py
-    - vllm_ascend/attention/kvcomp_attn/
   tests:
     - tests/ut/attention/
     - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
@@ -804,7 +803,6 @@ estimated_times:
   tests/ut/sample/a2/test_gumbel_sampling.py: 80
   tests/ut/spec_decode/a2/test_eagle_proposer.py: 50
   tests/ut/worker/a2/test_block_table.py: 40
-  tests/ut/worker/a2/test_kvcomp_utils.py: 50
   tests/ut/worker/a2/test_model_runner_v1.py: 40
   tests/ut/worker/a2/test_model_runner_v1_with_device.py: 70
   tests/ut/worker/a2/test_worker_multi_instance.py: 30
@@ -841,4 +839,3 @@ partition:
   a3_x2: 3
   a3_x4: 3
   cpu_x0: 1
-
