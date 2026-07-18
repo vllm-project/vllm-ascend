@@ -1203,7 +1203,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     scale=self.scale,
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
-                    current_key=passed_key,
+                    current_key=key,
                     current_value=passed_value,
                     attn_metadata=attn_metadata,
                     is_prefill_no_cache=attn_metadata.attn_state == AscendAttentionState.PrefillNoCache,
