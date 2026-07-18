@@ -19,6 +19,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     _block_hash_to_bytes,
     get_block_hashes,
 )
+from vllm_ascend.utils import SUPPORTED_VLLM_RELEASE, vllm_version_is
 
 _CACHE_MISSING = object()
 _MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
@@ -31,6 +32,10 @@ class ExternalCachedBlockPool:
         # exists=None is used for load/store masks where hit length has already
         # been decided and each manager only needs to apply its own reachability.
         self._exists = exists
+        # Upstream main managers read block_pool.hash_block_size to resolve
+        # block hashes; _find_longest_cache_hit re-points this per call to the
+        # spec granularity of the hashes it passes (making resolve a no-op).
+        self.hash_block_size = 0
         self.null_block = KVCacheBlock(block_id=0)
         self._present_block = KVCacheBlock(block_id=1)
 
@@ -364,6 +369,23 @@ def _find_longest_cache_hit(
     manager_cls: type[SingleTypeKVCacheManager],
     **kwargs: Any,
 ) -> tuple[list[KVCacheBlock], ...]:
+    if not vllm_version_is(SUPPORTED_VLLM_RELEASE):
+        # Upstream main managers resolve block hashes internally against
+        # ``block_pool.hash_block_size``. The hashes passed here are already
+        # re-hashed at the (effective) spec granularity, so present the
+        # duck-typed pool at that granularity to make the internal resolve a
+        # no-op. Main also returns (blocks, hit_length); drop the length —
+        # call sites recompute it from the block count, unchanged.
+        spec = kwargs["kv_cache_spec"]
+        kwargs["block_pool"].hash_block_size = spec.block_size
+        try:
+            hit_blocks, _ = manager_cls.find_longest_cache_hit(**kwargs)
+        except TypeError as exc:
+            if "drop_eagle_block" not in str(exc):
+                raise
+            kwargs["use_eagle"] = kwargs.pop("drop_eagle_block")
+            hit_blocks, _ = manager_cls.find_longest_cache_hit(**kwargs)
+        return hit_blocks
     try:
         return manager_cls.find_longest_cache_hit(**kwargs)
     except TypeError as exc:

@@ -77,6 +77,8 @@ class _FakeCompressedManager:
         alignment_tokens=16,
         **kwargs,
     ):
+        from vllm_ascend.utils import SUPPORTED_VLLM_RELEASE, vllm_version_is
+
         computed: tuple[list[object], ...] = tuple([] for _ in kv_cache_group_ids)
         logical_block_size = kv_cache_spec.block_size * kv_cache_spec.compress_ratio
         max_blocks = max_length // logical_block_size
@@ -86,7 +88,9 @@ class _FakeCompressedManager:
                 break
             for blocks, block in zip(computed, cached):
                 blocks.append(block)
-        return computed
+        if vllm_version_is(SUPPORTED_VLLM_RELEASE):
+            return computed
+        return computed, len(computed[0]) * logical_block_size
 
 
 class TestAscendStoreCoordinator(unittest.TestCase):

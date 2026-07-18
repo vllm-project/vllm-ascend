@@ -78,6 +78,8 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
+from vllm_ascend.utils import SUPPORTED_VLLM_RELEASE, vllm_version_is
+
 
 def _balance_scheduling_enabled(vllm_config) -> bool:
     # Primary source of truth is AscendConfig. The additional_config fallback
@@ -465,9 +467,17 @@ class BalanceScheduler(Scheduler):
                                 preempted=request.num_preemptions > 0,
                             )
                     else:
-                        new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(
-                            request
-                        )
+                        if vllm_version_is(SUPPORTED_VLLM_RELEASE):
+                            new_computed_blocks, num_new_local_computed_tokens = (
+                                self.kv_cache_manager.get_computed_blocks(request)
+                            )
+                        else:
+                            # Upstream main returns (blocks, hit_length,
+                            # num_uncached_common_prefix) — the 3rd element
+                            # is the Marconi-style shared-prefix boundary.
+                            new_computed_blocks, num_new_local_computed_tokens, _ = (
+                                self.kv_cache_manager.get_computed_blocks(request)
+                            )
 
                     # In case of hybrid models, obtain hint for Marconi-style APC logic
                     if self.has_mamba_layers:
@@ -772,6 +782,15 @@ class BalanceScheduler(Scheduler):
             (self.kv_cache_manager.take_new_block_ids() or None) if self.needs_kv_cache_zeroing else None
         )
 
+        # Drain partial-hit CoW copies (upstream main only) so their blocks
+        # are released and the worker applies the copies with this step.
+        extra_sched_kwargs: dict = {}
+        if not vllm_version_is(SUPPORTED_VLLM_RELEASE):
+            kv_cache_block_copies, cow_retained_blocks = self.kv_cache_manager.take_kv_cache_block_copies()
+            if kv_cache_block_copies:
+                self._free_cow_retained_blocks(cow_retained_blocks, self.sched_step_seq + 1)
+            extra_sched_kwargs["kv_cache_block_copies"] = kv_cache_block_copies or None
+
         # Dynamic speculative decoding: compute optimal K
         num_spec_tokens_to_schedule = self.num_spec_tokens
         if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
@@ -794,6 +813,7 @@ class BalanceScheduler(Scheduler):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
+            **extra_sched_kwargs,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:

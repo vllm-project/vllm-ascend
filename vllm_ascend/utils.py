@@ -580,6 +580,12 @@ def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None)
     os.environ["ASCEND_LOCAL_COMM_RES"] = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
+# The vLLM release version that this vllm-ascend supports alongside upstream
+# main. Version guards added for the current main2main cycle reference this
+# single source of truth; bump it here on the next supported-release change.
+SUPPORTED_VLLM_RELEASE = "0.24.0"
+
+
 @functools.cache
 def vllm_version_is(target_vllm_version: str):
     if envs_ascend.VLLM_VERSION is not None:
@@ -589,7 +595,7 @@ def vllm_version_is(target_vllm_version: str):
 
         vllm_version = vllm.__version__
     try:
-        return Version(vllm_version) == Version(target_vllm_version)
+        installed_version = Version(vllm_version)
     except InvalidVersion:
         raise ValueError(
             f"Invalid vllm version {vllm_version} found. A dev version of vllm "
@@ -597,6 +603,18 @@ def vllm_version_is(target_vllm_version: str):
             "to control it by hand. And please make sure the value follows the "
             "format of x.y.z."
         )
+    try:
+        target_version = Version(target_vllm_version)
+    except InvalidVersion:
+        # Fail loudly: an unparseable target means the guard itself is broken
+        # (e.g. an unsubstituted release-tag placeholder), and silently
+        # selecting one branch would mask that on every install.
+        raise ValueError(
+            f"Invalid target vllm version {target_vllm_version!r} passed to "
+            "vllm_version_is(). The target must be a valid PEP 440 release "
+            "version string such as '0.24.0'."
+        )
+    return installed_version == target_version
 
 
 def get_max_hidden_layers(hf_config) -> int:

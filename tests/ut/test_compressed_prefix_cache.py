@@ -22,6 +22,16 @@ from vllm.v1.request import Request
 
 from vllm_ascend.core.single_type_kv_cache_manager import CompressAttentionManager
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import AscendHybridKVCacheCoordinator
+from vllm_ascend.utils import SUPPORTED_VLLM_RELEASE, vllm_version_is
+
+
+def _find_hit_blocks(**kwargs) -> list:
+    result = CompressAttentionManager.find_longest_cache_hit(**kwargs)
+    if vllm_version_is(SUPPORTED_VLLM_RELEASE):
+        return result[0]
+    blocks, _hit_length = result
+    return blocks[0]
+
 
 pytestmark = pytest.mark.cpu_test
 
@@ -98,7 +108,7 @@ def test_compressed_prefix_cache_uses_logical_block_hash() -> None:
     )[0]
     assert cached_hash == expected_hash
 
-    hit_blocks = CompressAttentionManager.find_longest_cache_hit(
+    hit_blocks = _find_hit_blocks(
         block_hashes=request_b.block_hashes,
         max_length=logical_block_size,
         kv_cache_group_ids=[0],
@@ -106,7 +116,7 @@ def test_compressed_prefix_cache_uses_logical_block_hash() -> None:
         kv_cache_spec=spec,
         drop_eagle_block=False,
         alignment_tokens=logical_block_size,
-    )[0]
+    )
 
     assert hit_blocks == []
 
@@ -125,7 +135,7 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
     )
     manager.cache_blocks(request, num_tokens=logical_block_size)
 
-    hit_blocks = CompressAttentionManager.find_longest_cache_hit(
+    hit_blocks = _find_hit_blocks(
         block_hashes=request.block_hashes,
         max_length=logical_block_size,
         kv_cache_group_ids=[0],
@@ -133,7 +143,7 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
         kv_cache_spec=spec,
         drop_eagle_block=False,
         alignment_tokens=logical_block_size,
-    )[0]
+    )
 
     assert hit_blocks == manager.req_to_blocks[request.request_id]
 

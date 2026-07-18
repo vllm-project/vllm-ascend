@@ -151,11 +151,17 @@ def test_installer_cleans_main_registry_before_model_patch(monkeypatch):
     calls: list[Any] = []
 
     def clean_registry() -> bool:
+        # Upstream main already removed the stale entries (vLLM PR #47867),
+        # so the cleanup is a no-op; the installer must still patch the
+        # processor loader and the prompt updates.
         calls.append("registry")
-        return True
+        return False
 
     def patch_loader(module: Any) -> None:
         calls.append(("loader", module))
+
+    def patch_prompt_updates(module: Any) -> None:
+        calls.append(("prompt_updates", module))
 
     monkeypatch.setattr(compat, "vllm_version_is", lambda _version: False)
     monkeypatch.setattr(
@@ -169,13 +175,55 @@ def test_installer_cleans_main_registry_before_model_patch(monkeypatch):
         "_patch_hunyuan_processor_loader",
         patch_loader,
     )
+    monkeypatch.setattr(
+        compat,
+        "_patch_main_prompt_updates",
+        patch_prompt_updates,
+    )
     compat.install_hunyuan_vl_processor_compat()
 
     assert calls == [
         "registry",
         ("loader", hunyuan_vision),
+        ("prompt_updates", hunyuan_vision),
     ]
-    assert FakeMultiModalProcessor._get_prompt_updates is native_get_prompt_updates
+
+
+def test_main_prompt_updates_use_image_token_only():
+    class FakeMultiModalProcessor:
+        pass
+
+    hunyuan_vision = SimpleNamespace(
+        HunYuanVLMultiModalProcessor=FakeMultiModalProcessor,
+    )
+    compat._patch_main_prompt_updates(hunyuan_vision)
+
+    image_token_id = compat._HUNYUAN_VL_SPECIAL_TOKEN_IDS["image_token"]
+    hf_processor = SimpleNamespace(image_token_id=image_token_id)
+    image_processor = SimpleNamespace(merge_size=2)
+    processor = SimpleNamespace(
+        info=SimpleNamespace(
+            get_hf_processor=lambda **_kwargs: hf_processor,
+            get_image_processor=lambda **_kwargs: image_processor,
+        )
+    )
+    grid_item = {"image_grid_thw": SimpleNamespace(data=(1, 8, 6))}
+    out_mm_kwargs = {"image": [grid_item]}
+
+    get_prompt_updates = vars(FakeMultiModalProcessor)["_get_prompt_updates"]
+    updates = get_prompt_updates(
+        processor,
+        mm_items=None,
+        hf_processor_mm_kwargs={},
+        out_mm_kwargs=out_mm_kwargs,
+    )
+
+    assert len(updates) == 1
+    update = updates[0]
+    assert update.modality == "image"
+    assert update.target == [image_token_id]
+    expected_num_tokens = (8 // 2) * (6 // 2 + 1) + 2
+    assert update.replacement(0) == [image_token_id] * expected_num_tokens
 
 
 def test_registers_hunyuan_tokenizer_schema_without_changing_ids():

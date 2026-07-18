@@ -103,6 +103,10 @@ if _MOCK_VLLM_DEPS:
     for _mod_name in _vllm_mock_modules:
         if _mod_name not in sys.modules:
             sys.modules[_mod_name] = MagicMock()
+    # vllm_ascend.utils.vllm_version_is parses vllm.__version__; give the
+    # mocked module a parseable version (the supported release tag) so
+    # version-guarded code under test behaves deterministically.
+    sys.modules["vllm"].__version__ = "0.24.0"  # type: ignore[attr-defined]
 
 if _MOCK_VLLM_DEPS:
     sys.modules["vllm.utils.math_utils"].cdiv = lambda a, b: -(-a // b)  # type: ignore[attr-defined]
@@ -274,6 +278,8 @@ class _FakeSingleTypeKVCacheManager:
         dcp_world_size=1,
         pcp_world_size=1,
     ):
+        from vllm_ascend.utils import SUPPORTED_VLLM_RELEASE, vllm_version_is
+
         computed: tuple[list[object], ...] = tuple([] for _ in kv_cache_group_ids)
         max_blocks = max_length // kv_cache_spec.block_size
         for block_hash in list(block_hashes)[:max_blocks]:
@@ -285,7 +291,9 @@ class _FakeSingleTypeKVCacheManager:
         if drop_eagle_block and computed and computed[0]:
             for blocks in computed:
                 blocks.pop()
-        return computed
+        if vllm_version_is(SUPPORTED_VLLM_RELEASE):
+            return computed
+        return computed, len(computed[0]) * kv_cache_spec.block_size
 
 
 class _FakeSlidingWindowManager(_FakeSingleTypeKVCacheManager):

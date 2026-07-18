@@ -185,6 +185,16 @@ class TestUtils(TestBase):
         with mock.patch("vllm.__version__", "2.0.0"):
             self.assertTrue(utils.vllm_version_is.__wrapped__("2.0.0"))
             self.assertFalse(utils.vllm_version_is.__wrapped__("1.0.0"))
+        # A non-PEP440 target (e.g. an unsubstituted release-tag placeholder)
+        # must fail loudly instead of silently selecting a branch.
+        with mock.patch("vllm.__version__", "1.0.0"):
+            with self.assertRaises(ValueError):
+                utils.vllm_version_is.__wrapped__("<tag>")
+            # The shared release constant must always stay PEP440-parseable.
+            self.assertTrue(utils.vllm_version_is.__wrapped__(utils.SUPPORTED_VLLM_RELEASE) in (True, False))
+        # An unparseable installed version still raises.
+        with mock.patch("vllm.__version__", "not-a-version"), self.assertRaises(ValueError):
+            utils.vllm_version_is.__wrapped__("1.0.0")
         # Test caching takes effect
         utils.vllm_version_is.cache_clear()
         utils.vllm_version_is("1.0.0")

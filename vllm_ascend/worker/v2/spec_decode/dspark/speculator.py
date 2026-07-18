@@ -39,8 +39,16 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         model_state: Any,
         kv_cache_config: Any,
         block_tables: Any,
+        target_input_buffers: Any = None,
+        target_attn_groups: Any = None,
     ) -> None:
-        super().set_attn(model_state, kv_cache_config, block_tables)
+        super().set_attn(
+            model_state,
+            kv_cache_config,
+            block_tables,
+            target_input_buffers,
+            target_attn_groups,
+        )
         self._context_slot_mappings = self._context_slot_mappings.to(torch.int32)  # type: ignore[has-type]
 
     def propose(

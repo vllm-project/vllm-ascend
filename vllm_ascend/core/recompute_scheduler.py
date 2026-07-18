@@ -52,6 +52,7 @@ from vllm.v1.utils import ConstantList, record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.core.short_request_first_scheduler import ShortRequestFirstSchedulerMixin
+from vllm_ascend.utils import SUPPORTED_VLLM_RELEASE, vllm_version_is
 
 
 @dataclass
@@ -550,9 +551,17 @@ class RecomputeScheduler(ShortRequestFirstSchedulerMixin, Scheduler):
                                 preempted=request.num_preemptions > 0,
                             )
                     else:
-                        new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(
-                            request
-                        )
+                        if vllm_version_is(SUPPORTED_VLLM_RELEASE):
+                            new_computed_blocks, num_new_local_computed_tokens = (
+                                self.kv_cache_manager.get_computed_blocks(request)
+                            )
+                        else:
+                            # Upstream main returns (blocks, hit_length,
+                            # num_uncached_common_prefix) — the 3rd element
+                            # is the Marconi-style shared-prefix boundary.
+                            new_computed_blocks, num_new_local_computed_tokens, _ = (
+                                self.kv_cache_manager.get_computed_blocks(request)
+                            )
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -834,6 +843,15 @@ class RecomputeScheduler(ShortRequestFirstSchedulerMixin, Scheduler):
             (self.kv_cache_manager.take_new_block_ids() or None) if self.needs_kv_cache_zeroing else None
         )
 
+        # Drain partial-hit CoW copies (upstream main only) so their blocks
+        # are released and the worker applies the copies with this step.
+        extra_sched_kwargs: dict = {}
+        if not vllm_version_is(SUPPORTED_VLLM_RELEASE):
+            kv_cache_block_copies, cow_retained_blocks = self.kv_cache_manager.take_kv_cache_block_copies()
+            if kv_cache_block_copies:
+                self._free_cow_retained_blocks(cow_retained_blocks, self.sched_step_seq + 1)
+            extra_sched_kwargs["kv_cache_block_copies"] = kv_cache_block_copies or None
+
         scheduler_output = RecomputeSchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -852,6 +870,7 @@ class RecomputeScheduler(ShortRequestFirstSchedulerMixin, Scheduler):
             new_block_ids_to_zero=new_block_ids_to_zero,
             preempted_reqs=preempted_req_data,
             recomputed_reqs=recomputed_reqs,
+            **extra_sched_kwargs,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1000,6 +1019,7 @@ class RecomputeScheduler(ShortRequestFirstSchedulerMixin, Scheduler):
             new_token_ids = generated_token_ids
             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
+            ec_transfer_params = None
             status_before_stop = request.status
             num_output_tokens_before = len(request._output_token_ids)
 
@@ -1059,7 +1079,12 @@ class RecomputeScheduler(ShortRequestFirstSchedulerMixin, Scheduler):
                 finish_reason = request.get_finished_reason()
                 finished = self._handle_stopped_request(request)
                 if finished:
-                    kv_transfer_params = self._free_request(request)
+                    if vllm_version_is(SUPPORTED_VLLM_RELEASE):
+                        kv_transfer_params = self._free_request(request)
+                    else:
+                        # Upstream main returns (kv_transfer_params,
+                        # ec_transfer_params).
+                        kv_transfer_params, ec_transfer_params = self._free_request(request)
 
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
@@ -1075,7 +1100,12 @@ class RecomputeScheduler(ShortRequestFirstSchedulerMixin, Scheduler):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            if new_token_ids or pooler_output is not None or kv_transfer_params or stopped:
+            # EngineCoreOutput has no ec_transfer_params field on the release
+            # version; pass it only on upstream main.
+            extra_output_kwargs: dict = {}
+            if not vllm_version_is(SUPPORTED_VLLM_RELEASE):
+                extra_output_kwargs["ec_transfer_params"] = ec_transfer_params
+            if new_token_ids or pooler_output is not None or kv_transfer_params or ec_transfer_params or stopped:
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
@@ -1092,6 +1122,7 @@ class RecomputeScheduler(ShortRequestFirstSchedulerMixin, Scheduler):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        **extra_output_kwargs,
                     )
                 )
             else:

@@ -4003,7 +4003,8 @@ class NPUModelRunner(GPUModelRunner):
         else:
             from vllm.v1.worker.utils import bind_kv_cache
 
-            num_attn_module = 2 if self.model_config.hf_text_config.model_type == "longcat_flash" else 1
+            model_type = self.model_config.hf_text_config.model_type
+            num_attn_module = 2 if model_type in ("longcat_flash", "longcat_flash_ngram") else 1
             bind_kv_cache(
                 kv_caches,
                 self.compilation_config.static_forward_context,

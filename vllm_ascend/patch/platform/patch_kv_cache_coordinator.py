@@ -31,7 +31,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import SUPPORTED_VLLM_RELEASE, vllm_version_is
 
 USE_MULTI_GROUPS_KV_CACHE = True
 
@@ -154,6 +154,11 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # different KV cache groups have different block sizes, the actual block size
         # can be a multiple of hash_block_size.
         self.hash_block_size = hash_block_size
+        # Ascend hit lengths are always aligned to lcm_block_size (no partial
+        # block cache hits). Upstream main's inherited cache_blocks and
+        # _cache_hit_alignment_tokens read this attribute; keep it False so
+        # they take the scheduler-block-aligned path (0.24.0 behavior).
+        self.enable_partial_hash_hits = False
         if enable_caching:
             assert all(
                 self._get_effective_block_size(g.kv_cache_spec) % hash_block_size == 0
@@ -318,17 +323,34 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     # Eagle needs to match one more block and then pop the last.
                     _max_length = min(curr_hit_length + spec.block_size, max_cache_hit_length)
                 eagle_kwarg = {"drop_eagle_block": use_eagle}
-                hit_blocks = manager_cls.find_longest_cache_hit(
-                    block_hashes=_get_block_hashes(spec),
-                    max_length=_max_length,
-                    kv_cache_group_ids=group_ids,
-                    block_pool=self.block_pool,
-                    kv_cache_spec=spec,
-                    **eagle_kwarg,
-                    alignment_tokens=self.lcm_block_size,
-                    dcp_world_size=self.dcp_world_size,
-                    pcp_world_size=self.pcp_world_size,
-                )
+                if vllm_version_is(SUPPORTED_VLLM_RELEASE):
+                    hit_blocks = manager_cls.find_longest_cache_hit(
+                        block_hashes=_get_block_hashes(spec),
+                        max_length=_max_length,
+                        kv_cache_group_ids=group_ids,
+                        block_pool=self.block_pool,
+                        kv_cache_spec=spec,
+                        **eagle_kwarg,
+                        alignment_tokens=self.lcm_block_size,
+                        dcp_world_size=self.dcp_world_size,
+                        pcp_world_size=self.pcp_world_size,
+                    )
+                else:
+                    # Upstream main returns (blocks, hit_length). Discard the
+                    # manager-computed length: ascend recomputes it from the
+                    # block count with the compress-ratio-aware effective
+                    # block size below.
+                    hit_blocks, _ = manager_cls.find_longest_cache_hit(
+                        block_hashes=_get_block_hashes(spec),
+                        max_length=_max_length,
+                        kv_cache_group_ids=group_ids,
+                        block_pool=self.block_pool,
+                        kv_cache_spec=spec,
+                        **eagle_kwarg,
+                        alignment_tokens=self.lcm_block_size,
+                        dcp_world_size=self.dcp_world_size,
+                        pcp_world_size=self.pcp_world_size,
+                    )
                 _new_hit_length = len(hit_blocks[0]) * effective_block_size
                 if use_eagle:
                     eagle_verified.add(idx)
@@ -360,7 +382,16 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 if (blks := hit_blocks_by_group[group_id]) is not None:
                     del blks[num_blocks:]
 
-        return tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group), hit_length
+        if vllm_version_is(SUPPORTED_VLLM_RELEASE):
+            return tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group), hit_length
+        # Upstream main find_longest_cache_hit returns a 3-tuple:
+        # (blocks, hit_length, num_uncached_common_prefix_tokens).
+        # Ascend has no Marconi-style APC; the 3rd element is always 0.
+        return (
+            tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group),
+            hit_length,
+            0,
+        )
 
     def find_longest_cache_hit_per_group(
         self,
@@ -420,17 +451,34 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     # Eagle needs to match one more block and then pop the last.
                     _max_length = min(curr_hit_length + spec.block_size, max_cache_hit_length)
                 eagle_kwarg = {"drop_eagle_block": use_eagle}
-                hit_blocks = manager_cls.find_longest_cache_hit(
-                    block_hashes=_get_block_hashes(spec),
-                    max_length=_max_length,
-                    kv_cache_group_ids=group_ids,
-                    block_pool=self.block_pool,
-                    kv_cache_spec=spec,
-                    **eagle_kwarg,
-                    alignment_tokens=self.lcm_block_size,
-                    dcp_world_size=self.dcp_world_size,
-                    pcp_world_size=self.pcp_world_size,
-                )
+                if vllm_version_is(SUPPORTED_VLLM_RELEASE):
+                    hit_blocks = manager_cls.find_longest_cache_hit(
+                        block_hashes=_get_block_hashes(spec),
+                        max_length=_max_length,
+                        kv_cache_group_ids=group_ids,
+                        block_pool=self.block_pool,
+                        kv_cache_spec=spec,
+                        **eagle_kwarg,
+                        alignment_tokens=self.lcm_block_size,
+                        dcp_world_size=self.dcp_world_size,
+                        pcp_world_size=self.pcp_world_size,
+                    )
+                else:
+                    # Upstream main returns (blocks, hit_length). Discard the
+                    # manager-computed length: ascend recomputes it from the
+                    # block count with the compress-ratio-aware effective
+                    # block size below.
+                    hit_blocks, _ = manager_cls.find_longest_cache_hit(
+                        block_hashes=_get_block_hashes(spec),
+                        max_length=_max_length,
+                        kv_cache_group_ids=group_ids,
+                        block_pool=self.block_pool,
+                        kv_cache_spec=spec,
+                        **eagle_kwarg,
+                        alignment_tokens=self.lcm_block_size,
+                        dcp_world_size=self.dcp_world_size,
+                        pcp_world_size=self.pcp_world_size,
+                    )
                 _new_hit_length = len(hit_blocks[0]) * effective_block_size
                 if use_eagle:
                     eagle_verified.add(idx)

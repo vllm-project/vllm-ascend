@@ -5,12 +5,14 @@ from __future__ import annotations
 import importlib
 import sys
 from collections.abc import Mapping
+from functools import partial
 from types import ModuleType
 from typing import Any, cast
 
 from transformers import HunYuanVLProcessor
+from vllm.multimodal.processing import PromptReplacement
 
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import SUPPORTED_VLLM_RELEASE, vllm_version_is
 
 _STALE_PROCESSOR_MODULES = {
     "HunYuanVLProcessor": "vllm.transformers_utils.processors.hunyuan_vl",
@@ -166,6 +168,13 @@ def _patch_hunyuan_processor_loader(hunyuan_vision: Any) -> None:
     def get_hf_processor(self: Any, **kwargs: object) -> Any:
         kwargs.pop("use_fast", None)
         kwargs.setdefault("backend", "pil")
+        # Register the schema on the context tokenizer BEFORE constructing the
+        # processor: Transformers validates the tokenizer while building the
+        # processor, so registering inside the compat __init__ alone is too
+        # late. ctx.get_hf_processor passes this same tokenizer instance in.
+        tokenizer = getattr(self.ctx, "tokenizer", None)
+        if tokenizer is not None:
+            _register_hunyuan_tokenizer_special_tokens(tokenizer)
         return self.ctx.get_hf_processor(_HunYuanVLProcessorCompat, **kwargs)
 
     hunyuan_vision.HunYuanVLProcessingInfo.get_hf_processor = get_hf_processor
@@ -196,20 +205,74 @@ def _patch_v024_processor_methods(hunyuan_vision: Any) -> None:
     hunyuan_vision.HunYuanVLMultiModalProcessor._call_hf_processor = call_hf_processor
 
 
+def _patch_main_prompt_updates(hunyuan_vision: Any) -> None:
+    """Restore the image-token-only prompt replacement on the main ref.
+
+    Upstream main now replaces the image token with a full
+    start/image/end wrapper. On the processor-cache-hit path the
+    replacement is applied to the raw tokenized prompt, so prompts that
+    already carry the start/end wrapper (the documented HunYuan prompt
+    format, also produced by ``get_placeholder_str`` for chat requests)
+    get double-wrapped. ``get_xdrope_input_positions`` then finds more
+    image start tokens than image grids and raises IndexError. Keeping
+    the image-token-only replacement makes both the HF path (which
+    tolerates pre-wrapped prompts) and the cached path produce a single
+    wrapper, matching the v0.24.0 protocol.
+    """
+
+    def get_prompt_updates(
+        self: Any,
+        mm_items: Any,
+        hf_processor_mm_kwargs: Mapping[str, Any],
+        out_mm_kwargs: Any,
+    ) -> Any:
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
+
+        placeholder = {"image": hf_processor.image_token_id}
+        merge_size = image_processor.merge_size
+
+        def get_replacement_hunyuan_vl(item_idx: int, modality: str) -> list[int]:
+            out_item = out_mm_kwargs[modality][item_idx]
+            grid_thw = out_item[f"{modality}_grid_thw"].data
+            _, grid_h, grid_w = grid_thw
+            num_tokens = (int(grid_h) // merge_size) * (int(grid_w) // merge_size + 1) + 2
+            return [placeholder[modality]] * num_tokens
+
+        return [
+            PromptReplacement(
+                modality=modality,
+                target=[placeholder[modality]],
+                replacement=partial(get_replacement_hunyuan_vl, modality=modality),
+            )
+            for modality in ("image",)
+        ]
+
+    hunyuan_vision.HunYuanVLMultiModalProcessor._get_prompt_updates = get_prompt_updates
+
+
 def install_hunyuan_vl_processor_compat() -> None:
     """Align both supported vLLM refs with Transformers 5.13 Hunyuan APIs."""
-    # Keep each target's native, image-token-only prompt replacement. The
+    # Both refs must keep the image-token-only prompt replacement: the
     # cached processor path applies it inside an existing start/image/end
-    # wrapper; using a full-wrapper replacement here would duplicate wrappers.
-    if vllm_version_is("0.24.0"):
+    # wrapper; a full-wrapper replacement there would duplicate wrappers
+    # and break XD-RoPE position init. v0.24.0 does this natively; the
+    # main ref needs _patch_main_prompt_updates.
+    if vllm_version_is(SUPPORTED_VLLM_RELEASE):
         v024_hunyuan_vision = _import_v024_hunyuan_vision()
         _remove_stale_registry_entries()
         _patch_hunyuan_processor_loader(v024_hunyuan_vision)
         _patch_v024_processor_methods(v024_hunyuan_vision)
         return
 
-    if not _remove_stale_registry_entries():
-        return
+    # Upstream main removed the HunYuanVL entries from the lazy processor
+    # registry (this mirrors vLLM PR #47867), so the cleanup below is now a
+    # no-op there. The processor loader must still be patched: the HunyuanOCR
+    # tokenizer lacks the named special tokens required by Transformers 5.13,
+    # and upstream hunyuan_vision reads image_token/image_start_token/
+    # image_end_token (and their ids) from the processor.
+    _remove_stale_registry_entries()
     from vllm.model_executor.models import hunyuan_vision as main_hunyuan_vision
 
     _patch_hunyuan_processor_loader(main_hunyuan_vision)
+    _patch_main_prompt_updates(main_hunyuan_vision)

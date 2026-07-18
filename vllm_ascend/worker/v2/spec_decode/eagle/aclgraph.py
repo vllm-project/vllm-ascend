@@ -10,13 +10,22 @@ from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cudagraph_utils import AttentionStatePair, BatchExecutionDescriptor, prepare_inputs_to_capture
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, prepare_inputs_to_capture
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
-    DecodeSpeculatorCudaGraphManager,
-    PrefillSpeculatorCudaGraphManager,
-)
+
+from vllm_ascend.utils import SUPPORTED_VLLM_RELEASE, vllm_version_is
+
+if not vllm_version_is(SUPPORTED_VLLM_RELEASE):
+    # Upstream main-only class; the release version has neither this nor
+    # PrefillSpeculatorCudaGraphManager / DecodeSpeculatorCudaGraphManager.
+    # The V2 model runner and eagle spec decode are unsupported on 0.24.0,
+    # so the guarded classes never get instantiated there.
+    from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (  # type: ignore[import-not-found]
+        SpeculatorCudaGraphManager,
+    )
+else:
+    SpeculatorCudaGraphManager = object  # type: ignore[assignment]
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -29,7 +38,7 @@ from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_s
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
-class PrefillEagleAclGraphManager(PrefillSpeculatorCudaGraphManager):
+class PrefillEagleAclGraphManager(SpeculatorCudaGraphManager):
     """AclGraphManager for Eagle speculative decoding."""
 
     def __init__(
@@ -41,19 +50,8 @@ class PrefillEagleAclGraphManager(PrefillSpeculatorCudaGraphManager):
         speculator: Any = None,
     ):
         super().__init__(vllm_config, device, cudagraph_mode, decode_query_len)
-
-        # set speculator attribute, so we can access attributes speculator
-        # when call `run_fullgraph` method in CudaGraphManager,
-        # then we don't need to # copy `propose` method in `AscendEagleSpeculator` class.
         self.speculator = speculator
-        # The attention backend keys its per-size graph params by the actual
-        # captured token counts (rounded up to decode_query_len when using
-        # speculative decoding), so derive them from the capture descriptors
-        # instead of the raw config sizes.
         self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
-        # vllm-ascend need to update draft graph params of attention backend.
-        # so we need to set draft graph params before capture full graph.
-        # `prefill` graph and `decodes` graph are different, `decode_query_len` can be used to distinguish them
         self.is_draft_model_prefill = decode_query_len > 1
         if super().needs_capture():
             if self.is_draft_model_prefill:
@@ -64,14 +62,27 @@ class PrefillEagleAclGraphManager(PrefillSpeculatorCudaGraphManager):
     def capture(
         self,
         forward_fn: Callable,
-        attn_states: dict[BatchExecutionDescriptor, AttentionStatePair],
+        model_state: ModelState,
+        input_buffers: InputBuffers,
+        block_tables: BlockTables,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
-        """Capture ACL graphs for Eagle."""
+        """Capture ACL graphs for Eagle prefill.
+
+        The upstream SpeculatorCudaGraphManager always builds fresh dummy
+        metadata from the builder parameters; the old attn_states dict is
+        no longer passed.
+        """
         with communicator_switch(), model_capture_wrapper(self.speculator, self.is_draft_model_prefill):
             super().capture(
                 forward_fn,
-                attn_states,
+                model_state,
+                input_buffers,
+                block_tables,
+                attn_groups,
+                kv_cache_config,
                 progress_bar_desc=progress_bar_desc,
             )
 
@@ -121,7 +132,7 @@ class PrefillEagleAclGraphManager(PrefillSpeculatorCudaGraphManager):
         return ret
 
 
-class DecodeEagleAclGraphManager(DecodeSpeculatorCudaGraphManager):
+class DecodeEagleAclGraphManager(SpeculatorCudaGraphManager):
     """AclGraphManager for Eagle speculative decoding."""
 
     def __init__(
@@ -133,19 +144,8 @@ class DecodeEagleAclGraphManager(DecodeSpeculatorCudaGraphManager):
         speculator: Any = None,
     ):
         super().__init__(vllm_config, device, cudagraph_mode, decode_query_len)
-
-        # set speculator attribute, so we can access attributes speculator
-        # when call `run_fullgraph` method in CudaGraphManager,
-        # then we don't need to # copy `propose` method in `AscendEagleSpeculator` class.
         self.speculator = speculator
-        # The attention backend keys its per-size graph params by the actual
-        # captured token counts (rounded up to decode_query_len when using
-        # speculative decoding), so derive them from the capture descriptors
-        # instead of the raw config sizes.
         self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
-        # vllm-ascend need to update draft graph params of attention backend.
-        # so we need to set draft graph params before capture full graph.
-        # `prefill` graph and `decodes` graph are different, `decode_query_len` can be used to distinguish them
         self.is_draft_model_prefill = decode_query_len > 1
         if super().needs_capture():
             if self.is_draft_model_prefill:
@@ -163,15 +163,23 @@ class DecodeEagleAclGraphManager(DecodeSpeculatorCudaGraphManager):
         kv_cache_config: KVCacheConfig,
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
-        """Capture ACL graphs for Eagle."""
+        """Capture ACL graphs for Eagle decode.
 
-        def create_forward_fn(desc: BatchExecutionDescriptor, warmup: bool):
+        The upstream ``SpeculatorCudaGraphManager.capture`` calls the
+        forward function with 6 positional args
+        ``(num_reqs, num_tokens, attn_metadata, slot_mappings,
+        num_tokens_across_dp, cg_mode)``.  Ascend's
+        ``_multi_step_decode`` takes 4 args, so this wrapper builds the
+        metadata from the capture buffers and bridges the two protocols.
+        """
+
+        def create_forward_fn(desc: BatchExecutionDescriptor, warmup: bool) -> Callable[[CUDAGraphMode], None]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
             num_tokens_across_dp = (
                 torch.full((self.dp_size,), num_tokens, dtype=torch.int32, device="cpu") if self.dp_size > 1 else None
             )
-            attn_state = prepare_inputs_to_capture(
+            attn_metadata, slot_mappings = prepare_inputs_to_capture(
                 num_reqs,
                 num_tokens,
                 model_state,
@@ -180,19 +188,27 @@ class DecodeEagleAclGraphManager(DecodeSpeculatorCudaGraphManager):
                 attn_groups,
                 kv_cache_config,
             )
-            fwd = lambda cg_mode: forward_fn(
-                num_reqs,
-                cg_mode == CUDAGraphMode.PIECEWISE,
-                BatchExecutionDescriptor(cg_mode=cg_mode, num_tokens=num_tokens, num_reqs=num_reqs),
-                num_tokens_across_dp,
-            )
-            return fwd, attn_state
+
+            def wrapper(cg_mode: CUDAGraphMode) -> None:
+                forward_fn(
+                    num_reqs,
+                    cg_mode == CUDAGraphMode.PIECEWISE,
+                    BatchExecutionDescriptor(
+                        cg_mode=cg_mode,
+                        num_tokens=num_tokens,
+                        num_reqs=num_reqs,
+                    ),
+                    num_tokens_across_dp,
+                )
+
+            return wrapper
 
         with communicator_switch(), model_capture_wrapper(self.speculator, self.is_draft_model_prefill):
-            # Skip DecodeSpeculatorCudaGraphManager.capture (which builds its own
-            # create_forward_fn) and call CudaGraphManager.capture directly, so that
-            # our Ascend-specific create_forward_fn above is the one that gets used
-            super(DecodeSpeculatorCudaGraphManager, self).capture(create_forward_fn, progress_bar_desc)
+            # Bypass SpeculatorCudaGraphManager.capture (which builds its
+            # own create_forward_fn for the upstream 6-arg protocol) and
+            # call CudaGraphManager.capture directly with our Ascend
+            # bridge.
+            super(SpeculatorCudaGraphManager, self).capture(create_forward_fn, progress_bar_desc)
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""

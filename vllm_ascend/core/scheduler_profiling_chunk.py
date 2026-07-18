@@ -41,6 +41,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.core.profiling_chunk_predictor import ProfilingChunkManager
+from vllm_ascend.utils import SUPPORTED_VLLM_RELEASE, vllm_version_is
 
 
 class ProfilingChunkScheduler(Scheduler):
@@ -494,9 +495,16 @@ class ProfilingChunkScheduler(Scheduler):
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
-                    new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(
-                        request
-                    )
+                    if vllm_version_is(SUPPORTED_VLLM_RELEASE):
+                        new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(
+                            request
+                        )
+                    else:
+                        # Upstream main returns (blocks, hit_length,
+                        # num_uncached_common_prefix).
+                        new_computed_blocks, num_new_local_computed_tokens, _ = (
+                            self.kv_cache_manager.get_computed_blocks(request)
+                        )
 
                     if self.connector is not None:
                         ext_tokens, load_kv_async = self.connector.get_num_new_matched_tokens(
@@ -729,6 +737,15 @@ class ProfilingChunkScheduler(Scheduler):
             (self.kv_cache_manager.take_new_block_ids() or None) if self.needs_kv_cache_zeroing else None
         )
 
+        # Drain partial-hit CoW copies (upstream main only) so their blocks
+        # are released and the worker applies the copies with this step.
+        extra_sched_kwargs: dict = {}
+        if not vllm_version_is(SUPPORTED_VLLM_RELEASE):
+            kv_cache_block_copies, cow_retained_blocks = self.kv_cache_manager.take_kv_cache_block_copies()
+            if kv_cache_block_copies:
+                self._free_cow_retained_blocks(cow_retained_blocks, self.sched_step_seq + 1)
+            extra_sched_kwargs["kv_cache_block_copies"] = kv_cache_block_copies or None
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -741,6 +758,7 @@ class ProfilingChunkScheduler(Scheduler):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
+            **extra_sched_kwargs,
         )
 
         if self.connector is not None:

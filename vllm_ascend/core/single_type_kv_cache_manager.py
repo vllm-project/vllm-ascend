@@ -23,7 +23,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import SUPPORTED_VLLM_RELEASE, vllm_version_is
 
 if TYPE_CHECKING:
     from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
@@ -41,23 +41,42 @@ class CompressAttentionManager(FullAttentionManager):
         num_tokens: int,
         new_computed_blocks: Sequence[KVCacheBlock],
         total_computed_tokens: int,
-        num_tokens_main_model: int,
+        num_local_computed_tokens: int = 0,
+        num_tokens_main_model: int = 0,
         apply_admission_cap: bool = False,
     ) -> int:
         # Allocate extra `num_speculative_blocks` blocks for
         # speculative decoding (MTP/EAGLE) with linear attention.
         # assert isinstance(self.kv_cache_spec, (CompressAttentionSpec, C4IndexerSpec))
 
+        if vllm_version_is(SUPPORTED_VLLM_RELEASE):
+            # 0.24.0 callers have no num_local_computed_tokens parameter and
+            # pass num_tokens_main_model in the fifth positional slot.
+            num_tokens_main_model = num_local_computed_tokens
+
         num_tokens //= self.compress_ratio
         num_tokens_main_model //= self.compress_ratio
 
+        if vllm_version_is(SUPPORTED_VLLM_RELEASE):
+            return super().get_num_blocks_to_allocate(
+                request_id,
+                num_tokens,
+                new_computed_blocks,
+                total_computed_tokens,
+                num_tokens_main_model,
+                apply_admission_cap,
+            )
+        # Ascend cache hits are lcm-aligned (multiples of block_size *
+        # compress_ratio), so the compressed local-hit token count is always
+        # block-aligned and never triggers the partial-hit CoW reservation.
         return super().get_num_blocks_to_allocate(
             request_id,
             num_tokens,
             new_computed_blocks,
             total_computed_tokens,
+            num_local_computed_tokens // self.compress_ratio,
             num_tokens_main_model,
-            apply_admission_cap,
+            apply_admission_cap=apply_admission_cap,
         )
 
     def allocate_new_computed_blocks(
@@ -205,7 +224,7 @@ class CompressAttentionManager(FullAttentionManager):
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
         drop_eagle_block: bool = False,
-    ) -> tuple[list[KVCacheBlock], ...]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         eagle_drop = drop_eagle_block
         # assert isinstance(
         #     kv_cache_spec, Compress4AttentionSpec | Compress128AttentionSpec | C4IndexerSpec
@@ -239,7 +258,11 @@ class CompressAttentionManager(FullAttentionManager):
         ):
             for computed in computed_blocks:
                 computed.pop()
-        return computed_blocks
+        if vllm_version_is(SUPPORTED_VLLM_RELEASE):
+            # 0.24.0 managers return only the block lists.
+            return computed_blocks  # type: ignore[return-value]
+        hit_length = len(computed_blocks[0]) * logical_block_size
+        return computed_blocks, hit_length
 
 
 def get_manager_for_kv_cache_spec(

@@ -1159,17 +1159,25 @@
 #
 # ** 33. File: hunyuan_vl_processor_compat.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.hunyuan_vision.HunYuanVLProcessingInfo.get_hf_processor`
+#   1. `vllm.model_executor.models.hunyuan_vision.HunYuanVLProcessingInfo.get_hf_processor`,
+#      `vllm.model_executor.models.hunyuan_vision.HunYuanVLMultiModalProcessor._get_prompt_updates`
 #      and the vLLM processor lazy registry
 #    Why:
 #       The supported vLLM refs currently straddle the HunyuanVL processor
 #       migration. v0.23.0 still bundles the processor, while the verified
 #       main ref uses the Transformers-native processor but predates the full
-#       Transformers 5.13 registry and prompt-protocol cleanup.
+#       Transformers 5.13 registry and prompt-protocol cleanup. In addition,
+#       main's `_get_prompt_updates` now emits a full start/image/end wrapper
+#       replacement, which double-wraps pre-wrapped prompts on the processor
+#       cache-hit path and breaks XD-RoPE position init (IndexError in
+#       `get_xdrope_input_positions`).
 #    How:
 #       Preserve the bundled v0.23.0 processor protocol, translate its image
 #       processor registration to Transformers 5.13, and complete the native
 #       processor registry, loader, and tokenizer schema on the main ref.
+#       On main, also restore the image-token-only prompt replacement so the
+#       HF path and the cached path both yield a single start/image/end
+#       wrapper.
 #    Related PR:
 #       1. https://github.com/vllm-project/vllm/pull/47872
 #       2. https://github.com/vllm-project/vllm/pull/47867

@@ -16,9 +16,14 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as vllm_speculator_module
+from vllm_ascend.utils import SUPPORTED_VLLM_RELEASE, vllm_version_is
 
-from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import DecodeEagleAclGraphManager, PrefillEagleAclGraphManager
+if not vllm_version_is(SUPPORTED_VLLM_RELEASE):
+    # Upstream-main-only import; the 0.24.0 release does not have this module.
+    from vllm.v1.worker.gpu.spec_decode.autoregressive import (
+        speculator as vllm_speculator_module,  # type: ignore[import-not-found]  # noqa: E501
+    )
 
-vllm_speculator_module.PrefillSpeculatorCudaGraphManager = PrefillEagleAclGraphManager
-vllm_speculator_module.DecodeSpeculatorCudaGraphManager = DecodeEagleAclGraphManager
+    from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import DecodeEagleAclGraphManager
+
+    vllm_speculator_module.SpeculatorCudaGraphManager = DecodeEagleAclGraphManager
