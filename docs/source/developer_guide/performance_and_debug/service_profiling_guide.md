@@ -36,8 +36,8 @@ No additional packages need to be installed; it can be enabled through command-l
 Start the online service and set the `--profiler-config` parameter to control the path for saving performance files. After the parameter is set, the collection function is enabled.
 
 ```bash
-VLLM_PROMPT_SEQ_BUCKET_MAX=128
-VLLM_PROMPT_SEQ_BUCKET_MIN=128
+export VLLM_PROMPT_SEQ_BUCKET_MAX=128
+export VLLM_PROMPT_SEQ_BUCKET_MIN=128
 python3 -m vllm.entrypoints.openai.api_server \
 --port 8080 \
 --model "facebook/opt-125m" \
@@ -48,7 +48,7 @@ python3 -m vllm.entrypoints.openai.api_server \
 --max-model-len 256
 ```
 
-> Note:**January 19, 2026: The vLLM mainline has deprecated the VLLM_TORCH_PROFILER_DIR environment variable.**[Related PR](https://github.com/vllm-project/vllm-ascend/pull/5928)  When using the vLLM Ascend mainline code to collect profiler data, remember to use the `--profiler-config` (online) parameter or the `profiler_config` (offline) parameter.
+> Note: **January 19, 2026: The vLLM mainline has deprecated the VLLM_TORCH_PROFILER_DIR environment variable.** [Related PR](https://github.com/vllm-project/vllm-ascend/pull/5928)  When using the vLLM Ascend mainline code to collect profiler data, remember to use the `--profiler-config` (online) parameter or the `profiler_config` (offline) parameter.
 
 ### 2. Start Collection
 
@@ -237,7 +237,7 @@ The symbols configuration file defines which functions/methods to profile and su
 
 ##### File Name and Loading
 
-- Default load path:`~/.config/vllm_ascend/service_profiling_symbols.MAJOR.MINOR.PATCH.yaml`( According to the installed version of vllm )
+- Default load path: `~/.config/vllm_ascend/service_profiling_symbols.MAJOR.MINOR.PATCH.yaml` (According to the installed version of vllm)
 
 If you need to customize the profiling points, it is highly recommended to copy a symbol configuration file to your working directory and point to it with the `PROFILING_SYMBOLS_PATH` environment variable.
 

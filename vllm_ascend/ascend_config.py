@@ -162,6 +162,12 @@ class AscendConfig:
             ascend_envs.VLLM_ASCEND_ENABLE_FUSED_MC2,
         )
         assert self.enable_fused_mc2 in (0, 1), f"enable_fused_mc2 must be 0 or 1, got {self.enable_fused_mc2}"
+        if self.enable_fused_mc2 == 1 and self.multistream_overlap_shared_expert:
+            self.multistream_overlap_shared_expert = False
+            logger.warning_once(
+                "VLLM_ASCEND_ENABLE_FUSED_MC2 (fused mc2) and multistream_overlap_shared_expert "
+                "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
+            )
         self.enable_mlapo = self._get_config_value(
             additional_config,
             "enable_mlapo",
@@ -680,6 +686,65 @@ class ProfilingChunkConfig:
             raise ValueError(f"Recommend to use at least 30 data points for fitting, got {self.max_fit_chunk}")
 
 
+class BatchJobSchedConfig:
+    """Configuration for batch-job-aware scheduler.
+
+    All parameters can be configured via ``additional_config.batch_job_sched_config``
+    in the vLLM config.
+
+    Usage (offline)::
+
+        llm = LLM(model, additional_config={"batch_job_sched_config": {"enabled": true}})
+    """
+
+    def __init__(self, config: dict | None = None):
+        if config is None:
+            config = {}
+
+        # Enable batch-job-aware scheduler
+        self.enabled: bool = config.get("enabled", False)
+
+        # Maximum number of tracked jobs (0 = unlimited)
+        self.max_jobs: int = int(config.get("max_jobs", 20))
+
+        # Extra block margin added to the reserve as safety buffer
+        self.reserve_margin_blocks: int = int(config.get("reserve_margin_blocks", 2))
+
+        # Maximum number of blocks that can be reserved
+        self.reserve_max_blocks: int = int(config.get("reserve_max_blocks", 8))
+
+        # Threshold for prioritizing long vs short decode jobs
+        self.low_available_tokens_threshold: int = int(config.get("low_available_tokens_threshold", 4096))
+
+        # Threshold for identifying short decoding jobs
+        self.short_decode_token_threshold: int = int(config.get("short_decode_token_threshold", 32))
+
+        self._validate()
+
+    def _validate(self) -> None:
+        """Validate the validity of configuration parameters."""
+        if self.max_jobs < 0:
+            raise ValueError(f"batch_job_sched_config.max_jobs must be non-negative, got {self.max_jobs}")
+        if self.reserve_margin_blocks < 0:
+            raise ValueError(
+                f"batch_job_sched_config.reserve_margin_blocks must be non-negative, got {self.reserve_margin_blocks}"
+            )
+        if self.reserve_max_blocks <= 0:
+            raise ValueError(
+                f"batch_job_sched_config.reserve_max_blocks must be positive, got {self.reserve_max_blocks}"
+            )
+        if self.low_available_tokens_threshold <= 0:
+            raise ValueError(
+                f"batch_job_sched_config.low_available_tokens_threshold must be positive, "
+                f"got {self.low_available_tokens_threshold}"
+            )
+        if self.short_decode_token_threshold <= 0:
+            raise ValueError(
+                f"batch_job_sched_config.short_decode_token_threshold must be positive, "
+                f"got {self.short_decode_token_threshold}"
+            )
+
+
 class RejectionSamplerConfig:
     """Configuration for Block Verify and Entropy Verify in Rejection Sampler.
 
@@ -872,6 +937,9 @@ class SchedulerConfig:
         )
         self.profiling_chunk_config = ProfilingChunkConfig(
             self._get_config_value(scheduler_config, additional_config, "profiling_chunk_config", {})
+        )
+        self.batch_job_sched_config = BatchJobSchedConfig(
+            self._get_config_value(scheduler_config, additional_config, "batch_job_sched_config", {})
         )
 
     @staticmethod
