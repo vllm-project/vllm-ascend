@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import markdown
+import markdown  # type: ignore[import-untyped]
 import pytest
-from mkdocs.config import load_config
+from mkdocs.config import load_config  # type: ignore[import-not-found]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MKDOCS_CONFIG = REPO_ROOT / "mkdocs.yml"
