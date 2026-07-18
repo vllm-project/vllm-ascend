@@ -254,18 +254,17 @@ vllm serve your_model_path \
     export ASCEND_RT_VISIBLE_DEVICES=0,1
 
     vllm serve your_model_path  \
-      --host 127.0.0.1 \
-      --port 8080 \
-      --tensor-parallel-size 2 \
-      --gpu-memory-utilization 0.90 \
-      --max-num-seqs 16 \
-      --served-model-name qwen3.6 \
-      --dtype float16 \
-      --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
-      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}' \
-      --quantization ascend \
-      --max-model-len 16384 \
-      --no-enable-prefix-caching
+        --host 127.0.0.1 \
+        --port 8000 \
+        --tensor-parallel-size 2 \
+        --max-num-seqs 32 \
+        --served_model_name qwen3 \
+        --dtype float16 \
+        --quantization ascend \
+        --max-model-len 16384 \
+        --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,32]}' \
+        --no-enable-prefix-caching
     ```
 
     **Key parameters:**
