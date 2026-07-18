@@ -54,7 +54,12 @@ def test_draft_config_is_created_before_entering_eager_context():
     proposer.maybe_eager_context = _maybe_eager_context(vllm_config)
 
     observed_modes = []
-    proposer._create_draft_vllm_config = lambda: observed_modes.append(compilation_config.mode) or vllm_config
+
+    def create_draft_vllm_config():
+        observed_modes.append(compilation_config.mode)
+        return vllm_config
+
+    proposer._create_draft_vllm_config = create_draft_vllm_config
 
     def load_model(**kwargs):
         observed_modes.append(compilation_config.mode)
