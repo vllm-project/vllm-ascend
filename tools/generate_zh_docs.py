@@ -22,6 +22,8 @@ ZH_DIR = SOURCE_DIR / "zh"
 FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})[^\n]*$", re.MULTILINE)
 URL_RE = re.compile(r"https?://\S+")
 LINK_TARGET_RE = re.compile(r"\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+WHITESPACE_RE = re.compile(r"[ \t\n]+")
+MARKDOWN_BLOCK_PREFIX_RE = re.compile(r"(?:[-+*>#|]|\d+[.)])(?:\s|$)")
 
 
 def parse_po_file(po_path: Path) -> dict:
@@ -134,6 +136,34 @@ def _protected_ranges(text: str) -> list[tuple[int, int]]:
     return merged
 
 
+def _is_reflow_safe(msgid: str) -> bool:
+    """Return whether a multiline msgid is a reflowed prose paragraph.
+
+    Markdown block markers on continuation lines make line breaks semantic, so
+    those entries must keep using exact matching.
+    """
+    lines = msgid.splitlines()
+    return len(lines) > 1 and all(not MARKDOWN_BLOCK_PREFIX_RE.match(line.lstrip()) for line in lines[1:])
+
+
+def _reflowed_msgid_pattern(msgid: str) -> re.Pattern:
+    """Build a pattern that tolerates single prose line-wrap differences."""
+    parts = []
+    cursor = 0
+    for whitespace in WHITESPACE_RE.finditer(msgid):
+        parts.append(re.escape(msgid[cursor : whitespace.start()]))
+        value = whitespace.group()
+        if value.count("\n") <= 1:
+            # Match either spaces on one line or one wrapped line. Never cross
+            # a blank line, which would join separate Markdown blocks.
+            parts.append(r"(?:[ \t]+|[ \t]*\n[ \t]*)")
+        else:
+            parts.append(re.escape(value))
+        cursor = whitespace.end()
+    parts.append(re.escape(msgid[cursor:]))
+    return re.compile("".join(parts))
+
+
 def _apply_segment_translations(text: str, translations: list[tuple[str, str]]) -> str:
     """Apply the longest non-overlapping translations to the source once.
 
@@ -147,16 +177,27 @@ def _apply_segment_translations(text: str, translations: list[tuple[str, str]]) 
     for msgid, msgstr in translations:
         if not msgid.strip() or not msgstr.strip():
             continue
+        matches = []
         search_from = 0
         while True:
             start = text.find(msgid, search_from)
             if start == -1:
                 break
             end = start + len(msgid)
+            matches.append((start, end))
+            search_from = end
+
+        # PO entries can retain an older prose line wrapping even when the
+        # English paragraph is unchanged. Fall back to a whitespace-tolerant
+        # match for prose only; list, quote, table, and heading boundaries keep
+        # exact matching because their newlines are structural Markdown.
+        if not matches and _is_reflow_safe(msgid):
+            matches.extend(match.span() for match in _reflowed_msgid_pattern(msgid).finditer(text))
+
+        for start, end in matches:
             fully_protected = any(start >= range_start and end <= range_end for range_start, range_end in protected)
             if not fully_protected:
                 candidates.append((start, end, msgstr))
-            search_from = end
 
     # Prefer complete paragraphs over shorter msgids contained within them.
     candidates.sort(key=lambda item: (-(item[1] - item[0]), item[0]))

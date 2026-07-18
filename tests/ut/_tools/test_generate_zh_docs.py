@@ -45,3 +45,11 @@ def test_short_translations_do_not_modify_protected_spans():
     result = apply_translations(source, {"mode": "模式"})
 
     assert result == "Use 模式 with `mode`, [模式](https://example.com/mode), and ``mode``."
+
+
+def test_matches_translated_prose_after_source_line_reflow():
+    source = "Phase 3 removes the direct environment-variable read. Details in [Phased rollout](#phased-rollout)."
+    msgid = "Phase 3 removes the direct environment-variable read. Details in\n[Phased rollout](#phased-rollout)."
+    translation = "阶段 3 移除了直接环境变量读取。详情请参见[分阶段推出](#phased-rollout)。"
+
+    assert apply_translations(source, {msgid: translation}) == translation
