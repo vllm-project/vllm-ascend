@@ -230,7 +230,6 @@ export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=0
 
 vllm serve your_model_path \
     --served-model-name qwen3-omni \
@@ -246,7 +245,7 @@ vllm serve your_model_path \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.95 \
-    --additional-config '{"weight_nz_mode": 2}' \
+    --additional-config '{"enable_flashcomm1": false, "weight_nz_mode": 2}' \
     --port 8000 
 ```
 
@@ -483,7 +482,6 @@ export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=0
 
 vllm serve your_model_path \
     --served-model-name qwen3-omni \
@@ -498,7 +496,7 @@ vllm serve your_model_path \
     --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"weight_nz_mode": 2}' \
+    --additional-config '{"enable_flashcomm1": false, "weight_nz_mode": 2}' \
     --gpu-memory-utilization 0.95 \
     --port 8000 \
     --speculative-config '{"method": "eagle3","model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
@@ -557,7 +555,6 @@ export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=0
 
 vllm serve your_model_path \
     --served-model-name qwen3-omni \
@@ -572,7 +569,7 @@ vllm serve your_model_path \
     --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"weight_nz_mode": 2}' \
+    --additional-config '{"enable_flashcomm1": false, "weight_nz_mode": 2}' \
     --gpu-memory-utilization 0.95 \
     --port 8000 \
     --hf-overrides '{"rope_parameters": {"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}}'
