@@ -12,6 +12,13 @@ window.MathJax = {
 };
 
 document$.subscribe(() => {
+  if (
+    typeof MathJax === "undefined" ||
+    typeof MathJax.typesetPromise !== "function"
+  ) {
+    return
+  }
+
   MathJax.startup.output.clearCache()
   MathJax.typesetClear()
   MathJax.texReset()
