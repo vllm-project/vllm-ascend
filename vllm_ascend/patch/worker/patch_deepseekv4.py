@@ -62,15 +62,6 @@ from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import enable_dsa_cp
 
 
-# ---------------------------------------------------------------------------
-# AFD P2P Custom Ops
-# ---------------------------------------------------------------------------
-# Dynamo 无法 trace P2P 通信中的 pickle.dumps (用于 metadata 序列化)。
-# 将 attention 侧的 P2P send/recv 注册为 custom op, Dynamo 会将其视为
-# 不透明图节点 (通过 fake_impl 提供 shape 推断), 不再尝试 trace 内部逻辑。
-# 这样 AFD 模型 forward 可以被 aot_compile / npugraph 正常编译, 与非 AFD
-# 路径一致。FFN 侧使用 NPUGraph 捕获 (不走 Dynamo), 无需此处理。
-
 def afd_p2p_send_attn_output(
     hidden_states: torch.Tensor,
     input_ids: Optional[torch.Tensor],

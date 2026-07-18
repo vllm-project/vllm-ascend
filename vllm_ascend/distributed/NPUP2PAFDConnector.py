@@ -152,19 +152,12 @@ class NPUP2PAFDConnector(AFDConnectorBase):
                 timeout=timeout  # TODO(yxj):use timeout set
             )
 
-        # The first min_size Attention ranks send metadata to multiple FFN
-        # ranks (1-to-N mapping): attn_i sends to every ffn_j where
-        # j % min_size == i.
         if self.is_attn_top_min_size_rank(self.rank):
             local_attn_rank = self.rank
             dst = local_attn_rank
             while dst < self.ffn_size:
                 self.dst_list.append(dst)
                 dst += self.min_size
-        # logger.info(
-        #     f"[p2p] world_rank={self.rank}, p2p_rank={self.p2p_rank}, "
-        #     f"min_size={self.min_size}, dst_list={self.dst_list}, "
-        #     f"npu p2p connector initialized")
 
         default_pg_switcher = DefaultProcessGroupSwitcher(
             _get_default_group(), afd_pg)
@@ -173,11 +166,6 @@ class NPUP2PAFDConnector(AFDConnectorBase):
             for i in range(len(ffn_ranks)):
                 ranks = list([attn_ranks[i], ffn_ranks[i]])
                 sub_group_ranks.append(ranks)
-            # Create two independent groups:
-            # a2e_group: attention -> expert/ffn (send_attn, recv_attn)
-            # e2a_group: expert/ffn -> attention (send_ffn, recv_ffn)
-            # The rank range is the same, but a different group_name creates
-            # independent communicator instances.
             self.a2e_group = init_model_parallel_group(sub_group_ranks,
                                                        self.local_rank,
                                                        backend=self.backend,
@@ -205,6 +193,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
             tensor_dict: dict[str, torch.Tensor],
             dst: int,
             process_group: GroupCoordinator,
+            p2p_group: GroupCoordinator,
     ) -> list:
         """Asynchronously send a tensor dictionary.
 
@@ -218,52 +207,31 @@ class NPUP2PAFDConnector(AFDConnectorBase):
         """
         if not torch.distributed.is_initialized() or process_group.world_size == 1:
             return []
-
         assert dst < process_group.world_size, f"Invalid dst rank ({dst})"
 
-        # Split tensor dictionary into metadata and tensor list
         metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
-
-        # Send metadata first (synchronously, as metadata is small and on CPU)
         process_group.send_object(metadata_list, dst=dst)
-        # logger.info(f"[p2p] _send_tensor_dict_async send_object success, metadata_list={metadata_list}")
-
         work_list = []
-        group = process_group.device_group
-        metadata_group = process_group.cpu_group
-
         for tensor in tensor_list:
             if tensor.numel() == 0:
                 # Skip empty tensors
                 continue
-
-            if tensor.is_cpu:
-                # CPU tensor uses metadata_group
-                work = torch.distributed.send(
-                    tensor, dst=process_group.ranks[dst], group=metadata_group
-                )
-            else:
-                # GPU tensor uses device_group
-                work = torch.distributed.send(
-                    tensor, dst=process_group.ranks[dst], group=group
-                )
-            work_list.append(work)
-        # logger.info(f"[p2p] _send_tensor_dict_async send success")
-
+            num = torch.distributed.send(tensor, dst=p2p_group.ranks[dst], group=p2p_group)
+            work_list.append(num)
         return work_list
 
     def _recv_tensor_dict_async(
             self,
             src: int,
             process_group: GroupCoordinator,
-            all_gather_group: Optional["GroupCoordinator"] = None,
+            p2p_group: GroupCoordinator,
     ) -> tuple[dict[str, torch.Tensor | Any], list]:
         """Asynchronously receive a tensor dictionary.
 
         Args:
             src: Source rank (local rank)
             process_group: The process group to use for communication
-            all_gather_group: Group for all-gather optimization
+            p2p_group: The process group to use for communication
 
         Returns:
             tuple: (tensor_dict, work_list) - tensor dictionary and work object list
@@ -273,12 +241,8 @@ class NPUP2PAFDConnector(AFDConnectorBase):
 
         assert src < process_group.world_size, f"Invalid src rank ({src})"
 
-        # Receive metadata first synchronously (need to know tensor shape and type)
         recv_metadata_list = process_group.recv_object(src=src)
 
-        # logger.info(f"[p2p] _recv_tensor_dict_async recv_object success, metadata_list={recv_metadata_list}")
-
-        # Create empty tensor dictionary and work list
         tensor_dict: dict[str, Any] = {}
         work_list = []
         group = process_group.device_group
@@ -293,24 +257,11 @@ class NPUP2PAFDConnector(AFDConnectorBase):
                     # Skip empty tensors
                     tensor_dict[key] = tensor
                     continue
-
-                # Asynchronously receive tensor
-                if tensor.is_cpu:
-                    # CPU tensor uses metadata_group
-                    work = torch.distributed.recv(
-                        tensor, src=process_group.ranks[src], group=metadata_group
-                    )
-                else:
-                    # GPU tensor uses device_group
-                    work = torch.distributed.recv(
-                        tensor, src=process_group.ranks[src], group=group
-                    )
+                work = torch.distributed.recv(tensor, src=p2p_group.ranks[src], group=p2p_group)
                 work_list.append(work)
                 tensor_dict[key] = tensor
             else:
-                # Non-tensor values are added directly
                 tensor_dict[key] = value
-        # logger.info(f"[p2p] _recv_tensor_dict_async recv success")
         return tensor_dict, work_list
 
     def configure_metadata(self, metadata: Optional["AFDConnectorMetadata"],
@@ -336,22 +287,15 @@ class NPUP2PAFDConnector(AFDConnectorBase):
             **kwargs
         )
         try:
-            # Use async send instead of sync send
-            # Use a2e_group for attention -> expert/ffn communication
-            # self.current_stream_synchronize(self.backend)
             dst = (self.a2e_group.rank_in_group + 1) % self.a2e_group.world_size
-            work_list = self._send_tensor_dict_async(
+            logger.info(f"send_attn_output: dst={dst}")
+            self._send_tensor_dict_async(
                 intermediate_tensors.tensors,
                 dst=dst,
-                process_group=groupEp,
+                process_group=self.a2e_group,
+                p2pgroup=groupEp,
             )
-            # work_list can be used for waiting later if we need to ensure send completion
-            # Here we don't wait, letting the send proceed asynchronously in the background
-            # self.a2e_group.send_object(metadata, dst)
-            # if metadata is not None:
-            #     metadata.send_handle_list = work_list
-
-            return hidden_states, work_list
+            return hidden_states
         except Exception as e:
             raise RuntimeError(f"Communication error: {e}")
 
@@ -364,18 +308,13 @@ class NPUP2PAFDConnector(AFDConnectorBase):
         groupEp = _get_group_ep(ubatch_idx, self.hccl_comm_name, self.hccl_comm_name2, self.hccl_comm_name3)
 
         src = (self.a2e_group.rank_in_group - 1) % self.a2e_group.world_size
+        logger.info(f"recv_attn_output: src={src}")
         intermediate_tensors, work_list = self._recv_tensor_dict_async(
             src=src,
-            process_group=groupEp,
-            all_gather_group=None,
+            process_group=self.a2e_group,
+            p2p_group=groupEp,
         )
 
-        # metadata = self.a2e_group.recv_object(src)
-        # if metadata is not None:
-        #     metadata.recv_handle_list = work_list
-        # else:
-        #     for work in work_list:
-        #         work.wait()
         if self.backend == "hccl":
             recv_input_ids = intermediate_tensors["input_ids"]
             if recv_input_ids is not None:
@@ -413,16 +352,13 @@ class NPUP2PAFDConnector(AFDConnectorBase):
             }
         )
         dst = (self.e2a_group.rank_in_group + 1) % self.e2a_group.world_size
-        work_list = self._send_tensor_dict_async(
+        logger.info(f"send_ffn_output: dst={dst}")
+        self._send_tensor_dict_async(
             intermediate_tensors.tensors,
             dst=dst,
-            process_group=groupEp,
+            process_group=self.e2a_group,
+            p2pgroup=groupEp,
         )
-        # work_list can be used for waiting later if we need to ensure send completion
-        # Here we don't wait, letting the send proceed asynchronously in the background
-        # self.e2a_group.send_object(metadata, dst)
-        # if metadata is not None:
-        #     metadata.send_handle_list = work_list
 
     def recv_ffn_output(self,
                         hidden_states: Optional[torch.Tensor] = None,
@@ -431,20 +367,12 @@ class NPUP2PAFDConnector(AFDConnectorBase):
         groupEp = _get_group_ep(ubatch_idx, self.hccl_comm_name, self.hccl_comm_name2, self.hccl_comm_name3)
         # Use e2a_group for expert/ffn -> attention communication
         src = (self.e2a_group.rank_in_group - 1) % self.e2a_group.world_size
-        # Use async receive for tensor_dict
+        logger.info(f"recv_ffn_output: src={src}")
         intermediate_tensors, work_list = self._recv_tensor_dict_async(
             src=src,
-            process_group=groupEp,
+            process_group=self.e2a_group,
             all_gather_group=None,
         )
-        # Asynchronously receive independent metadata
-        # metadata = self.e2a_group.recv_object(src)
-        # # Wait for tensor receive completion (because we need to use data immediately)
-        # if metadata is not None:
-        #     metadata.recv_handle_list = work_list
-        # else:
-        #     for work in work_list:
-        #         work.wait()
         recv_hs = intermediate_tensors["hidden_states"]
         return recv_hs
 
