@@ -45,7 +45,6 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 import torch_npu
-from torch import nn
 from torch.nn.parameter import Parameter
 from vllm.distributed import (
     split_tensor_along_last_dim,
@@ -56,7 +55,6 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
 from vllm.model_executor.models.utils import extract_layer_index
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.distributed.parallel_state import (
     get_mlp_tp_group,
@@ -475,13 +473,7 @@ def _get_column_parallel_op(
 
 def _get_row_parallel_op(
     prefix, layer
-) -> (
-    MLPRowParallelOp
-    | OProjRowParallelOp
-    | DSV4OProjRowParallelOp
-    | SequenceRowParallelOp
-    | None
-):
+) -> MLPRowParallelOp | OProjRowParallelOp | DSV4OProjRowParallelOp | SequenceRowParallelOp | None:
     if "wo_b" in prefix and oproj_tp_enable():
         return DSV4OProjRowParallelOp(layer)
     if "down_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):

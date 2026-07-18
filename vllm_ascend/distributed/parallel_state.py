@@ -133,6 +133,7 @@ def init_ascend_model_parallel(
     if mlp_tp_size > 0:
         _MLP_TP = _create_or_get_group(mlp_tp_size, "mlptp")
 
+
 def model_parallel_initialized():
     return _MC2 is not None
 
