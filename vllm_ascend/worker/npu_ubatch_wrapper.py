@@ -216,7 +216,7 @@ class UBatchWrapper(GPUUBatchWrapper):
             ubatch_threads = []
             for metadata in ubatch_metadata:
                 if metadata.num_tokens > 0:
-                    logger.info(f"metadata.context.id {metadata.context.id} num_tokens {metadata.num_tokens} model {model}")
+                    logger.info(f"UBatchWrapper _run_ubatches metadata.context.id {metadata.context.id} num_tokens {metadata.num_tokens}")
                     thread = threading.Thread(target=_ubatch_thread,
                                             args=(results, model, metadata))
                     ubatch_threads.append(thread)
@@ -450,5 +450,5 @@ class UBatchWrapper(GPUUBatchWrapper):
                 batch_descriptor=batch_descriptor,
                 aclgraph_runtime_mode=CUDAGraphMode.NONE,
                 afd_metadata=afd_metadata)
-            logger.info('_call__ ubatch_metadata: %s', ubatch_metadata)
+            logger.info('UBatchWrapper _call__ ubatch_metadata: %s', ubatch_metadata)
             return self._run_ubatches(ubatch_metadata, self.runnable)
