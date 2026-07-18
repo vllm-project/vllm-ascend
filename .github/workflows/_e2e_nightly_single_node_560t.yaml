@@ -98,6 +98,7 @@ jobs:
     env:
       HF_HUB_OFFLINE: 1
       VLLM_USE_MODELSCOPE: True
+      HCCL_IF_BASE_PORT: 55000
       UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
       UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
       UV_INDEX_STRATEGY: unsafe-best-match
@@ -138,7 +139,7 @@ jobs:
 
       - name: Set MAX_JOBS based on runner
         run: |
-          CARDS=$(echo "${{ inputs.runner }}" | grep -oE '[0-9]+$')
+          CARDS=$(echo "${{ inputs.runner }}" | sed -E 's/.*a3-([0-9]+).*/\1/')
           echo "MAX_JOBS=$((CARDS * 23))" >> $GITHUB_ENV
 
       - name: Install vllm-project/vllm-ascend

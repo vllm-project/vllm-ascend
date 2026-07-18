@@ -220,7 +220,7 @@ jobs:
 
           benchmark_job_name="${{ steps.vars.outputs.benchmark_job_name }}"
 
-          jinja2 tests/e2e/nightly/multi_node/scripts/lws.yaml.jinja2 \
+          jinja2 tests/e2e/nightly/multi_node/scripts/lws_560t.yaml.jinja2 \
             -D lws_name="$LWS_NAME" \
             -D log_prefix="$LOG_PREFIX" \
             -D size="$size" \
