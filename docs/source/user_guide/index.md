@@ -2,7 +2,7 @@
 
 This section provides comprehensive documentation for using vLLM Ascend in production environments.
 
-## support_matrix
+## Support Matrix
 
 - **[Supported Models](support_matrix/supported_models.md)** — Models supported by vLLM Ascend
 - **[Supported Features](support_matrix/supported_features.md)** — Features supported on Ascend NPU
