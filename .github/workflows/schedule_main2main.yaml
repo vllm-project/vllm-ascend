@@ -43,7 +43,7 @@ env:
 
 jobs:
   main2main:
-    runs-on: linux-aarch64-a2b3-8
+    runs-on: linux-aarch64-a2b1-8
     timeout-minutes: 2880
     concurrency:
       group: main2main
@@ -142,7 +142,7 @@ jobs:
           if [ -s "$GITHUB_WORKSPACE/packages.txt" ]; then
             xargs -r apt-get -y install < "$GITHUB_WORKSPACE/packages.txt"
           fi
-          apt-get -y install git curl ca-certificates gcc g++ cmake libnuma-dev clang-15 jq gh
+          apt-get -y install git curl ca-certificates gcc g++ cmake libnuma-dev clang-15 jq gh shellcheck
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -460,5 +460,5 @@ jobs:
           print_group "Manual review issue" /tmp/main2main-manual-review.md
           gh issue create \
             --repo "${UPSTREAM_REPO}" \
-            --title "main2main manual review required (${SHORT_NEW})" \
+            --title "[main2main] main2main manual review required (${SHORT_NEW})" \
             --body-file /tmp/main2main-manual-review.md
