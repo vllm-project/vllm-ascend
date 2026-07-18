@@ -34,6 +34,7 @@ jobs:
     name: test
     runs-on: linux-aarch64-a5-${{ matrix.npus }}
     strategy:
+      fail-fast: false
       matrix:
         npus: [2,4,8]
     container:
