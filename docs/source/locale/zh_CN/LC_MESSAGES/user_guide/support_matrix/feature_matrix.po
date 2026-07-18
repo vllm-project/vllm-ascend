@@ -18,8 +18,8 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: detect_po_changes.py\n"
 
-msgid "# Feature × Feature"
-msgstr "# 功能 × 功能"
+msgid "# feature_matrix"
+msgstr "# 功能矩阵"
 
 msgid ""
 "The table below shows mutually exclusive features and the support on Ascend "

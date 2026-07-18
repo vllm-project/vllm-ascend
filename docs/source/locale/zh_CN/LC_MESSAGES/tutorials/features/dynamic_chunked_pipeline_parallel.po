@@ -87,7 +87,7 @@ msgid ""
 "For configuration details, see the [Feature "
 "Guide](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md)."
 msgstr ""
-"配置详情请参阅[功能指南](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md)。"
+"配置详情请参阅[特性指南](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md)。"
 
 msgid "### Online Calibration"
 msgstr "### 在线校准"

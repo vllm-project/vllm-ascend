@@ -49,7 +49,7 @@ msgstr ""
 "- **[附加配置](configuration/additional_config.md)** — 其他配置选项"
 
 msgid "## Feature Guide"
-msgstr "## 功能指南"
+msgstr "## 特性指南"
 
 msgid ""
 "Explore detailed guides for vLLM Ascend features including graph mode, CPU "

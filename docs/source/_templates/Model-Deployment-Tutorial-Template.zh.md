@@ -243,11 +243,11 @@ lm_eval \
 
 **资料写作要求：**
 
-若不涉及特殊调优可直接给出特性叠加表和公共性能调优文档链接供参考。
+若不涉及特殊调优可直接给出特性叠加表和优化与调优链接供参考。
 
 **示例：**
 
-请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)获得调优方法。
+请参考[优化与调优](../../developer_guide/performance_and_debug/optimization_and_tuning.md)获得调优方法。
 请参考[特性指南](../../user_guide/support_matrix/feature_matrix.md)获得详细特性说明。
 
 #### 9.2.2  模型特有优化（可选）

@@ -111,7 +111,7 @@ Expected result: The version information for both packages is displayed, confirm
 
 For more details, please refer to the [Installation Guide](../../installation.md).
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
 

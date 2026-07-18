@@ -80,7 +80,7 @@ vllm serve ${MODEL_PATH} \
     --served-model-name Hunyuan \
     --tensor-parallel-size 4 \
     --max-model-len 32768 \
-    --gpu-memory-utilization 0.90 \
+    --gpu-memory-utilization 0.90
 ```
 
 ### Key Performance Indicators
