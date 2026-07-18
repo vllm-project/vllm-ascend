@@ -249,7 +249,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
             patch(
                 "vllm_ascend.device.device_op.torch_npu.npu_kv_quant_sparse_flash_attention",
                 create=True,
-                side_effect=AssertionError("C8 SFA must use the custom op"),
+                side_effect=AssertionError("Base must use _C_ascend custom op"),
             ),
         ):
             result = impl._execute_sparse_flash_attention_process(
