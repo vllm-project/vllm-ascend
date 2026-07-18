@@ -133,7 +133,6 @@ def set_ascend_forward_context(
         forward_context.mmrs_fusion = mmrs_fusion
         forward_context.num_tokens = num_tokens
         forward_context.flash_comm_v1_enabled = flash_comm_v1_enabled
-        forward_context.flashcomm_v2_enabled = False
 
         forward_context.pad_size = 0
         if forward_context.flash_comm_v1_enabled:
@@ -162,7 +161,7 @@ def set_ascend_forward_context(
         if dp_world_size > 1 and forward_context.dp_metadata is not None:
             dp_meta = forward_context.dp_metadata
             max_tokens_across_dp = dp_meta.num_tokens_across_dp_cpu.max().item()
-            if forward_context.flash_comm_v1_enabled or forward_context.flashcomm_v2_enabled:
+            if forward_context.flash_comm_v1_enabled:
                 padded_length = (max_tokens_across_dp + tp_world_size - 1) // tp_world_size * tp_world_size
                 pad_size = padded_length - num_tokens
                 forward_context.padded_length = padded_length
@@ -351,7 +350,6 @@ class _ExtraForwardContextProxy:
         "mmrs_fusion",
         "num_tokens",
         "flash_comm_v1_enabled",
-        "flashcomm_v2_enabled",
         "pad_size",
         "padded_length",
         "num_tokens_across_dp",
