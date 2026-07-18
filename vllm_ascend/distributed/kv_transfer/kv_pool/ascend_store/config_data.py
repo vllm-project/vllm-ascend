@@ -1041,7 +1041,6 @@ class LayerBatchReqMeta:
     addr_array: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
     size_array: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
     gvas_array: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
-    save_keys: list[str] = field(default_factory=list)
     load_keys: list[str] = field(default_factory=list)
 
 

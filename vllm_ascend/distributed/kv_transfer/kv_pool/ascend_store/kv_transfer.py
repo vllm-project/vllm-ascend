@@ -287,7 +287,6 @@ class LayerBatchBuilder:
             addr_array=addr_array,
             size_array=size_array,
             gvas_array=gvas_array,
-            save_keys=shared.save_keys,
             load_keys=shared.load_keys,
         )
 
@@ -1379,8 +1378,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             for req_id in req_meta.req_ids:
                 self.dec_stored_request(req_id)
                 all_req_ids.append(req_id)
-            if req_meta.save_keys:
-                all_save_keys.extend(req_meta.save_keys)
+            all_save_keys.extend(shared.save_keys)
             all_gvas.append(req_meta.gvas_array)
             all_addrs.append(req_meta.addr_array)
             all_sizes.append(req_meta.size_array)
@@ -1409,12 +1407,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 logger.error("Layerwise %d save batch_copy failed with return code %d", physical_layer, res)
             if physical_layer == self.final_layer_id and all_save_keys:
                 save_keys = list(dict.fromkeys(all_save_keys))
-                self.m_store.batch_put_end(save_keys)
-                logger.info(
-                    "[KVPOOL] save_thread completed %d puts after final layer %d",
-                    len(save_keys),
-                    physical_layer,
-                )
+                self.m_store.batch_put_end(save_keys, [res] * len(save_keys))
             for req_id in all_req_ids:
                 if self.try_finish_and_delete_stored_request(req_id):
                     self.set_finished_request(req_id)
