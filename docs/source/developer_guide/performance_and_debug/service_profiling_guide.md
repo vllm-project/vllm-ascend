@@ -193,8 +193,6 @@ After parsing, the `output` directory will contain:
 
 ### 6. Appendix related to MS Service Profiler
 
-(profiling-configuration-file)=
-
 #### 6.1 Profiling Configuration File
 
 The profiling configuration file controls profiling parameters and behavior.
@@ -228,8 +226,6 @@ The configuration is in JSON format. Main parameters:
 ```
 
 ---
-
-(symbols-configuration-file)=
 
 #### 6.2 Symbols Configuration File
 
