@@ -13,7 +13,8 @@ MKDOCS_CONFIG = REPO_ROOT / "mkdocs.yml"
 @pytest.mark.parametrize(
     ("smart_enable", "source", "expected"),
     [
-        ("none", "通常**按需**发布", "<p>通常<strong>按需</strong>发布</p>"),
+        ("underscore", "通常**按需**发布", "<p>通常<strong>按需</strong>发布</p>"),
+        ("underscore", "配置 foo_bar_baz 即可", "<p>配置 foo_bar_baz 即可</p>"),
         ("all", "Typically **on demand** released", "<p>Typically <strong>on demand</strong> released</p>"),
     ],
 )
