@@ -404,6 +404,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         we share the target model's embedding layers with the draft model to save
         memory.
         """
+        # hack temporarily, specially for dspark now
+        if self.speculative_config.use_dspark():
+            return
         if get_pp_group().world_size == 1:
             if hasattr(target_language_model.model, "embed_tokens"):
                 target_embed_tokens = target_language_model.model.embed_tokens
@@ -468,7 +471,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     def _maybe_share_lm_head(self, model: nn.Module) -> None:
         # some model definition do not define lm_head explicitly
         # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
-        if self.method in ("eagle", "dflash"):
+        # hack temporarily, specially for dspark now
+        if self.method in ("eagle", "dflash") and not self.speculative_config.use_dspark():
             # For DFlash drafters trained with a reduced draft vocabulary, the
             # draft model ships its own lm_head of shape [draft_vocab_size,
             # hidden] whose rows map to a trained subset of the target vocab via

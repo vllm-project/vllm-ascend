@@ -144,3 +144,90 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid(
                 if q_idx > 0:
                     sample_out_idx = req_idx * num_speculative_tokens + (q_idx - 1)
                     tl.store(out_token_indices_ptr + sample_out_idx, query_out_idx)
+
+
+# TODO to delete
+def copy_and_expand_dflash_inputs_py(
+    # Inputs
+    next_token_ids,  # [num_reqs]
+    target_positions,  # [num_context]
+    context_slot_mapping,  # [num_context]
+    # Outputs
+    out_input_ids,  # [num_query_total]
+    out_context_positions,  # [num_context]
+    out_query_positions,  # [num_query_total]
+    out_context_slot_mapping,  # [num_context]
+    out_query_slot_mapping,  # [num_query_total]
+    out_token_indices,  # [num_reqs * num_speculative_tokens]
+    # Block table
+    block_table,  # [max_reqs, max_blocks]
+    block_table_stride,  # stride of block_table dim 0 (unused on host; parity)
+    # Metadata
+    query_start_loc,  # [num_reqs + 1]
+    seq_lens,  # [num_reqs]
+    num_rejected_tokens,  # [num_reqs] | None
+    # Scalars
+    parallel_drafting_token_id,
+    block_size,
+    num_query_per_req,
+    num_speculative_tokens,
+    total_input_tokens,  # unused (kernel declares it); parity
+    batch_size,
+    HAS_NUM_REJECTED=False,
+    SAMPLE_FROM_ANCHOR=False,
+):
+    """Host-side reference of ``copy_and_expand_dflash_inputs_kernel_single_grid``.
+
+    Same interface and logic as the triton kernel (parameters aligned 1:1), for
+    reuse from paths that run per kv-cache-group (e.g. DSpark, which has
+    multiple groups) instead of launching the fused single-block-table kernel.
+    ``block_table_stride`` and ``total_input_tokens`` are unused on host (the
+    kernel needs them for pointer arithmetic / grid sizing) but kept for
+    interface parity.
+    """
+    has_num_rejected = HAS_NUM_REJECTED
+    for req_idx in range(batch_size):
+        ctx_start = int(query_start_loc[req_idx].item())
+        ctx_end = int(query_start_loc[req_idx + 1].item())
+
+        out_context_positions[ctx_start:ctx_end] = target_positions[ctx_start:ctx_end]
+        out_context_slot_mapping[ctx_start:ctx_end] = context_slot_mapping[ctx_start:ctx_end]
+
+        if has_num_rejected:
+            num_rejected = int(num_rejected_tokens[req_idx].item())
+            valid_ctx_end = ctx_end - num_rejected
+        else:
+            num_rejected = 0
+            valid_ctx_end = ctx_end
+
+        seq_len = int(seq_lens[req_idx].item())
+        effective_seq_len = seq_len - num_rejected
+        last_pos = int(target_positions[valid_ctx_end - 1].item())
+
+        for q_idx in range(num_query_per_req):
+            query_out_idx = req_idx * num_query_per_req + q_idx
+
+            out_query_positions[query_out_idx] = last_pos + 1 + q_idx
+
+            query_cache_pos = effective_seq_len + q_idx
+            block_num_q = query_cache_pos // block_size
+            block_id_q = int(block_table[req_idx, block_num_q].item())
+            out_query_slot_mapping[query_out_idx] = (
+                block_id_q * block_size + (query_cache_pos % block_size)
+            )
+
+            if q_idx == 0:
+                out_input_ids[query_out_idx] = next_token_ids[req_idx]
+            else:
+                out_input_ids[query_out_idx] = parallel_drafting_token_id
+
+            # token_indices: map i-th sampled token -> its query position.
+            # DFlash (SAMPLE_FROM_ANCHOR=False): bonus at q_idx=0 is NOT sampled,
+            #   sample_out_idx = req*num_spec + (q_idx-1) (skips bonus).
+            # DSpark (SAMPLE_FROM_ANCHOR=True): anchor at q_idx=0 IS sampled,
+            #   sample_out_idx = req*num_spec + q_idx (includes anchor).
+            if SAMPLE_FROM_ANCHOR or q_idx > 0:
+                sample_out_idx = req_idx * num_speculative_tokens + (
+                    q_idx if SAMPLE_FROM_ANCHOR else (q_idx - 1)
+                )
+                out_token_indices[sample_out_idx] = query_out_idx

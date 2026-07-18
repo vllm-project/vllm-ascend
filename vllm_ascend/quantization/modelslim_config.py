@@ -632,6 +632,18 @@ class AscendModelSlimConfig(QuantizationConfig):
                 for candidate in (prefix.replace("model.layers.", "language_model.model.layers.", 1),):
                     if self._has_quant_weight(candidate, packed_modules_mapping):
                         return candidate
+        # jjz
+        # ======================= 新增: DeepSeek MTP 层名称映射 =======================
+        # 将 vllm 里的 model.layers.43 转换为量化配置里的 mtp.0
+        match = re.search(r"model\.layers\.(\d+)", prefix)
+        if match:
+            layer_idx = int(match.group(1))
+            if layer_idx >= 43:
+                mtp_idx = layer_idx - 43
+                # 替换前缀，比如将 model.layers.43 替换为 mtp.0
+                prefix = prefix.replace(f"model.layers.{layer_idx}", f"mtp.{mtp_idx}")
+        # ============================================================================
+        # jjz
         return prefix
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str, tid2eid=None) -> Optional["QuantizeMethodBase"]:
