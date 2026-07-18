@@ -27,8 +27,10 @@ We're excited to announce v0.23.0rc1, the first release candidate for the vLLM A
 
 ### Stability and Bug Fixes
 
-- Fixed PD, PCP, and DCP accuracy regressions in the GDN path. [#12027](https://github.com/vllm-project/vllm-ascend/pull/12027)
+- Restored the pre-#12027 model-runner graph-dispatch behavior while the remaining GDN correctness work continues to be validated. [#12283](https://github.com/vllm-project/vllm-ascend/pull/12283)
 - Fixed the DeepSeek V4 Flash Float8/Bool promotion failure reported in [#11498](https://github.com/vllm-project/vllm-ascend/issues/11498) and backported the correction to the release branch. [#11663](https://github.com/vllm-project/vllm-ascend/pull/11663) [#11718](https://github.com/vllm-project/vllm-ascend/pull/11718)
+- Fixed the AscendStore parent-block hash chain when a KV block group is only partially missing. [#12252](https://github.com/vllm-project/vllm-ascend/pull/12252)
+- Disabled shared-expert multistream overlap when fused MC2 is enabled to avoid an unsupported configuration. [#12245](https://github.com/vllm-project/vllm-ascend/pull/12245)
 - Fixed DCP/DP service hangs and restricted the recompute scheduler to decode nodes. [#12034](https://github.com/vllm-project/vllm-ascend/pull/12034) [#11490](https://github.com/vllm-project/vllm-ascend/pull/11490)
 - Fixed layerwise KV Pool indexing when MTP is enabled and delayed AscendStore initialization until the first real decode request. [#11829](https://github.com/vllm-project/vllm-ascend/pull/11829) [#11673](https://github.com/vllm-project/vllm-ascend/pull/11673)
 - Fixed low MTP acceptance rates for SFA with DSA-CP and multiple speculative tokens. [#10878](https://github.com/vllm-project/vllm-ascend/pull/10878)
@@ -45,8 +47,9 @@ We're excited to announce v0.23.0rc1, the first release candidate for the vLLM A
 ### Known Issues
 
 - The fix for the A3 DCP replicated-indexer startup assertion is included in [#11981](https://github.com/vllm-project/vllm-ascend/pull/11981), but the exact configuration reported in [#12102](https://github.com/vllm-project/vllm-ascend/issues/12102) still needs verification.
+- Qwen3.5 GDN PCP/DCP accuracy and `FULL_DECODE_ONLY` tail-prefill behavior have not completed target-hardware validation. Candidate fixes are tracked in [#12255](https://github.com/vllm-project/vllm-ascend/pull/12255) and [#12297](https://github.com/vllm-project/vllm-ascend/pull/12297).
+- With a layerwise KV connector, compiled hybrid GDN execution can leave a decode request waiting for an unsubmitted cache group. The release-branch candidate fix is tracked in [#12264](https://github.com/vllm-project/vllm-ascend/pull/12264).
 - The load-balance proxy can swallow decode errors and return an empty HTTP 200 response. [#12166](https://github.com/vllm-project/vllm-ascend/issues/12166)
-- AscendStore can generate an incorrect parent-block hash for partially missing KV blocks. [#12002](https://github.com/vllm-project/vllm-ascend/issues/12002)
 
 ## v0.22.1rc1 - 2026.06.30
 
