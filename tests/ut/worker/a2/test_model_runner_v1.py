@@ -158,6 +158,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             dtype=torch.bfloat16,
             cache_dtype_str="auto",
             cache_sparse_sfa_c8=True,
+            cache_sparse_li_c8=True,
             c8_k_cache_dtype=torch.int8,
             c8_k_scale_cache_dtype=torch.float16,
             sfa_dcp_replicated_indexer_size=dcp_size,
