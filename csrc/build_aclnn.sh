@@ -8,6 +8,29 @@ log() {
     echo "[build_aclnn] $*"
 }
 
+resolve_soc_family() {
+    local soc_version
+    soc_version=$(echo "${1:-}" | tr '[:upper:]' '[:lower:]')
+
+    case "${soc_version}" in
+        310p|ascend310*)
+            echo "ascend310p"
+            ;;
+        910b|ascend910b*)
+            echo "ascend910b"
+            ;;
+        910c|ascend910_93*)
+            echo "ascend910_93"
+            ;;
+        ascend950*)
+            echo "ascend950"
+            ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
+
 setup_catlass_dependency() {
     local catlass_path="${ROOT_DIR}/csrc/third_party/catlass/include"
     local catlass_commit
@@ -56,6 +79,7 @@ log_selected_ops() {
     local kernel_cpp_file_count
 
     log "resolved SOC_ARG=${SOC_ARG}"
+    log "resolved SOC_FAMILY=${SOC_FAMILY}"
     log "resolved CUSTOM_OPS=${CUSTOM_OPS}"
     log "custom op count=${#CUSTOM_OPS_ARRAY[@]}"
     for op_name in "${CUSTOM_OPS_ARRAY[@]}"; do
@@ -75,7 +99,9 @@ log_selected_ops() {
 log "start: ROOT_DIR=${ROOT_DIR:-<unset>} SOC_VERSION=${SOC_VERSION:-<unset>} cwd=$(pwd)"
 log "env: ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-<unset>} ASCEND_TOOLKIT_HOME=${ASCEND_TOOLKIT_HOME:-<unset>}"
 
-if [[ "$SOC_VERSION" =~ ^ascend310 ]]; then
+SOC_FAMILY=$(resolve_soc_family "${SOC_VERSION}")
+
+if [[ "$SOC_FAMILY" == "ascend310p" ]]; then
     log "matched SOC branch: ascend310"
     # ASCEND310P series
     # dependency: catlass
@@ -88,8 +114,8 @@ if [[ "$SOC_VERSION" =~ ^ascend310 ]]; then
         "chunk_gated_delta_rule_fwd_h"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
-    SOC_ARG="ascend310p"
-elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
+    SOC_ARG="${SOC_FAMILY}"
+elif [[ "$SOC_FAMILY" == "ascend910b" ]]; then
     log "matched SOC branch: ascend910b"
     # ASCEND910B (A2) series
     # dependency: catlass
@@ -130,6 +156,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "reshape_and_cache_bnsd"
         "recurrent_gated_delta_rule"
         "fused_gdn_gating"
+        "solve_tri"
         "ngram_spec_decode"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
@@ -138,8 +165,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
-    SOC_ARG="ascend910b"
-elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
+    SOC_ARG="${SOC_FAMILY}"
+elif [[ "$SOC_FAMILY" == "ascend910_93" ]]; then
     log "matched SOC branch: ascend910_93"
     # ASCEND910C (A3) series
     # dependency: catlass
@@ -183,6 +210,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "reshape_and_cache_bnsd"
         "recurrent_gated_delta_rule"
         "fused_gdn_gating"
+        "solve_tri"
         "ngram_spec_decode"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
@@ -190,8 +218,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "store_kv_block_metadata"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
-    SOC_ARG="ascend910_93"
-elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
+    SOC_ARG="${SOC_FAMILY}"
+elif [[ "$SOC_FAMILY" == "ascend950" ]]; then
     log "matched SOC branch: ascend950"
     # ASCEND950 (A5) series
     # dependency: catlass
@@ -224,7 +252,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
-    SOC_ARG="ascend950"
+    SOC_ARG="${SOC_FAMILY}"
 else
     # others
     # currently, no custom aclnn ops for other series
@@ -253,7 +281,13 @@ log_selected_ops
   log "subshell cwd before cd=$(pwd)"
   cd "${ROOT_DIR}/csrc"
   log "subshell cwd after cd=$(pwd)"
-  log "preserving csrc/build and cleaning output dirs"
+  build_signature="${SOC_ARG}|${CUSTOM_OPS}"
+  build_signature_file="build/.vllm_ascend_aclnn_build_signature"
+  if [[ -f "${build_signature_file}" ]] && [[ "$(cat "${build_signature_file}")" != "${build_signature}" ]]; then
+    log "build signature changed from $(cat "${build_signature_file}") to ${build_signature}; cleaning csrc/build"
+    rm -rf -- build
+  fi
+  log "preserving compatible csrc/build cache and cleaning output dirs"
   rm -rf -- output build_out
 
   : "${CUSTOM_OPS:?CUSTOM_OPS is not set}"
@@ -264,6 +298,8 @@ log_selected_ops
   log "building custom ops ${CUSTOM_OPS} for ${SOC_VERSION}"
   bash build.sh --pkg --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}"
   log "build.sh finished"
+  mkdir -p -- build
+  printf '%s\n' "${build_signature}" > "${build_signature_file}"
 
   custom_ops_install_dir="${ROOT_DIR}/vllm_ascend/_cann_ops_custom"
   log "custom_ops_install_dir=${custom_ops_install_dir}"
