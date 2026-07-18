@@ -76,7 +76,7 @@ Select an image based on your machine type and start the docker image on your no
 
 After a successful docker run, you can verify the running container service by executing the `docker ps` command.
 
-### 4.2 Source Code Installation
+### 4.2 Source Code Installation {: #42-source-code-installation }
 
 If you don't want to use the docker image as above, you can also build all from source:
 

@@ -2246,7 +2246,7 @@ msgid ""
 msgstr ""
 "- 提升了 DeepSeek V3.2 的性能，请参考 [教程](https://github.com/vllm-project/vllm-ascend/blob/v0.13.0rc1/docs/source/tutorials/DeepSeek-V3.2.md)\n"
 "- 现在支持 Qwen3-Next MTP 与 chunked prefill [#4770](https://github.com/vllm-project/vllm-ascend/pull/4770)，请参考 [教程](https://github.com/vllm-project/vllm-ascend/blob/v0.13.0rc1/docs/source/tutorials/Qwen3-Next.md)\n"
-"- [实验性] 支持 Prefill Context Parallel 和 Decode Context Parallel，但请注意这是一个实验性功能，欢迎反馈。请参考 [context parallel 功能指南](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/context_parallel.html)"
+"- [实验性] 支持 Prefill Context Parallel 和 Decode Context Parallel，但请注意这是一个实验性功能，欢迎反馈。请参考 [context parallel 特性指南](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/context_parallel.html)"
 
 msgid ""
 "- Support openPangu Ultra MoE [4615](https://github.com/vllm-project/vllm-ascend/pull/4615)\n"
