@@ -245,7 +245,7 @@ vllm serve your_model_path \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.95 \
-    --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
+    --additional-config '{"enable_flashcomm1": false, "weight_nz_mode": 2}' \
     --port 8000 
 ```
 
