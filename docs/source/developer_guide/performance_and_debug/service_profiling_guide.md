@@ -112,8 +112,6 @@ After analysis, the `*ascend_pt` directory will contain many files, with the mai
 
 - `trace_view.json`: Chrome tracing format data, can be opened with [MindStudio Insight](https://www.hiascend.com/document/detail/zh/mindstudio/81RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html)
 
-[↑ Back to Top](#service-profiling-guide)
-
 ---
 
 ## MS Service Profiler  
@@ -367,5 +365,3 @@ def custom_handler(original_func, this, *args, **kwargs):
 ```
 
 If the custom handler fails to import, the system will automatically fall back to the default timer mode.
-
-[↑ Back to Top](#service-profiling-guide)
