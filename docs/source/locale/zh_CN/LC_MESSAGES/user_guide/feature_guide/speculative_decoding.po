@@ -267,8 +267,8 @@ msgid ""
 " `.safetensors` files (one per request)."
 msgstr "5. **`shared_storage_path`**：隐藏状态将保存为 `.safetensors` 文件（每个请求一个文件）的目录。"
 
-msgid "## Block Verify and Entropy Verify"
-msgstr "## 块验证和熵验证"
+msgid "## Block Verify and Entropy Verify {: #block-verify-and-entropy-verify }"
+msgstr "## 块验证和熵验证 {: #block-verify-and-entropy-verify }"
 
 msgid ""
 "vLLM Ascend provides two optional optimizations for the rejection sampler in"
