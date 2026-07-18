@@ -110,8 +110,8 @@ msgid ""
 "by executing the `docker ps` command."
 msgstr "Docker 运行成功后，您可以通过执行 `docker ps` 命令来验证正在运行的容器服务。"
 
-msgid "### 4.2 Source Code Installation"
-msgstr "### 4.2 源码安装"
+msgid "### 4.2 Source Code Installation {: #42-source-code-installation }"
+msgstr "### 4.2 源码安装 {: #42-source-code-installation }"
 
 msgid ""
 "If you don't want to use the docker image as above, you can also build all "
