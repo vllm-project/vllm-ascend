@@ -1,0 +1,82 @@
+model_name: "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4"
+model_type: "vllm"
+hardware: "Atlas A3 Series"
+
+# Server deployments can replace model_name with this local checkpoint path.
+# Keep the Hugging Face identifier above for the standard lm-eval workflow.
+local_model_path: "/models/Mistral-Large-3-675B-Instruct-2512-NVFP4"
+
+serve:
+  tensor_parallel_size: 16
+  dtype: bfloat16
+  quantization: nvfp4
+  max_model_len: 131072
+  max_num_seqs: 16
+  gpu_memory_utilization: 0.90
+  trust_remote_code: true
+  enable_expert_parallel: true
+
+envs:
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "1"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+
+# These requests complement lm-eval with OpenAI-compatible service smoke tests.
+smoke_test:
+  endpoint: "/v1/chat/completions"
+  served_model_name: "mistral-large-3-nvfp4"
+  sampling_params:
+    temperature: 0.2
+    top_p: 0.9
+    top_k: 40
+    max_tokens: 512
+    seed: 0
+  prompts:
+    - name: "complex_reasoning"
+      category: "complex_reasoning"
+      prompt: >-
+        A factory has three production lines. Line A produces 120 units per
+        hour with a 2% defect rate, line B produces 80 units per hour with a
+        5% defect rate, and line C produces 100 units per hour with a 1%
+        defect rate. All lines run for 10 hours. Compute the expected number
+        of non-defective units, show each calculation step, and identify the
+        line contributing the most non-defective units.
+      checks:
+        min_output_chars: 160
+        required_terms: ["1176", "760", "990", "2926", "Line A"]
+    - name: "multilingual_support"
+      category: "multilingual"
+      prompt: >-
+        请先用中文解释“数据主权”对跨境云服务的影响，然后用 English
+        summarize the three main compliance risks, et terminez en français
+        avec deux recommandations concrètes. Keep the three language sections
+        clearly separated.
+      checks:
+        min_output_chars: 240
+        required_terms: ["中文", "English", "français"]
+    - name: "enterprise_incident_response"
+      category: "enterprise"
+      prompt: >-
+        You are the incident commander for a global payment platform. Error
+        rates rose from 0.2% to 8% immediately after a database migration,
+        p99 latency tripled, and one region is losing replication events.
+        Produce a concise P0 response plan covering the first 15 minutes,
+        containment and rollback criteria, stakeholder communication,
+        evidence preservation, and a 24-hour follow-up checklist. Do not
+        invent unavailable telemetry; state assumptions explicitly.
+      checks:
+        min_output_chars: 320
+        required_terms: ["rollback", "communication", "evidence", "assumption"]
+
+tasks:
+  - name: "gpqa_diamond"
+    metrics:
+      - name: "exact_match,none"
+        value: 0.6717
+
+num_fewshot: 0
+apply_chat_template: true
+fewshot_as_multiturn: false
+batch_size: 16
