@@ -14,7 +14,7 @@ import msgspec
 import torch
 import zmq
 from vllm.utils.network_utils import make_zmq_path
-from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, UniformTypeKVCacheSpecs
 from vllm.v1.request import RequestStatus
 
 fake_engine = types.ModuleType("mooncake.engine")
@@ -56,6 +56,7 @@ patch(
     "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_pcp_group", return_value=_mock_pcp_group
 ).start()
 patch("vllm.distributed.parallel_state._DCP", _mock_dcp_group).start()
+patch("torch.npu.set_device").start()
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # noqa: E402
     MAX_REQUESTS_PER_PEER_HANDLER,
@@ -83,6 +84,11 @@ for _k, _v in _saved_modules.items():
 
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
+
+
+def make_mock_kv_caches() -> dict[str, Any]:
+    kv_cache = MagicMock(device=torch.device("npu:0"))
+    return {"layer_0": (kv_cache, kv_cache)}
 
 
 def make_agent_metadata(**overrides: Any) -> MooncakeAgentMetadata:
@@ -299,30 +305,66 @@ class TestKVCacheSendingThread(unittest.TestCase):
 
 
 class TestMooncakeTransferGroups(unittest.TestCase):
+    def test_attention_group_uses_explicit_total_heads_for_unequal_pd_tp(self):
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.num_key_value_heads = 16
+        mla_group = {
+            "kv_cache_spec_type": "AscendMLAAttentionSpec",
+            "kv_cache_spec": {"num_kv_heads": 1, "total_num_kv_heads": 1},
+        }
+        full_attention_decode_group = {
+            "kv_cache_spec_type": "FullAttentionSpec",
+            "kv_cache_spec": {"num_kv_heads": 4, "total_num_kv_heads": 8},
+        }
+        replicated_prefill_group = {
+            "kv_cache_spec_type": "FullAttentionSpec",
+            "kv_cache_spec": {"num_kv_heads": 1, "total_num_kv_heads": 8},
+        }
+
+        self.assertEqual(worker._get_attention_group_num_key_value_heads(mla_group), 1)
+        self.assertEqual(
+            worker._get_attention_group_num_key_value_heads(full_attention_decode_group),
+            8,
+        )
+        self.assertEqual(
+            worker._get_attention_group_num_key_value_heads(replicated_prefill_group),
+            8,
+        )
+        self.assertEqual(
+            worker._get_attention_group_num_need_pulls_for_decode_tp(full_attention_decode_group, 8, 2),
+            4,
+        )
+
     def test_build_kv_group2layeridx_splits_uniform_group_by_kv_heads(self):
-        mla_spec = FullAttentionSpec(
+        mla_spec = MLAAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=64,
+            dtype=torch.float16,
+        )
+        qga_spec = FullAttentionSpec(
             block_size=16,
             num_kv_heads=1,
             head_size=64,
             head_size_v=64,
             dtype=torch.float16,
         )
-        qga_spec = FullAttentionSpec(
-            block_size=16,
-            num_kv_heads=8,
-            head_size=64,
-            head_size_v=64,
-            dtype=torch.float16,
-        )
         layer_specs = {
-            "model.layers.0.self_attn": mla_spec,
-            "model.layers.1.self_attn": qga_spec,
+            "language_model.model.layers.0.self_attn": mla_spec,
+            "model.layers.32.self_attn": qga_spec,
         }
-        uniform_spec = UniformTypeKVCacheSpecs.from_specs(layer_specs)
-        assert uniform_spec is not None
+        uniform_spec = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=layer_specs)
 
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.vllm_config = MockVllmConfig()
+        worker.vllm_config.model_config.hf_text_config.num_key_value_heads = 128
+        worker.vllm_config.model_config.get_total_num_kv_heads = MagicMock(return_value=128)
+        worker.vllm_config.speculative_config = types.SimpleNamespace(
+            draft_model_config=types.SimpleNamespace(
+                hf_text_config=types.SimpleNamespace(num_key_value_heads=8),
+                get_total_num_kv_heads=MagicMock(return_value=8),
+            ),
+        )
         worker.total_layers = 32
         worker.kv_cache_config = MockKVCacheConfig(
             kv_cache_groups=[
@@ -340,6 +382,67 @@ class TestMooncakeTransferGroups(unittest.TestCase):
         self.assertEqual(kv_group2layeridx[1][0]["kv_cache_group_id"], 0)
         self.assertEqual(worker._get_attention_group_num_key_value_heads(kv_group2layeridx[0][0]), 1)
         self.assertEqual(worker._get_attention_group_num_key_value_heads(kv_group2layeridx[1][0]), 8)
+        self.assertEqual(kv_group2layeridx[0][0]["kv_cache_spec"]["num_kv_heads"], 1)
+        self.assertEqual(kv_group2layeridx[1][0]["kv_cache_spec"]["num_kv_heads"], 1)
+
+    def test_build_kv_group2layeridx_splits_equal_local_heads_by_total_heads(self):
+        shared_local_spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=64,
+            head_size_v=64,
+            dtype=torch.float16,
+        )
+        layer_names = [
+            "model.layers.0.self_attn",
+            "eagle.model.layers.0.self_attn",
+        ]
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.vllm_config = MockVllmConfig()
+        worker.vllm_config.model_config.hf_text_config.num_key_value_heads = 16
+        worker.vllm_config.model_config.get_total_num_kv_heads = MagicMock(return_value=16)
+        worker.vllm_config.speculative_config = types.SimpleNamespace(
+            draft_model_config=types.SimpleNamespace(
+                hf_text_config=types.SimpleNamespace(num_key_value_heads=8),
+                get_total_num_kv_heads=MagicMock(return_value=8),
+            ),
+        )
+        worker.total_layers = 32
+        worker.kv_cache_config = MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(
+                    layer_names=layer_names,
+                    kv_cache_spec=shared_local_spec,
+                )
+            ]
+        )
+
+        kv_group2layeridx = worker._build_kv_group2layeridx()
+
+        self.assertEqual(len(kv_group2layeridx), 2)
+        self.assertEqual(kv_group2layeridx[0][1], [0])
+        self.assertEqual(kv_group2layeridx[1][1], [32])
+        self.assertEqual(kv_group2layeridx[0][0]["kv_cache_spec"]["total_num_kv_heads"], 16)
+        self.assertEqual(kv_group2layeridx[1][0]["kv_cache_spec"]["total_num_kv_heads"], 8)
+        self.assertEqual(kv_group2layeridx[0][0]["kv_cache_spec"]["num_kv_heads"], 1)
+        self.assertEqual(kv_group2layeridx[1][0]["kv_cache_spec"]["num_kv_heads"], 1)
+        worker.kv_group2layeridx = kv_group2layeridx
+        self.assertTrue(worker._requires_group_aware_attention_transfer())
+
+        worker.tp_rank = 0
+        worker.tp_size = 8
+        worker._decode_tp_size = 8
+        worker._prefill_tp_size = 16
+        worker._prefill_pp_size = 1
+        worker.use_sparse = False
+        _, rank_group_pulls = worker._get_hybrid_remote_rank_group_pulls("req-1", prefill_tp_size=16)
+        pulls = [pull for group_pulls in rank_group_pulls.values() for pull in group_pulls]
+        target_pulls = [pull for pull in pulls if pull.group_id == 0]
+        draft_pulls = [pull for pull in pulls if pull.group_id == 1]
+        self.assertEqual(len(target_pulls), 2)
+        self.assertTrue(all(pull.num_group_pulls == 2 for pull in target_pulls))
+        self.assertEqual(len(draft_pulls), 1)
+        self.assertEqual(draft_pulls[0].num_group_pulls, 1)
 
     def test_hybrid_rank_pulls_use_transfer_group_kv_heads(self):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
@@ -357,7 +460,10 @@ class TestMooncakeTransferGroups(unittest.TestCase):
                 {
                     "kv_cache_spec_type": "UniformTypeKVCacheSpecs",
                     "kv_cache_group_id": 0,
-                    "kv_cache_spec": {"model.layers.0.self_attn": {"num_kv_heads": 1}},
+                    "kv_cache_spec": {
+                        "total_num_kv_heads": 1,
+                        "model.layers.0.self_attn": {"num_kv_heads": 1},
+                    },
                 },
                 [0],
             ),
@@ -365,7 +471,10 @@ class TestMooncakeTransferGroups(unittest.TestCase):
                 {
                     "kv_cache_spec_type": "UniformTypeKVCacheSpecs",
                     "kv_cache_group_id": 0,
-                    "kv_cache_spec": {"model.layers.1.self_attn": {"num_kv_heads": 8}},
+                    "kv_cache_spec": {
+                        "total_num_kv_heads": 8,
+                        "model.layers.1.self_attn": {"num_kv_heads": 8},
+                    },
                 },
                 [1],
             ),
@@ -446,7 +555,7 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
         self.engine = MagicMock()
         self.ready_event = threading.Event()
         self.vllm_config = MockVllmConfig()
-        self.kv_caches: dict[str, Any] = {}
+        self.kv_caches = make_mock_kv_caches()
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
@@ -514,6 +623,69 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
         mock_tracker.return_value = {"req1", "req2"}
         result = self.thread.get_and_clear_finished_requests()
         self.assertEqual(result, {"req1", "req2"})
+
+    def test_executor_workers_bind_kv_cache_device_before_handling_requests(self):
+        expected_device = torch.device("npu:5")
+        kv_cache = MagicMock(device=expected_device)
+        worker_events: defaultdict[int, list[tuple[str, int | str]]] = defaultdict(list)
+        events_lock = threading.Lock()
+        both_workers_started = threading.Event()
+        release_workers = threading.Event()
+
+        def record_set_device(device):
+            device_index = device if isinstance(device, int) else torch.device(device).index
+            with events_lock:
+                worker_events[threading.get_ident()].append(("set_device", cast(int, device_index)))
+
+        with patch("torch.npu.set_device", side_effect=record_set_device):
+            thread = KVCacheRecvingThread(
+                tp_rank=1,
+                tp_size=4,
+                _prefill_pp_size=1,
+                engine=self.engine,
+                local_engine_id="local_engine",
+                local_handshake_port=5555,
+                side_channel_port=30000,
+                local_kv_caches_base_addr=[[0x1000]],
+                block_len_per_addr=[[1024]],
+                block_stride_per_addr=[[1024]],
+                ready_event=self.ready_event,
+                vllm_config=self.vllm_config,
+                kv_caches={"layer.0": (kv_cache, kv_cache)},
+                prefill_pp_layer_partition=None,
+            )
+
+            def handle_request(req_meta: dict[str, Any]):
+                with events_lock:
+                    worker_events[threading.get_ident()].append(("handle", req_meta["request_id"]))
+                    handled_worker_count = sum(
+                        any(event == "handle" for event, _ in events) for events in worker_events.values()
+                    )
+                    if handled_worker_count == 2:
+                        both_workers_started.set()
+                release_workers.wait()
+
+            thread._handle_request = handle_request  # type: ignore[method-assign]
+            try:
+                for index in range(2):
+                    thread._submit_request(
+                        {
+                            "request_id": f"req-{index}",
+                            "remote_host": f"host-{index}",
+                            "remote_handshake_port": 6000 + index,
+                            "all_task_done": True,
+                        }
+                    )
+                self.assertTrue(both_workers_started.wait(timeout=5.0), "executor did not start two workers")
+            finally:
+                release_workers.set()
+                thread.executor.shutdown(wait=True, cancel_futures=True)
+
+        handled_worker_events = [events for events in worker_events.values() if any(e == "handle" for e, _ in events)]
+        self.assertEqual(len(handled_worker_events), 2)
+        for events in handled_worker_events:
+            self.assertEqual(events[0], ("set_device", expected_device.index))
+            self.assertEqual(events[1][0], "handle")
 
     def test_submit_request_serializes_same_peer_fifo(self):
         release_first_request = threading.Event()
@@ -614,7 +786,7 @@ class TestSocketManagement(unittest.TestCase):
         self.engine = MagicMock()
         self.ready_event = threading.Event()
         self.vllm_config = MockVllmConfig()
-        self.kv_caches: dict[str, Any] = {}
+        self.kv_caches = make_mock_kv_caches()
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
@@ -670,7 +842,7 @@ class TestCoreFunctionality(unittest.TestCase):
         self.ready_event = threading.Event()
         self.mock_queue = MagicMock()
         self.vllm_config = MockVllmConfig()
-        self.kv_caches: dict[str, Any] = {"layer_0": (MagicMock(), MagicMock())}
+        self.kv_caches = make_mock_kv_caches()
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
@@ -877,7 +1049,7 @@ class TestMetadataHandling(unittest.TestCase):
         self.engine = MagicMock()
         self.ready_event = threading.Event()
         self.vllm_config = MockVllmConfig()
-        self.kv_caches: dict[str, Any] = {}
+        self.kv_caches = make_mock_kv_caches()
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
@@ -945,7 +1117,7 @@ class TestMainThreadLoop(unittest.TestCase):
         self.engine = MagicMock()
         self.ready_event = threading.Event()
         self.vllm_config = MockVllmConfig()
-        self.kv_caches: dict[str, Any] = {}
+        self.kv_caches = make_mock_kv_caches()
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,

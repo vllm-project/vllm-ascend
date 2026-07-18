@@ -4,7 +4,7 @@
 
 test_cases:
   - name: "qwen3-32b"
-    model: "Eco-Tech/Qwen3-32B-w8a8sc-310-vllm/TP4/Qwen3-32B-w8a8sc-310-vllm-tp4"
+    model: "vllm-ascend/Qwen3-32B-w8a8sc-310-vllm-tp4"
     envs:
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:

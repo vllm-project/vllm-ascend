@@ -3,7 +3,7 @@ from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import GroupCoordinator, get_tp_group, get_world_group, init_model_parallel_group
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import enable_dsa_cp_with_layer_shard, flashcomm2_enable
+from vllm_ascend.utils import flashcomm2_enable
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: GroupCoordinator | None = None
@@ -17,10 +17,6 @@ _EMBED_TP: GroupCoordinator | None = None
 # flashcomm specific groups
 _FLASHCOMM2_OTP: GroupCoordinator | None = None
 _FLASHCOMM2_ODP: GroupCoordinator | None = None
-_FC3_QUANT_X: GroupCoordinator | None = None
-
-# shard_weight across rank groups
-_SHARD_WEIGHT: GroupCoordinator | None = None
 
 _P_TP: GroupCoordinator | None = None
 
@@ -99,12 +95,6 @@ def init_ascend_model_parallel(
         global _DYNAMIC_EPLB
         _DYNAMIC_EPLB = init_model_parallel_group(
             group_ranks, get_world_group().local_rank, backend, group_name="dynamic_eplb"
-        )
-
-    if get_ascend_config().multistream_overlap_gate:
-        global _FC3_QUANT_X
-        _FC3_QUANT_X = init_model_parallel_group(
-            group_ranks, get_world_group().local_rank, backend, group_name="fc3_quant_x"
         )
 
     # Initialize fine-grained TP process groups on Ascend for four components:
@@ -188,43 +178,6 @@ def init_ascend_model_parallel(
                 odp_group_ranks, get_world_group().local_rank, backend, group_name="flashcomm2_odp"
             )
 
-    def create_shard_weight_group(module_tp_group_ranks: None) -> GroupCoordinator:
-        # Argument module_tp_group_ranks: The module specific tensor parallel group.
-        # There are three situations.
-        # 1. If it is None, then the TP_size of the specific module is 1 and is replicated linear layer.
-        # 2. If it is not None, and the module tp_group is same as the global tp_group.
-        # 3. If it is not None, and the module tp_group is different from the global tp_group.(eg. flashcomm2_otp)
-        group_ranks = []
-        pp_group_ranks = all_ranks.transpose(2, 4).reshape(-1, global_pp_size)
-        if module_tp_group_ranks is None:
-            # If it is None, then the TP_size of this shard weight is 1.
-            shard_weight_group_ranks = pp_group_ranks.transpose(0, 1).unbind(0)
-            group_ranks = [x.tolist() for x in shard_weight_group_ranks]
-        else:
-            # combine standard tp group and non-standard tp group to build  shard_weight comm_group
-            module_tp_tanspose_ranks = module_tp_group_ranks.transpose(0, 1)
-            G = world_size // (global_pp_size * module_tp_group_ranks.size(1))
-            shard_weight_group_ranks = torch.stack([t.view(global_pp_size, G) for t in module_tp_tanspose_ranks], dim=1)
-            group_ranks = shard_weight_group_ranks.view(-1, G).tolist()
-        return init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="shard_weight")
-
-    # Create shard weight group if enabled
-    if get_ascend_config().layer_sharding is not None:
-        global _SHARD_WEIGHT
-        if flashcomm2_enable():
-            if len(flashcomm2_otp_group_ranks) == 0:
-                FC2_group_ranks = None
-            else:
-                FC2_group_ranks = torch.tensor(flashcomm2_otp_group_ranks).squeeze(0)
-            _SHARD_WEIGHT = create_shard_weight_group(FC2_group_ranks)
-        elif enable_dsa_cp_with_layer_shard():
-            # For dsa_cp, all shard layers are replicated.
-            _SHARD_WEIGHT = create_shard_weight_group(None)
-        else:
-            # For standard tp, use global tp group_ranks
-            tp_group_ranks = all_ranks.view(-1, global_tp_size)
-            _SHARD_WEIGHT = create_shard_weight_group(tp_group_ranks)
-
 
 def model_parallel_initialized():
     return _MC2 is not None
@@ -264,19 +217,9 @@ def get_flashcomm2_odp_group() -> GroupCoordinator:
     return _FLASHCOMM2_ODP
 
 
-def get_shard_weight_group() -> GroupCoordinator:
-    assert _SHARD_WEIGHT is not None, "output shard weight parallel group for flashcomm2 is not initialized"
-    return _SHARD_WEIGHT
-
-
 def get_p_tp_group() -> GroupCoordinator:
     assert _P_TP is not None, "distributed prefill tensor parallel group is not initialized"
     return _P_TP
-
-
-def get_fc3_quant_x_group() -> GroupCoordinator:
-    assert _FC3_QUANT_X is not None, "fc3 quant x group is not initialized"
-    return _FC3_QUANT_X
 
 
 def get_dynamic_eplb_group() -> GroupCoordinator:
@@ -324,16 +267,6 @@ def destroy_ascend_model_parallel():
     if _FLASHCOMM2_ODP and get_ascend_config().flashcomm2_oproj_tensor_parallel_size != 1:
         _FLASHCOMM2_ODP.destroy()
         _FLASHCOMM2_ODP = None
-
-    global _SHARD_WEIGHT
-    if _SHARD_WEIGHT:
-        _SHARD_WEIGHT.destroy()
-    _SHARD_WEIGHT = None
-
-    global _FC3_QUANT_X
-    if _FC3_QUANT_X:
-        _FC3_QUANT_X.destroy()
-    _FC3_QUANT_X = None
 
     global _DYNAMIC_EPLB
     if _DYNAMIC_EPLB:
