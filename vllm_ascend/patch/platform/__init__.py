@@ -31,11 +31,14 @@ else:
 import vllm_ascend.patch.platform.patch_minimax_m2_config  # noqa
 import vllm_ascend.patch.platform.patch_glm_tool_call_streaming  # noqa
 
+# TODO: Remove these retained v0.23-only compatibility patches after
+# their respective owners complete the cleanup.
 if vllm_version_is("0.23.0"):
     import vllm_ascend.patch.platform.patch_glm47_tool_call_parser  # noqa
+
+if vllm_version_is("0.24.0"):
     import vllm_ascend.patch.platform.patch_deepseek_v4_tool_call_parser  # noqa
-    import vllm_ascend.patch.platform.patch_minimax_m2_tool_call_parser  # noqa
-    import vllm_ascend.patch.platform.patch_minimax_usage_accounting  # noqa
+    import vllm_ascend.patch.platform.patch_parser_reasoning_usage  # noqa
 import vllm_ascend.patch.platform.patch_structured_output  # noqa
 import vllm_ascend.patch.platform.patch_weight_transfer_engine  # noqa
 import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
@@ -50,6 +53,5 @@ import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_coordinator  # noqa
 import vllm_ascend.patch.platform.patch_speculative_config  # noqa
 
-if not vllm_version_is("0.23.0"):
-    import vllm_ascend.patch.platform.patch_fused_moe  # noqa
-    import vllm_ascend.patch.platform.patch_dp_device_ids  # noqa
+import vllm_ascend.patch.platform.patch_fused_moe  # noqa
+import vllm_ascend.patch.platform.patch_dp_device_ids  # noqa

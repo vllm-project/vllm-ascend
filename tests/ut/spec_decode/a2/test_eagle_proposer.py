@@ -409,7 +409,6 @@ class TestEagleProposerLoadModel(TestBase):
         mock_ascend_config.enable_flashcomm2_parallel_size = 0
         mock_ascend_config.enable_context_parallel = False
         mock_ascend_config.enable_flashcomm1 = False
-        mock_ascend_config.enable_matmul_allreduce = False
         mock_ascend_config.weight_nz_mode = 1
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_fused_mc2 = 0
@@ -572,7 +571,6 @@ class TestEagleProposerDummyRun(TestBase):
         mock_ascend_config.enable_flashcomm2_parallel_size = 0
         mock_ascend_config.enable_context_parallel = False
         mock_ascend_config.enable_flashcomm1 = False
-        mock_ascend_config.enable_matmul_allreduce = False
         mock_ascend_config.weight_nz_mode = 1
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_fused_mc2 = 0
@@ -1007,7 +1005,6 @@ class TestEagleProposerPropose:
         mock_ascend_config.enable_flashcomm2_parallel_size = 0
         mock_ascend_config.enable_context_parallel = False
         mock_ascend_config.enable_flashcomm1 = False
-        mock_ascend_config.enable_matmul_allreduce = False
         mock_ascend_config.weight_nz_mode = 1
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_fused_mc2 = 0
@@ -1195,6 +1192,7 @@ class TestEagleProposerPropose:
         self.proposer.draft_attn_groups = [mock_attn_group]
         self.proposer.attn_layer_names = ['model.layers.36.self_attn.attn']
         self.proposer.kernel_block_size = 128
+        self.proposer.block_size = 128
         self.proposer._runnable = MagicMock()
         self.proposer._runnable.return_value = [0, 0, 0]
         captured_common_attn_metadata = None
@@ -4057,6 +4055,9 @@ class TestEagleProposerSetInputsFirstPass:
 
         proposer.parallel_drafting_token_id = -2
         parallel_drafting_hs = proposer.parallel_drafting_hidden_state_tensor
+        assert parallel_drafting_hs is not None
+        # Production initializes this from the loaded drafter's mask hidden state.
+        parallel_drafting_hs.fill_(1.0)
 
         mock_kv_cache_spec = MagicMock()
         mock_kv_cache_spec.block_size = block_size

@@ -112,8 +112,8 @@ msgstr "**静态 vs 动态：** 静态量化使用预计算的缩放因子，性
 
 msgid ""
 "**Granularity:** Refers to the scope of scaling factor computation (e.g., "
-"per-tensor, per-channel, per-group)."
-msgstr "**粒度：** 指缩放因子计算的范围（例如 per-tensor、per-channel、per-group）。"
+"Per-Tensor, Per-Channel, Per-Group)."
+msgstr "**粒度：** 指缩放因子计算的范围（例如 Per-Tensor、Per-Channel、Per-Group）。"
 
 msgid "# Quantization Adaptation Guide"
 msgstr "# 量化适配指南"
