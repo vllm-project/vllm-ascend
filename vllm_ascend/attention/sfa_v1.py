@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import scipy  # type: ignore
 import torch
@@ -23,7 +23,11 @@ from vllm.v1.worker.utils import select_common_block_size
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
+from vllm_ascend.attention.context_parallel.common_cp import (
+    AscendPCPMetadata,
+    DCPContext,
+    DSACPContext,
+)
 from vllm_ascend.attention.mla_v1 import MLAPO_MAX_SUPPORTED_TOKENS
 from vllm_ascend.attention.utils import (
     SFA_QSFA_TILE_SIZE,
@@ -77,20 +81,6 @@ O_PROJ_ACLNN_INPUT_PARAMS = (
     "aclnn_input_scale_reciprocal",
     "aclnn_input_offset",
 )
-
-
-class DCPQueryGatherContext(NamedTuple):
-    """State needed to finish the async fused DCP query all-gather."""
-
-    # The gathered fused query tensor: cat([ql_nope, q_pe], dim=-1).
-    gathered: torch.Tensor
-    # Async all-gather work handle. None means the gather completed synchronously.
-    handle: torch.distributed.Work | None
-    # Permutation that restores the original dimension order after dim>0 gather.
-    restore_perm: tuple[int, ...] | None
-    # Last-dimension sizes used to split the fused query back into ql_nope/q_pe.
-    ql_nope_dim: int
-    q_pe_dim: int
 
 
 def _get_indexer_types(configs: tuple[Any, ...]) -> Any | None:
@@ -164,26 +154,6 @@ class AscendSFABackend(AttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
-
-
-@dataclass
-class DCPContext:
-    slot_mapping: torch.Tensor
-    block_table: torch.Tensor
-    seq_lens: torch.Tensor
-    query_gather_context: DCPQueryGatherContext | None = None
-
-
-@dataclass
-class DSACPContext:
-    num_tokens: int
-    num_tokens_pad: int
-    local_start: int
-    local_end: int
-    local_end_with_pad: int
-    slot_mapping_cp: torch.Tensor
-    actual_seq_lengths_query: torch.Tensor
-    actual_seq_lengths_key: torch.Tensor
 
 
 @dataclass
