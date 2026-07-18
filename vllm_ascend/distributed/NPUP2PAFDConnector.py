@@ -293,7 +293,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
                 intermediate_tensors.tensors,
                 dst=dst,
                 process_group=self.a2e_group,
-                p2pgroup=groupEp,
+                p2p_group=groupEp,
             )
             return hidden_states
         except Exception as e:
@@ -357,7 +357,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
             intermediate_tensors.tensors,
             dst=dst,
             process_group=self.e2a_group,
-            p2pgroup=groupEp,
+            p2p_group=groupEp,
         )
 
     def recv_ffn_output(self,
@@ -371,7 +371,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
         intermediate_tensors, work_list = self._recv_tensor_dict_async(
             src=src,
             process_group=self.e2a_group,
-            all_gather_group=None,
+            p2p_group=groupEp,
         )
         recv_hs = intermediate_tensors["hidden_states"]
         return recv_hs
