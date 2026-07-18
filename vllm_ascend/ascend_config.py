@@ -227,15 +227,6 @@ class AscendConfig:
             ascend_envs.VLLM_ASCEND_ENABLE_NZ,
         )
 
-        # when enable_async_exponential is True, AscendSampler will be different from vllm Sampler,
-        # which make batch_invariant mode not working.
-        # so we disable async exponential when batch_invariant mode is enabled.
-        import vllm.envs as envs
-
-        self.enable_async_exponential = (
-            bool(additional_config.get("enable_async_exponential", False)) and not envs.VLLM_BATCH_INVARIANT
-        )
-
         from vllm_ascend.utils import model_uses_sfa_sparse
 
         use_sparse = model_uses_sfa_sparse(vllm_config.model_config)
