@@ -171,8 +171,13 @@ jobs:
           set -eu
           set -o pipefail
 
-          # install opencode (curl --retry handles transient SSL drops)
-          curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors https://opencode.ai/install | bash
+          # Install through Huawei Cloud's domestic npm mirror. The official
+          # installer first queries GitHub for the latest release and then
+          # downloads the binary from GitHub, which is slow from this runner.
+          npm install --global \
+            --prefix "$HOME/.opencode" \
+            --registry https://repo.huaweicloud.com/repository/npm/ \
+            opencode-ai
           # configure opencode auth
           mkdir -p ~/.local/share/opencode
           cat > ~/.local/share/opencode/auth.json <<EOF
@@ -185,7 +190,7 @@ jobs:
           EOF
 
           # ensure opencode is on PATH within this step
-          export PATH="/root/.opencode/bin:$PATH"
+          export PATH="$HOME/.opencode/bin:$PATH"
 
           # verify opencode works
           echo "Verifying opencode..."
@@ -304,7 +309,7 @@ jobs:
           RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: True
         run: |
           set -euo pipefail
-          export PATH="/root/.opencode/bin:$PATH"
+          export PATH="$HOME/.opencode/bin:$PATH"
           eval "${MAIN2MAIN_LOG_HELPERS}"
 
           rm -rf /tmp/main2main
