@@ -286,7 +286,6 @@ class NPUP2PAFDConnector(AFDConnectorBase):
         )
         try:
             dst = (self.a2e_group.rank_in_group + 1) % self.a2e_group.world_size
-            logger.info(f"send_attn_output: dst={dst}")
             self._send_tensor_dict_async(
                 intermediate_tensors.tensors,
                 dst=dst,
@@ -306,7 +305,6 @@ class NPUP2PAFDConnector(AFDConnectorBase):
         groupEp = _get_group_ep(ubatch_idx, self.hccl_comm_name, self.hccl_comm_name2, self.hccl_comm_name3)
 
         src = (self.a2e_group.rank_in_group - 1) % self.a2e_group.world_size
-        logger.info(f"recv_attn_output: src={src}")
         intermediate_tensors, work_list = self._recv_tensor_dict_async(
             src=src,
             process_group=self.a2e_group,

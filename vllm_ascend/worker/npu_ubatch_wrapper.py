@@ -378,7 +378,7 @@ class UBatchWrapper(GPUUBatchWrapper):
         ubatch_slices = forward_context.ubatch_slices
         cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
         afd_metadata = forward_context.afd_metadata
-
+        logger.info('UBatchWrapper _call__ ubatch_slices: %s', ubatch_slices)
         # If there's no ubatching, just run the runnable object
         if ubatch_slices is None:
             if cudagraph_runtime_mode is CUDAGraphMode.FULL:

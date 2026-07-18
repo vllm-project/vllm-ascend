@@ -2367,9 +2367,6 @@ class NPUModelRunner(GPUModelRunner):
                 ),
             ) as kv_connector_output,
         ):
-            # Send dp_metadata_list to FFN side so that FFN servers can
-            # pre-allocate per-stage token buffers. Only the first
-            # min_size attention ranks actually send (1-to-N mapping).
             if self.afd_config and self.afd_connector:
                 dp_metadata_list = self._build_afd_dp_metadata_list(ubatch_slices_attn)
                 logger.info("dp_metadata_list: %s", dp_metadata_list)
