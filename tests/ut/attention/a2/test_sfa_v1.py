@@ -241,11 +241,19 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
         actual_seq_lengths = torch.tensor([3], dtype=torch.int32)
         expected = torch.randn(3, 2, 32)
 
-        with patch(
-            "vllm_ascend.device.device_op.torch_npu.npu_kv_quant_sparse_flash_attention",
-            create=True,
-            return_value=expected,
-        ) as mock_qsfa:
+        with (
+            patch.object(
+                torch.ops._C_ascend,
+                "npu_kv_quant_sparse_flash_attention",
+                create=True,
+                return_value=(expected, torch.empty(0), torch.empty(0)),
+            ) as mock_qsfa,
+            patch(
+                "vllm_ascend.device.device_op.torch_npu.npu_kv_quant_sparse_flash_attention",
+                create=True,
+                side_effect=AssertionError("Base must use _C_ascend custom op"),
+            ),
+        ):
             result = impl._execute_sparse_flash_attention_process(
                 ql_nope,
                 q_pe,
