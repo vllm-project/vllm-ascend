@@ -102,7 +102,7 @@ class UBatchWrapper(GPUUBatchWrapper):
 
         # Ubatch threads plus the main thread
         self.ready_barrier = threading.Barrier(
-            self.vllm_config.parallel_config.num_ubatches + 1
+            1 + 1
         )
 
         self.aclgraphs: dict[int, ACLGraphMetaData] = {}
@@ -221,12 +221,9 @@ class UBatchWrapper(GPUUBatchWrapper):
                                             args=(results, model, metadata))
                     ubatch_threads.append(thread)
                     thread.start()
-                # else:
-                #     # 假设模型输出维度为 (num_tokens, hidden_size) 或 (num_tokens, vocab_size)
-                #     # 此处以 vocab_size 为例，实际需根据模型配置获取
-                #     empty_output = torch.empty((0, model.config.vocab_size), device='npu:0')
-                #     results.append((metadata.context.id, empty_output))
-
+            self.ready_barrier.wait() 
+            logger.info('UBatchWrapper _run_ubatches ubatch_metadata[0].context.cpu_wait_event: %s', ubatch_metadata[0].context.cpu_wait_event)
+            ubatch_metadata[0].context.cpu_wait_event.set()
             for thread in ubatch_threads:
                 thread.join()
 
@@ -386,6 +383,7 @@ class UBatchWrapper(GPUUBatchWrapper):
 
             if cudagraph_runtime_mode in (CUDAGraphMode.NONE,
                                           CUDAGraphMode.PIECEWISE):
+                logger.info('UBatchWrapper _call__ runnable')
                 return self.runnable(*args, **kwargs)
             else:
                 assert self.aclgraph_wrapper is not None
