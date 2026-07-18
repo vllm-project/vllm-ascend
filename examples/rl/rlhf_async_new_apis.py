@@ -65,8 +65,8 @@ from vllm_ascend.distributed.weight_transfer.hccl_engine import (
     HCCLWeightTransferUpdateInfo,
 )
 
-MODEL_NAME_V1 = "/home/data/weights/Qwen/Qwen3-1.7B-Base"
-MODEL_NAME_V2 = "/home/data/weights/Qwen/Qwen3-1.7B"
+MODEL_NAME_V1 = "Qwen/Qwen3-1.7B-Base"
+MODEL_NAME_V2 = "Qwen/Qwen3-1.7B"
 PAUSE_TOKEN_THRESHOLD = 10
 
 
