@@ -16,6 +16,7 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     is_pd_decode_recompute_scheduler_enabled,
 )
+
 SFA_QSFA_TILE_SIZE = 128
 
 
