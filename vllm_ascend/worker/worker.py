@@ -744,42 +744,204 @@ class NPUWorker(WorkerBase):
         logger.info("[snapshot] [parallel] rank %s: cleanup_dist_env_for_snapshot done", self.rank)
 
     def rebuild_parallel_group_after_resume(self) -> None:
-        """[snapshot] Tear down and re-init HCCL / TP / PP parallel groups after resume."""
+        """[snapshot] Tear down and re-init HCCL / TP / PP parallel groups after resume.
+
+        The rebuild runs in a synchronized, verified loop to work around an
+        *intermittent* HCCL AIV failure. After a snapshot restore the peer IPC
+        names are byte-identical to the pre-snapshot ones (CRIU preserves the
+        buffer VA + pid + sdid), and the HCCL restore path
+        (``SnapshotControl::Recovery`` -> ``SetDeviceUnavailable``) only drops
+        the *in-process* IPC-name cache without synchronously destroying the
+        stale driver-side registrations. Depending on the teardown / re-open
+        ordering across the co-located ranks (and driver-side IPC GC), a rebuilt
+        link can bind to a stale registration of the same name, which later
+        surfaces as the AIV all_reduce invalid-GM (EI0012 / 507035) error.
+
+        To make the rebuild deterministic we:
+          1. Rely on the ``init_process_group`` rendezvous as a global barrier
+             so no rank re-opens peer IPC until every rank has finished tearing
+             down its old groups.
+          2. Wait a short settle interval so the driver can GC the identically
+             named stale IPC registrations before the fresh open.
+          3. Verify every intra-node communicator (TP, and EP / MC2 when expert
+             parallelism is on) with a warm-up all_reduce and, if any is
+             unhealthy, tear everything down and rebuild again (new port).
+        """
         import torch.distributed as dist
 
         # DEBUG level triggers a known torchair bug, so keep INFO level.
         dist.set_debug_level(dist.DebugLevel.INFO)
 
         rebuild_time_start = time.time()
-        logger.info("[snapshot] [parallel] rank %s: destroying HCCL and model-parallel groups", self.rank,)
-        self.parallel_group_clean_up()
 
-        logger.info("[snapshot] [parallel] rank %s: rebuilding HCCL and model-parallel groups", self.rank,)
+        max_attempts = int(os.environ.get("VLLM_SNAPSHOT_REBUILD_MAX_ATTEMPTS", "3"))
+        settle_seconds = float(os.environ.get("VLLM_SNAPSHOT_REBUILD_SETTLE_SECONDS", "0.1"))
+        # Capture the base init method once so per-attempt port bumps are stable.
+        base_init_method = self.distributed_init_method
+
+        last_err: BaseException | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                self._teardown_and_init_parallel_groups(base_init_method, attempt, settle_seconds)
+                self._verify_parallel_group_health()
+                logger.info(
+                    "[snapshot] [parallel] rank %s: rebuild healthy on attempt %d, cost %.2fs",
+                    self.rank, attempt, time.time() - rebuild_time_start,
+                )
+                return
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                logger.warning(
+                    "[snapshot] [parallel] rank %s: rebuild attempt %d/%d failed: %s",
+                    self.rank, attempt, max_attempts, e,
+                )
+
+        raise RuntimeError(
+            f"[snapshot] rank {self.rank}: parallel group rebuild failed after "
+            f"{max_attempts} attempts"
+        ) from last_err
+
+    def _teardown_and_init_parallel_groups(
+        self, base_init_method: str, attempt: int, settle_seconds: float
+    ) -> None:
+        """[snapshot] Destroy the current parallel groups and re-init them.
+
+        A fresh rendezvous port is used per attempt so retries never collide
+        with the cold-start store or a previous failed attempt's TCPStore.
+        """
         import urllib.parse
-        # distributed_init_method must point to the Pod where DP rank 0 runs.
-        init_method = self.distributed_init_method
-        parsed = urllib.parse.urlparse(init_method)
-        master_ip = self.vllm_config.parallel_config.data_parallel_master_ip
-
-        if not master_ip:
-            raise RuntimeError(f"Unable to resolve master IP for distributed init method: {init_method}")
-        port = parsed.port
-        if port is None:
-            raise RuntimeError(f"Invalid distributed init method URL (missing port): {init_method}")
-        new_method = urllib.parse.urlunparse(parsed._replace(netloc=f"{master_ip}:{port + 1}"))
 
         logger.info(
-            "[snapshot] [parallel] rank %s: distributed_init_method %s -> %s (port+1)",
-            self.rank, init_method, new_method,
+            "[snapshot] [parallel] rank %s: destroying HCCL and model-parallel groups (attempt %d)",
+            self.rank, attempt,
+        )
+        self.parallel_group_clean_up()
+
+        # Let the driver GC the stale, identically-named IPC registrations that
+        # the snapshot restore path only dropped from the in-process cache. This
+        # shrinks the window in which a fresh open can bind to a stale name.
+        if settle_seconds > 0:
+            time.sleep(settle_seconds)
+
+        # distributed_init_method must point to the Pod where DP rank 0 runs.
+        parsed = urllib.parse.urlparse(base_init_method)
+        master_ip = self.vllm_config.parallel_config.data_parallel_master_ip
+        if not master_ip:
+            raise RuntimeError(f"Unable to resolve master IP for distributed init method: {base_init_method}")
+        base_port = parsed.port
+        if base_port is None:
+            raise RuntimeError(f"Invalid distributed init method URL (missing port): {base_init_method}")
+        new_port = base_port + attempt
+        new_method = urllib.parse.urlunparse(parsed._replace(netloc=f"{master_ip}:{new_port}"))
+
+        logger.info(
+            "[snapshot] [parallel] rank %s: rebuilding groups, distributed_init_method %s -> %s (attempt %d)",
+            self.rank, base_init_method, new_method, attempt,
         )
         self.distributed_init_method = new_method
 
         with set_current_vllm_config(self.vllm_config):
             self._init_worker_distributed_environment()
 
+    def _collect_ipc_probe_groups(self) -> "list[tuple[str, object]]":
+        """[snapshot] Intra-node comm groups whose AIV/IPC links must be validated.
+
+        Each of these is a *separate* HCCL communicator with its own CCL
+        buffers / IPC registrations, so validating one does not validate the
+        others. In particular, once expert parallelism is enabled the MoE
+        dispatch/combine runs over the EP / Ascend MC2 communicators, which are
+        distinct from the TP all_reduce path and therefore need their own probe.
+        """
+        from vllm.distributed.parallel_state import get_tp_group
+
+        groups: list[tuple[str, object]] = []
+
+        tp = get_tp_group()
+        if tp is not None and tp.world_size > 1:
+            groups.append(("tp", tp))
+
+        # EP group: only created for MoE models with expert parallelism enabled.
+        try:
+            from vllm.distributed.parallel_state import get_ep_group
+            ep = get_ep_group()
+            if ep is not None and ep.world_size > 1:
+                groups.append(("ep", ep))
+        except Exception:  # noqa: BLE001 - not an MoE/EP deployment
+            pass
+
+        # Ascend MC2 group drives the MoE dispatch/combine all-to-all.
+        try:
+            from vllm_ascend.distributed.parallel_state import get_mc2_group
+            mc2 = get_mc2_group()
+            if mc2 is not None and mc2.world_size > 1:
+                groups.append(("mc2", mc2))
+        except Exception:  # noqa: BLE001 - mc2 not initialized
+            pass
+
+        return groups
+
+    def _verify_parallel_group_health(self) -> None:
+        """[snapshot] Run synchronized warm-up all_reduces and verify the results.
+
+        This forces the fresh HCCL AIV IPC links of *every* intra-node
+        communicator (TP, and EP / MC2 when expert parallelism is on) to be
+        (re)opened in a controlled collective right after the rebuild
+        rendezvous - by which point every rank has finished tearing down its old
+        groups - and checks that each result is numerically correct. A stale-IPC
+        rebuild is therefore detected (and retried) here instead of corrupting
+        real inference or crashing later during recapture_graph.
+
+        The barrier and the pass/fail vote run over the CPU (gloo) group, which
+        is transport-independent from AIV: it stays usable even when every AIV
+        collective above faults, and it guarantees all ranks make the same retry
+        decision so the next rebuild rendezvous cannot deadlock.
+        """
+        from vllm.distributed.parallel_state import get_world_group
+
+        world = get_world_group()
+        # CPU/gloo barrier: all ranks reach the probe together, independent of
+        # the (possibly broken) AIV IPC links.
+        torch.distributed.barrier(group=world.cpu_group)
+
+        local_ok = 1
+        details: list[str] = []
+        for name, group in self._collect_ipc_probe_groups():
+            size = group.world_size
+            try:
+                probe = torch.ones(1024, dtype=torch.float32, device=group.device)
+                result = group.all_reduce(probe)
+                torch.npu.synchronize()
+                got = result.float().mean().item()
+                if abs(got - float(size)) > 1e-3:
+                    local_ok = 0
+                    details.append(f"{name}={got:.1f}/{size}!")
+                else:
+                    details.append(f"{name}={got:.1f}/{size}")
+            except Exception as e:  # noqa: BLE001
+                local_ok = 0
+                details.append(f"{name}=EXC")
+                logger.warning(
+                    "[snapshot] [parallel] rank %s: %s warm-up all_reduce raised: %s",
+                    self.rank, name, e,
+                )
+
+        # Agree on health across the world via the CPU (gloo) group so the vote
+        # is reliable even if every AIV collective faulted, and so all ranks
+        # retry in lockstep.
+        flag = torch.tensor([local_ok], dtype=torch.int32)
+        torch.distributed.all_reduce(
+            flag, op=torch.distributed.ReduceOp.MIN, group=world.cpu_group
+        )
+
+        if int(flag.item()) == 0:
+            raise RuntimeError(
+                f"[snapshot] rank {self.rank}: AIV/IPC health check failed "
+                f"(local_ok={local_ok}, probes=[{', '.join(details)}]) - "
+                f"likely stale IPC mapping on this or a peer rank"
+            )
         logger.info(
-            "[snapshot] [parallel] rank %s: rebuild_parallel_group cost %.2fs",
-            self.rank, time.time() - rebuild_time_start,
+            "[snapshot] [parallel] rank %s: AIV/IPC health check passed (probes=[%s])",
+            self.rank, ", ".join(details),
         )
 
     def update_worker_info_after_resume(self, local_ip: str, data_parallel_master_ip: str) -> None:
