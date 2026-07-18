@@ -673,6 +673,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         sparse_mode,
                         pre_tokens,
                         next_tokens,
+                        sliding_window,
                         c8_k_aq_scale,
                         c8_k_aq_offset,
                         c8_v_aq_scale,
@@ -708,7 +709,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                             and obj.kvcomp_metadata.hashk_caches[layer_count] is not None
                         ):
                             seq_lens = obj.kvcomp_metadata.seq_lens_from_hamming
-                        elif not hasattr(vllm_config.model_config.hf_text_config, "sliding_window"):
+                        elif sliding_window is None:
                             block_tables = attn_metadata[metadata_key].block_tables
                     layer_count += 1
 
@@ -888,6 +889,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             sparse_mode,
             pre_tokens,
             next_tokens,
+            self.sliding_window,
         )
         if self.enable_c8_quant and layer is not None:
             attn_params = attn_params + (
