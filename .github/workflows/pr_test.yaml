@@ -42,7 +42,7 @@ concurrency:
 
 jobs:
   lint-and-select-tests:
-    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' }}
+    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' || github.event.label.name == 'ready-a5' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -50,6 +50,8 @@ jobs:
       has_tests: ${{ steps.scope.outputs.has_tests || steps.noop.outputs.has_tests }}
       test_groups: ${{ steps.scope.outputs.test_groups || steps.noop.outputs.test_groups }}
       matched_modules: ${{ steps.scope.outputs.matched_modules || steps.noop.outputs.matched_modules }}
+      has_tests_a5: ${{ steps.scope-a5.outputs.has_tests || steps.noop-a5.outputs.has_tests }}
+      test_groups_a5: ${{ steps.scope-a5.outputs.test_groups || steps.noop-a5.outputs.test_groups }}
       main_commit: ${{ steps.vllm.outputs.main_commit }}
       release_tag: ${{ steps.vllm.outputs.release_tag }}
     steps:
@@ -209,6 +211,27 @@ jobs:
             echo "matched_modules="
           } >> "$GITHUB_OUTPUT"
 
+      - name: Select A5 tests
+        id: scope-a5
+        if: steps.filter.outputs.src == 'true'
+        run: |
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          git fetch origin ${{ github.base_ref }}
+          pip install regex
+          python3 .github/workflows/scripts/select_tests.py \
+            --diff-base origin/${{ github.base_ref }} \
+            --modules a5 \
+            --runner-override a5_x4
+
+      - name: Set no-tests output for A5 when source paths unchanged
+        id: noop-a5
+        if: steps.filter.outputs.src != 'true'
+        run: |
+          {
+            echo "has_tests=false"
+            echo "test_groups=[]"
+          } >> "$GITHUB_OUTPUT"
+
   run-selected-tests:
     needs: lint-and-select-tests
     if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' && contains(github.event.pull_request.labels.*.name, 'ready') }}
@@ -234,11 +257,26 @@ jobs:
       HITEST_KEY: ${{ secrets.HITEST_KEY }}
       HITEST_SECRET: ${{ secrets.HITEST_SECRET }}
 
+  run-selected-tests-a5:
+    needs: lint-and-select-tests
+    if: ${{ needs.lint-and-select-tests.outputs.has_tests_a5 == 'true' && contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
+    strategy:
+      matrix:
+        vllm_version:
+          - ${{ needs.lint-and-select-tests.outputs.main_commit }}
+          - ${{ needs.lint-and-select-tests.outputs.release_tag }}
+    uses: ./.github/workflows/_selected_tests.yaml
+    with:
+      vllm: ${{ matrix.vllm_version }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups_a5 }}
+
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
-    needs: [lint-and-select-tests, run-selected-tests]
-    if: ${{ always() && contains(github.event.pull_request.labels.*.name, 'ready') }}
+    needs: [lint-and-select-tests, run-selected-tests, run-selected-tests-a5]
+    if: ${{ always() && (contains(github.event.pull_request.labels.*.name, 'ready') || contains(github.event.pull_request.labels.*.name, 'ready-a5')) }}
     runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Check all required jobs
@@ -247,10 +285,12 @@ jobs:
 
           LINT_RESULT="${{ needs.lint-and-select-tests.result }}"
           HAS_TESTS="${{ needs.lint-and-select-tests.outputs.has_tests }}"
+          HAS_TESTS_A5="${{ needs.lint-and-select-tests.outputs.has_tests_a5 }}"
 
           echo "=== CI Gate Summary ==="
           echo "lint-and-select-tests: ${LINT_RESULT}"
           echo "has_tests: ${HAS_TESTS}"
+          echo "has_tests_a5: ${HAS_TESTS_A5}"
 
           if [ "${LINT_RESULT}" != "success" ] && [ "${LINT_RESULT}" != "skipped" ]; then
             echo "::error::lint-and-select-tests did not succeed (result: ${LINT_RESULT})"
@@ -262,6 +302,15 @@ jobs:
             echo "run-selected-tests: ${TESTS_RESULT}"
             if [ "${TESTS_RESULT}" != "success" ]; then
               echo "::error::run-selected-tests did not succeed (result: ${TESTS_RESULT})"
+              exit 1
+            fi
+          fi
+
+          if [ "${HAS_TESTS_A5}" = "true" ]; then
+            TESTS_A5_RESULT="${{ needs.run-selected-tests-a5.result }}"
+            echo "run-selected-tests-a5: ${TESTS_A5_RESULT}"
+            if [ "${TESTS_A5_RESULT}" != "success" ]; then
+              echo "::error::run-selected-tests-a5 did not succeed (result: ${TESTS_A5_RESULT})"
               exit 1
             fi
           fi

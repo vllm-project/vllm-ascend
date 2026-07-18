@@ -40,6 +40,16 @@
 #                paths after directory scanning)
 
 # === Modules ===
+# A5 (Ascend 950) curated test suite
+- name: a5
+  optional: true
+  tests:
+    - tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py
+    - tests/e2e/pull_request/two_card/test_sequence_parallelism_moe.py
+    - tests/e2e/pull_request/one_card/spec_decode/
+    - tests/e2e/pull_request/four_card/context_parallel/
+    - tests/e2e/pull_request/four_card/spec_decode/
+
 # Default CPU UT module - always runs all CPU UTs in every PR
 - name: default_cpu_ut
   optional: false

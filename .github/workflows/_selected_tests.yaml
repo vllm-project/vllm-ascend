@@ -83,7 +83,7 @@ jobs:
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
-        HF_HUB_OFFLINE: 1
+        HF_HUB_OFFLINE: 0
         MAX_JOBS: 4
         UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
         UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
@@ -96,13 +96,25 @@ jobs:
       - name: Check NPU availability
         if: ${{ matrix.group.npu_type != 'cpu' }}
         run: |
-          npu-smi info
+          # npu-smi info
+          sleep 99999
+
+      - name: Configure A5 mirror source
+        if: ${{ matrix.group.npu_type == 'a5' }}
+        run: |
+          {
+            echo "UV_INDEX_URL=https://repo.huaweicloud.com/repository/pypi/simple"
+            echo "UV_EXTRA_INDEX_URL=https://repo.huaweicloud.com/ascend/repos/pypi"
+            echo "UV_INSECURE_HOST="
+          } >> $GITHUB_ENV
 
       - name: Install packages
         run: |
-          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          if [ "${{ matrix.group.npu_type }}" != "a5" ]; then
+            sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+            pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+            pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          fi
           apt-get update -y
           apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2 zstd
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend

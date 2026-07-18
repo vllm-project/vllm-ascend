@@ -78,6 +78,7 @@ class NpuType(str, Enum):
     A2 = "a2"
     A3 = "a3"
     _310P = "310p"
+    A5 = "a5"
     CPU = "cpu"
 
 
@@ -737,6 +738,18 @@ def main():
         action="store_true",
         help="Run tests for all configured modules regardless of changed files",
     )
+    parser.add_argument(
+        "--modules",
+        type=str,
+        default=None,
+        help="Force-select specific modules (comma-separated), bypassing file-change matching",
+    )
+    parser.add_argument(
+        "--runner-override",
+        type=str,
+        default=None,
+        help="Force route all non-CPU tests to the specified runner key (e.g. a5_x4)",
+    )
 
     args = parser.parse_args()
     docs = list(yaml.safe_load_all(args.config.read_text()))
@@ -777,6 +790,18 @@ def main():
             )
         if args.run_all_modules:
             matched_modules = [module["name"] for module in config]
+        elif args.modules:
+            requested = set(args.modules.split(","))
+            available = {m["name"] for m in config}
+            missing = requested - available
+            if missing:
+                print(
+                    f"ERROR: unknown module(s): {', '.join(sorted(missing))}. "
+                    f"Available: {', '.join(sorted(available))}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            matched_modules = sorted(requested)
         elif bisect_tool_scoped_change:
             matched_modules = _match_modules(changed_files, config, include_always=False)
         elif test_only_change:
@@ -835,6 +860,16 @@ def main():
                         all_groups[key].append(f)
 
         _dedup_groups(all_groups)
+
+    if args.runner_override:
+        override_key = _parse_runner_key(args.runner_override)
+        overridden: dict[RunnerKey, list[str]] = {}
+        for (num_npus, npu_type), tests in all_groups.items():
+            if npu_type == NpuType.CPU:
+                overridden[(num_npus, npu_type)] = tests
+            else:
+                overridden.setdefault(override_key, []).extend(tests)
+        all_groups = overridden
 
     if skip_tests:
         for key in list(all_groups.keys()):
