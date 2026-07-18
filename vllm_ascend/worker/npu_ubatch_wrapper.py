@@ -216,7 +216,7 @@ class UBatchWrapper(GPUUBatchWrapper):
             ubatch_threads = []
             for metadata in ubatch_metadata:
                 if metadata.num_tokens > 0:
-                    logger.info(f"metadata.context.id {metadata.context.id} num_tokens {metadata.num_tokens}")
+                    logger.info(f"metadata.context.id {metadata.context.id} num_tokens {metadata.num_tokens} model {model}")
                     thread = threading.Thread(target=_ubatch_thread,
                                             args=(results, model, metadata))
                     ubatch_threads.append(thread)

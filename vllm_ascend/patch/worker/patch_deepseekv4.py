@@ -509,7 +509,7 @@ def afd_model_forward(
 
     forward_ctx = get_forward_context()
     afd_metadata = forward_ctx.afd_metadata if forward_ctx is not None else None
-
+    logger.info(f"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     if afd_metadata is not None:
         logger.info(f"afd_model_forward afd_metadata {afd_metadata}")
         hidden_states, residual = self.forward_m2n(

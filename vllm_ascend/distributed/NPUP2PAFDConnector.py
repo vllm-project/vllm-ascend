@@ -246,9 +246,6 @@ class NPUP2PAFDConnector(AFDConnectorBase):
 
         tensor_dict: dict[str, Any] = {}
         work_list = []
-        group = process_group.device_group
-        metadata_group = process_group.cpu_group
-
         for key, value in recv_metadata_list:
             if isinstance(value, TensorMetadata):
                 # Create empty tensor from metadata
