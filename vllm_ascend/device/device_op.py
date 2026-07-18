@@ -612,8 +612,9 @@ class BaseDeviceAdaptor:
             )
         return topk_indices
 
-    @staticmethod
+    @classmethod
     def execute_sparse_flash_attention_process(
+        cls,
         sfa_impl,
         ql_nope: torch.Tensor,
         q_pe: torch.Tensor,
@@ -641,7 +642,7 @@ class BaseDeviceAdaptor:
             torch.float8_e5m2,
         )
         if use_kv_quant_sparse_attention:
-            return BaseDeviceAdaptor.execute_kv_quant_sparse_flash_attention(
+            return cls.execute_kv_quant_sparse_flash_attention(
                 sfa_impl,
                 ql_nope,
                 q_pe,
@@ -1123,6 +1124,48 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             scale=scale,
             **kwargs,
         )
+
+    @staticmethod
+    def execute_kv_quant_sparse_flash_attention(
+        sfa_impl,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv: torch.Tensor,
+        block_table: torch.Tensor,
+        topk_indices: torch.Tensor,
+        actual_seq_lengths_query: torch.Tensor,
+        actual_seq_lengths_key: torch.Tensor,
+        *,
+        sparse_mode: int = 3,
+        return_lse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        query = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
+        result = torch_npu.npu_kv_quant_sparse_flash_attention(
+            query=query,
+            key=kv,
+            value=kv,
+            sparse_indices=topk_indices,
+            scale_value=sfa_impl.scale,
+            sparse_block_size=1,
+            block_table=block_table,
+            actual_seq_lengths_query=actual_seq_lengths_query,
+            actual_seq_lengths_kv=actual_seq_lengths_key,
+            layout_query="TND",
+            layout_kv="PA_BSND",
+            sparse_mode=sparse_mode,
+            attention_mode=2,
+            quant_scale_repo_mode=1,
+            tile_size=getattr(sfa_impl, "sfa_qsfa_tile_size", 128),
+            key_quant_mode=2,
+            value_quant_mode=2,
+            rope_head_dim=getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]),
+        )
+        if return_lse:
+            raise RuntimeError(
+                "C8 sparse flash attention via torch_npu only returns attention_out; "
+                "cannot return softmax max/sum for DCP LSE merge."
+            )
+        return result
 
     @staticmethod
     def npu_moe_init_routing(
