@@ -674,6 +674,46 @@ npu_copy_and_expand_eagle_inputs(
             out_new_token_indices, out_hidden_state_mapping};
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+npu_copy_and_expand_dflash_inputs(
+    const at::Tensor &next_token_ids,
+    const at::Tensor &target_positions,
+    const at::Tensor &context_slot_mapping,
+    const at::Tensor &query_start_loc,
+    const at::Tensor &seq_lens,
+    const at::Tensor &block_table,
+    const at::Tensor &num_rejected_tokens,
+    int64_t parallel_drafting_token_id,
+    int64_t block_size,
+    int64_t num_query_per_req,
+    int64_t num_speculative_tokens,
+    bool sample_from_anchor)
+{
+    int64_t num_context = target_positions.size(0);
+    int64_t num_reqs = query_start_loc.size(0) - 1;
+    int64_t num_query_total = num_reqs * num_query_per_req;
+
+    auto device = target_positions.device();
+    auto int_opts = at::dtype(at::kInt).device(device);
+    at::Tensor out_input_ids = at::zeros({num_query_total}, int_opts);
+    at::Tensor out_query_positions = at::zeros({num_query_total}, int_opts);
+    at::Tensor out_query_slot_mapping = at::zeros({num_query_total}, int_opts);
+    at::Tensor out_context_positions = at::zeros({num_context}, int_opts);
+    at::Tensor out_context_slot_mapping = at::zeros({num_context}, int_opts);
+    at::Tensor out_token_indices = at::zeros({num_reqs * num_speculative_tokens}, int_opts);
+
+    EXEC_NPU_CMD(aclnnCopyAndExpandDflashInputs,
+        next_token_ids, target_positions, context_slot_mapping, query_start_loc,
+        seq_lens, block_table, num_rejected_tokens,
+        parallel_drafting_token_id, block_size, num_query_per_req,
+        num_speculative_tokens, sample_from_anchor,
+        out_input_ids, out_query_positions, out_query_slot_mapping,
+        out_context_positions, out_context_slot_mapping, out_token_indices);
+
+    return {out_input_ids, out_query_positions, out_query_slot_mapping,
+            out_context_positions, out_context_slot_mapping, out_token_indices};
+}
+
 at::Tensor npu_causal_conv1d_custom(
     const at::Tensor& output,
     const at::Tensor& x,
@@ -2144,6 +2184,17 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "chunk_fwd_o(Tensor q, Tensor k, Tensor v, Tensor h, float scale, *, Tensor? g=None, Tensor? g_gamma=None, int[]? cu_seqlens=None, int[]? chunk_indices=None, int? chunk_size=None, bool? transpose_state_layout=False) -> Tensor"
     );
     ops.impl("chunk_fwd_o", torch::kPrivateUse1, &vllm_ascend::chunk_fwd_o);
+
+    ops.def(
+        "npu_copy_and_expand_dflash_inputs(Tensor next_token_ids, Tensor target_positions, "
+        "Tensor context_slot_mapping, Tensor query_start_loc, Tensor seq_lens, "
+        "Tensor block_table, Tensor num_rejected_tokens, "
+        "int parallel_drafting_token_id, int block_size, int num_query_per_req, "
+        "int num_speculative_tokens, bool sample_from_anchor) -> "
+        "(Tensor out_input_ids, Tensor out_query_positions, Tensor out_query_slot_mapping, "
+        "Tensor out_context_positions, Tensor out_context_slot_mapping, Tensor out_token_indices)"
+    );
+    ops.impl("npu_copy_and_expand_dflash_inputs", torch::kPrivateUse1, &vllm_ascend::npu_copy_and_expand_dflash_inputs);
 }
 #else
 // Pybind on other platform
