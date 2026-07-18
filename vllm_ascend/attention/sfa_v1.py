@@ -521,6 +521,10 @@ class AscendSFAImpl(MLAAttentionImpl):
     # Supports forward using the all-gather o_proj weight for decode requests when Sharded CP is enabled.
     o_proj_full_pools: dict[tuple[str, int | None, torch.dtype, int, tuple[int, ...]], torch.Tensor] = {}
 
+    # Set in process_weights_after_loading via _process_kv_b_proj_weights.
+    W_UV: torch.Tensor
+    W_UK_T: torch.Tensor
+
     # q_hadamard and k_hadamard tensor shared when dsa c8 enabled
     q_hadamard: torch.Tensor | None = None
     k_hadamard: torch.Tensor | None = None
