@@ -87,22 +87,6 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             )
             return ckv_bytes + qli_bytes + qli_scale_bytes
 
-        if (
-            self.sparse_head_dim is not None
-            and len(self.sparse_head_dim) == 3
-            and self.sfa_dcp_replicated_indexer_size > 1
-        ):
-            k_head_dim, v_head_dim, index_head_dim = self.sparse_head_dim
-            replicated_head_size = k_head_dim + v_head_dim + index_head_dim * self.sfa_dcp_replicated_indexer_size
-            return (
-                self.block_size
-                * self.num_kv_heads
-                * (
-                    replicated_head_size * get_dtype_size(self.dtype)
-                    + self.scale_dim * get_dtype_size(self.scale_dtype)
-                )
-            )
-
         return (
             self.block_size
             * self.num_kv_heads
@@ -150,16 +134,10 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 None,  # kv_cache[3] does not exist for Sparse C8
             )
 
-        k_head_dim, v_head_dim, index_head_dim = self.sparse_head_dim
-        replicated_index_head_dim = index_head_dim * self.sfa_dcp_replicated_indexer_size
-        total_virtual_head_dim = k_head_dim + v_head_dim + replicated_index_head_dim
-
         return (
-            total_virtual_head_dim / k_head_dim,  # kv_cache[0]
-            total_virtual_head_dim / v_head_dim,  # kv_cache[1]
-            (
-                total_virtual_head_dim / replicated_index_head_dim if replicated_index_head_dim > 0 else None
-            ),  # kv_cache[2]
+            self.head_size / self.sparse_head_dim[0],  # kv_cache[0]
+            self.head_size / self.sparse_head_dim[1],  # kv_cache[1]
+            (self.head_size / self.sparse_head_dim[2] if self.sparse_head_dim[2] > 0 else None),  # kv_cache[2]
             None,  # kv_cache[3] does not exist
         )
 
