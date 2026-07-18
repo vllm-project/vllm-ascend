@@ -18,12 +18,14 @@
 import copy
 import functools
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any, cast
 
 import torch
 import torch.fx as fx
 from torch._dynamo.backends.common import aot_autograd
+from torch._functorch import config as functorch_config
 from torch._inductor.compile_fx import graph_returns_tuple, make_graph_return_tuple
 from torch._inductor.decomposition import select_decomp_table
 from torch.fx import GraphModule
@@ -34,6 +36,18 @@ from vllm.logger import logger
 
 from vllm_ascend.ascend_config import AscendCompilationConfig, get_ascend_config
 from vllm_ascend.utils import COMPILATION_PASS_KEY
+
+
+@contextmanager
+def _disable_incompatible_aot_autograd_cache() -> Iterator[None]:
+    """Disable PyTorch's bundled AOTAutograd cache for npugraph_ex."""
+    cache_config = {"bundled_autograd_cache": False}
+    # force_autograd_cache was added after PyTorch 2.10.
+    if hasattr(functorch_config, "force_autograd_cache"):
+        cache_config["force_autograd_cache"] = False
+
+    with functorch_config.patch(cache_config):
+        yield
 
 
 def compile_fx(graph: GraphModule, example_inputs: list, inner_compile: Callable, decompositions: dict) -> Callable:
@@ -201,11 +215,17 @@ def npugraph_ex_compile(
 
         nfx._NpuFxCompiler._get_compiled_gm = patched_get_compiled_gm
         backend = nge.get_npu_backend(compiler_config=config)
-        # torch.compile requires the output of the fx graph to be a tuple
-        if not graph_returns_tuple(graph):
-            compiled_fn = make_graph_return_tuple(graph, example_inputs, backend)
-        else:
-            compiled_fn = backend(graph, example_inputs)
+        # PyTorch's fullgraph AOT compilation enables its bundled AOTAutograd
+        # cache while invoking custom backends. npugraph_ex enters AOTAutograd
+        # again and returns _CompiledFxGraph rather than Inductor OutputCode, so
+        # the nested result cannot be bundled by PyTorch. Keep the outer cache
+        # intact and disable it only while compiling the nested NPU graph.
+        with _disable_incompatible_aot_autograd_cache():
+            # torch.compile requires the output of the fx graph to be a tuple
+            if not graph_returns_tuple(graph):
+                compiled_fn = make_graph_return_tuple(graph, example_inputs, backend)
+            else:
+                compiled_fn = backend(graph, example_inputs)
         nfx._NpuFxCompiler._get_compiled_gm = _original_get_compiled_gm
         return compiled_fn, (key, cache_path)
     except ImportError:
