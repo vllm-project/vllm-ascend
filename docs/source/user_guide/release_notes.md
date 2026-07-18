@@ -47,8 +47,9 @@ We're excited to announce v0.23.0rc1, the first release candidate for the vLLM A
 ### Known Issues
 
 - The fix for the A3 DCP replicated-indexer startup assertion is included in [#11981](https://github.com/vllm-project/vllm-ascend/pull/11981), but the exact configuration reported in [#12102](https://github.com/vllm-project/vllm-ascend/issues/12102) still needs verification.
-- Qwen3.5 GDN PCP/DCP accuracy and `FULL_DECODE_ONLY` tail-prefill behavior have not completed target-hardware validation. Candidate fixes are tracked in [#12255](https://github.com/vllm-project/vllm-ascend/pull/12255) and [#12297](https://github.com/vllm-project/vllm-ascend/pull/12297).
+- Qwen3.5 GDN PCP/DCP accuracy and `FULL_DECODE_ONLY` tail-prefill behavior have not completed target-hardware validation. The remaining candidate fix is tracked in [#12255](https://github.com/vllm-project/vllm-ascend/pull/12255).
 - With a layerwise KV connector, compiled hybrid GDN execution can leave a decode request waiting for an unsubmitted cache group. The release-branch candidate fix is tracked in [#12264](https://github.com/vllm-project/vllm-ascend/pull/12264).
+- The combination of pipeline parallelism (PP) and prefill context parallelism (PCP) is not supported in v0.23.0. Support for this combination is deferred to a later release.
 - The load-balance proxy can swallow decode errors and return an empty HTTP 200 response. [#12166](https://github.com/vllm-project/vllm-ascend/issues/12166)
 
 ## v0.22.1rc1 - 2026.06.30
