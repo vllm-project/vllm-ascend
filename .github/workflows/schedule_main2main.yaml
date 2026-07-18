@@ -171,21 +171,33 @@ jobs:
             cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info || true
           fi
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: '24'
-          architecture: arm64
-          mirror: https://repo.huaweicloud.com/nodejs
-          registry-url: https://repo.huaweicloud.com/repository/npm/
-          package-manager-cache: false
-
       - name: Install opencode + main2main-flow
+        env:
+          NODE_VERSION: 24.18.0
         run: |
-          set -eu
-          set -o pipefail
+          set -euxo pipefail
 
-          npm install --global --prefix "$HOME/.opencode" opencode-ai
+          NODE_INSTALL_DIR="/opt/nodejs"
+          NODE_ARCHIVE_NAME="node-v${NODE_VERSION}-linux-arm64.tar.gz"
+          NODE_ARCHIVE="/tmp/${NODE_ARCHIVE_NAME}"
+          NODE_CHECKSUMS="/tmp/node-v${NODE_VERSION}-SHASUMS256.txt"
+          curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
+            -o "${NODE_ARCHIVE}" \
+            "https://repo.huaweicloud.com/nodejs/v${NODE_VERSION}/${NODE_ARCHIVE_NAME}"
+          curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
+            -o "${NODE_CHECKSUMS}" \
+            "https://repo.huaweicloud.com/nodejs/v${NODE_VERSION}/SHASUMS256.txt"
+          (cd /tmp && grep " ${NODE_ARCHIVE_NAME}$" "${NODE_CHECKSUMS}" | sha256sum -c -)
+          mkdir -p "${NODE_INSTALL_DIR}"
+          tar -xzf "${NODE_ARCHIVE}" --strip-components=1 -C "${NODE_INSTALL_DIR}"
+          export PATH="${NODE_INSTALL_DIR}/bin:${PATH}"
+          node --version
+          npm --version
+
+          npm install --global \
+            --prefix "$HOME/.opencode" \
+            --registry https://repo.huaweicloud.com/repository/npm/ \
+            opencode-ai
           # configure opencode auth
           mkdir -p ~/.local/share/opencode
           cat > ~/.local/share/opencode/auth.json <<EOF
