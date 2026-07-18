@@ -31,7 +31,7 @@ from typing import Any, Optional
 import regex as re
 import torch
 from transformers import PretrainedConfig
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import LinearBase
@@ -522,8 +522,10 @@ class AscendModelSlimConfig(QuantizationConfig):
         """
         if self._mapper_applied and self.hf_to_vllm_mapper is hf_to_vllm_mapper:
             return
-        vllm_config = get_current_vllm_config()
-        model_type = vllm_config.model_config.hf_config.model_type
+        vllm_config = get_current_vllm_config_or_none()
+        model_type = None
+        if vllm_config is not None:
+            model_type = vllm_config.model_config.hf_config.model_type
 
         if model_type == "qwen3_omni_moe":
             hf_to_vllm_mapper.orig_to_new_prefix = {
@@ -626,10 +628,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             prefix = prefix.replace("linear_attn", "attention")
             prefix = prefix.replace("self_attn", "attention")
         if model_type in packed_modules_model_mapping:
-            self.packed_modules_mapping = packed_modules_model_mapping.get(
-                model_type,
-                {}
-            )
+            self.packed_modules_mapping = packed_modules_model_mapping.get(model_type, {})
         prefix = self.quant_prefix_mapper(model_type, prefix)
 
         if isinstance(layer, LinearBase):
@@ -664,10 +663,9 @@ class AscendModelSlimConfig(QuantizationConfig):
             logger.debug("Select AscendFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
             return AscendFusedMoEMethod(scheme, layer.moe_config, tid2eid)
         elif isinstance(layer, VocabParallelEmbedding):
-            if not self._has_quant_weight(prefix,self.packed_modules_mapping):
+            if not self._has_quant_weight(prefix, self.packed_modules_mapping):
                 logger.debug(
-                    "No ModelSlim quant entry for %s; "
-                    "select UnquantizedEmbeddingMethod",
+                    "No ModelSlim quant entry for %s; select UnquantizedEmbeddingMethod",
                     prefix,
                 )
                 return UnquantizedEmbeddingMethod()
