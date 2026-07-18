@@ -287,8 +287,8 @@ msgstr "此部分显示进程在离线推理后退出，不影响实际推理：
 msgid "## Multi-node Deployment"
 msgstr "## 多节点部署"
 
-msgid "### Verify Multi-Node Communication {: #verify-multi-node-communication } "
-msgstr "### 验证多节点通信"
+msgid "### Verify Multi-Node Communication {: #verify-multi-node-communication }"
+msgstr "### 验证多节点通信 {: #verify-multi-node-communication }"
 
 msgid ""
 "First, check physical layer connectivity, then verify each node, and finally"

@@ -693,7 +693,7 @@ msgstr ""
 "5. **NPU性能检查。** 根据 AGENTS.md 的 NPU 指南，`max(t.item() for t in self.balance_queue)` 每次步骤触发一次主机同步（不可避免，因为此值驱动主机端控制流）。通过性能分析确认重构**未**引入超出当前同步的额外同步。"
 
 msgid "## Phased rollout {: #phased-rollout }"
-msgstr "## 分阶段发布"
+msgstr "## 分阶段发布 {: #phased-rollout }"
 
 msgid ""
 "| Phase | Scope"

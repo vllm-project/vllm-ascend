@@ -551,7 +551,7 @@ first inside `schedule()`, then inside `_process_engine_step`; now after
    (unavoidable, since this value drives host-side control flow). Profile to
    confirm the refactor introduces **no** extra sync beyond the current one.
 
-## Phased rollout {: #phased-rollout}
+## Phased rollout {: #phased-rollout }
 
 | Phase | Scope                                                                                                                  | Risk | Depends on     | Status        |
 |-------|------------------------------------------------------------------------------------------------------------------------|------|----------------|---------------|
