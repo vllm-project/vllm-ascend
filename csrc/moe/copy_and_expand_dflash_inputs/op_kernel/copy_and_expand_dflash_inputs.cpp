@@ -169,16 +169,26 @@ private:
                                              LocalTensor<int32_t>& lTok)
     {
         // Scalar metadata read directly from GM (proven 310P pattern).
+        int32_t ctxStart = gmQueryStartLoc.GetValue(r);
         int32_t ctxEnd = gmQueryStartLoc.GetValue(r + 1);
 
+        // Clamp numRejected to [0, ctxLen] so validCtxEnd stays inside this
+        // request's own context span: a negative value or one exceeding the
+        // context length would otherwise index into the previous request
+        // (data corruption) or produce validCtxEnd == 0 (see lastPos below).
         int32_t numRejected = gmNumRejectedTokens.GetValue(r);
         if (numRejected < 0) numRejected = 0;
+        int32_t ctxLen = ctxEnd - ctxStart;
+        if (numRejected > ctxLen) numRejected = ctxLen;
         int32_t validCtxEnd = ctxEnd - numRejected;
 
         int32_t seqLen = gmSeqLens.GetValue(r);
         int32_t effectiveSeqLen = seqLen - numRejected;
+        if (effectiveSeqLen < 0) effectiveSeqLen = 0;
         int32_t nextTokenId = gmNextTokenIds.GetValue(r);
-        int32_t lastPos = gmTargetPositions.GetValue(validCtxEnd - 1);
+        // Guard the GM read: validCtxEnd == 0 (whole context rejected) would
+        // otherwise read target_positions[-1] out of bounds.
+        int32_t lastPos = (validCtxEnd > 0) ? gmTargetPositions.GetValue(validCtxEnd - 1) : -1;
 
         int32_t queryBase = (int32_t)(r * numQueryPerReq);
 

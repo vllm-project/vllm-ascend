@@ -43,8 +43,13 @@ static ge::graphStatus InferShape4CopyAndExpandDflashInputs(gert::InferShapeCont
     const gert::Shape* queryStartLocShape = context->GetInputShape(IDX_QUERY_START_LOC);
     OP_CHECK_NULL_WITH_CONTEXT(context, queryStartLocShape);
 
-    int64_t numContext = targetPositionsShape->GetDim(0);
-    int64_t numReqs = queryStartLocShape->GetDim(0) - 1;
+    // Guard against empty/uninitialized shapes: GetDim(0) on a rank-0 shape is
+    // undefined, and query_start_loc has num_reqs + 1 entries so numReqs must
+    // never go negative when the shape is degenerate.
+    int64_t numContext = targetPositionsShape->GetDimNum() > 0 ? targetPositionsShape->GetDim(0) : 0;
+    int64_t numReqs = (queryStartLocShape->GetDimNum() > 0 && queryStartLocShape->GetDim(0) > 0)
+                          ? queryStartLocShape->GetDim(0) - 1
+                          : 0;
 
     auto attrs = context->GetAttrs();
     OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
