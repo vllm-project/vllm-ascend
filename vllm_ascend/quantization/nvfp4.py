@@ -12,7 +12,7 @@ execution is dispatched to optional vLLM Ascend custom operators.
 
 from __future__ import annotations
 
-import re
+import regex as re
 from fnmatch import fnmatch
 from typing import Any, Optional
 
@@ -239,7 +239,7 @@ class AscendNvFp4LinearMethod(LinearMethodBase):
 class AscendNvFp4FusedMoEMethod(FusedMoEMethodBase):
     """Mistral-Large-3 NVFP4 MoE weight loader and NPU-op skeleton."""
 
-    def __init__(self, quant_config: "AscendNvFp4Config", moe_config: Any) -> None:
+    def __init__(self, quant_config: "AscendNvFp4Config", moe_config: AscendNvFp4Config) -> None:
         super().__init__(moe_config)
         self.quant_config = quant_config
 
@@ -257,13 +257,8 @@ class AscendNvFp4FusedMoEMethod(FusedMoEMethodBase):
     ) -> None:
         del params_dtype
         group_size = self.quant_config.group_size
-        if (
-            hidden_size % group_size != 0
-            or intermediate_size_per_partition % group_size != 0
-        ):
-            raise ValueError(
-                "NVFP4 MoE hidden and intermediate sizes must be divisible by 16."
-            )
+        if hidden_size % group_size != 0 or intermediate_size_per_partition % group_size != 0:
+            raise ValueError("NVFP4 MoE hidden and intermediate sizes must be divisible by 16.")
 
         weight_loader = extra_weight_attrs.get("weight_loader")
 
