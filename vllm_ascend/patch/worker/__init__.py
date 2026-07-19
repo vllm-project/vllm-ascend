@@ -64,6 +64,8 @@ import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
 import vllm_ascend.patch.worker.patch_gemma4_router  # noqa
 import vllm_ascend.patch.worker.patch_step3p5  # noqa
+import vllm_ascend.patch.worker.patch_gemma4_qkv  # noqa
+import vllm_ascend.patch.worker.patch_gemma4_moe_topk  # noqa
 
 if not is_310p():
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa

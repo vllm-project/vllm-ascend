@@ -110,6 +110,27 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Experimental DiffusionGemma fused qkv projection + q/k/v norm + RoPE
+    # Ascend C op. Disabled by default and only used by the Gemma4 worker patch.
+    "VLLM_ASCEND_DGEMMA_FUSE_QKVPROJ_ASCENDC": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_DGEMMA_FUSE_QKVPROJ_ASCENDC", "0"))
+    ),
+    # Experimental DiffusionGemma selected-router-weight per-expert scaling
+    # Ascend C op. Disabled by default and limited to Gemma4 custom routing.
+    "VLLM_ASCEND_DGEMMA_FUSE_ROUTER_SCALE_ASCENDC": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_DGEMMA_FUSE_ROUTER_SCALE_ASCENDC", "0"))
+    ),
+    # Experimental DiffusionGemma router top-k plus per-expert scaling Ascend C
+    # op. Disabled by default and limited to Gemma4 custom routing.
+    "VLLM_ASCEND_DGEMMA_FUSE_ROUTER_GATING_SCALE_ASCENDC": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_DGEMMA_FUSE_ROUTER_GATING_SCALE_ASCENDC", "0"))
+    ),
+    # Experimental DiffusionGemma decode-only router-front Ascend C op:
+    # router RMSNorm, root-size scale, router scale, projection, top-k, and
+    # per-expert scale. Disabled by default and guarded to batch-1 decode.
+    "VLLM_ASCEND_DGEMMA_FUSE_ROUTER_FRONT_ASCENDC": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_DGEMMA_FUSE_ROUTER_FRONT_ASCENDC", "0"))
+    ),
 }
 
 # end-env-vars-definition

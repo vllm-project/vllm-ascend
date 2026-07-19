@@ -21,6 +21,7 @@ import torch.nn.functional as F
 from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import split_tensor_along_first_dim
@@ -326,22 +327,43 @@ def _select_experts_with_fusion_ops(
     norm_type = 0 if scoring_func == "softmax" else 1
     if e_score_correction_bias is not None and e_score_correction_bias.dtype != router_logits.dtype:
         e_score_correction_bias = e_score_correction_bias.to(router_logits.dtype)
-    topk_weights, topk_ids, _ = DeviceOperator.moe_gating_top_k(
-        router_logits,
-        k=top_k,
-        k_group=topk_group,
-        group_count=num_expert_group,
-        group_select_mode=1,
-        renorm=renorm,
-        norm_type=norm_type,  # 0: softmax; 1: sigmoid
-        out_flag=False,
-        routed_scaling_factor=routed_scaling_factor,
-        eps=1e-20,
-        bias_opt=e_score_correction_bias,
-    )
-    if per_expert_scale is not None:
-        expert_scales = per_expert_scale[topk_ids].to(topk_weights.dtype)
-        topk_weights = topk_weights * expert_scales
+    if per_expert_scale is not None and envs.VLLM_ASCEND_DGEMMA_FUSE_ROUTER_GATING_SCALE_ASCENDC:
+        topk_weights, topk_ids, _ = torch.ops._C_ascend.dgemma_moe_gating_top_k_scaled(
+            router_logits.to(torch.float32),
+            per_expert_scale.to(torch.float32),
+            k=top_k,
+            k_group=topk_group,
+            group_count=num_expert_group,
+            group_select_mode=1,
+            renorm=renorm,
+            norm_type=norm_type,  # 0: softmax; 1: sigmoid
+            out_flag=False,
+            routed_scaling_factor=routed_scaling_factor,
+            eps=1e-20,
+            bias_opt=e_score_correction_bias,
+        )
+    else:
+        topk_weights, topk_ids, _ = DeviceOperator.moe_gating_top_k(
+            router_logits,
+            k=top_k,
+            k_group=topk_group,
+            group_count=num_expert_group,
+            group_select_mode=1,
+            renorm=renorm,
+            norm_type=norm_type,  # 0: softmax; 1: sigmoid
+            out_flag=False,
+            routed_scaling_factor=routed_scaling_factor,
+            eps=1e-20,
+            bias_opt=e_score_correction_bias,
+        )
+    if per_expert_scale is not None and not envs.VLLM_ASCEND_DGEMMA_FUSE_ROUTER_GATING_SCALE_ASCENDC:
+        if envs.VLLM_ASCEND_DGEMMA_FUSE_ROUTER_SCALE_ASCENDC:
+            topk_weights = torch.ops._C_ascend.npu_dgemma_apply_router_scale(
+                topk_weights, topk_ids, per_expert_scale.to(torch.float32)
+            )
+        else:
+            expert_scales = per_expert_scale[topk_ids].to(topk_weights.dtype)
+            topk_weights = topk_weights * expert_scales
 
     return topk_weights, topk_ids
 

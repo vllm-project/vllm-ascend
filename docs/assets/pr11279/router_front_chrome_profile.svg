@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="780" viewBox="0 0 1600 780" role="img" aria-labelledby="title desc">
+  <title id="title">DiffusionGemma router-front Chrome profile comparison on NPU3</title>
+  <desc id="desc">Baseline router-front profile versus fused DgemmaFusedRouterFront profile. Baseline p50 is 802.2 microseconds and fused p50 is 207.6 microseconds, a 3.86x trace speedup. End-to-end throughput improves from 87.03 to 145.08 tokens per second with unchanged 95 percent accuracy on GSM8K n=20.</desc>
+  <defs>
+    <style>
+      .bg { fill: #f7f8fb; }
+      .panel { fill: #ffffff; stroke: #d8dde8; stroke-width: 1.5; }
+      .axis { stroke: #6b7280; stroke-width: 2; }
+      .tick { stroke: #cbd5e1; stroke-width: 1; }
+      .base { fill: #ef6f5e; }
+      .fused { fill: #2f9e8f; }
+      .removed { fill: #6876d9; }
+      .appeared { fill: #d7862b; }
+      .text { fill: #172033; font-family: Arial, Helvetica, sans-serif; }
+      .muted { fill: #64748b; font-family: Arial, Helvetica, sans-serif; }
+      .label { fill: #334155; font-family: Arial, Helvetica, sans-serif; font-size: 24px; }
+      .mono { fill: #172033; font-family: "SFMono-Regular", Consolas, monospace; }
+    </style>
+  </defs>
+
+  <rect class="bg" width="1600" height="780" rx="0"/>
+
+  <text class="text" x="70" y="72" font-size="38" font-weight="700">DiffusionGemma Router-Front Fusion</text>
+  <text class="muted" x="70" y="112" font-size="23">Chrome trace analysis, Ascend 910B3 NPU3 only, decode T=1, layer 0</text>
+
+  <rect class="panel" x="70" y="145" width="705" height="280" rx="8"/>
+  <text class="text" x="105" y="190" font-size="28" font-weight="700">Trace Region Latency</text>
+  <text class="muted" x="105" y="224" font-size="20">p50 across 8 captured router-front regions</text>
+
+  <line class="tick" x1="255" y1="365" x2="720" y2="365"/>
+  <line class="tick" x1="255" y1="315" x2="720" y2="315"/>
+  <line class="tick" x1="255" y1="265" x2="720" y2="265"/>
+  <line class="axis" x1="255" y1="385" x2="720" y2="385"/>
+  <line class="axis" x1="255" y1="245" x2="255" y2="385"/>
+
+  <text class="muted" x="200" y="392" font-size="17">0 us</text>
+  <text class="muted" x="190" y="320" font-size="17">400</text>
+  <text class="muted" x="190" y="270" font-size="17">800</text>
+
+  <text class="label" x="105" y="293">baseline</text>
+  <rect class="base" x="255" y="267" width="425" height="34" rx="4"/>
+  <text class="mono" x="690" y="292" font-size="23">802.2 us</text>
+
+  <text class="label" x="105" y="357">fused</text>
+  <rect class="fused" x="255" y="331" width="110" height="34" rx="4"/>
+  <text class="mono" x="378" y="356" font-size="23">207.6 us</text>
+
+  <rect class="panel" x="825" y="145" width="705" height="280" rx="8"/>
+  <text class="text" x="860" y="190" font-size="28" font-weight="700">End-to-End Hot Path</text>
+  <text class="muted" x="860" y="224" font-size="20">GSM8K n=20, accuracy unchanged at 19/20</text>
+
+  <text class="label" x="860" y="290">baseline reference</text>
+  <rect class="base" x="1105" y="266" width="230" height="34" rx="4"/>
+  <text class="mono" x="1350" y="291" font-size="23">87.03 tok/s</text>
+
+  <text class="label" x="860" y="356">qkv + router-front hot</text>
+  <rect class="fused" x="1105" y="332" width="383" height="34" rx="4"/>
+  <text class="mono" x="1265" y="357" font-size="23">145.08 tok/s</text>
+
+  <text class="text" x="860" y="404" font-size="24" font-weight="700">x1.67 throughput</text>
+  <text class="muted" x="1088" y="404" font-size="22">42.6s wall, 6184 generated tokens</text>
+
+  <rect class="panel" x="70" y="465" width="705" height="245" rx="8"/>
+  <text class="text" x="105" y="510" font-size="28" font-weight="700">Removed Small Ops</text>
+  <text class="muted" x="105" y="544" font-size="20">Baseline op totals eliminated inside the fused path</text>
+
+  <text class="mono" x="105" y="590" font-size="21">MatMulV2</text>
+  <rect class="removed" x="270" y="572" width="220" height="24" rx="3"/>
+  <text class="mono" x="505" y="591" font-size="19">52.6 us</text>
+
+  <text class="mono" x="105" y="628" font-size="21">Mul</text>
+  <rect class="removed" x="270" y="610" width="180" height="24" rx="3"/>
+  <text class="mono" x="465" y="629" font-size="19">43.1 us</text>
+
+  <text class="mono" x="105" y="666" font-size="21">Cast</text>
+  <rect class="removed" x="270" y="648" width="161" height="24" rx="3"/>
+  <text class="mono" x="446" y="667" font-size="19">38.5 us</text>
+
+  <text class="mono" x="105" y="704" font-size="21">ReduceMean</text>
+  <rect class="removed" x="270" y="686" width="153" height="24" rx="3"/>
+  <text class="mono" x="438" y="705" font-size="19">36.6 us</text>
+
+  <rect class="panel" x="825" y="465" width="705" height="245" rx="8"/>
+  <text class="text" x="860" y="510" font-size="28" font-weight="700">Correctness Gates</text>
+
+  <circle class="fused" cx="878" cy="568" r="8"/>
+  <text class="mono" x="900" y="576" font-size="22">pre-E2E: iddiff=0, wmax=0.000913247</text>
+
+  <circle class="fused" cx="878" cy="618" r="8"/>
+  <text class="mono" x="900" y="626" font-size="22">repeat: bad=0/300, hot_us=50.59</text>
+
+  <circle class="fused" cx="878" cy="668" r="8"/>
+  <text class="mono" x="900" y="676" font-size="22">isolation: visible_npus=[3], PCI 0000:82:00.0</text>
+
+  <rect class="appeared" x="1032" y="710" width="225" height="26" rx="4"/>
+  <text class="mono" x="1272" y="731" font-size="20">DgemmaFusedRouterFront: 171.8 us total</text>
+</svg>
