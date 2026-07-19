@@ -279,7 +279,21 @@ jobs:
             git fetch upstream main
             git checkout -B "${BRANCH}" origin/main2main_baseline
             if git rebase upstream/main; then
-              echo "::notice::incremental mode: rebased main2main_baseline onto upstream/main"
+              # If a specific TARGET_COMMIT was set (e.g. manual dispatch) and
+              # it is older than what the baseline already verified, the
+              # baseline's version guards would be wrong for this older vllm
+              # commit.  Fall back to fresh mode in that case.
+              if [ -n "${TARGET_COMMIT}" ]; then
+                BASELINE_VLLM=$(cat .github/vllm-main-verified.commit 2>/dev/null || echo "")
+                if [ -n "${BASELINE_VLLM}" ] && git -C vllm-upstream merge-base --is-ancestor "${TARGET_COMMIT}" "${BASELINE_VLLM}" 2>/dev/null; then
+                  git checkout -B "${BRANCH}" upstream/main
+                  echo "::warning::target commit ${TARGET_COMMIT} is behind baseline verified commit ${BASELINE_VLLM}, forcing fresh mode"
+                else
+                  echo "::notice::incremental mode: rebased main2main_baseline onto upstream/main"
+                fi
+              else
+                echo "::notice::incremental mode: rebased main2main_baseline onto upstream/main"
+              fi
             else
               git rebase --abort
               git checkout -B "${BRANCH}" upstream/main
