@@ -140,7 +140,9 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
     set_mc2_mask,
     set_mc2_tokens_capacity,
 )
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
+from vllm_ascend.ops.fused_moe.routed_experts_capture import (
+    AscendRoutedExpertsCapturer,
+)
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -1111,11 +1113,11 @@ class NPUModelRunner(GPUModelRunner):
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if self.vllm_config.model_config.enable_return_routed_experts:
-            capturer = RoutedExpertsCapturer.get_instance()
+            capturer = AscendRoutedExpertsCapturer.get_instance()
             if capturer is not None:
                 capturer.clear_buffer()
             else:
-                logger.warning("RoutedExpertsCapturer is not initialized.")
+                logger.warning("AscendRoutedExpertsCapturer is not initialized.")
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called after execute_model() returns None.")
         # self._draft_token_ids is None when `input_fits_in_drafter=False`
@@ -1554,11 +1556,11 @@ class NPUModelRunner(GPUModelRunner):
                 self.finalize_kv_connector()
 
         if self.model_config.enable_return_routed_experts:
-            capturer = RoutedExpertsCapturer.get_instance()
+            capturer = AscendRoutedExpertsCapturer.get_instance()
             if capturer is not None:
                 capturer.save_captured_experts(indices=self.cpu_slot_mapping)
             else:
-                logger.warning("RoutedExpertsCapturer is not initialized.")
+                logger.warning("AscendRoutedExpertsCapturer is not initialized.")
 
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
@@ -3226,6 +3228,36 @@ class NPUModelRunner(GPUModelRunner):
                             )
                     else:
                         self.reorder_batch_threshold = reorder_batch_threshold_i  # noqa
+    
+    def init_routed_experts_capturer(self):
+        logger.info(
+            "Initializing routed experts capturer, enable_return_routed_experts: %s",
+            self.model_config.enable_return_routed_experts,
+        )
+        routed_experts_capturer = AscendRoutedExpertsCapturer.create()
+        self.routed_experts_attn_gid = self._get_attention_kv_cache_gid()
+        max_block_size = max(
+            [
+                group.kv_cache_spec.block_size
+                for group in self.kv_cache_config.kv_cache_groups
+            ]
+        )
+
+        self.max_num_kv_tokens = (
+            self.kv_cache_config.num_blocks
+        ) * max_block_size
+        dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
+        pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+        if pcp_size * dcp_size > 1:
+            self.max_num_kv_tokens *= pcp_size * dcp_size
+
+        routed_experts_capturer.init_buffer(
+            max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
+            max_num_kv_tokens=self.max_num_kv_tokens,
+            vllm_config=self.vllm_config,
+        )
+        self._bind_routed_experts_capturer(routed_experts_capturer)
+        self.routed_experts_initialized = True
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
