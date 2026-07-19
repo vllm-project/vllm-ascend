@@ -184,7 +184,7 @@ class AscendNvFp4LinearMethod(LinearMethodBase):
             requires_grad=False,
         )
         layer.input_global_scale_inv = Parameter(
-            (1.0 / layer.input_global_scale).to(torch.float32),
+            (torch.tensor(1.0, dtype=torch.float32) / layer.input_global_scale).to(torch.float32),
             requires_grad=False,
         )
         layer.weight.data = layer.weight.data.contiguous()
