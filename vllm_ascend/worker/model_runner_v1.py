@@ -959,7 +959,11 @@ class NPUModelRunner(GPUModelRunner):
                 cu_num_tokens,
                 self._draft_token_ids,  # type: ignore[has-type]
                 scheduler_output,
-                self.num_spec_tokens,
+                # Unpacks the *previous* step's draft tensor, whose width equals
+                # the K used last step. Under dynamic SD that width can be < the
+                # configured maximum, so use ``prev_num_spec_tokens`` (tracked in
+                # ``_copy_draft_token_ids_to_cpu``) rather than ``num_spec_tokens``.
+                self.prev_num_spec_tokens,
                 prev_positions=prev_positions_gpu,
             )
 
@@ -1237,7 +1241,9 @@ class NPUModelRunner(GPUModelRunner):
                 arange_np=self.arange_np,
                 cu_num_tokens=cu_num_tokens,
                 draft_token_ids=self._draft_token_ids,  # type: ignore[has-type]
-                num_spec_tokens=self.num_spec_tokens,
+                # Previous step's draft width (see the note on the other
+                # generate_pcp_mtp_input call); matters when dynamic SD varies K.
+                num_spec_tokens=self.prev_num_spec_tokens,
                 prepare_input_ids=self._prepare_input_ids,
             )
         else:
@@ -1745,7 +1751,13 @@ class NPUModelRunner(GPUModelRunner):
             )
         elif isinstance(self.drafter, AscendMedusaProposer):
             draft_token_ids = self.drafter.propose(
-                valid_sampled_token_ids, sampling_metadata, spec_decode_metadata, sample_hidden_states
+                # Dynamic SD: forward the scheduled K (equals the configured
+                # maximum when the feature is disabled).
+                scheduler_output.num_spec_tokens_to_schedule,
+                valid_sampled_token_ids,
+                sampling_metadata,
+                spec_decode_metadata,
+                sample_hidden_states,
             )
         elif self.speculative_config.uses_extract_hidden_states():
             # Handle extract_hidden_states method
@@ -1762,7 +1774,9 @@ class NPUModelRunner(GPUModelRunner):
             target_hidden_states = [h[:num_scheduled_tokens] for h in aux_hidden_states]
 
             draft_token_ids = self.drafter.propose(
-                self.speculative_config.num_speculative_tokens,
+                # Dynamic SD: honor the per-step K chosen by the scheduler
+                # (equals the configured maximum when the feature is disabled).
+                scheduler_output.num_spec_tokens_to_schedule,
                 sampled_token_ids=valid_sampled_token_ids,
                 target_hidden_states=target_hidden_states,
                 common_attn_metadata=common_attn_metadata,
@@ -1889,6 +1903,13 @@ class NPUModelRunner(GPUModelRunner):
                     else:
                         target_hidden_states = hidden_states[token_indices]
             assert self.drafter is not None
+            # Dynamic SD: the eagle/draft-model drafter drives its draft loop
+            # off ``num_speculative_tokens``. Set it to the scheduler's per-step
+            # K (== the configured maximum when the feature is disabled, so the
+            # default path is unchanged). The value never exceeds the maximum,
+            # so the drafter's pre-allocated buffers stay valid; K == 0 is
+            # handled inside ``_propose``.
+            self.drafter.num_speculative_tokens = scheduler_output.num_spec_tokens_to_schedule
             draft_token_ids = self.drafter._propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
@@ -1958,6 +1979,13 @@ class NPUModelRunner(GPUModelRunner):
     def _copy_draft_token_ids_to_cpu(
         self, scheduler_output: "SchedulerOutput", zeros_only: bool = False
     ) -> None:
+        # Record the width of the drafts just produced so the next step unpacks
+        # the previous-step draft tensor with the right stride. Under dynamic SD
+        # this width can change step to step (mirrors vLLM's GPUModelRunner
+        # ``prev_num_spec_tokens`` bookkeeping). Kept before the early returns so
+        # it is updated even when the CPU copy itself is skipped.
+        if torch.is_tensor(self._draft_token_ids):  # type: ignore[has-type]
+            self.prev_num_spec_tokens = self._draft_token_ids.shape[1]  # type: ignore[has-type]
         if not self.num_spec_tokens:
             return
         if self.use_async_scheduling and not (
@@ -1976,14 +2004,18 @@ class NPUModelRunner(GPUModelRunner):
         assert self.draft_token_ids_cpu is not None
         default_stream = torch.npu.current_stream()
         num_reqs = draft_token_ids.shape[0]
+        # Slice the pre-allocated CPU buffer (sized for the configured maximum
+        # K) to the *actual* draft width. Under dynamic SD the produced width
+        # can be < max, so an unsliced copy would shape-mismatch.
+        num_spec_tokens = draft_token_ids.shape[1]
         with torch.npu.stream(self.draft_token_ids_copy_stream):
             if not zeros_only:
                 self.draft_token_ids_copy_stream.wait_stream(default_stream)
-                self.draft_token_ids_cpu[:num_reqs].copy_(
+                self.draft_token_ids_cpu[:num_reqs, :num_spec_tokens].copy_(
                     draft_token_ids, non_blocking=True
                 )
             else:
-                self.draft_token_ids_cpu[:num_reqs] = 0
+                self.draft_token_ids_cpu[:num_reqs, :num_spec_tokens] = 0
             self.draft_token_ids_event.record()
 
     @torch.inference_mode()
