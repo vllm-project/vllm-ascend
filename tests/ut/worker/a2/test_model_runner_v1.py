@@ -24,7 +24,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.device = torch.device("cpu")
         runner.use_sparse = False
-        runner.use_sparse_c8 = False
+        runner.enable_sparse_sfa_c8 = False
+        runner.enable_sparse_li_c8 = False
         runner.use_compress = False
         runner.use_hybrid_blocks = False
         runner.hybrid_with_attn_and_mamba = False
@@ -119,8 +120,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         torch.nn.Module.__init__(attn_module)
         attn_module.impl = SimpleNamespace(
             has_indexer=False,
-            use_sparse_c8_sfa=False,
-            use_sparse_c8_indexer=False,
+            enable_sparse_sfa_c8=False,
+            enable_sparse_li_c8=False,
         )
         attn_module.kv_lora_rank = 512
         attn_module.qk_rope_head_dim = 64
@@ -169,7 +170,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.kv_cache_dtype = torch.bfloat16
         runner.shared_kv_cache_layers = {}
         runner.ascend_config = MagicMock()
-        runner.ascend_config.is_sparse_c8_layer.return_value = False
+        runner.ascend_config.is_sparse_li_c8_layer.return_value = False
         runner.model_config.hf_text_config = SimpleNamespace(
             kv_lora_rank=512,
             qk_rope_head_dim=64,
@@ -181,8 +182,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         torch.nn.Module.__init__(attn_module)
         attn_module.impl = SimpleNamespace(
             has_indexer=True,
-            use_sparse_c8_sfa=False,
-            use_sparse_c8_indexer=False,
+            enable_sparse_sfa_c8=False,
+            enable_sparse_li_c8=False,
         )
         attn_module.kv_lora_rank = 512
         attn_module.qk_rope_head_dim = 64
@@ -266,7 +267,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             num_kv_heads=1,
             head_size=512 + 64,
             dtype=torch.bfloat16,
-            cache_sparse_c8=True,
+            cache_sparse_sfa_c8=True,
         )
         indexer_spec = AscendSFAIndexerCacheSpec(
             block_size=16,
@@ -275,7 +276,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             dtype=torch.int8,
             scale_dim=1,
             scale_dtype=torch.float16,
-            cache_sparse_c8=True,
+            cache_sparse_li_c8=True,
             sfa_dcp_replicated_indexer_size=2,
         )
 
@@ -300,7 +301,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.c8_k_scale_cache_dtype = torch.float32
         runner.shared_kv_cache_layers = {}
         runner.ascend_config = MagicMock()
-        runner.ascend_config.is_sparse_c8_layer.return_value = True
+        runner.ascend_config.is_sparse_li_c8_layer.return_value = True
         runner.model_config.hf_text_config = SimpleNamespace(
             kv_lora_rank=512,
             qk_rope_head_dim=64,
@@ -312,8 +313,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         torch.nn.Module.__init__(attn_module)
         attn_module.impl = SimpleNamespace(
             has_indexer=True,
-            use_sparse_c8_sfa=True,
-            use_sparse_c8_indexer=True,
+            enable_sparse_sfa_c8=True,
+            enable_sparse_li_c8=True,
         )
         attn_module.kv_lora_rank = 512
         attn_module.qk_rope_head_dim = 64
@@ -331,7 +332,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         indexer_spec = specs[indexer_layer_name]
 
         self.assertEqual(
-            runner.ascend_config.is_sparse_c8_layer.call_args_list,
+            runner.ascend_config.is_sparse_li_c8_layer.call_args_list,
             [call(indexer_layer_name)],
         )
         self.assertEqual(main_spec.head_size, 512 + 64 * 2 + 4 * 4)
