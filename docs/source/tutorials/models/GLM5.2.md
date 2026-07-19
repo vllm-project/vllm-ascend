@@ -648,7 +648,7 @@ Before you start, please
             --served-model-name glm-52 \
             --max-model-len 135000 \
             --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp", "enforce_eager": true}' \
-            --additional-config '{"enable_sparse_c8":false, "enable_dsa_cp": true}' \
+            --additional-config '{"enable_sparse_sfa_c8":false, "enable_sparse_li_c8":false, "enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -718,7 +718,7 @@ Before you start, please
             --served-model-name glm-52 \
             --max-model-len 135000 \
             --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp", "enforce_eager": true}' \
-            --additional-config '{"enable_sparse_c8":false, "enable_dsa_cp": true}' \
+            --additional-config '{"enable_sparse_sfa_c8":false, "enable_sparse_li_c8":false, "enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -790,7 +790,7 @@ Before you start, please
             --max-num-batched-tokens 164 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp", "enforce_eager": true}' \
-            --additional-config '{"enable_sparse_c8":false, "recompute_scheduler_enable": true}' \
+            --additional-config '{"enable_sparse_sfa_c8":false, "enable_sparse_li_c8":false, "recompute_scheduler_enable": true}' \
             --trust-remote-code \
             --max-num-seqs 48 \
             --gpu-memory-utilization 0.92 \
@@ -860,7 +860,7 @@ Before you start, please
             --max-num-batched-tokens 164 \
             --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp", "enforce_eager": true}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-            --additional-config '{"enable_sparse_c8":false,"recompute_scheduler_enable": true}' \
+            --additional-config '{"enable_sparse_sfa_c8":false, "enable_sparse_li_c8":false, "recompute_scheduler_enable": true}' \
             --trust-remote-code \
             --max-num-seqs 48 \
             --gpu-memory-utilization 0.92 \
@@ -1023,7 +1023,8 @@ vllm serve <MODEL_PATH> \
   }' \
   --additional-config \
   '{
-    "enable_sparse_c8": false,
+    "enable_sparse_sfa_c8": false,
+    "enable_sparse_li_c8": false,
     "multistream_overlap_shared_expert": true,
     "enable_dsa_cp": true
   }' \
@@ -1105,7 +1106,8 @@ vllm serve <MODEL_PATH> \
   '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --additional-config \
   '{
-    "enable_sparse_c8": false,
+    "enable_sparse_sfa_c8": false,
+    "enable_sparse_li_c8": false,
     "multistream_overlap_shared_expert": true,
     "recompute_scheduler_enable": true
   }' \
@@ -1216,7 +1218,7 @@ vllm serve <MODEL_PATH> \
   --decode-context-parallel-size 16 \
   --cp-kv-cache-interleave-size 128 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 16, 128]}' \
-  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false}' \
+  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false}' \
   --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
   --enable-expert-parallel \
@@ -1271,7 +1273,7 @@ vllm serve <MODEL_PATH> \
   --decode-context-parallel-size 8 \
   --cp-kv-cache-interleave-size 128 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false}' \
+  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false}' \
   --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
   --enable-expert-parallel \
@@ -1327,7 +1329,7 @@ vllm serve <MODEL_PATH> \
   --decode-context-parallel-size 8 \
   --cp-kv-cache-interleave-size 128 \
   --enforce-eager \
-  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true}' \
+  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true}' \
   --speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
   --enable-expert-parallel \
@@ -1398,7 +1400,7 @@ vllm serve <MODEL_PATH> \
   --decode-context-parallel-size 8 \
   --cp-kv-cache-interleave-size 128 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_flashcomm1": false, "enable_dsa_cp": false, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true}' \
+  --additional-config '{"enable_flashcomm1": false, "enable_dsa_cp": false, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true}' \
   --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
   --enable-expert-parallel \

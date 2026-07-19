@@ -74,6 +74,40 @@ class TestAscendSFABackend(TestBase):
         self.assertIsNotNone(impl_cls)
 
 
+class TestAscendSFACacheComposition(TestBase):
+    def test_compose_independent_sfa_and_li_c8_layouts(self):
+        for enable_sfa_c8, enable_li_c8 in (
+            (False, False),
+            (True, False),
+            (False, True),
+            (True, True),
+        ):
+            with self.subTest(
+                enable_sfa_c8=enable_sfa_c8,
+                enable_li_c8=enable_li_c8,
+            ):
+                impl = AscendSFAImpl.__new__(AscendSFAImpl)
+                impl.layer_name = "model.layers.0.self_attn.attn"
+                impl.has_indexer = True
+                impl.enable_sparse_sfa_c8 = enable_sfa_c8
+                impl.enable_sparse_li_c8 = enable_li_c8
+
+                main_cache = tuple(torch.empty(1) for _ in range(1 if enable_sfa_c8 else 2))
+                indexer_cache = tuple(torch.empty(1) for _ in range(2 if enable_li_c8 else 1))
+                impl.indexer = SimpleNamespace(
+                    k_cache=SimpleNamespace(kv_cache=indexer_cache)
+                )
+
+                composed = impl._compose_sfa_kv_cache(main_cache)
+
+                expected = (*main_cache, *indexer_cache)
+                self.assertIsNotNone(composed)
+                assert composed is not None
+                self.assertEqual(len(composed), len(expected))
+                for actual_tensor, expected_tensor in zip(composed, expected):
+                    self.assertIs(actual_tensor, expected_tensor)
+
+
 class TestAscendSFAKVQuantSparseAttention(TestBase):
     @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_dynamic_block_quant")
     @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_interleave_rope")
@@ -109,7 +143,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
 
     def test_execute_kv_quant_sparse_flash_attention(self):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
-        impl.use_sparse_c8_sfa = True
+        impl.enable_sparse_sfa_c8 = True
         impl.scale = 0.125
         impl.sfa_qsfa_tile_size = 128
         impl.qk_rope_head_dim = 16
@@ -145,7 +179,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
 
     def test_prolog_v3_enables_packed_int8_kv_cache(self):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
-        impl.use_sparse_c8_sfa = True
+        impl.enable_sparse_sfa_c8 = True
         impl.has_indexer = True
         impl.sfa_qsfa_tile_size = 128
         impl.sfa_qsfa_k_nope_clip_alpha = torch.ones(1)
