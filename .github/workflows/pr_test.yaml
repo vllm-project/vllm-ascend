@@ -212,7 +212,6 @@ jobs:
     strategy:
       matrix:
         vllm_version:
-          - ${{ needs.lint-and-select-tests.outputs.main_commit }}
           - ${{ needs.lint-and-select-tests.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
@@ -220,6 +219,16 @@ jobs:
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
       test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
+
+  generate-hitest:
+    name: Generate hitest recommendations
+    needs: lint-and-select-tests
+    if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' }}
+    uses: ./.github/workflows/_manual-hitest.yaml
+    secrets:
+      HITEST_APIG_APPCODE: ${{ secrets.HITEST_APIG_APPCODE }}
+      HITEST_KEY: ${{ secrets.HITEST_KEY }}
+      HITEST_SECRET: ${{ secrets.HITEST_SECRET }}
 
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.

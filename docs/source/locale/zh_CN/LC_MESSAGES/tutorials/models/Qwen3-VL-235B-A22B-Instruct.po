@@ -112,7 +112,7 @@ msgid ""
 "your node, refer to [using docker](../../installation.md#set-up-using-"
 "docker)."
 msgstr ""
-"根据您的机器类型选择镜像，并在节点上启动Docker镜像，请参考[使用Docker](../../installation.md#set-up-"
+"根据您的机器类型选择镜像，并在节点上启动Docker镜像，请参考[安装指南](../../installation.md#set-up-"
 "using-docker)。"
 
 msgid "=== \"Build from source\""

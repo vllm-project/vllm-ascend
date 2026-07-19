@@ -36,7 +36,6 @@
 #include "mla_preprocess/mla_preprocess_torch_adpt.h"
 #endif
 #include "mc2/dispatch_ffn_combine/dispatch_ffn_combine_torch_adpt.h"
-#include "mc2/dispatch_gmm_combine_decode/dispatch_gmm_combine_decode_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
 #include "attention/lightning_indexer/lightning_indexer_torch_adpt.h"
@@ -2248,20 +2247,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                                      Tensor? offset=None, float swiglu_limit=0.0) -> "
         "                                      (Tensor output, Tensor output_scale, Tensor output_offset)");
     ops.impl("grouped_matmul_swiglu_quant_weight_nz", torch::kPrivateUse1, &vllm_ascend::grouped_matmul_swiglu_quant_weight_nz);
-
-    ops.def(
-        "dispatch_gmm_combine_decode(Tensor x, Tensor expert_ids, Tensor[] gmm1_permuted_weight,"
-        "                            Tensor[] gmm1_permuted_weight_scale,"
-        "                            Tensor[] gmm2_weight, Tensor[] gmm2_weight_scale,"
-        "                            Tensor expert_scales, Tensor? expert_smooth_scales=None,"
-        "                            Tensor? x_active_mask=None,"
-        "                            str group_ep='',"
-        "                            int ep_rank_size=0, int ep_rank_id=0, int moe_expert_num=0,"
-        "                            int shared_expert_num=1, int shared_expert_rank_num=0,"
-        "                            int quant_mode=0,"
-        "                            int global_bs=0) -> (Tensor output, Tensor expert_token_nums)"
-    );
-    ops.impl("dispatch_gmm_combine_decode", torch::kPrivateUse1, &vllm_ascend::dispatch_gmm_combine_decode);
 
     ops.def(
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list(Tensor x, Tensor[] weight, Tensor[] weight_scale, Tensor x_scale,"

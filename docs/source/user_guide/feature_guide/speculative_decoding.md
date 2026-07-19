@@ -29,6 +29,10 @@ All speculative decoding methods are configured through the `speculative_config`
 
 - **`method`** (str, required): The speculative decoding method. Must be one of the supported method names listed in the table above.
 - **`num_speculative_tokens`** (int, required): Number of speculative tokens to generate per forward pass. Auto-filled from the draft model's `n_predict` config (e.g., MTP) or `suffix_decoding_max_tree_depth` (suffix method) when available.
+    > **Note**: For PD Separation deployment, `num_speculative_tokens` should be subject to one of the following conditions:
+    >
+    > 1. Hybrid Mamba models (e.g., Qwen-Next and Qwen3.5 series): `num_speculative_tokens` should be equal on P nodes and D nodes.
+    > 2. Other models: `num_speculative_tokens` on P nodes should be 1, and `num_speculative_tokens` on D nodes should be greater or equal to 1.
 - **`model`** (str, optional): Path or HF repo ID for the draft model. Required for `eagle`, `eagle3`, `dflash`, `medusa`, and `draft_model`. Automatically resolved for `mtp` (reuses target model), `ngram`, `suffix`, and `extract_hidden_states`.
 - **`draft_tensor_parallel_size`** (int, optional): Tensor parallelism size for the draft model. Can only be `1` or the same as the target model's tensor parallel size.
 - **`disable_padded_drafter_batch`** (bool, default: `False`): Disable input padding for speculative decoding. If set to `True`, speculative input batches can contain sequences of different lengths, which may only be supported by certain attention backends. **Note:** Only effective with `eagle`, `eagle3`, `mtp`, `dflash`, `draft_model`, and `extract_hidden_states` methods.
@@ -285,7 +289,7 @@ Key configuration parameters:
 
 5. **`shared_storage_path`**: Directory where hidden states will be saved as `.safetensors` files (one per request).
 
-## Block Verify and Entropy Verify
+## Block Verify and Entropy Verify {: #block-verify-and-entropy-verify }
 
 vLLM Ascend provides two optional optimizations for the rejection sampler in speculative decoding: **Block Verify** and **Entropy Verify**. These features trade a small amount of output precision for improved inference throughput.
 

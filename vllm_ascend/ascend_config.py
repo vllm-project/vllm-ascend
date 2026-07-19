@@ -166,6 +166,13 @@ class AscendConfig:
             "VLLM_ASCEND_ENABLE_FUSED_MC2",
             ascend_envs.VLLM_ASCEND_ENABLE_FUSED_MC2,
         )
+        assert self.enable_fused_mc2 in (0, 1), f"enable_fused_mc2 must be 0 or 1, got {self.enable_fused_mc2}"
+        if self.enable_fused_mc2 == 1 and self.multistream_overlap_shared_expert:
+            self.multistream_overlap_shared_expert = False
+            logger.warning_once(
+                "VLLM_ASCEND_ENABLE_FUSED_MC2 (fused mc2) and multistream_overlap_shared_expert "
+                "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
+            )
         self.enable_mlapo = self._get_config_value(
             additional_config,
             "enable_mlapo",

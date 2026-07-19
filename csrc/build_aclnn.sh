@@ -157,7 +157,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "dispatch_ffn_combine"
         "dispatch_ffn_combine_w4_a8"
         "dispatch_ffn_combine_bf16"
-        "dispatch_gmm_combine_decode"
         "moe_init_routing_custom"
         "moe_gating_top_k"
         "moe_gating_top_k_hash"
