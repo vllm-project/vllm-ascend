@@ -28,7 +28,7 @@ class AscendDflashProposer(AscendEagleProposer):
         self.max_query_tokens = self.max_batch_size * (1 + self.num_speculative_tokens)
         self.max_positions = self.max_num_tokens + self.max_query_tokens
 
-        self._context_slot_mapping_buffer = torch.zeros(
+        self._context_slot_mapping_buffers = torch.zeros(
             self.max_num_tokens,
             dtype=torch.int32,
             device=device,
@@ -101,7 +101,7 @@ class AscendDflashProposer(AscendEagleProposer):
             out_input_ids_ptr=self.input_ids,
             out_context_positions_ptr=self._context_positions_buffer,
             out_query_positions_ptr=self.positions,
-            out_context_slot_mapping_ptr=self._context_slot_mapping_buffer,
+            out_context_slot_mapping_ptr=self._context_slot_mapping_buffers,
             out_query_slot_mapping_ptr=self._slot_mapping_buffer,
             out_token_indices_ptr=token_indices_to_sample,
             # Block table

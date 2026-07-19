@@ -22,7 +22,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import logger
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -39,12 +39,8 @@ from vllm_ascend.models.deepseek_v4 import (
     DeepseekV4MoE,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
-from vllm_ascend.utils import vllm_version_is
 
 _EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.(gate_proj|up_proj|down_proj)\.scale$")
-
-if not vllm_version_is("0.23.0"):
-    from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 
 
 def _apply_dsv4_rope(
@@ -265,15 +261,6 @@ class DeepseekV4DSparkModel(nn.Module):
         return logits_processor(lm_head, self.norm(hidden_states))
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        if vllm_version_is("0.23.0"):
-            return FusedMoE.make_expert_params_mapping(
-                self,
-                ckpt_gate_proj_name="gate_proj",
-                ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name="up_proj",
-                num_experts=self.config.n_routed_experts,
-                num_redundant_experts=0,
-            )
         return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",

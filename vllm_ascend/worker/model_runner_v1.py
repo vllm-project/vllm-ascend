@@ -452,9 +452,6 @@ class NPUModelRunner(GPUModelRunner):
             if vllm_config.speculative_config
             else None
         )
-
-        if vllm_config.speculative_config and vllm_config.speculative_config.use_dspark():
-            self.use_aux_hidden_state_outputs = True
         # When True, run update_full_graph_params before self.model (ENPU / graph capture order).
         # Internal / non-public toggle: read C getenv ``ENPU_ENABLE`` from enpu code (not in envs.py).
         _enpu = get_c_env("ENPU_ENABLE")
@@ -645,11 +642,11 @@ class NPUModelRunner(GPUModelRunner):
             return layer_ids
         assert self.speculative_config.use_dspark()
         hf_config = self.speculative_config.draft_model_config.hf_config
-        # deepseekv4 dspark
+        # deepseek v4 dspark
         dspark_layer_ids = getattr(hf_config, "dspark_target_layer_ids", None)
         if dspark_layer_ids:
             return tuple(i + 1 for i in dspark_layer_ids)
-        # qwen3 dspark
+        # gqa backend dspark
         dspark_layer_ids = getattr(hf_config, "target_layer_ids", None)
         if dspark_layer_ids:
             return tuple(i + 1 for i in dspark_layer_ids)

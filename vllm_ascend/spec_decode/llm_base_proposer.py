@@ -1075,27 +1075,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # `model_hidden_states` represent the speculative model inputs.
         model_input_ids = self.input_ids[:num_input_tokens]
         model_positions = self._get_positions(num_input_tokens)
+        model_kwargs = {"input_ids": model_input_ids, "positions": model_positions, "inputs_embeds": inputs_embeds}
 
-        if self.method == "dflash" or self.method == "dspark":
-            if hasattr(self, "_layer_group_idx"):
-                self.build_model_inputs_first_pass(num_input_tokens, self._context_slots)
-                model_kwargs = dict(
-                    input_ids=self.input_ids[:num_input_tokens], positions=self.positions[:num_input_tokens]
-                )
-            else:
-                self.build_model_inputs_first_pass(num_input_tokens, self._context_slot_mapping_buffer)
-                model_kwargs = dict(
-                    input_ids=self.input_ids[:num_input_tokens],
-                    positions=self.positions[:num_input_tokens],
-                    inputs_embeds=None,
-                )
+        if self.method in ("dflash", "dspark"):
+            self.build_model_inputs_first_pass(num_input_tokens, self._context_slot_mapping_buffers)
         else:
-            model_kwargs = {
-                "input_ids": model_input_ids,
-                "positions": model_positions,
-                "inputs_embeds": inputs_embeds,
-            }
-
             if self.pass_hidden_states_to_model:
                 model_hidden_states = self.hidden_states[:num_input_tokens]
                 model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)

@@ -96,7 +96,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._per_group_context_slot_mapping_buffers: dict[int, torch.Tensor] = {}
 
         # per-layer context slot mappings as a flat list
-        self._context_slots: list[torch.Tensor | None] | None = None
+        self._context_slot_mapping_buffers: list[torch.Tensor | None] | None = None
 
     def initialize_attn_backend(self, kv_cache_config, kernel_block_sizes=None) -> None:
         # Find draft layers (attention layers added by draft model)
@@ -209,12 +209,11 @@ class AscendDSparkProposer(AscendDflashProposer):
         num_query_total = batch_size * block_size
         has_num_rejected = num_rejected_tokens_gpu is not None
         primary_gid = getattr(self, "kv_cache_gid", 0)
-        per_group_draft_block_tables = {
+        self._per_group_block_table_buffers = {
             attn_group.kv_cache_group_id: self._per_group_block_tables[attn_group.kv_cache_group_id]
             for attn_group in self.draft_attn_groups
         }
-        self._per_group_block_table_buffers = per_group_draft_block_tables
-        self._context_slots = None
+        self._context_slot_mapping_buffers = None
         self._dflash_num_context = int(cad.query_start_loc_cpu[batch_size])
         self._dflash_hidden_states[: self._dflash_num_context] = target_hidden_states[: self._dflash_num_context]
 
@@ -229,48 +228,45 @@ class AscendDSparkProposer(AscendDflashProposer):
         # per kv-cache-group to fill positions / input_ids / query slot_mapping
         # / token_indices (SAMPLE_FROM_ANCHOR: anchor at q_idx=0 is sampled too).
         draft_attn_groups = getattr(self, "draft_attn_groups", [])
-        if per_group_draft_block_tables and draft_attn_groups:
-            for attn_group in draft_attn_groups:
-                gid = attn_group.kv_cache_group_id
-                gid_block_table = per_group_draft_block_tables.get(gid)
-                if gid_block_table is None:
-                    continue
-                kv_block_size = int(attn_group.kv_cache_spec.block_size)
-                copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid[1,](
-                    # Inputs
-                    next_token_ids_ptr=next_token_ids,
-                    target_positions_ptr=target_positions,
-                    context_slot_mapping_ptr=self._per_group_slot_mappings[gid],
-                    # Outputs
-                    out_input_ids_ptr=self.input_ids,
-                    out_context_positions_ptr=self._context_positions_buffer,
-                    out_query_positions_ptr=self.positions,
-                    out_context_slot_mapping_ptr=self._per_group_context_slot_mapping_buffers[gid],
-                    out_query_slot_mapping_ptr=self._per_group_query_slot_mapping_buffers[gid],
-                    out_token_indices_ptr=token_indices_to_sample,
-                    # Block table
-                    block_table_ptr=gid_block_table,
-                    block_table_stride=gid_block_table.stride(0),
-                    # Metadata
-                    query_start_loc_ptr=cad.query_start_loc,
-                    seq_lens_ptr=cad.seq_lens,
-                    num_rejected_tokens_ptr=num_rejected_tokens_gpu,
-                    # Scalars
-                    parallel_drafting_token_id=self.parallel_drafting_token_id,
-                    block_size=kv_block_size,
-                    num_query_per_req=block_size,
-                    num_speculative_tokens=block_size,
-                    total_input_tokens=self._dflash_num_context,
-                    batch_size=batch_size,
-                    HAS_NUM_REJECTED=has_num_rejected,
-                    SAMPLE_FROM_ANCHOR=True,
-                )
-        # to compute self._context_slots
-        if per_group_draft_block_tables:
-            per_group_draft_context_slot_mappings = {
-                gid: self._per_group_context_slot_mapping_buffers[gid] for gid in per_group_draft_block_tables
-            }
-            self._context_slots = [per_group_draft_context_slot_mappings[gidx] for gidx in self._layer_group_idx]
+        for attn_group in draft_attn_groups:
+            gid = attn_group.kv_cache_group_id
+            gid_block_table = self._per_group_block_table_buffers.get(gid)
+            if gid_block_table is None:
+                continue
+            kv_block_size = int(attn_group.kv_cache_spec.block_size)
+            copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid[1,](
+                # Inputs
+                next_token_ids_ptr=next_token_ids,
+                target_positions_ptr=target_positions,
+                context_slot_mapping_ptr=self._per_group_slot_mappings[gid],
+                # Outputs
+                out_input_ids_ptr=self.input_ids,
+                out_context_positions_ptr=self._context_positions_buffer,
+                out_query_positions_ptr=self.positions,
+                out_context_slot_mapping_ptr=self._per_group_context_slot_mapping_buffers[gid],
+                out_query_slot_mapping_ptr=self._per_group_query_slot_mapping_buffers[gid],
+                out_token_indices_ptr=token_indices_to_sample,
+                # Block table
+                block_table_ptr=gid_block_table,
+                block_table_stride=gid_block_table.stride(0),
+                # Metadata
+                query_start_loc_ptr=cad.query_start_loc,
+                seq_lens_ptr=cad.seq_lens,
+                num_rejected_tokens_ptr=num_rejected_tokens_gpu,
+                # Scalars
+                parallel_drafting_token_id=self.parallel_drafting_token_id,
+                block_size=kv_block_size,
+                num_query_per_req=block_size,
+                num_speculative_tokens=block_size,
+                total_input_tokens=self._dflash_num_context,
+                batch_size=batch_size,
+                HAS_NUM_REJECTED=has_num_rejected,
+                SAMPLE_FROM_ANCHOR=True,
+            )
+        # to compute self._context_slot_mapping_buffers from dict to list
+        self._context_slot_mapping_buffers = [
+            self._per_group_context_slot_mapping_buffers[gidx] for gidx in self._layer_group_idx
+        ]
 
         effective_seq_lens = cad.seq_lens
         if has_num_rejected:
@@ -291,13 +287,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.num_input_tokens = num_query_total
         cad.max_query_len = block_size
         cad.max_seq_len = cad.max_seq_len + block_size
-        cad.slot_mapping = self._per_group_query_slot_mapping_buffers[self.kv_cache_gid][:num_query_total]
-        if per_group_draft_block_tables:
-            self._per_group_query_slot_mapping_buffers = {
-                gid: self._per_group_query_slot_mapping_buffers[gid] for gid in per_group_draft_block_tables
-            }
-            if primary_gid in self._per_group_query_slot_mapping_buffers:
-                cad.slot_mapping = self._per_group_query_slot_mapping_buffers[primary_gid][:num_query_total]
+        cad.slot_mapping = self._per_group_query_slot_mapping_buffers[primary_gid][:num_query_total]
         cad.positions = self.positions[:num_query_total]
         cad.causal = False
         cad.attn_mask = None
