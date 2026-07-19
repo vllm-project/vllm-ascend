@@ -882,6 +882,26 @@ async def _abort_prefill_selection(
         await runtime.schedule("release_prefill_kv", prefiller_key, prefiller_score)
 
 
+async def _abort_instance_selection(
+    runtime: WorkerRuntime,
+    prefiller_key: str,
+    prefiller_score: float,
+    decoder_key: str | None,
+    decoder_score: float,
+    *,
+    is_initial_request: bool,
+) -> None:
+    if is_initial_request:
+        await runtime.schedule(
+            "finish_request", prefiller_key, prefiller_score, decoder_key, decoder_score, release_prefill_kv=True
+        )
+        return
+
+    await runtime.schedule("release_prefill_kv", prefiller_key, prefiller_score)
+    if decoder_key is not None:
+        await runtime.schedule("release_decoder", decoder_key, decoder_score)
+
+
 async def _finish_instance(runtime: WorkerRuntime, info: InstanceInfo, *, release_prefill_kv: bool) -> None:
     await runtime.schedule(
         "finish_request",
@@ -918,28 +938,37 @@ async def assign_instances(
             max_retries=args.max_retries,
             base_delay=args.retry_delay,
         )
-    except Exception:
+        kv_transfer_params = response.json().get("kv_transfer_params", {})
+    except BaseException:
         await _abort_prefill_selection(runtime, prefiller_key, prefiller_score, is_initial_request=is_initial_request)
         raise
 
-    kv_transfer_params = response.json().get("kv_transfer_params", {})
     if kv_transfer_params:
         req_data["kv_transfer_params"] = kv_transfer_params
 
+    decoder_key = None
     try:
         decoder = await runtime.schedule("pick_decoder", decoder_score)
-    except Exception:
-        await _abort_prefill_selection(runtime, prefiller_key, prefiller_score, is_initial_request=is_initial_request)
+        decoder_key = decoder["key"]
+        prefiller_client = await runtime.get_client(ServerRole.PREFILL, prefiller_key)
+        decoder_client = await runtime.get_client(ServerRole.DECODE, decoder_key)
+    except BaseException:
+        await _abort_instance_selection(
+            runtime,
+            prefiller_key,
+            prefiller_score,
+            decoder_key,
+            decoder_score,
+            is_initial_request=is_initial_request,
+        )
         raise
 
-    prefiller_client = await runtime.get_client(ServerRole.PREFILL, prefiller_key)
-    decoder_client = await runtime.get_client(ServerRole.DECODE, decoder["key"])
     logger.debug("Using %s %s", prefiller_client.base_url, decoder_client.base_url)
     return InstanceInfo(
         request_id=request_id,
         prefiller_key=prefiller_key,
         prefiller_score=prefiller_score,
-        decoder_key=decoder["key"],
+        decoder_key=decoder_key,
         decoder_score=decoder_score,
         decoder_host=decoder["host"],
         decoder_port=decoder["port"],
@@ -1086,7 +1115,7 @@ async def handle_completions_impl(api: str, request: Request):
 
         media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
         return StreamingResponse(generate_stream(), media_type=media_type)
-    except Exception:
+    except BaseException:
         import traceback
 
         exc_info = sys.exc_info()

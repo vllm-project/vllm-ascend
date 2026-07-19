@@ -421,6 +421,9 @@ def get_origin_request_id(api, req_id):
 
 
 async def _handle_completions(api: str, request: Request):
+    decoder_idx: int | None = None
+    decoder_score = 0.0
+    response_started = False
     try:
         req_data = await request.json()
         req_body = await request.body()
@@ -437,8 +440,9 @@ async def _handle_completions(api: str, request: Request):
         decoder_score = proxy_state.calculate_decode_scores(request_length)
         logger.debug("Decoder score: %f", decoder_score)
         # Use the prefiller's kv_transfer_params to select decoder
-        decoder_idx = proxy_state.select_decoder(decoder_score)
-        decoder = proxy_state.decoders[decoder_idx]
+        selected_decoder_idx: int = proxy_state.select_decoder(decoder_score)
+        decoder_idx = selected_decoder_idx
+        decoder = proxy_state.decoders[selected_decoder_idx]
         # logger.debug("Using %s %s", prefiller.url, decoder.url)
         # Stream response from decoder
         released_kv = False
@@ -541,16 +545,22 @@ async def _handle_completions(api: str, request: Request):
                 proxy_state.release_decoder(decoder_idx, decoder_score)
 
         if stream_flag:
-            return StreamingResponse(generate_stream(), media_type="text/event-stream")
+            response = StreamingResponse(generate_stream(), media_type="text/event-stream")
+            response_started = True
+            return response
         else:
-            return StreamingResponse(generate_stream(), media_type="application/json")
-    except Exception as e:
+            response = StreamingResponse(generate_stream(), media_type="application/json")
+            response_started = True
+            return response
+    except BaseException as e:
         import traceback
 
         exc_info = sys.exc_info()
         print(f"Error occurred in disagg prefill proxy server - {api} endpoint")
         print(e)
         print("".join(traceback.format_exception(*exc_info)))
+        if decoder_idx is not None and not response_started:
+            proxy_state.release_decoder(decoder_idx, decoder_score)
         raise
 
 
@@ -599,6 +609,8 @@ async def reset_prefix_cache(request: Request):
 
 @app.post("/v1/metaserver")
 async def metaserver(request: Request):
+    prefiller_idx: int | None = None
+    prefiller_score = 0.0
     try:
         kv_transfer_params = await request.json()
 
@@ -611,13 +623,14 @@ async def metaserver(request: Request):
         logger.debug("Request length: %s, Prefiller score: %s", request_length, prefiller_score)
 
         # Select prefiller
-        prefiller_idx = proxy_state.select_prefiller(prefiller_score)
-        prefiller = proxy_state.prefillers[prefiller_idx]
+        selected_prefiller_idx: int = proxy_state.select_prefiller(prefiller_score)
+        prefiller_idx = selected_prefiller_idx
+        prefiller = proxy_state.prefillers[selected_prefiller_idx]
         logger.debug("Using prefill prefiller.url=%r req_data=%r", prefiller.url, req_data)
         # Send request to prefiller
         await send_request_to_service(
             prefiller.client,
-            prefiller_idx,
+            selected_prefiller_idx,
             api,
             req_data,
             request_id,
@@ -628,8 +641,9 @@ async def metaserver(request: Request):
     except Exception as e:
         logger.error("Post metaserver failed with: %s", e)
     finally:
-        proxy_state.release_prefiller(prefiller_idx, prefiller_score)
-        proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
+        if prefiller_idx is not None:
+            proxy_state.release_prefiller(prefiller_idx, prefiller_score)
+            proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
 
 
 if __name__ == "__main__":
