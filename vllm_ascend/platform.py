@@ -27,6 +27,10 @@ import vllm.envs as envs_vllm
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
+from vllm_ascend import register_ec_manager
+from vllm_ascend.ec_manager.score_encoder_cache import get_score_encoder_cache_config
+from vllm.config.ec_manager_config import EncoderCacheManagerMetadata, EncoderCacheManagerConfig
+
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
@@ -290,6 +294,12 @@ class NPUPlatform(Platform):
             vllm_config.additional_config.setdefault("ascend_fusion_config", {}).update(
                 vars(ascend_fusion_config) if not isinstance(ascend_fusion_config, dict) else ascend_fusion_config
             )
+
+        cfg = get_score_encoder_cache_config(vllm_config)
+        logger.warning("get_score_encoder_cache_config: %s", cfg)
+        if cfg.enabled:
+            vllm_config.ec_manager_config = EncoderCacheManagerConfig()
+            vllm_config.ec_manager_config.encoder_cache_manager_cls = register_ec_manager()
 
         if model_config is None:
             logger.warning("Model config is missing. This may indicate that we are running a test case")
