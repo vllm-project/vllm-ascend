@@ -68,6 +68,7 @@ The following features and optimizations are planned for deprecation in a future
 ### Known Issues
 
 - The combination of pipeline parallelism (PP) and prefill context parallelism (PCP) is not supported in v0.23.0. Support for this combination is deferred to a later release.
+- The former `enable_sparse_c8` option has been split into `enable_sparse_sfa_c8` and `enable_sparse_li_c8`. Existing `--additional-config` settings must use one or both new options depending on whether Sparse Flash Attention C8, LightningIndexer C8, or both are required. [#12351](https://github.com/vllm-project/vllm-ascend/pull/12351)
 - The load-balance proxy can swallow decode errors and return an empty HTTP 200 response. [#12166](https://github.com/vllm-project/vllm-ascend/issues/12166)
 - Qwen3-30B-A3B floating-point serving can show a 1-2 ms TPOT regression at batch size 1 in the reported TP4 full-graph configuration. [#12337](https://github.com/vllm-project/vllm-ascend/issues/12337)
 - In the reported DeepSeek V4 Flash W8A8 MTP P/D-disaggregated deployment, the second aisbench round can cause a worker process from another card to appear on an NPU device. [#12338](https://github.com/vllm-project/vllm-ascend/issues/12338)
