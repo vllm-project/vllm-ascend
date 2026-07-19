@@ -1155,29 +1155,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
             graph_params = get_graph_params()
         num_tokens = query.shape[0]
         if _EXTRA_CTX.capturing:
-            block_table = attn_metadata.block_tables
-            context_lens = attn_metadata.seq_lens
-            # Draft KV-sharing layers read K/V from the target's paged cache,
-            # not their own (empty) cache. Swap to the target impl's
-            # key/value_cache and route the per-group block_table, mirroring
-            # kv_sharing._get_shared_kv_from_block_table. Without this
-            # PA reads the draft's empty cache → all-zero attention.
-            key_cache = self.key_cache
-            value_cache = self.value_cache
-            if _EXTRA_CTX.is_draft_model and self.kv_sharing_target_layer_name is not None:
-                _b = kv_sharing.binding_of(self)
-                if _b is not None and _b.target_impl is not None and _b.target_impl.key_cache is not None:
-                    key_cache = _b.target_impl.key_cache
-                    value_cache = _b.target_impl.value_cache
-                if _b is not None and _b.gid is not None and _b.bt_ref is not None and _b.gid in _b.bt_ref:
-                    block_table = _b.bt_ref[_b.gid]
-            # MTP verify: expand per-seq to per-query (see expand_paged_kv_to_per_query).
-            if attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
-                spec_cfg = self.vllm_config.speculative_config
-                if (spec_cfg is not None
-                        and num_tokens == context_lens.shape[0] * (spec_cfg.num_speculative_tokens + 1)):
-                    block_table, context_lens = expand_paged_kv_to_per_query(
-                        block_table, context_lens, spec_cfg.num_speculative_tokens)
+            # Resolve KV sources (KV-sharing swap + MTP-verify expand) in one
+            # place; see attention.kv_sharing.resolve_capture_kv.
+            key_cache, value_cache, block_table, context_lens = kv_sharing.resolve_capture_kv(
+                self, attn_metadata, num_tokens
+            )
             # Get workspace from cache or calculate it if not present.
             workspace = graph_params.workspaces.get(num_tokens)
             if workspace is None:
@@ -1440,15 +1422,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ) -> torch.Tensor:
         if _EXTRA_CTX.capturing:
             return self.full_graph_pa(query, attn_metadata, output)
-        block_table = attn_metadata.block_tables
-        context_lens = attn_metadata.seq_lens
         # MTP verify: expand per-seq block_table/seq_lens to per-query so token0
-        # does not attend draft1's KV (future leak). See expand_paged_kv_to_per_query.
-        if attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
-            spec_cfg = self.vllm_config.speculative_config
-            if spec_cfg is not None and query.shape[0] == context_lens.shape[0] * (spec_cfg.num_speculative_tokens + 1):
-                block_table, context_lens = expand_paged_kv_to_per_query(
-                    block_table, context_lens, spec_cfg.num_speculative_tokens)
+        # does not attend draft1's KV (future leak). See kv_sharing.
+        block_table, context_lens = kv_sharing.maybe_expand_paged_kv_for_verify(
+            self, attn_metadata, query.shape[0]
+        )
         torch_npu._npu_paged_attention(
             query=query,
             key_cache=self.key_cache,
@@ -1559,23 +1537,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
     ):
         num_tokens = query.shape[0]
-        # KV-sharing draft layers read K/V from the target's paged cache via
-        # PyTorch SDPA, because FIA cannot handle cross-attention where
-        # Q length != KV length. The helper self-gates on
-        # kv_sharing_target_layer_name and returns None for non-KV-sharing
-        # layers to fall through to the normal path. No config-based gate
-        # (see above: draft forward misfire).
-        _kv_share_out = kv_sharing.maybe_kv_share_prefill(
-            self,
-            query,
-            key,
-            value,
-            kv_cache,
-            attn_metadata,
-            output,
-        )
-        if _kv_share_out is not None:
-            return _kv_share_out
         from vllm_ascend.utils import is_950
         _pa_gate = (
             attn_metadata.attn_state in (AscendAttentionState.DecodeOnly,

@@ -605,8 +605,8 @@ def maybe_route_512_capture(impl, attn_metadata) -> bool:
     routing requires attn_state==DecodeOnly which excludes MTP's SpecDecoding
     capture step.  Route 512-dim non-sliding layers to the paged-attention
     graph path here, mirroring using_paged_attention(head_size=512) in
-    forward_impl.  KV-sharing draft 512 layers are intercepted earlier by
-    maybe_kv_share_prefill and never reach here.
+    forward_impl.  KV-sharing draft 512 layers are excluded by the
+    ``is_draft_model`` gate below (draft routes to FIA) and never reach here.
 
     A5 gate: on A5 (950) full_graph_pa segfaults in atb::_npu_paged_attention
     during capture for this layer; A5's original path (full_graph_fia) works.

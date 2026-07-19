@@ -171,10 +171,10 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
     # When the draft model's attention layer is configured with a different
     # number of KV heads than the target layer it shares with (e.g. draft
     # reports 16 KV heads from HuggingFace config but the target's
-    # full_attention uses num_global_kv_heads=4), the KV-cache reshape in
-    # attention_v1._get_current_token_shared_kv will misinterpret the data.
-    # Align the draft's num_kv_heads (and num_heads) to the target layer's
-    # values so PA and shared-KV prefill paths produce correct results.
+    # full_attention uses num_global_kv_heads=4), reading that cache under the
+    # draft's head counts would misinterpret the layout.  Align the draft's
+    # num_kv_heads (and num_heads) to the target layer's values so the shared
+    # KV cache is decoded correctly on both the FIA (A5) and PA (A2/A3) paths.
 
     def _fix_draft_kv_head_counts(self, target_model) -> None:
         from vllm.logger import logger
@@ -277,8 +277,8 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
     # ---- _store_gids_on_impls ----------------------------------------------
     # After initialize_attn_backend and _fix_draft_kv_head_counts have both
     # run, store the kv_cache_group_id on each draft attention backend impl
-    # so that _get_shared_kv_from_block_table can find the correct
-    # block_table for this layer's KV cache group.
+    # so that resolve_capture_kv (the A2/A3 PA capture path) can route the
+    # per-group block_table for this layer's KV cache group.
     def _store_gids_on_impls(self) -> None:
         """Store kv_cache_group_id on each draft attention backend impl."""
         if not hasattr(self, "draft_attn_groups"):
@@ -367,9 +367,9 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
         # may have a different GQA configuration than the target layers
         # they share KV caches with (e.g., the draft reads 16 KV heads
         # from its config but the target's full_attention layer only has
-        # 4 global KV heads).  If they don't match, the KV cache reshape
-        # in _get_current_token_shared_kv will misinterpret the data,
-        # leading to garbage attention outputs and downstream crashes.
+        # 4 global KV heads).  If they don't match, reading the shared cache
+        # under the draft's head counts misinterprets the layout, leading to
+        # garbage attention outputs and downstream crashes.
         self._fix_draft_kv_head_counts(target_model)
 
         # Centroids CUDA graphs are CUDA-only; skip on Ascend.
