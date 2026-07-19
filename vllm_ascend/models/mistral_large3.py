@@ -29,42 +29,24 @@ class MistralLarge3ForCausalLM(DeepseekV3ForCausalLM):
     # later rule when WeightsMapper applies the rules sequentially.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_regex={
-            re.compile(r"\Alayers\.(\d+)\.attention_norm\.weight\Z"): (
-                r"model.layers.\1.input_layernorm.weight"
-            ),
-            re.compile(r"\Alayers\.(\d+)\.attention\.wq_a\.(\w+)\Z"): (
-                r"model.layers.\1.self_attn.q_a_proj.\2"
-            ),
+            re.compile(r"\Alayers\.(\d+)\.attention_norm\.weight\Z"): (r"model.layers.\1.input_layernorm.weight"),
+            re.compile(r"\Alayers\.(\d+)\.attention\.wq_a\.(\w+)\Z"): (r"model.layers.\1.self_attn.q_a_proj.\2"),
             re.compile(r"\Alayers\.(\d+)\.attention\.q_a_norm\.weight\Z"): (
                 r"model.layers.\1.self_attn.q_a_layernorm.weight"
             ),
-            re.compile(r"\Alayers\.(\d+)\.attention\.wq_b\.(\w+)\Z"): (
-                r"model.layers.\1.self_attn.q_b_proj.\2"
-            ),
+            re.compile(r"\Alayers\.(\d+)\.attention\.wq_b\.(\w+)\Z"): (r"model.layers.\1.self_attn.q_b_proj.\2"),
             re.compile(r"\Alayers\.(\d+)\.attention\.wkv_a_with_mqa\.(\w+)\Z"): (
                 r"model.layers.\1.self_attn.kv_a_proj_with_mqa.\2"
             ),
             re.compile(r"\Alayers\.(\d+)\.attention\.kv_a_norm\.weight\Z"): (
                 r"model.layers.\1.self_attn.kv_a_layernorm.weight"
             ),
-            re.compile(r"\Alayers\.(\d+)\.attention\.wkv_b\.(\w+)\Z"): (
-                r"model.layers.\1.self_attn.kv_b_proj.\2"
-            ),
-            re.compile(r"\Alayers\.(\d+)\.attention\.wo\.(\w+)\Z"): (
-                r"model.layers.\1.self_attn.o_proj.\2"
-            ),
-            re.compile(r"\Alayers\.(\d+)\.ffn_norm\.weight\Z"): (
-                r"model.layers.\1.post_attention_layernorm.weight"
-            ),
-            re.compile(r"\Alayers\.(\d+)\.feed_forward\.w1\.(\w+)\Z"): (
-                r"model.layers.\1.mlp.gate_proj.\2"
-            ),
-            re.compile(r"\Alayers\.(\d+)\.feed_forward\.w2\.(\w+)\Z"): (
-                r"model.layers.\1.mlp.down_proj.\2"
-            ),
-            re.compile(r"\Alayers\.(\d+)\.feed_forward\.w3\.(\w+)\Z"): (
-                r"model.layers.\1.mlp.up_proj.\2"
-            ),
+            re.compile(r"\Alayers\.(\d+)\.attention\.wkv_b\.(\w+)\Z"): (r"model.layers.\1.self_attn.kv_b_proj.\2"),
+            re.compile(r"\Alayers\.(\d+)\.attention\.wo\.(\w+)\Z"): (r"model.layers.\1.self_attn.o_proj.\2"),
+            re.compile(r"\Alayers\.(\d+)\.ffn_norm\.weight\Z"): (r"model.layers.\1.post_attention_layernorm.weight"),
+            re.compile(r"\Alayers\.(\d+)\.feed_forward\.w1\.(\w+)\Z"): (r"model.layers.\1.mlp.gate_proj.\2"),
+            re.compile(r"\Alayers\.(\d+)\.feed_forward\.w2\.(\w+)\Z"): (r"model.layers.\1.mlp.down_proj.\2"),
+            re.compile(r"\Alayers\.(\d+)\.feed_forward\.w3\.(\w+)\Z"): (r"model.layers.\1.mlp.up_proj.\2"),
             re.compile(r"\Alayers\.(\d+)\.gate\.weight\Z"): r"model.layers.\1.mlp.gate.weight",
             re.compile(r"\Alayers\.(\d+)\.shared_experts\.w1\.(\w+)\Z"): (
                 r"model.layers.\1.mlp.shared_experts.gate_proj.\2"
@@ -81,9 +63,7 @@ class MistralLarge3ForCausalLM(DeepseekV3ForCausalLM):
             re.compile(r"\Alayers\.(\d+)\.experts\.(\d+)\.w2\.(\w+)\Z"): (
                 r"model.layers.\1.mlp.experts.\2.down_proj.\3"
             ),
-            re.compile(r"\Alayers\.(\d+)\.experts\.(\d+)\.w3\.(\w+)\Z"): (
-                r"model.layers.\1.mlp.experts.\2.up_proj.\3"
-            ),
+            re.compile(r"\Alayers\.(\d+)\.experts\.(\d+)\.w3\.(\w+)\Z"): (r"model.layers.\1.mlp.experts.\2.up_proj.\3"),
             re.compile(r"\Anorm\.weight\Z"): "model.norm.weight",
             re.compile(r"\Atok_embeddings\.weight\Z"): "model.embed_tokens.weight",
             re.compile(r"\Aoutput\.weight\Z"): "lm_head.weight",

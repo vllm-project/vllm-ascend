@@ -78,7 +78,7 @@ smoke_test:
       prompt: >-
         请先用中文解释数据主权对跨境云服务的影响，然后用 English summarize
         the main compliance risks, et terminez en français avec deux
-        recommandations concrètes.
+        recommendations concrètes.
     - name: "enterprise_incident_response"
       prompt: >-
         Produce a P0 response plan for a payment platform whose error rate rose

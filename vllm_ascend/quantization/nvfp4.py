@@ -12,10 +12,10 @@ execution is dispatched to optional vLLM Ascend custom operators.
 
 from __future__ import annotations
 
-import regex as re
 from fnmatch import fnmatch
-from typing import Any, Optional
+from typing import Any
 
+import regex as re
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
@@ -61,16 +61,12 @@ _NVFP4_E2M1_VALUES = (
 def unpack_nvfp4(packed_weight: torch.Tensor) -> torch.Tensor:
     """Unpack uint8 E2M1 pairs to float32, low nibble first."""
     if packed_weight.dtype != torch.uint8:
-        raise TypeError(
-            f"NVFP4 packed weight must be uint8, got {packed_weight.dtype}."
-        )
+        raise TypeError(f"NVFP4 packed weight must be uint8, got {packed_weight.dtype}.")
 
     low = packed_weight & 0x0F
     high = packed_weight >> 4
     indices = torch.stack((low, high), dim=-1).reshape(*packed_weight.shape[:-1], -1)
-    value_table = torch.tensor(
-        _NVFP4_E2M1_VALUES, dtype=torch.float32, device=packed_weight.device
-    )
+    value_table = torch.tensor(_NVFP4_E2M1_VALUES, dtype=torch.float32, device=packed_weight.device)
     return value_table[indices.to(torch.long)]
 
 
@@ -92,14 +88,10 @@ def dequantize_nvfp4(
 
     unpacked = unpack_nvfp4(packed_weight)
     if unpacked.shape[-1] % group_size != 0:
-        raise ValueError(
-            f"NVFP4 logical input size {unpacked.shape[-1]} must be divisible by group_size {group_size}."
-        )
+        raise ValueError(f"NVFP4 logical input size {unpacked.shape[-1]} must be divisible by group_size {group_size}.")
     expected_scale_shape = (*unpacked.shape[:-1], unpacked.shape[-1] // group_size)
     if tuple(weight_scale.shape) != expected_scale_shape:
-        raise ValueError(
-            f"NVFP4 weight_scale shape must be {expected_scale_shape}, got {tuple(weight_scale.shape)}."
-        )
+        raise ValueError(f"NVFP4 weight_scale shape must be {expected_scale_shape}, got {tuple(weight_scale.shape)}.")
 
     block_scale = weight_scale.to(torch.float32).repeat_interleave(group_size, dim=-1)
     global_scale = weight_scale_2.to(torch.float32)
@@ -128,7 +120,7 @@ def _is_npu_tensor(tensor: torch.Tensor) -> bool:
 class AscendNvFp4LinearMethod(LinearMethodBase):
     """NVFP4 linear method with an Ascend-op dispatch and CPU reference path."""
 
-    def __init__(self, quant_config: "AscendNvFp4Config") -> None:
+    def __init__(self, quant_config: AscendNvFp4Config) -> None:
         self.quant_config = quant_config
 
     def create_weights(
@@ -144,8 +136,7 @@ class AscendNvFp4LinearMethod(LinearMethodBase):
         del input_size, output_size, params_dtype
         if input_size_per_partition % self.quant_config.group_size != 0:
             raise ValueError(
-                "NVFP4 input size must be divisible by "
-                f"{self.quant_config.group_size}, got {input_size_per_partition}."
+                f"NVFP4 input size must be divisible by {self.quant_config.group_size}, got {input_size_per_partition}."
             )
 
         output_size_per_partition = sum(output_partition_sizes)
@@ -186,12 +177,8 @@ class AscendNvFp4LinearMethod(LinearMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Fused projections need one scale for the initial operator skeleton.
         # Taking the maximum matches upstream ModelOpt's conservative behavior.
-        layer.input_global_scale = Parameter(
-            layer.input_scale.max().to(torch.float32), requires_grad=False
-        )
-        layer.weight_global_scale = Parameter(
-            layer.weight_scale_2.max().to(torch.float32), requires_grad=False
-        )
+        layer.input_global_scale = Parameter(layer.input_scale.max().to(torch.float32), requires_grad=False)
+        layer.weight_global_scale = Parameter(layer.weight_scale_2.max().to(torch.float32), requires_grad=False)
         layer.alpha = Parameter(
             layer.input_global_scale * layer.weight_global_scale,
             requires_grad=False,
@@ -239,7 +226,7 @@ class AscendNvFp4LinearMethod(LinearMethodBase):
 class AscendNvFp4FusedMoEMethod(FusedMoEMethodBase):
     """Mistral-Large-3 NVFP4 MoE weight loader and NPU-op skeleton."""
 
-    def __init__(self, quant_config: "AscendNvFp4Config", moe_config: AscendNvFp4Config) -> None:
+    def __init__(self, quant_config: AscendNvFp4Config, moe_config: AscendNvFp4Config) -> None:
         super().__init__(moe_config)
         self.quant_config = quant_config
 
@@ -262,9 +249,7 @@ class AscendNvFp4FusedMoEMethod(FusedMoEMethodBase):
 
         weight_loader = extra_weight_attrs.get("weight_loader")
 
-        def register_weight(
-            name: str, shape: tuple[int, ...], dtype: torch.dtype
-        ) -> None:
+        def register_weight(name: str, shape: tuple[int, ...], dtype: torch.dtype) -> None:
             param = ModelWeightParameter(
                 data=torch.empty(shape, dtype=dtype),
                 input_dim=2,
@@ -380,14 +365,10 @@ _remove_existing_registration()
 class AscendNvFp4Config(QuantizationConfig):
     """Configuration for serialized Mistral/ModelOpt NVFP4 checkpoints."""
 
-    def __init__(
-        self, group_size: int = NVFP4_GROUP_SIZE, ignore: list[str] | None = None
-    ) -> None:
+    def __init__(self, group_size: int = NVFP4_GROUP_SIZE, ignore: list[str] | None = None) -> None:
         super().__init__()
         if group_size != NVFP4_GROUP_SIZE:
-            raise ValueError(
-                f"Ascend NVFP4 currently requires group_size={NVFP4_GROUP_SIZE}, got {group_size}."
-            )
+            raise ValueError(f"Ascend NVFP4 currently requires group_size={NVFP4_GROUP_SIZE}, got {group_size}.")
         self.group_size = group_size
         self.ignore = ignore or []
 
@@ -401,9 +382,7 @@ class AscendNvFp4Config(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        raise NotImplementedError(
-            'Ascend hardware does not use CUDA "min capability" checks.'
-        )
+        raise NotImplementedError('Ascend hardware does not use CUDA "min capability" checks.')
 
     @classmethod
     def get_config_filenames(cls) -> list[str]:
@@ -411,7 +390,7 @@ class AscendNvFp4Config(QuantizationConfig):
         return []
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "AscendNvFp4Config":
+    def from_config(cls, config: dict[str, Any]) -> AscendNvFp4Config:
         quant_config = config.get("quantization_config") or config
         quant_config = quant_config.get("quantization") or quant_config
         group_size = quant_config.get("group_size")
@@ -421,13 +400,9 @@ class AscendNvFp4Config(QuantizationConfig):
             weight_config = nvfp4_group.get("weights") or {}
             group_size = weight_config.get("group_size", NVFP4_GROUP_SIZE)
         group_size = int(group_size)
-        ignore = quant_config.get(
-            "exclude_modules", quant_config.get("ignore", config.get("ignore", []))
-        )
+        ignore = quant_config.get("exclude_modules", quant_config.get("ignore", config.get("ignore", [])))
         if not isinstance(ignore, list):
-            raise ValueError(
-                f"NVFP4 ignore/exclude_modules must be a list, got {type(ignore)}."
-            )
+            raise ValueError(f"NVFP4 ignore/exclude_modules must be a list, got {type(ignore)}.")
         return cls(group_size=group_size, ignore=ignore)
 
     @classmethod
@@ -436,7 +411,7 @@ class AscendNvFp4Config(QuantizationConfig):
         hf_quant_cfg: dict[str, Any] | None,
         user_quant: str | None,
         hf_config: Any | None = None,
-    ) -> Optional[str]:
+    ) -> str | None:
         del hf_config
         if user_quant == NVFP4_METHOD:
             return NVFP4_METHOD
@@ -449,8 +424,7 @@ class AscendNvFp4Config(QuantizationConfig):
         quant_format = str(quant_config.get("format", "")).lower()
         config_groups = quant_config.get("config_groups") or {}
         has_nvfp4_group = any(
-            str(group.get("format", "")).lower() == "nvfp4-pack-quantized"
-            for group in config_groups.values()
+            str(group.get("format", "")).lower() == "nvfp4-pack-quantized" for group in config_groups.values()
         )
         if (
             "NVFP4" in quant_algo
@@ -475,7 +449,7 @@ class AscendNvFp4Config(QuantizationConfig):
         layer: torch.nn.Module,
         prefix: str,
         tid2eid: Any | None = None,
-    ) -> Optional[QuantizeMethodBase]:
+    ) -> QuantizeMethodBase | None:
         del tid2eid
         if self._is_ignored(prefix):
             return UnquantizedLinearMethod() if isinstance(layer, LinearBase) else None
