@@ -55,6 +55,15 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_dfx import (
+    MooncakeDFXErrorCode,
+    compute_kv_cache_checksum,
+    dump_metadata,
+    is_mooncake_transfer_dfx_enabled,
+    make_checksum_error,
+    record_kv_content_check,
+    record_metadata_error,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
 from vllm_ascend.utils import enable_custom_op, is_vl_model
@@ -69,6 +78,12 @@ if TYPE_CHECKING:
 
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
+GET_KV_CACHE_CHECKSUM_MSG = b"get_kv_cache_checksum_msg"
+DFX_CHECKSUM_RECV_TIMEOUT = 60.0
+
+
+def select_kv_caches_by_layer_names(kv_caches: dict[str, Any], layer_names: list[str]) -> dict[str, Any]:
+    return {layer_name: kv_caches[layer_name] for layer_name in layer_names if layer_name in kv_caches}
 
 
 class RemotePortInfo(TypedDict):
@@ -257,7 +272,17 @@ class KVCacheSendingThread(threading.Thread):
 
     def run_busy_loop(self, sock: zmq.Socket):  # type: ignore
         encoder = msgspec.msgpack.Encoder()
-        encoded_data = encoder.encode(self.metadata)
+        try:
+            encoded_data = encoder.encode(self.metadata)
+        except Exception as err:
+            record_metadata_error(
+                label="encode_agent_metadata",
+                error_code=MooncakeDFXErrorCode.METADATA_ENCODE_ERROR,
+                error=err,
+                role="kv_producer",
+                metadata=self.metadata,
+            )
+            raise
         size_in_bytes = len(encoded_data)
         logger.debug("Size of encoded MooncakeAgentMetadata: %s bytes", str(size_in_bytes))
 
@@ -277,7 +302,49 @@ class KVCacheSendingThread(threading.Thread):
 
                 msg = decoder.decode(payload[0])
                 if msg[0] == GET_META_MSG:
-                    sock.send_multipart((identity, b"", encoded_data))
+                    dump_metadata(
+                        label="send_agent_metadata",
+                        metadata=self.metadata,
+                        role="kv_producer",
+                        extra={"encoded_size_bytes": size_in_bytes},
+                    )
+                    try:
+                        sock.send_multipart((identity, b"", encoded_data))
+                    except Exception as err:
+                        record_metadata_error(
+                            label="send_agent_metadata",
+                            error_code=MooncakeDFXErrorCode.METADATA_SEND_ERROR,
+                            error=err,
+                            role="kv_producer",
+                            metadata=self.metadata,
+                            extra={"encoded_size_bytes": size_in_bytes},
+                        )
+                        raise
+                elif msg[0] == GET_KV_CACHE_CHECKSUM_MSG:
+                    checksum_request = msg[1]
+                    layer_names = checksum_request.get("layer_names", [])
+                    kv_caches = (
+                        select_kv_caches_by_layer_names(self.kv_caches, layer_names)
+                        if layer_names
+                        else self.kv_caches
+                    )
+                    try:
+                        checksum = compute_kv_cache_checksum(
+                            kv_caches=kv_caches,
+                            block_groups=checksum_request["block_groups"],
+                            tp_num_need_pulls=checksum_request.get("tp_num_need_pulls", 1),
+                            inner_offset=checksum_request.get("inner_offset", 0),
+                            cache_start=checksum_request.get("cache_start", 0),
+                            cache_end=checksum_request.get("cache_end"),
+                        )
+                    except Exception as err:
+                        logger.exception(
+                            "Failed to compute Mooncake source KV checksum for request %s: %s",
+                            checksum_request.get("remote_request_id"),
+                            err,
+                        )
+                        checksum = make_checksum_error(MooncakeDFXErrorCode.SOURCE_CHECKSUM_ERROR, err)
+                    sock.send_multipart((identity, b"", encoder.encode({"checksum": checksum})))
                 elif msg[0] == DONE_RECVING_MSG:
                     logger.debug("Got DONE_RECVING_MSG for request %s", msg[1])
                     request_id = msg[1]
@@ -326,6 +393,7 @@ class KVCacheRecvingThread(threading.Thread):
         has_mamba,
         hma_group_size,
         _is_mamba_group,
+        group_layer_names: list[list[str]],
         ready_event: threading.Event,
         vllm_config: VllmConfig,
         kv_caches: dict[str, Any],
@@ -348,6 +416,7 @@ class KVCacheRecvingThread(threading.Thread):
         self.hma_group_size = hma_group_size
         self.mamba_ssm_size = mamba_ssm_size
         self._is_mamba_group = _is_mamba_group
+        self.group_layer_names = group_layer_names
         self.remote_te_port: dict[str, dict[int, int]] = SizedDict()
 
         self.request_queue: queue.Queue[Any] = queue.Queue()
@@ -406,6 +475,8 @@ class KVCacheRecvingThread(threading.Thread):
         tp_num_need_pulls: int,
         remote_port_send_num: dict[int, RemotePortInfo] | None = None,
         all_task_done: bool = False,
+        num_external_tokens: int = 0,
+        num_prompt_blocks: int = 0,
     ):
         """Add a new request to the queue for processing."""
         if remote_port_send_num is None:
@@ -422,6 +493,8 @@ class KVCacheRecvingThread(threading.Thread):
             "tp_num_need_pulls": tp_num_need_pulls,
             "remote_port_send_num": remote_port_send_num,
             "all_task_done": all_task_done,
+            "num_external_tokens": num_external_tokens,
+            "num_prompt_blocks": num_prompt_blocks,
         }
         logger.debug(f"Adding request {request_id} to the queue.Trans info:{trans_info}")
         self.request_queue.put(trans_info)
@@ -521,6 +594,7 @@ class KVCacheRecvingThread(threading.Thread):
 
         req_start_time = time.perf_counter()
         src_list, dst_list, length_list = [], [], []
+        checksum_groups: list[dict[str, Any]] = []
         for i in range(self.hma_group_size):
             if not self._is_mamba_group[i]:
                 grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
@@ -530,6 +604,19 @@ class KVCacheRecvingThread(threading.Thread):
                 transfer_block_idx = len(remote_block_ids[i]) - self.num_speculative_tokens - 1
                 grouped_remote_block_ids = [[remote_block_ids[i][transfer_block_idx]]]
                 grouped_local_block_ids = [[local_block_ids[i][0]]]
+            if is_mooncake_transfer_dfx_enabled():
+                layer_names = self.group_layer_names[i] if i < len(self.group_layer_names) else []
+                selected_kv_caches = select_kv_caches_by_layer_names(self.kv_caches, layer_names)
+                if selected_kv_caches and grouped_remote_block_ids and grouped_local_block_ids:
+                    checksum_groups.append(
+                        {
+                            "group_idx": i,
+                            "group_is_mamba": self._is_mamba_group[i],
+                            "layer_names": layer_names,
+                            "source_block_groups": grouped_remote_block_ids,
+                            "target_block_groups": grouped_local_block_ids,
+                        }
+                    )
 
             for k, (src_layer_base_addr, dst_layer_base_addr) in enumerate(
                 zip(local_kv_caches_base_addrs, remote_kv_caches_base_addrs)
@@ -543,10 +630,56 @@ class KVCacheRecvingThread(threading.Thread):
                     dst_list.append(dst)
                     length_list.append(length)
 
+        for checksum_group in checksum_groups:
+            checksum_group["source_checksum"] = self._get_remote_kv_cache_checksum(
+                remote_host,
+                remote_handshake_port,
+                {
+                    "request_id": req_meta["request_id"],
+                    "remote_request_id": remote_request_id,
+                    "block_groups": checksum_group["source_block_groups"],
+                    "layer_names": checksum_group["layer_names"],
+                    "tp_num_need_pulls": 1,
+                    "inner_offset": 0,
+                },
+            )
         ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
         if ret < 0:
             logger.error("Mooncake transfer failed for request %s", req_meta["remote_request_id"])
             raise RuntimeError(f"Mooncake transfer failed, ret: {ret}")
+
+        for checksum_group in checksum_groups:
+            try:
+                group_kv_caches = select_kv_caches_by_layer_names(self.kv_caches, checksum_group["layer_names"])
+                target_checksum = compute_kv_cache_checksum(
+                    kv_caches=group_kv_caches,
+                    block_groups=checksum_group["target_block_groups"],
+                )
+            except Exception as err:
+                logger.exception(
+                    "Failed to compute Mooncake target KV checksum for request %s group %s: %s",
+                    remote_request_id,
+                    checksum_group["group_idx"],
+                    err,
+                )
+                target_checksum = make_checksum_error(MooncakeDFXErrorCode.TARGET_CHECKSUM_ERROR, err)
+            record_kv_content_check(
+                request_id=req_meta["request_id"],
+                remote_request_id=remote_request_id,
+                role="kv_consumer",
+                source_checksum=checksum_group["source_checksum"],
+                target_checksum=target_checksum,
+                extra={
+                    "path": "_transfer_kv_cache_all_groups",
+                    "session_id": session_id,
+                    "num_local_blocks": num_local_blocks,
+                    "group_idx": checksum_group["group_idx"],
+                    "group_is_mamba": checksum_group["group_is_mamba"],
+                    "layer_names": checksum_group["layer_names"],
+                    "source_block_groups": checksum_group["source_block_groups"],
+                    "target_block_groups": checksum_group["target_block_groups"],
+                },
+            )
 
         req_end_time = time.perf_counter()
         req_transfer_elapsed = (req_end_time - req_start_time) * 1000
@@ -576,10 +709,25 @@ class KVCacheRecvingThread(threading.Thread):
         if num_local_blocks == 0:
             return
 
+        original_remote_block_ids = list(remote_block_ids)
+        num_prompt_blocks = req_meta.get("num_prompt_blocks", 0)
+        num_external_tokens = req_meta.get("num_external_tokens", 0)
+        num_external_blocks = math.ceil(num_external_tokens / self.block_size) if num_external_tokens > 0 else 0
+        is_mtp_partial_prompt = (
+            self.vllm_config.speculative_config is not None
+            and num_prompt_blocks > 0
+            and num_local_blocks < num_prompt_blocks
+            and num_external_blocks >= num_prompt_blocks
+        )
         num_remote_blocks = len(remote_block_ids)
         assert num_local_blocks <= num_remote_blocks
         if num_local_blocks < num_remote_blocks:
             remote_block_ids = remote_block_ids[-num_local_blocks:]
+        checksum_remote_block_ids = (
+            original_remote_block_ids[:num_local_blocks]
+            if is_mtp_partial_prompt
+            else remote_block_ids
+        )
 
         # Check if we have the remote metadata cached.
         if (
@@ -592,10 +740,12 @@ class KVCacheRecvingThread(threading.Thread):
             grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
                 remote_block_ids, local_block_ids
             )
+            checksum_source_block_groups, _ = group_concurrent_contiguous(checksum_remote_block_ids, local_block_ids)
         else:
             remote_block_ids = list(map(lambda x: [x], remote_block_ids))
             local_block_ids = list(map(lambda x: [x], local_block_ids))
             grouped_remote_block_ids, grouped_local_block_ids = remote_block_ids, local_block_ids
+            checksum_source_block_groups = list(map(lambda x: [x], checksum_remote_block_ids))
         num_transfer_groups = len(grouped_remote_block_ids)
         # tp_num_need_pulls: number of KV caches each Decode node needs to pull from each PP stage
         # Due to GQA, different KV heads are distributed across different ranks, so there are offsets
@@ -622,6 +772,8 @@ class KVCacheRecvingThread(threading.Thread):
 
         req_start_time = time.perf_counter()
         src_list, dst_list, length_list = [], [], []
+        local_cache_start = first_layer_index * num_cache_per_layer
+        local_cache_end = end_layer_index * num_cache_per_layer
         for k, (src_layer_base_addr, dst_layer_base_addr) in enumerate(
             zip(local_kv_caches_base_addrs, remote_kv_caches_base_addrs)
         ):
@@ -635,10 +787,60 @@ class KVCacheRecvingThread(threading.Thread):
                 dst_list.append(dst)
                 length_list.append(length)
 
+        source_checksum = self._get_remote_kv_cache_checksum(
+            remote_host,
+            remote_handshake_port,
+            {
+                "request_id": req_meta["request_id"],
+                "remote_request_id": remote_request_id,
+                "block_groups": checksum_source_block_groups,
+                "tp_num_need_pulls": 1,
+                "inner_offset": 0,
+                "cache_start": 0,
+                "cache_end": len(local_kv_caches_base_addrs),
+            },
+        )
         ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
         if ret < 0:
             logger.error("Mooncake transfer failed for request %s", req_meta["remote_request_id"])
             raise RuntimeError(f"Mooncake transfer failed, ret: {ret}")
+
+        try:
+            target_checksum = compute_kv_cache_checksum(
+                kv_caches=self.kv_caches,
+                block_groups=grouped_local_block_ids,
+                tp_num_need_pulls=tp_num_need_pulls,
+                inner_offset=inner_offset,
+                cache_start=local_cache_start,
+                cache_end=local_cache_end,
+            )
+        except Exception as err:
+            logger.exception("Failed to compute Mooncake target KV checksum for request %s: %s", remote_request_id, err)
+            target_checksum = make_checksum_error(MooncakeDFXErrorCode.TARGET_CHECKSUM_ERROR, err)
+        record_kv_content_check(
+            request_id=req_meta["request_id"],
+            remote_request_id=remote_request_id,
+            role="kv_consumer",
+            source_checksum=source_checksum,
+            target_checksum=target_checksum,
+            extra={
+                "path": "_transfer_kv_cache",
+                "session_id": session_id,
+                "num_blocks": num_blocks,
+                "tp_num_need_pulls": tp_num_need_pulls,
+                "inner_offset": inner_offset,
+                "num_prompt_blocks": num_prompt_blocks,
+                "num_external_tokens": num_external_tokens,
+                "num_external_blocks": num_external_blocks,
+                "actual_remote_block_groups": grouped_remote_block_ids,
+                "checksum_source_block_groups": checksum_source_block_groups,
+                "checksum_source_block_policy": (
+                    "mtp_partial_prompt_prefix"
+                    if is_mtp_partial_prompt
+                    else "transfer_remote_blocks"
+                ),
+            },
+        )
 
         req_end_time = time.perf_counter()
         req_transfer_elapsed = (req_end_time - req_start_time) * 1000
@@ -788,17 +990,108 @@ class KVCacheRecvingThread(threading.Thread):
     def _get_remote_metadata(self, remote_host: str, remote_handshake_port: int) -> None:
         """Get the metadata from the remote host."""
         sock: zmq.Socket | None = None  # type: ignore
+        remote_addr = f"{remote_host}:{remote_handshake_port}"
         try:
             sock = self._get_remote_socket(remote_host, remote_handshake_port)
-            ensure_zmq_send(sock, self.encoder.encode((GET_META_MSG, "")), f"{remote_host}:{remote_handshake_port}")
-            metadata_bytes = ensure_zmq_recv(sock, self.remote_poller, f"{remote_host}:{remote_handshake_port}")
-            agent_meta = self.decoder.decode(metadata_bytes)
-            engine_id = agent_meta.engine_id
-            assert engine_id != self.local_engine_id, (
-                f"Conflict engine id {engine_id} with local engine id {self.local_engine_id}."
+            try:
+                ensure_zmq_send(sock, self.encoder.encode((GET_META_MSG, "")), remote_addr)
+            except Exception as err:
+                record_metadata_error(
+                    label="request_agent_metadata",
+                    error_code=MooncakeDFXErrorCode.METADATA_SEND_ERROR,
+                    error=err,
+                    role="kv_consumer",
+                    extra={"remote_host": remote_host, "remote_handshake_port": remote_handshake_port},
+                )
+                raise
+            try:
+                metadata_bytes = ensure_zmq_recv(sock, self.remote_poller, remote_addr)
+            except Exception as err:
+                record_metadata_error(
+                    label="recv_agent_metadata",
+                    error_code=MooncakeDFXErrorCode.METADATA_RECV_ERROR,
+                    error=err,
+                    role="kv_consumer",
+                    extra={"remote_host": remote_host, "remote_handshake_port": remote_handshake_port},
+                )
+                raise
+            try:
+                agent_meta = self.decoder.decode(metadata_bytes)
+            except Exception as err:
+                record_metadata_error(
+                    label="decode_agent_metadata",
+                    error_code=MooncakeDFXErrorCode.METADATA_DECODE_ERROR,
+                    error=err,
+                    role="kv_consumer",
+                    extra={
+                        "remote_host": remote_host,
+                        "remote_handshake_port": remote_handshake_port,
+                        "encoded_size_bytes": len(metadata_bytes),
+                    },
+                )
+                raise
+            dump_metadata(
+                label="recv_agent_metadata",
+                metadata=agent_meta,
+                role="kv_consumer",
+                extra={"remote_host": remote_host, "remote_handshake_port": remote_handshake_port},
             )
+            engine_id = agent_meta.engine_id
+            try:
+                assert engine_id != self.local_engine_id, (
+                    f"Conflict engine id {engine_id} with local engine id {self.local_engine_id}."
+                )
+            except AssertionError as err:
+                record_metadata_error(
+                    label="validate_agent_metadata",
+                    error_code=MooncakeDFXErrorCode.METADATA_VALIDATE_ERROR,
+                    error=err,
+                    role="kv_consumer",
+                    metadata=agent_meta,
+                    extra={
+                        "remote_host": remote_host,
+                        "remote_handshake_port": remote_handshake_port,
+                        "local_engine_id": self.local_engine_id,
+                        "remote_engine_id": engine_id,
+                    },
+                )
+                raise
             self.kv_caches_base_addr[engine_id][remote_handshake_port] = agent_meta.kv_caches_base_addr
             self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
+        finally:
+            if sock is not None:
+                self._return_remote_socket(sock, remote_host, remote_handshake_port)
+                logger.debug("Returned socket to pool for %s:%d", remote_host, remote_handshake_port)
+
+    def _get_remote_kv_cache_checksum(
+        self,
+        remote_host: str,
+        remote_handshake_port: int,
+        checksum_request: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if not is_mooncake_transfer_dfx_enabled():
+            return None
+
+        sock: zmq.Socket | None = None  # type: ignore
+        try:
+            sock = self._get_remote_socket(remote_host, remote_handshake_port)
+            data = self.encoder.encode((GET_KV_CACHE_CHECKSUM_MSG, checksum_request))
+            ensure_zmq_send(sock, data, f"{remote_host}:{remote_handshake_port}")
+            checksum_bytes = ensure_zmq_recv(
+                sock,
+                self.remote_poller,
+                f"{remote_host}:{remote_handshake_port}",
+                timeout=DFX_CHECKSUM_RECV_TIMEOUT,
+            )
+            checksum_response = msgspec.msgpack.decode(checksum_bytes)
+            return checksum_response.get("checksum")
+        except Exception as err:
+            logger.exception(
+                "Failed to get Mooncake source KV checksum for request %s: %s",
+                checksum_request.get("remote_request_id"),
+                err,
+            )
+            return make_checksum_error(MooncakeDFXErrorCode.SOURCE_CHECKSUM_UNAVAILABLE, err)
         finally:
             if sock is not None:
                 self._return_remote_socket(sock, remote_host, remote_handshake_port)
@@ -1243,6 +1536,7 @@ class MooncakeConnectorWorker:
             layer: group.kv_cache_spec for group in kv_cache_config.kv_cache_groups for layer in group.layer_names
         }
         self.hma_group_size = len(kv_cache_config.kv_cache_groups)
+        self.group_layer_names = [list(group.layer_names) for group in kv_cache_config.kv_cache_groups]
 
         # Mamba metadata
         self._is_mamba_group = [isinstance(group.kv_cache_spec, MambaSpec) for group in kv_cache_config.kv_cache_groups]
@@ -1404,6 +1698,15 @@ class MooncakeConnectorWorker:
             local_ip=get_ip(),
         )
         self.xfer_handshake_metadata = metadata
+        dump_metadata(
+            label="register_kv_caches",
+            metadata=metadata,
+            role=self.kv_role,
+            extra={
+                "registered_ptr_count": len(ptrs),
+                "registered_total_bytes": sum(lengths),
+            },
+        )
 
         ready_event = threading.Event()
         if self.kv_role == "kv_producer":
@@ -1436,6 +1739,7 @@ class MooncakeConnectorWorker:
                 self._has_mamba,
                 self.hma_group_size,
                 self._is_mamba_group,
+                self.group_layer_names,
                 ready_event,
                 self.vllm_config,
                 self.kv_caches,
@@ -1726,6 +2030,8 @@ class MooncakeConnectorWorker:
                     offset=0,
                     tp_num_need_pulls=tp_num_need_pulls,
                     all_task_done=True,
+                    num_external_tokens=meta.num_external_tokens,
+                    num_prompt_blocks=meta.num_prompt_blocks,
                 )
             elif meta.remote_pcp_size * meta.remote_dcp_size > 1:
                 assert len(meta.local_block_ids) == 1, "Context Parallel does not support multi-groups now."
@@ -1759,6 +2065,8 @@ class MooncakeConnectorWorker:
                             all_task_done=(
                                 pcp_dcp_rank == len(remote_handshake_port_list) - 1 and i == tp_num_need_pulls - 1
                             ),
+                            num_external_tokens=meta.num_external_tokens,
+                            num_prompt_blocks=meta.num_prompt_blocks,
                         )
             else:  # TODO: support prefill context parallel and pipeline parallel open at the same time
                 chosen_rank_list = self._get_remote_rank(remote_req_id, prefill_tp_size)
@@ -1783,6 +2091,8 @@ class MooncakeConnectorWorker:
                         offset=i,
                         tp_num_need_pulls=tp_num_need_pulls,
                         all_task_done=(i == tp_num_need_pulls * self._prefill_pp_size - 1),
+                        num_external_tokens=meta.num_external_tokens,
+                        num_prompt_blocks=meta.num_prompt_blocks,
                     )
 
         for req_id in metadata.reqs_in_batch:
