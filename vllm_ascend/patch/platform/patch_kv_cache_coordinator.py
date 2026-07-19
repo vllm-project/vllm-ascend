@@ -256,7 +256,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int] | tuple[tuple[list[KVCacheBlock], ...], int, int]:
         """
         Find the longest cache hit using an iterative fixed-point algorithm.
 
@@ -318,18 +318,31 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     # Eagle needs to match one more block and then pop the last.
                     _max_length = min(curr_hit_length + spec.block_size, max_cache_hit_length)
                 eagle_kwarg = {"drop_eagle_block": use_eagle}
-                hit_blocks = manager_cls.find_longest_cache_hit(
-                    block_hashes=_get_block_hashes(spec),
-                    max_length=_max_length,
-                    kv_cache_group_ids=group_ids,
-                    block_pool=self.block_pool,
-                    kv_cache_spec=spec,
-                    **eagle_kwarg,
-                    alignment_tokens=self.lcm_block_size,
-                    dcp_world_size=self.dcp_world_size,
-                    pcp_world_size=self.pcp_world_size,
-                )
-                _new_hit_length = len(hit_blocks[0]) * effective_block_size
+                if vllm_version_is("0.24.0"):
+                    hit_blocks = manager_cls.find_longest_cache_hit(
+                        block_hashes=_get_block_hashes(spec),
+                        max_length=_max_length,
+                        kv_cache_group_ids=group_ids,
+                        block_pool=self.block_pool,
+                        kv_cache_spec=spec,
+                        **eagle_kwarg,
+                        alignment_tokens=self.lcm_block_size,
+                        dcp_world_size=self.dcp_world_size,
+                        pcp_world_size=self.pcp_world_size,
+                    )
+                    _new_hit_length = len(hit_blocks[0]) * effective_block_size
+                else:
+                    hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
+                        block_hashes=_get_block_hashes(spec),
+                        max_length=_max_length,
+                        kv_cache_group_ids=group_ids,
+                        block_pool=self.block_pool,
+                        kv_cache_spec=spec,
+                        **eagle_kwarg,
+                        alignment_tokens=self.lcm_block_size,
+                        dcp_world_size=self.dcp_world_size,
+                        pcp_world_size=self.pcp_world_size,
+                    )
                 if use_eagle:
                     eagle_verified.add(idx)
                 elif _new_hit_length < curr_hit_length:
@@ -360,13 +373,16 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 if (blks := hit_blocks_by_group[group_id]) is not None:
                     del blks[num_blocks:]
 
-        return tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group), hit_length
+        result = tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group)
+        if vllm_version_is("0.24.0"):
+            return result, hit_length
+        return result, hit_length, 0
 
     def find_longest_cache_hit_per_group(
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int] | tuple[tuple[list[KVCacheBlock], ...], int, int]:
         def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
             target_block_size = kv_cache_spec.block_size
             if not isinstance(kv_cache_spec, MambaSpec) and self.dcp_world_size * self.pcp_world_size > 1:
@@ -420,18 +436,31 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     # Eagle needs to match one more block and then pop the last.
                     _max_length = min(curr_hit_length + spec.block_size, max_cache_hit_length)
                 eagle_kwarg = {"drop_eagle_block": use_eagle}
-                hit_blocks = manager_cls.find_longest_cache_hit(
-                    block_hashes=_get_block_hashes(spec),
-                    max_length=_max_length,
-                    kv_cache_group_ids=group_ids,
-                    block_pool=self.block_pool,
-                    kv_cache_spec=spec,
-                    **eagle_kwarg,
-                    alignment_tokens=self.lcm_block_size,
-                    dcp_world_size=self.dcp_world_size,
-                    pcp_world_size=self.pcp_world_size,
-                )
-                _new_hit_length = len(hit_blocks[0]) * effective_block_size
+                if vllm_version_is("0.24.0"):
+                    hit_blocks = manager_cls.find_longest_cache_hit(
+                        block_hashes=_get_block_hashes(spec),
+                        max_length=_max_length,
+                        kv_cache_group_ids=group_ids,
+                        block_pool=self.block_pool,
+                        kv_cache_spec=spec,
+                        **eagle_kwarg,
+                        alignment_tokens=self.lcm_block_size,
+                        dcp_world_size=self.dcp_world_size,
+                        pcp_world_size=self.pcp_world_size,
+                    )
+                    _new_hit_length = len(hit_blocks[0]) * effective_block_size
+                else:
+                    hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
+                        block_hashes=_get_block_hashes(spec),
+                        max_length=_max_length,
+                        kv_cache_group_ids=group_ids,
+                        block_pool=self.block_pool,
+                        kv_cache_spec=spec,
+                        **eagle_kwarg,
+                        alignment_tokens=self.lcm_block_size,
+                        dcp_world_size=self.dcp_world_size,
+                        pcp_world_size=self.pcp_world_size,
+                    )
                 if use_eagle:
                     eagle_verified.add(idx)
                 elif _new_hit_length < curr_hit_length:
@@ -462,7 +491,10 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 if (blks := hit_blocks_by_group[group_id]) is not None:
                     del blks[num_blocks:]
 
-        return tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group), hit_length
+        result = tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group)
+        if vllm_version_is("0.24.0"):
+            return result, hit_length
+        return result, hit_length, 0
 
 
 def get_kv_cache_coordinator(

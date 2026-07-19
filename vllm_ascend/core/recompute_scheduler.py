@@ -535,12 +535,20 @@ class RecomputeScheduler(ShortRequestFirstSchedulerMixin, Scheduler):
                             HybridKVCacheCoordinator,
                         )
                     ):
-                        computed_blocks, num_new_local_computed_tokens = (
-                            self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
-                                request.block_hashes,
-                                request.num_tokens - 1,
+                        if vllm_version_is("0.24.0"):
+                            computed_blocks, num_new_local_computed_tokens = (
+                                self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
+                                    request.block_hashes,
+                                    request.num_tokens - 1,
+                                )
                             )
-                        )
+                        else:
+                            computed_blocks, num_new_local_computed_tokens, _ = (
+                                self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
+                                    request.block_hashes,
+                                    request.num_tokens - 1,
+                                )
+                            )
                         new_computed_blocks = self.kv_cache_manager.create_kv_cache_blocks(computed_blocks)
                         if self.kv_cache_manager.log_stats:
                             assert self.kv_cache_manager.prefix_cache_stats is not None

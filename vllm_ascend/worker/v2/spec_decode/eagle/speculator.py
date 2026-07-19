@@ -3,6 +3,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
+from __future__ import annotations
+
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -28,7 +30,12 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cudagraph_utils import AttentionStatePair, BatchExecutionDescriptor
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.24.0"):
+    from vllm.v1.worker.gpu.cudagraph_utils import AttentionStatePair  # type: ignore[import-not-found]
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
@@ -165,26 +172,31 @@ class AscendEagleSpeculator(EagleSpeculator):
 
     def capture(
         self,
-        attn_states: dict[BatchExecutionDescriptor, AttentionStatePair],
+        attn_states: dict[BatchExecutionDescriptor, AttentionStatePair]  # type: ignore[valid-type]  # noqa: E501
+        | None = None,
     ) -> None:
         logger.info("Capturing model for speculator...")
-        # Reset indices to zeros to prevent stale values from prior
-        # dummy runs to cause out-of-bounds indexing during capture.
         self.last_token_indices.zero_()
-
-        # Capture the prefill routine (model forward + compute_logits +
-        # sample).
-        # For FULL graphs, the entire routine is recorded as one graph.
-        # For PIECEWISE, only the model's compiled regions are captured
-        # and the rest (compute_logits, gumbel_sample) runs eagerly.
         assert self.prefill_cudagraph_manager is not None
         if self.prefill_cudagraph_manager.use_breakable_cg:
             self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
-        self.prefill_cudagraph_manager.capture(
-            self._prefill,
-            attn_states,
-            progress_bar_desc="Capturing prefill CUDA graphs",
-        )
+        if vllm_version_is("0.24.0"):
+            assert attn_states is not None
+            self.prefill_cudagraph_manager.capture(
+                self._prefill,
+                attn_states,
+                progress_bar_desc="Capturing prefill CUDA graphs",
+            )
+        else:
+            self.prefill_cudagraph_manager.capture(
+                self._prefill,
+                self.model_state,
+                self.target_input_buffers,
+                self.block_tables,
+                self.target_attn_groups,
+                self.kv_cache_config,
+                progress_bar_desc="Capturing prefill CUDA graphs",
+            )
 
         if self.num_speculative_steps == 1:
             return
