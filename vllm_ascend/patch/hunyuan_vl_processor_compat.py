@@ -196,6 +196,66 @@ def _patch_v024_processor_methods(hunyuan_vision: Any) -> None:
     hunyuan_vision.HunYuanVLMultiModalProcessor._call_hf_processor = call_hf_processor
 
 
+def _patch_xdrope_input_positions(hunyuan_vision: Any) -> None:
+    """Guard IndexError when image_start_indices > image_grid_thw entries."""
+
+    def get_xdrope_input_positions(
+        self: Any,
+        input_tokens: list[int],
+        mm_features: list[Any],
+    ) -> Any:
+        from vllm.multimodal.inputs import MultiModalFeatureSpec
+
+        kwargs = MultiModalFeatureSpec.gather_kwargs(
+            mm_features,
+            {"image_grid_thw"},
+        )
+        image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
+
+        hf_config = self.config
+        image_start_token_id = hf_config.image_start_token_id
+        spatial_merge_size = hf_config.vision_config.spatial_merge_size
+        xd_num = len(hf_config.rope_scaling["xdrope_section"])
+
+        import torch
+
+        input_tokens_tensor = torch.tensor(input_tokens)
+        image_start_indices = torch.argwhere(input_tokens_tensor == image_start_token_id).squeeze(1)
+
+        p_index = torch.arange(len(input_tokens_tensor))
+        w_index = torch.arange(len(input_tokens_tensor))
+        h_index = torch.arange(len(input_tokens_tensor))
+        t_index = torch.arange(len(input_tokens_tensor))
+        for image_index in range(len(image_start_indices)):
+            if image_index >= len(image_grid_thw):
+                continue
+            pos = image_start_indices[image_index] + 2
+            t, h, w = image_grid_thw[image_index]
+            _, llm_grid_h, llm_grid_w = (
+                t,
+                h // spatial_merge_size,
+                w // spatial_merge_size,
+            )
+
+            token_num = (llm_grid_w + 1) * llm_grid_h
+            w_index[pos : pos + token_num].copy_(
+                torch.arange(0, llm_grid_w + 1).reshape(1, -1).expand(llm_grid_h, -1).reshape(-1)
+            )
+            h_index[pos : pos + token_num].copy_(
+                torch.arange(0, llm_grid_h).reshape(-1, 1).expand(-1, llm_grid_w + 1).reshape(-1)
+            )
+            t_index[pos : pos + token_num] = image_index
+
+        if xd_num == 4:
+            llm_positions = torch.stack([p_index, w_index, h_index, t_index])
+        elif xd_num == 3:
+            llm_positions = torch.stack([w_index, h_index, t_index])
+
+        return llm_positions
+
+    hunyuan_vision.HunYuanVLForConditionalGeneration.get_xdrope_input_positions = get_xdrope_input_positions
+
+
 def install_hunyuan_vl_processor_compat() -> None:
     """Align both supported vLLM refs with Transformers 5.13 Hunyuan APIs."""
     # Keep each target's native, image-token-only prompt replacement. The
@@ -208,8 +268,8 @@ def install_hunyuan_vl_processor_compat() -> None:
         _patch_v024_processor_methods(v024_hunyuan_vision)
         return
 
-    if not _remove_stale_registry_entries():
-        return
+    _remove_stale_registry_entries()
     from vllm.model_executor.models import hunyuan_vision as main_hunyuan_vision
 
     _patch_hunyuan_processor_loader(main_hunyuan_vision)
+    _patch_xdrope_input_positions(main_hunyuan_vision)
