@@ -159,7 +159,7 @@ class AscendConfig:
             and use_sparse
             and get_ascend_device_type() != AscendDeviceType.A5
         )
-
+        self.c8_enable_reshape_optim = self.enable_sparse_c8 and additional_config.get("c8_enable_reshape_optim", False)
         self.enable_sp_by_pass = (
             vllm_config.model_config is not None
             and not vllm_config.model_config.enforce_eager
