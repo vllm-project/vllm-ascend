@@ -59,11 +59,10 @@ jobs:
         id: auth
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          ACTOR: ${{ github.event.client_payload.github.payload.comment.user.login }}
+          PR_AUTHOR: ${{ github.event.client_payload.pull_request.user.login }}
+          REPO: ${{ github.event.client_payload.github.payload.repository.full_name }}
         run: |
-          ACTOR='${{ github.event.client_payload.github.payload.comment.user.login }}'
-          PR_AUTHOR='${{ github.event.client_payload.pull_request.user.login }}'
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-
           if [ "$ACTOR" = "$PR_AUTHOR" ]; then
             echo "User $ACTOR is the PR author, authorized."
             echo "authorized=true" >> "$GITHUB_OUTPUT"
@@ -133,15 +132,16 @@ jobs:
 
       - name: Resolve PR info and test names
         id: resolve
+        env:
+          PR_SHA: ${{ github.event.client_payload.pull_request.head.sha }}
+          PR_BASE_REF: ${{ github.event.client_payload.pull_request.base.ref }}
+          ALL_ARGS: ${{ github.event.client_payload.slash_command.args.all }}
         run: |
-          PR_SHA='${{ github.event.client_payload.pull_request.head.sha }}'
-          echo "pr_sha=$PR_SHA" >> "$GITHUB_OUTPUT"
-
-          PR_BASE_REF='${{ github.event.client_payload.pull_request.base.ref }}'
-          echo "pr_base_ref=${PR_BASE_REF:-main}" >> "$GITHUB_OUTPUT"
-
-          ALL_ARGS="${{ github.event.client_payload.slash_command.args.all }}"
-          echo "all_args=$ALL_ARGS" >> "$GITHUB_OUTPUT"
+          {
+            echo "pr_sha=$PR_SHA"
+            echo "pr_base_ref=${PR_BASE_REF:-main}"
+            echo "all_args=$ALL_ARGS"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Validate test paths
         id: validate

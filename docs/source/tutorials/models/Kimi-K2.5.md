@@ -115,7 +115,7 @@ If you don't want to use the docker image as above, you can also build all from 
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
 
@@ -503,7 +503,7 @@ Parameter descriptions:
         --enable-auto-tool-choice \
         --tool-call-parser kimi_k2 \
         --reasoning-parser kimi_k2 \
-        --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}' \
+        --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 1}' \
         --additional-config '{"recompute_scheduler_enable":true}' \
         --mm-encoder-tp-mode data \
         --kv-transfer-config \
@@ -584,7 +584,7 @@ Parameter descriptions:
         --enable-auto-tool-choice \
         --tool-call-parser kimi_k2 \
         --reasoning-parser kimi_k2 \
-        --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}' \
+        --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 1}' \
         --additional-config '{"recompute_scheduler_enable":true}' \
         --mm-encoder-tp-mode data \
         --kv-transfer-config \

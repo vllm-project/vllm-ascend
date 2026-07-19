@@ -43,13 +43,13 @@ env:
 
 jobs:
   main2main:
-    runs-on: linux-aarch64-a2b3-8
+    runs-on: linux-aarch64-a2b1-8
     timeout-minutes: 2880
     concurrency:
       group: main2main
       cancel-in-progress: false
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-910b-ubuntu22.04-py3.12
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -62,12 +62,17 @@ jobs:
         UV_HTTP_TIMEOUT: 120
         UV_NO_CACHE: 1
         UV_SYSTEM_PYTHON: 1
+        PRE_COMMIT_HOME: /tmp/main2main-pre-commit
+        # Use Huawei Cloud's domestic Go module proxy for pre-commit hooks
+        # such as actionlint, whose golangenv otherwise accesses proxy.golang.org.
+        GOPROXY: https://repo.huaweicloud.com/repository/goproxy/
+        GONOSUMDB: '*'
     defaults:
       run:
         shell: bash -el {0}
     env:
       GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-      MAIN2MAIN_IMAGE_TAG: 9.0.0-910b-ubuntu22.04-py3.12
+      MAIN2MAIN_IMAGE_TAG: 9.0.1-910b-ubuntu22.04-py3.12
       TARGET_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
       PUSH_TO_GITHUB: 'true'
       GITHUB_REPO: vllm-project/vllm-ascend
@@ -116,7 +121,7 @@ jobs:
           echo "MAIN2MAIN_TEST_CASES=${CASES}" >> "$GITHUB_ENV"
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: vllm-project/vllm
           ref: ${{ env.TARGET_COMMIT != '' && env.TARGET_COMMIT || 'main' }}
@@ -142,7 +147,7 @@ jobs:
           if [ -s "$GITHUB_WORKSPACE/packages.txt" ]; then
             xargs -r apt-get -y install < "$GITHUB_WORKSPACE/packages.txt"
           fi
-          apt-get -y install git curl ca-certificates gcc g++ cmake libnuma-dev clang-15 jq gh
+          apt-get -y install git curl ca-certificates gcc g++ cmake libnuma-dev clang-15 jq gh shellcheck
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -167,12 +172,32 @@ jobs:
           fi
 
       - name: Install opencode + main2main-flow
+        env:
+          NODE_VERSION: 24.18.0
         run: |
-          set -eu
-          set -o pipefail
+          set -euxo pipefail
 
-          # install opencode (curl --retry handles transient SSL drops)
-          curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors https://opencode.ai/install | bash
+          NODE_INSTALL_DIR="/opt/nodejs"
+          NODE_ARCHIVE_NAME="node-v${NODE_VERSION}-linux-arm64.tar.gz"
+          NODE_ARCHIVE="/tmp/${NODE_ARCHIVE_NAME}"
+          NODE_CHECKSUMS="/tmp/node-v${NODE_VERSION}-SHASUMS256.txt"
+          curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
+            -o "${NODE_ARCHIVE}" \
+            "https://repo.huaweicloud.com/nodejs/v${NODE_VERSION}/${NODE_ARCHIVE_NAME}"
+          curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
+            -o "${NODE_CHECKSUMS}" \
+            "https://repo.huaweicloud.com/nodejs/v${NODE_VERSION}/SHASUMS256.txt"
+          (cd /tmp && grep " ${NODE_ARCHIVE_NAME}$" "${NODE_CHECKSUMS}" | sha256sum -c -)
+          mkdir -p "${NODE_INSTALL_DIR}"
+          tar -xzf "${NODE_ARCHIVE}" --strip-components=1 -C "${NODE_INSTALL_DIR}"
+          export PATH="${NODE_INSTALL_DIR}/bin:${PATH}"
+          node --version
+          npm --version
+
+          npm install --global \
+            --prefix "$HOME/.opencode" \
+            --registry https://repo.huaweicloud.com/repository/npm/ \
+            opencode-ai
           # configure opencode auth
           mkdir -p ~/.local/share/opencode
           cat > ~/.local/share/opencode/auth.json <<EOF
@@ -185,7 +210,7 @@ jobs:
           EOF
 
           # ensure opencode is on PATH within this step
-          export PATH="/root/.opencode/bin:$PATH"
+          export PATH="$HOME/.opencode/bin:$PATH"
 
           # verify opencode works
           echo "Verifying opencode..."
@@ -246,8 +271,18 @@ jobs:
           BRANCH="main2main_auto_$(date +%Y-%m-%d_%H-%M)"
           git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" || \
             git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
-          git fetch upstream main
-          git checkout -B "${BRANCH}" upstream/main
+          # Prefer main2main_baseline ref on the fork - it carries the
+          # cumulative successful adaptations from prior runs, enabling
+          # incremental adaptation.  Fall back to upstream/main if absent
+          # (first run, ref deleted, or fork reset).
+          if git fetch origin refs/heads/main2main_baseline:refs/remotes/origin/main2main_baseline 2>/dev/null; then
+            git checkout -B "${BRANCH}" origin/main2main_baseline
+            echo "::notice::incremental mode: starting from main2main_baseline"
+          else
+            git fetch upstream main
+            git checkout -B "${BRANCH}" upstream/main
+            echo "::notice::fresh mode: starting from upstream/main (no main2main_baseline found)"
+          fi
           BASE_SHA=$(git rev-parse HEAD)
           echo "name=${BRANCH}" >> "$GITHUB_OUTPUT"
           echo "base_sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"
@@ -304,7 +339,7 @@ jobs:
           RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: True
         run: |
           set -euo pipefail
-          export PATH="/root/.opencode/bin:$PATH"
+          export PATH="$HOME/.opencode/bin:$PATH"
           eval "${MAIN2MAIN_LOG_HELPERS}"
 
           rm -rf /tmp/main2main
@@ -460,5 +495,5 @@ jobs:
           print_group "Manual review issue" /tmp/main2main-manual-review.md
           gh issue create \
             --repo "${UPSTREAM_REPO}" \
-            --title "main2main manual review required (${SHORT_NEW})" \
+            --title "[main2main] main2main manual review required (${SHORT_NEW})" \
             --body-file /tmp/main2main-manual-review.md

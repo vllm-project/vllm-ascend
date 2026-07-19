@@ -34,6 +34,7 @@ from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
@@ -67,7 +68,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        output: torch.Tensor,
+        output: torch.Tensor = None,
     ):
         """
         Forward pass with three parts:
@@ -134,7 +135,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
-        maybe_save_kv_layer_to_connector("", [])
         z_shape_og = z.shape
         # Reshape input data into 2D tensor
         core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
@@ -142,7 +142,11 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
-        output[:num_tokens], _ = self.out_proj(core_attn_out)
+        if vllm_version_is("0.24.0"):
+            output[:num_tokens], _ = self.out_proj(core_attn_out)
+        else:
+            out, _ = self.out_proj(core_attn_out)
+            return out
 
     def _forward_core(
         self,
@@ -452,3 +456,4 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
+        maybe_save_kv_layer_to_connector("", [])

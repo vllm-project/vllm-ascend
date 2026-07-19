@@ -36,11 +36,9 @@
 #include "mla_preprocess/mla_preprocess_torch_adpt.h"
 #endif
 #include "mc2/dispatch_ffn_combine/dispatch_ffn_combine_torch_adpt.h"
-#include "mc2/dispatch_gmm_combine_decode/dispatch_gmm_combine_decode_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
 #include "attention/lightning_indexer/lightning_indexer_torch_adpt.h"
-#include "mc2/matmul_allreduce_add_rmsnorm/matmul_allreduce_add_rmsnorm_torch_adpt.h"
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "moe/moe_init_routing_custom/moe_init_routing_custom_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
@@ -51,7 +49,7 @@
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
-#include "attention/fused_gdn_gating/fused_gdn_gating_torch_adpt.h"
+#include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -317,110 +315,6 @@ AscendType get_dtype_from_torch(at::ScalarType scalarType)
     }
 }
 
-std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
-    at::Tensor &input,
-    const int64_t org_vocab_start_index,
-    const int64_t org_vocab_end_index,
-    const int64_t num_org_vocab_padding,
-    const int64_t added_vocab_start_index,
-    const int64_t added_vocab_end_index)
-    /*
-    https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/vocab_parallel_embedding.py#L161-L198
-    Embedding parallelized in the vocabulary dimension.
-
-    Adapted from torch.nn.Embedding, note that we pad the vocabulary size to
-    make sure it is divisible by the number of model parallel GPUs.
-
-    In order to support various loading methods, we ensure that LoRA-added
-    embeddings are always at the end of TP-sharded tensors. In other words,
-    we shard base embeddings and LoRA embeddings separately (both padded),
-    and place them in the same tensor.
-    In this example, we will have the original vocab size = 1010,
-    added vocab size = 16 and padding to 64. Therefore, the total
-    vocab size with padding will be 1088 (because we first pad 1010 to
-    1024, add 16, and then pad to 1088).
-    Therefore, the tensor format looks like the following:
-    TP1, rank 0 (no sharding):
-                            |< --------BASE-------- >|< -BASE PADDING-- >|< -----LORA------ >|< -LORA PADDING-- >|
-    corresponding token_id: |  0  |  1  | ... | 1009 |  -1  | ... |  -1  | 1010 | ... | 1015 |  -1  | ... |  -1  |
-                     index: |  0  |  1  | ... | 1009 | 1010 | ... | 1023 | 1024 | ... | 1039 | 1040 | ... | 1087 |
-
-    TP2, rank 0:
-                            |< --------------------BASE--------------------- >|< -----LORA------ >|< -LORA PADDING- >|
-    corresponding token_id: |  0  |  1  |  2  | ... | 497  | 498 | ...  | 511 | 1000 | ... | 1015 |  -1  | ... |  -1 |
-                     index: |  0  |  1  |  2  | ... | 497  | 498 | ...  | 511 | 512  | ... | 527  |  520 | ... | 543 |
-    TP2, rank 1:
-                            |< -----------BASE----------- >|< -BASE PADDING- >|< -----------LORA PADDING----------- >|
-    corresponding token_id: | 512 | 513 | 514 | ... | 1009 | -1  | ...  | -1  |  -1  | ... |  -1  | -1  | ... |   -1 |
-                     index: |  0  |  1  |  2  | ... | 497  | 498 | ...  | 511 | 512  | ... | 519  | 520 | ... |  543 |
-    Parameters:
-        org_vocab_start_index //base embeddings start
-        org_vocab_end_index //base embeddings end
-        num_org_vocab_padding //base embeddings padding
-        added_vocab_start_index //LoRA embeddings start
-        added_vocab_end_index //LoRA embeddings end
-    */
-{
-    // Input validation
-    TORCH_CHECK(input.dim() >= 1, "input must have at least 1 dimension");
-    TORCH_CHECK(org_vocab_start_index >= 0, "org_vocab_start_index must be non-negative");
-    TORCH_CHECK(org_vocab_end_index >= org_vocab_start_index, "org_vocab_end_index must be greater than org_vocab_start_index");
-    TORCH_CHECK(num_org_vocab_padding >= 0, "num_org_vocab_padding must be non-negative");
-    TORCH_CHECK(added_vocab_start_index >= org_vocab_end_index, "added_vocab_start_index must be greater than org_vocab_end_index");
-    TORCH_CHECK(added_vocab_end_index >= added_vocab_start_index, "added_vocab_end_index must be greater than added_vocab_start_index");
-
-    // Get total number of elements
-    int64_t size = input.numel();
-
-    // Create output tensors
-    at::Tensor masked_input = at::empty_like(input);
-    at::Tensor mask = at::empty_like(input).to(at::kBool);
-
-    // Get data pointers
-    void *input_ptr = input.data_ptr();
-    void *masked_input_ptr = masked_input.data_ptr();
-    void *mask_ptr = mask.data_ptr();
-
-    // Get current stream
-    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
-
-    // Get scalar type
-    at::ScalarType scalar_type = input.scalar_type();
-
-    // Create and configure OpCommand
-    at_npu::native::OpCommand cmd;
-    cmd.Name("get_masked_input_and_mask");
-    cmd.SetCustomHandler([scalar_type, size, stream,
-                         input_ptr, masked_input_ptr, mask_ptr,
-                         org_vocab_start_index, org_vocab_end_index,
-                         num_org_vocab_padding, added_vocab_start_index,
-                         added_vocab_end_index]() -> int {
-        int device_id = 0;
-        int64_t aiv_num = 0;
-        TORCH_CHECK(aclGetDeviceCapability(device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS);
-        uint32_t loop_cnt = (size + aiv_num - 1) / aiv_num;
-
-        // Call implementation
-        get_masked_input_and_mask_impl(
-            stream,
-            input_ptr,
-            masked_input_ptr,
-            mask_ptr,
-            org_vocab_start_index,
-            org_vocab_end_index,
-            num_org_vocab_padding,
-            added_vocab_start_index,
-            added_vocab_end_index,
-            size,
-            loop_cnt,
-            aiv_num);
-
-        return 0;
-    });
-    cmd.Run();
-    return {masked_input, mask};
-}
-
 void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y, double scale)
 {
     at::ScalarType scalar_type = x.scalar_type();
@@ -594,54 +488,6 @@ at::Tensor sgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indic
     return y_out;
 }
 #endif
-
-at::Tensor convert_hamming_dist_top_k_output(const at::Tensor &hashq,
-                                             const at::Tensor &hashkCache,
-                                             const c10::optional<at::Tensor>& indices) {
-    if (indices.has_value()) {
-        return indices.value();
-    }
-    uint32_t MAX_BLOCK_PER_REQ_INHSA = 512;
-
-    auto n_bs = hashq.size(0);
-    auto n_kv_heads = hashkCache.size(1);
-    auto n_max_kv = MAX_BLOCK_PER_REQ_INHSA;
-    at::Tensor res = at::empty({n_bs, n_kv_heads, n_max_kv}, torch::TensorOptions().dtype(torch::kInt32).device(hashq.device()));
-    return res;
-}
-
-at::Tensor npu_hamming_dist_top_k(const at::Tensor &hashq,
-                                       const at::Tensor &hashkCache,
-                                       const at::Tensor& hashkCacheRope,
-                                       const at::Tensor &topN,
-                                       const at::Tensor &seqLen,
-                                       const c10::optional<at::Tensor> &chunkSize,
-                                       const c10::optional<int64_t> maxSeqLen,
-                                       const c10::optional<int64_t> sink,
-                                       const c10::optional<int64_t> recent,
-                                       const c10::optional<int64_t> supportOffload,
-                                       const c10::optional<at::Tensor> &blockTable,
-                                       const c10::optional<at::Tensor> &mask,
-                                       const c10::optional<at::Tensor>& indices) {
-
-    auto&& maxSeqLen_ = maxSeqLen.value_or(0);
-    auto&& sink_ = sink.value_or(0);
-    auto&& recent_ = recent.value_or(0);
-    auto&& supportOffload_ = supportOffload.value_or(0);
-
-    at::Tensor out = convert_hamming_dist_top_k_output(hashq, hashkCache, indices);
-    EXEC_NPU_CMD(aclnnHammingDistTopK, hashq, hashkCache, topN, seqLen, chunkSize, blockTable, indices, hashkCacheRope, mask, maxSeqLen_, sink_, recent_, supportOffload_, out);
-    return out;
-}
-
-at::Tensor npu_reshape_and_cache_bnsd(const at::Tensor& hashq,
-                                           const at::Tensor& hashkCache,
-                                           const at::Tensor& slotMapping,
-                                           const at::Tensor& seqLen,
-                                           const at::Tensor& hashkCacheOut) {
-    EXEC_NPU_CMD(aclnnReshapeAndCacheBnsd, hashq, hashkCache, slotMapping, seqLen, hashkCacheOut);
-    return hashkCacheOut;
-}
 
 at::Tensor npu_sign_bits_pack(const at::Tensor& input,
                                    const int64_t size) {
@@ -2282,15 +2128,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
     // Direct kernel custom ops
-    ops.def(
-        "get_masked_input_and_mask(Tensor input, "
-        "                         int org_vocab_start_index, "
-        "                         int org_vocab_end_index, "
-        "                         int num_org_vocab_padding, "
-        "                         int added_vocab_start_index, "
-        "                         int added_vocab_end_index) -> (Tensor masked_input, Tensor mask)");
-    ops.impl("get_masked_input_and_mask", torch::kPrivateUse1, &vllm_ascend::get_masked_input_and_mask);
-
     ops.def("bgmv_shrink(Tensor! x, Tensor! weight, Tensor! indices, Tensor! y, float scale) -> ()");
     ops.impl("bgmv_shrink", torch::kPrivateUse1, &vllm_ascend::bgmv_shrink);
 
@@ -2359,20 +2196,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                                      Tensor? offset=None, float swiglu_limit=0.0) -> "
         "                                      (Tensor output, Tensor output_scale, Tensor output_offset)");
     ops.impl("grouped_matmul_swiglu_quant_weight_nz", torch::kPrivateUse1, &vllm_ascend::grouped_matmul_swiglu_quant_weight_nz);
-
-    ops.def(
-        "dispatch_gmm_combine_decode(Tensor x, Tensor expert_ids, Tensor[] gmm1_permuted_weight,"
-        "                            Tensor[] gmm1_permuted_weight_scale,"
-        "                            Tensor[] gmm2_weight, Tensor[] gmm2_weight_scale,"
-        "                            Tensor expert_scales, Tensor? expert_smooth_scales=None,"
-        "                            Tensor? x_active_mask=None,"
-        "                            str group_ep='',"
-        "                            int ep_rank_size=0, int ep_rank_id=0, int moe_expert_num=0,"
-        "                            int shared_expert_num=1, int shared_expert_rank_num=0,"
-        "                            int quant_mode=0,"
-        "                            int global_bs=0) -> (Tensor output, Tensor expert_token_nums)"
-    );
-    ops.impl("dispatch_gmm_combine_decode", torch::kPrivateUse1, &vllm_ascend::dispatch_gmm_combine_decode);
 
     ops.def(
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list(Tensor x, Tensor[] weight, Tensor[] weight_scale, Tensor x_scale,"
@@ -2450,10 +2273,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("dispatch_ffn_combine", torch::kPrivateUse1, &vllm_ascend::dispatch_ffn_combine);
 
-    ops.def("matmul_allreduce_add_rmsnorm(Tensor x1, Tensor x2, Tensor residual, Tensor gamma, \
-        str groupTp, int tpRankSize, int tpRankId, float epsilon, bool isTransB, bool isGatherAddOut) -> (Tensor output, Tensor add_out)");
-    ops.impl("matmul_allreduce_add_rmsnorm", torch::kPrivateUse1, &vllm_ascend::matmul_allreduce_add_rmsnorm);
-
     ops.def(
         "npu_moe_init_routing_custom(Tensor x, Tensor expert_idx, *, Tensor? scale=None, Tensor? offset=None, int active_num=-1, "
         "                            int expert_capacity=-1, int expert_num=-1, int drop_pad_mode=0, int expert_tokens_num_type=0, "
@@ -2491,19 +2310,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     ops.def("npu_apply_top_k_top_p(Tensor logits, Tensor? p=None, Tensor? k=None) -> Tensor");
     ops.impl("npu_apply_top_k_top_p", torch::kPrivateUse1, &vllm_ascend::npu_apply_top_k_top_p);
-
-    ops.def(
-        "npu_hamming_dist_top_k(Tensor q, Tensor k_comp, Tensor k_comp_rope, Tensor k,"
-        "                      Tensor seq_len, Tensor? chunk_size=None,"
-        "                      int? max_seq_len=None, int? sink=None, int? recent=None, int? support_offload=None,"
-        "                      Tensor? key_block_table=None, Tensor? mask=None, Tensor? indices=None) -> Tensor"
-    );
-    ops.impl("npu_hamming_dist_top_k", torch::kPrivateUse1, &vllm_ascend::npu_hamming_dist_top_k);
-
-    ops.def(
-        "npu_reshape_and_cache_bnsd(Tensor q, Tensor k_comp, Tensor slot_mapping, Tensor seq_len, Tensor k_out) -> Tensor"
-    );
-    ops.impl("npu_reshape_and_cache_bnsd", torch::kPrivateUse1, &vllm_ascend::npu_reshape_and_cache_bnsd);
 
     ops.def("npu_sign_bits_pack(Tensor input, int size) -> Tensor");
     ops.impl("npu_sign_bits_pack", torch::kPrivateUse1, &vllm_ascend::npu_sign_bits_pack);
@@ -2939,24 +2745,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("chunk_fwd_o", torch::kPrivateUse1, &vllm_ascend::chunk_fwd_o);
 
     //store_kv_block
-    ops.def(
-        "store_kv_block_pre(Tensor slot_mapping_npu, int[2] slot_mapping_list =[], int block_size=0)"
-         "-> (Tensor group_len ,Tensor group_key_idx, Tensor group_key_cache_idx)"
-    );
-    ops.impl("store_kv_block_pre", torch::kPrivateUse1, &vllm_ascend::store_kv_block_pre);
+     ops.def(
+        "store_kv_block_metadata(Tensor slot_mapping_npu, Tensor group_len, Tensor group_key_idx, Tensor group_key_cache_idx, int block_size=0)"
+         "-> ()"
+     );
+    ops.impl("store_kv_block_metadata", torch::kPrivateUse1, &vllm_ascend::store_kv_block_metadata);
 
     ops.def(
         "store_kv_block(Tensor key_in, Tensor key_cache_in, Tensor group_len, Tensor group_key_idx,Tensor group_key_cache_idx, int block_size=0) -> ()"
     );
     ops.impl("store_kv_block", torch::kPrivateUse1, &vllm_ascend::store_kv_block);
-    // Fused GDN gating.
-    ops.def(
-        "npu_fused_gdn_gating(Tensor A_log, "
-        "                     Tensor a, "
-        "                     Tensor b, "
-        "                     Tensor dt_bias, "
-        "                     float beta=1.0, "
-        "                     float threshold=20.0) -> (Tensor g, Tensor beta_output)");
-    ops.impl("npu_fused_gdn_gating", torch::kPrivateUse1, &vllm_ascend::npu_fused_gdn_gating);
 }
 #endif

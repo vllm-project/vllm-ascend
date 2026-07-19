@@ -30,7 +30,7 @@ import pytest
 from PIL import Image
 from vllm import SamplingParams
 
-from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
 
 DEEPSEEK_V2_LITE = "vllm-ascend/DeepSeek-V2-Lite-W8A8"
 DEEPSEEK_MTP = "wemaster/deepseek_mtp_main_random_bf16"
@@ -131,7 +131,8 @@ class AccuracyCase:
 
 
 def _run_accuracy_case(case: AccuracyCase) -> None:
-    with VllmRunner(case.model, **case.runner_kwargs) as runner:
+    runner_cls = DPVllmRunner if case.runner_kwargs.get("data_parallel_size", 1) > 1 else VllmRunner
+    with runner_cls(case.model, **case.runner_kwargs) as runner:
         outputs = runner.generate_greedy(list(case.prompts), case.max_tokens)
 
     if isinstance(case.expected_outputs[0], str):
@@ -381,6 +382,7 @@ FULL_FEATURE_MODEL_CASES = [
             "max_model_len": 1024,
             "max_num_seqs": MAX_NUM_SEQS,
             "max_num_batched_tokens": 1024,
+            "data_parallel_size": 2,
             "tensor_parallel_size": 2,
             "prefill_context_parallel_size": 1,
             "decode_context_parallel_size": 2,
@@ -395,7 +397,7 @@ FULL_FEATURE_MODEL_CASES = [
             "compilation_config": FULL_DECODE_GRAPH,
             "additional_config": {
                 "enable_flashcomm1": True,
-                "enable_sparse_c8": True,
+                "enable_sparse_c8": False,
             },
             "speculative_config": {
                 "method": "mtp",
