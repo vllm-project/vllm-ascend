@@ -271,13 +271,20 @@ jobs:
           BRANCH="main2main_auto_$(date +%Y-%m-%d_%H-%M)"
           git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" || \
             git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
-          # Prefer main2main_baseline ref on the fork - it carries the
-          # cumulative successful adaptations from prior runs, enabling
-          # incremental adaptation.  Fall back to upstream/main if absent
-          # (first run, ref deleted, or fork reset).
-          if git fetch origin refs/heads/main2main_baseline:refs/remotes/origin/main2main_baseline 2>/dev/null; then
+          # Attempt incremental: fetch main2main_baseline from the fork,
+          # then rebase it onto the latest upstream/main.  This carries
+          # forward all prior adaptation commits and merges with any
+          # external changes (e.g. PRs merged since the last run).
+          if git fetch "https://github.com/${HEAD_FORK}.git" "refs/heads/main2main_baseline:refs/remotes/origin/main2main_baseline" 2>/dev/null; then
+            git fetch upstream main
             git checkout -B "${BRANCH}" origin/main2main_baseline
-            echo "::notice::incremental mode: starting from main2main_baseline"
+            if git rebase upstream/main; then
+              echo "::notice::incremental mode: rebased main2main_baseline onto upstream/main"
+            else
+              git rebase --abort
+              git checkout -B "${BRANCH}" upstream/main
+              echo "::warning::rebase conflicts between main2main_baseline and upstream/main, falling back to fresh mode"
+            fi
           else
             git fetch upstream main
             git checkout -B "${BRANCH}" upstream/main
@@ -458,6 +465,7 @@ jobs:
           {
             echo "status=${FINAL_STATUS}"
             echo "commit_count=${COMMIT_COUNT}"
+            echo "steps_completed=${STEPS_COMPLETED}"
             echo "manual_review_required=${MANUAL_REVIEW_REQUIRED}"
             echo "old_commit=${OLD_COMMIT}"
             echo "new_commit=${NEW_COMMIT}"
@@ -497,3 +505,10 @@ jobs:
             --repo "${UPSTREAM_REPO}" \
             --title "[main2main] main2main manual review required (${SHORT_NEW})" \
             --body-file /tmp/main2main-manual-review.md
+
+      - name: Chain next run
+        if: steps.final-status.outputs.status == 'completed' && steps.final-status.outputs.steps_completed != '0'
+        run: |
+          echo "::notice::Chaining next main2main run..."
+          gh workflow run Main2Main \
+            --repo "${UPSTREAM_REPO}"
