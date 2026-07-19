@@ -22,6 +22,7 @@ class PolicyFactory:
             # FlashLB EPLB policy: expert replacement based on Joint Optimization,
             # Multi-Shot Enhancement and Incremental Adjustment
             3: FlashLB,
+            4: DefaultEplb
         }
         policy_class = policy.get(policy_type, RandomLoadBalance)
         policy_instance = policy_class(config)
