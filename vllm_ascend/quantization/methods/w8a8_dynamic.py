@@ -295,8 +295,6 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         topk_weights = topk_weights.to(self.in_dtype)
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
-        if getattr(layer, "swigluoai_uninterleave", False):
-            activation = "swigluoai_uninterleave"
         act_name = getattr(activation, "value", activation)
         fused_scale_flag = (
             _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2
@@ -338,8 +336,8 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
                 swiglu_limit=layer.swiglu_limit,
-                swiglu_alpha=getattr(layer, "swiglu_alpha", 1.702),
-                swiglu_beta=getattr(layer, "swiglu_beta", 1.0),
+                swiglu_alpha=getattr(layer, "swiglu_alpha", 1.0),
+                swiglu_beta=getattr(layer, "swiglu_beta", 0.0),
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
