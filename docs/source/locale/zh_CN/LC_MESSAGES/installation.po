@@ -68,11 +68,10 @@ msgid ""
 msgstr "要验证昇腾 NPU 固件和驱动是否正确安装，请运行："
 
 msgid ""
-"Refer to [Ascend Environment Setup "
-"Guide](https://ascend.github.io/docs/sources/ascend/quick_install.html) for "
+"Refer to [CANN Installation](https://www.hiascend.com/cann/download?versionId=735&ids=d806%2Ch0501%2Ch0601%2Ch0702) for "
 "more details."
 msgstr ""
-"更多详情请参考[昇腾环境搭建指南](https://ascend.github.io/docs/sources/ascend/quick_install.html)。"
+"更多详情请参考[CANN 安装指南](https://www.hiascend.com/cann/download?versionId=735&ids=d806%2Ch0501%2Ch0601%2Ch0702)。"
 
 msgid "### Configure software environment"
 msgstr "### 配置软件环境"

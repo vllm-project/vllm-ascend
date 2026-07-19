@@ -34,7 +34,7 @@ To verify that the Ascend NPU firmware and driver were correctly installed, run:
 npu-smi info
 ```
 
-Refer to [Ascend Environment Setup Guide](https://ascend.github.io/docs/sources/ascend/quick_install.html) for more details.
+Refer to [CANN Installation](https://www.hiascend.com/cann/download?versionId=735&ids=d806%2Ch0501%2Ch0601%2Ch0702) for more details.
 
 ### Configure software environment
 
