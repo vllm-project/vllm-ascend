@@ -375,7 +375,7 @@ class AscendNvFp4FusedMoEMethod(FusedMoEMethodBase):
 
 def _remove_existing_registration() -> None:
     if NVFP4_METHOD in QUANTIZATION_METHODS:
-        QUANTIZATION_METHODS.remove(NVFP4_METHOD)
+        QUANTIZATION_METHODS.pop(NVFP4_METHOD, None)
 
 
 _remove_existing_registration()
@@ -417,13 +417,13 @@ class AscendNvFp4Config(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "AscendNvFp4Config":
-        quant_config = config.get("quantization_config", config)
-        quant_config = quant_config.get("quantization", quant_config)
+        quant_config = config.get("quantization_config") or config
+        quant_config = quant_config.get("quantization") or quant_config
         group_size = quant_config.get("group_size")
         if group_size is None:
-            config_groups = quant_config.get("config_groups", {})
-            nvfp4_group = config_groups.get("NVFP4", {})
-            weight_config = nvfp4_group.get("weights", {})
+            config_groups = quant_config.get("config_groups") or {}
+            nvfp4_group = config_groups.get("NVFP4") or {}
+            weight_config = nvfp4_group.get("weights") or {}
             group_size = weight_config.get("group_size", NVFP4_GROUP_SIZE)
         group_size = int(group_size)
         ignore = quant_config.get(
@@ -447,12 +447,12 @@ class AscendNvFp4Config(QuantizationConfig):
             return NVFP4_METHOD
         if not hf_quant_cfg:
             return None
-        quant_config = hf_quant_cfg.get("quantization_config", hf_quant_cfg)
-        quant_config = quant_config.get("quantization", quant_config)
+        quant_config = hf_quant_cfg.get("quantization_config") or hf_quant_cfg
+        quant_config = quant_config.get("quantization") or quant_config
         quant_algo = str(quant_config.get("quant_algo", "")).upper()
         quant_method = str(quant_config.get("quant_method", "")).lower()
         quant_format = str(quant_config.get("format", "")).lower()
-        config_groups = quant_config.get("config_groups", {})
+        config_groups = quant_config.get("config_groups") or {}
         has_nvfp4_group = any(
             str(group.get("format", "")).lower() == "nvfp4-pack-quantized"
             for group in config_groups.values()
