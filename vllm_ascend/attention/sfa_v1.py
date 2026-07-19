@@ -1701,6 +1701,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 assert k_pe is not None
                 assert k_nope is not None
                 async_op = self.enable_dsa_cp_with_layer_shard or full_gather_o_proj_enabled
+                kv_ag_handles = []
                 # support all_gather kv async for communication calculation overlap
                 if self.enable_sparse_sfa_c8:
                     assert knope_scale is not None
@@ -1724,6 +1725,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                     get_tp_group(),
                     async_op=async_op,
                 )
+                if kv_ag_handle is not None:
+                    kv_ag_handles.append(kv_ag_handle)
 
                 if self.has_indexer and (self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8):
                     assert k_li is not None
@@ -1732,6 +1735,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                         get_tp_group(),
                         async_op=async_op,
                     )
+                    if kv_ag_handle is not None:
+                        kv_ag_handles.append(kv_ag_handle)
                 if self.has_indexer and self.enable_sparse_li_c8:
                     assert k_li_scale is not None
                     k_li_scale, kv_ag_handle = all_gather_async(
@@ -1739,13 +1744,15 @@ class AscendSFAImpl(MLAAttentionImpl):
                         get_tp_group(),
                         async_op=async_op,
                     )
+                    if kv_ag_handle is not None:
+                        kv_ag_handles.append(kv_ag_handle)
 
             ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
             q_pe = self.rope_single(q_pe, cos, sin)
             self._record_dcp_query_gather_context(ql_nope, q_pe, attn_metadata)
 
             if self.enable_dsa_cp:
-                if kv_ag_handle is not None:
+                for kv_ag_handle in kv_ag_handles:
                     kv_ag_handle.wait()
 
                 if self.enable_dsa_cp_with_layer_shard:
