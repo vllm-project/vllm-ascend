@@ -1,129 +1,147 @@
-# Mistral Large 3 675B NVFP4
+# Mistral Large 3 675B NVFP4 部署与容量验证
 
-## 1 模型简介
+## 1 Introduction / 模型简介
 
 `mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4` 是 Mistral Large 3
-的 NVFP4 训练后量化检查点。其文本解码器采用细粒度 MoE 架构，共 675B
-参数，每个 token 激活约 41B 参数。Hugging Face 仓库约 403 GB，部署前需
-同时规划模型存储、主机内存、NPU 显存和启动时间。
+的 NVFP4 量化检查点。模型为细粒度 MoE 架构，总参数约 675B，每个 token
+激活约 41B 参数。Hugging Face 仓库约 403 GB；部署前必须同时规划模型盘、
+主机内存、NPU HBM、分布式拓扑和首次图编译时间。
 
-本教程覆盖昇腾平台上的文本生成路径。该检查点同时包含视觉编码器，但当前
-`MistralLarge3ForCausalLM` 适配器尚未开放多模态输入。
+本仓库提供文本解码器适配、NVFP4 权重接口和部署模板。真实权重通过
+`GET /v1/models` 与首个非空推理响应之前，不得宣称 Mistral 检查点已在
+Ascend 上验证通过。
 
-## 2 功能状态
+### 本次验证边界
+
+2026-07-19 的实际环境只有两张 Ascend 910B2C，每张 HBM 65,536 MiB；
+`/data` 总容量 117.56 GiB，预留运行空间后的安全权重上限 100.74 GiB。
+该环境无法容纳约 403 GB 的 Mistral 检查点，双卡 HBM 也不足以可靠部署
+675B 模型，因此 Mistral 真实权重测试状态为
+`blocked_by_hardware_capacity`，不是软件报错，也不是测试通过。
+
+同一环境已使用 `Qwen/Qwen-7B-Chat` 的 8 个真实 safetensors 分片完成
+TP=2 验证：两张 NPU Worker 均运行、ACL Graph replay 成功、
+`/v1/models` 和 `/v1/chat/completions` 均返回 HTTP 200 且输出非空。
+该案例证明 vLLM-Ascend、CANN、双卡通信与 OpenAI API 链路可用，但不能
+替代 Mistral NVFP4 的权重加载、MoE、EP、FlashComm1 或量化内核验证。
+
+## 2 Supported Features / 支持状态
 
 | 功能 | 状态 | 说明 |
 | --- | --- | --- |
-| 文本生成 | 已适配，待真实权重验证 | 必须取得 HTTP 200 和非空输出 |
-| NVFP4 权重加载 | Python 接口已实现 | 加载 E2M1 打包权重和两级缩放因子 |
-| NVFP4 NPU 执行 | 依赖内核 | 需要 `_C_ascend.nvfp4_linear` 和 `_C_ascend.nvfp4_moe` |
-| 专家并行 | 启动模板默认开启 | 仅适用于 MoE 模型 |
-| FlashComm1 | 启动模板默认开启 | 投产前需以真实流量验证 |
-| ACLGraph | 默认验证路径 | Eager 仅用于故障隔离 |
-| MTP | 检查点缺失 | 检查点未提供 MTP 权重 |
-| 多模态输入 | 当前适配器不支持 | 仅适配文本解码器 |
+| 文本解码器 | 已实现，真实 Mistral 权重未验证 | 必须通过真实权重门禁 |
+| NVFP4 权重加载 | 接口已实现 | 仍需完整检查点验证权重键和 scale |
+| NVFP4 NPU 执行 | 依赖镜像内核 | 需要 `_C_ascend.nvfp4_linear` 与 `_C_ascend.nvfp4_moe` |
+| TP + EP | Mistral 推荐路径 | 建议 A3 TP16，并启用 EP |
+| FlashComm1 | 待 Mistral 实机验证 | 仅 MoE 路径适用 |
+| ACLGraph | 默认目标 | Eager 仅用于故障隔离 |
+| MTP | checkpoint missing | 检查点未提供 MTP 权重 |
+| 多模态输入 | 当前适配器不支持 | 本教程只覆盖文本生成 |
+| Qwen TP=2 参考 | 已用真实权重验证 | 仅证明环境和通用 API/TP 链路 |
 
-!!! warning
+Dummy 权重只能验证架构构建和部分算子路径，不能验证 NVFP4 分片、权重映射、
+量化 scale、真实显存占用或首个真实输出。
 
-    Python 适配器可以完成模型构建，但不能证明当前镜像已经包含 NVFP4 NPU
-    内核。必须使用真实权重发送至少一次请求。如果缺少任一 `_C_ascend`
-    算子，应更换或构建包含对应算子的镜像，不能用启动成功或 dummy 权重替代
-    真实权重验证。
+## 3 Environment Preparation / 环境准备
 
-## 3 环境依赖准备
+### 3.1 资源门禁
 
-### 3.1 硬件与存储
-
-建议从一台包含 16 张 NPU 的 Atlas 800 A3 服务器开始：
-
-- 16 张 NPU 均可见，使用 TP16 和专家并行；
-- 模型目录至少预留 500 GB 可用空间；
-- 主机内存能容纳权重元数据和加载缓冲区；
-- 模型磁盘到主机之间具有稳定的高带宽；
-- OpenAI 兼容接口使用的 `8000` 端口未被占用。
-
-模型配置的理论上下文长度超过 256K。本教程先验证 131,072 token 和 16 路
-并发。该值是验证目标而非容量承诺；如果服务无法完成启动及首个请求，应先
-降低上下文长度和并发数。
-
-### 3.2 启动容器
-
-使用与当前代码版本匹配的 vLLM Ascend 镜像，并将宿主机模型目录挂载到
-`/models`，避免容器重建后重复下载。
+部署 Mistral 前至少检查：
 
 ```shell
-export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
-export HOST_MODEL_ROOT=/data/models
-
-docker run --rm --name vllm-ascend-mistral-large3-nvfp4 \
-    --net=host --shm-size=16g --privileged=true \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-    -v "${HOST_MODEL_ROOT}:/models" \
-    -v /root/.cache:/root/.cache \
-    -it "${IMAGE}" bash
-```
-
-进入容器后检查软件版本和 NPU 数量：
-
-```shell
+df -h /data
+free -h
 npu-smi info
-pip show vllm vllm-ascend torch torch-npu mistral-common
-
 python - <<'PY'
 import torch
-import vllm
-import vllm_ascend
-
-print("vLLM:", vllm.__file__)
-print("vLLM Ascend:", vllm_ascend.__file__)
-print("NPU available:", torch.npu.is_available())
-print("NPU count:", torch.npu.device_count())
+print("visible_npu_count=", torch.npu.device_count())
 PY
 ```
 
-不要单独升级 `transformers`。应优先使用版本匹配的 vLLM Ascend 镜像，确保
-vLLM、vLLM Ascend、torch、torch-npu、CANN 和 mistral-common 相互兼容。
+建议从 16 张 NPU 的 Atlas A3 服务器开始，模型盘至少预留 500 GiB。不要把
+“磁盘能下载”误当成“HBM 能加载”；还需为 KV cache、图捕获、临时张量和
+主机侧加载缓冲区保留空间。
 
-## 4 下载 Hugging Face 模型
+### 3.2 容器
 
-安装 Hugging Face CLI。环境需要鉴权时使用交互式登录，不要将访问令牌写入
-脚本、命令历史或本文档。
+=== "A3 series"
+
+    ```shell
+    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+    docker run --rm --name vllm-ascend-mistral-large3 \
+        --net=host --shm-size=16g --privileged=true \
+        --device /dev/davinci_manager --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+        -v /data/models:/models -v /root/.cache:/root/.cache \
+        -it "${IMAGE}" bash
+    ```
+
+=== "A2 series"
+
+    完整 675B 检查点通常需要多机或更大 NPU 拓扑。先按部署规划配置多机
+    TP/EP、HCCL 网卡与共享模型盘，再启动标准 A2 镜像。
+
+    ```shell
+    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+    docker run --rm --name vllm-ascend-mistral-large3 \
+        --net=host --shm-size=16g --privileged=true \
+        --device /dev/davinci_manager --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+        -v /data/models:/models -it "${IMAGE}" bash
+    ```
+
+核对运行时版本与导入路径：
 
 ```shell
-python -m pip install --upgrade "huggingface_hub[cli]"
+python -c "import vllm,vllm_ascend;print(vllm.__version__);print(vllm.__file__);print(vllm_ascend.__file__)"
+python -c "import torch,torch_npu;print(torch.__version__,torch_npu.__version__);print(torch.npu.device_count())"
+```
+
+不要单独升级 `transformers`。vLLM、vLLM-Ascend、torch、torch-npu、CANN、
+triton-ascend 必须使用对应版本组合。
+
+## 4 Download and Authorization / 权重下载与授权
+
+先在 Hugging Face 账号取得模型许可，再交互登录；不要把 Token 写进脚本、
+文档、日志或聊天记录。
+
+```shell
 hf auth login
+hf auth whoami
 
 export MODEL_ID=mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4
 export MODEL_PATH=/models/Mistral-Large-3-675B-Instruct-2512-NVFP4
-
 mkdir -p "${MODEL_PATH}"
-hf download "${MODEL_ID}" \
-    --local-dir "${MODEL_PATH}" \
-    --max-workers 8
+hf download "${MODEL_ID}" --local-dir "${MODEL_PATH}" --max-workers 8
 ```
 
-Hugging Face CLI 会复用缓存中的完整文件。下载结束后确认 `params.json`、
-tokenizer 文件和所有 safetensors 分片均存在：
+常见授权错误：
+
+- `401/403`：账号未接受许可，或 fine-grained token 未启用 gated repository；
+- `Not logged in`：运行用户与登录用户不同，或容器未挂载 Hugging Face 缓存；
+- `huggingface-cli ... no longer works`：新客户端改用等价的 `hf download`；
+- 镜像站 403：确认 `HF_ENDPOINT`，必要时在合规前提下切回官方端点；
+- 下载停在 `.incomplete`：保留目录并重跑 `hf download` 续传，不要提前服务。
+
+下载后按索引校验所有分片，并观察至少三个稳定采样周期：
 
 ```shell
-test -f "${MODEL_PATH}/params.json"
-find "${MODEL_PATH}" -maxdepth 1 -name 'consolidated-*.safetensors' | wc -l
+test -f "${MODEL_PATH}/params.json" || test -f "${MODEL_PATH}/config.json"
+find "${MODEL_PATH}" -type f -name '*.incomplete' -o -name '*.part'
+find "${MODEL_PATH}" -maxdepth 1 -name '*.safetensors' | wc -l
 du -sh "${MODEL_PATH}"
 ```
 
-分片仍在下载时不要启动分布式服务。
+## 5 Deployment / 部署
 
-## 5 vLLM Ascend 多卡部署
+### 5.1 Mistral 目标部署：A3 TP16 + EP
 
-从 `/workspace` 直接启动 vLLM。默认命令开启专家并行、FlashComm1 和
-ACLGraph，并显式选择 Ascend NVFP4 后端。
+从 `/workspace` 直接启动：
 
 ```shell
 cd /workspace
-
 export MODEL_PATH=/models/Mistral-Large-3-675B-Instruct-2512-NVFP4
 export HCCL_OP_EXPANSION_MODE=AIV
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -146,116 +164,113 @@ vllm serve "${MODEL_PATH}" \
     --port 8000
 ```
 
-首次容量验证保持 `max-model-len=131072` 和 `max-num-seqs=16`。只有在记录
-峰值 NPU 显存、TTFT、TPOT、吞吐量及 ACLGraph replay 证据后，才逐步提高
-并发数。
+该命令是目标配置，不是本次双卡实测结果。只有完整 Mistral 权重和足够硬件
+到位后才能执行并验收。
 
-### 5.1 Eager 隔离命令
+### 5.2 双卡 TP=2 环境参考流程
 
-如果图捕获失败，使用相同参数增加 `--enforce-eager` 重试一次。下面同时将
-上下文和并发调低，以便区分显存/shape 压力与内核错误。Eager 是隔离手段，
-不是优先的生产配置。
+两张 910B2C 不能部署 675B，但可用较小 Dense 模型验证 TP/HCCL/API 链路。
+本次使用 Qwen-7B-Chat 的成功路径如下：
 
 ```shell
+export MODEL_PATH=/data/models/Qwen-7B-Chat
+
 vllm serve "${MODEL_PATH}" \
-    --served-model-name mistral-large-3-nvfp4 \
-    --tokenizer-mode mistral \
-    --config-format mistral \
-    --load-format mistral \
-    --quantization nvfp4 \
-    --dtype bfloat16 \
-    --tensor-parallel-size 16 \
-    --enable-expert-parallel \
-    --max-model-len 32768 \
-    --max-num-seqs 4 \
+    --served-model-name Qwen-7B-Chat \
+    --trust-remote-code \
+    --tensor-parallel-size 2 \
     --gpu-memory-utilization 0.90 \
-    --enforce-eager \
+    --max-model-len 8192 \
+    --max-num-seqs 4 \
     --port 8000
 ```
 
-## 6 功能验证
+真实日志中出现 `Worker_TP0`、`Worker_TP1`、`Graph capturing finished` 与
+`Replaying aclgraph`，两个接口均为 HTTP 200。此结果只能标记为
+“同框架双卡适配参考通过”。
 
-不能只以 `Application startup complete` 判断成功。先检查 readiness，再以
-真实权重发送请求并确认输出非空。
+### 5.3 上下文长度适配
+
+不要从其他模型复制 `--max-model-len`。先读取当前检查点：
+
+```shell
+python - <<'PY'
+import json
+from pathlib import Path
+
+p = json.loads((Path("/path/to/model") / "config.json").read_text())
+for key in ("max_position_embeddings", "seq_length", "model_max_length"):
+    if p.get(key) is not None:
+        print(key, p[key])
+PY
+```
+
+若 vLLM 报 `User-specified max_model_len ... greater than derived`，将启动值降到
+配置声明的长度。不要用 `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` 强行绕过；RoPE
+超界可能产生 NaN，绝对位置编码可能越界。本次 Qwen 从错误的 32768 调整到
+原生 8192 后成功。
+
+## 6 Functional Verification / 功能验证
+
+`Application startup complete` 不是通过条件。必须先 readiness，再发送真实
+请求并确认非空输出：
 
 ```shell
 curl -f http://127.0.0.1:8000/v1/models
 
 curl -f http://127.0.0.1:8000/v1/chat/completions \
-    -H "Content-Type: application/json" \
+    -H 'Content-Type: application/json' \
     -d '{
       "model": "mistral-large-3-nvfp4",
-      "messages": [{
-        "role": "user",
-        "content": "请用中文给出数据库迁移故障的前三项应急措施。"
-      }],
+      "messages": [{"role": "user", "content": "请给出数据库迁移故障的前三项应急措施。"}],
       "temperature": 0,
       "max_tokens": 128
     }'
 ```
 
-响应必须为 HTTP 200，且 `choices[0].message.content` 非空。即使 readiness
-已经通过，只要首个请求导致 worker 退出，也应判定为运行时失败。
+通过门禁：两个请求均 HTTP 200，且 `choices[0].message.content` 非空。首个
+请求导致 worker 退出属于 false-ready，必须判失败。
 
-## 7 常见报错排查模板
+## 7 Troubleshooting / 故障排查
 
-### 7.1 日志采集
-
-始终保留完整启动命令、版本、NPU 拓扑、首个错误和最后 200 行日志。诊断时
-将完整的 `vllm serve` 参数替换到 `<serve-options>`：
+### 7.1 NPU 被占用或残留进程
 
 ```shell
-mkdir -p /workspace/logs
-export LOG_FILE=/workspace/logs/mistral-large3-nvfp4-$(date +%Y%m%d-%H%M%S).log
-
-set -o pipefail
-vllm serve "${MODEL_PATH}" <serve-options> 2>&1 | tee "${LOG_FILE}"
-```
-
-提交问题时使用以下模板：
-
-```text
-硬件型号/NPU 数量：
-CANN、torch、torch-npu、vLLM、vLLM Ascend 版本：
-vLLM 与 vLLM Ascend import 路径：
-模型路径、目录大小和分片数量：
-完整启动命令及环境变量：
-ACLGraph 或 Eager 模式：
-readiness 结果：
-首个请求内容和 HTTP 状态：
-第一个错误签名：
-日志文件路径：
-```
-
-### 7.2 高频问题
-
-| 现象 | 可能原因 | 处理方法 |
-| --- | --- | --- |
-| `No space left on device` 或分片数量不足 | 约 403 GB 的检查点未完整下载 | 至少预留 500 GB，续传 `hf download`，启动前核对分片 |
-| `No module named ...` 或修改未生效 | 运行时导入了另一套安装 | 打印 `vllm.__file__` 和 `vllm_ascend.__file__`，切换到匹配镜像或 `/vllm-workspace` 安装 |
-| 模型架构无法识别 | 运行环境缺少模型适配器 | 确认已注册 `MistralLarge3ForCausalLM` 并核对运行时 commit |
-| 缺少 `qscale_weight`、`qscale_weight_2` 或出现未知权重键 | 检查点不完整或 loader 不兼容 | 核对 `params.json`、分片、Mistral load format 和 NVFP4 适配版本 |
-| `_C_ascend.nvfp4_linear` 或 `_C_ascend.nvfp4_moe` 不存在 | 镜像未包含 NVFP4 自定义算子 | 安装或构建包含算子的镜像；调整启动参数无法替代缺失内核 |
-| 权重加载或图捕获时 NPU OOM | 上下文、并发或 shape 超出容量 | 保持 TP16，将上下文降至 32768、并发降至 4，再用 Eager 隔离 |
-| `AclmdlRICaptureEnd ... 507903` | ACLGraph 捕获序列失效 | 保留 `HCCL_OP_EXPANSION_MODE=AIV`，降低 shape 压力，再测试 Eager |
-| HCCL `Communication_Error_Bind_IP_Port` | 残留 worker 或通信端口占用 | 停止残留进程，确认 8000 端口空闲，再干净启动所有 rank |
-| readiness 正常但首个请求崩溃 | MLA、MoE 或后端引发 false-ready | 保存首个堆栈，用确定性请求在 Eager 重现，修复第一个后端错误 |
-| 输出为空或包含模板残片 | endpoint、tokenizer mode 或聊天模板不匹配 | 使用 chat completions 和 Mistral 三种 format，temperature 设为 0 |
-
-常用隔离命令：
-
-```shell
-pkill -f "vllm serve|EngineCore" || true
-ss -ltnp | grep ':8000' || true
 npu-smi info
-tail -n 200 "${LOG_FILE}"
+ss -ltnp | grep ':8000' || true
+ps -eo pid,ppid,stat,cmd | grep -E 'vllm serve|EngineCore|Worker_TP'
 ```
 
-## 8 精度评测
+先核验 PID 命令行，再终止精确服务 PID；不要对未知进程使用宽泛强杀：
 
-使用仓库配置 `tests/e2e/models/configs/mistral_large3_675b_nvfp4.yaml`。
-其中 GPQA Diamond 数值是检查点参考值，不是昇腾实测结果；只有完成真实权重
-评测后才能确认或替换该数值。
+```shell
+tr '\0' ' ' </proc/<PID>/cmdline
+kill <PID>
+for i in 1 2 3 4 5; do kill -0 <PID> 2>/dev/null || break; sleep 1; done
+```
+
+如果主进程退出但 Worker/EngineCore 残留，保存进程树和日志后再清理。确认
+8000 端口空闲、两卡没有旧 Worker，才重新启动。
+
+### 7.2 典型故障矩阵
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| `No space left on device` | 403 GB 检查点无法落盘 | 扩容至至少 500 GiB，续传并复核分片 |
+| NPU HBM 高占用或 OOM | 残留 Worker、上下文/并发过大 | 核验 PID；降低长度和并发；保留 TP 拓扑 |
+| HCCL bind/通信错误 | 端口或 rank 残留、网卡配置错误 | 清理旧进程，核对 HCCL 网卡和所有 rank |
+| NVFP4 算子不存在 | 镜像缺少自定义内核 | 更换/构建匹配镜像，不能靠参数绕过 |
+| 权重键或 scale 缺失 | 分片不完整或 loader 不匹配 | 核对索引、模型 revision 与适配 commit |
+| ACLGraph `507903` | 图捕获序列失效或 shape 压力 | 使用 AIV，降低长度/并发，再以 Eager 隔离 |
+| readiness 200 后请求崩溃 | 后端运行时 false-ready | 保存首请求堆栈，使用确定性请求复现 |
+| 输出含模板残片 | chat template/tokenizer 不匹配 | 核对 endpoint、模板和 tokenizer mode |
+
+Eager 隔离示例：保持 TP16 和 EP，先降低 shape 压力，并增加
+`--enforce-eager`。它是诊断路径，不是默认生产结论。
+
+## 8 Accuracy Evaluation / 精度评测
+
+使用：
 
 ```shell
 pytest -sv tests/e2e/models/test_lm_eval_correctness.py \
@@ -263,24 +278,37 @@ pytest -sv tests/e2e/models/test_lm_eval_correctness.py \
     --tp-size 16
 ```
 
-## 9 性能与投产检查
+YAML 中 GPQA Diamond 的 `0.6717` 是参考目标，不是本次 Ascend 实测结果。
+当前 Mistral 用例因硬件容量阻塞，必须在完整真实权重环境中重新评测后，才能
+确认或替换该数值。
 
-投产前必须以真实权重记录：
+## 9 Performance / 性能与投产
 
-- readiness 与首个请求的 HTTP 状态；
-- 复杂推理、多语言和企业场景 prompt 的非空输出；
-- TP16+EP rank 健康状态和 FlashComm1 结果；
-- ACLGraph 捕获/replay 证据以及 Eager 对照；
-- 加载期和稳态的 NPU/主机内存峰值；
-- TTFT、TPOT、吞吐量、输入输出长度和并发；
-- 模型 revision、镜像 digest、CANN 与 Python 包版本。
+目标基线为 `max-model-len=131072`、`max-num-seqs=16`、TP16+EP。真实部署
+需记录加载时间、TTFT、TPOT、吞吐量、输入输出长度、峰值 HBM/主机内存、
+ACLGraph replay、FlashComm1 和所有 rank 健康状态。
 
-官方模型卡提示 NVFP4 在长上下文下可能出现质量或性能下降。必须按照生产
-流量的实际上下文分布验证，不能用 32K 工作负载推断理论最大长度的表现。
+本次双卡实例没有执行 Mistral 性能测试；原因是磁盘安全容量 100.74 GiB 小于
+约 403 GB 权重，且约 128 GiB 总 HBM 不具备可靠部署余量。不得用 Qwen 的
+性能数字外推 Mistral。
 
-## 10 参考资料
+## 10 Evidence / 证据与归档
+
+本次 Qwen 参考案例的日志、接口响应和报告已打包并通过 SHA256 校验：
+
+```text
+archive: vllm-ascend_run_logs_20260719.tar.gz
+sha256: ddd591ecaec016f99ff55f244fd549efbd209646c9f8d42c64f3206052807edb
+files: 91
+```
+
+关键文件包括 `FINAL_ACCEPTANCE.zh-CN.md`、`MIGRATION_REPORT.zh-CN.md`、
+`qwen7b_tp2_service_startup.log`、`qwen7b_models_response.json` 与
+`qwen7b_chat_response.json`。
+
+## 11 References / 参考资料
 
 - [Mistral Large 3 675B NVFP4 模型卡](https://huggingface.co/mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4)
-- [Hugging Face CLI 文档](https://huggingface.co/docs/huggingface_hub/guides/cli)
+- [Hugging Face CLI](https://huggingface.co/docs/huggingface_hub/guides/cli)
 - [vLLM Ascend 安装指南](../../installation.md)
 - [vLLM Ascend FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)

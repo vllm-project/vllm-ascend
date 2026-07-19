@@ -1,296 +1,264 @@
 ---
 name: vllm-ascend
-description: Adapt, test, document, and review large MoE models and NVFP4 checkpoints for vLLM Ascend. Use when implementing an Ascend model adapter, mapping native Mistral or DeepSeek-style weights, registering a quantization backend, adding Linear or fused-MoE NVFP4 loading, creating e2e model YAML and deployment tutorials, or preparing an AI-assisted development report for a vllm-ascend issue.
+description: Adapt, deploy, troubleshoot, validate, and document large MoE or quantized checkpoints on vLLM Ascend. Use for Mistral Large 3 NVFP4 model configuration, Ascend NPU capacity gating, TP/EP service bring-up, real-weight OpenAI API acceptance, SSH migration, evidence archiving, and AI-assisted delivery reports.
 ---
 
-# vLLM Ascend 大模型适配
+# vLLM Ascend 模型适配与验收
 
-## 目标
+## 核心原则
 
-按最小改动原则完成新模型在 vLLM Ascend 上的架构注册、权重映射、量化后端、
-测试配置和部 署文档。对 dummy、静态检查、真实权重和 NPU 内核验证分别给出
-结论，不要用前一阶段替代后一阶段。
+1. 先确认仓库、运行时导入路径、模型配置、权重索引和硬件事实，再改代码。
+2. 绝不把架构适配 Python 文件当作模型权重；`--model` 必须指向完整检查点
+   目录或受支持的模型 ID。
+3. 不单独升级 `transformers`。保持 vLLM、vLLM-Ascend、torch、torch-npu、
+   triton-ascend 和 CANN 的版本组合一致。
+4. Dummy 只能作为快速隔离手段，不能替代真实权重。
+5. 真实权重门禁必须同时满足：服务就绪、`/v1/models` HTTP 200、至少一个
+   推理请求 HTTP 200 且输出非空。
+6. `Application startup complete` 不是通过；首请求崩溃属于 false-ready。
+7. 对 EP、FlashComm1、MTP、多模态和 ACLGraph 分别记录“已验证、不支持、
+   checkpoint missing、N/A 或未验证”，不要混写。
+8. 资源不足时明确标记 `blocked_by_hardware_capacity`，不能用小模型成功冒充
+   目标模型成功，也不能把容量阻塞写成软件失败。
+9. 操作云实例时先归档并校验交付物，再停服务，最后关机。
 
-本技能来源于
-[Issue #7338](https://github.com/vllm-project/vllm-ascend/issues/7338) 的
-Mistral Large 3 675B NVFP4 适配过程，正文可以直接作为该 Issue 的 AI 辅助
-开发记录粘贴。
+## 标准工作流
 
-## 本次使用的提示词
-
-### 1. 模型架构适配
-
-```text
-项目路径 C:\Users\wangc\vllm-ascend，进入
-vllm_ascend/model_executor/models 目录；参考同目录现有模型
-（deepseek_v4.py 等）的代码结构、模型装饰器注册、权重加载、MoE 前向传播、
-昇腾适配逻辑，新建 mistral_large3.py，实现
-MistralLarge3ForCausalLM 类；适配 Mistral Large3 MoE 架构，预留 NVFP4
-量化权重加载接口，代码补充基础注释，符合仓库原有编码规范。取消补丁导入
-方式，直接在对应目录新建目标 py、yaml、md 文件，不使用临时目录、patch
-脚本。
-```
-
-### 2. NVFP4 量化适配
-
-```text
-项目路径 C:\Users\wangc\vllm-ascend，进入
-vllm_ascend/model_executor/quantization 目录；参考目录内 AWQ、GPTQ 量化
-实现，新建 nvfp4.py；完成量化类注册、NVFP4 权重反量化、对接昇腾 NPU
-算子的基础代码骨架，适配 Mistral-Large-3-675B 的 NVFP4 量化权重。
-```
-
-### 3. 端到端测试配置
-
-```text
-项目路径 C:\Users\wangc\vllm-ascend，进入 tests/e2e/models/configs
-目录；复制仓库现有模型 yaml 测试配置格式，新建
-mistral_large3_675b_nvfp4.yaml；填入 HuggingFace 模型路径
-mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4、合理张量并行参数、
-多组测试 prompt（复杂推理、多语言、企业场景）、推理采样参数，预留服务器
-本地权重路径字段，满足端到端测试要求。
-```
-
-### 4. 部署教程
-
-```text
-项目路径 C:\Users\wangc\vllm-ascend，进入 docs/source/tutorials/models
-目录；参考现有模型教程格式，新建 mistral_large3_675b_nvfp4.md；编写内容
-包含：环境依赖准备、HuggingFace 模型下载命令、vLLM-Ascend 多卡推理启动
-命令、常见报错排查模板，适配 675B NVFP4 模型部署场景。
-```
-
-### 5. AI 辅助开发记录
-
-```text
-在项目根目录新建 SKILL.md，严格参照 https://agentskills.io/specification
-规范撰写；记录本次 AI 辅助开发全流程：使用的提示词、代码适配工作流、
-MoE+NVFP4 量化适配的解决思路、可复用开发经验；内容后续可直接粘贴到
-Issue #7338 评论区提交。
-```
-
-## 代码适配工作流
-
-### 1. 先确认仓库事实
-
-1. 读取根目录 `AGENTS.md`、适用技能和贡献规范。
-2. 检查工作树，保留用户已有修改，不重置或覆盖无关文件。
-3. 使用仓库搜索确认真实目录、注册入口、配置 schema 和现有测试。
-4. 当提示词路径与当前仓库布局不一致时，以可被运行时导入的真实路径为准，
-   并在交付说明中记录偏差。
-
-本次发现仓库没有 `vllm_ascend/model_executor/models` 和
-`vllm_ascend/model_executor/quantization` 下的对应实现体系。最终使用：
-
-- `vllm_ascend/models/mistral_large3.py`；
-- `vllm_ascend/quantization/nvfp4.py`；
-- `vllm_ascend/models/__init__.py` 的 `ModelRegistry.register_model`；
-- vLLM 的 `register_quantization_config` 和插件启动注册。
-
-不要为了逐字匹配提示词而创建运行时不会导入的重复目录。
-
-### 2. 分析模型和检查点
-
-1. 查看官方 `params.json`、模型卡和权重命名。
-2. 确认模型拓扑：MLA、61 层、128 个路由专家、每 token 选择 4 个专家、
-   1 个共享专家，以及前三层 dense MLP。
-3. 对比上游 vLLM 的 DeepSeek-V3、ModelOpt NVFP4 和 compressed-tensors
-   实现，不凭记忆猜测张量格式。
-4. 确认 Mistral 原生配置把 NVFP4 描述放在 `quantization_config`，格式为
-   `nvfp4-pack-quantized`，但 `quant_method` 标记为 `compressed-tensors`。
-5. 先列出权重名称、shape、dtype、分片维度和缩放因子，再写 loader。
-
-### 3. 复用兼容架构
-
-1. 优先复用已经验证的上游模型拓扑，不复制整套 forward。
-2. 让 `MistralLarge3ForCausalLM` 继承 `DeepseekV3ForCausalLM`，保留 MLA、
-   MoE、专家并行和 Ascend FusedMoE 路径。
-3. 使用锚定正则的 `WeightsMapper` 显式映射：
-   - attention norm、MLA Q/KV LoRA 投影和 output projection；
-   - dense `w1/w2/w3`；
-   - routed expert `w1/w2/w3`；
-   - shared expert `w1/w2/w3`；
-   - embedding、final norm 和 lm head。
-4. 映射量化后缀：
-   - `.qscale_act` 到 `.input_scale`；
-   - `.qscale_weight` 到 `.weight_scale`；
-   - `.qscale_weight_2` 到 `.weight_scale_2`。
-5. 使用 `AutoWeightsLoader` 统一加载，避免为每种精度复制 loader。
-
-### 4. 实现 NVFP4 量化后端
-
-1. 注册 `nvfp4` 配置，并在插件发现阶段加入平台支持列表。
-2. 同时识别显式 `--quantization nvfp4` 和原生
-   `nvfp4-pack-quantized` 配置，不能只检查 `quant_method=nvfp4`。
-3. 固定并校验 Mistral 检查点使用的 `group_size=16`。
-4. 为 Linear 分配：
-   - `weight`: `uint8[out, in/2]`；
-   - `weight_scale`: `float8_e4m3fn[out, in/16]`；
-   - `weight_scale_2`: FP32 全局权重 scale；
-   - `input_scale`: FP32 全局激活 scale。
-5. 为 MoE 分配：
-   - `w13_weight`: `uint8[experts, 2*intermediate, hidden/2]`；
-   - `w2_weight`: `uint8[experts, hidden, intermediate/2]`；
-   - 对应的 16 元素分组 scale、二级权重 scale 和激活 scale。
-6. 支持 `re:` 忽略规则，避免错误量化 attention、embedding、vision 或
-   lm head。
-7. 将 NPU 快路径接到 `_C_ascend.nvfp4_linear` 和
-   `_C_ascend.nvfp4_moe`。算子缺失时在 NPU 上快速报错，不要静默展开 675B
-   权重。
-8. 仅提供 CPU Linear 参考路径用于验证反量化数学；不要把它当作生产后端。
-
-## NVFP4 反量化思路
-
-每个 `uint8` 沿输入维打包两个 E2M1 FP4 值，低四位在前，高四位在后。
-使用下表解码 nibble：
-
-```text
-[0, 0.5, 1, 1.5, 2, 3, 4, 6,
- -0, -0.5, -1, -1.5, -2, -3, -4, -6]
-```
-
-将 FP8 E4M3 分组 scale 沿最后一维每 16 个元素展开，再乘 FP32 全局 scale：
-
-```text
-W_dequant = E2M1(unpack(weight)) * repeat(weight_scale, 16) * weight_scale_2
-```
-
-ModelOpt 风格的 `weight_scale_2` 是乘数 `amax / (6 * 448)`，不是倒数。
-compressed-tensors 的某些导出格式可能保存倒数；接入新检查点时必须先确认
-导出约定，不能复用名称后直接假设公式相同。
-
-避免在热路径调用 `tensor.item()`。shape、dtype 和 group size 校验应在创建
-权重或加载阶段完成。
-
-## 测试与文档工作流
-
-### 单元测试
-
-至少覆盖：
-
-- nibble 低位优先的解包顺序；
-- E2M1 正负数值表；
-- 分组 scale 和全局 scale 的组合；
-- 错误 scale shape；
-- 原生 Mistral `quantization_config` 自动识别；
-- `re:` ignore 规则；
-- 模型权重名称映射。
-
-先运行目标用例，再运行格式和静态检查：
+### 1. 收集事实
 
 ```shell
-python -m pytest -sv tests/ut/quantization/test_nvfp4.py
-python -m pytest -sv tests/ut/quantization/test_nvfp4_mistral_config.py
-python -m pytest -sv tests/ut/models/test_mistral_large3.py
-python -m py_compile vllm_ascend/models/mistral_large3.py
-python -m py_compile vllm_ascend/quantization/nvfp4.py
-git diff --check
+git status --short
+git branch --show-current
+python -c "import vllm,vllm_ascend;print(vllm.__version__,vllm.__file__);print(vllm_ascend.__file__)"
+python -c "import torch,torch_npu;print(torch.__version__,torch_npu.__version__);print(torch.npu.device_count())"
+npu-smi info
+df -h /data
 ```
 
-如果本地缺少 `torch`、vLLM 或 NPU，不要声称 pytest 或真实推理通过。记录
-阻塞依赖，并继续执行可以完成的 YAML、Markdown、AST、编译和 diff 检查。
+检查模型：
 
-### 端到端配置
+```shell
+find "${MODEL_PATH}" -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
+python - <<'PY'
+import json, os
+p = json.load(open(os.path.join(os.environ["MODEL_PATH"], "config.json")))
+for k in ("architectures", "model_type", "quantization_config",
+          "max_position_embeddings", "seq_length", "num_experts"):
+    print(k, p.get(k))
+PY
+```
 
-保持 `tests/e2e/models/configs` 的标准字段：`model_name`、`model_type`、
-`hardware`、`serve`、`tasks`、`num_fewshot`。为 675B NVFP4 使用 A3
-TP16+EP、131072 初始上下文和 16 并发，并保留本地模型路径。
+### 2. 做资源门禁
 
-将服务 smoke prompt 放在独立扩展段，覆盖复杂推理、多语言和企业事故响应；
-不要破坏 lm-eval 对标准字段的读取。
+比较四类容量：模型仓库总大小、模型盘安全可用空间、主机加载内存、NPU HBM
+及 KV cache/图捕获余量。检查点无法落盘时立即停止真实权重部署尝试，记录：
 
-### 部署教程
+- 文件系统总量、原始可用量和预留日志后的安全上限；
+- NPU 数量、型号、单卡 HBM；
+- 目标权重预计大小；
+- 推荐硬件拓扑；
+- 可用的小模型同框架参考，但明确非等价。
 
-至少写明：
+本次 Mistral 事实：检查点约 403 GB；测试实例 `/data` 117.56 GiB，安全权重
+上限 100.74 GiB；两张 910B2C 每卡 65,536 MiB。结论是磁盘和 HBM 均不足。
 
-- A3 16 NPU、磁盘和版本依赖；
-- `hf download --local-dir` 下载及分片检查；
-- `/workspace` 下直接执行的 TP16+EP 启动命令；
-- readiness 与首个真实权重请求；
-- Eager 和低上下文隔离命令；
-- NVFP4 算子缺失、OOM、HCCL、ACLGraph、权重键异常模板；
-- dummy 与真实权重不等价；
-- 实测前不得将参考精度写成 Ascend 结果。
+### 3. 下载和稳定性校验
 
-## 两阶段 NPU 验证门禁
+```shell
+hf auth login
+hf download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
+```
 
-### 阶段 A：dummy 快速门禁
+遇到 401/403 时检查仓库许可、fine-grained token 的 gated repository 权限、
+运行用户和 `HF_ENDPOINT`。不要记录 Token。若 `huggingface-cli` 提示废弃，
+使用客户端给出的等价 `hf download`，不要为此升级 transformers。
 
-验证架构构建、注册、基础算子路径和 API。必须同时满足 readiness 和至少一个
-非空文本响应。dummy 不能验证权重键、FP4 反量化或真实显存占用。
+启动前要求 config、索引和索引引用的所有分片存在；`.incomplete`、`.part`、
+`.tmp` 或 `.lock` 必须为零。连续多个采样周期确认大小和 mtime 不再变化。
 
-### 阶段 B：真实权重强制门禁
+### 4. 启动与上下文适配
 
-使用完整约 403 GB 检查点，验证：
+从 `/workspace` 直接启动。先使用模型配置声明的上下文长度，不复制其他模型
+的值。若 vLLM 报用户长度超过 derived length，应降低到 config 声明值；不要
+使用 `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` 强行越界。
 
-1. 所有分片完整加载；
-2. 无未处理的权重键或 scale；
-3. Linear 与 routed/shared expert 的 NVFP4 路径可执行；
-4. `GET /v1/models` 返回 200；
-5. 首个请求返回 200 且输出非空；
-6. TP16+EP、FlashComm1 和 ACLGraph 有运行证据；
-7. 记录 TTFT、TPOT、吞吐量及内存峰值。
+双卡 Dense 参考模板：
 
-`Application startup complete` 不是通过条件。readiness 正常但首请求崩溃属于
-false-ready，必须按运行时失败处理。
+```shell
+vllm serve "${MODEL_PATH}" \
+  --served-model-name "${SERVED_MODEL_NAME}" \
+  --trust-remote-code \
+  --tensor-parallel-size 2 \
+  --gpu-memory-utilization 0.90 \
+  --max-model-len "${MODEL_MAX_LEN}" \
+  --max-num-seqs 4 \
+  --port 8000
+```
 
-## 常见问题与可复用经验
+Mistral 675B NVFP4 目标模板使用 A3 TP16+EP、NVFP4、FlashComm1 和 ACLGraph；
+两张 910B2C 只用于较小模型的环境参考验证。
 
-1. **目录名不等于运行时入口。** 先搜索注册链，再决定文件位置。
-2. **架构相似时继承优于复制。** 复用 DeepSeek-V3 forward，只维护明确的
-   Mistral 权重映射。
-3. **量化方法名不可靠。** 同时检查 format、config group、dtype、group size
-   和实际权重字段。
-4. **MoE scale 必须区分 w1/w3。** `w13_weight_scale_2` 通常为
-   `[experts, 2]`，`w2_weight_scale_2` 为 `[experts]`。
-5. **融合层 scale 可能不一致。** 合并 q/k/v 或 gate/up 前先定义保守策略并
-   输出警告，不能静默假设完全相等。
-6. **不要在 NPU 上使用巨型反量化 fallback。** 缺少内核时快速失败，避免
-   OOM 或长时间假运行。
-7. **不要从 dummy 推断真实权重正确。** 权重命名、scale 配对和分片问题只在
-   阶段 B 暴露。
-8. **新增配置必须被现有 runner 消费。** 未被 runner 使用的 prompt 扩展应
-   与标准 lm-eval 字段隔离。
-9. **文档必须暴露限制。** 教程应明确内核依赖和未验证状态，而不是只给一个
-   看似可运行的命令。
-10. **每步形成单一、可审计提交。** 使用 Conventional Commit 和 sign-off，
-    保持代码、测试、配置和文档差异清晰。
+### 5. API 和功能门禁
 
-## 本次交付记录
+```shell
+curl -f http://127.0.0.1:8000/v1/models
+curl -f http://127.0.0.1:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"MODEL","messages":[{"role":"user","content":"say hi"}],"temperature":0,"max_tokens":32}'
+```
 
-| 提交 | 内容 | 验证状态 |
-| --- | --- | --- |
-| `efce799c7e30be5c6c70ab6dde9f38043e60caf9` | 模型注册、权重映射、模型 UT、初版 YAML/教程 | `py_compile` 和映射静态检查通过 |
-| `afc8f833d38296c16bcafe750aad5d15c7e004ee` | NVFP4 配置、反量化、Linear/MoE NPU 骨架及 UT | 静态检查通过；本机缺少 torch，pytest 未执行 |
-| `2e6015594749716355f5299ea818b73a92741a5c` | NVFP4 e2e YAML 与三类 prompt | YAML 解析和字段断言通过 |
-| `0ae1a2a159000a195dfb5e19cd985ebf76cfd03c` | 中文下载、部署和排障教程 | Markdown 结构、引用和 diff 检查通过 |
+验证日志中的 Worker rank、权重加载、KV cache、图捕获和首请求。MoE 才检查
+EP/FlashComm1；Dense 模型标记 N/A。配置/索引没有 MTP 时标记 checkpoint
+missing；文本模型的多模态标记 N/A。
 
-主要文件：
+### 6. 故障排查阶梯
 
-- `vllm_ascend/models/mistral_large3.py`
-- `vllm_ascend/quantization/nvfp4.py`
-- `tests/ut/models/test_mistral_large3.py`
-- `tests/ut/quantization/test_nvfp4.py`
-- `tests/ut/quantization/test_nvfp4_mistral_config.py`
-- `tests/e2e/models/configs/mistral_large3_675b_nvfp4.yaml`
-- `docs/source/tutorials/models/mistral_large3_675b_nvfp4.md`
+1. 以相同参数复现一次并保留第一个错误。
+2. 检查端口、残留 APIServer、EngineCore 和 Worker_TP。
+3. 检查 config derived max length、模型架构、权重索引和缺失键。
+4. 图捕获失败时保持其他参数不变，使用 `--enforce-eager` 隔离一次。
+5. OOM 时先降低上下文和并发，不要破坏必要 TP/EP 拓扑。
+6. HCCL 错误先清残留 rank、核对网卡和通信端口。
+7. NVFP4 自定义算子缺失时更换或构建匹配镜像，不做巨型 CPU/NPU 反量化
+   fallback。
+8. 首请求失败时按运行时失败处理，不接受 readiness 假阳性。
 
-## 当前结论
+精确停进程：
 
-已完成模型适配、权重映射、NVFP4 配置和反量化参考实现、Linear/MoE 权重
-分配、NPU 算子接口、单元测试源码、e2e 配置及中文教程。
+```shell
+tr '\0' ' ' </proc/<PID>/cmdline
+kill <PID>
+for i in 1 2 3 4 5; do kill -0 <PID> 2>/dev/null || break; sleep 1; done
+```
 
-尚未完成真实 Ascend 服务器上的 403 GB 权重加载和首请求验证，也未在当前
-环境证明 `_C_ascend.nvfp4_linear` 与 `_C_ascend.nvfp4_moe` 已有可用实现。
-因此当前交付应表述为“适配代码与算子接口骨架已完成，等待真实 NPU 内核和
-权重门禁”，不能表述为 Issue #7338 已完全验证通过。
+### 7. 交付和关机顺序
 
-## 后续执行清单
+1. 更新 e2e YAML、模型教程、SKILL.md 和提示词归档。
+2. 校验 YAML、Markdown、链接、`git diff --check` 和相关测试。
+3. 生成一个带 sign-off 的 Conventional Commit。
+4. 在服务器归档完整 `run_logs`，生成 SHA256。
+5. 下载到本地并对比 SHA256，确认最终报告和接口响应存在。
+6. 精确终止推理服务，记录停服时间、PID、端口与 NPU 释放状态。
+7. 再次下载停服后的增量日志并校验。
+8. 最后执行云实例关机；操作系统关机不一定等于云控制台停止计费，应在控制台
+   复核实例状态和计费策略。
 
-1. 在匹配版本的 A3 镜像中确认 vLLM 和 vLLM Ascend import 路径。
-2. 下载并核对全部 Mistral Large 3 NVFP4 分片。
-3. 确认两个 `_C_ascend` NVFP4 算子已注册且 schema 与 Python 调用一致。
-4. 先以低上下文 Eager 模式验证真实权重加载和首请求。
-5. 再验证 TP16+EP、FlashComm1、ACLGraph、131072 上下文和 16 并发。
-6. 用实测结果替换参考精度和性能数据。
-7. 将本文件内容粘贴到 Issue #7338 评论区，附上真实验证日志或明确阻塞项。
+## 本次验证结论
+
+### Mistral Large 3 675B NVFP4
+
+- 测试配置和部署教程已提供。
+- 真实权重没有下载或加载，因为约 403 GB 权重大于 100.74 GiB 安全磁盘容量。
+- 两卡总 HBM 约 128 GiB，不具备可靠部署余量。
+- 状态：`blocked_by_hardware_capacity`。
+- GPQA `0.6717` 仅为参考目标，不是 Ascend 实测值。
+
+### Qwen-7B-Chat 同框架参考
+
+- 真实权重 8/8 分片，总计 15,442,677,288 字节。
+- 2 × Ascend 910B2C，TP=2，`gpu-memory-utilization=0.90`。
+- Qwen config `seq_length=8192`；从错误的 32768 调整到 8192 后启动成功。
+- `/v1/models` 与 chat 均 HTTP 200，输出非空。
+- ACLGraph 捕获和 replay 有日志证据。
+- 该结果证明环境、TP/HCCL、NPU 图和 OpenAI API 链路，不证明 Mistral
+  NVFP4/EP/FlashComm1。
+
+## 关键提示词归档
+
+以下内容按实际任务阶段归档。所有密码、Token、完整 SSH 用户标识和实例敏感
+信息均以 `[REDACTED]` 替换；复用提示词时通过安全凭据渠道注入。
+
+### A. 文件角色与启动参数
+
+```text
+区分 vllm_ascend/models 下的 Python 架构适配代码、需要额外下载的模型权重，
+说明运行时自动调用关系，并明确 vllm serve --model 应填写完整权重目录或模型 ID。
+```
+
+```text
+基于 vLLM-Ascend、Ascend NPU 和 Mistral Large 3，校验启动命令，补充显存比例、
+最大上下文长度、张量并行参数，并给出 OpenAI 格式 /v1/models 与 chat 示例。
+```
+
+### B. 仓库版本、安装与算子适配
+
+```text
+查阅当前 vllm-ascend README，确认要求的 vLLM 基准版本；在目标服务器执行
+VLLM_TARGET_DEVICE=empty python3 -m pip install -e .，完整保存日志并校验 import。
+```
+
+```text
+定位 build_aclnn.sh、LightningIndexer 和 SparseFlashAttention 的 socVersion
+校验，在支持列表加入 ascend910b2c；保存三处 diff，切换 CANN 8.5.1 对应发布
+分支，核对 torch、torch-npu、triton-ascend 后重装并运行模型测试。
+```
+
+### C. 双卡实例迁移与环境验证
+
+```text
+通过已配置 SSH 接入双卡实例，核验两张 Ascend 910B、CANN、vLLM-Ascend 环境；
+迁移完整项目、算子改动、run_logs 和文档，执行 editable install，准备 TP=2
+脚本与模型目录，全程记录操作日志。
+```
+
+```text
+实例重启后记录 npu-smi、torch_npu.device_count、两卡最小张量计算和 vLLM import；
+识别两卡则校验 TP=2，识别失败则把故障证据写入迁移报告。
+```
+
+### D. 容量门禁与自动监控
+
+```text
+把双卡 NPU 验证日志归档到迁移报告，统计 /data 原始与安全可用空间；等待完整
+config、索引和权重分片稳定后自动启动 TP=2，保存服务、接口和最终验收日志。
+```
+
+```text
+Mistral 675B 因模型盘与双卡 HBM 不足无法部署时，明确写为客观硬件限制，不得
+声称真实权重测试通过；使用可部署小模型验证同一 vLLM-Ascend 双卡链路。
+```
+
+### E. Llama 权重授权隔离
+
+```text
+创建 Llama-2-7B 目录并切换 TP=2 脚本；从官方 gated repository 下载配置与
+权重。若没有 Meta 许可或 Token 返回 403，记录授权阻塞，不绕过许可，不使用
+dummy 冒充真实权重。
+```
+
+### F. Qwen 双卡真实权重验收
+
+```text
+创建 /data/models/Qwen-7B-Chat；修改现有启动脚本指向该目录，保留 TP_SIZE=2
+和 gpu-memory-utilization=0.90；下载 Qwen/Qwen-7B-Chat，等待权重稳定后启动，
+调用 /v1/models 和 /v1/chat/completions，补齐 FINAL_ACCEPTANCE。
+```
+
+```text
+如果 huggingface-cli 已废弃，执行工具建议的 hf download 等价命令，不升级
+transformers；若 max_model_len 超过 config derived length，降到模型原生值后
+重试，保留首次失败和最终成功日志。
+```
+
+### G. 证据归档与下线
+
+```text
+将服务器 run_logs 整体压缩，生成 SHA256，下载到本地桌面并复核哈希、文件数、
+FINAL_ACCEPTANCE 和 MIGRATION_REPORT；云平台计费截图可选，但日志归档必须完成。
+```
+
+```text
+完成 Mistral YAML、部署教程和 SKILL.md 后归档全部文档；精确核验并终止推理
+PID，确认端口和 NPU 释放，下载最终增量日志，最后下发云实例关机指令。
+```
+
+## 可复用交付检查表
+
+- [ ] YAML 包含 `model_name`、`hardware`、`tasks.metrics` 和 `num_fewshot`。
+- [ ] 参考精度明确标注来源，不冒充 Ascend 实测。
+- [ ] 教程包含环境、下载、部署、接口、精度和性能章节。
+- [ ] 理论上下文与实际成功上下文分别记录。
+- [ ] 目标模型和小模型参考案例的结论严格分离。
+- [ ] ACLGraph、EP、FlashComm1、MTP、多模态逐项给出状态。
+- [ ] 完整日志、报告和接口响应已做 SHA256 本地备份。
+- [ ] 停服和关机发生在最终备份之后。
