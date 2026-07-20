@@ -23,13 +23,13 @@ import torch.distributed as dist
 import vllm.v1.engine.core as _engine_core_mod
 import vllm.v1.request as _request_module
 from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc
+from vllm.v1.request import Request
 
 import vllm_ascend.patch.platform.patch_balance_schedule as _balance_patch
 import vllm_ascend.patch.platform.patch_nonbsp_request_status  # noqa: F401
 from vllm_ascend.ascend_config import NonBSPConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.core.nonbsp_balance_load import balance_load
 
-Request = _request_module.Request
 RequestStatus = _request_module.RequestStatus
 
 
