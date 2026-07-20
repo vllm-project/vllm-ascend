@@ -30,11 +30,12 @@ except ImportError:
     IntermediateTensors = None
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
-from vllm_ascend.utils import is_310p
+from vllm_ascend.utils import is_310p, vllm_version_is
 
-_IS_VLLM_RELEASE = vllm_version_is("0.24.0")
-if not vllm_version_is("0.24.0"):
+_IS_VLLM_RELEASE = vllm_version_is("0.25.0")
+if not _IS_VLLM_RELEASE:
     import vllm.model_executor.models.qwen3_next as qwen3_next_module
     from vllm.model_executor.models.qwen3_next import _all_gather_hidden_and_residual
 

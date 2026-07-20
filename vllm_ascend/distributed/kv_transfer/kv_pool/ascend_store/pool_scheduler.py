@@ -110,7 +110,7 @@ class KVPoolScheduler:
         self.grouped_block_size = [block_size * cp_scale for block_size in self.original_block_size]
         requested_hash_block_size = (
             vllm_config.cache_config.hash_block_size
-            if vllm_version_is("0.24.0")
+            if vllm_version_is("0.25.0")
             else vllm_config.cache_config.prefix_match_unit
         )
         if not isinstance(requested_hash_block_size, int):

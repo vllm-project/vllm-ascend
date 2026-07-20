@@ -19,7 +19,7 @@ import torch
 
 from vllm_ascend.utils import vllm_version_is
 
-if vllm_version_is("0.24.0"):
+if vllm_version_is("0.25.0"):
     from vllm.model_executor.layers.fla.ops.index import prepare_lens  # type: ignore[import-not-found]
     from vllm.model_executor.layers.fla.ops.utils import tensor_cache  # type: ignore[import-not-found]
 else:

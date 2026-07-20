@@ -108,7 +108,7 @@ def test_compressed_prefix_cache_uses_logical_block_hash() -> None:
         drop_eagle_block=False,
         alignment_tokens=logical_block_size,
     )
-    hit_blocks = hit_result[0] if vllm_version_is("0.24.0") else hit_result[0][0]
+    hit_blocks = hit_result[0] if vllm_version_is("0.25.0") else hit_result[0][0]
 
     assert hit_blocks == []
 
@@ -136,7 +136,7 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
         drop_eagle_block=False,
         alignment_tokens=logical_block_size,
     )
-    hit_blocks = hit_result[0] if vllm_version_is("0.24.0") else hit_result[0][0]
+    hit_blocks = hit_result[0] if vllm_version_is("0.25.0") else hit_result[0][0]
 
     assert hit_blocks == manager.req_to_blocks[request.request_id]
 
@@ -192,11 +192,19 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
         )
         manager.cache_blocks(request_a, num_tokens=logical_block_size)
 
+    per_group_blocks, per_group_hits = coordinator.find_longest_cache_hit_per_group(
+        request_a.block_hashes,
+        max_cache_hit_length=logical_block_size,
+    )
+    assert isinstance(per_group_hits, tuple)
+    assert per_group_hits == (logical_block_size, logical_block_size)
+    assert all(per_group_blocks)
+
     hit_result = coordinator.find_longest_cache_hit(
         request_b.block_hashes,
         max_cache_hit_length=logical_block_size,
     )
-    if vllm_version_is("0.24.0"):
+    if vllm_version_is("0.25.0"):
         hit_blocks, hit_length = hit_result
     else:
         hit_blocks, hit_length, _ = hit_result

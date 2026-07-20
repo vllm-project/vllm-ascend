@@ -294,7 +294,7 @@ class AscendLogitsProcessor(LogitsProcessor):
         hidden_states: torch.Tensor,
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor:
-        if vllm_version_is("0.24.0"):
+        if vllm_version_is("0.25.0"):
             return lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias)
         return super()._apply_head(lm_head, hidden_states, embedding_bias)
 

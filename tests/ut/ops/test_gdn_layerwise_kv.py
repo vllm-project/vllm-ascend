@@ -54,7 +54,6 @@ class _OutputProjection(nn.Module):
 
 class _GDNForwardWrapper(nn.Module):
     forward = AscendGatedDeltaNetAttention.forward
-    _forward_ascend = AscendGatedDeltaNetAttention._forward_ascend
     _forward_core = AscendGatedDeltaNetAttention._forward_core
     _split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_tp
 
@@ -98,7 +97,7 @@ def _run_gdn_forward(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
 ) -> torch.Tensor:
-    if vllm_version_is("0.24.0"):
+    if vllm_version_is("0.25.0"):
         result = model(hidden_states, output)
         return output if result is None else result
     return model(hidden_states)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -14,10 +13,6 @@ from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
 from vllm.v1.core.sched.output import NewRequestData
 
 from vllm_ascend.memcache_comm_fence import AttentionComputeStartGate
-from vllm_ascend.utils import vllm_version_is
-
-_GROUPED_BLOCK_HASH_DOMAIN = b"vllm-ascend-grouped-block-hash-v1\0"
-_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
 
 
 @dataclass(frozen=True)
@@ -596,28 +591,12 @@ def get_block_hashes(
         return block_hashes
     assert group_block_size % hash_block_size == 0, "block_size must be divisible by hash_block_size"
     scale_factor = group_block_size // hash_block_size
-    if not vllm_version_is("0.24.0"):
-        # vLLM #46384 uses chained hashes; the last fine-grained hash already
-        # identifies the complete larger block.
-        return [
-            block_hashes[idx + scale_factor - 1]
-            for idx in range(0, len(block_hashes) // scale_factor * scale_factor, scale_factor)
-        ]
+    # Both supported lanes use chained hashes. The last fine-grained hash
+    # already identifies the complete larger block.
     return [
-        _rehash_block_hash_group(block_hashes[idx : idx + scale_factor])
+        block_hashes[idx + scale_factor - 1]
         for idx in range(0, len(block_hashes) // scale_factor * scale_factor, scale_factor)
     ]
-
-
-def _rehash_block_hash_group(block_hashes: Sequence[BlockHash | str]) -> BlockHash:
-    hasher = hashlib.sha256()
-    hasher.update(_GROUPED_BLOCK_HASH_DOMAIN)
-    hasher.update(len(block_hashes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
-    for block_hash in block_hashes:
-        hash_bytes = _block_hash_to_bytes(block_hash)
-        hasher.update(len(hash_bytes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
-        hasher.update(hash_bytes)
-    return BlockHash(hasher.digest())
 
 
 def block_hash_to_str(block_hash: BlockHash | str) -> str:

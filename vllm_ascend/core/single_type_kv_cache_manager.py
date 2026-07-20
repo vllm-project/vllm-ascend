@@ -50,7 +50,7 @@ class CompressAttentionManager(FullAttentionManager):
         # assert isinstance(self.kv_cache_spec, (CompressAttentionSpec, C4IndexerSpec))
 
         num_tokens //= self.compress_ratio
-        if vllm_version_is("0.24.0"):
+        if vllm_version_is("0.25.0"):
             if num_tokens_main_model is None:
                 assert num_local_computed_tokens is not None
                 num_tokens_main_model = num_local_computed_tokens
@@ -233,7 +233,7 @@ class CompressAttentionManager(FullAttentionManager):
         if dcp_world_size * pcp_world_size > 1:
             block_size *= dcp_world_size * pcp_world_size
         logical_block_size = block_size * kv_cache_spec.compress_ratio
-        hash_block_size = block_size if vllm_version_is("0.24.0") else block_pool.hash_block_size
+        hash_block_size = block_size if vllm_version_is("0.25.0") else block_pool.hash_block_size
         logical_block_hashes = BlockHashListWithBlockSize(block_hashes, hash_block_size, logical_block_size)
         max_num_blocks = max_length // logical_block_size
         for block_hash in itertools.islice(logical_block_hashes, max_num_blocks):
@@ -257,7 +257,7 @@ class CompressAttentionManager(FullAttentionManager):
             for computed in computed_blocks:
                 computed.pop()
         hit_length = len(computed_blocks[0]) * logical_block_size
-        if vllm_version_is("0.24.0"):
+        if vllm_version_is("0.25.0"):
             return computed_blocks
         return computed_blocks, hit_length
 

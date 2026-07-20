@@ -80,7 +80,7 @@ class _FakeCompressedManager:
     ):
         computed: tuple[list[object], ...] = tuple([] for _ in kv_cache_group_ids)
         logical_block_size = kv_cache_spec.block_size * kv_cache_spec.compress_ratio
-        if not vllm_version_is("0.24.0") and logical_block_size != block_pool.hash_block_size:
+        if not vllm_version_is("0.25.0") and logical_block_size != block_pool.hash_block_size:
             scale_factor = logical_block_size // block_pool.hash_block_size
             block_hashes = [
                 block_hashes[index + scale_factor - 1]
@@ -93,7 +93,7 @@ class _FakeCompressedManager:
                 break
             for blocks, block in zip(computed, cached):
                 blocks.append(block)
-        if vllm_version_is("0.24.0"):
+        if vllm_version_is("0.25.0"):
             return computed
         return computed, len(computed[0]) * logical_block_size
 

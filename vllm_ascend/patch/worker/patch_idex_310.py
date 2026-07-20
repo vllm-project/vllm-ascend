@@ -10,7 +10,7 @@ from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 from vllm_ascend.utils import is_rc_device, vllm_version_is
 
-if vllm_version_is("0.24.0"):
+if vllm_version_is("0.25.0"):
     from vllm.model_executor.layers.fla.ops import index as fla_index  # type: ignore[import-not-found]
 else:
     from vllm.third_party.flash_linear_attention.ops import index as fla_index

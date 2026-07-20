@@ -207,7 +207,7 @@ class AscendStoreCoordinator:
         return tuple(masks)
 
     def block_hashes_for_spec(self, block_hashes: list[BlockHash], spec: KVCacheSpec) -> BlockHashList:
-        if not vllm_version_is("0.24.0"):
+        if not vllm_version_is("0.25.0"):
             # vLLM #46384 moved hash-size resolution into each manager.
             return block_hashes
         if spec.block_size == self.hash_block_size:
@@ -384,7 +384,7 @@ def _find_longest_cache_hit(
             raise
         kwargs["use_eagle"] = kwargs.pop("drop_eagle_block")
         hit_result = manager_cls.find_longest_cache_hit(**kwargs)
-    if vllm_version_is("0.24.0"):
+    if vllm_version_is("0.25.0"):
         hit_blocks = cast(tuple[list[KVCacheBlock], ...], hit_result)
         hit_length = len(hit_blocks[0]) * kwargs["kv_cache_spec"].block_size
         return hit_blocks, hit_length
