@@ -188,7 +188,7 @@ nav:
         - tutorials/models/Qwen3-Coder-30B-A3B.md
         - tutorials/models/Qwen3-Embedding.md
         - tutorials/models/Qwen3-VL-Embedding.md
-        - tutorials/models/Qwen3_Reranker.md
+        - tutorials/models/Qwen3-Reranker.md
         - tutorials/models/Qwen3-VL-Reranker.md
         - tutorials/models/Qwen3-Next.md
         - tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md
