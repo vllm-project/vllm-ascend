@@ -30,12 +30,7 @@ def _png_bytes(color):
     header = struct.pack(">IIBBBBB", IMAGE_SIZE, IMAGE_SIZE, 8, 2, 0, 0, 0)
     scanline = b"\x00" + bytes(color) * IMAGE_SIZE
     pixels = zlib.compress(scanline * IMAGE_SIZE)
-    return (
-        PNG_SIGNATURE
-        + _png_chunk(b"IHDR", header)
-        + _png_chunk(b"IDAT", pixels)
-        + _png_chunk(b"IEND", b"")
-    )
+    return PNG_SIGNATURE + _png_chunk(b"IHDR", header) + _png_chunk(b"IDAT", pixels) + _png_chunk(b"IEND", b"")
 
 
 def _base64(data):
