@@ -22,7 +22,7 @@ test_cases:
       - "--gpu-memory-utilization"
       - "0.92"
       - "--max-model-len"
-      - "43008"
+      - "15000"
       - "--enable-expert-parallel"
       - "--max-num-seqs"
       - "16"
