@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, ClassVar
 
 import torch
+import torch_npu
 from torch import nn
 from torch.nn.parameter import Parameter
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
@@ -65,6 +66,43 @@ from vllm_ascend.ops.linear_op import get_parallel_op
 logger = init_logger(__name__)
 
 _SPARSE_ATTN_LOGGED = False
+
+
+def _scatter_index_cache(
+    cache: torch.Tensor,
+    updates: torch.Tensor,
+    slot_mapping: torch.Tensor,
+) -> None:
+    """Write index keys while safely ignoring graph/parallel padding slots."""
+    slots = slot_mapping.reshape(-1)
+    if slots.numel() == 0:
+        return
+
+    updates = updates.reshape(slots.shape[0], cache.shape[-1])
+    valid = slots >= 0
+    first_valid_idx = torch.argmax(valid.to(torch.int32))
+    has_valid = valid.any()
+
+    # A5 ScatterNdUpdate requires in-range indices. Redirect padding to the
+    # first valid slot with that slot's same update, making duplicates harmless.
+    # If the whole batch is padding, write cache[0] back to itself.
+    fallback_slot = torch.where(
+        has_valid,
+        slots[first_valid_idx],
+        slots.new_zeros(()),
+    )
+    fallback_update = torch.where(
+        has_valid,
+        updates[first_valid_idx],
+        cache[0],
+    )
+    safe_slots = torch.where(valid, slots, fallback_slot).view(-1, 1)
+    safe_updates = torch.where(
+        valid.view(-1, 1),
+        updates,
+        fallback_update.view(1, -1),
+    )
+    torch_npu.npu_scatter_nd_update_(cache, safe_slots, safe_updates)
 
 
 def _select_num_idx_from_topk(topk_idx: torch.Tensor) -> torch.Tensor:
@@ -1087,7 +1125,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             hidden_size,
             bias=False,
             quant_config=quant_config,
-            reduce_results=False,
+            reduce_results=True,
             prefix=f"{prefix}.o_proj",
         )
 
@@ -1143,10 +1181,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {self.layer_name}")
         compilation_config.static_forward_context[self.layer_name] = self
         self.kv_cache = torch.tensor([])
-        self._sparse_attn_out_buf: torch.Tensor | None = None
-        self._max_batched_tokens = (
-            vllm_config.scheduler_config.max_num_batched_tokens
-        )
 
         global _SPARSE_ATTN_LOGGED
         if not _SPARSE_ATTN_LOGGED:
@@ -1203,23 +1237,11 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         if isinstance(idx_cache, (tuple, list)):
             idx_cache = idx_cache[0]
         flat = idx_cache.view(-1, self.idx_head_dim)
-        flat[index_meta.slot_mapping[:num_tokens]] = index_key[:num_tokens].to(
-            flat.dtype
+        _scatter_index_cache(
+            flat,
+            index_key[:num_tokens].to(flat.dtype),
+            index_meta.slot_mapping[:num_tokens],
         )
-
-    def _get_sparse_attn_out_buf(self, q: torch.Tensor) -> torch.Tensor:
-        if (
-            self._sparse_attn_out_buf is None
-            or self._sparse_attn_out_buf.shape[0] < self._max_batched_tokens
-            or self._sparse_attn_out_buf.dtype != q.dtype
-            or self._sparse_attn_out_buf.device != q.device
-        ):
-            self._sparse_attn_out_buf = torch.empty(
-                (self._max_batched_tokens, self.q_size),
-                dtype=q.dtype,
-                device=q.device,
-            )
-        return self._sparse_attn_out_buf[: q.shape[0]]
 
     def _sparse_prepare(
         self,
@@ -1285,7 +1307,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         q, k, v, index_q, index_k = self._sparse_prepare(positions, hidden_states)
-        attn_out = self._get_sparse_attn_out_buf(q)
+        attn_out = torch.empty_like(q)
         torch.ops.vllm.minimax_m3_sparse_forward(
             q,
             k,
@@ -1295,7 +1317,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             attn_out,
             self.layer_name,
         )
-        
+
         projected, _ = self.o_proj(attn_out)
         return projected
 

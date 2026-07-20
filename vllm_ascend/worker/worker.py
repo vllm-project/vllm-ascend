@@ -20,6 +20,7 @@
 import copy
 import gc
 import logging
+import os
 from types import NoneType
 
 import torch
@@ -37,7 +38,7 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
-from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
@@ -50,7 +51,6 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
-from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -163,8 +163,24 @@ class NPUWorker(WorkerBase):
         if self.use_v2_model_runner and vllm_version_is("0.23.0"):
             logger.warning("VLLM_USE_V2_MODEL_RUNNER is not supported on vllm 0.23.0; falling back to v1 model runner.")
             self.use_v2_model_runner = False
-        self._pp_send_work: list[Handle] = []
-
+        self._use_blocking_pp_p2p = os.getenv(
+            "VLLM_ASCEND_USE_BLOCKING_PP_P2P", "0"
+        ).lower() in ("1", "true", "yes", "on")
+        warmup_pp_group = os.getenv("VLLM_ASCEND_WARMUP_PP_GROUP")
+        self._warmup_pp_group = (
+            self._use_blocking_pp_p2p
+            if warmup_pp_group is None
+            else warmup_pp_group.lower() in ("1", "true", "yes", "on")
+        )
+        if self._use_blocking_pp_p2p:
+            if self.parallel_config.tensor_parallel_size != 1:
+                raise ValueError(
+                    "VLLM_ASCEND_USE_BLOCKING_PP_P2P currently requires "
+                    "tensor_parallel_size=1."
+                )
+            logger.warning(
+                "Using blocking torch.distributed send/recv for PP activations."
+            )
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
             # Prevent duplicate triggers, execute the exit logic only once
@@ -609,6 +625,83 @@ class NPUWorker(WorkerBase):
                 self.torch_allocated / GiB_bytes,
             )
 
+    def _send_pp_tensors_blocking(
+        self, tensor_dict: dict[str, torch.Tensor | object]
+    ) -> None:
+        pp_group = get_pp_group()
+        dst = (pp_group.rank_in_group + 1) % pp_group.world_size
+        metadata: list[tuple[str, object]] = []
+        tensors: list[tuple[str, torch.Tensor]] = []
+
+        for key, value in tensor_dict.items():
+            if isinstance(value, torch.Tensor):
+                tensor = value.contiguous()
+                metadata.append(
+                    (
+                        key,
+                        (
+                            "tensor",
+                            tuple(tensor.shape),
+                            tensor.dtype,
+                            tensor.device.type,
+                        ),
+                    )
+                )
+                tensors.append((key, tensor))
+            else:
+                metadata.append((key, ("object", value)))
+
+        # ACL graph replay may run on a different stream. Make the produced
+        # activations visible before issuing blocking HCCL P2P operations.
+        torch.npu.synchronize()
+        pp_group.send_object(metadata, dst=dst)
+        global_dst = pp_group.ranks[dst]
+        for key, tensor in tensors:
+            group = pp_group.cpu_group if tensor.device.type == "cpu" else pp_group.device_group
+            logger.debug(
+                "PP%d blocking send %s shape=%s to PP%d",
+                pp_group.rank_in_group,
+                key,
+                tuple(tensor.shape),
+                dst,
+            )
+            torch.distributed.send(tensor, dst=global_dst, group=group)
+            if tensor.device.type != "cpu":
+                torch.npu.synchronize()
+            logger.debug("PP%d blocking send %s complete", pp_group.rank_in_group, key)
+
+    def _recv_pp_tensors_blocking(self) -> dict[str, torch.Tensor | object]:
+        pp_group = get_pp_group()
+        src = (pp_group.rank_in_group - 1) % pp_group.world_size
+        metadata = pp_group.recv_object(src=src)
+        global_src = pp_group.ranks[src]
+        tensor_dict: dict[str, torch.Tensor | object] = {}
+
+        for key, value in metadata:
+            kind = value[0]
+            if kind == "object":
+                tensor_dict[key] = value[1]
+                continue
+
+            _, shape, dtype, device_type = value
+            device = "cpu" if device_type == "cpu" else self.device
+            tensor = torch.empty(shape, dtype=dtype, device=device)
+            group = pp_group.cpu_group if device_type == "cpu" else pp_group.device_group
+            logger.debug(
+                "PP%d blocking recv %s shape=%s from PP%d",
+                pp_group.rank_in_group,
+                key,
+                shape,
+                src,
+            )
+            torch.distributed.recv(tensor, src=global_src, group=group)
+            if device_type != "cpu":
+                torch.npu.synchronize()
+            logger.debug("PP%d blocking recv %s complete", pp_group.rank_in_group, key)
+            tensor_dict[key] = tensor
+
+        return tensor_dict
+
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -617,11 +710,6 @@ class NPUWorker(WorkerBase):
         # enable msMonitor to monitor the performance of vllm-ascend
         if get_ascend_config().msmonitor_use_daemon:
             dp.step()
-
-        if self._pp_send_work:
-            for handle in self._pp_send_work:
-                handle.wait()
-            self._pp_send_work = []
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
@@ -632,15 +720,16 @@ class NPUWorker(WorkerBase):
                 all_gather_group = None
             else:
                 all_gather_group = get_tp_group()
-            tensor_dict, comm_handles, comm_postprocess = get_pp_group().irecv_tensor_dict(
-                all_gather_group=all_gather_group
-            )
-            assert tensor_dict is not None
-            intermediate_tensors = AsyncIntermediateTensors(
-                tensor_dict,
-                comm_handles=comm_handles,
-                comm_postprocess=comm_postprocess,
-            )
+            if self._use_blocking_pp_p2p:
+                intermediate_tensors = IntermediateTensors(
+                    self._recv_pp_tensors_blocking()
+                )
+            else:
+                intermediate_tensors = IntermediateTensors(
+                    get_pp_group().recv_tensor_dict(
+                        all_gather_group=all_gather_group
+                    )
+                )
 
         if self.profiler is not None:
             self.profiler.step()
@@ -658,10 +747,13 @@ class NPUWorker(WorkerBase):
             all_gather_group = None
         else:
             all_gather_group = get_tp_group()
-        self._pp_send_work = get_pp_group().isend_tensor_dict(
-            output.tensors,
-            all_gather_group=all_gather_group,
-        )
+        if self._use_blocking_pp_p2p:
+            self._send_pp_tensors_blocking(output.tensors)
+        else:
+            get_pp_group().send_tensor_dict(
+                output.tensors,
+                all_gather_group=all_gather_group,
+            )
 
         kv_connector_output = output.kv_connector_output
         if not kv_connector_output:
@@ -1000,6 +1092,24 @@ class NPUWorker(WorkerBase):
             self.parallel_config.decode_context_parallel_size,
         )
         init_ascend_model_parallel(self.parallel_config)
+        if self._warmup_pp_group and get_pp_group().world_size > 1:
+            pp_group = get_pp_group()
+            logger.warning(
+                "Warming up PP HCCL group on PP rank %d with ranks %s.",
+                pp_group.rank_in_group,
+                pp_group.ranks,
+            )
+            warmup = torch.zeros(
+                1,
+                dtype=torch.float32,
+                device=torch.device("npu", torch.npu.current_device()),
+            )
+            torch.distributed.all_reduce(warmup, group=pp_group.device_group)
+            torch.npu.synchronize()
+            logger.warning(
+                "PP HCCL group warmup complete on PP rank %d.",
+                pp_group.rank_in_group,
+            )
         ensure_ec_transfer_initialized(self.vllm_config)
 
     def get_supported_pooling_tasks(self):

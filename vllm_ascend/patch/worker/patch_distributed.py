@@ -30,6 +30,7 @@ from vllm_ascend.utils import create_hccl_pg_options
 
 _HCCL_PG_REGISTRY = HcclPgRegistry()
 logger = logging.getLogger(__name__)
+_ENABLE_HCCL_PG_REUSE = False
 
 
 def _normalize_backend(backend: str | Backend) -> str:
@@ -62,6 +63,11 @@ def _acquire_hccl_group(
     hccl_pg_options: object,
     reuse_domain: str,
 ):
+    # Temporary workaround: PP and world coordinators can have identical rank
+    # sets, but sharing their HCCL handle may deadlock point-to-point traffic.
+    if not _ENABLE_HCCL_PG_REUSE:
+        return _create_device_group(ranks, backend, hccl_pg_options), None
+
     # Coordinator construction must remain process-serial and globally ordered:
     # new_group is collective, and the registry only deduplicates equivalent
     # HCCL groups within that ordering contract. It is not a concurrent PG factory.

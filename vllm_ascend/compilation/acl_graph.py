@@ -15,7 +15,7 @@ import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphOptions
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
@@ -277,29 +277,32 @@ def update_full_graph_params(
     num_dcp_pcp_tokens=None,
     draft_attn_metadatas=None,
 ):
-    impl_cls = attn_backend.get_impl_cls()
-    impl_cls.update_graph_params(
-        update_stream,
-        forward_context,
-        num_tokens,
-        vllm_config,
-        speculative_config,
-        num_dcp_pcp_tokens,
-        draft_attn_metadatas,
-    )
+    # vLLM 0.23 does not keep the config context active during execute_model.
+    # Backend selection may still consult it (for example, enable_cp()).
+    with set_current_vllm_config(vllm_config):
+        impl_cls = attn_backend.get_impl_cls()
+        impl_cls.update_graph_params(
+            update_stream,
+            forward_context,
+            num_tokens,
+            vllm_config,
+            speculative_config,
+            num_dcp_pcp_tokens,
+            draft_attn_metadatas,
+        )
 
-    from vllm_ascend.ops.gdn import update_conv1d_graph_params
+        from vllm_ascend.ops.gdn import update_conv1d_graph_params
 
-    # For GDN Attention: AscendC operate(conv1d update) update graph params
-    # No patch can be loaded, update method call is temporarily placed here
-    update_conv1d_graph_params(
-        update_stream,
-        forward_context,
-        num_tokens,
-        vllm_config,
-        _EXTRA_CTX.is_draft_model,
-        draft_attn_metadatas,
-    )
+        # For GDN Attention: AscendC operate(conv1d update) update graph params
+        # No patch can be loaded, update method call is temporarily placed here
+        update_conv1d_graph_params(
+            update_stream,
+            forward_context,
+            num_tokens,
+            vllm_config,
+            _EXTRA_CTX.is_draft_model,
+            draft_attn_metadatas,
+        )
 
 
 @dataclass

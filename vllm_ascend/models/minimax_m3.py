@@ -138,12 +138,6 @@ def _is_moe_layer(config: PretrainedConfig, layer_idx: int) -> bool:
     return moe_layer_freq[layer_idx] != 0 if moe_layer_freq is not None else True
 
 
-def _deferred_tp_all_reduce(hidden_states: torch.Tensor) -> torch.Tensor:
-    if get_tensor_model_parallel_world_size() == 1:
-        return hidden_states
-    return torch.ops.vllm.maybe_pad_and_reduce(hidden_states)
-
-
 def _get_text_config(vllm_config: VllmConfig) -> PretrainedConfig:
     return vllm_config.model_config.hf_text_config
 
@@ -387,7 +381,7 @@ class MiniMaxM3Attention(nn.Module):
             hidden_size,
             bias=False,
             quant_config=quant_config,
-            reduce_results=False,
+            reduce_results=True,
             prefix=f"{prefix}.o_proj",
         )
 
@@ -504,11 +498,6 @@ class MiniMaxM3DecoderLayer(nn.Module):
         # ``LayerCommunicator``, ``gpt_oss``, ``falcon_h1`` etc all access
         # ``layer.is_layer_sparse``.
         self.is_layer_sparse = _is_moe_layer(config, layer_idx)
-        self.defer_input_allreduce = (
-            layer_idx > 0
-            and not _is_moe_layer(config, layer_idx - 1)
-            and pipeline_parallel_size == 1
-        )
 
         if self.is_layer_sparse:
             self.block_sparse_moe = MiniMaxM3MoE(
@@ -522,7 +511,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
                 intermediate_size=config.dense_intermediate_size,
-                reduce_results=pipeline_parallel_size > 1,
+                reduce_results=True,
             )
         self.input_layernorm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = GemmaRMSNorm(
@@ -540,8 +529,6 @@ class MiniMaxM3DecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            if self.defer_input_allreduce:
-                hidden_states = _deferred_tp_all_reduce(hidden_states)
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(
             positions=positions,
@@ -549,7 +536,6 @@ class MiniMaxM3DecoderLayer(nn.Module):
         )
 
         # Fully Connected
-        hidden_states = _deferred_tp_all_reduce(hidden_states)
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
         if self.is_layer_sparse:
@@ -560,7 +546,14 @@ class MiniMaxM3DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-@support_torch_compile
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": 0,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+    },
+)
 class MiniMaxM3Model(nn.Module, EagleModelMixin):
     fall_back_to_pt_during_load = False
 
@@ -603,12 +596,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
-        self.defer_final_allreduce = (
-            self.end_layer > 0
-            and not _is_moe_layer(config, self.end_layer - 1)
-            and vllm_config.parallel_config.pipeline_parallel_size == 1
-        )
-
         if get_pp_group().is_last_rank:
             self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
@@ -651,8 +638,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
-        if self.defer_final_allreduce:
-            hidden_states = _deferred_tp_all_reduce(hidden_states)
         hidden_states, _ = self.norm(hidden_states, residual)
 
         if len(aux_hidden_states) > 0:
@@ -891,10 +876,10 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEa
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
-            self.logits_processor = LogitsProcessor(config.vocab_size)
         else:
             self.lm_head = PPMissingLayer()
-        
+        self.logits_processor = LogitsProcessor(config.vocab_size)
+
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
@@ -1291,6 +1276,9 @@ class MiniMaxM3VLModel(nn.Module):
         self.language_model = MiniMaxM3SparseForCausalLM(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "language_model"),
+        )
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors
         )
 
     def forward(
