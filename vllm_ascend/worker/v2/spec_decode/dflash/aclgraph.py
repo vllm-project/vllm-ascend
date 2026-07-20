@@ -32,11 +32,11 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         speculator: Any = None,
-        # vllm v0.25.0 passes ``causal=self.dflash_causal`` here while the
+        # vllm v0.25.1 passes ``causal=self.dflash_causal`` here while the
         # vllm main branch removed it from ``init_cudagraph_manager`` and moved
         # it into ``capture()`` instead. Accepting ``causal`` via ``**kwargs``
         # keeps us compatible with both pinned versions; it is simply forwarded
-        # to the upstream ``__init__`` which only consumes it on v0.25.0.
+        # to the upstream ``__init__`` which only consumes it on v0.25.1.
         **kwargs: Any,
     ):
         super().__init__(
@@ -75,11 +75,11 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
     ) -> None:
         """Capture ACL graphs for DFlash."""
         with communicator_switch(), model_capture_wrapper(self.speculator, False):
-            # On vllm v0.25.0, ``causal`` is forwarded via ``__init__`` and the
+            # On vllm v0.25.1, ``causal`` is forwarded via ``__init__`` and the
             # upstream ``DFlashCudaGraphManager.capture`` does not accept it.
             # On vllm main, ``causal`` was moved into ``capture()``, so forward
             # it there. Gate on the pinned vllm version to stay compatible.
-            if vllm_version_is("0.25.0"):
+            if vllm_version_is("0.25.1"):
                 super().capture(
                     forward_fn,
                     input_buffers,
