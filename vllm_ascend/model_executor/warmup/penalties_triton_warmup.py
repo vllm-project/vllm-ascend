@@ -63,27 +63,28 @@ def collect_warmup_bincount_seq_lens(
 
 def collect_warmup_bincount_shapes(
     max_num_reqs: int,
-    max_seq_len: int,
+    max_num_batched_tokens: int,
 ) -> list[tuple[int, int]]:
     """Minimal (num_seqs, seq_len) pairs to JIT bincount once per process.
 
     Launch grid is fixed at ``core_num``; batch/seq/total_blocks/vocab are
-    dynamic in the kernel. One small and one max-batch shape are enough to
-    populate the compile cache before the first real request.
+    dynamic in the kernel. ``seq_len`` follows ``--max-num-batched-tokens``
+    (``SchedulerConfig.max_num_batched_tokens``), which bounds prompt history
+    work in typical serving configs.
     """
-    if max_num_reqs <= 0 or max_seq_len <= 0:
+    if max_num_reqs <= 0 or max_num_batched_tokens <= 0:
         return []
 
-    typical_seq_len = min(_BINCOUNT_SEQ_BLOCK + 1, max_seq_len)
+    typical_seq_len = min(_BINCOUNT_SEQ_BLOCK + 1, max_num_batched_tokens)
     pairs = {(1, 1), (max_num_reqs, typical_seq_len)}
-    if max_seq_len != typical_seq_len:
-        pairs.add((max_num_reqs, max_seq_len))
+    if max_num_batched_tokens != typical_seq_len:
+        pairs.add((max_num_reqs, max_num_batched_tokens))
     return sorted(pairs)
 
 
 def collect_warmup_penalty_cases(
     max_num_reqs: int,
-    max_seq_len: int,
+    max_num_batched_tokens: int,
 ) -> list[tuple[int, int, int]]:
     """(num_seqs, prompt_len, output_len) cases for ``apply_penalties_triton`` warmup."""
     max_num_reqs = max(max_num_reqs, 1)
@@ -96,8 +97,10 @@ def collect_warmup_penalty_cases(
             seen.add(key)
             cases.append(key)
 
-    for num_seqs, seq_len in collect_warmup_bincount_shapes(max_num_reqs, max_seq_len):
-        add_case(num_seqs, seq_len, seq_len)
+    for num_seqs, prompt_len in collect_warmup_bincount_shapes(
+        max_num_reqs, max_num_batched_tokens
+    ):
+        add_case(num_seqs, prompt_len, prompt_len)
 
     for prompt_len, output_len in _EXTRA_PROMPT_OUTPUT_LEN_PAIRS:
         add_case(max_num_reqs, prompt_len, output_len)
@@ -157,12 +160,12 @@ def penalties_triton_warmup(worker: NPUWorker) -> None:
 
     device = worker.device
     max_num_reqs = max(worker.scheduler_config.max_num_seqs, 1)
-    max_seq_len = worker.model_config.max_model_len
+    max_num_batched_tokens = worker.scheduler_config.max_num_batched_tokens
     vocab_size = _local_vocab_size(worker.model_config)
     logits_dtype = worker.model_config.dtype
     core_num = get_vectorcore_num()
     launch_grid = bincount_fixed_launch_grid_size(core_num)
-    penalty_cases = collect_warmup_penalty_cases(max_num_reqs, max_seq_len)
+    penalty_cases = collect_warmup_penalty_cases(max_num_reqs, max_num_batched_tokens)
 
     logger.info(
         "Warming up penalties Triton kernels: local_vocab_size=%d, "
