@@ -382,6 +382,7 @@ def build_dspark_swa_indices(
     block_size: int,
     query_start_loc: torch.Tensor,
     seq_lens: torch.Tensor,
+    num_decode_tokens: int | None = None,
     index_width: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build DSpark non-causal visible slot ids for a paged SWA cache.
@@ -419,8 +420,8 @@ def build_dspark_swa_indices(
     slot_ids = (block_ids * block_size + block_offsets).to(torch.int32)
     slot_ids = slot_ids.where(col_mask, torch.full_like(slot_ids, -1))
 
-    per_token_slots = torch.repeat_interleave(slot_ids, query_lens, dim=0).unsqueeze(1)
-    per_token_lens = torch.repeat_interleave(visible_lens, query_lens, dim=0)
+    per_token_slots = torch.repeat_interleave(slot_ids, query_lens, dim=0, output_size=num_decode_tokens).unsqueeze(1)
+    per_token_lens = torch.repeat_interleave(visible_lens, query_lens, dim=0, output_size=num_decode_tokens)
 
     return per_token_slots, per_token_lens
 
@@ -1362,6 +1363,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 self.block_size,
                 query_start_loc[: num_decodes + 1],
                 seq_lens[:num_decodes],
+                num_decode_tokens,
             )
             dspark_swa_indices = dspark_swa_indices[:num_decode_tokens_typed]
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)

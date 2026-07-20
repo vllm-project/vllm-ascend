@@ -198,13 +198,6 @@ class DeepseekV4DSparkModel(nn.Module):
 
         from vllm_ascend.device.device_op import DeviceOperator
 
-        slot_mapping = slot_mapping.to(device=shared_kv.device, dtype=torch.int32)
-        valid = slot_mapping >= 0 if slot_mapping.ndim == 1 else torch.all(slot_mapping >= 0, dim=-1)
-        if not bool(torch.any(valid).item()):
-            return
-        if not bool(torch.all(valid).item()):
-            shared_kv = shared_kv[valid]
-            slot_mapping = slot_mapping[valid]
         if slot_mapping.ndim == 1:
             slot_mapping = DeviceOperator.format_dsa_slot_mapping(slot_mapping, swa_cache_layer.block_size)
         DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, shared_kv, slot_mapping)
