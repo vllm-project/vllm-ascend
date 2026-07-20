@@ -18,6 +18,7 @@
 #
 
 import copy
+import os
 from typing import Optional, Union
 
 import torch
@@ -45,7 +46,6 @@ from vllm.v1.worker.worker_base import WorkerBase
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.cpu_binding import bind_cpus
-from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (init_ascend_soc_version, is_enable_nz,
@@ -65,6 +65,16 @@ torch_non_c_binding_in_graph_functions_npu[
 torch._dynamo.trace_rules.torch_name_rule_map.append(
     torch_non_c_binding_in_graph_functions_npu)  # noqa: E402
 
+import os
+enable_bifrost = os.getenv("ENABLE_BIFROST", "0").lower() in {
+  "1", "true", "yes", "on"
+}
+if enable_bifrost:
+    from vllm_ascend.device_allocator.camem_bifrost import CaMemAllocator
+    import vllm_ascend.vllm_ascend_C # this is to ensure the custom ops in 
+                    # vllm_ascend_C are registered when Bifrost is enabled
+else:
+    from vllm_ascend.device_allocator.camem import CaMemAllocator
 
 class NPUWorker(WorkerBase):
 
@@ -165,14 +175,16 @@ class NPUWorker(WorkerBase):
             }
         allocator = CaMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights", ) if level == 1 else tuple())
-        free_bytes_after_sleep, total = NPUPlatform.mem_get_info()
-        freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
-        used_bytes = total - free_bytes_after_sleep
-        assert freed_bytes >= 0, "Memory usage increased after sleeping."
-        logger.info(
-            "Sleep mode freed %.2f GiB memory, "
-            "%.2f GiB memory is still in use.", freed_bytes / GiB_bytes,
-            used_bytes / GiB_bytes)
+
+        if not enable_bifrost:
+            free_bytes_after_sleep, total = NPUPlatform.mem_get_info()
+            freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
+            used_bytes = total - free_bytes_after_sleep
+            assert freed_bytes >= 0, "Memory usage increased after sleeping."
+            logger.info(
+                "Sleep mode freed %.2f GiB memory, "
+                "%.2f GiB memory is still in use.", freed_bytes / GiB_bytes,
+                used_bytes / GiB_bytes)
 
     def wake_up(self, tags: Optional[list[str]] = None) -> None:
         if not sleep_mode_enabled():
@@ -226,33 +238,38 @@ class NPUWorker(WorkerBase):
         _, total_npu_memory = NPUPlatform.mem_get_info()
         self.model_runner.profile_run()
 
-        # Calculate the number of blocks that can be allocated with the
-        # profiled peak memory.
-        free_npu_memory, _ = NPUPlatform.mem_get_info()
-        # NOTE(woosuk): Here we assume that the other processes using the same
-        # GPU did not change their memory usage during the profiling.
-        assert self.init_npu_memory > free_npu_memory, (
-            "Error in memory profiling. "
-            f"Initial free memory {self.init_npu_memory}, current free memory"
-            f" {free_npu_memory}. This happens when the NPU memory was "
-            "not properly cleaned up before initializing the vLLM instance.")
+        if not enable_bifrost:
+            # Calculate the number of blocks that can be allocated with the
+            # profiled peak memory.
+            free_npu_memory, _ = NPUPlatform.mem_get_info()
+            # NOTE(woosuk): Here we assume that the other processes using the same
+            # GPU did not change their memory usage during the profiling.
+            assert self.init_npu_memory > free_npu_memory, (
+                "Error in memory profiling. "
+                f"Initial free memory {self.init_npu_memory}, current free memory"
+                f" {free_npu_memory}. This happens when the NPU memory was "
+                "not properly cleaned up before initializing the vLLM instance.")
 
-        # Get the peak memory allocation recorded by torch
-        peak_memory = torch_npu.npu.memory_stats()["allocated_bytes.all.peak"]
-        # TODO: don`t need impl this func after empty_cache in
-        # Worker.determine_num_available_blocks() unified`
-        NPUPlatform.empty_cache()
-        torch_allocated_bytes = torch_npu.npu.memory_stats(
-        )["allocated_bytes.all.current"]
-        total_allocated_bytes = torch_npu.npu.mem_get_info(
-        )[1] - torch_npu.npu.mem_get_info()[0]
-        non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
-        if non_torch_allocations > 0:
-            peak_memory += non_torch_allocations
-        available_kv_cache_memory = int(
-            total_npu_memory * self.cache_config.gpu_memory_utilization -
-            peak_memory)
-        available_kv_cache_memory = int(max(available_kv_cache_memory, 0))
+            # Get the peak memory allocation recorded by torch
+            peak_memory = torch_npu.npu.memory_stats()["allocated_bytes.all.peak"]
+            # TODO: don`t need impl this func after empty_cache in
+            # Worker.determine_num_available_blocks() unified`
+            NPUPlatform.empty_cache()
+            torch_allocated_bytes = torch_npu.npu.memory_stats(
+            )["allocated_bytes.all.current"]
+            total_allocated_bytes = torch_npu.npu.mem_get_info(
+            )[1] - torch_npu.npu.mem_get_info()[0]
+            non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
+            if non_torch_allocations > 0:
+                peak_memory += non_torch_allocations
+            available_kv_cache_memory = int(
+                total_npu_memory * self.cache_config.gpu_memory_utilization -
+                peak_memory)
+            available_kv_cache_memory = int(max(available_kv_cache_memory, 0))
+        else:
+            NPUPlatform.empty_cache()
+            available_kv_cache_memory = os.environ.get("MODEL_KV_MAX_GB", '40')
+            available_kv_cache_memory = int(float(available_kv_cache_memory) * GiB_bytes)
         logger.info(
             f"Available memory: {available_kv_cache_memory}, total memory: {total_npu_memory}"
         )
@@ -305,7 +322,10 @@ class NPUWorker(WorkerBase):
             assert allocator.get_current_usage() == 0, (
                 "Sleep mode can only be "
                 "used for one instance per process.")
-            context = allocator.use_memory_pool(tag="weights")
+            if enable_bifrost:
+                context = allocator.use_weight_memory_pool(tag="weights")
+            else:
+                context = allocator.use_memory_pool(tag="weights")
         else:
             from contextlib import nullcontext
             context = nullcontext()  # type: ignore
@@ -350,7 +370,10 @@ class NPUWorker(WorkerBase):
         """Allocate NPU KV cache with the specified kv_cache_config."""
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
-            context = allocator.use_memory_pool(tag="kv_cache")
+            if enable_bifrost:
+                context = allocator.use_kvcache_memory_pool(tag="kv_cache")
+            else:
+                context = allocator.use_memory_pool(tag="kv_cache")
         else:
             from contextlib import nullcontext
             context = nullcontext()  # type: ignore
