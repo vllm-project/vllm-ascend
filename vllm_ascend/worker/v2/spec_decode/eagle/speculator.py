@@ -28,14 +28,18 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cudagraph_utils import AttentionStatePair, BatchExecutionDescriptor
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
+
+if not vllm_version_is("0.25.1"):
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -142,8 +146,19 @@ class AscendEagleSpeculator(EagleSpeculator):
         model_state: ModelState,
         kv_cache_config: KVCacheConfig,
         block_tables: BlockTables,
+        target_input_buffers: Any = None,
+        target_attn_groups: Any = None,
     ) -> None:
-        super().set_attn(model_state, kv_cache_config, block_tables)
+        if vllm_version_is("0.25.1"):
+            super().set_attn(
+                model_state,
+                kv_cache_config,
+                block_tables,
+                target_input_buffers,
+                target_attn_groups,
+            )
+        else:
+            super().set_attn(model_state, kv_cache_config, block_tables)
 
         # npu needs attn_backends to update graph params
         attn_backends: dict[str, type[AttentionBackend]] = {}
@@ -165,7 +180,7 @@ class AscendEagleSpeculator(EagleSpeculator):
 
     def capture(
         self,
-        attn_states: dict[BatchExecutionDescriptor, AttentionStatePair],
+        attn_states: Any = None,
     ) -> None:
         logger.info("Capturing model for speculator...")
         # Reset indices to zeros to prevent stale values from prior
@@ -182,7 +197,11 @@ class AscendEagleSpeculator(EagleSpeculator):
             self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
         self.prefill_cudagraph_manager.capture(
             self._prefill,
-            attn_states,
+            self.model_state,
+            self.input_buffers,
+            self.block_tables,
+            self.attn_groups,
+            self.kv_cache_config,
             progress_bar_desc="Capturing prefill CUDA graphs",
         )
 
