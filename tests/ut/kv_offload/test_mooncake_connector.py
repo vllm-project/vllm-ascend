@@ -71,6 +71,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # n
     MooncakeConnectorScheduler,
     MooncakeConnectorWorker,
     ReqMeta,
+    bind_handshake_zmq_ctx,
     ensure_zmq_recv,
     ensure_zmq_send,
     group_concurrent_contiguous,
@@ -105,6 +106,19 @@ def make_agent_metadata(**overrides: Any) -> MooncakeAgentMetadata:
     }
     metadata.update(overrides)
     return MooncakeAgentMetadata(**metadata)
+
+
+def patch_kv_sending_thread_parallel_groups(test_case: unittest.TestCase) -> None:
+    patcher = patch.dict(
+        KVCacheSendingThread.__init__.__globals__,
+        {
+            "get_pp_group": MagicMock(return_value=_mock_pp_group),
+            "get_pcp_group": MagicMock(return_value=_mock_pcp_group),
+            "get_tensor_model_parallel_world_size": MagicMock(return_value=4),
+        },
+    )
+    patcher.start()
+    test_case.addCleanup(patcher.stop)
 
 
 class TestKVCacheTaskTrackerInit(unittest.TestCase):
@@ -152,6 +166,7 @@ class TestGetAndClearFinishedSingleRequests(unittest.TestCase):
 
 class TestKVCacheSendingThreadInit(unittest.TestCase):
     def setUp(self):
+        patch_kv_sending_thread_parallel_groups(self)
         kv_caches: dict[str, Any] = {}
         self.common_args: dict[str, Any] = {
             "tp_rank": 1,
@@ -195,6 +210,7 @@ class TestKVCacheSendingThreadInit(unittest.TestCase):
 
 class TestGetAndClearFinishedRequests(unittest.TestCase):
     def setUp(self):
+        patch_kv_sending_thread_parallel_groups(self)
         kv_caches: dict[str, Any] = {}
         self.common_args: dict[str, Any] = {
             "tp_rank": 1,
@@ -221,6 +237,7 @@ class TestGetAndClearFinishedRequests(unittest.TestCase):
 
 class TestKVCacheSendingThread(unittest.TestCase):
     def test_run_handles_get_meta_and_done_recv_msgs(self):
+        patch_kv_sending_thread_parallel_groups(self)
         ready_event = threading.Event()
         metadata = make_agent_metadata(
             engine_id="engine1",
@@ -229,9 +246,11 @@ class TestKVCacheSendingThread(unittest.TestCase):
         )
         vllm_config = MockVllmConfig()
         host = "127.0.0.1"
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("", 0))
-            base_port = s.getsockname()[1]
+        occupied_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        occupied_socket.bind((host, 0))
+        occupied_socket.listen()
+        base_port = occupied_socket.getsockname()[1]
+        self.addCleanup(occupied_socket.close)
 
         thread = KVCacheSendingThread(
             tp_rank=0,
@@ -246,13 +265,15 @@ class TestKVCacheSendingThread(unittest.TestCase):
             pcp_rank=0,
         )
         thread.start()
-        actual_port = base_port + (
-            thread.pp_rank * thread.tp_size + thread.tp_rank + thread.pcp_rank * thread.prefill_tp_size
-        )
         self.assertTrue(ready_event.wait(timeout=3), "Server thread startup timeout")
+        actual_port = thread.handshake_port
+        self.assertIsInstance(actual_port, int)
+        assert actual_port is not None
+        self.assertNotEqual(actual_port, base_port)
 
         context = zmq.Context()  # type: ignore
         sock = context.socket(zmq.DEALER)  # type: ignore
+        sock.setsockopt(zmq.RCVTIMEO, 1000)  # type: ignore
         sock.connect(f"tcp://{host}:{actual_port}")
         encoder = msgspec.msgpack.Encoder()
         decoder = msgspec.msgpack.Decoder(type=MooncakeAgentMetadata)
@@ -264,17 +285,49 @@ class TestKVCacheSendingThread(unittest.TestCase):
         self.assertEqual(meta.engine_id, "engine1")
         self.assertEqual(meta.kv_caches_base_addr, [[12345678]])
         self.assertEqual(meta.num_blocks, 2)
+        self.assertEqual(meta.handshake_port, actual_port)
 
         req_id = "request_42"
         thread.task_tracker.add_req_to_process(req_id)
-        sock.send_multipart([b"", encoder.encode((DONE_RECVING_MSG, req_id, 0))])
+        remote_port_send_num = {
+            thread.logical_handshake_port: {
+                "num": 1,
+                "host": host,
+                "handshake_port": actual_port,
+            }
+        }
+        sock.send_multipart([b"", encoder.encode((DONE_RECVING_MSG, req_id, remote_port_send_num))])
         frames = sock.recv_multipart()
         self.assertEqual(frames[0], b"")
         self.assertEqual(frames[1], b"ACK")
         self.assertIn(req_id, thread.task_tracker.finished_requests)
 
-        sock.close()
+        missing_mapping_req_id = "request_missing_mapping"
+        thread.task_tracker.add_req_to_process(missing_mapping_req_id)
+        missing_mapping = {
+            thread.logical_handshake_port + 1: {
+                "num": 1,
+                "host": host,
+                "handshake_port": actual_port,
+            }
+        }
+        sock.send_multipart([b"", encoder.encode((DONE_RECVING_MSG, missing_mapping_req_id, missing_mapping))])
+        frames = sock.recv_multipart()
+        self.assertEqual(frames[0], b"")
+        self.assertIn(b"ERROR: RuntimeError", frames[1])
+        self.assertNotIn(missing_mapping_req_id, thread.task_tracker.finished_requests)
+
+        sock.close(linger=0)
         context.term()
+
+    def test_bind_handshake_zmq_ctx_allocates_distinct_ports(self):
+        host = "127.0.0.1"
+        with bind_handshake_zmq_ctx(host) as (_, first_port), bind_handshake_zmq_ctx(host) as (_, second_port):
+            self.assertIsInstance(first_port, int)
+            self.assertIsInstance(second_port, int)
+            self.assertGreater(first_port, 0)
+            self.assertGreater(second_port, 0)
+            self.assertNotEqual(first_port, second_port)
 
     def test_reformat_kv_cache_hybrid_linear_uses_cache_block_size(self):
         block_size = 4
@@ -600,6 +653,18 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
         self.assertEqual(queued["request_id"], "req1")
         self.assertEqual(queued["remote_host"], "localhost")
         self.assertEqual(queued["num_computed_tokens"], 0)
+
+    def test_send_done_signal_to_free_remote_port_uses_actual_ports(self):
+        self.thread.local_handshake_port = self.thread.side_channel_port
+        remote_port_send_num = {
+            30000: {"num": 0, "host": "prefill-0", "handshake_port": 45100},
+            30001: {"num": 1, "host": "prefill-1", "handshake_port": 45101},
+        }
+
+        with patch.object(self.thread, "_send_done_recv_signal") as mock_send_done:
+            self.thread._send_done_signal_to_free_remote_port("remote_req", "fallback", remote_port_send_num)
+
+        mock_send_done.assert_called_once_with("remote_req", "prefill-0", 45100, remote_port_send_num)
 
     def test_mark_and_is_failed(self):
         self.thread._mark_failed_recv_request("req1", [[10, 20]])
@@ -1372,6 +1437,66 @@ class TestMooncakeConnectorSchedulerMatchedTokens(unittest.TestCase):
         self.assertEqual(meta.requests["req1"].num_computed_tokens, 16)
         self.assertEqual(len(self.scheduler._reqs_need_recv), 0)
 
+    def test_set_xfer_handshake_metadata_records_actual_port_by_tuple_key(self):
+        metadata = make_agent_metadata(
+            engine_id="remote_engine",
+            local_ip="10.0.0.8",
+            handshake_port=45123,
+        )
+
+        self.scheduler.set_xfer_handshake_metadata({(0, 0, 3): metadata})
+
+        self.assertEqual(
+            self.scheduler.multi_nodes_meta_mapping["3"],
+            {
+                "host": "10.0.0.8",
+                "engine_id": "remote_engine",
+                "handshake_port": 45123,
+            },
+        )
+
+    def test_set_xfer_handshake_metadata_rejects_missing_actual_port(self):
+        metadata = make_agent_metadata(
+            engine_id="remote_engine",
+            local_ip="10.0.0.8",
+            handshake_port=0,
+        )
+
+        with self.assertRaisesRegex(ValueError, "Missing actual Mooncake handshake port"):
+            self.scheduler.set_xfer_handshake_metadata({(0, 0, 3): metadata})
+
+    def test_connector_pp_aware_metadata_accepts_pp_pcp_tp_keys(self):
+        connector = MooncakeConnector.__new__(MooncakeConnector)
+        connector.connector_scheduler = self.scheduler
+        first_metadata = make_agent_metadata(
+            engine_id="remote_engine_0",
+            local_ip="10.0.0.8",
+            handshake_port=45100,
+        )
+        second_metadata = make_agent_metadata(
+            engine_id="remote_engine_1",
+            local_ip="10.0.0.9",
+            handshake_port=45101,
+        )
+
+        connector.set_xfer_handshake_metadata_pp_aware({(0, 0, 0): first_metadata, (0, 0, 1): second_metadata})
+
+        self.assertEqual(
+            self.scheduler.multi_nodes_meta_mapping,
+            {
+                "0": {
+                    "host": "10.0.0.8",
+                    "engine_id": "remote_engine_0",
+                    "handshake_port": 45100,
+                },
+                "1": {
+                    "host": "10.0.0.9",
+                    "engine_id": "remote_engine_1",
+                    "handshake_port": 45101,
+                },
+            },
+        )
+
 
 class TestHelperFunctions(unittest.TestCase):
     def test_group_concurrent_contiguous(self):
@@ -2030,6 +2155,23 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         for p in self.patches:
             p.stop()  # type: ignore
 
+    def _make_remote_multi_nodes_meta_mapping(
+        self,
+        remote_port: int,
+        remote_tp_size: int,
+        remote_pcp_size: int = 1,
+        remote_engine_id: Any = "remote_engine",
+        remote_host: str = "localhost",
+    ) -> dict[str, dict[str, Any]]:
+        return {
+            str(rank): {
+                "host": remote_host,
+                "engine_id": remote_engine_id,
+                "handshake_port": remote_port + 10000 + rank,
+            }
+            for rank in range(remote_tp_size * remote_pcp_size)
+        }
+
     def test_register_kv_caches_producer(self):
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
         worker.register_kv_caches(self.kv_caches)
@@ -2043,6 +2185,130 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         worker.register_kv_caches(self.kv_caches)
         self.assertIsNone(worker.kv_send_thread)
         self.assertIsNotNone(worker.kv_recv_thread)
+
+    def test_resolve_remote_endpoint_uses_actual_handshake_port(self):
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+
+        host, engine_id, handshake_port = worker._get_remote_endpoint_info_by_port(
+            base_port=30000,
+            remote_logical_port=30002,
+            remote_host="fallback-host",
+            remote_engine_id="fallback-engine",
+            remote_multi_nodes_meta_mapping={
+                "2": {
+                    "host": "prefill-2",
+                    "engine_id": "remote-engine-2",
+                    "handshake_port": 45102,
+                }
+            },
+        )
+
+        self.assertEqual(host, "prefill-2")
+        self.assertEqual(engine_id, "remote-engine-2")
+        self.assertEqual(handshake_port, 45102)
+
+    def test_get_local_logical_handshake_port_ignores_actual_port(self):
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.side_channel_port = 30000
+        worker.logical_handshake_port = 30007
+        worker.handshake_port = 30001
+
+        self.assertEqual(worker._get_local_logical_handshake_port(), 30007)
+
+    def test_resolve_remote_endpoint_fails_when_mapping_empty(self):
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+
+        with self.assertRaisesRegex(RuntimeError, "Missing Mooncake handshake metadata mapping"):
+            worker._get_remote_endpoint_info_by_port(
+                base_port=30000,
+                remote_logical_port=30002,
+                remote_host="fallback-host",
+                remote_engine_id="fallback-engine",
+                remote_multi_nodes_meta_mapping={},
+            )
+
+    def test_resolve_remote_endpoint_fails_when_mapping_is_partial(self):
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+
+        with self.assertRaisesRegex(RuntimeError, "Missing Mooncake handshake metadata for logical rank 2"):
+            worker._get_remote_endpoint_info_by_port(
+                base_port=30000,
+                remote_logical_port=30002,
+                remote_host="fallback-host",
+                remote_engine_id="fallback-engine",
+                remote_multi_nodes_meta_mapping={
+                    "0": {
+                        "host": "prefill-0",
+                        "engine_id": "remote-engine-0",
+                        "handshake_port": 45100,
+                    }
+                },
+            )
+
+    def test_resolve_remote_endpoint_fails_when_actual_port_missing(self):
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+
+        with self.assertRaisesRegex(RuntimeError, "Missing actual Mooncake handshake port for logical rank 2"):
+            worker._get_remote_endpoint_info_by_port(
+                base_port=30000,
+                remote_logical_port=30002,
+                remote_host="fallback-host",
+                remote_engine_id="fallback-engine",
+                remote_multi_nodes_meta_mapping={
+                    "2": {
+                        "host": "prefill-2",
+                        "engine_id": "remote-engine-2",
+                    }
+                },
+            )
+
+    def test_start_load_kv_resolves_logical_port_to_actual_endpoint(self):
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.kv_send_thread = None
+        worker.kv_recv_thread = MagicMock()
+        worker.pcp_size = 1
+        worker.dcp_size = 1
+        worker.remote_port_send_num = {}
+
+        connector_metadata = MooncakeConnectorMetadata()
+        connector_metadata.requests["req1"] = ReqMeta(
+            local_block_ids=([1],),
+            num_external_tokens=16,
+            num_computed_tokens=0,
+            remote_block_ids=([2],),
+            remote_host="fallback-host",
+            remote_port=30000,
+            remote_engine_id="fallback-engine",
+            remote_request_id="remote_req1",
+            remote_pcp_size=1,
+            remote_dcp_size=1,
+            remote_ptp_size=1,
+            remote_multi_nodes_meta_mapping={
+                "0": {
+                    "host": "prefill-0",
+                    "engine_id": "remote-engine-0",
+                    "handshake_port": 45100,
+                }
+            },
+            num_prompt_blocks=1,
+            remote_block_size=16,
+        )
+
+        with (
+            patch.object(worker, "_get_kv_split_metadata", return_value=([[30000]], [([1],)], [([2],)])),
+            patch.object(
+                worker,
+                "_get_group_pulls_metadata",
+                return_value=[[[GroupPull(group_id=0, remote_tp_offset=0, num_group_pulls=1)]]],
+            ),
+        ):
+            worker.start_load_kv(connector_metadata)
+
+        worker.kv_recv_thread.add_request.assert_called_once()
+        add_request_kwargs = worker.kv_recv_thread.add_request.call_args.kwargs
+        self.assertEqual(add_request_kwargs["remote_host"], "prefill-0")
+        self.assertEqual(add_request_kwargs["remote_engine_id"], "remote-engine-0")
+        self.assertEqual(add_request_kwargs["remote_handshake_port"], 45100)
 
     def test_register_kv_caches_mla_case(self):
         self.vllm_config.model_config.is_deepseek_mla = True
@@ -2199,7 +2465,13 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             meta.remote_engine_id = remote_engine_id
             meta.remote_host = "localhost"
             meta.remote_block_size = worker.block_size
-            meta.remote_multi_nodes_meta_mapping = {}
+            prefill_tp_size = remote_ptp_size if remote_ptp_size is not None else _prefill_tp_size
+            meta.remote_multi_nodes_meta_mapping = self._make_remote_multi_nodes_meta_mapping(
+                remote_port,
+                prefill_tp_size,
+                remote_pcp_size,
+                remote_engine_id,
+            )
 
             (
                 remote_handshake_port_list,
@@ -2316,6 +2588,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 worker.remote_port_send_num = {}
                 worker.side_channel_port = 5000
                 worker.handshake_port = worker.side_channel_port + worker.tp_rank
+                worker.logical_handshake_port = worker.handshake_port
                 # Bd=32 stored as 2 kernels of 16 (scale 2); Bp=16 == 1 kernel.
                 worker.block_size_scale = [[2]]
                 worker.kv_group2layeridx = {
@@ -2335,7 +2608,12 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     remote_block_size=16,
                     remote_engine_id=f"remote_bs_{dcp_rank}",
                     remote_host="localhost",
-                    remote_multi_nodes_meta_mapping={},
+                    remote_multi_nodes_meta_mapping=self._make_remote_multi_nodes_meta_mapping(
+                        30000,
+                        4,
+                        2,
+                        f"remote_bs_{dcp_rank}",
+                    ),
                 )
 
                 ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_bs", cast(ReqMeta, meta))
@@ -2370,6 +2648,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         worker.remote_port_send_num = {}
         worker.side_channel_port = 5000
         worker.handshake_port = worker.side_channel_port + worker.tp_rank
+        worker.logical_handshake_port = worker.handshake_port
         worker.block_size_scale = [[1]]
         worker.kv_group2layeridx = {
             0: ({"kv_cache_spec_type": "FullAttentionSpec"}, [0]),
@@ -2389,7 +2668,12 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             remote_block_size=16,
             remote_engine_id="remote_prefix_cp",
             remote_host="localhost",
-            remote_multi_nodes_meta_mapping={},
+            remote_multi_nodes_meta_mapping=self._make_remote_multi_nodes_meta_mapping(
+                30000,
+                8,
+                2,
+                "remote_prefix_cp",
+            ),
         )
 
         ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_prefix_cp", cast(ReqMeta, meta))
@@ -2523,6 +2807,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         worker.remote_port_send_num = {}
         worker.side_channel_port = 5000
         worker.handshake_port = worker.side_channel_port + (worker.pp_rank + pcp_rank) * worker.tp_size + tp_rank
+        worker.logical_handshake_port = worker.handshake_port
         worker.block_size_scale = [[1], [1]]
         worker.kv_group2layeridx = {
             0: ({"kv_cache_spec_type": "FullAttentionSpec"}, [0]),
@@ -2630,6 +2915,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                             dcp_rank=dcp_rank,
                         ):
                             worker = self._build_worker_for_pd_case(case, tp_rank, pcp_rank, dcp_rank)
+                            remote_engine_id = f"remote_{case['name']}_{tp_rank}_{pcp_rank}_{dcp_rank}"
                             meta = types.SimpleNamespace(
                                 remote_pcp_size=case["remote_pcp_size"],
                                 remote_dcp_size=case["remote_dcp_size"],
@@ -2640,9 +2926,14 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                                 num_external_tokens=case["num_external_blocks"] * worker.block_size,
                                 num_prompt_blocks=case["num_prompt_blocks"],
                                 remote_block_size=worker.block_size,
-                                remote_engine_id=f"remote_{case['name']}_{tp_rank}_{pcp_rank}_{dcp_rank}",
+                                remote_engine_id=remote_engine_id,
                                 remote_host="localhost",
-                                remote_multi_nodes_meta_mapping={},
+                                remote_multi_nodes_meta_mapping=self._make_remote_multi_nodes_meta_mapping(
+                                    30000,
+                                    case["prefill_tp_size"],
+                                    case["remote_pcp_size"],
+                                    remote_engine_id,
+                                ),
                             )
 
                             ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_pd", meta)
@@ -2772,6 +3063,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 worker._prefill_pp_size = 1
                 worker.side_channel_port = 5000
                 worker.handshake_port = worker.side_channel_port + tp_rank
+                worker.logical_handshake_port = worker.handshake_port
                 worker.local_remote_block_port_mapping = {}
                 worker.remote_port_send_num = {}
                 worker.block_size_scale = [[1], [1], [1]]
@@ -2797,7 +3089,12 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     num_prompt_blocks=4,
                     remote_engine_id=f"remote_hybrid_pcp_{tp_rank}",
                     remote_host="localhost",
-                    remote_multi_nodes_meta_mapping={},
+                    remote_multi_nodes_meta_mapping=self._make_remote_multi_nodes_meta_mapping(
+                        31000,
+                        4,
+                        2,
+                        f"remote_hybrid_pcp_{tp_rank}",
+                    ),
                     remote_block_size=16,
                 )
                 ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_hybrid_pcp", cast(ReqMeta, meta))

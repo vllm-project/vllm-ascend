@@ -1287,6 +1287,16 @@ def dispose_layer(layer: Any):
 
 
 def check_kv_extra_config(vllm_config):
+    def _is_mooncake_v1_internal_dp_engine_config() -> bool:
+        engine_id = getattr(vllm_config.kv_transfer_config, "engine_id", None)
+        kv_role = getattr(vllm_config.kv_transfer_config, "kv_role", None)
+        return (
+            isinstance(engine_id, str)
+            and re.search(r"_dp\d+$", engine_id) is not None
+            and kv_role in ("kv_producer", "kv_consumer")
+            and uses_mooncake_connector(vllm_config.kv_transfer_config)
+        )
+
     def _check(name: str, config: dict):
         tp_key = "tp_size"
         dp_key = "dp_size"
@@ -1301,7 +1311,10 @@ def check_kv_extra_config(vllm_config):
         if dp_key in config:
             config_dp = config[dp_key]
             vllm_dp = vllm_config.parallel_config.data_parallel_size
-            if config_dp != vllm_dp:
+            # Mooncake V1 dense internal-DP engines run with local DP=1 while
+            # keeping kv_connector_extra_config as the global P/D topology.
+            is_engine_local_dense_dp = vllm_dp == 1 and config_dp > 1 and _is_mooncake_v1_internal_dp_engine_config()
+            if config_dp != vllm_dp and not is_engine_local_dense_dp:
                 raise ValueError(
                     f"KV transfer '{name}' config has a conflicting data parallel size. "
                     f"Expected {vllm_dp}, but got {config_dp}."

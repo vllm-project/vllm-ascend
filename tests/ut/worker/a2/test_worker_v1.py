@@ -7,6 +7,16 @@ from vllm.config import CacheConfig, ModelConfig, ParallelConfig, ProfilerConfig
 from tests.ut.base import TestBase
 
 init_cached_hf_modules_path = "vllm.utils.import_utils.init_cached_hf_modules"
+_MOONCAKE_METADATA_MODULE = "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector"
+
+
+def _make_mooncake_metadata() -> object:
+    mooncake_metadata = type(
+        "MooncakeAgentMetadata",
+        (),
+        {"__module__": _MOONCAKE_METADATA_MODULE},
+    )
+    return mooncake_metadata()
 
 
 class TestNPUWorker(TestBase):
@@ -52,6 +62,75 @@ class TestNPUWorker(TestBase):
         self.rank = 0
         self.distributed_init_method = "tcp://localhost:12345"
         self.is_driver_worker = False
+
+    def test_get_kv_connector_handshake_metadata_keeps_pp_tp_key_for_non_mooncake(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        metadata = MagicMock()
+        connector = MagicMock()
+        connector.get_handshake_metadata.return_value = metadata
+        tp_group = MagicMock(rank_in_group=3)
+        pp_group = MagicMock(rank_in_group=2)
+
+        with (
+            patch("vllm_ascend.worker.worker.has_kv_transfer_group", return_value=True),
+            patch("vllm_ascend.worker.worker.get_kv_transfer_group", return_value=connector),
+            patch("vllm_ascend.worker.worker.get_tp_group", return_value=tp_group),
+            patch("vllm_ascend.worker.worker.get_pp_group", return_value=pp_group),
+            patch("vllm_ascend.worker.worker.get_pcp_group") as mock_get_pcp_group,
+        ):
+            worker = NPUWorker.__new__(NPUWorker)
+            result = worker.get_kv_connector_handshake_metadata()
+
+        assert result is not None
+        self.assertIs(result[(2, 3)], metadata)
+        mock_get_pcp_group.assert_not_called()
+
+    def test_get_kv_connector_handshake_metadata_uses_pp_pcp_tp_key_for_mooncake(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        metadata = _make_mooncake_metadata()
+        connector = MagicMock()
+        connector.get_handshake_metadata.return_value = metadata
+        tp_group = MagicMock(rank_in_group=3)
+        pp_group = MagicMock(rank_in_group=2)
+        pcp_group = MagicMock(rank_in_group=1)
+
+        with (
+            patch("vllm_ascend.worker.worker.has_kv_transfer_group", return_value=True),
+            patch("vllm_ascend.worker.worker.get_kv_transfer_group", return_value=connector),
+            patch("vllm_ascend.worker.worker.get_tp_group", return_value=tp_group),
+            patch("vllm_ascend.worker.worker.get_pp_group", return_value=pp_group),
+            patch("vllm_ascend.worker.worker.get_pcp_group", return_value=pcp_group),
+        ):
+            worker = NPUWorker.__new__(NPUWorker)
+            result = worker.get_kv_connector_handshake_metadata()
+
+        assert result is not None
+        self.assertIs(result[(2, 1, 3)], metadata)
+
+    def test_get_kv_connector_handshake_metadata_includes_zero_pcp_rank(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        metadata = _make_mooncake_metadata()
+        connector = MagicMock()
+        connector.get_handshake_metadata.return_value = metadata
+        tp_group = MagicMock(rank_in_group=3)
+        pp_group = MagicMock(rank_in_group=2)
+        pcp_group = MagicMock(rank_in_group=0)
+
+        with (
+            patch("vllm_ascend.worker.worker.has_kv_transfer_group", return_value=True),
+            patch("vllm_ascend.worker.worker.get_kv_transfer_group", return_value=connector),
+            patch("vllm_ascend.worker.worker.get_tp_group", return_value=tp_group),
+            patch("vllm_ascend.worker.worker.get_pp_group", return_value=pp_group),
+            patch("vllm_ascend.worker.worker.get_pcp_group", return_value=pcp_group),
+        ):
+            worker = NPUWorker.__new__(NPUWorker)
+            result = worker.get_kv_connector_handshake_metadata()
+
+        assert result is not None
+        self.assertIs(result[(2, 0, 3)], metadata)
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.ops")

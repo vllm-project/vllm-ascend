@@ -1,12 +1,14 @@
 from typing import TYPE_CHECKING, Any, cast
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeMetadata,
     KVConnectorRole,
     SupportsHMA,
     supports_hma,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import MooncakeAgentMetadata, MooncakeConnector
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import MooncakeLayerwiseConnector
 
 if TYPE_CHECKING:
@@ -28,6 +30,37 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         assert vllm_config.scheduler_config.disable_hybrid_kv_cache_manager or self._all_support_hma, (
             "HMA should not be enabled unless all sub-connectors support it"
         )
+
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: dict[int | tuple[int, ...], KVConnectorHandshakeMetadata]
+    ) -> None:
+        if not metadata:
+            return super().set_xfer_handshake_metadata_pp_aware(metadata)
+
+        has_logical_rank_keys = any(isinstance(key, int) for key in metadata)
+        has_tuple_keys = any(isinstance(key, tuple) for key in metadata)
+        if has_logical_rank_keys and has_tuple_keys:
+            raise ValueError("Mixed int logical-rank and tuple handshake metadata keys are not supported.")
+
+        has_mooncake_metadata = any(
+            isinstance(rank_metadata, MooncakeAgentMetadata) for rank_metadata in metadata.values()
+        )
+        if has_logical_rank_keys or has_mooncake_metadata:
+            # MooncakeAgentMetadata is strongly typed and should not be
+            # broadcast to other typed connectors such as NIXL.
+            handled = False
+            for connector in self._connectors:
+                if isinstance(connector, MooncakeConnector):
+                    if has_logical_rank_keys:
+                        connector.set_xfer_handshake_metadata(metadata)
+                    else:
+                        connector.set_xfer_handshake_metadata_pp_aware(metadata)
+                    handled = True
+            if not handled:
+                raise ValueError("Mooncake handshake metadata requires a MooncakeConnector child.")
+            return
+
+        return super().set_xfer_handshake_metadata_pp_aware(metadata)
 
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         chosen_connector = self._requests_to_connector.get(request.request_id, -1)
