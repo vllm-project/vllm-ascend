@@ -38,23 +38,21 @@ Usage:
     python rlhf_async_new_apis_npu.py
 """
 
-import os
 import asyncio
+import os
 import uuid
 from dataclasses import asdict
 
 import ray
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
 import vllm
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from vllm import SamplingParams
 from vllm.config import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )
-from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_ip, get_open_port
 from vllm.v1.executor import Executor
 
@@ -68,6 +66,8 @@ from vllm_ascend.distributed.weight_transfer.hccl_engine import (
 MODEL_NAME_V1 = "Qwen/Qwen3-1.7B-Base"
 MODEL_NAME_V2 = "Qwen/Qwen3-1.7B"
 PAUSE_TOKEN_THRESHOLD = 10
+
+os.environ["ASCEND_RT_VISIBLE_DEVICES"] = "0,1"
 
 
 class MyLLM(vllm.AsyncLLMEngine):
@@ -104,10 +104,7 @@ class MyLLM(vllm.AsyncLLMEngine):
         ):
             output = request_output
             cur_token_count = len(output.outputs[0].token_ids)
-            if (
-                cur_token_count >= PAUSE_TOKEN_THRESHOLD
-                and not self._request_pause_flag
-            ):
+            if cur_token_count >= PAUSE_TOKEN_THRESHOLD and not self._request_pause_flag:
                 self._request_pause_flag = True
             if self._generation_paused and pause_token_index == -1:
                 pause_token_index = prev_token_count
@@ -131,12 +128,11 @@ class TrainModel:
         from vllm_ascend.batch_invariant import (
             enable_batch_invariant_mode,
         )
+
         torch.use_deterministic_algorithms(True, warn_only=True)
         enable_batch_invariant_mode()
 
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name, dtype=torch.bfloat16
-        ).to("npu:0")
+        self.model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.bfloat16).to("npu:0")
         self.port = get_open_port()
         self.master_address = get_ip()
 
@@ -184,7 +180,7 @@ class TrainModel:
             max_new_tokens=max_new_tokens,
             do_sample=False,
         )
-        new_token_ids = output[0, len(token_ids):].tolist()
+        new_token_ids = output[0, len(token_ids) :].tolist()
         return new_token_ids
 
 
@@ -243,16 +239,12 @@ PROMPTS = [
 ]
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME_V1)
-batch_prompt_token_ids = [
-    tokenizer.encode(prompt, add_special_tokens=False) for prompt in PROMPTS
-]
+batch_prompt_token_ids = [tokenizer.encode(prompt, add_special_tokens=False) for prompt in PROMPTS]
 
 
 # Set up the communication channel between the training process and the
 # inference engine.
-master_address, master_port = ray.get(
-    train_model.get_master_address_and_port.remote()
-)
+master_address, master_port = ray.get(train_model.get_master_address_and_port.remote())
 
 world_size = 2  # 1 trainer + 1 inference worker
 inference_handle = llm.init_weight_transfer_engine.remote(
@@ -276,9 +268,7 @@ ray.get([train_handle, inference_handle])
 N_NEW_TOKENS = 100
 
 # Collect weight metadata once
-names, dtype_names, shapes = ray.get(
-    train_model.get_weight_metadata.remote()
-)
+names, dtype_names, shapes = ray.get(train_model.get_weight_metadata.remote())
 
 # -- Phase 1: concurrent requests with weight sync --------------------
 print(f"\n{'=' * 50}")
@@ -287,18 +277,13 @@ for p in PROMPTS:
     print(f"  - {p!r}")
 print(f"{'=' * 50}")
 
-sampling_params = SamplingParams(
-    temperature=0, max_tokens=PAUSE_TOKEN_THRESHOLD + N_NEW_TOKENS
-)
+sampling_params = SamplingParams(temperature=0, max_tokens=PAUSE_TOKEN_THRESHOLD + N_NEW_TOKENS)
 
-gen_futures = [
-    llm.do_generate.remote(ptids, sampling_params)
-    for ptids in batch_prompt_token_ids
-]
+gen_futures = [llm.do_generate.remote(ptids, sampling_params) for ptids in batch_prompt_token_ids]
 
 ray.get(llm.pause_after_n_tokens.remote())
 
-ray.get(llm.start_weight_update.remote(is_checkpoint_format=True))
+ray.get(llm.start_weight_update.remote())
 
 inference_handle = llm.update_weights.remote(
     WeightTransferUpdateRequest(
@@ -359,8 +344,7 @@ llm_v2 = ray.remote(
 
 val_futures = [
     llm_v2.do_generate.remote(
-        list(output.prompt_token_ids)
-        + list(output.outputs[0].token_ids)[:pause_idx],
+        list(output.prompt_token_ids) + list(output.outputs[0].token_ids)[:pause_idx],
         SamplingParams(
             temperature=0,
             max_tokens=len(output.outputs[0].token_ids) - pause_idx,
@@ -372,9 +356,7 @@ val_results = ray.get(val_futures)
 
 num_pass = 0
 num_total = len(results)
-for i, ((output, pause_idx), (val_output, _)) in enumerate(
-    zip(results, val_results)
-):
+for i, ((output, pause_idx), (val_output, _)) in enumerate(zip(results, val_results)):
     expected = list(output.outputs[0].token_ids)[pause_idx:]
     actual = list(val_output.outputs[0].token_ids)
     match = actual == expected
