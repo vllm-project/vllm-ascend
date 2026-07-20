@@ -10,7 +10,7 @@ The `Qwen3-VL-30B-A3B-Instruct` tutorial was introduced for the `vllm-ascend` `v
 
 ## 2 Supported Features
 
-Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_features.md) to get the model's supported feature matrix.
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
@@ -19,6 +19,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 ### 3.1 Model Weight
 
 - `Qwen3-VL-30B-A3B-Instruct` (BF16 version): requires 1 Atlas 800 A3 (64G x 16) node or 1 Atlas 800 A2 (64G x 8) node. [Model Weight](https://modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Instruct).
+- `Qwen3-VL-30B-A3B-Instruct-w8a8-mxfp8` (quantized version): requires 1 Ascend950DT (96G x 8) node. [Model Weight]#TODO
 
 It is recommended to download the model weight to a shared directory across multiple nodes.
 
@@ -31,6 +32,46 @@ Select an image based on your machine type and start the docker image on your no
 :::::{tab-set}
 :sync-group: install
 
+::::{tab-item} Ascend950DT series
+:sync: 950dt
+
+Start the docker image on your each node.
+
+```{code-block} bash
+  :substitutions:
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-#TODO
+export NAME=vllm-ascend
+
+docker run --rm \
+  --name $NAME \
+  --net=host \
+  --shm-size=1g \
+  --device /dev/davinci0 \
+  --device /dev/davinci1 \
+  --device /dev/davinci2 \
+  --device /dev/davinci3 \
+  --device /dev/davinci4 \
+  --device /dev/davinci5 \
+  --device /dev/davinci6 \
+  --device /dev/davinci7 \
+  --device /dev/davinci_manager \
+  --device /dev/hisi_hdc \
+  --device /dev/ummu \
+  --device /dev/uburma \
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+  -v /etc/ascend_install.info:/etc/ascend_install.info \
+  -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
+  -v /etc/hixlep/:/etc/hixlep/ \
+  -v /root/.cache:/root/.cache \
+  -v /usr/local/sbin:/usr/local/sbin \
+  -v /usr/local/dcmi:/usr/local/dcmi \
+  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+  -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
+  -v /usr/lib64:/usr/lib64 \
+  -itd $IMAGE bash
+```
+
+::::
 ::::{tab-item} A3 series
 :sync: A3
 
@@ -151,9 +192,60 @@ For more details, please refer to the [Installation Guide](../../installation.md
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment runs both Prefill and Decode on the same node. The following example is suitable for image-only online serving on 1 Atlas 800 A2 (64G x 8) node or 1 Atlas 800 A3 (64G x 16) node.
+Single-node deployment runs both Prefill and Decode on the same node. The following examples are suitable for image-only online serving.
 
-Run the following script to start image-only serving:
+:::::{tab-set}
+:sync-group: deploy
+
+::::{tab-item} Ascend950DT series
+:sync: 950dt
+
+Run the following script to execute online inference on 1 Ascend950DT (96G x 8). The quantized version (`Qwen3-VL-30B-A3B-Instruct-w8a8-mxfp8`) can be deployed on a single Ascend950DT node. The W8A8 version needs `--quantization ascend`.
+
+```shell
+#!/bin/sh
+
+# Load model from ModelScope to speed up download.
+export VLLM_USE_MODELSCOPE=True
+
+# Reduce memory fragmentation and avoid out-of-memory errors.
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_BUFFSIZE=400
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=100
+export TASK_QUEUE_ENABLE=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+
+vllm serve Eco-Tech/Qwen3-VL-30B-A3B-Instruct-w8a8-mxfp8 \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --distributed-executor-backend mp \
+  --data-parallel-size 1 \
+  --tensor-parallel-size 8 \
+  --enable-expert-parallel \
+  --seed 1024 \
+  --quantization ascend \
+  --served-model-name qwen3-vl-30b \
+  --max-num-seqs 32 \
+  --max-model-len 32768 \
+  --max-num-batched-tokens 8192 \
+  --trust-remote-code \
+  --no-enable-prefix-caching \
+  --mm-processor-cache-gb 0 \
+  --limit-mm-per-prompt.image 1 \
+  --limit-mm-per-prompt.video 0 \
+  --gpu-memory-utilization 0.9 \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+```
+
+::::
+
+::::{tab-item} A3 series
+:sync: A3
+
+Run the following script to start image-only serving on 1 Atlas 800 A3 (64G x 16) node.
 
 ```shell
 #!/bin/sh
@@ -190,6 +282,16 @@ vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
   --limit-mm-per-prompt.video 0 \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,24,32]}'
 ```
+
+::::
+
+::::{tab-item} A2 series
+:sync: A2
+
+The A3 series script above also works on 1 Atlas 800 A2 (64G x 8) node.
+
+::::
+:::::
 
 Key Parameter Descriptions:
 
