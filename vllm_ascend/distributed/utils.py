@@ -7,15 +7,11 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup, Store
 from torch.distributed.distributed_c10d import BackendConfig, _world
 from vllm.distributed import get_dcp_group
-from vllm.distributed.parallel_state import GroupCoordinator, get_dp_group
+from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.distributed.stateless_coordinator import (
     stateless_destroy_torch_distributed_process_group,
     stateless_init_torch_distributed_process_group,
 )
-from vllm.forward_context import get_forward_context
-
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.distributed.parallel_state import get_fc3_quant_x_group
 
 
 def get_decode_context_model_parallel_world_size() -> int:

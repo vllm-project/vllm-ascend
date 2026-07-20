@@ -6,7 +6,7 @@ import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import Any
 from unittest.mock import patch
 
 import torch
@@ -25,6 +25,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from ..utils import weak_ref_tensors
 
 _acl_graph_wrappers: weakref.WeakSet[Any] = weakref.WeakSet()
+_acl_graph_pool: tuple[int, int] | None = None
 _STREAM_RESOURCE_ERROR_CODE = "207008"
 _STREAM_RESOURCE_ERROR_MARKERS = (
     "insufficient_stream_resources",
@@ -82,19 +83,18 @@ class ACLGraphWrapper:
     guaranteed when VLLM_LOGGING_LEVEL == "DEBUG".
     """
 
-    _all_instances: ClassVar[weakref.WeakSet["ACLGraphWrapper"]] = weakref.WeakSet()
-    _graph_pool: ClassVar[tuple[int, int] | None] = None
-
     @classmethod
     def clear_all_graphs(cls) -> None:
-        cls._graph_pool = current_platform.graph_pool_handle()
-        for instance in list(cls._all_instances):
+        global _acl_graph_pool
+        _acl_graph_pool = None
+        for instance in list(_acl_graph_wrappers):
             instance.clear_graphs()
 
     @classmethod
     def get_graph_pool(cls):
-        if cls._graph_pool is None:
-            cls._graph_pool = current_platform.graph_pool_handle()
+        global _acl_graph_pool
+        if _acl_graph_pool is None:
+            _acl_graph_pool = current_platform.graph_pool_handle()
         return cls._graph_pool
 
     def __init__(
@@ -144,6 +144,10 @@ class ACLGraphWrapper:
     def unwrap(self) -> Callable:
         # in case we need to access the original runnable.
         return self.runnable
+
+    def clear_graphs(self):
+        self.concrete_aclgraph_entries.clear()
+        self.graph_pool = ACLGraphWrapper.get_graph_pool()
 
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()
