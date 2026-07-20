@@ -38,7 +38,7 @@ jobs:
       matrix:
         npus: [2,4,8]
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-950-ubuntu22.04-py3.12
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-950-openeuler24.03-py3.12
     steps:
       - name: Check NPU availability
         run: |
