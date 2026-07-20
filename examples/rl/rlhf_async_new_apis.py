@@ -201,7 +201,7 @@ ray.init(runtime_env={"env_vars": ray_env_vars})
 
 # Launch the training model actor. Ray's resource scheduler will allocate
 # 1 NPU (via resources={"NPU": 1} in the decorator), ensuring pg_inference gets a different NPU.
-train_model = TrainModel.remote(MODEL_NAME_V2)
+train_model = TrainModel.remote(MODEL_NAME_V2)  # type: ignore[attr-defined]
 
 # Build LLM kwargs for the inference engine.
 llm_kwargs = dict(
