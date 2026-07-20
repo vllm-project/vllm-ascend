@@ -253,14 +253,12 @@ def _warm_sample_recovered_tokens_kernel(
     prob_vocab_size = tensors["prob_vocab_size"]
     assert isinstance(prob_vocab_size, int)
 
-    target_probs = None if no_draft_probs else tensors["target_probs"]
-
     sample_recovered_tokens_kernel[(batch_size, max_spec_len)](
         tensors["recovered_token_ids"],
         tensors["cu_num_draft_tokens"],
         tensors["draft_token_ids"],
         tensors["draft_probs"],
-        target_probs,
+        tensors["target_probs"],
         tensors["target_indices"],
         tensors["q"],
         prob_vocab_size,
