@@ -129,18 +129,20 @@ def _warm_prepare_inputs_padded_kernel(
 
 def _warm_expand_kernel(device: torch.device, batch_size: int) -> None:
     cu_num_tokens = torch.arange(1, batch_size + 1, dtype=torch.int32, device=device)
-    num_tokens = int(cu_num_tokens[-1].item())
-    x = torch.zeros(batch_size, dtype=torch.int32, device=device)
-    expanded_x = torch.empty(num_tokens, dtype=torch.int32, device=device)
-    expand_triton(
-        batch_size,
-        expanded_x,
-        x,
-        cu_num_tokens,
-        replace_from=-1,
-        replace_to=0,
-        max_num_tokens=MAX_SPEC_LEN,
-    )
+    num_tokens = batch_size
+    # expand_batch_to_tokens uses x.new_empty; temperature/top_p are float, top_k int.
+    for value_dtype in (torch.int32, torch.float32):
+        x = torch.zeros(batch_size, dtype=value_dtype, device=device)
+        expanded_x = torch.empty(num_tokens, dtype=value_dtype, device=device)
+        expand_triton(
+            batch_size,
+            expanded_x,
+            x,
+            cu_num_tokens,
+            replace_from=-1,
+            replace_to=0,
+            max_num_tokens=MAX_SPEC_LEN,
+        )
 
 
 def _make_rejection_tensors(
@@ -216,7 +218,7 @@ def _make_rejection_tensors(
     q = torch.full(
         (batch_size, prob_vocab),
         1.0,
-        dtype=torch.int32,
+        dtype=torch.float32,
         device=device,
     )
 
