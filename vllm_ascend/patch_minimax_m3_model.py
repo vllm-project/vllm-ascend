@@ -33,12 +33,9 @@ def _install_fused_allreduce_norm_fallback() -> None:
         norm: GemmaRMSNorm,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from vllm.distributed import get_tensor_model_parallel_world_size
-        from vllm.distributed.communication_op import (
-            tensor_model_parallel_all_reduce,
-        )
 
         if get_tensor_model_parallel_world_size() > 1:
-            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+            hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states)
         return norm(hidden_states, residual)
 
     cast(Any, fallback_module).fused_allreduce_gemma_rms_norm = fused_allreduce_gemma_rms_norm
@@ -54,6 +51,10 @@ from vllm.models.minimax_m3.nvidia import model as minimax_m3_model  # noqa: E40
 
 from vllm_ascend.attention.msa_m3 import (  # noqa: E402
     MiniMaxM3SparseAttention as AscendMiniMaxM3SparseAttentionBase,
+)
+
+_ORIGINAL_MINIMAX_M3_MAYBE_ADD_HIDDEN_STATE = (
+    minimax_m3_model.MiniMaxM3Model._maybe_add_hidden_state
 )
 
 
@@ -113,6 +114,24 @@ def _forward_minimax_m3_attention(
     attn_output = self.attn(q, k, v.contiguous())
     output, _ = self.o_proj(attn_output)
     return output
+
+
+def _maybe_add_minimax_m3_hidden_state(
+    self: Any,
+    aux_hidden_states: list[torch.Tensor],
+    layer_idx: int,
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor | None,
+) -> list[torch.Tensor]:
+    if (
+        residual is not None
+        and layer_idx in self.aux_hidden_state_layers
+        and hidden_states.size(0) != residual.size(0)
+    ):
+        hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states)
+    return _ORIGINAL_MINIMAX_M3_MAYBE_ADD_HIDDEN_STATE(
+        self, aux_hidden_states, layer_idx, hidden_states, residual
+    )
 
 
 def _apply_minimax_m3_vision_rotary_emb(
@@ -258,6 +277,9 @@ def _load_minimax_m3_weights(
 # that are hardware-specific on Ascend.
 minimax_m3_model.MiniMAXGemmaRMSNorm = GemmaRMSNorm
 minimax_m3_model.MiniMaxM3Attention.forward = _forward_minimax_m3_attention
+minimax_m3_model.MiniMaxM3Model._maybe_add_hidden_state = (
+    _maybe_add_minimax_m3_hidden_state
+)
 minimax_m3_model.MiniMaxM3SparseAttention = AscendMiniMaxM3SparseAttention
 minimax_m3_model.MiniMaxM3Model.load_weights = _load_minimax_m3_weights
 MiniMaxVLAttention._apply_rotary_emb = _apply_minimax_m3_vision_rotary_emb
