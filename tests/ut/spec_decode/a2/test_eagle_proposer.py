@@ -406,10 +406,8 @@ class TestEagleProposerLoadModel(TestBase):
         self.mock_get_ascend_config = patch("vllm_ascend.utils.get_ascend_config")
         mock_config = self.mock_get_ascend_config.start()
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_flashcomm2_parallel_size = 0
         mock_ascend_config.enable_context_parallel = False
         mock_ascend_config.enable_flashcomm1 = False
-        mock_ascend_config.enable_matmul_allreduce = False
         mock_ascend_config.weight_nz_mode = 1
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_fused_mc2 = 0
@@ -569,10 +567,8 @@ class TestEagleProposerDummyRun(TestBase):
         self.mock_get_ascend_config = patch("vllm_ascend.utils.get_ascend_config")
         mock_config = self.mock_get_ascend_config.start()
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_flashcomm2_parallel_size = 0
         mock_ascend_config.enable_context_parallel = False
         mock_ascend_config.enable_flashcomm1 = False
-        mock_ascend_config.enable_matmul_allreduce = False
         mock_ascend_config.weight_nz_mode = 1
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_fused_mc2 = 0
@@ -1004,10 +1000,8 @@ class TestEagleProposerPropose:
         self.mock_get_ascend_config = patch("vllm_ascend.utils.get_ascend_config")
         mock_get_ascend_config = self.mock_get_ascend_config.start()
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_flashcomm2_parallel_size = 0
         mock_ascend_config.enable_context_parallel = False
         mock_ascend_config.enable_flashcomm1 = False
-        mock_ascend_config.enable_matmul_allreduce = False
         mock_ascend_config.weight_nz_mode = 1
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_fused_mc2 = 0
@@ -1058,7 +1052,6 @@ class TestEagleProposerPropose:
         self.vllm_config.speculative_config.disable_padded_drafter_batch = False
         self.vllm_config.additional_config = None
         self.ascend_config = init_ascend_config(self.vllm_config)
-        self.ascend_config.enable_flashcomm2_parallel_size = 0
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()

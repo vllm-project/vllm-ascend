@@ -47,6 +47,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
+from vllm.model_executor.offloader.base import get_offloader, set_offloader
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv, round_up
@@ -125,6 +126,7 @@ from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
+from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -163,7 +165,6 @@ from vllm_ascend.utils import (
     oproj_tp_enable,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
-    vllm_version_is,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPAsyncSpecDecodeRebuildResult, PCPManager
@@ -286,20 +287,7 @@ class NPUModelRunner(GPUModelRunner):
 
         self.pin_memory = PIN_MEMORY
 
-        # Replace the CUDA PrefetchOffloader set by parent __init__ with NPU version.
-        offload_cfg = vllm_config.offload_config
-        if (offload_cfg is not None
-                and getattr(offload_cfg, "prefetch", None) is not None
-                and getattr(offload_cfg.prefetch, "offload_group_size", 0) > 0):
-            from vllm.model_executor.offloader.base import set_offloader
-
-            from vllm_ascend.model_executor.offloader.prefetch import NPUPrefetchOffloader
-            set_offloader(NPUPrefetchOffloader(
-                group_size=offload_cfg.prefetch.offload_group_size,
-                num_in_group=offload_cfg.prefetch.offload_num_in_group,
-                prefetch_step=offload_cfg.prefetch.offload_prefetch_step,
-                offload_params=offload_cfg.prefetch.offload_params,
-            ))
+        set_offloader(create_offloader(self.offload_config))
 
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
@@ -460,9 +448,9 @@ class NPUModelRunner(GPUModelRunner):
             if vllm_config.speculative_config
             else None
         )
-        if not vllm_version_is("0.24.0"):
-            if vllm_config.speculative_config and vllm_config.speculative_config.use_dspark():
-                self.use_aux_hidden_state_outputs = True
+
+        if vllm_config.speculative_config and vllm_config.speculative_config.use_dspark():
+            self.use_aux_hidden_state_outputs = True
         # When True, run update_full_graph_params before self.model (ENPU / graph capture order).
         # Internal / non-public toggle: read C getenv ``ENPU_ENABLE`` from enpu code (not in envs.py).
         _enpu = get_c_env("ENPU_ENABLE")
@@ -585,14 +573,6 @@ class NPUModelRunner(GPUModelRunner):
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: Any | None = None
         self._mamba_copy_bufs: Any | None = None
-        self.enable_hamming_sparse = (self.ascend_config.enable_hamming_sparse is True)
-        self.enable_hamming_sparse = self.enable_hamming_sparse and not vllm_config.speculative_config
-        if self.enable_hamming_sparse is True:
-            from vllm_ascend.worker.kvcomp_utils import initialize_kvcomp_metadata
-            self.kvcomp_meta_data = initialize_kvcomp_metadata(max_num_reqs=self.max_num_reqs,
-                block_size=self.block_size, device=self.device, vllm_config=self.vllm_config,
-                parallel_config=self.parallel_config, dtype=self.dtype)
-
     @property
     def use_cp(self) -> bool:
         return self.pcp_size * self.dcp_size > 1
@@ -2318,13 +2298,6 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_mode = CUDAGraphMode.NONE
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False  # type: ignore[has-type]
-        if self.ascend_config.enable_async_exponential:
-            self.sampler.do_async_exponential(
-                b_s=logits_indices.shape[0],
-                head_dim=self.model_config.get_vocab_size(),
-                generators=self.input_batch.sampling_metadata.generators,
-            )
-
         # Encoder-decoder models can only compile the pure decode steps where no
         # encoder inputs are present. Use eager for the first pass.
         num_encoder_reqs = len(scheduler_output.scheduled_encoder_inputs)
@@ -3294,7 +3267,6 @@ class NPUModelRunner(GPUModelRunner):
                     block_size=attn_group.kv_cache_spec.block_size,
                 )
 
-            # add kvcomp_metadata into common_attn_metadata
             if (for_cudagraph_capture
                     and not isinstance(builder, (
                         AscendDSAMetadataBuilder,
@@ -3373,9 +3345,6 @@ class NPUModelRunner(GPUModelRunner):
                         spec_decode_common_attn_metadata = cm
                 else:
                     spec_decode_common_attn_metadata = cm
-            if self.enable_hamming_sparse is True:
-                from vllm_ascend.attention.kvcomp_attn.attention_utils import build_kvcomp_metadata
-                build_kvcomp_metadata(self.kvcomp_meta_data, cm)
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
                 _build_attn_group_metadata(
                     kv_cache_gid,
@@ -3849,7 +3818,6 @@ class NPUModelRunner(GPUModelRunner):
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
 
-        from vllm.model_executor.offloader.base import get_offloader
         get_offloader().post_init()
 
         mm_config = self.model_config.multimodal_config
@@ -4009,17 +3977,6 @@ class NPUModelRunner(GPUModelRunner):
                 self.compilation_config.static_forward_context,
                 self.kv_caches,
                 num_attn_module,
-            )
-
-        if self.enable_hamming_sparse is True:
-            from vllm_ascend.worker.kvcomp_utils import init_and_bind_hashk_cache
-            init_and_bind_hashk_cache(
-                kv_caches=kv_caches,
-                num_attn_module=num_attn_module,
-                vllm_config=self.vllm_config,
-                device=self.device,
-                compilation_config=self.compilation_config,
-                kvcomp_meta_data=self.kvcomp_meta_data
             )
 
         return kv_caches
@@ -5022,25 +4979,15 @@ class NPUModelRunner(GPUModelRunner):
                     min_cg_attn_backend = attn_backend.__name__
 
         with update_pass_config(self):
-            if vllm_version_is("0.24.0"):
-                cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
-                    min_cg_support=min_cg_support,
-                    min_cg_attn_backend=min_cg_attn_backend,
-                    uniform_decode_query_len=self.uniform_decode_query_len,
-                    tensor_parallel_size=self.parallel_config.tensor_parallel_size,
-                    kv_cache_config=self.kv_cache_config,
-                    max_num_reqs=self.max_num_reqs,
-                )
-            else:
-                cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
-                    min_cg_support=min_cg_support,
-                    min_cg_attn_backend=min_cg_attn_backend,
-                    uniform_decode_query_len=self.uniform_decode_query_len,
-                    use_v2_model_runner=False,
-                    tensor_parallel_size=self.parallel_config.tensor_parallel_size,
-                    kv_cache_config=self.kv_cache_config,
-                    max_num_reqs=self.max_num_reqs,
-                )
+            cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
+                min_cg_support=min_cg_support,
+                min_cg_attn_backend=min_cg_attn_backend,
+                uniform_decode_query_len=self.uniform_decode_query_len,
+                use_v2_model_runner=False,
+                tensor_parallel_size=self.parallel_config.tensor_parallel_size,
+                kv_cache_config=self.kv_cache_config,
+                max_num_reqs=self.max_num_reqs,
+            )
             self.cudagraph_dispatcher.initialize_cudagraph_keys(
                 cudagraph_mode, self.uniform_decode_query_len
             )
@@ -5172,6 +5119,7 @@ def _torch_cuda_wrapper():
         torch.cuda.stream = torch.npu.stream
         torch.cuda.synchronize = torch.npu.synchronize
         torch.cuda.mem_get_info = torch.npu.mem_get_info
+        torch.cuda.is_current_stream_capturing = torch.npu.is_current_stream_capturing
         yield
     except Exception as e:
         torch.cuda.Event = _EventPlaceholder
@@ -5181,6 +5129,7 @@ def _torch_cuda_wrapper():
         torch.cuda.stream = _StreamPlaceholder
         torch.cuda.synchronize = _StreamPlaceholder
         torch.cuda.mem_get_info = _StreamPlaceholder
+        torch.cuda.is_current_stream_capturing = lambda: False
         raise RuntimeError(f"NPUModelRunner init failed, error is {e}")
     finally:
         # Async model-runner outputs are created after runner initialization.
@@ -5193,6 +5142,7 @@ def _torch_cuda_wrapper():
         torch.cuda.stream = torch.npu.stream
         torch.cuda.synchronize = torch.npu.synchronize
         torch.cuda.mem_get_info = torch.npu.mem_get_info
+        torch.cuda.is_current_stream_capturing = torch.npu.is_current_stream_capturing
 
 
 # TODO: This method will be removed subsequently and implemented in platform.

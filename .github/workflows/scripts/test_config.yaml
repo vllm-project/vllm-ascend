@@ -65,7 +65,6 @@
     - vllm_ascend/attention/abstract.py
     - vllm_ascend/attention/attention_mask.py
     - vllm_ascend/attention/utils.py
-    - vllm_ascend/attention/kvcomp_attn/
   tests:
     - tests/ut/attention/
     - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
@@ -178,7 +177,6 @@
   optional: false
   source_file_dependencies:
     - vllm_ascend/compilation/passes/allgather_chunk_noop_pass.py
-    - vllm_ascend/compilation/passes/allreduce_rmsnorm_fusion_pass.py
     - vllm_ascend/compilation/passes/muls_add_pass.py
     - vllm_ascend/compilation/passes/noop_elimination.py
   tests: []
@@ -191,6 +189,7 @@
   tests:
     - tests/ut/core
     - tests/ut/test_compressed_prefix_cache.py
+    - tests/e2e/pull_request/one_card/test_batch_job_aware_scheduler_e2e.py
 
 # Device
 - name: device
@@ -269,6 +268,7 @@
     - vllm_ascend/worker/model_runner_v1.py
     - vllm_ascend/compilation/acl_graph.py
   tests:
+    - tests/ut/model_executor
     - tests/e2e/pull_request/one_card/test_cpu_weight_offload.py
 
 # Model Loader
@@ -578,6 +578,7 @@
   tests:
     - tests/ut/xlite
     - tests/e2e/pull_request/one_card/test_xlite.py
+    - tests/e2e/pull_request/two_card/test_xlite.py
 
 # Batch Invariant
 - name: batch_invariant
@@ -717,7 +718,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_camem.py: 140
   tests/e2e/pull_request/one_card/test_completion_with_prompt_embeds.py: 200
   tests/e2e/pull_request/one_card/test_cpu_offloading.py: 30
-  tests/e2e/pull_request/one_card/test_cpu_weight_offload.py: 830
+  tests/e2e/pull_request/one_card/test_cpu_weight_offload.py: 1400
   tests/e2e/pull_request/one_card/test_guided_decoding.py: 610
   tests/e2e/pull_request/one_card/test_minicpm.py: 330
   tests/e2e/pull_request/one_card/test_multi_instance.py: 140
@@ -731,6 +732,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_simple_cpu_offload.py: 220
   tests/e2e/pull_request/one_card/test_vlm.py: 860
   tests/e2e/pull_request/one_card/test_xlite.py: 170
+  tests/e2e/pull_request/one_card/test_batch_job_aware_scheduler_e2e.py: 263
   tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py: 20
   tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py: 150
   tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py: 510
@@ -756,6 +758,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_shared_expert_dp.py: 400
   tests/e2e/pull_request/two_card/test_sp_pass.py: 260
   tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py: 110
+  tests/e2e/pull_request/two_card/test_xlite.py: 180
   tests/e2e/pull_request/four_card/_310p/test_dense_model_310p.py: 410
   tests/e2e/pull_request/four_card/_310p/test_moe_model_310p.py: 510
   tests/e2e/pull_request/four_card/_310p/test_vl_model_310p.py: 360
@@ -789,6 +792,7 @@ estimated_times:
   tests/ut/kv_offload/a2/test_remote_decode_lifecycle.py: 60
   tests/ut/kv_offload/a2/test_remote_prefill_lifecycle.py: 60
   tests/ut/ops/a2/test_gdn_chunk_meta.py: 30
+  tests/ut/ops/a2/test_gdn_layerwise_kv.py: 30
   tests/ut/ops/a2/test_token_dispatcher.py: 30
   tests/ut/ops/a3_2/test_activation.py: 50
   tests/ut/ops/a3_2/test_select_experts.py: 20
@@ -802,7 +806,6 @@ estimated_times:
   tests/ut/sample/a2/test_gumbel_sampling.py: 80
   tests/ut/spec_decode/a2/test_eagle_proposer.py: 50
   tests/ut/worker/a2/test_block_table.py: 40
-  tests/ut/worker/a2/test_kvcomp_utils.py: 50
   tests/ut/worker/a2/test_model_runner_v1.py: 40
   tests/ut/worker/a2/test_model_runner_v1_with_device.py: 70
   tests/ut/worker/a2/test_worker_multi_instance.py: 30
@@ -839,4 +842,3 @@ partition:
   a3_x2: 3
   a3_x4: 3
   cpu_x0: 1
-

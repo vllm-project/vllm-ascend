@@ -15,26 +15,37 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
 #### Core Supported Models
 
-| Model | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
-| ------------------------------- | ----------- | ---------------------------------------------------------------------- | ------ | -------------------- | ------ | ----------------- | ------------------------ | ------ | ---------------------- | ------------------ | ----------------- | ------------------- | ----------------- | --------------- | ------------------------------- | -------------------- | -------------------- | --------------- | ----- |
-| DeepSeek V4-Flash | ✅ |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | 1M | [DeepSeek-V4](../../tutorials/models/DeepSeek-V4-Flash.md) |
-| DeepSeek V4-Pro | ✅ |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | 1M | [DeepSeek-V4](../../tutorials/models/DeepSeek-V4-Pro.md) |
-| DeepSeek V3/3.1 | ✅ |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 240k | [DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md) |
-| DeepSeek V3.2 | 🔵 |  | ✅ | A2/A3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 160k | [DeepSeek-V3.2](../../tutorials/models/DeepSeek-V3.2.md) |
-| DeepSeek R1 | ✅ |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 128k | [DeepSeek-R1](../../tutorials/models/DeepSeek-R1.md) |
-| Qwen3-Dense | ✅ |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  |  | ✅ | ✅ |  |  | ✅ |  | ✅ | ✅ | 128k | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
-| Qwen3-30B-A3B | ✅ |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ |  | ✅ | ✅ |  | [Qwen3-30B-A3B](../../tutorials/models/Qwen3-30B-A3B.md) |
-| Qwen3-Coder-30B-A3B | ✅ |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ |  | ✅ | ✅ |  | [Qwen3-Coder-30B-A3B](../../tutorials/models/Qwen3-Coder-30B-A3B.md) |
-| Qwen3-235B-A22B | ✅ |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  |  | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 256k | [Qwen3-235B-A22B](../../tutorials/models/Qwen3-235B-A22B.md) |
-| Qwen3-Next | 🔵 |  | ✅ | A2/A3 | ✅ |  |  |  |  |  | ✅ |  |  | ✅ |  | ✅ | ✅ |  | [Qwen3-Next](../../tutorials/models/Qwen3-Next.md) |
-| GLM-4.x | 🔵 |  |  | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 198k | [GLM-4.x](../../tutorials/models/GLM4.x.md) |
-| GLM-5/5.1 | 🔵 |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5](../../tutorials/models/GLM5.md) |
-| GLM-5.2 | 🔵 |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5](../../tutorials/models/GLM5.2.md) |
-| Gemma4 | 🔵 |  | ✅ | A2/A3/Ascend950 |  | ✅ | ✅ |  |  | ✅ | ✅ |  |  | ✅ |  | ✅ | ✅ |  | [Gemma4](../../tutorials/models/Gemma4.md) |
-| Kimi-K2-Thinking | 🔵 |  |  | A2/A3 |  |  |  |  |  |  |  |  |  |  |  |  |  |  | [Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md) |
-| DeepSeekOCR2 | ✅ |  | ✅ | A2/A3 |  | ✅ |  |  |  | ✅ |  |  |  |  |  |  |  |  | [DeepSeekOCR2](../../tutorials/models/DeepSeekOCR2.md) |
-| MiniMax-M2.5/2.7 | ✅ |  | ✅ | A2/A3/Ascend950 (Ascend950 experimental) | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ | 🟡 | ✅ | 200k | [MiniMax-M2](../../tutorials/models/MiniMax-M2.md) |
-| Qwen2.5-Math-RM-72B | ✅ | vllm-rm, tensor_parallel_size=4, max_model_len=4096 | ✅ | A2 | ✅ | 🟡 | 🟡 | ❌ | 🟡 | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 4096 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |
+=== "A2/A3"
+
+    | Model | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
+    | ------------------------------- | ----------- | ---------------------------------------------------------------------- | ------ | -------------------- | ------ | ----------------- | ------------------------ | ------ | ---------------------- | ------------------ | ----------------- | ------------------- | ----------------- | --------------- | ------------------------------- | -------------------- | -------------------- | --------------- | ----- |
+    | DeepSeek V4-Flash | 🔵 |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | 1M | [DeepSeek-V4-Flash](../../tutorials/models/DeepSeek-V4-Flash.md) |
+    | DeepSeek V4-Pro | 🔵 |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | 1M | [DeepSeek-V4-Pro](../../tutorials/models/DeepSeek-V4-Pro.md) |
+    | DeepSeek V3/3.1 | ✅ |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 240k | [DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md) |
+    | DeepSeek V3.2 | 🔵 |  | ✅ | A2/A3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 160k | [DeepSeek-V3.2](../../tutorials/models/DeepSeek-V3.2.md) |
+    | DeepSeek R1 | ✅ |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 128k | [DeepSeek-R1](../../tutorials/models/DeepSeek-R1.md) |
+    | Qwen3-Dense | ✅ |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  |  | ✅ | ✅ |  |  | ✅ |  | ✅ | ✅ | 128k | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
+    | Qwen3-30B-A3B | ✅ |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ |  | ✅ | ✅ |  | [Qwen3-30B-A3B](../../tutorials/models/Qwen3-30B-A3B.md) |
+    | Qwen3-Coder-30B-A3B | ✅ |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ |  | ✅ | ✅ |  | [Qwen3-Coder-30B-A3B](../../tutorials/models/Qwen3-Coder-30B-A3B.md) |
+    | Qwen3-235B-A22B | ✅ |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  |  | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 256k | [Qwen3-235B-A22B](../../tutorials/models/Qwen3-235B-A22B.md) |
+    | Qwen3-Next | 🔵 |  | ✅ | A2/A3 | ✅ |  |  |  |  |  | ✅ |  |  | ✅ |  | ✅ | ✅ |  | [Qwen3-Next](../../tutorials/models/Qwen3-Next.md) |
+    | GLM-4.x | 🔵 |  |  | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 198k | [GLM-4.x](../../tutorials/models/GLM4.x.md) |
+    | GLM-5/5.1 | 🔵 |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5](../../tutorials/models/GLM5.md) |
+    | GLM-5.2 | 🔵 |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5.2](../../tutorials/models/GLM5.2.md) |
+    | Gemma4 | 🔵 |  | ✅ | A2/A3/Ascend950 |  | ✅ | ✅ |  |  | ✅ | ✅ |  |  | ✅ |  | ✅ | ✅ |  | [Gemma4](../../tutorials/models/Gemma4.md) |
+    | Kimi-K2-Thinking | 🔵 |  |  | A2/A3 |  |  |  |  |  |  |  |  |  |  |  |  |  |  | [Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md) |
+    | DeepSeekOCR2 | ✅ |  | ✅ | A2/A3 |  | ✅ |  |  |  | ✅ |  |  |  |  |  |  |  |  | [DeepSeekOCR2](../../tutorials/models/DeepSeekOCR2.md) |
+    | MiniMax-M2.5/2.7 | ✅ |  | ✅ | A2/A3/Ascend950 (Ascend950 experimental) | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ | 🟡 | ✅ | 200k | [MiniMax-M2](../../tutorials/models/MiniMax-M2.md) |
+    | Qwen2.5-Math-RM-72B | ✅ | vllm-rm, tensor_parallel_size=4, max_model_len=4096 | ✅ | A2 | ✅ | 🟡 | 🟡 | ❌ | 🟡 | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 4096 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |
+
+=== "Atlas inference products"
+
+    | Model | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
+    |-------|---------|------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------|-----------------|---------------|-------------------------------|--------------------|--------------------|---------------|-----|
+    | Qwen3-Dense | 🔵 | FP16; `FULL_DECODE_ONLY` graph mode | ❌ | Atlas inference products | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ❌ | 🔵 | 20k | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
+    | Qwen3-30B-A3B | 🔵 | FP16 | ❌ | Atlas inference products | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ❌ | 🟡 | 16k | [Qwen3-30B-A3B](../../tutorials/models/Qwen3-30B-A3B.md) |
+    | Qwen3.5-4B | 🔵 | FP16; `FULL_DECODE_ONLY` graph mode | ❌ | Atlas inference products | 🟡 | 🟡 | ✅ | 🟡 | 🔵 | 🟡 | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ❌ | 🔵 | 16k | |
+    | Qwen3.5-35B-A3B | 🔵 | FP16 | ❌ | Atlas inference products | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ❌ | 🟡 | 16k | |
 
 #### Extended Compatible Models
 
@@ -66,16 +77,26 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
 ### Pooling Models
 
-| Model                         | Support   | Note                                                                 |    Supported Hardware    |  Doc |
-|-------------------------------|-----------|----------------------------------------------------------------------|--------------------------|------|
-| Qwen3-Embedding               | 🔵        |                                                                      |         A2/A3            | [Qwen3_embedding](../../tutorials/models/Qwen3_embedding.md)|
-| Qwen3-VL-Embedding            | 🔵        |                                                                      |         A2/A3            | [Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md)|
-| Qwen3-Reranker                | 🔵        |                                                                      |         A2/A3            | [Qwen3_reranker](../../tutorials/models/Qwen3_reranker.md)|
-| Qwen3-VL-Reranker             | 🔵        |                                                                      |         A2/A3            | [Qwen3-VL-Reranker](../../tutorials/models/Qwen3-VL-Reranker.md)|
-| Molmo                         | 🔵        | [1942](https://github.com/vllm-project/vllm-ascend/issues/1942)      |         A2/A3            |      |
-| XLM-RoBERTa-based             | 🔵        |                                                                      |         A2/A3            |      |
-| Bert                          | 🔵        |                                                                      |         A2/A3            |      |
-| Qwen2.5-Math-RM-72B           | ✅        | Reward Model, gsm8k_correctness accuracy=0.80 | A2 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |
+=== "A2/A3"
+
+    | Model                         | Support   | Note                                                                 |    Supported Hardware    |  Doc |
+    |-------------------------------|-----------|----------------------------------------------------------------------|--------------------------|------|
+    | Qwen3-Embedding               | 🔵        |                                                                      |         A2/A3            | [Qwen3_embedding](../../tutorials/models/Qwen3_embedding.md)|
+    | Qwen3-VL-Embedding            | 🔵        |                                                                      |         A2/A3            | [Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md)|
+    | Qwen3-Reranker                | 🔵        |                                                                      |         A2/A3            | [Qwen3_reranker](../../tutorials/models/Qwen3_reranker.md)|
+    | Qwen3-VL-Reranker             | 🔵        |                                                                      |         A2/A3            | [Qwen3-VL-Reranker](../../tutorials/models/Qwen3-VL-Reranker.md)|
+    | Molmo                         | 🔵        | [1942](https://github.com/vllm-project/vllm-ascend/issues/1942)      |         A2/A3            |      |
+    | XLM-RoBERTa-based             | 🔵        |                                                                      |         A2/A3            |      |
+    | Bert                          | 🔵        |                                                                      |         A2/A3            |      |
+    | Qwen2.5-Math-RM-72B           | ✅        | Reward Model, gsm8k_correctness accuracy=0.80 | A2 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |
+
+=== "Atlas inference products"
+
+    | Model | Support | Note | Supported Hardware | Doc |
+    |-------|---------|------|--------------------|-----|
+    | Qwen3-Embedding | 🔵 | FP16, eager mode | Atlas inference products | [Qwen3_embedding](../../tutorials/models/Qwen3_embedding.md) |
+    | XLM-RoBERTa-based | 🔵 | FP16; embedding and scoring | Atlas inference products | |
+    | Qwen2.5-based | 🔵 | FP16 classification | Atlas inference products | |
 
 ## Multimodal Language Models
 
@@ -83,15 +104,23 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
 #### Core Supported Models
 
-| Model | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
-| -------------------------------- | --------------- | ---------------------------------------------------------------------- | ------ | -------------------- | ------ | ----------------- | ------------------------ | ------ | ---------------------- | ------------------ | ----------------- | ------------------- | ----------------- | --------------- | ------------------------------- | -------------------- | -------------------- | --------------- | ----- |
-| Qwen3-VL | ✅ |  |  | A2/A3 |  |  |  |  |  |  | ✅ |  |  |  |  | ✅ | ✅ |  | [Qwen-VL-Dense](../../tutorials/models/Qwen-VL-Dense.md) |
-| Qwen3-VL-MOE | ✅ |  | ✅ | A2/A3 |  | ✅ | ✅ |  |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 256k | [Qwen3-VL-MOE](../../tutorials/models/Qwen3-VL-235B-A22B-Instruct.md) |
-| Qwen3.5-397B-A17B | ✅ |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 1010000 | [Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md) |
-| Qwen3.5-27B / Qwen3.6-27B | ✅ |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 262144 | [Qwen3.5-27B / Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
-| Qwen3.6-35B-A3B | 🔵 |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | 🔵 | ✅ | ✅ |  | ✅ | ✅ | ❌ | ✅ | ✅ | 262144 | [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
-| Qwen3-Omni-30B-A3B-Thinking | 🔵 |  |  | A2/A3 |  |  |  |  |  |  | ✅ |  | ✅ |  |  |  |  |  | [Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md) |
-| Kimi-K2.5/Kimi-K2.6 | ✅ |  |  | A2/A3 |  | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 262144 | [Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)/[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md) |
+=== "A2/A3"
+
+    | Model | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
+    | -------------------------------- | --------------- | ---------------------------------------------------------------------- | ------ | -------------------- | ------ | ----------------- | ------------------------ | ------ | ---------------------- | ------------------ | ----------------- | ------------------- | ----------------- | --------------- | ------------------------------- | -------------------- | -------------------- | --------------- | ----- |
+    | Qwen3-VL | ✅ |  |  | A2/A3 |  |  |  |  |  |  | ✅ |  |  |  |  | ✅ | ✅ |  | [Qwen-VL-Dense](../../tutorials/models/Qwen-VL-Dense.md) |
+    | Qwen3-VL-30B-A3B/Qwen3-VL-235B-A22B | ✅ |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  |  | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 262144 | [Qwen3-VL-30B-A3B](../../tutorials/models/Qwen3-VL-30B-A3B-Instruct.md)/[Qwen3-VL-235B-A22B](../../tutorials/models/Qwen3-VL-235B-A22B-Instruct.md) |
+    | Qwen3.5-397B-A17B | ✅ |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 1010000 | [Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md) |
+    | Qwen3.5-27B / Qwen3.6-27B | ✅ |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 262144 | [Qwen3.5-27B / Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
+    | Qwen3.6-35B-A3B | 🔵 |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | 🔵 | ✅ | ✅ |  | ✅ | ✅ | ❌ | ✅ | ✅ | 262144 | [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
+    | Qwen3-Omni-30B-A3B-Thinking | 🔵 |  |  | A2/A3 |  |  |  |  |  |  | ✅ |  | ✅ |  |  |  |  |  | [Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md) |
+    | Kimi-K2.5/Kimi-K2.6 | ✅ |  |  | A2/A3 |  | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 262144 | [Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)/[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md) |
+
+=== "Atlas inference products"
+
+    | Model | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
+    |-------|---------|------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------|-----------------|---------------|-------------------------------|--------------------|--------------------|---------------|-----|
+    | Qwen3-VL | 🔵 | FP16, eager mode | ❌ | Atlas inference products | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ❌ | 🟡 | 16k | [Qwen-VL-Dense](../../tutorials/models/Qwen-VL-Dense.md) |
 
 #### Extended Compatible Models
 
