@@ -35,10 +35,9 @@ from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheSpec,
-    MLAAttentionSpec,
 )
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.models.ops.msa_m3_npu import minimax_m3_sparse_attn
 from vllm_ascend.models.ops.msa_m3_triton import (
     minimax_m3_index_decode,

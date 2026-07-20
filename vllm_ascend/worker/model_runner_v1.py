@@ -4033,6 +4033,9 @@ class NPUModelRunner(GPUModelRunner):
                     layer_kv_cache_spec[layer_name] = group_spec.kv_cache_specs[layer_name]
                 else:
                     layer_kv_cache_spec[layer_name] = group_spec
+                attn_layer = self.compilation_config.static_forward_context.get(layer_name)
+                if isinstance(attn_layer, AscendMiniMaxM3IndexerCache):
+                    layer_kv_cache_spec[layer_name] = attn_layer.get_kv_cache_spec(self.vllm_config)
         return layer_kv_cache_spec
 
     def _get_attention_kv_cache_dims(self, layer_name: str, kv_cache_spec: AttentionSpec) -> tuple[int, int]:

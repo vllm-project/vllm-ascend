@@ -534,6 +534,7 @@ class MiniMaxM3MoE(nn.Module):
         else:
             self.e_score_correction_bias = None
 
+        self.shared_experts: MiniMaxM3MLP | None
         if self.n_shared_experts:
             intermediate_size = config.intermediate_size * self.n_shared_experts
             self.shared_experts = MiniMaxM3MLP(
