@@ -13,7 +13,6 @@ import sys
 from pathlib import Path
 
 import regex as re
-from polib import pofile
 
 SOURCE_DIR = Path("docs/source")
 LOCALE_DIR = SOURCE_DIR / "locale" / "zh_CN" / "LC_MESSAGES"
@@ -28,6 +27,8 @@ MARKDOWN_BLOCK_PREFIX_RE = re.compile(r"(?:[-+*>#|]|\d+[.)])(?:\s|$)")
 
 def parse_po_file(po_path: Path) -> dict:
     """Parse a .po file and return msgid -> msgstr mapping."""
+    from polib import pofile
+
     po = pofile(str(po_path))
     translations = {}
     for entry in po:
