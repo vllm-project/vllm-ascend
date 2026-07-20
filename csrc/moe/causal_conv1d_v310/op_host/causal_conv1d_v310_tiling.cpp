@@ -249,8 +249,9 @@ static ge::graphStatus GetShapeDtypeInfo(gert::TilingContext *context, CausalCon
             OP_CHECK_IF(qslSize < 1, OP_LOGE(context, "queryStartLoc.size must be >= 1"), return ge::GRAPH_FAILED);
 
             OP_CHECK_NULL_WITH_CONTEXT(context, qslDesc);
-            OP_CHECK_IF(qslDesc->GetDataType() != ge::DT_INT64, OP_LOGE(context, "queryStartLoc dtype must be int64"),
-                        return ge::GRAPH_FAILED);
+            const ge::DataType qslDtype = qslDesc->GetDataType();
+            OP_CHECK_IF(qslDtype != ge::DT_INT32 && qslDtype != ge::DT_INT64,
+                        OP_LOGE(context, "queryStartLoc dtype must be int32 or int64"), return ge::GRAPH_FAILED);
         }
     }
 
@@ -259,12 +260,11 @@ static ge::graphStatus GetShapeDtypeInfo(gert::TilingContext *context, CausalCon
                     return ge::GRAPH_FAILED);
         qslSize = batch + 1;
     }
+    tiling.hasQueryStartLoc = qslAbsent ? 0 : 1;
 
     OP_CHECK_IF(cuSeqlen > static_cast<int64_t>(std::numeric_limits<int32_t>::max()),
                 OP_LOGE(context, "cuSeqlen is too large for int32 indexing, got %ld", cuSeqlen),
                 return ge::GRAPH_FAILED);
-
-    const int64_t *qslData = nullptr;
 
     if (!qslAbsent && isDecodeMode && inputMode == 2) {
         const int64_t batchFromQsl = qslSize - 1;
@@ -295,6 +295,7 @@ static ge::graphStatus GetShapeDtypeInfo(gert::TilingContext *context, CausalCon
     }
 
     tiling.hasCacheIndices = 0;
+    tiling.cacheIndicesStride = 1;
     bool ciAbsent = true;
     auto ciShapePtr = context->GetOptionalInputShape(CACHE_INDICES_INDEX);
     if (ciShapePtr != nullptr) {
@@ -303,9 +304,17 @@ static ge::graphStatus GetShapeDtypeInfo(gert::TilingContext *context, CausalCon
         ciAbsent = (ciDimNum == 0) || (ciDimNum == 1 && ciStorageShape.GetDim(0) <= 0);
         if (!ciAbsent) {
             auto ciShape = EnsureNotScalar(ciStorageShape);
-            OP_CHECK_IF(ciShape.GetDimNum() != 1, OP_LOGE(context, "cacheIndices must be 1D"), return ge::GRAPH_FAILED);
-            OP_CHECK_IF(ciShape.GetDim(0) != batch, OP_LOGE(context, "cacheIndices.size must equal batch"),
+            // Spec decode passes cache indices as [batch, num_spec + 1];
+            // kernels read the first column with cacheIndicesStride.
+            OP_CHECK_IF(ciShape.GetDimNum() != 1 && ciShape.GetDimNum() != 2,
+                        OP_LOGE(context, "cacheIndices must be 1D or 2D"), return ge::GRAPH_FAILED);
+            OP_CHECK_IF(ciShape.GetDim(0) != batch, OP_LOGE(context, "cacheIndices first dim must equal batch"),
                         return ge::GRAPH_FAILED);
+            if (ciShape.GetDimNum() == 2) {
+                OP_CHECK_IF(ciShape.GetDim(1) <= 0, OP_LOGE(context, "cacheIndices second dim must be positive"),
+                            return ge::GRAPH_FAILED);
+                tiling.cacheIndicesStride = ciShape.GetDim(1);
+            }
             tiling.hasCacheIndices = 1;
         }
     }
@@ -405,31 +414,42 @@ static ge::graphStatus GetShapeDtypeInfo(gert::TilingContext *context, CausalCon
     if (!qslAbsent) {
         auto qslDesc2 = context->GetOptionalInputDesc(QUERY_START_LOC_INDEX);
         OP_CHECK_NULL_WITH_CONTEXT(context, qslDesc2);
-        OP_CHECK_IF(qslDesc2->GetDataType() != ge::DT_INT64, OP_LOGE(context, "queryStartLoc dtype must be int64"),
-                    return ge::GRAPH_FAILED);
+        const ge::DataType qslDtype = qslDesc2->GetDataType();
+        OP_CHECK_IF(qslDtype != ge::DT_INT32 && qslDtype != ge::DT_INT64,
+                    OP_LOGE(context, "queryStartLoc dtype must be int32 or int64"), return ge::GRAPH_FAILED);
+        tiling.queryStartLocUseInt64 = (qslDtype == ge::DT_INT64) ? 1 : 0;
     }
 
+    tiling.cacheIndicesUseInt64 = 0;
     if (tiling.hasCacheIndices == 1) {
         auto ciDesc = context->GetOptionalInputDesc(CACHE_INDICES_INDEX);
         OP_CHECK_NULL_WITH_CONTEXT(context, ciDesc);
-        OP_CHECK_IF(ciDesc->GetDataType() != ge::DT_INT64, OP_LOGE(context, "cacheIndices dtype must be int64"),
-                    return ge::GRAPH_FAILED);
+        const ge::DataType ciDtype = ciDesc->GetDataType();
+        OP_CHECK_IF(ciDtype != ge::DT_INT32 && ciDtype != ge::DT_INT64,
+                    OP_LOGE(context, "cacheIndices dtype must be int32 or int64"), return ge::GRAPH_FAILED);
+        tiling.cacheIndicesUseInt64 = (ciDtype == ge::DT_INT64) ? 1 : 0;
     }
 
     if (tiling.hasInitialStateMode == 1) {
         auto ismDesc = context->GetOptionalInputDesc(INITIAL_STATE_MODE_INDEX);
         OP_CHECK_NULL_WITH_CONTEXT(context, ismDesc);
-        OP_CHECK_IF(ismDesc->GetDataType() != ge::DT_INT64, OP_LOGE(context, "initialStateMode dtype must be int64"),
-                    return ge::GRAPH_FAILED);
+        const ge::DataType ismDtype = ismDesc->GetDataType();
+        OP_CHECK_IF(ismDtype != ge::DT_BOOL && ismDtype != ge::DT_INT32 && ismDtype != ge::DT_INT64,
+                    OP_LOGE(context, "initialStateMode dtype must be bool, int32 or int64"), return ge::GRAPH_FAILED);
+        tiling.initialStateModeDtype =
+            (ismDtype == ge::DT_INT64) ? 2 : ((ismDtype == ge::DT_INT32) ? 1 : 0);
     }
 
+    tiling.numAcceptedTokensUseInt64 = 0;
     if (tiling.hasNumAcceptedTokens == 1) {
         OP_CHECK_IF(width != 4, OP_LOGE(context, "numAcceptedTokens is only supported for width=4 currently"),
                     return ge::GRAPH_FAILED);
         auto natDesc = context->GetOptionalInputDesc(NUM_ACCEPTED_TOKENS_INDEX);
         OP_CHECK_NULL_WITH_CONTEXT(context, natDesc);
-        OP_CHECK_IF(natDesc->GetDataType() != ge::DT_INT64, OP_LOGE(context, "numAcceptedTokens dtype must be int64"),
-                    return ge::GRAPH_FAILED);
+        const ge::DataType natDtype = natDesc->GetDataType();
+        OP_CHECK_IF(natDtype != ge::DT_INT32 && natDtype != ge::DT_INT64,
+                    OP_LOGE(context, "numAcceptedTokens dtype must be int32 or int64"), return ge::GRAPH_FAILED);
+        tiling.numAcceptedTokensUseInt64 = (natDtype == ge::DT_INT64) ? 1 : 0;
     }
 
     tiling.dim = dim;

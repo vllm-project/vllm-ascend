@@ -37,11 +37,10 @@ from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import WeightPrefetchConfig, get_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.kv_cache_interface import AttentionSpec
 else:
     VllmConfig = None
 
@@ -58,8 +57,6 @@ ACL_FORMAT_FRACTAL_NZ = 29
 _CUSTOM_OP_ENABLED = None
 _DEVICE_PRINT_OP_REGISTERED = False
 _CURRENT_STREAM = None
-_PREFETCH_STREAM = None
-_WEIGHT_PREFETCH_METHOD = None
 _GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
 _CP_CHUNKEDPREFILL_COMM_STREAM = None
@@ -111,11 +108,35 @@ def get_dsv4_compress_ratio(config: Any, layer_idx: int) -> int:
     return compress_ratios[layer_idx]
 
 
+def model_uses_sfa_sparse(model_config: Any | None) -> bool:
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    hf_config = getattr(model_config, "hf_config", None)
+    return (
+        hf_text_config is not None
+        and hasattr(hf_text_config, "index_topk")
+        and not hasattr(hf_text_config, "compress_ratios")
+        and not hasattr(hf_config, "compress_ratios")
+    )
+
+
+def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> bool:
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+
+    parallel_config = vllm_config.parallel_config
+    return (
+        model_uses_sfa_sparse(vllm_config.model_config)
+        and parallel_config.decode_context_parallel_size > 1
+        and parallel_config.prefill_context_parallel_size == 1
+    )
+
+
 def clear_enable_sp():
     global _ENABLE_SP
     _ENABLE_SP = None
     enable_dsa_cp.cache_clear()
-    enable_dsa_cp_with_layer_shard.cache_clear()
     enable_dsa_cp_with_o_proj_tp.cache_clear()
     _libc_getenv.cache_clear()
 
@@ -481,28 +502,6 @@ def current_stream() -> torch.npu.Stream:
     return _CURRENT_STREAM
 
 
-def prefetch_stream() -> torch.npu.Stream:
-    global _PREFETCH_STREAM
-    if _PREFETCH_STREAM is None:
-        # when this function is called before any stream is set,
-        # we return the default stream.
-        _PREFETCH_STREAM = torch_npu.npu.Stream()
-    return _PREFETCH_STREAM
-
-
-def set_weight_prefetch_method(weight_prefetch_config: WeightPrefetchConfig):
-    global _WEIGHT_PREFETCH_METHOD
-    if _WEIGHT_PREFETCH_METHOD is None:
-        from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
-
-        _WEIGHT_PREFETCH_METHOD = WeightPrefetchMethod(weight_prefetch_config)
-    return _WEIGHT_PREFETCH_METHOD
-
-
-def get_weight_prefetch_method():
-    return _WEIGHT_PREFETCH_METHOD
-
-
 def global_stream() -> torch.npu.Stream:
     global _GLOBAL_STREAM
     if _GLOBAL_STREAM is None:
@@ -735,11 +734,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
         "BailingMoELinearAttention": AscendBailingMoELinearAttention,
     }
-    if vllm_version_is("0.23.0"):
-        from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
-
-        REGISTERED_ASCEND_OPS["FusedMoE"] = AscendFusedMoE
-
     if vllm_config is None:
         try:
             from vllm.config import get_current_vllm_config
@@ -784,11 +778,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "MRotaryEmbedding": AscendMRotaryEmbedding310,
             }
         )
-        if vllm_version_is("0.23.0"):
-            from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310
-
-            REGISTERED_ASCEND_OPS["FusedMoE"] = AscendFusedMoE310
-
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
 
@@ -867,10 +856,6 @@ def mlp_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 0
 
 
-def matmul_allreduce_enable() -> bool:
-    return get_ascend_config().enable_matmul_allreduce
-
-
 def enable_sp_by_pass():
     return get_ascend_config().enable_sp_by_pass
 
@@ -937,30 +922,9 @@ def is_drafter_moe_model(vllm_config: VllmConfig):
             return _IS_DRAFTER_MOE_MODEL
         if "Eagle3DeepseekV2ForCausalLM" in model_configs["architectures"]:
             _IS_DRAFTER_MOE_MODEL = False
+        if "Step3p5MTP" in model_configs["architectures"]:
+            _IS_DRAFTER_MOE_MODEL = False
     return _IS_DRAFTER_MOE_MODEL
-
-
-def speculative_enable_dispatch_gmm_combine_decode(vllm_config: VllmConfig) -> bool:
-    """When draft contains MOE Arch and non-w8a8, disable dispatch_gmm_combine_decode."""
-    if vllm_config.speculative_config is None:
-        return True
-    speculative_method = getattr(vllm_config.speculative_config, "method", None)
-    if speculative_method in [None, "ngram", "suffix"]:
-        return True
-    if speculative_method in ["eagle", "eagle3"]:
-        if is_drafter_moe_model(vllm_config):
-            draft_model_config = vllm_config.speculative_config.draft_model_config
-            hf_text_config = draft_model_config.hf_text_config
-            quant_type = getattr(hf_text_config, "moe_quantize", None)
-            if quant_type is None:
-                quant_type = getattr(hf_text_config, "quantize", None)
-            return quant_type == "w8a8_dynamic"
-        else:
-            return True
-    if speculative_method == "mtp":
-        mtp_quant_type = getattr(vllm_config.model_config.hf_text_config, "mtp_quantize", None)
-        return mtp_quant_type == "w8a8_dynamic"
-    return False
 
 
 def _is_contain_expert(config: Any):
@@ -1140,7 +1104,7 @@ def is_pd_decode_recompute_scheduler_enabled(vllm_config: VllmConfig | None = No
         kv_cfg = vllm_config.kv_transfer_config
         if kv_cfg is None or not kv_cfg.is_kv_consumer or kv_cfg.is_kv_producer:
             return False
-        return get_ascend_config().recompute_scheduler_enable
+        return get_ascend_config().scheduler_config.recompute_scheduler_enable
     except (RuntimeError, AttributeError):
         return False
 
@@ -1208,7 +1172,7 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
     Skipping is applicable for all dense models and for moe models only on ranks
     that act as KV consumers. We skip the DP all-reduce when either:
     - Both the prefill and decode communication methods are MC2 (or FUSED_MC2), or
-    - Decode requires MC2 and ascend_config.recompute_scheduler_enable is True.
+    - Decode requires MC2 and ascend_config.scheduler_config.recompute_scheduler_enable is True.
 
     Skipping means each rank may have a different number of tokens, so MC2 needs
     a non-zero global_bs and must NOT receive mc2_mask.
@@ -1247,7 +1211,9 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
     prefill_must_use_mc2 = needs_mc2(scheduler_config.max_num_batched_tokens)
     # Skip all-reduce if decode requires MC2 and either prefill also
     # requires MC2 or recompute-based scheduler is enabled.
-    return decode_must_use_mc2 and (prefill_must_use_mc2 or get_ascend_config().recompute_scheduler_enable)
+    return decode_must_use_mc2 and (
+        prefill_must_use_mc2 or get_ascend_config().scheduler_config.recompute_scheduler_enable
+    )
 
 
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:
@@ -1258,87 +1224,6 @@ def has_layer_idx(model_instance: torch.nn.Module) -> bool:
     if _HAS_LAYER_IDX is None:
         _HAS_LAYER_IDX = hasattr(model_instance, "model") and hasattr(model_instance.model, "start_layer")
     return _HAS_LAYER_IDX
-
-
-def flashcomm2_enable() -> bool:
-    config_val = get_ascend_config().enable_flashcomm2_parallel_size
-    return config_val > 0
-
-
-def o_shard_enable() -> bool:
-    layer_sharding = get_ascend_config().layer_sharding
-    if layer_sharding is None:
-        return False
-    return "o_proj" in layer_sharding
-
-
-def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
-    flashcomm2_oproj_tp_size = ascend_config.enable_flashcomm2_parallel_size
-    global_tp_size = vllm_config.parallel_config.tensor_parallel_size
-
-    if ascend_config.enable_flashcomm2_parallel_size <= 0:
-        return 0
-
-    logger.info("Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = %s", flashcomm2_oproj_tp_size)
-
-    layer_sharding = ascend_config.layer_sharding or []
-    if layer_sharding:
-        if layer_sharding == ["o_proj"]:
-            logger.info_once("Enable FLASHCOMM2 with o_proj layer sharding for reduced memory consumption.")
-        else:
-            raise ValueError(
-                "FLASHCOMM2 only supports 'o_proj' as the sole layer sharding configuration! "
-                f"Found invalid layer_sharding: {layer_sharding}"
-            )
-    if not ascend_config.enable_flashcomm1:
-        logger.warning_once(
-            "It is recommended to enable FLASHCOMM1 simultaneously when starting FLASHCOMM2 for optimal performance."
-        )
-    if ascend_config.finegrained_tp_config.oproj_tensor_parallel_size > 0:
-        raise AssertionError(
-            "flashcomm2_oproj_tensor_parallel_size cannot be enabled simultaneously with oproj_tensor_parallel_size"
-        )
-    if global_tp_size <= flashcomm2_oproj_tp_size:
-        raise AssertionError(
-            f"flashcomm2_oproj_tensor_parallel_size ({flashcomm2_oproj_tp_size}) cannot exceed "
-            f"global tensor parallel size ({global_tp_size})"
-        )
-    if global_tp_size % flashcomm2_oproj_tp_size != 0:
-        raise AssertionError(
-            f"Global tensor parallel size ({global_tp_size}) must be divisible by "
-            f"flashcomm2_oproj_tensor_parallel_size ({flashcomm2_oproj_tp_size})"
-        )
-    if vllm_config.kv_transfer_config is None:
-        logger.warning_once(
-            "It is recommended to enable FLASHCOMM2 in P-scenario deployments, enable it in hybrid deployment "
-            "may lead to decode performance degradation."
-        )
-    if vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer:
-        raise AssertionError(
-            "FLASHCOMM2 primarily targets P-scenario deployments, with additional support "
-            "for hybrid deployment scenarios. It is not applicable in D-scenario environments."
-        )
-
-    return flashcomm2_oproj_tp_size
-
-
-def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:
-    # Reorganize batch_ids so that, after the all2all and reduce-scatter operation,
-    # each batch_id corresponds to the rank_id within the DP domain.
-    # For example, when DP = [0, 1, 2, ..., 15] and flashcomm2_oproj_tensor_parallel_size = 2,
-    # the reorganized batch_ids will be [[batch0, batch8], [batch1, batch9], ..., [batch7, batch15]].
-    flashcomm2_otp_size = get_ascend_config().flashcomm2_oproj_tensor_parallel_size
-    num_oproj_tensor_parallel_groups: int = global_tp_size // flashcomm2_otp_size
-
-    reorgnized_batch_ids = []
-    for i in range(num_oproj_tensor_parallel_groups):
-        ranks = []
-        for j in range(flashcomm2_otp_size):
-            rank_idx = i + j * num_oproj_tensor_parallel_groups
-            ranks.append(rank_idx)
-        reorgnized_batch_ids.append(ranks)
-
-    return reorgnized_batch_ids
 
 
 def refresh_block_size(vllm_config):
@@ -1511,20 +1396,6 @@ def enable_dsa_cp() -> bool:
 
 
 @lru_cache(maxsize=1)
-def enable_dsa_cp_with_layer_shard() -> bool:
-    if not enable_dsa_cp():
-        return False
-    from vllm.config import get_current_vllm_config
-
-    vllm_config = get_current_vllm_config()
-    kv_transfer_config = vllm_config.kv_transfer_config
-    # Layer sharding broadcast only pays off when it can be hidden by the
-    # heavier prefill-stage compute, so enable it only on the P-side instance.
-    is_prefill_instance = kv_transfer_config is not None and kv_transfer_config.kv_role == "kv_producer"
-    return is_prefill_instance
-
-
-@lru_cache(maxsize=1)
 def enable_dsa_cp_with_o_proj_tp() -> bool:
     if not enable_dsa_cp():
         return False
@@ -1692,11 +1563,6 @@ def kv_cache_spec_uses_sparse_c8(kv_cache_spec) -> bool:
     from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
     return isinstance(kv_cache_spec, AscendMLAAttentionSpec) and bool(getattr(kv_cache_spec, "cache_sparse_c8", False))
-
-
-def sparse_kv_cache_has_indexer(kv_cache_spec: AttentionSpec) -> bool:
-    sparse_head_dim = getattr(kv_cache_spec, "sparse_head_dim", None)
-    return sparse_head_dim is not None and len(sparse_head_dim) == 3 and sparse_head_dim[2] > 0
 
 
 def is_hidden_state_cache_spec(spec) -> bool:

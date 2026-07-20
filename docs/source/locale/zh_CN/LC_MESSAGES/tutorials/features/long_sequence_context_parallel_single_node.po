@@ -126,9 +126,6 @@ msgstr ""
 "- \"cudagraph_capture_sizes\"：表示不同级别的图模式。默认值为 [1, 2, 4, 8, 16, 24, 32, 40,..., `--max-num-seqs`]。在图模式下，不同级别图的输入是固定的，级别之间的输入会自动填充到下一级别。目前建议使用默认设置。仅在部分场景下需要单独设置以达到最佳性能。\n"
 "- `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` 表示启用 Flashcomm1 优化。目前，该优化仅在 tp_size > 1 的 MoE 场景中支持。"
 
-msgid "**Notice:**"
-msgstr "**注意：**"
-
 msgid ""
 "- tp_size needs to be divisible by dcp_size\n"
 "- decode context parallel size must be less than or equal to max_dcp_size, where max_dcp_size = tensor_parallel_size // total_num_kv_heads."
@@ -150,20 +147,8 @@ msgid ""
 "`Qwen3-235B-A22B-w8a8` for reference only."
 msgstr "2. 执行后可获取结果，以下为`Qwen3-235B-A22B-w8a8`的结果，仅供参考。"
 
-msgid ""
-"| dataset  | version | metric | mode | vllm-api-general-chat |\n"
-"|----------| ----- | ----- | ----- |-----------------------|\n"
-"| aime2024 | - | accuracy | gen | 83.33 |"
-msgstr ""
-"| dataset  | version | metric | mode | vllm-api-general-chat |\n"
-"|----------| ----- | ----- | ----- |-----------------------|\n"
-"| aime2024 | - | accuracy | gen | 83.33 |"
-
 msgid "## Performance"
 msgstr "## 性能"
-
-msgid "### Using AISBench"
-msgstr "### 使用AISBench"
 
 msgid ""
 "Refer to [Using AISBench for performance "
@@ -203,17 +188,17 @@ msgid ""
 "After about several minutes, you can get the performance evaluation result."
 msgstr "大约几分钟后，即可获取性能评估结果。"
 
-msgid ""
-"| dataset | version | metric      | mode | ttft   |\n"
-"|---------| ----- |-------------|------|--------|\n"
-"| random  | - | performance | perf | 17.36s |"
-msgstr ""
-"| dataset | version | metric      | mode | ttft   |\n"
-"|---------| ----- |-------------|------|--------|\n"
-"| random  | - | performance | perf | 17.36s |"
-
 msgid "**Notice:**"
 msgstr "**注意：**"
 
 msgid "### Using AISBench"
 msgstr "### 使用AISBench"
+
+msgid "| dataset  | version | metric | mode | vllm-api-general-chat |"
+msgstr "| 数据集  | 版本 | 指标 | 模式 | vllm-api-general-chat |"
+
+msgid "| dataset | version | metric      | mode | ttft   |"
+msgstr "| 数据集 | 版本 | 指标      | 模式 | ttft   |"
+
+msgid "| random  | - | performance | perf | 17.36s |"
+msgstr "| random  | - | performance | perf | 17.36s |"

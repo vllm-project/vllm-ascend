@@ -72,24 +72,10 @@ msgstr "6. 检查 NPU TLS 配置"
 msgid "=== \"A2\""
 msgstr "=== \"A2\""
 
-msgid "1. Single Node Verification:"
-msgstr "1. 单节点验证："
-
 msgid ""
 "Execute the following commands on each node in sequence. The results must "
 "all be `success` and the status must be `UP`:"
 msgstr "在每个节点上依次执行以下命令。结果必须全部为 `success`，状态必须为 `UP`："
-
-msgid "2. Check NPU HCCN Configuration:"
-msgstr "2. 检查 NPU HCCN 配置："
-
-msgid ""
-"Ensure that the hccn.conf file exists in the environment. If using Docker, "
-"mount it into the container."
-msgstr "确保环境中存在 hccn.conf 文件。如果使用 Docker，请将其挂载到容器中。"
-
-msgid "3. Get NPU IP Addresses"
-msgstr "3. 获取 NPU IP 地址"
 
 msgid "4. Cross-Node PING Test"
 msgstr "4. 跨节点 PING 测试"
@@ -164,17 +150,6 @@ msgstr ""
 "在 Ascend NPU 上，Mooncake 使用 AscendDirectTransport 进行 RDMA 数据传输，该传输会在 `[20000,"
 " 20000 + npu_per_node × 1000)` 范围内随机分配端口。如果 `kv_port` "
 "与此范围重叠，可能会发生间歇性端口冲突。为避免此问题，请根据下表配置 `kv_port`："
-
-msgid ""
-"| NPUs per Node | Reserved Port Range | Recommended kv_port |\n"
-"|---------------|---------------------|---------------------|\n"
-"| 8             | 20000 - 27999       | >= 28000            |\n"
-"| 16            | 20000 - 35999       | >= 36000            |"
-msgstr ""
-"| 每节点 NPU 数量 | 保留端口范围 | 推荐 kv_port |\n"
-"|---------------|---------------------|---------------------|\n"
-"| 8             | 20000 - 27999       | >= 28000            |\n"
-"| 16            | 20000 - 35999       | >= 36000            |"
 
 msgid ""
 "If you occasionally see `zmq.error.ZMQError: Address already in use` during "
@@ -687,25 +662,6 @@ msgid "=== \"Non-layerwise\""
 msgstr "=== \"非分层\""
 
 msgid ""
-"|Parameter  | meaning |\n"
-"| --- | --- |\n"
-"| --port | Proxy service Port |\n"
-"| --host | Proxy service Host IP|\n"
-"| --prefiller-hosts | Hosts of prefiller nodes |\n"
-"| --prefiller-ports | Ports of prefiller nodes |\n"
-"| --decoder-hosts | Hosts of decoder nodes |\n"
-"| --decoder-ports | Ports of decoder nodes |"
-msgstr ""
-"|参数  | 含义 |\n"
-"| --- | --- |\n"
-"| --port | 代理服务端口 |\n"
-"| --host | 代理服务主机 IP|\n"
-"| --prefiller-hosts | 预填充节点的主机 |\n"
-"| --prefiller-ports | 预填充节点的端口 |\n"
-"| --decoder-hosts | 解码器节点的主机 |\n"
-"| --decoder-ports | 解码器节点的端口 |"
-
-msgid ""
 "You can get the proxy program in the repository's examples, "
 "[load\\_balance\\_proxy\\_server\\_example.py](https://github.com/vllm-"
 "project/vllm-"
@@ -769,18 +725,8 @@ msgstr "## 验证"
 msgid "Check service health using the proxy server endpoint."
 msgstr "使用代理服务器端点检查服务健康状态。"
 
-msgid ""
-"Execute the following commands on each node in sequence. The results must "
-"all be `success` and the status must be `UP`:"
-msgstr "依次在每个节点上执行以下命令，结果必须全部为 `success`，且状态必须为 `UP`："
-
 msgid "1. Single Node Verification:"
 msgstr "1. 单节点验证："
-
-msgid ""
-"Execute the following commands on each node in sequence. The results must "
-"all be `success` and the status must be `UP`:"
-msgstr "依次在每个节点上执行以下命令，结果必须全部为 `success`，且状态必须为 `UP`："
 
 msgid "2. Check NPU HCCN Configuration:"
 msgstr "2. 检查 NPU HCCN 配置："
@@ -792,3 +738,38 @@ msgstr "确保环境中存在 hccn.conf 文件。如果使用 Docker，请将其
 
 msgid "3. Get NPU IP Addresses"
 msgstr "3. 获取 NPU IP 地址"
+
+msgid "| NPUs per Node | Reserved Port Range | Recommended kv_port |"
+msgstr "| 每节点NPU数 | 预留端口范围 | 推荐kv_port |"
+
+msgid "|Parameter  | meaning |"
+msgstr "| 参数 | 含义 |"
+
+msgid "| --port | Proxy service Port |"
+msgstr "| --port | 代理服务端口 |"
+
+msgid "| --host | Proxy service Host IP|"
+msgstr "| --host | 代理服务主机IP |"
+
+msgid "| --prefiller-hosts | Hosts of prefiller nodes |"
+msgstr "| --prefiller-hosts | 预填充节点主机 |"
+
+msgid "| --prefiller-ports | Ports of prefiller nodes |"
+msgstr "| --prefiller-ports | 预填充节点端口 |"
+
+msgid "| --decoder-hosts | Hosts of decoder nodes |"
+msgstr "| --decoder-hosts | 解码器节点主机 |"
+
+msgid "| --decoder-ports | Ports of decoder nodes |"
+msgstr "| --decoder-ports | 解码器节点端口 |"
+
+msgid ""
+"> **Note**: If speculative decoding is enabled, `num_speculative_tokens` should be subject to one of the following conditions:\n"
+">\n"
+"> 1. Hybrid Mamba models (e.g., Qwen-Next and Qwen3.5 series): `num_speculative_tokens` should be equal on P nodes and D nodes.\n"
+"> 2. Other models: `num_speculative_tokens` on P nodes should be 1, and `num_speculative_tokens` on D nodes should be greater or equal to 1."
+msgstr ""
+"> **注意**：如果启用了推测解码，`num_speculative_tokens` 需满足以下条件之一：\n"
+">\n"
+"> 1. 混合Mamba模型（例如Qwen-Next和Qwen3.5系列）：P节点和D节点上的 `num_speculative_tokens` 应相等。\n"
+"> 2. 其他模型：P节点上的 `num_speculative_tokens` 应为1，D节点上的 `num_speculative_tokens` 应大于或等于1。"
