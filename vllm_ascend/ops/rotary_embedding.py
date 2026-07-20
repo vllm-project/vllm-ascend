@@ -161,9 +161,7 @@ def rope_forward_oot(
     is_neox_style: bool,
     offsets: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    # NOTE: key is None (Gemma4 MTP Q-only) is handled by the caller
-    # (AscendRotaryEmbedding.forward_oot) via gemma4_q_only_rope; this shared
-    # op only handles the normal key-is-not-None path.
+    # Gemma4 MTP Q-only (key=None) is handled by the caller.
     query_shape, key_shape = query.shape, key.shape
     if offsets is not None:
         raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
@@ -245,13 +243,8 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         is_neox_style = self.is_neox_style
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override
-        # Gemma4 MTP Q-only attention passes key=None (K/V come from the
-        # target's KV cache).  key is None is the sole signal: only Gemma4
-        # MTP ever calls RoPE without a key, so this gate is implicitly
-        # Gemma4-only.  Do NOT add a get_current_vllm_config() gate here —
-        # during draft forward the current config is the draft model's config,
-        # which has no speculative_config, so a config-based gate would
-        # wrongly fall through and skip Q-only RoPE (regresses pos1/pos2).
+        # Gemma4 MTP Q-only: key=None (K/V from target cache). Gate on key,
+        # not config — draft forward's config has no speculative_config.
         # See ops.rope_q_only.gemma4_q_only_rope.
         if key is None:
             from vllm_ascend.ops.rope_q_only import gemma4_q_only_rope
