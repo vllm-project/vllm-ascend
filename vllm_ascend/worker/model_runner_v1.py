@@ -2434,15 +2434,12 @@ class NPUModelRunner(GPUModelRunner):
         # the target model runs in FDO graph mode because reshape_and_cache
         # KV writes are async on the NPU stream.
         _target_is_fdo = self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        # Proposers that read the target's KV cache (e.g. Gemma4 MTP) override
-        # notify_target_forward_done to record an NPU event they will wait on
-        # before reading the cache; the Ascend base proposer's hook is a no-op,
-        # so Eagle/DFlash/etc. pay only a single Python call, and non-Ascend
-        # proposers (Medusa/Ngram/...) are skipped via the isinstance gate.
+        # Only Gemma4 MTP reads the target's KV cache and needs event sync;
+        # Eagle/DFlash/etc. own their KV cache and are skipped by the gate.
         if (
             _target_is_fdo
             and getattr(self, "drafter", None) is not None
-            and isinstance(self.drafter, AscendSpecDecodeBaseProposer)
+            and isinstance(self.drafter, AscendGemma4Proposer)
         ):
             self.drafter.notify_target_forward_done()
         with record_function_or_nullcontext("post process"):
@@ -3460,11 +3457,9 @@ class NPUModelRunner(GPUModelRunner):
             # MTP: Capture per-group block tables for multi-group proposers
             # (e.g. Gemma4 MTP). Each KV cache group has its own block_table;
             # the draft model needs all of them to read the correct KV cache.
-            # Multi-group proposers override the hook; the Ascend base no-ops
-            # it, and non-Ascend proposers are skipped via the isinstance gate.
             if (
                 self.speculative_config
-                and isinstance(self.drafter, AscendSpecDecodeBaseProposer)
+                and isinstance(self.drafter, AscendGemma4Proposer)
             ):
                 self.drafter.set_per_group_block_table(kv_cache_gid, cm.block_table_tensor)
             if self.enable_hamming_sparse is True:
