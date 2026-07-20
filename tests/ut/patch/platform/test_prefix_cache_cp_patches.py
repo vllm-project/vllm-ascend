@@ -308,6 +308,33 @@ def test_get_kv_cache_coordinator_uses_ascend_for_deepseek_v4(monkeypatch) -> No
     assert coordinator is sentinel
 
 
+def test_find_longest_cache_hit_per_group_returns_hit_length_per_group() -> None:
+    kv_cache_config = _make_hybrid_kv_cache_config(
+        full_block_size=16,
+        mamba_block_size=16,
+    )
+    coordinator = AscendHybridKVCacheCoordinator(
+        kv_cache_config=kv_cache_config,
+        max_model_len=128,
+        use_eagle=False,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=1,
+        pcp_world_size=1,
+        hash_block_size=16,
+        max_num_batched_tokens=128,
+    )
+
+    hit_blocks, hit_lengths = coordinator.find_longest_cache_hit_per_group(
+        block_hashes=[],
+        max_cache_hit_length=0,
+    )
+
+    assert hit_blocks == ([], [])
+    assert hit_lengths == (0, 0)
+    assert max(hit_lengths) == 0
+
+
 class _FakeEagleManager:
     def __init__(self) -> None:
         self.use_eagle = False
