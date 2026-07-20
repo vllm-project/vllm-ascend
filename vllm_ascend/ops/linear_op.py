@@ -285,6 +285,16 @@ class OProjRowParallelOp(CustomRowParallelOp):
         self.input_size_per_partition = self.layer.input_size_per_partition
 
 
+def _is_multimodal_encoder_prefix(prefix: str) -> bool:
+    multimodal_encoder_prefixes = (
+        "vision_tower",
+        "vision_model",
+        "multi_modal_projector",
+        "patch_merge_mlp",
+    )
+    return any(part in prefix for part in multimodal_encoder_prefixes)
+
+
 class SequenceColumnParallelOp(CustomColumnParallelOp):
     def apply_impl(self, input_: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         """Linear layer with column parallelism.
@@ -452,7 +462,7 @@ def _get_column_parallel_op(
         return DSV4OProjColumnParallelOp(layer)
     if "gate_up_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
         return MLPColumnParallelOp(layer)
-    if enable_sp():
+    if enable_sp() and not _is_multimodal_encoder_prefix(prefix):
         # "share_expert" added for Step3p5
         if "shared_expert" in prefix or "share_expert" in prefix:
             return None
@@ -462,6 +472,7 @@ def _get_column_parallel_op(
             "qkv_proj",  # qkv linear of most LLMs
             "conv1d",  # gated deltanet of Qwen3 Next
             "query_key_value",  # qkv linear of Bailing
+            "indexer_proj",  # indexer linear of M3
             "g_proj",  # attention gate projection of Step3p5
         ]
         for a_prefix in sp_column_prefix:
@@ -480,7 +491,8 @@ def _get_row_parallel_op(
         return MLPRowParallelOp(layer)
     if "o_proj" in prefix and oproj_tp_enable():
         return OProjRowParallelOp(layer)
-    if enable_sp():
+
+    if enable_sp() and not _is_multimodal_encoder_prefix(prefix):
         # "share_expert" added for Step3p5
         if "shared_expert" in prefix or "share_expert" in prefix:
             return None
