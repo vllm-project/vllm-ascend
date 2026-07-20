@@ -15,6 +15,9 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
 #### Core Supported Models
 
+:::::{tab-set}
+::::{tab-item} A2/A3
+
 | Model                         | Support   | Note                                                                 | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | MLP Weight Prefetch | Doc |
 |-------------------------------|-----------|----------------------------------------------------------------------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------|-----------------|---------------|-------------------------------|--------------------|--------------------|---------------|---------------------|-----|
 | DeepSeek V4-Flash               | 🔵         |                                                                      | ✅ | A2/A3 | ✅ | ✅ |✅|| ✅ |✅| ✅ || ✅ | ✅ | ✅ || ✅ | 1M || [DeepSeek V4-Flash](../../tutorials/models/DeepSeek-V4-Flash.md) |
@@ -34,6 +37,18 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | DeepseekOCR2                  | ✅        |                                                                      | ✅ | A2/A3 ||✅||||✅|||||||||| [DeepSeekOCR2](../../tutorials/models/DeepSeekOCR2.md) |
 | MiniMax-M2.5/2.7                  | ✅        |                                                                      | ✅ | A2/A3/Ascend950 (Ascend950 experimental) |✅|✅|✅|❌|✅|✅|✅|🟡|✅|✅|✅|🟡|✅|200k|🟡| [MiniMax-M2](../../tutorials/models/MiniMax-M2.md) |
 | Qwen2.5-Math-RM-72B           | ✅        | vllm-rm, tensor_parallel_size=4, max_model_len=4096 | ✅ | A2 | ✅ | 🟡 | 🟡 | ❌ | 🟡 | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 4096 | 🟡 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |
+
+::::
+
+::::{tab-item} Atlas inference products
+
+| Model | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
+|-------|---------|------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------------------|--------------------|--------------------|---------------|-----|
+| Qwen3-Dense | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 20k | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
+| Qwen3-30B-A3B | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 16k | [Qwen3-30B-A3B](../../tutorials/models/Qwen3-30B-A3B.md) |
+
+::::
+:::::
 
 #### Extended Compatible Models
 
@@ -82,6 +97,9 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
 #### Core Supported Models
 
+:::::{tab-set}
+::::{tab-item} A2/A3
+
 | Model                          | Support       | Note                                                                 | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | MLP Weight Prefetch | Doc |
 |--------------------------------|---------------|----------------------------------------------------------------------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------|-----------------|---------------|-------------------------------|--------------------|--------------------|---------------|---------------------|-----|
 | Qwen3-VL                       | ✅            |                                                                      ||A2/A3|||||||✅|||||✅|✅||| [Qwen-VL-Dense](../../tutorials/models/Qwen-VL-Dense.md) |
@@ -91,6 +109,23 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Qwen3.6-35B-A3B                | 🔵            |                                                                      |✅| A2/A3 |✅|✅|✅||🔵|✅|✅||✅|✅|❌|✅|✅|262144|| [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
 | Qwen3-Omni-30B-A3B-Thinking    | 🔵            |                                                                      ||A2/A3|||||||✅||✅|||||||[Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md)|
 | Kimi-K2.5/Kimi-K2.6    | ✅            |                                                                      ||A2/A3||✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|262144||[Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)/[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md)|
+
+::::
+
+::::{tab-item} Atlas inference products
+
+| Model | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
+|-------|---------|------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------------------|--------------------|--------------------|---------------|-----|
+| Qwen3-VL | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 16k | [Qwen-VL-Dense](../../tutorials/models/Qwen-VL-Dense.md) |
+| Qwen3.5-Dense | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 16k | [Qwen3.5-Dense](../../tutorials/models/Qwen3.5-Dense.md) |
+| Qwen3.5-35B-A3B | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 16k | |
+| Qwen3.6-27B | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
+| Qwen3.6-35B-A3B | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 16k | [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
+| PaddleOCR-VL | ✅ |  | ❌ | Atlas inference products | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | 16k | [PaddleOCR-VL](../../tutorials/models/PaddleOCR-VL.md) |
+| Qwen3-ASR | ✅ |  | ❌ | Atlas inference products | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | 🟡 | ❌ | ✅ | ✅ | 4096 | [Qwen3-ASR-1.7B](../../tutorials/models/Qwen3-ASR-1.7B.md) |
+
+::::
+:::::
 
 #### Extended Compatible Models
 
