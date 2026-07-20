@@ -53,9 +53,7 @@ from vllm_ascend.attention.msa_m3 import (  # noqa: E402
     MiniMaxM3SparseAttention as AscendMiniMaxM3SparseAttentionBase,
 )
 
-_ORIGINAL_MINIMAX_M3_MAYBE_ADD_HIDDEN_STATE = (
-    minimax_m3_model.MiniMaxM3Model._maybe_add_hidden_state
-)
+_ORIGINAL_MINIMAX_M3_MAYBE_ADD_HIDDEN_STATE = minimax_m3_model.MiniMaxM3Model._maybe_add_hidden_state
 
 
 class AscendMiniMaxM3SparseAttention(AscendMiniMaxM3SparseAttentionBase):
@@ -123,15 +121,9 @@ def _maybe_add_minimax_m3_hidden_state(
     hidden_states: torch.Tensor,
     residual: torch.Tensor | None,
 ) -> list[torch.Tensor]:
-    if (
-        residual is not None
-        and layer_idx in self.aux_hidden_state_layers
-        and hidden_states.size(0) != residual.size(0)
-    ):
+    if residual is not None and layer_idx in self.aux_hidden_state_layers and hidden_states.size(0) != residual.size(0):
         hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states)
-    return _ORIGINAL_MINIMAX_M3_MAYBE_ADD_HIDDEN_STATE(
-        self, aux_hidden_states, layer_idx, hidden_states, residual
-    )
+    return _ORIGINAL_MINIMAX_M3_MAYBE_ADD_HIDDEN_STATE(self, aux_hidden_states, layer_idx, hidden_states, residual)
 
 
 def _apply_minimax_m3_vision_rotary_emb(
@@ -277,9 +269,7 @@ def _load_minimax_m3_weights(
 # that are hardware-specific on Ascend.
 minimax_m3_model.MiniMAXGemmaRMSNorm = GemmaRMSNorm
 minimax_m3_model.MiniMaxM3Attention.forward = _forward_minimax_m3_attention
-minimax_m3_model.MiniMaxM3Model._maybe_add_hidden_state = (
-    _maybe_add_minimax_m3_hidden_state
-)
+minimax_m3_model.MiniMaxM3Model._maybe_add_hidden_state = _maybe_add_minimax_m3_hidden_state
 minimax_m3_model.MiniMaxM3SparseAttention = AscendMiniMaxM3SparseAttention
 minimax_m3_model.MiniMaxM3Model.load_weights = _load_minimax_m3_weights
 MiniMaxVLAttention._apply_rotary_emb = _apply_minimax_m3_vision_rotary_emb

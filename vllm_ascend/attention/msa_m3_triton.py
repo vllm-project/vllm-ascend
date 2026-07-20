@@ -577,8 +577,8 @@ def _decode_index_score_kernel(
         qk = tl.where(pos_mask & q_mask[:, None], qk, float("-inf"))
         score = tl.max(qk, axis=1)  # [HQ]
         mask_off = q_ids * stride_mask_q + blk * stride_mask_k
-        is_init = tl.load(init_mask_ptr + mask_off)!=0
-        is_local = tl.load(local_mask_ptr + mask_off)!=0
+        is_init = tl.load(init_mask_ptr + mask_off) != 0
+        is_local = tl.load(local_mask_ptr + mask_off) != 0
         score = tl.where(is_local, 1e29, tl.where(is_init, 1e30, score))
         tl.store(
             score_ptr + h_offsets * stride_s_h + q_ids * stride_s_n + blk * stride_s_k,

@@ -339,3 +339,53 @@ def test_stream_wrapper_does_not_forward_legacy_reasoning_parser_kwarg():
         ]
 
     assert asyncio.run(run_wrapper()) == ["data: [DONE]\n\n"]
+
+
+def test_chat_completion_logging_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_LOG_CHAT_COMPLETIONS", "0")
+    logged_messages = []
+    monkeypatch.setattr(
+        usage_patch.logger,
+        "info",
+        lambda *args, **kwargs: logged_messages.append(args),
+    )
+
+    usage_patch._log_chat_completion_request(
+        "request-id",
+        "model-name",
+        _fake_request(model="model-name"),
+    )
+    usage_patch._log_chat_completion_response(
+        "request-id",
+        "model-name",
+        {"choices": []},
+    )
+
+    assert logged_messages == []
+
+
+def test_chat_completion_logging_records_request_and_response(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_LOG_CHAT_COMPLETIONS", "1")
+    logged_messages = []
+    monkeypatch.setattr(
+        usage_patch.logger,
+        "info",
+        lambda *args, **kwargs: logged_messages.append(args),
+    )
+
+    usage_patch._log_chat_completion_request(
+        "request-id",
+        "model-name",
+        _fake_request(model="model-name"),
+    )
+    usage_patch._log_chat_completion_response(
+        "request-id",
+        "model-name",
+        {"choices": [{"message": {"content": "hello"}}]},
+    )
+
+    assert len(logged_messages) == 2
+    assert "Chat completion request" in logged_messages[0][0]
+    assert "request-id" in logged_messages[0]
+    assert "Chat completion response" in logged_messages[1][0]
+    assert "hello" in logged_messages[1][-1]

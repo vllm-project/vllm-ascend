@@ -30,6 +30,9 @@ from vllm.entrypoints.openai.chat_completion import protocol as chat_protocol
 from vllm.entrypoints.openai.chat_completion import serving as chat_serving
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine import protocol as engine_protocol
+from vllm.logger import logger
+
+from vllm_ascend import envs
 
 
 class _AscendCompletionTokenUsageInfo(engine_protocol.OpenAIBaseModel):
@@ -98,6 +101,48 @@ def _call_with_supported_kwargs(func: Callable, *args, **kwargs):
     if not any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()):
         kwargs = {key: value for key, value in kwargs.items() if key in signature.parameters}
     return func(*args, **kwargs)
+
+
+def _serialize_chat_payload(payload: Any) -> str:
+    if isinstance(payload, str):
+        return payload
+
+    if hasattr(payload, "model_dump"):
+        payload = payload.model_dump(mode="json", exclude_none=True)
+    elif hasattr(payload, "dict"):
+        payload = payload.dict(exclude_none=True)
+
+    return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def _log_chat_completion_request(
+    request_id: str,
+    model_name: str,
+    request: chat_protocol.ChatCompletionRequest,
+) -> None:
+    if not envs.VLLM_ASCEND_LOG_CHAT_COMPLETIONS:
+        return
+    logger.info(
+        "Chat completion request. request_id=%s, model=%s, payload=%s",
+        request_id,
+        model_name,
+        _serialize_chat_payload(request),
+    )
+
+
+def _log_chat_completion_response(
+    request_id: str,
+    model_name: str,
+    response: Any,
+) -> None:
+    if not envs.VLLM_ASCEND_LOG_CHAT_COMPLETIONS:
+        return
+    logger.info(
+        "Chat completion response. request_id=%s, model=%s, payload=%s",
+        request_id,
+        model_name,
+        _serialize_chat_payload(response),
+    )
 
 
 def _coerce_reasoning_token_count(value: object) -> int:
@@ -630,6 +675,7 @@ async def _wrapped_chat_completion_stream_generator(
     **extra_kwargs: Any,
 ):
     original_stream_generator = self._ascend_original_chat_completion_stream_generator_for_reasoning_usage
+    _log_chat_completion_request(request_id, model_name, request)
     state = _create_usage_tracking_state(
         self,
         request,
@@ -651,7 +697,9 @@ async def _wrapped_chat_completion_stream_generator(
         request_metadata,
         **kwargs,
     ):
-        yield _inject_stream_usage_details(data, state)
+        response = _inject_stream_usage_details(data, state)
+        _log_chat_completion_response(request_id, model_name, response)
+        yield response
 
     _set_stream_final_usage(request_metadata, state)
 
@@ -670,6 +718,7 @@ async def _wrapped_chat_completion_full_generator(
     **extra_kwargs: Any,
 ):
     original_full_generator = self._ascend_original_chat_completion_full_generator_for_reasoning_usage
+    _log_chat_completion_request(request_id, model_name, request)
     state = _UsageTrackingState(
         completion_tokens=[],
         reasoning_tokens=[],
@@ -698,6 +747,7 @@ async def _wrapped_chat_completion_full_generator(
     )
 
     if not isinstance(response, chat_protocol.ChatCompletionResponse):
+        _log_chat_completion_response(request_id, model_name, response)
         return response
 
     reasoning_tokens = _count_full_response_reasoning_tokens(
@@ -710,6 +760,7 @@ async def _wrapped_chat_completion_full_generator(
     )
     _set_usage_details(response.usage, reasoning_tokens)
     _set_usage_details(request_metadata.final_usage_info, reasoning_tokens)
+    _log_chat_completion_response(request_id, model_name, response)
     return response
 
 

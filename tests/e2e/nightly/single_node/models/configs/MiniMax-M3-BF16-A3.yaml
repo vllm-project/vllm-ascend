@@ -35,8 +35,8 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--additional-config"
-      - '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":true,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2}'
-    benchmarks:
+      - '{"enable_reduce_sample": true, "enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":true,"fuse_norm_quant":false},"multistream_overlap_shared_expert":false,"weight_nz_mode":2}'
+benchmarks:
       acc:
         case_type: accuracy
         dataset_path: vllm-ascend/gsm8k-lite
