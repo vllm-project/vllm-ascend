@@ -502,12 +502,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if torch.equal(layer_module.shared_head.head.weight, model.lm_head.weight):
                     layer_module.shared_head.head = model.lm_head
 
-        _has_full = self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        # Gemma4 MTP draft: draft follows the target's graph mode. When target
-        # uses FULL cudagraph, draft is also wrapped in ACLGraphWrapper(FULL)
-        # (dual-graph). Draft attention routes to PA (head_dim=512) / FIA
-        # (head_dim=256) under graph instead of SDPA.
-        if _has_full and self.use_cuda_graph:
+        if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
             logger.info(
                 "[spec_decode/base] Wrapping draft model with ACLGraphWrapper:"
                 " runtime_mode=FULL, use_eagle=%s, enable_enpu=%s",
