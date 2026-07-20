@@ -15,8 +15,8 @@ def _chunk_kkt_reference(
     num_v_heads = beta.shape[-1]
     output = torch.zeros(
         batch,
-        max_seqlen,
         num_v_heads,
+        max_seqlen,
         chunk_size,
         device=k.device,
         dtype=torch.float32,
@@ -38,7 +38,7 @@ def _chunk_kkt_reference(
                 gate_diff = gate[:, None] - gate[None, :]
                 score *= torch.exp(torch.where(gate_diff <= 0, gate_diff, float("-inf")))
                 score *= beta[batch_idx, chunk_start:chunk_end, head_idx].float()[:, None]
-                output[batch_idx, chunk_start:chunk_end, head_idx, : chunk_end - chunk_start] = torch.tril(
+                output[batch_idx, head_idx, chunk_start:chunk_end, : chunk_end - chunk_start] = torch.tril(
                     score,
                     diagonal=-1,
                 )

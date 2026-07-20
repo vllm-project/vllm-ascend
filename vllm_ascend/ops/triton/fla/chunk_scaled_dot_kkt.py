@@ -87,7 +87,11 @@ def chunk_scaled_dot_kkt_fwd_kernel(
 
         b_A *= b_beta[:, None]
         b_A = tl.where(o_t_fp32[:, None] > o_t_fp32[None, :], b_A, 0)
-        p_A = tl.make_block_ptr(A + (bos * H + i_h) * BT, (T, BT), (BT * H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+        if IS_VARLEN:
+            a_offset = (i_h * T_max + bos) * BT
+        else:
+            a_offset = (i_b * H + i_h) * T_max * BT
+        p_A = tl.make_block_ptr(A + a_offset, (T, BT), (BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
         tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -121,7 +125,7 @@ def chunk_scaled_dot_kkt_fwd(
             The dtype of the output tensor. Default: `torch.float32`
 
     Returns:
-        beta * K * K^T of shape `[B, T, H, BT]` where `BT` is the chunk size.
+        beta * K * K^T of shape `[B, H, T, BT]` where `BT` is the chunk size.
     """
     B, Hg, T, K = k.shape
 
@@ -130,7 +134,7 @@ def chunk_scaled_dot_kkt_fwd(
     if cu_seqlens is not None and chunk_indices is None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
+    A = torch.empty(B, H, T, BT, device=k.device, dtype=output_dtype)
 
     num_core = get_aicore_num()
     bh_step = B * H

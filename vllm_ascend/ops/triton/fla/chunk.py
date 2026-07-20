@@ -17,6 +17,7 @@ from .chunk_delta_hupdate import chunk_gated_delta_rule_fwd_hupdate
 from .chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from .cumsum import chunk_local_cumsum
 from .l2norm import l2norm_fwd
+from .solve_tril import solve_tril as solve_tril_fast
 from .utils import input_guard, prepare_chunk_indices, prepare_final_chunk_indices
 
 
@@ -45,25 +46,24 @@ def solve_tril(
     cu_seqlens=None,
     chunk_indices_large_block=None,
     chunk_indices_bt=None,
+    chunk_indices_32=None,
     output_dtype: torch.dtype = torch.float,
 ) -> torch.Tensor:
-    del chunk_indices_large_block
     output_dtype = A.dtype if output_dtype is None else output_dtype
     A_for_kernel = A.to(output_dtype).contiguous()
-    if cu_seqlens is None:
-        return torch.ops._C_ascend.npu_solve_tri(A_for_kernel, layout="bsnd")
-
-    chunk_indices_bt = _prepare_chunk_indices_if_needed(cu_seqlens, chunk_indices_bt, A_for_kernel.shape[-1])
-    cu_seqlens_host = _as_host_tuple(cu_seqlens)
-    chunk_indices_host = _as_host_tuple(chunk_indices_bt)
-    A_tnd = A_for_kernel.reshape(-1, A_for_kernel.shape[-2], A_for_kernel.shape[-1])
-    out = torch.ops._C_ascend.npu_solve_tri(
-        A_tnd,
-        cu_seqlens=cu_seqlens_host,
-        chunk_indices=chunk_indices_host,
-        layout="tnd",
+    if cu_seqlens is not None and not isinstance(cu_seqlens, torch.Tensor):
+        cu_seqlens = torch.tensor(cu_seqlens, device=A.device, dtype=torch.int64)
+    prebuilt_indices = {
+        "1216": chunk_indices_large_block,
+        "32": chunk_indices_32,
+        str(A_for_kernel.shape[-1]): chunk_indices_bt,
+    }
+    return solve_tril_fast(
+        A_for_kernel,
+        cu_seqlens=cu_seqlens,
+        chunk_indices_out=prebuilt_indices,
+        output_dtype=output_dtype,
     )
-    return out.reshape_as(A_for_kernel)
 
 
 def recompute_w_u_fwd(
@@ -183,6 +183,9 @@ def chunk_gated_delta_rule_fwd(
     update_chunk_offsets_chunk64 = None if prebuilt_meta is None else prebuilt_meta.update_chunk_offsets_chunk64
     final_chunk_indices_chunk64 = None if prebuilt_meta is None else prebuilt_meta.final_chunk_indices_chunk64
     chunk_indices_large_block = None if prebuilt_meta is None else prebuilt_meta.chunk_indices_large_block
+    chunk_indices_chunk32 = (
+        None if prebuilt_meta is None else getattr(prebuilt_meta, "chunk_indices_chunk32", None)
+    )
 
     cu_seqlens = None if cu_seqlens is None else cu_seqlens.to(torch.int64)
     if cu_seqlens is not None and chunk_indices_chunk64 is None and chunk_indices_chunk64_host is None:
@@ -230,14 +233,14 @@ def chunk_gated_delta_rule_fwd(
     )
     A = solve_tril(
         A=A,
-        cu_seqlens=cu_seqlens_host,
+        cu_seqlens=cu_seqlens,
         chunk_indices_large_block=chunk_indices_large_block,
-        chunk_indices_bt=chunk_indices_chunk64_host,
+        chunk_indices_bt=chunk_indices_chunk64,
+        chunk_indices_32=chunk_indices_chunk32,
         output_dtype=k.dtype,
     )
-    A_bhtc = A.movedim(1, 2).contiguous()
-    # recompute's ACLNN adapter requires physical BHT inputs. Materialize this
-    # after KKT so the BTH beta path remains transpose-free.
+    # KKT and solve-tril preserve BHTC, matching the ACLNN recompute input.
+    A_bhtc = A
     beta_bht = beta.movedim(1, 2).contiguous()
 
     w, u = recompute_w_u_fwd(

@@ -55,6 +55,7 @@ def _stable_argsort_for_npu(tensor: torch.Tensor) -> torch.Tensor:
 class GDNChunkedPrefillMetadata:
     cu_seqlens_host: tuple[int, ...]
     chunk_indices_chunk64_host: tuple[int, ...]
+    chunk_indices_chunk32: torch.Tensor
     chunk_indices_chunk64: torch.Tensor
     chunk_offsets_chunk64: torch.Tensor
     update_chunk_offsets_chunk64: torch.Tensor
@@ -158,6 +159,7 @@ def _build_non_spec_chunked_prefill_metadata(
     cumsum_chunk_size = 1 if cumsum_chunks <= 1 else 1 << (cumsum_chunks - 1).bit_length()
 
     chunk_indices_chunk64 = prepare_chunk_indices(cu_seqlens_cpu, _GDN_CHUNK_SIZE)
+    chunk_indices_chunk32 = prepare_chunk_indices(cu_seqlens_cpu, _GDN_CHUNK_SIZE // 2)
     chunk_offsets_chunk64 = prepare_chunk_offsets(cu_seqlens_cpu, _GDN_CHUNK_SIZE)
     update_chunk_offsets_chunk64 = prepare_update_chunk_offsets(cu_seqlens_cpu, _GDN_CHUNK_SIZE)
     final_chunk_indices_chunk64 = prepare_final_chunk_indices(cu_seqlens_cpu, _GDN_CHUNK_SIZE)
@@ -179,6 +181,7 @@ def _build_non_spec_chunked_prefill_metadata(
     return GDNChunkedPrefillMetadata(
         cu_seqlens_host=cu_seqlens_host,
         chunk_indices_chunk64_host=tuple(chunk_indices_chunk64.to(torch.int64).reshape(-1).tolist()),
+        chunk_indices_chunk32=chunk_indices_chunk32.to(device=device, non_blocking=True),
         chunk_indices_chunk64=chunk_indices_chunk64.to(device=device, non_blocking=True),
         chunk_offsets_chunk64=chunk_offsets_chunk64.to(device=device, non_blocking=True),
         update_chunk_offsets_chunk64=update_chunk_offsets_chunk64.to(device=device, non_blocking=True),

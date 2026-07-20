@@ -248,6 +248,13 @@ def _assert_chunk_meta_matches_runtime(builder, chunk_meta, cu_seqlens: torch.Te
     cumsum_chunk_size = 1 if cumsum_chunks <= 1 else 1 << (cumsum_chunks - 1).bit_length()
 
     assert torch.equal(
+        chunk_meta.chunk_indices_chunk32,
+        runtime_prepare_chunk_indices(
+            cu_seqlens,
+            ascend_gdn_attn_builder._GDN_CHUNK_SIZE // 2,
+        ),
+    )
+    assert torch.equal(
         chunk_meta.chunk_indices_chunk64,
         runtime_prepare_chunk_indices(cu_seqlens, ascend_gdn_attn_builder._GDN_CHUNK_SIZE),
     )
