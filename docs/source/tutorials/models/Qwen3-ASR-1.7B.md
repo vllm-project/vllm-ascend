@@ -10,9 +10,10 @@ Qwen3-ASR-1.7B was introduced with upstream vLLM v0.19.0. Use a vLLM-Ascend imag
 
 ## 2 Supported Features
 
-Please refer to the [Supported Features List](../../user_guide/support_matrix/supported_models.md) for the model support matrix.
+`Qwen3-ASR-1.7B`(BF16 version): requires 1 Ascend 910B (with 1 x 64GB NPUs).
 
-Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration information.
+`Qwen3-ASR-1.7B`(BF16 version): requires 1 Ascend 310P (with 1 x 48GB NPUs).
+[Download model weight](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B).
 
 ## 3 Prerequisites
 
