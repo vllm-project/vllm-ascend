@@ -221,8 +221,6 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
 
 === "Atlas inference products"
 
-    The following example follows the [Atlas inference products requirements](../../quick_start.md#requirements) and uses the same model variant as the Atlas A2 inference products / Atlas A3 inference products example. It uses port 8080 to match the Atlas inference products Docker port mapping in Section 4.1. Set `--dtype float16` and keep an explicit, conservative `--max-model-len`.
-
     ```shell
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0,1
