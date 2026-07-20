@@ -15,11 +15,38 @@
 # limitations under the License.
 #
 
+from collections.abc import Sequence
+from typing import Literal, TypedDict
 
-def balance_load(requests_by_rank, dev_num, max_num_seqs=None, max_iters=1000, threshold=5):
-    modifications = [{"out_blk": [], "in_blk": [], "freeze": False} for _ in range(dev_num)]
 
-    def calc_bubble(cards_info):
+class _RequestItem(TypedDict):
+    blk_num: int
+    newly_added: bool
+
+
+class _CardData(TypedDict):
+    card_idx: int
+    running: list[_RequestItem]
+    waiting: list[_RequestItem]
+    tot_blk: int
+
+
+class _Modification(TypedDict):
+    out_blk: list[int]
+    in_blk: list[int]
+    freeze: bool
+
+
+def balance_load(
+    requests_by_rank: Sequence[tuple[Sequence[int], int]],
+    dev_num: int,
+    max_num_seqs: int | None = None,
+    max_iters: int = 1000,
+    threshold: float = 5,
+) -> list[_Modification]:
+    modifications: list[_Modification] = [{"out_blk": [], "in_blk": [], "freeze": False} for _ in range(dev_num)]
+
+    def calc_bubble(cards_info: Sequence[_CardData]) -> float:
         tot_blks = [c["tot_blk"] for c in cards_info]
         max_blk = max(tot_blks)
         avg_blk = sum(tot_blks) / dev_num
@@ -27,7 +54,7 @@ def balance_load(requests_by_rank, dev_num, max_num_seqs=None, max_iters=1000, t
             return (max_blk - avg_blk) / max_blk if max_blk > 0 else 0.0
         return max_blk - avg_blk
 
-    def perform_swap(run_item, wait_item, card):
+    def perform_swap(run_item: _RequestItem, wait_item: _RequestItem, card: _CardData) -> None:
         card_idx = card["card_idx"]
         modifications[card_idx]["out_blk"].append(run_item["blk_num"])
         modifications[card_idx]["in_blk"].append(wait_item["blk_num"])
@@ -37,14 +64,14 @@ def balance_load(requests_by_rank, dev_num, max_num_seqs=None, max_iters=1000, t
         card["running"].append(wait_item)
         card["waiting"].append(run_item)
 
-    def perform_pull_in(wait_item, card):
+    def perform_pull_in(wait_item: _RequestItem, card: _CardData) -> None:
         card_idx = card["card_idx"]
         modifications[card_idx]["in_blk"].append(wait_item["blk_num"])
         card["tot_blk"] += wait_item["blk_num"]
         card["waiting"].remove(wait_item)
         card["running"].append(wait_item)
 
-    def fill_running_from_waiting(card):
+    def fill_running_from_waiting(card: _CardData) -> bool:
         if max_num_seqs is None:
             return False
         pulled_any = False
@@ -55,9 +82,11 @@ def balance_load(requests_by_rank, dev_num, max_num_seqs=None, max_iters=1000, t
             pulled_any = True
         return pulled_any
 
-    def find_best_swap(card, mode):
+    def find_best_swap(
+        card: _CardData, mode: Literal["increase", "decrease"]
+    ) -> tuple[_RequestItem, _RequestItem] | None:
         target_avg = sum(c["tot_blk"] for c in cards_data) / dev_num
-        best_swap = None
+        best_swap: tuple[_RequestItem, _RequestItem] | None = None
         best_dist = abs(card["tot_blk"] - target_avg)
         best_newly_added = False
 
@@ -78,7 +107,7 @@ def balance_load(requests_by_rank, dev_num, max_num_seqs=None, max_iters=1000, t
                     best_newly_added = run_newly_added
         return best_swap
 
-    def try_drop_for_throughput(max_card):
+    def try_drop_for_throughput(max_card: _CardData) -> bool:
         card_idx = max_card["card_idx"]
         total_reqs = sum(len(c["running"]) for c in cards_data)
         if total_reqs <= 1:
@@ -88,7 +117,7 @@ def balance_load(requests_by_rank, dev_num, max_num_seqs=None, max_iters=1000, t
         second_max_blk = max([c["tot_blk"] for c in cards_data if c["card_idx"] != max_card["card_idx"]] + [0])
         current_latency = 1200 + 19.2 * max_blk
         current_tp = total_reqs / current_latency
-        best_drop = None
+        best_drop: _RequestItem | None = None
         best_tp = current_tp
         best_newly_added = False
 
@@ -110,16 +139,16 @@ def balance_load(requests_by_rank, dev_num, max_num_seqs=None, max_iters=1000, t
             return True
         return False
 
-    cards_data = []
+    cards_data: list[_CardData] = []
     for rank in range(dev_num):
         blks, split = requests_by_rank[rank] if rank < len(requests_by_rank) else ([], 0)
-        running = []
-        waiting = []
+        running: list[_RequestItem] = []
+        waiting: list[_RequestItem] = []
         tot_run_blk = 0
         for index, blk_num in enumerate(blks):
             if blk_num == 0:
                 break
-            req_obj = {"blk_num": blk_num}
+            req_obj: _RequestItem = {"blk_num": blk_num, "newly_added": False}
             if index < split:
                 running.append(req_obj)
                 tot_run_blk += blk_num

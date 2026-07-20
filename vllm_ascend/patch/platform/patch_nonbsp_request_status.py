@@ -61,7 +61,7 @@ def patch_request_status_for_nonbsp() -> None:
     ):
         module = sys.modules.get(module_name)
         if module is not None and hasattr(module, "RequestStatus"):
-            module.RequestStatus = RequestStatus
+            module.__dict__["RequestStatus"] = RequestStatus
     request_module._FINISHED_REASON_MAP = {
         RequestStatus.FINISHED_STOPPED: request_module.FinishReason.STOP,
         RequestStatus.FINISHED_LENGTH_CAPPED: request_module.FinishReason.LENGTH,
