@@ -372,7 +372,7 @@ def test_sparse_prepare_keeps_npu_fused_qkv_norm_rope_path() -> None:
     source = inspect.getsource(MiniMaxM3SparseAttention._sparse_prepare)
 
     assert "qkv_rmsnorm_rope" in source
-    assert "main_qkv.device.type != \"npu\"" in source
+    assert 'main_qkv.device.type != "npu"' in source
     assert "self.q_norm.weight_plus_one" in source
 
 

@@ -228,14 +228,10 @@ class TestColumnParallelOpDispatch(unittest.TestCase):
         from vllm_ascend.ops.linear_op import _should_skip_sp_for_multimodal_encoder
 
         self.assertTrue(
-            _should_skip_sp_for_multimodal_encoder(
-                "model.vision_model.encoder.layers.0.self_attn.qkv_proj"
-            )
+            _should_skip_sp_for_multimodal_encoder("model.vision_model.encoder.layers.0.self_attn.qkv_proj")
         )
         self.assertFalse(
-            _should_skip_sp_for_multimodal_encoder(
-                "model.layers.0.not_vision_model_but_contains_text.qkv_proj"
-            )
+            _should_skip_sp_for_multimodal_encoder("model.layers.0.not_vision_model_but_contains_text.qkv_proj")
         )
 
 

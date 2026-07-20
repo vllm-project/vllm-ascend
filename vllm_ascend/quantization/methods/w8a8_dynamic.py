@@ -297,7 +297,8 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         act_name = getattr(activation, "value", activation)
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         fused_scale_flag = (
-            _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2 and get_ascend_config().enable_fused_mc2 == 1
+            _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2
+            and get_ascend_config().enable_fused_mc2 == 1
             and act_name != "swigluoai_uninterleave"
         )
         if self.dynamic_eplb:

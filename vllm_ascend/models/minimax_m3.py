@@ -121,6 +121,7 @@ from vllm_ascend.models.ops.msa_m3 import (
 
 _SPARSE_ATTN_LOGGED = False
 
+
 class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     """Block-sparse attention with lightning indexer on Ascend."""
 
@@ -429,19 +430,12 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         return idx_q, idx_k
 
 
-
 def _load_vllm_minimax_m3_vision_model() -> type[nn.Module]:
     """Load vLLM's MiniMax-M3 vision tower without importing its platform entry."""
     if vllm.__file__ is None:
         raise ImportError("Unable to locate the installed vLLM package.")
 
-    vision_tower_path = (
-        Path(vllm.__file__).resolve().parent
-        / "models"
-        / "minimax_m3"
-        / "common"
-        / "vision_tower.py"
-    )
+    vision_tower_path = Path(vllm.__file__).resolve().parent / "models" / "minimax_m3" / "common" / "vision_tower.py"
     if not vision_tower_path.is_file():
         raise ImportError(
             "The vLLM MiniMax M3 vision tower source was not found at "

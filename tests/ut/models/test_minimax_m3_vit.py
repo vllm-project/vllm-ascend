@@ -61,13 +61,7 @@ class TestMiniMaxM3VitProcessor(unittest.TestCase):
         source_file = inspect.getsourcefile(MiniMaxVLVisionModel)
         self.assertIsNotNone(source_file)
         self.assertIsNotNone(vllm.__file__)
-        expected_source = (
-            Path(vllm.__file__).resolve().parent
-            / "models"
-            / "minimax_m3"
-            / "common"
-            / "vision_tower.py"
-        )
+        expected_source = Path(vllm.__file__).resolve().parent / "models" / "minimax_m3" / "common" / "vision_tower.py"
         self.assertTrue(Path(source_file).samefile(expected_source))
 
     def test_standalone_vllm_vision_bridge_is_removed(self) -> None:
