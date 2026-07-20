@@ -425,7 +425,6 @@ def unquant_apply_mlp(
     lora_context=None,
     expanded_row_idx: torch.Tensor | None = None,
     topk_ids: torch.Tensor | None = None,
-    exchanged_lora_indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if need_trans:
         w1 = w1.transpose(1, 2)
@@ -442,10 +441,10 @@ def unquant_apply_mlp(
     )[0]
 
     # MoE LoRA: only attempt injection when an adapter wraps this layer and
-    # the comm method provided routing metadata.
+    # the comm method provided routing metadata in lora_context.
     # Two paths are supported:
     #   - AllGather: expanded_row_idx + topk_ids from npu_moe_init_routing
-    #   - AlltoAll:  exchanged_lora_indices + group_list after all_to_all
+    #   - AlltoAll:  lora_context.exchanged_lora_indices + group_list after all_to_all
     lora_routing = None
     if lora_context is not None:  # LoRA applied
         from vllm_ascend.lora.fused_moe import (
@@ -458,19 +457,18 @@ def unquant_apply_mlp(
         if expanded_row_idx is not None and topk_ids is not None:
             # AllGather path: use npu_moe_init_routing's expanded_row_idx.
             lora_routing = _recover_moe_lora_routing_allgather(lora_context, expanded_row_idx, topk_ids)
-        elif exchanged_lora_indices is not None:
+        elif getattr(lora_context, "exchanged_lora_indices", None) is not None:
             # AlltoAll path: tokens already sorted by expert after exchange.
             # Build per-row (expert_id, lora_id) directly from group_list.
             lora_routing = _recover_moe_lora_routing_all2all(
                 lora_context,
                 group_list=group_list,
-                exchanged_lora_indices=exchanged_lora_indices,
             )
         else:
             raise AssertionError(
                 "MoE LoRA requires either expanded_row_idx+topk_ids "
-                "(AllGather) or exchanged_lora_indices (AlltoAll). "
-                "Neither was provided."
+                "(AllGather) or lora_context.exchanged_lora_indices "
+                "(AlltoAll). Neither was provided."
             )
 
         moe_lora_apply_w13(
@@ -523,7 +521,7 @@ def unquant_apply_mlp(
     return hidden_states, None
 
 
-def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
+def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput, lora_context=None) -> torch.Tensor:
     """
     Unified MoE MLP entry.
     Quant path is dispatched by DeviceOperator with explicit typed kernel flags.
@@ -562,10 +560,9 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
             topk_scales=topk_scales,
             need_trans=need_trans,
             swiglu_limit=swiglu_limit,
-            lora_context=mlp_compute_input.lora_context,
+            lora_context=lora_context,
             expanded_row_idx=mlp_compute_input.expanded_row_idx,
             topk_ids=mlp_compute_input.topk_ids,
-            exchanged_lora_indices=mlp_compute_input.exchanged_lora_indices,
         )
 
     assert w1_scale is not None and w2_scale is not None

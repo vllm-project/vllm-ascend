@@ -209,6 +209,10 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         super().__init__(moe_config)
         self.quant_method = scheme
         self.tid2eid = tid2eid
+        self.lora_context = None
+
+    def set_lora_context(self, lora_context) -> None:
+        self.lora_context = lora_context
 
     @property
     def is_monolithic(self) -> bool:
@@ -276,13 +280,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
         mc2_mask: torch.Tensor | None = None,
-        split_lora_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if split_lora_indices is not None or getattr(layer, "_ascend_moe_lora_context", None) is not None:
-            raise NotImplementedError(
-                "Ascend quantized MoE LoRA is not supported yet. "
-                "Use unquantized MoE for LoRA or disable MoE LoRA on quantized experts."
-            )
         return self.quant_method.apply(
             layer=layer,
             x=x,
