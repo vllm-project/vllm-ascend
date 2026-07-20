@@ -186,7 +186,7 @@ nav:
         - tutorials/models/Qwen3-VL-30B-A3B-Instruct.md
         - tutorials/models/Qwen3-VL-235B-A22B-Instruct.md
         - tutorials/models/Qwen3-Coder-30B-A3B.md
-        - tutorials/models/Qwen3_Embedding.md
+        - tutorials/models/Qwen3-Embedding.md
         - tutorials/models/Qwen3-VL-Embedding.md
         - tutorials/models/Qwen3_Reranker.md
         - tutorials/models/Qwen3-VL-Reranker.md
