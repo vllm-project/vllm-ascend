@@ -54,7 +54,6 @@ from vllm_ascend.attention.utils import (
     cache_graph_workspace,
     enable_cp,
     needs_layer_aware_fia_graph_replay,
-    notify_kv_cache_written,
     split_decodes_and_prefills,
     update_paged_attention_graph_param,
     using_paged_attention,
@@ -1479,10 +1478,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
                 slot_mapping=slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots.to(torch.int32),
             )
-            # Notify the KV-transfer connector that KV has been written. No-op
-            # when there is no connector (Gemma4 MTP uses in-process KV-sharing).
-            # No config-based gate (see above: draft forward misfire).
-            notify_kv_cache_written()
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
         return query, key, value, output

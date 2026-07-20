@@ -550,21 +550,4 @@ def enabling_mlapo(vllm_config: VllmConfig) -> bool:
     return bool(config_val and is_decode_instance)
 
 
-def notify_kv_cache_written(layer_name: str = ""):
-    """Notify the KV-transfer connector that KV cache has been written.
-
-    No-op when there is no v1 KV-transfer group (the common case for
-    Gemma4 MTP, which uses in-process KV-sharing via kv_sharing_target_layer_name
-    rather than a distributed connector).  Restored from the revert of PR #11021
-    (commit 44312516) — only the no-op stub is needed here, not the rest of
-    the Layerwise KV Pooling machinery.
-    """
-    if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
-        return
-    connector = get_kv_transfer_group()
-    on_kv_cache_written = getattr(connector, "on_kv_cache_written", None)
-    if on_kv_cache_written is not None:
-        on_kv_cache_written(layer_name)
-
-
 
