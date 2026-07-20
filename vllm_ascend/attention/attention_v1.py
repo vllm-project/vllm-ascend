@@ -47,7 +47,6 @@ from vllm_ascend.attention.kvcomp_attn.attention_utils import (
     is_enable_hamming_sparse,
     reshape_and_cache_kvcomp,
 )
-from vllm_ascend.attention import kv_sharing
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     PagedAttentionGraphParam,
@@ -1554,11 +1553,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
         output_padded = None
-        # Q-only draft KV-sharing layers are read-only; skip reshape_and_cache
-        # to avoid writing dummy K/V back into the shared cache. The helper
-        # self-gates on kv_sharing_target_layer_name + is_draft_model. No
-        # config-based gate (see above: draft forward misfire).
-        if key is not None and value is not None and not kv_sharing.should_skip_draft_kv_write(self):
+        if key is not None and value is not None:
             output_padded = output
             query, key, value, output_padded = self.reshape_and_cache(
                 query, key, value, kv_cache, attn_metadata, output
