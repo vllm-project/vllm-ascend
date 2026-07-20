@@ -155,6 +155,7 @@ Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
      ```shell
     #!/bin/sh
     vllm serve Qwen/Qwen3-VL-Reranker-2B \
+        --served-model-name Qwen/Qwen3-VL-Reranker-2B \
         --runner pooling \
         --max-model-len 4096 \
         --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}' \
@@ -170,6 +171,7 @@ Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
     ```shell
     #!/bin/sh
     vllm serve Qwen/Qwen3-VL-Reranker-2B \
+        --served-model-name Qwen/Qwen3-VL-Reranker-2B \
         --runner pooling \
         --max-model-len 4096 \
         --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}' \
@@ -185,6 +187,7 @@ Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
     ```shell
     #!/bin/sh
     vllm serve Qwen/Qwen3-VL-Reranker-2B \
+        --served-model-name Qwen/Qwen3-VL-Reranker-2B \
         --runner pooling \
         --max-model-len 4096 \
         --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}' \
