@@ -81,9 +81,9 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
     | Model                         | Support   | Note                                                                 |    Supported Hardware    |  Doc |
     |-------------------------------|-----------|----------------------------------------------------------------------|--------------------------|------|
-    | Qwen3-Embedding               | 🔵        |                                                                      |         A2/A3            | [Qwen3_embedding](../../tutorials/models/Qwen3_embedding.md)|
+    | Qwen3-Embedding               | 🔵        |                                                                      |         A2/A3            | [Qwen3_Embedding](../../tutorials/models/Qwen3_Embedding.md)|
     | Qwen3-VL-Embedding            | 🔵        |                                                                      |         A2/A3            | [Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md)|
-    | Qwen3-Reranker                | 🔵        |                                                                      |         A2/A3            | [Qwen3_reranker](../../tutorials/models/Qwen3_reranker.md)|
+    | Qwen3-Reranker                | 🔵        |                                                                      |         A2/A3            | [Qwen3_Reranker](../../tutorials/models/Qwen3_Reranker.md)|
     | Qwen3-VL-Reranker             | 🔵        |                                                                      |         A2/A3            | [Qwen3-VL-Reranker](../../tutorials/models/Qwen3-VL-Reranker.md)|
     | Molmo                         | 🔵        | [1942](https://github.com/vllm-project/vllm-ascend/issues/1942)      |         A2/A3            |      |
     | XLM-RoBERTa-based             | 🔵        |                                                                      |         A2/A3            |      |
@@ -94,7 +94,10 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
     | Model | Support | Note | Supported Hardware | Doc |
     |-------|---------|------|--------------------|-----|
-    | Qwen3-Embedding | 🔵 | FP16, eager mode | Atlas inference products | [Qwen3_embedding](../../tutorials/models/Qwen3_embedding.md) |
+    | Qwen3-Embedding | 🔵 | FP16 | Atlas inference products | [Qwen3_Embedding](../../tutorials/models/Qwen3_Embedding.md) |
+    | Qwen3-VL-Embedding | 🔵 | FP16 | Atlas inference products | [Qwen3_VL_Embedding](../../tutorials/models/Qwen3_VL_Embedding.md) |
+    | Qwen3-Reranker  | 🔵 | FP16 | Atlas inference products | [Qwen3_Reranekr](../../tutorials/models/Qwen3_Reranker.md) |
+    | Qwen3-VL-Reranker | 🔵 | FP16 | Atlas inference products | [Qwen3_VL_Reranker](../../tutorials/models/Qwen3_VL_Reranker.md) |
     | XLM-RoBERTa-based | 🔵 | FP16; embedding and scoring | Atlas inference products | |
     | Qwen2.5-based | 🔵 | FP16 classification | Atlas inference products | |
 
