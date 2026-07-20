@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
 import typing
 from collections.abc import Iterable
 
@@ -47,6 +48,15 @@ DSPARK_NOPE_QDQ_BLOCK_SIZE = 64
 DSPARK_WO_A_DEQUANT_BLOCK_SIZE = 128
 DSPARK_DEFAULT_BLOCK_SIZE = 5
 DSPARK_DEFAULT_NUM_LAYERS = 3
+DSPARK_SAS_OP_NAMESPACES = ("_ascend_dsv4", "_ascend_v4", "custom")
+
+
+def _get_dspark_sas_op(name: str):
+    for namespace in DSPARK_SAS_OP_NAMESPACES:
+        op_namespace = getattr(torch.ops, namespace, None)
+        if op_namespace is not None and hasattr(op_namespace, name):
+            return getattr(op_namespace, name)
+    raise RuntimeError(f"DSpark fused attention operator {name!r} is unavailable.")
 
 
 def _dequant_dspark_wo_a_weight(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
@@ -186,6 +196,9 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         vllm_config = kwargs["vllm_config"]
         config = kwargs["config"]
         super().__init__(*args, **kwargs)
+        importlib.import_module("ascend_ops")
+        self.dspark_sparse_attn_op = _get_dspark_sas_op("npu_sparse_attn_sharedkv")
+        self.dspark_sparse_attn_metadata_op = _get_dspark_sas_op("npu_sparse_attn_sharedkv_metadata")
         self.compress_ratio = 0
         self.dsa_attn.compress_ratio = 0
         # DSpark uses the uncompressed SWA cache as its context cache. Disable
@@ -199,6 +212,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             or DSPARK_DEFAULT_BLOCK_SIZE
         )
         self.window_size = int(self.window_size)
+        self.pa_block_size = int(self.dsa_attn.swa_cache_layer.block_size)
         scheduler_config = getattr(vllm_config, "scheduler_config", None)
         max_request_slots = max(
             1,
@@ -206,7 +220,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         )
         self.register_buffer(
             "_dspark_kv_cache",
-            torch.empty(
+            torch.zeros(
                 (max_request_slots, self.window_size, self.head_dim),
                 dtype=vllm_config.model_config.dtype,
                 device=self.attn_sink.device,
@@ -233,6 +247,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         if request_slots is None or request_slots.numel() == 0:
             return
         slots = torch.unique(request_slots.to(device=self._dspark_cache_positions.device, dtype=torch.long))
+        self._dspark_kv_cache[slots] = 0
         self._dspark_cache_positions[slots] = -1
 
     def _get_dspark_kv_cache(self) -> torch.Tensor | None:
@@ -314,6 +329,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         paged_tokens = kv_cache.flatten(start_dim=2)
         context_kv = paged_tokens[safe_block_ids, block_offsets, : self.head_dim]
 
+        self._dspark_kv_cache[request_slots] = 0
         self._dspark_cache_positions[request_slots] = -1
         slot_indices = request_slots.view(-1, 1).expand_as(context_positions)
         cache_indices = context_positions.clamp_min(0).remainder(self.window_size)
@@ -327,20 +343,40 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             cache_indices.reshape(-1)[flat_valid],
         ] = context_positions.to(torch.int32).reshape(-1)[flat_valid]
 
-    def _dspark_attn(
+    def _get_dspark_fused_attention_metadata(
         self,
-        q: torch.Tensor,
-        kv: torch.Tensor,
-        key_valid: torch.Tensor,
-    ) -> torch.Tensor:
-        scores = torch.einsum("bshd,bkd->bshk", q.float(), kv.float()) * float(self.scale)
-        scores = scores.masked_fill(~key_valid[:, None, None, :], torch.finfo(scores.dtype).min)
-        sink_scores = self.attn_sink[: q.shape[2]].to(scores.dtype).view(1, 1, q.shape[2], 1)
-        scores_max = torch.maximum(scores.max(dim=-1, keepdim=True).values, sink_scores)
-        exp_scores = torch.exp(scores - scores_max)
-        denom = exp_scores.sum(dim=-1, keepdim=True) + torch.exp(sink_scores - scores_max)
-        weights = exp_scores / denom
-        return torch.einsum("bshk,bkd->bshd", weights.to(kv.dtype), kv).to(q.dtype)
+        device: torch.device,
+        batch_size: int,
+        draft_len: int,
+    ) -> tuple[int, torch.Tensor, torch.Tensor, torch.Tensor]:
+        total_tokens = self.window_size + draft_len
+        blocks_per_request = (total_tokens + self.pa_block_size - 1) // self.pa_block_size
+        block_table = torch.arange(
+            batch_size * blocks_per_request,
+            dtype=torch.int32,
+            device=device,
+        ).view(batch_size, blocks_per_request)
+        seqused_kv = torch.full((batch_size,), total_tokens, dtype=torch.int32, device=device)
+        metadata = self.dspark_sparse_attn_metadata_op(
+            num_heads_q=self.n_local_heads,
+            num_heads_kv=1,
+            head_dim=self.head_dim,
+            cu_seqlens_q=None,
+            seqused_kv=seqused_kv,
+            batch_size=batch_size,
+            max_seqlen_q=draft_len,
+            max_seqlen_kv=total_tokens,
+            cmp_ratio=1,
+            ori_mask_mode=0,
+            cmp_mask_mode=3,
+            ori_win_left=self.window_size - 1,
+            ori_win_right=0,
+            layout_q="BSND",
+            layout_kv="PA_BNBD",
+            has_ori_kv=True,
+            has_cmp_kv=False,
+        )
+        return blocks_per_request, block_table, seqused_kv, metadata
 
     def _dspark_attention_from_cache(
         self,
@@ -358,16 +394,48 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         within_ctx = ctx_positions <= context_end
         cache_indices = ctx_positions.remainder(self.window_size)
         slot_indices = request_slots[:, :1].to(device=draft_kv.device, dtype=torch.long).expand(-1, self.window_size)
-        cached_positions = self._dspark_cache_positions[slot_indices, cache_indices].to(torch.long)
-        ctx_valid = within_ctx & (cached_positions == ctx_positions)
         ctx_kv = self._dspark_kv_cache[slot_indices, cache_indices]
+        ctx_kv = torch.where(within_ctx.unsqueeze(-1), ctx_kv, torch.zeros_like(ctx_kv))
 
-        kv = torch.cat([ctx_kv, draft_kv], dim=1)
-        key_valid = torch.cat(
-            [ctx_valid, torch.ones((batch_size, draft_len), dtype=torch.bool, device=draft_kv.device)],
-            dim=1,
+        blocks_per_request, block_table, seqused_kv, metadata = self._get_dspark_fused_attention_metadata(
+            draft_kv.device,
+            batch_size,
+            draft_len,
         )
-        return self._dspark_attn(q, kv, key_valid)
+        total_tokens = self.window_size + draft_len
+        padded_tokens = blocks_per_request * self.pa_block_size
+        if padded_tokens > total_tokens:
+            pad = draft_kv.new_zeros((batch_size, padded_tokens - total_tokens, self.head_dim))
+            kv = torch.cat([ctx_kv, draft_kv, pad], dim=1)
+        else:
+            kv = torch.cat([ctx_kv, draft_kv], dim=1)
+        kv = kv.view(batch_size * blocks_per_request, self.pa_block_size, 1, self.head_dim).contiguous()
+
+        return self.dspark_sparse_attn_op(
+            q=q,
+            ori_kv=kv,
+            cmp_kv=None,
+            ori_sparse_indices=None,
+            cmp_sparse_indices=None,
+            ori_block_table=block_table,
+            cmp_block_table=None,
+            cu_seqlens_q=None,
+            cu_seqlens_ori_kv=None,
+            cu_seqlens_cmp_kv=None,
+            seqused_q=None,
+            seqused_kv=seqused_kv,
+            sinks=self.attn_sink,
+            metadata=metadata,
+            softmax_scale=float(self.scale),
+            cmp_ratio=1,
+            ori_mask_mode=0,
+            cmp_mask_mode=3,
+            ori_win_left=self.window_size - 1,
+            ori_win_right=0,
+            layout_q="BSND",
+            layout_kv="PA_BNBD",
+            return_softmax_lse=False,
+        )[0].to(q.dtype)
 
     def forward(
         self,
