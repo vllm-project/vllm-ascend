@@ -560,8 +560,63 @@ def attention_calculation_stream() -> torch.npu.Stream:
     return _ATNN_CALCULATION_STREAM
 
 
+def _patch_get_config_hf_overrides():
+    """Fix vLLM 0.23.0: ensure hf_overrides_fn is always applied to config.
+
+    vLLM's get_config() passes hf_overrides_fn to config_parser.parse(),
+    which consumes it (via kwargs.pop) without applying it to the loaded
+    config.  The application block at lines 858-860 of config.py should
+    catch this, but in some code paths it does not execute.
+
+    This patch wraps ModelConfig.__post_init__ to apply the override
+    to the loaded config after get_config() returns.  It is critical for
+    Gemma4 MTP where hf_config_override remaps
+    gemma4_assistant→gemma4_mtp and sets architectures=["Gemma4MTPModel"].
+
+    We also refresh model_arch_config (which depends on hf_config) so that
+    the architecture resolution uses the overridden values.
+    """
+    import logging
+
+    _logger = logging.getLogger(__name__)
+
+    from vllm.config.model import ModelConfig as _ModelConfig
+
+    # Idempotency guard: if adapt_patch() is called more than once (e.g.
+    # reload or repeated registration), don't re-wrap __post_init__ — a
+    # double wrap would capture the already-patched function as _orig and
+    # apply hf_overrides twice.
+    if getattr(_ModelConfig.__post_init__, "_ascend_hf_overrides_patched", False):
+        return
+
+    _orig_post_init = _ModelConfig.__post_init__
+
+    def _patched_post_init(self, *args, **kwargs):
+        result = _orig_post_init(self, *args, **kwargs)
+        # Re-apply hf_overrides_fn if it was provided but not applied.
+        # The original __post_init__ calls get_config() with hf_overrides_fn,
+        # but it is not applied (consumed by config_parser.parse()).
+        if hasattr(self, "hf_overrides") and callable(self.hf_overrides):
+            self.hf_config = self.hf_overrides(self.hf_config)
+            # Refresh model_arch_config (depends on hf_config)
+            self.model_arch_config = _ModelConfig.get_model_arch_config(self)
+            # Re-resolve architecture with the updated config
+            model_info, arch = self.registry.inspect_model_cls(
+                self.architectures,
+                self,
+            )
+            self._model_info = model_info
+            self._architecture = arch
+        return result
+
+    _patched_post_init._ascend_hf_overrides_patched = True  # type: ignore[attr-defined]
+    _ModelConfig.__post_init__ = _patched_post_init
+    _logger.info("vllm_ascend: patched ModelConfig.__post_init__ for hf_config_override fix")
+
+
 def adapt_patch(is_global_patch: bool = False):
-    print("[vllm_ascend] adapt_patch: hf_overrides patch removed (53de8f70)", flush=True)
+    _patch_get_config_hf_overrides()
+
     if is_global_patch:
         from vllm_ascend.patch import platform  # noqa: F401
     else:
