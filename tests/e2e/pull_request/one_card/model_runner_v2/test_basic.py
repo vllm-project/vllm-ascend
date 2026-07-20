@@ -41,7 +41,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.mark.skipif(True, reason="Fix me, it's broken after CANN and trition-ascend are upgraded.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [True])
@@ -61,6 +60,9 @@ def test_qwen3_dense_eager_mode(
     sampling_params = SamplingParams(
         max_tokens=max_tokens,
         temperature=0.5,
+        top_p=0.95,
+        top_k=10,
+        repetition_penalty=1.03,
         logprobs=2,
         prompt_logprobs=2,
         logit_bias={0: -1.0, 1: 0.5},
@@ -73,7 +75,7 @@ def test_qwen3_dense_eager_mode(
         enforce_eager=enforce_eager,
         async_scheduling=True,
     ) as runner:
-        runner.model.generate(prompts, sampling_params)
+        runner.generate(prompts, sampling_params)
 
 
 @pytest.mark.parametrize("model", MAIN_MODELS)
@@ -139,13 +141,24 @@ def test_egale_spec_decoding(
 @pytest.mark.parametrize("model", DFLASH_MAIN_MODEL)
 @pytest.mark.parametrize("dflash_model", DFLASH_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("enforce_eager", [True])
+@pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize(
+    "compilation_config",
+    [
+        pytest.param(
+            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8]},
+            id="full_decode_only",
+        ),
+        pytest.param({}, id="default_full_and_piecewise"),
+    ],
+)
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 def test_dflash_spec_decoding(
     model: str,
     dflash_model: str,
     max_tokens: int,
     enforce_eager: bool,
+    compilation_config: dict,
 ) -> None:
     prompts = [
         "Hello, my name is",
@@ -167,6 +180,7 @@ def test_dflash_spec_decoding(
             "method": "dflash",
             "num_speculative_tokens": num_speculative_tokens,
         },
+        compilation_config=compilation_config,
     ) as runner:
         runner.model.generate(prompts, sampling_params)
         metrics = runner.model.get_metrics()

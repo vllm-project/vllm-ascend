@@ -67,18 +67,12 @@ def _patch_select_moe_comm_method_deps(
     ep_world_size: int = 8,
     enable_fused_mc2: int = 0,
     is_moe: bool = True,
-    spec_decode_enabled: bool = False,
 ):
     monkeypatch.setattr(afc, "is_moe_model", lambda _: is_moe)
     monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: capacity)
     monkeypatch.setattr(afc, "get_ascend_device_type", lambda: device_type)
     monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=ep_world_size))
     monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2))
-    monkeypatch.setattr(
-        afc,
-        "speculative_enable_dispatch_gmm_combine_decode",
-        lambda _: spec_decode_enabled,
-    )
 
 
 def test_set_mc2_tokens_capacity_without_cudagraph_aligns_per_tp_rank():
@@ -192,29 +186,23 @@ def test_select_moe_comm_method_a3_enable_fused_mc2_mode_1(
 
 
 @pytest.mark.parametrize(
-    ("num_tokens", "quant_type", "spec_decode_enabled", "expected"),
+    ("num_tokens", "expected"),
     [
-        (128, "w8a8_dynamic", True, MoECommType.FUSED_MC2),
-        (128, "w8a8_dynamic", False, MoECommType.MC2),
-        (128, "w4a8", True, MoECommType.MC2),
-        (129, "w8a8_dynamic", True, MoECommType.ALLTOALL),
+        (128, MoECommType.MC2),
+        (129, MoECommType.ALLTOALL),
     ],
 )
-def test_select_moe_comm_method_a3_enable_fused_mc2_mode_2(
+def test_select_moe_comm_method_a3_without_fused_mc2(
     monkeypatch,
     num_tokens,
-    quant_type,
-    spec_decode_enabled,
     expected,
 ):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
         device_type=afc.AscendDeviceType.A3,
         capacity=128,
-        enable_fused_mc2=2,
-        spec_decode_enabled=spec_decode_enabled,
     )
-    vllm_config = _make_vllm_config(quant_type=quant_type)
+    vllm_config = _make_vllm_config()
 
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
 

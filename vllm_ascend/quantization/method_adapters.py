@@ -27,9 +27,8 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
-from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.parallel_state import get_flashcomm2_otp_group, get_mlp_tp_group, get_otp_group
-from vllm_ascend.utils import flashcomm2_enable, mlp_tp_enable, oproj_tp_enable
+from vllm_ascend.distributed.parallel_state import get_mlp_tp_group, get_otp_group
+from vllm_ascend.utils import mlp_tp_enable, oproj_tp_enable
 
 from .methods import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, is_mx_quant_type
 
@@ -147,11 +146,6 @@ class AscendLinearMethod(LinearMethodBase):
                 tp_rank = get_otp_group().rank_in_group
             elif layer.prefix.find("down_proj") != -1 and mlp_tp_enable():
                 tp_rank = get_mlp_tp_group().rank_in_group
-            elif (layer.prefix.find("o_proj") != -1 or layer.prefix.find("out_proj") != -1) and flashcomm2_enable():
-                if get_ascend_config().flashcomm2_oproj_tensor_parallel_size == 1:
-                    tp_rank = 0
-                else:
-                    tp_rank = get_flashcomm2_otp_group().rank_in_group
             else:
                 tp_rank = get_tensor_model_parallel_rank()
         else:
