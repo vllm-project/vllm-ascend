@@ -593,15 +593,6 @@ class NPUPlatform(Platform):
                 prune_capture_sizes_for_950(vllm_config)
             update_aclgraph_sizes(vllm_config)
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
-        elif (
-            compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
-            or compilation_config.cudagraph_mode == CUDAGraphMode.FULL
-        ):
-            logger.info(
-                "FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode"
-            )
-            compilation_config.use_inductor = False
-            compilation_config.splitting_ops = []
         elif compilation_config.cudagraph_mode.has_full_cudagraphs():
             # We don't want to have our FX graph split for the sake of static kernel feature,
             # because it will compile multiple times, so we set splitting_ops to empty manually.
