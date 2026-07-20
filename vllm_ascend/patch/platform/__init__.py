@@ -29,9 +29,6 @@ else:
     import vllm_ascend.patch.platform.patch_mamba_config_310  # noqa
 import vllm_ascend.patch.platform.patch_minimax_m2_config  # noqa
 import vllm_ascend.patch_minimax_m3_model  # noqa
-import vllm_ascend.patch.platform.patch_glm_tool_call_streaming  # noqa
-
-
 
 if vllm_version_is("0.24.0"):
     import vllm_ascend.patch.platform.patch_deepseek_v4_tool_call_parser  # noqa
