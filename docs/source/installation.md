@@ -6,7 +6,8 @@ This document describes how to install vllm-ascend manually.
 
 - OS: Linux
 - Python: >= 3.10, < 3.13
-- Hardware with supported Ascend NPUs, including Atlas A2 inference products, Atlas A3 inference products, Atlas inference products (Atlas 300I DUO), and Atlas 200I Pro.
+- Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series.
+- For 310P: Atlas inference products (Atlas 300I DUO) or Atlas 200I Pro.
 - Software:
 
     | Software      | Supported version                | Note                                      |
