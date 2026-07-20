@@ -147,7 +147,9 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         self.replace_allreduce = replace_allreduce
         self.enable_shared_expert_dp = enable_shared_expert_dp
         lora_context = self.lora_context
-        token_lora_indices = lora_context.punica_wrapper.token_lora_indices if lora_context is not None else None
+        token_lora_indices = None
+        if lora_context is not None:
+            token_lora_indices = lora_context.punica_wrapper.token_lora_indices
 
         padded_hidden_states_shape = hidden_states.shape
         split_lora_indices = None
