@@ -256,19 +256,24 @@ class NPUWorker(WorkerBase):
         model = self.model_runner.model
         if self.vllm_config.quant_config is None and (tags is None or "weights" in tags):
             for name, param in model.named_parameters():
-                if "w2_weight" in name and param.shape[2] == hidden_size:
-                    parts = name.split(".")
-                    param_name = parts[-1]
-                    parent_module = model.get_submodule(".".join(parts[:-1]))
+                is_legacy_w2 = "w2_weight" in name and param.shape[2] == hidden_size
+                is_legacy_w13 = "w13_weight" in name and param.shape[1] == hidden_size
+                if not (is_legacy_w2 or is_legacy_w13):
+                    continue
 
+                parts = name.split(".")
+                param_name = parts[-1]
+                parent_module = model.get_submodule(".".join(parts[:-1]))
+                quant_method = getattr(parent_module, "quant_method", None)
+                make_loading_view = getattr(quant_method, "make_weight_loading_view", None)
+                if callable(make_loading_view):
+                    # Preserve the backend weight loader on checkpoint-layout views.
+                    setattr(parent_module, param_name, make_loading_view(param))
+                elif is_legacy_w2:
                     w2_data = param.transpose(1, 2)
                     w2_data = torch.nn.Parameter(w2_data, requires_grad=False)
                     setattr(parent_module, param_name, w2_data)
-                elif "w13_weight" in name and param.shape[1] == hidden_size:
-                    parts = name.split(".")
-                    param_name = parts[-1]
-                    parent_module = model.get_submodule(".".join(parts[:-1]))
-
+                else:
                     w13_data = param.transpose(1, 2)
                     w13_data = torch.nn.Parameter(w13_data, requires_grad=False)
                     setattr(parent_module, param_name, w13_data)
@@ -304,6 +309,21 @@ class NPUWorker(WorkerBase):
                 "VLLM_ASCEND_ENABLE_NZ=0."
             )
 
+    def prepare_model_for_native_layerwise_reload(self, model: nn.Module) -> None:
+        """Prepare backend-specific layouts before layerwise reload initialization."""
+        for layer in model.modules():
+            quant_method = getattr(layer, "quant_method", None)
+            if getattr(quant_method, "requires_native_layerwise_reload", False) is not True:
+                continue
+
+            prepare = getattr(quant_method, "prepare_for_native_layerwise_reload", None)
+            if not callable(prepare):
+                raise RuntimeError(
+                    "A quantization method requires native layerwise reload but does not provide "
+                    "prepare_for_native_layerwise_reload()."
+                )
+            prepare(layer)
+
     def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
         """Begin a new weight update; prepares the model for layerwise reload."""
         self._check_weight_transfer_engine()
@@ -320,6 +340,7 @@ class NPUWorker(WorkerBase):
 
             model = self.model_runner.model
             with torch.device(self.device):
+                self.prepare_model_for_native_layerwise_reload(model)
                 initialize_layerwise_reload(model)
 
         self._is_checkpoint_format = is_checkpoint_format
