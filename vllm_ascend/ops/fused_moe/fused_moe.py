@@ -99,6 +99,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         super().__init__(moe=moe)
         self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
         self.tid2eid = tid2eid
+        self.lora_context = None
+
+    def set_lora_context(self, lora_context) -> None:
+        self.lora_context = lora_context
 
     @property
     def is_monolithic(self) -> bool:
@@ -170,7 +174,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         global_redundant_expert_num: int = 0,
         pertoken_scale: torch.Tensor | None = None,
         mc2_mask: torch.Tensor | None = None,
-        split_lora_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
@@ -228,6 +231,11 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
+        lora_context = self.lora_context
+        if lora_context is None:
+            lora_context = getattr(layer, "_ascend_moe_lora_context", None)
+        if hasattr(moe_comm_method, "set_lora_context"):
+            moe_comm_method.set_lora_context(lora_context)
         # NOTE: In the MoECommType.FUSED_MC2 branch, we wrap weights (w1, w2) into lists
         # and provide dummy scales (w1_scale, w2_scale). This is required because:
         # The underlying Ascend fused operator (e.g., dispatch_ffn_combine) expects
@@ -284,10 +292,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
                 swiglu_limit=layer.swiglu_limit,
-                # Per-layer MoE LoRA state, set once by AscendFusedMoEWithLoRA
-                # when an adapter wraps this layer; None for non-LoRA layers.
-                lora_context=getattr(layer, "_ascend_moe_lora_context", None),
-                split_lora_indices=split_lora_indices,
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
@@ -563,15 +567,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # This approach may overlook some extreme scenarios.
         enable_force_load_balance = _EXTRA_CTX.in_profile_run
 
-        # This is only needed in the EP + TP path where tokens are
-        # TP-split along the token dimension.  In pure TP (AllGather
-        # path) the recovery function reads token_lora_indices directly
-        # from lora_context, so skip the split there.
         lora_context = getattr(self.routed_experts, "_ascend_moe_lora_context", None)
-
-        token_lora_indices = None
-        if lora_context is not None and self.moe_config.ep_size > 1:
-            token_lora_indices = lora_context.punica_wrapper.token_lora_indices
+        if hasattr(_EXTRA_CTX.moe_comm_method, "set_lora_context"):
+            _EXTRA_CTX.moe_comm_method.set_lora_context(lora_context)
+        if hasattr(self._quant_method, "set_lora_context"):
+            self._quant_method.set_lora_context(lora_context)
 
         prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
             hidden_states=hidden_states,
@@ -579,14 +579,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             replace_allreduce=_EXTRA_CTX.flash_comm_v1_enabled,
             enable_shared_expert_dp=self.enable_shared_expert_dp,
             quant_type=self.quant_type,
-            token_lora_indices=token_lora_indices,
         )
         hidden_states = prepare_output.hidden_states
         router_logits = prepare_output.router_logits
         mc2_mask = prepare_output.mc2_mask
         padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
         pertoken_scale = prepare_output.pertoken_scale
-        split_lora_indices = prepare_output.split_lora_indices
 
         # Matrix multiply.
         # apply() expects a RoutedExperts-like layer for weight access
@@ -614,7 +612,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             log2phy=self.log2phy,
             global_redundant_expert_num=self.global_redundant_expert_num,
             mc2_mask=mc2_mask,
-            split_lora_indices=split_lora_indices,
         )
 
         if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
