@@ -46,7 +46,8 @@ public:
                                       const SparseAttnSharedkvTilingData *__restrict tilingData);
     __aicore__ inline void InitVec1GlobalTensor(GlobalTensor<MM1_OUT_T> mm1ResGm, GlobalTensor<KV_T> vec1ResGm,
                                                 GlobalTensor<int32_t> actualSeqLengthsQGm,
-                                                GlobalTensor<int32_t> actualSeqLengthsKVGm, GlobalTensor<T> sinksGm, GlobalTensor<T> softmaxLseGm);
+                                                GlobalTensor<int32_t> actualSeqLengthsKVGm,
+                                                GlobalTensor<T> sinksGm, GlobalTensor<T> softmaxLseGm);
     __aicore__ inline void InitVec2GlobalTensor(GlobalTensor<T> accumOutGm, GlobalTensor<UPDATE_T> vec2ResGm,
                                                 GlobalTensor<MM2_OUT_T> mm2ResGm, GlobalTensor<OUT_T> attentionOutGm);
     __aicore__ inline void AllocEventID();
@@ -67,8 +68,9 @@ public:
                                                  LocalTensor<T> &mmResUb, LocalTensor<uint8_t> &softmaxTmpUb,
                                                  uint32_t startRow, uint32_t dealRowCount, uint32_t columnCount,
                                                  uint32_t actualColumnCount);
-    __aicore__ inline void ElewiseCompute(const RunInfo &info, const LocalTensor<T> &mmResUb, uint32_t dealRowCount,
-                                          uint32_t columnCount);
+    __aicore__ inline void ElewiseCompute(const RunInfo &info, const MSplitInfo &mSplitInfo,
+                                          const LocalTensor<T> &mmResUb, uint32_t dealRowCount,
+                                          uint32_t startRow, uint32_t columnCount);
     __aicore__ inline void ProcessLse(const RunInfo &info, const MSplitInfo &mSplitInfo);
     // ================================Vecotr2==========================================
     __aicore__ inline void ProcessVec2SingleBuf(const RunInfo &info, const MSplitInfo &mSplitInfo);
@@ -87,6 +89,8 @@ public:
     __aicore__ inline void Bmm2FDDataCopyOut(const RunInfo &info, LocalTensor<T> &bmm2ResUb, uint32_t wsMStart,
                                              uint32_t dealRowCount, uint32_t columnCount, uint32_t actualColumnCount);
     __aicore__ inline uint64_t CalcAccumOffset(uint32_t bN2Idx, uint32_t gS1Idx);
+    __aicore__ inline void SetInfInBlk(const LocalTensor<T> &mmResUb, uint32_t dealRowCount, uint32_t columnCount,
+                                       int64_t startId, int64_t endId);
 
     // BLOCK和REPEAT的字节数
     static constexpr uint64_t BYTE_BLOCK = 32UL;
@@ -319,12 +323,119 @@ __aicore__ inline void SWAVectorBlock<SAST>::InitSoftmaxDefaultBuffer()
 }
 
 template <typename SAST>
-__aicore__ inline void SWAVectorBlock<SAST>::ElewiseCompute(const RunInfo &info, const LocalTensor<T> &mmResUb,
+__aicore__ inline void SWAVectorBlock<SAST>::ElewiseCompute(const RunInfo &info,
+                                                            const MSplitInfo &mSplitInfo,
+                                                            const LocalTensor<T> &mmResUb, uint32_t startRow,
                                                             uint32_t dealRowCount, uint32_t columnCount)
 {
     Muls(mmResUb, mmResUb, static_cast<T>(tilingData->baseParams.softmaxScale), dealRowCount * columnCount);
+    uint32_t gs1StartIdx = info.gS1Idx + mSplitInfo.nBufferStartM + mSplitInfo.vecStartM + startRow;
+    uint32_t gs1EndIdx = gs1StartIdx + dealRowCount;
+    uint32_t s1StartIdx = gs1StartIdx / constInfo.gSize;
+    uint32_t s1EndIdx = gs1EndIdx / constInfo.gSize;
+    uint32_t gStartIdx = gs1StartIdx % constInfo.gSize;
+    uint32_t gEndIdx = gs1EndIdx % constInfo.gSize;
+    uint32_t dealTempSize = 0;
+    uint32_t ubOffset = 0;
+    if (info.isOriOnly) {
+        int32_t right = info.oriDealSize + s1StartIdx - info.gS1Idx / constInfo.gSize;
+        int32_t left = Max(0, static_cast<int32_t>(right) - constInfo.oriWinLeft + constInfo.oriWinRight);
+        for (uint32_t i = s1StartIdx; i <= s1EndIdx; i++) {
+            dealTempSize = constInfo.gSize - gStartIdx;
+            if (i == s1EndIdx) {
+                dealTempSize = gEndIdx - gStartIdx;
+            }
+            if (dealTempSize == 0) {
+                continue;
+            }
+            SetInfInBlk(mmResUb[ubOffset], dealTempSize, columnCount, 0, left - 1);
+            SetInfInBlk(mmResUb[ubOffset], dealTempSize, columnCount, right + 1, columnCount - 1);
+            right = Min(right + 1, columnCount - 1);
+            left = Max(0, static_cast<int32_t>(right) - constInfo.oriWinLeft + constInfo.oriWinRight);
+            ubOffset += dealTempSize * columnCount;
+            gStartIdx = 0;
+        }
+    } else if (info.isOriCmpMix) {
+        int32_t oriRight = info.oriDealSize + s1StartIdx - info.gS1Idx / constInfo.gSize;
+        int32_t oriLeft = Max(0, static_cast<int32_t>(oriRight) - constInfo.oriWinLeft + constInfo.oriWinRight);
+        int32_t noMaskCmpSize = info.cmpMaskRight + s1StartIdx + 1;
+        int32_t actNoMaskCmpSize = 0;
+        int32_t cmpRight = 0;
+        for (uint32_t i = s1StartIdx; i <= s1EndIdx; i++) {
+            dealTempSize = constInfo.gSize - gStartIdx;
+            if (i == s1EndIdx) {
+                dealTempSize = gEndIdx - gStartIdx;
+            }
+            if (dealTempSize == 0) {
+                continue;
+            }
+            actNoMaskCmpSize = noMaskCmpSize / constInfo.cmpRatio;
+            if (actNoMaskCmpSize <= 0) {
+                cmpRight = 0;
+            } else {
+                cmpRight = Min(actNoMaskCmpSize, constInfo.s2BaseSize - info.actualSingleProcessSInnerOriSize);
+            }
+            SetInfInBlk(mmResUb[ubOffset], dealTempSize, columnCount, 0, oriLeft - 1);
+            SetInfInBlk(mmResUb[ubOffset], dealTempSize, columnCount, oriRight + 1,
+                info.actualSingleProcessSInnerOriSize - 1);
+            oriRight = Min(oriRight + 1, info.actualSingleProcessSInnerOriSize);
+            oriLeft = Max(0, static_cast<int32_t>(oriRight) - constInfo.oriWinLeft + constInfo.oriWinRight);
+            SetInfInBlk(mmResUb[ubOffset], dealTempSize, columnCount, cmpRight + info.actualSingleProcessSInnerOriSize,
+                columnCount - 1);
+            noMaskCmpSize += 1;
+            ubOffset += dealTempSize * columnCount;
+            gStartIdx = 0;
+        }
+    } else {
+        int32_t noMaskCmpSize = info.cmpMaskRight + s1StartIdx + 1;
+        int32_t actNoMaskCmpSize = 0;
+        int32_t right = 0;
+        for (uint32_t i = s1StartIdx; i <= s1EndIdx; i++) {
+            actNoMaskCmpSize = noMaskCmpSize / constInfo.cmpRatio;
+            if (actNoMaskCmpSize <= 0) {
+                right = 0;
+            } else {
+                right = actNoMaskCmpSize - info.s2StartPoint;
+            }
+            dealTempSize = constInfo.gSize - gStartIdx;
+            if (i == s1EndIdx) {
+                dealTempSize = gEndIdx - gStartIdx;
+            }
+            if (dealTempSize == 0) {
+                continue;
+            }
+            SetInfInBlk(mmResUb[ubOffset], dealTempSize, columnCount, right, columnCount - 1);
+            noMaskCmpSize += 1;
+            ubOffset += dealTempSize * columnCount;
+            gStartIdx = 0;
+        }
+    }
 }
 
+template <typename SAST>
+__aicore__ inline void SWAVectorBlock<SAST>::SetInfInBlk(const LocalTensor<T> &mmResUb,
+                                                         uint32_t dealRowCount, uint32_t columnCount,
+                                                         int64_t startId, int64_t endId)
+{
+    //       startId     endId
+    // x x x   0      0   0     x x x
+    // 从startId到endId部分置-inf, endId、startId为endId一个blk内部的下标
+    // 左闭右闭
+    if (startId > endId) {
+        return;
+    }
+    startId = static_cast<uint64_t>(startId);
+    endId = static_cast<uint64_t>(endId);
+    uint64_t startFloorAlignSize = startId / BLOCK_ELEMENT_NUM * BLOCK_ELEMENT_NUM;
+    uint64_t notComputePreMaskOneBlk = (1llu << static_cast<uint64_t>(startId - startFloorAlignSize)) - 1;
+    uint64_t notComputePostMaskOneBlk = ~((1llu << static_cast<uint64_t>(endId - startFloorAlignSize + 1)) - 1);
+    uint64_t notComputeMaskOneBlk = notComputePreMaskOneBlk ^ notComputePostMaskOneBlk;
+
+    uint64_t maskOneBlk = ~notComputeMaskOneBlk;
+    uint64_t mask[1] = {maskOneBlk};
+    Duplicate(mmResUb[startFloorAlignSize], SOFTMAX_MIN_NUM, mask,
+              dealRowCount, 1, columnCount / 8);
+}
 
 template <typename SAST>
 __aicore__ inline void
@@ -369,12 +480,12 @@ __aicore__ inline void SWAVectorBlock<SAST>::ProcessLse(const RunInfo &info, con
     uint64_t lseOffset;
     if (constInfo.outputLayout == SAS_LAYOUT::TND) {
         uint32_t tBase = actualSeqLengthsQGm.GetValue(info.bIdx);
-        lseOffset = (tBase + info.s1Idx) * constInfo.gSize  + // T轴、s1轴偏移
-                                    info.n2IdxReal * constInfo.qSeqSize * constInfo.gSize; // N2轴偏移
+        lseOffset = (tBase + info.s1Idx) * constInfo.gSize +
+                    info.n2IdxReal * constInfo.qSeqSize * constInfo.gSize;
     } else if (constInfo.outputLayout == SAS_LAYOUT::BSND) {
-        lseOffset = info.bIdx * constInfo.qSeqSize * constInfo.kvHeadNum * constInfo.gSize  + // B轴偏移
-                    info.n2IdxReal  * constInfo.qSeqSize * constInfo.gSize + // N2轴偏移
-                    info.s1Idx * constInfo.gSize; // S1轴偏移
+        lseOffset = info.bIdx * constInfo.qSeqSize * constInfo.kvHeadNum * constInfo.gSize +
+                    info.n2IdxReal * constInfo.qSeqSize * constInfo.gSize +
+                    info.s1Idx * constInfo.gSize;
     }
     lseOffset = lseOffset + mSplitInfo.nBufferStartM + mSplitInfo.vecStartM;
     uint32_t baseOffset = mSplitInfo.nBufferStartM / 2;
@@ -401,7 +512,6 @@ __aicore__ inline void SWAVectorBlock<SAST>::ProcessLse(const RunInfo &info, con
     SetFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF2_FLAG);
 }
 
-
 template <typename SAST>
 __aicore__ inline void SWAVectorBlock<SAST>::DealBmm1ResBaseBlock(const RunInfo &info, const MSplitInfo &mSplitInfo,
                                                                   uint32_t startRow, uint32_t dealRowCount,
@@ -418,7 +528,7 @@ __aicore__ inline void SWAVectorBlock<SAST>::DealBmm1ResBaseBlock(const RunInfo 
     SetFlag<AscendC::HardEvent::MTE2_V>(SYNC_INPUT_BUF1_FLAG);
     WaitFlag<AscendC::HardEvent::MTE2_V>(SYNC_INPUT_BUF1_FLAG);
 
-    ElewiseCompute(info, mmResUb, dealRowCount, columnCount);
+    ElewiseCompute(info, mSplitInfo, mmResUb, startRow, dealRowCount, columnCount);
 
     PipeBarrier<PIPE_V>();
     LocalTensor<T> tmpAFloorUb = tmpBuff1.Get<T>();
