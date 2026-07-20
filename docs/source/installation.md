@@ -7,7 +7,7 @@ This document describes how to install vllm-ascend manually.
 - OS: Linux
 - Python: >= 3.10, < 3.13
 - Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series.
-- For 310P: Atlas inference products (Atlas 300I DUO) or Atlas 200I Pro.
+- Atlas inference products.
 - Software:
 
     | Software      | Supported version                | Note                                      |
@@ -20,7 +20,7 @@ This document describes how to install vllm-ascend manually.
 
 !!! note "Atlas inference products"
 
-    Atlas inference products and Atlas 200I Pro require CANN 9.1.0 beta. The Atlas A2/A3 requirements in the table above remain unchanged.
+    Atlas inference products require CANN 9.1.0 beta. The Atlas A2/A3 requirements in the table above remain unchanged.
 
 There are two installation methods:
 
@@ -210,7 +210,7 @@ Then you can install `vllm` and `vllm-ascend` from a **pre-built wheel** using o
 
     !!! note "Atlas inference products"
 
-        Atlas 300I DUO does not support `triton` or `triton-ascend`. Source installations can pull these packages as dependencies; remove them before running on Atlas inference products:
+        Atlas inference products do not support `triton` or `triton-ascend`. Source installations can pull these packages as dependencies; remove them before running on Atlas inference products:
 
         ```bash
         pip uninstall -y triton-ascend triton
@@ -225,7 +225,7 @@ Then you can install `vllm` and `vllm-ascend` from a **pre-built wheel** using o
 
     - Atlas A2: `export SOC_VERSION=ascend910b1`
     - Atlas A3: `export SOC_VERSION=ascend910_9391`
-    - Atlas inference products / Atlas 200I Pro: `export SOC_VERSION=ascend310p1`
+    - Atlas inference products: `export SOC_VERSION=ascend310p1`
     - Ascend 950 Products: `export SOC_VERSION=<value starting with "ascend950">`
 
 !!! note
@@ -245,8 +245,8 @@ Supported images as following.
 | vllm-ascend:{{ vllm_ascend_version }}-openeuler | Atlas A2 | openEuler |
 | vllm-ascend:{{ vllm_ascend_version }}-a3 | Atlas A3 | Ubuntu |
 | vllm-ascend:{{ vllm_ascend_version }}-a3-openeuler | Atlas A3 | openEuler |
-| vllm-ascend:{{ vllm_ascend_version }}-310p | Atlas inference products / Atlas 200I Pro | Ubuntu |
-| vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler | Atlas inference products / Atlas 200I Pro | openEuler |
+| vllm-ascend:{{ vllm_ascend_version }}-310p | Atlas inference products | Ubuntu |
+| vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler | Atlas inference products | openEuler |
 
 ??? "Click here to see 'Build from Dockerfile'"
 

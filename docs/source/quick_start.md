@@ -15,7 +15,7 @@ This section guides you through container-based environment setup and large mode
 - Atlas 800I A2 inference series (Atlas 800I A2)
 - Atlas A3 training series (Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD)
 - Atlas 800I A3 inference series (Atlas 800I A3)
-- [Experimental] Atlas inference products (Atlas 300I DUO) and Atlas 200I Pro acceleration modules
+- [Experimental] Atlas inference products
 
 ## Requirements
 
@@ -34,7 +34,7 @@ This section guides you through container-based environment setup and large mode
 
 !!! note "Atlas inference products"
 
-    Atlas inference products use CANN 9.1.0 beta and `float16`. Use the `-310p` image suffix for Ubuntu or `-310p-openeuler` for openEuler. Atlas 300I DUO does not support `triton` or `triton-ascend`.
+    Atlas inference products use CANN 9.1.0 beta and `float16`. Use the `-310p` image suffix for Ubuntu or `-310p-openeuler` for openEuler. Atlas inference products do not support `triton` or `triton-ascend`.
 
     Always set an explicit, conservative `max_model_len`/`--max-model-len` value on Atlas inference products, for example, `--max-model-len 16384`. The current attention path creates a causal mask whose memory usage grows quadratically with the configured context length, so automatic model-length detection can cause out-of-memory errors.
 
@@ -107,7 +107,7 @@ Before using containers, make sure Docker is installed on your system. If Docker
 
 === "Ubuntu (Atlas inference products)"
 
-    The following command applies to Atlas 300I DUO. For Atlas 200I Pro, use the additional device nodes and driver mounts documented in [Installation](installation.md#set-up-using-docker).
+    The following command applies to Atlas inference products. For Atlas 200I Pro, use the additional device nodes and driver mounts documented in [Installation](installation.md#set-up-using-docker).
 
     ```bash
 
@@ -197,7 +197,7 @@ Before using containers, make sure Docker is installed on your system. If Docker
 
 === "openEuler (Atlas inference products)"
 
-    The following command applies to Atlas 300I DUO. For Atlas 200I Pro, use the additional device nodes and driver mounts documented in [Installation](installation.md#set-up-using-docker).
+    The following command applies to Atlas inference products. For Atlas 200I Pro, use the additional device nodes and driver mounts documented in [Installation](installation.md#set-up-using-docker).
 
     ```bash
 
