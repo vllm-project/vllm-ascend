@@ -67,6 +67,15 @@ from vllm.utils.network_utils import get_open_port
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
+COVERAGE_TIMEOUT_MULTIPLIER = 3
+PROCESS_JOIN_TIMEOUT_SECONDS = 900
+
+
+def coverage_scaled_timeout(timeout: float) -> float:
+    if os.getenv("ENABLE_COVERAGE") == "true":
+        return timeout * COVERAGE_TIMEOUT_MULTIPLIER
+    return timeout
+
 
 def parse_args():
     import argparse
@@ -227,10 +236,11 @@ if __name__ == "__main__":
         proc.start()
         procs.append(proc)
     exit_code = 0
+    process_join_timeout = coverage_scaled_timeout(PROCESS_JOIN_TIMEOUT_SECONDS)
     for proc in procs:
-        proc.join(timeout=900)
+        proc.join(timeout=process_join_timeout)
         if proc.exitcode is None:
-            print(f"Killing process {proc.pid} that didn't stop within 15 minutes.")
+            print(f"Killing process {proc.pid} that didn't stop within {process_join_timeout} seconds.")
             proc.kill()
             exit_code = 1
         elif proc.exitcode:

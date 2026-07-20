@@ -27,6 +27,7 @@ from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import cleanup_dist_env_and_memory, wait_until_npu_memory_free
 from tests.e2e.pull_request.utils import PROMPTS_LONG, PROMPTS_SHORT
+from tests.e2e.timeout_utils import coverage_scaled_timeout
 
 QWEN3 = "Qwen/Qwen3-0.6B"
 DEEPSEEK_V2_LITE = "vllm-ascend/DeepSeek-V2-Lite-W8A8"
@@ -644,7 +645,7 @@ def test_aclgraph(cur_case: dict, monkeypatch: pytest.MonkeyPatch):
     # get results
     for _ in range(cur_case["data_parallel_size"]):
         try:
-            result = result_queue.get(timeout=180)
+            result = result_queue.get(timeout=coverage_scaled_timeout(180))
             all_dp_results.append(result)
         except queue.Empty:
             print("Error: Timeout waiting for worker results. A worker might have crashed.")
@@ -652,12 +653,12 @@ def test_aclgraph(cur_case: dict, monkeypatch: pytest.MonkeyPatch):
 
     # Supervision loop
     for p in workers:
-        p.join(timeout=30)
+        p.join(timeout=coverage_scaled_timeout(30))
         if p.exitcode != 0:
             for k in workers:
                 if k.is_alive():
                     k.kill()
-                    p.join(timeout=5)
+                    k.join(timeout=coverage_scaled_timeout(5))
             raise RuntimeError(f"Worker {p.pid} failed with exit code {p.exitcode}")
     _exit()
     assert len(all_dp_results) == cur_case["data_parallel_size"], f"Expected 2 results, got {len(all_dp_results)}"
