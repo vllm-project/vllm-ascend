@@ -118,10 +118,10 @@ def _patch_image_token_wrapping(hunyuan_vision: Any) -> None:
     Transformers' ``HunYuanVLProcessor.validate_inputs`` requires every image
     placeholder to be surrounded by the image start/end tokens, i.e.
     ``<no_100><no_102><no_101>``. vLLM main folds this wrapping into
-    ``hunyuan_vision._call_hf_processor`` natively, but vLLM v0.25.0 does not,
+    ``hunyuan_vision._call_hf_processor`` natively, but vLLM v0.25.1 does not,
     so prompts built with a bare image token (e.g. the dummy mm batch during
     ``profile_run``) are rejected by ``validate_inputs``. Backport the wrapping
-    on v0.25.0 only; the ``wrapped not in prompt`` guard keeps it idempotent.
+    on v0.25.1 only; the ``wrapped not in prompt`` guard keeps it idempotent.
     """
 
     def call_hf_processor(
@@ -148,13 +148,12 @@ def _patch_image_token_wrapping(hunyuan_vision: Any) -> None:
 
 def install_hunyuan_vl_processor_compat() -> None:
     """Align both supported vLLM refs with Transformers 5.13 Hunyuan APIs."""
-    if not _remove_stale_registry_entries():
-        return
+    _remove_stale_registry_entries()
     from vllm.model_executor.models import hunyuan_vision as main_hunyuan_vision
 
     _patch_hunyuan_processor_loader(main_hunyuan_vision)
-    # vLLM v0.25.0 does not wrap bare image tokens with start/end tokens inside
+    # vLLM v0.25.1 does not wrap bare image tokens with start/end tokens inside
     # ``_call_hf_processor`` (that landed on main only), so backport it here.
-    # Main already does this natively, so the patch is v0.25.0-only.
-    if vllm_version_is("0.25.0"):
+    # Main already does this natively, so the patch is v0.25.1-only.
+    if vllm_version_is("0.25.1"):
         _patch_image_token_wrapping(main_hunyuan_vision)
