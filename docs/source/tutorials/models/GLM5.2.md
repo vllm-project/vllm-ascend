@@ -258,7 +258,6 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --host 0.0.0.0 \
     --port 8077 \
     --headless \
-    --api-server-count 1 \
     --data-parallel-size 8 \
     --data-parallel-size-local 4 \
     --data-parallel-start-rank 4 \
