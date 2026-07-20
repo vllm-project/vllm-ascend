@@ -350,6 +350,12 @@ Supported images as following.
         -it $IMAGE bash
     ```
 
+    For openEuler, keep the same command structure and make the following substitutions:
+
+    - Set `IMAGE` to `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler`.
+    - Add `-v /usr/lib64/libsemanage.so.2:/usr/lib64/libsemanage.so.2`.
+    - Replace the `libyaml` mount with `-v /usr/lib64/libyaml-0.so.2.0.9:/usr/lib64/libyaml-0.so.2`.
+
 ## Extra information
 
 ### Verify installation
