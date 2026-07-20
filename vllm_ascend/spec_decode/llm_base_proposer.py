@@ -754,6 +754,35 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self.speculative_config is not None and getattr(self.speculative_config, "use_gemma4_mtp", lambda: False)()
         )
 
+    def notify_target_forward_done(self) -> None:
+        """Record any state needed right after the target model's forward.
+
+        Called by the runner immediately after the target forward completes.
+        No-op in the shared base: only Gemma4 MTP reads the target model's
+        KV cache and thus needs to record an NPU event to synchronise with
+        the target's async (FDO-graph) KV writes.  AscendGemma4Proposer
+        overrides this with the real event-record; all other draft proposers
+        own their KV cache and fall through here.  Paired with
+        ``_sync_wait_target_events`` (the wait side, called inside the draft).
+        """
+        return
+
+    def set_per_group_block_table(
+        self,
+        gid: int,
+        block_table: torch.Tensor,
+    ) -> None:
+        """Capture a per-KV-cache-group block table.
+
+        Called by the runner once per KV cache group while building attention
+        metadata.  No-op in the shared base: only multi-group proposers that
+        read the target's KV across groups (e.g. Gemma4 MTP) need each
+        group's block table to locate the correct shared cache at runtime.
+        AscendGemma4Proposer overrides this; single-group proposers fall
+        through here.
+        """
+        return
+
     def _sync_wait_target_events(self) -> None:
         """Wait for NPU events recorded after target forward completes.
 

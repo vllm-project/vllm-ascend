@@ -314,8 +314,20 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
     # Gemma4 MTP reads K/V from the target model's KV cache, so the draft must
     # wait for the target's (async, FDO-graph) KV writes to land before it
     # reads.  This is Gemma4-specific: other draft proposers own their KV
-    # cache and need no such sync.  Hence the override lives here (gemma4
-    # gated by class) rather than in the shared base proposer.
+    # cache and need no such sync, so the runner calls the no-op base hooks
+    # and only this class actually records/waits on the event.
+
+    def notify_target_forward_done(self) -> None:
+        """Record an NPU event now that the target forward has finished.
+
+        The draft reads the target's KV cache, whose FDO-graph replay writes
+        land asynchronously on the NPU stream; ``_sync_wait_target_events``
+        waits on this event before the draft reads the cache.  A single event
+        is reused across steps to avoid NPU event resource pressure.
+        """
+        if not hasattr(self, "_target_done_event"):
+            self._target_done_event = torch.npu.Event()
+        self._target_done_event.record()
 
     def _sync_wait_target_events(self) -> None:
         """Wait for the NPU event recorded after target forward completes.
@@ -327,7 +339,6 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
         _ev = getattr(self, "_target_done_event", None)
         if _ev is not None:
             _ev.wait()
-            self._target_done_event = None
 
     # ---- load_model --------------------------------------------------------
     # We need BOTH:

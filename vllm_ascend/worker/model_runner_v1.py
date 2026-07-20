@@ -137,6 +137,7 @@ from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
 from vllm_ascend.spec_decode.gemma4_proposer import AscendGemma4Proposer
+from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
@@ -2433,24 +2434,17 @@ class NPUModelRunner(GPUModelRunner):
         # the target model runs in FDO graph mode because reshape_and_cache
         # KV writes are async on the NPU stream.
         _target_is_fdo = self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        # Only Gemma4 MTP reads the target KV cache and waits on this event;
-        # gate the record side on the drafter type so Eagle/DFlash/Medusa/
-        # Ngram drafts don't pay the per-step event record + attr assign cost.
+        # Proposers that read the target's KV cache (e.g. Gemma4 MTP) override
+        # notify_target_forward_done to record an NPU event they will wait on
+        # before reading the cache; the Ascend base proposer's hook is a no-op,
+        # so Eagle/DFlash/etc. pay only a single Python call, and non-Ascend
+        # proposers (Medusa/Ngram/...) are skipped via the isinstance gate.
         if (
             _target_is_fdo
             and getattr(self, "drafter", None) is not None
+            and isinstance(self.drafter, AscendSpecDecodeBaseProposer)
         ):
-            from vllm_ascend.spec_decode.gemma4_proposer import (
-                AscendGemma4Proposer,
-            )
-            if isinstance(self.drafter, AscendGemma4Proposer):
-                # Reuse a single event across steps instead of allocating one
-                # per forward on the hot path, to avoid NPU event resource
-                # pressure.
-                if not hasattr(self, "_target_done_event"):
-                    self._target_done_event = torch.npu.Event()
-                self._target_done_event.record()
-                self.drafter._target_done_event = self._target_done_event
+            self.drafter.notify_target_forward_done()
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
@@ -3464,9 +3458,14 @@ class NPUModelRunner(GPUModelRunner):
                 else:
                     spec_decode_common_attn_metadata = cm
             # MTP: Capture per-group block tables for multi-group proposers
-            # (Gemma4 MTP). Each KV cache group has its own block_table;
+            # (e.g. Gemma4 MTP). Each KV cache group has its own block_table;
             # the draft model needs all of them to read the correct KV cache.
-            if self.speculative_config and isinstance(self.drafter, AscendGemma4Proposer):
+            # Multi-group proposers override the hook; the Ascend base no-ops
+            # it, and non-Ascend proposers are skipped via the isinstance gate.
+            if (
+                self.speculative_config
+                and isinstance(self.drafter, AscendSpecDecodeBaseProposer)
+            ):
                 self.drafter.set_per_group_block_table(kv_cache_gid, cm.block_table_tensor)
             if self.enable_hamming_sparse is True:
                 from vllm_ascend.attention.kvcomp_attn.attention_utils import build_kvcomp_metadata
