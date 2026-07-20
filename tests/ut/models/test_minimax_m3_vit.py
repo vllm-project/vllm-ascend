@@ -3,18 +3,13 @@
 
 from __future__ import annotations
 
-import importlib.util
-import inspect
 import unittest
 from dataclasses import dataclass
-from pathlib import Path
 
-import vllm
 from transformers import BatchFeature
 
 from vllm_ascend.models.minimax_m3 import (
     MiniMaxM3VLMultiModalProcessor,
-    MiniMaxVLVisionModel,
     _get_minimax_m3_num_video_tokens,
 )
 
@@ -57,22 +52,6 @@ def _make_processor() -> MiniMaxM3VLMultiModalProcessor:
 
 
 class TestMiniMaxM3VitProcessor(unittest.TestCase):
-    def test_vision_tower_uses_vllm_common_implementation(self) -> None:
-        source_file = inspect.getsourcefile(MiniMaxVLVisionModel)
-        self.assertIsNotNone(source_file)
-        self.assertIsNotNone(vllm.__file__)
-        expected_source = (
-            Path(vllm.__file__).resolve().parent
-            / "models"
-            / "minimax_m3"
-            / "common"
-            / "vision_tower.py"
-        )
-        self.assertTrue(Path(source_file).samefile(expected_source))
-
-    def test_standalone_vllm_vision_bridge_is_removed(self) -> None:
-        self.assertIsNone(importlib.util.find_spec("vllm_ascend.models.minimax_m3_vllm_vision"))
-
     def test_video_token_count_pads_temporal_frames(self) -> None:
         video_processor = _FakeVideoProcessor()
 

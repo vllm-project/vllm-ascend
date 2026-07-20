@@ -23,19 +23,15 @@
 # limitations under the License.
 """Inference-only MiniMaxM3 model."""
 
-import sys
 from collections.abc import Iterable, Mapping, Sequence
 from itertools import islice
-from pathlib import Path
-from types import ModuleType
-from typing import Any, cast
+from typing import Any
 
 import torch
-import vllm
 from torch import nn
 from transformers import BatchFeature, PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import (
     get_pp_group,
@@ -43,9 +39,21 @@ from vllm.distributed import (
 )
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import logger
+from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    GateLinear,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -87,63 +95,9 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.import_utils import import_from_path
 
 from vllm_ascend.attention.msa_m3 import MiniMaxM3SparseAttention
-
-
-def _load_vllm_minimax_m3_vision_model() -> type[nn.Module]:
-    """Load vLLM's MiniMax-M3 vision tower without importing its platform entry."""
-    if vllm.__file__ is None:
-        raise ImportError("Unable to locate the installed vLLM package.")
-
-    vision_tower_path = (
-        Path(vllm.__file__).resolve().parent
-        / "models"
-        / "minimax_m3"
-        / "common"
-        / "vision_tower.py"
-    )
-    if not vision_tower_path.is_file():
-        raise ImportError(
-            "The vLLM MiniMax M3 vision tower source was not found at "
-            f"{vision_tower_path}. This vllm-ascend adapter requires vLLM 0.24."
-        )
-
-    vision_tower_module = import_from_path(
-        "vllm_ascend.models._vllm_024_minimax_m3_vision_tower",
-        vision_tower_path,
-    )
-    return vision_tower_module.MiniMaxVLVisionModel
-
-
-MiniMaxVLVisionModel = _load_vllm_minimax_m3_vision_model()
-
-
-def _install_fused_allreduce_norm_fallback() -> None:
-    """Avoid importing vLLM's FlashInfer-only fusion module on Ascend."""
-    module_name = "vllm.model_executor.layers.fused_allreduce_gemma_rms_norm"
-    if module_name in sys.modules:
-        return
-
-    fallback_module = ModuleType(module_name)
-
-    def fused_allreduce_gemma_rms_norm(
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor,
-        norm: GemmaRMSNorm,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if get_tensor_model_parallel_world_size() > 1:
-            hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states)
-        return norm(hidden_states, residual)
-
-    cast(Any, fallback_module).fused_allreduce_gemma_rms_norm = fused_allreduce_gemma_rms_norm
-    sys.modules[module_name] = fallback_module
-
-
-_install_fused_allreduce_norm_fallback()
-
-from vllm.models.minimax_m3.nvidia import model as minimax_m3_model  # noqa: E402
+from vllm_ascend.models.minimax_m3_vllm_vision import MiniMaxVLVisionModel
 
 
 def _sparse_attention_layer_ids(config: PretrainedConfig) -> set[int]:
@@ -180,9 +134,27 @@ def _get_rope_parameters(config: PretrainedConfig) -> dict[str, Any] | None:
     return rope_parameters
 
 
-class MiniMaxM3MLP(minimax_m3_model.MiniMaxM3MLP):
-    """Compatibility wrapper around vLLM's native MiniMax-M3 MLP."""
+class MiniMaxM3SwiGLUOAI(nn.Module):
+    """MiniMax-M3 SwiGLU-OAI activation for packed gate/up outputs."""
 
+    def __init__(self, alpha: float, beta: float, limit: float):
+        super().__init__()
+        self.alpha = float(alpha)
+        self.beta = float(beta)
+        self.limit = float(limit)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.ops.npu.npu_clipped_swiglu(
+            x,
+            dim=-1,
+            alpha=self.alpha,
+            limit=self.limit,
+            bias=self.beta,
+            interleaved=False,
+        )
+
+
+class MiniMaxM3MLP(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
@@ -191,140 +163,333 @@ class MiniMaxM3MLP(minimax_m3_model.MiniMaxM3MLP):
         intermediate_size: int | None = None,
         prefix: str = "",
     ) -> None:
-        super().__init__(
-            config=config,
-            intermediate_size=intermediate_size or config.intermediate_size,
+        super().__init__()
+        hidden_size = config.hidden_size
+        hidden_act = config.hidden_act
+        if intermediate_size is None:
+            intermediate_size = config.intermediate_size
+
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size,
+            [intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
+        )
+        self.down_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=False,
             quant_config=quant_config,
             reduce_results=reduce_results,
-            prefix=prefix,
+            prefix=f"{prefix}.down_proj",
         )
+        if hidden_act == "swigluoai":
+            self.act_fn = MiniMaxM3SwiGLUOAI(
+                alpha=config.swiglu_alpha,
+                beta=getattr(config, "swiglu_beta", 1.0),
+                limit=config.swiglu_limit,
+            )
+        else:
+            raise ValueError(f"Unsupported activation: {hidden_act}. Only swigluoai is supported.")
+
+    def forward(
+        self,
+        x,
+    ):
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
+        return x
 
 
-class MiniMaxM3MoE(minimax_m3_model.MiniMaxM3MoE):
-    """Compatibility wrapper around vLLM's native MiniMax-M3 MoE."""
-
+class MiniMaxM3MoE(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        layer_id: int = 0,
-    ) -> None:
-        super().__init__(
-            config=config,
-            layer_id=layer_id,
-            quant_config=quant_config,
-            prefix=prefix,
+    ):
+        super().__init__()
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.n_shared_experts = getattr(config, "n_shared_experts", None)
+
+        if self.tp_size > config.num_local_experts:
+            raise ValueError(
+                f"Tensor parallel size {self.tp_size} is greater than the number of experts {config.num_local_experts}."
+            )
+        self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
+        self.use_routing_bias = getattr(config, "use_routing_bias", False)
+        if self.use_routing_bias:
+            self.e_score_correction_bias = nn.Parameter(torch.empty(config.num_local_experts, dtype=torch.float32))
+            self.e_score_correction_bias.weight_loader = MiniMaxM3MoE.ebias_weight_loader
+        else:
+            self.e_score_correction_bias = None
+
+        if self.n_shared_experts:
+            intermediate_size = config.intermediate_size * self.n_shared_experts
+            self.shared_experts = MiniMaxM3MLP(
+                config=config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.shared_experts",
+                reduce_results=False,
+                intermediate_size=intermediate_size,
+            )
+        else:
+            self.shared_experts = None
+
+        self.gate = GateLinear(
+            config.hidden_size,
+            config.num_local_experts,
+            bias=False,
+            params_dtype=torch.float32,
+            out_dtype=torch.float32,
+            prefix=f"{prefix}.gate",
         )
 
-
-class AscendMiniMaxM3SparseAttention(MiniMaxM3SparseAttention):
-    """Translate vLLM 0.24's MiniMax-M3 constructor to the Ascend backend."""
-
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        layer_id: int,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-        cache_config: CacheConfig | None = None,
-        topk_indices_buffer: torch.Tensor | None = None,
-    ) -> None:
-        del topk_indices_buffer
-        sparse_cfg = config.sparse_attention_config
-        disable_index_value = sparse_cfg["sparse_disable_index_value"][layer_id] == 1
-        super().__init__(
+        self.experts = FusedMoE(
+            shared_experts=self.shared_experts,
+            num_experts=config.num_local_experts,
+            top_k=config.num_experts_per_tok,
+            scoring_func=config.scoring_func,
+            e_score_correction_bias=self.e_score_correction_bias,
             hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            renormalize=True,
+            activation="swigluoai_uninterleave",
+            swiglu_limit=config.swiglu_limit,
+            swiglu_alpha=config.swiglu_alpha,
+            swiglu_beta=getattr(config, "swiglu_beta", 1.0),
+            quant_config=quant_config,
+            prefix=f"{prefix}.experts",
+            router_logits_dtype=self.gate.out_dtype,
+            routed_scaling_factor=self.routed_scaling_factor,
+            apply_routed_scale_to_output=True,
+        )
+
+    @staticmethod
+    def ebias_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
+        assert param.size() == loaded_weight.size()
+        param.data.copy_(loaded_weight.to(torch.float32))
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        num_tokens, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_dim)
+
+        # router_logits: (num_tokens, n_experts)
+        router_logits, _ = self.gate(hidden_states)
+        final_hidden_states = self.experts(hidden_states=hidden_states, router_logits=router_logits)
+
+        return final_hidden_states.view(num_tokens, hidden_dim)
+
+
+class MiniMaxM3Attention(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        rotary_dim: int,
+        rope_parameters: dict[str, Any] | None = None,
+        attn_window_size: int | None = None,
+        max_position_embeddings: int = 8192,
+        head_dim: int | None = None,
+        rms_norm_eps: float = 1e-06,
+        qkv_bias: bool = False,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.hidden_size = hidden_size
+
+        tp_size = get_tensor_model_parallel_world_size()
+        self.total_num_heads = num_heads
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
+        self.total_num_kv_heads = num_kv_heads
+        if self.total_num_kv_heads >= tp_size:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
+            assert tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        self.head_dim = head_dim or (hidden_size // self.total_num_heads)
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        self.scaling = self.head_dim**-0.5
+        self.max_position_embeddings = max_position_embeddings
+
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size,
+            self.head_dim,
+            self.total_num_heads,
+            self.total_num_kv_heads,
+            bias=qkv_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+        )
+
+        self.o_proj = RowParallelLinear(
+            self.total_num_heads * self.head_dim,
+            hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+        )
+
+        if rope_parameters is not None and "partial_rotary_factor" not in rope_parameters:
+            rope_parameters["partial_rotary_factor"] = rotary_dim / self.head_dim
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            max_position=max_position_embeddings,
+            rope_parameters=rope_parameters,
+        )
+
+        self.q_norm = GemmaRMSNorm(self.head_dim, eps=rms_norm_eps)
+        self.k_norm = GemmaRMSNorm(self.head_dim, eps=rms_norm_eps)
+
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            per_layer_sliding_window=attn_window_size,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
+
+    def _qk_norm(self, q: torch.Tensor, k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        q_shape = q.shape
+        k_shape = k.shape
+        q = q.reshape(-1, self.head_dim).contiguous()
+        k = k.reshape(-1, self.head_dim).contiguous()
+        q = self.q_norm(q).reshape(q_shape)
+        k = self.k_norm(k).reshape(k_shape)
+        return q, k
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        v = v.contiguous()
+
+        q, k = self._qk_norm(q, k)
+        q, k = self.rotary_emb(positions, q, k)
+
+        attn_output = self.attn(q, k, v)
+        output, _ = self.o_proj(attn_output)
+        return output
+
+
+class MiniMaxM3DecoderLayer(nn.Module):
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        prefix: str,
+        model_config: ModelConfig,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+    ) -> None:
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        max_position_embeddings = _get_max_position_embeddings(config)
+        # DecoderLayers are created with `make_layers` which passes the prefix
+        # with the layer's index.
+        layer_idx = int(prefix.split(sep=".")[-1])
+
+        self.layer_idx = layer_idx
+
+        sparse_attention_config = getattr(config, "sparse_attention_config", None)
+
+        if sparse_attention_config is not None:
+            is_sparse_attention_layer = layer_idx in _sparse_attention_layer_ids(config)
+            disable_index_value = sparse_attention_config["sparse_disable_index_value"][layer_idx] == 1
+        else:
+            is_sparse_attention_layer = False
+            disable_index_value = False
+
+        attn_kwargs = dict(
+            hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
             rotary_dim=config.rotary_dim,
             rope_parameters=_get_rope_parameters(config),
-            max_position_embeddings=_get_max_position_embeddings(config),
-            head_dim=config.head_dim,
+            max_position_embeddings=max_position_embeddings,
             rms_norm_eps=config.rms_norm_eps,
             qkv_bias=getattr(config, "attention_bias", False),
+            head_dim=getattr(config, "head_dim", None),
             cache_config=cache_config,
             quant_config=quant_config,
-            prefix=prefix,
-            sparse_cfg=sparse_cfg,
-            disable_index_value=disable_index_value,
-            # vLLM's decoder completes this all-reduce together with the
-            # following Gemma RMSNorm.
-            reduce_results=False,
+            prefix=f"{prefix}.self_attn",
         )
+        if is_sparse_attention_layer:
+            self.self_attn = MiniMaxM3SparseAttention(
+                **attn_kwargs,
+                sparse_cfg=sparse_attention_config,
+                disable_index_value=disable_index_value,
+            )
+        else:
+            self.self_attn = MiniMaxM3Attention(**attn_kwargs)
 
+        moe_layer_freq = getattr(config, "moe_layer_freq", None)
+        # ``is_layer_sparse`` here means "this layer's MLP is a sparse MoE",
+        # not anything about attention sparsity. The name is kept (instead of
+        # the clearer ``is_layer_moe``) to match the convention used by the
+        # rest of sglang -- ``OperationsStrategy``, ``LayerScatterModes``,
+        # ``LayerCommunicator``, ``gpt_oss``, ``falcon_h1`` etc all access
+        # ``layer.is_layer_sparse``.
+        self.is_layer_sparse = moe_layer_freq[layer_idx] != 0 if moe_layer_freq is not None else True
 
-def _forward_minimax_m3_attention(
-    self: Any,
-    positions: torch.Tensor,
-    hidden_states: torch.Tensor,
-) -> torch.Tensor:
-    qkv, _ = self.qkv_proj(hidden_states)
-    q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-    q_shape = q.shape
-    k_shape = k.shape
-    q = self.q_norm(q.reshape(-1, self.head_dim).contiguous()).reshape(q_shape)
-    k = self.k_norm(k.reshape(-1, self.head_dim).contiguous()).reshape(k_shape)
-    q, k = self.rotary_emb(positions, q, k)
-    attn_output = self.attn(q, k, v.contiguous())
-    output, _ = self.o_proj(attn_output)
-    return output
+        if self.is_layer_sparse:
+            self.block_sparse_moe = MiniMaxM3MoE(
+                config=config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.block_sparse_moe",
+            )
+        else:
+            self.mlp = MiniMaxM3MLP(
+                config=config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp",
+                intermediate_size=config.dense_intermediate_size,
+            )
+        self.input_layernorm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-
-_ORIGINAL_MINIMAX_M3_MAYBE_ADD_HIDDEN_STATE = minimax_m3_model.MiniMaxM3Model._maybe_add_hidden_state
-
-
-def _maybe_add_minimax_m3_hidden_state(
-    self: Any,
-    aux_hidden_states: list[torch.Tensor],
-    layer_idx: int,
-    hidden_states: torch.Tensor,
-    residual: torch.Tensor | None,
-) -> list[torch.Tensor]:
-    if (
-        residual is not None
-        and layer_idx in self.aux_hidden_state_layers
-        and hidden_states.size(0) != residual.size(0)
-    ):
-        hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states)
-    return _ORIGINAL_MINIMAX_M3_MAYBE_ADD_HIDDEN_STATE(
-        self, aux_hidden_states, layer_idx, hidden_states, residual
-    )
-
-
-minimax_m3_model.MiniMAXGemmaRMSNorm = GemmaRMSNorm
-minimax_m3_model.MiniMaxM3Attention.forward = _forward_minimax_m3_attention
-minimax_m3_model.MiniMaxM3SparseAttention = AscendMiniMaxM3SparseAttention
-minimax_m3_model.MiniMaxM3Model._maybe_add_hidden_state = _maybe_add_minimax_m3_hidden_state
-
-MiniMaxM3Attention = minimax_m3_model.MiniMaxM3Attention
-
-
-class AscendMiniMaxM3DecoderLayer(minimax_m3_model.MiniMaxM3DecoderLayer):
-    """vLLM MiniMax-M3 decoder layer with Ascend-specific patches installed."""
-
-    def __init__(
+    def forward(
         self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str,
-        force_sparse_attn: bool = False,
-        force_moe: bool = False,
-        is_mtp_block: bool = False,
-        topk_indices_buffer: torch.Tensor | None = None,
-    ) -> None:
-        super().__init__(
-            vllm_config=vllm_config,
-            prefix=prefix,
-            force_sparse_attn=force_sparse_attn,
-            force_moe=force_moe,
-            is_mtp_block=is_mtp_block,
-            topk_indices_buffer=topk_indices_buffer,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ) -> torch.Tensor:
+        # Self Attention
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        hidden_states = self.self_attn(
+            positions=positions,
+            hidden_states=hidden_states,
         )
-        self.is_layer_sparse = self.is_moe_layer
 
+        # Fully Connected
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
-MiniMaxM3DecoderLayer = AscendMiniMaxM3DecoderLayer
+        if self.is_layer_sparse:
+            hidden_states = self.block_sparse_moe(hidden_states)
+        else:
+            hidden_states = self.mlp(hidden_states)
+
+        return hidden_states, residual
 
 
 @support_torch_compile
@@ -337,6 +502,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         # config = vllm_config.model_config.hf_config
         config = _get_text_config(vllm_config)
         text_config = config
+        model_config = vllm_config.model_config
+        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
         self._enable_eagle3_aux_hidden_states = (
@@ -357,7 +524,13 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             text_config.num_hidden_layers,
-            lambda prefix: AscendMiniMaxM3DecoderLayer(vllm_config=vllm_config, prefix=prefix),
+            lambda prefix: MiniMaxM3DecoderLayer(
+                config,
+                prefix,
+                model_config=model_config,
+                cache_config=cache_config,
+                quant_config=quant_config,
+            ),
             prefix=f"{prefix}.layers",
         )
 
@@ -410,28 +583,17 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         else:
             EagleModelMixin._set_aux_hidden_state_layers(self, ())
 
-    def _maybe_add_hidden_state(
-        self,
-        aux_hidden_states: list[torch.Tensor],
-        layer_idx: int,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
-    ) -> list[torch.Tensor]:
-        if (
-            residual is not None
-            and layer_idx in self.aux_hidden_state_layers
-            and hidden_states.size(0) != residual.size(0)
-        ):
-            hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states)
-        return EagleModelMixin._maybe_add_hidden_state(
-            self, aux_hidden_states, layer_idx, hidden_states, residual
-        )
-
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self._set_aux_hidden_state_layers(layers)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return minimax_m3_model.MiniMaxM3Model.get_expert_mapping(self)
+        return fused_moe_make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="w1",
+            ckpt_down_proj_name="w2",
+            ckpt_up_proj_name="w3",
+            num_experts=self.config.num_local_experts,
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping: list[tuple[str, str, int | str]] = [
@@ -608,9 +770,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             skipped_reasons,
         )
         return loaded_params
-
-
-minimax_m3_model.MiniMaxM3Model.load_weights = MiniMaxM3Model.load_weights
 
 
 class MiniMaxM3SparseForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
