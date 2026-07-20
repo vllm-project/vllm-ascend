@@ -436,7 +436,7 @@ class QwenMoeXliteModel(LlamaXliteModel):
         layers, _ = self._get_layers_and_model_prefix()
 
         xlite_model.gate = get_layer_weights(layers, "mlp.gate.weight")
-        prefix = "mlp.experts."
+        prefix = "mlp.experts.routed_experts."
         kwargs: WeightGetterConfig = {"secondary_flattening": f"{prefix}local_num_experts", "post_processor": None}
         xlite_model.re_up_gate = get_layer_weights(layers, f"{prefix}w13_weight", **kwargs)
         xlite_model.re_down = get_layer_weights(layers, f"{prefix}w2_weight", **kwargs)
@@ -444,7 +444,7 @@ class QwenMoeXliteModel(LlamaXliteModel):
 
         if self.quantization:
             kwargs["post_processor"] = self._transform_deq_scale
-            xlite_model.re_up_gate_scale = get_layer_weights(layers, f"{prefix}w13_weight_scale_fp32", **kwargs)
+            xlite_model.re_up_gate_scale = get_layer_weights(layers, f"{prefix}w13_weight_scale", **kwargs)
             xlite_model.re_down_scale = get_layer_weights(layers, f"{prefix}w2_weight_scale", **kwargs)
 
 
@@ -486,7 +486,7 @@ class Glm4MoeXliteModel(LlamaXliteModel):
         self.init_matmul_weights(layers, "se_up_gate", "mlp.shared_experts.gate_up_proj")
         self.init_matmul_weights(layers, "se_down", "mlp.shared_experts.down_proj")
 
-        prefix = "mlp.experts."
+        prefix = "mlp.experts.routed_experts."
         kwargs: WeightGetterConfig = {"secondary_flattening": f"{prefix}local_num_experts", "post_processor": None}
         xlite_model.re_up_gate = get_layer_weights(layers, f"{prefix}w13_weight", **kwargs)
         xlite_model.re_down = get_layer_weights(layers, f"{prefix}w2_weight", **kwargs)
@@ -495,7 +495,7 @@ class Glm4MoeXliteModel(LlamaXliteModel):
 
         if self.quantization:
             kwargs["post_processor"] = self._transform_deq_scale
-            xlite_model.re_up_gate_scale = get_layer_weights(layers, f"{prefix}w13_weight_scale_fp32", **kwargs)
+            xlite_model.re_up_gate_scale = get_layer_weights(layers, f"{prefix}w13_weight_scale", **kwargs)
             xlite_model.re_down_scale = get_layer_weights(layers, f"{prefix}w2_weight_scale", **kwargs)
 
 
@@ -530,7 +530,7 @@ class MiniMaxM2XliteModel(LlamaXliteModel):
             layers, "block_sparse_moe.e_score_correction_bias", post_processor=lambda b: b.to(torch.float32)
         )
 
-        prefix = "block_sparse_moe.experts."
+        prefix = "block_sparse_moe.experts.routed_experts."
         kwargs: WeightGetterConfig = {"secondary_flattening": f"{prefix}local_num_experts", "post_processor": None}
         xlite_model.re_up_gate = get_layer_weights(layers, f"{prefix}w13_weight", **kwargs)
         xlite_model.re_down = get_layer_weights(layers, f"{prefix}w2_weight", **kwargs)
@@ -539,7 +539,7 @@ class MiniMaxM2XliteModel(LlamaXliteModel):
 
         if self.quantization:
             kwargs["post_processor"] = self._transform_deq_scale
-            xlite_model.re_up_gate_scale = get_layer_weights(layers, f"{prefix}w13_weight_scale_fp32", **kwargs)
+            xlite_model.re_up_gate_scale = get_layer_weights(layers, f"{prefix}w13_weight_scale", **kwargs)
             xlite_model.re_down_scale = get_layer_weights(layers, f"{prefix}w2_weight_scale", **kwargs)
 
 
