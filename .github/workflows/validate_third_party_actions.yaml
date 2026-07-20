@@ -66,11 +66,11 @@ jobs:
             workflows:
               - '.github/workflows/**'
             source:
-              - 'vllm_ascend/**
-              - 'csrc/**
+              - 'vllm_ascend/**'
+              - 'csrc/**'
               - 'setup.py'
             docs:
-              - 'docs/**
+              - 'docs/**'
               - '*.md'
             tests:
               - 'tests/**'
@@ -186,6 +186,7 @@ jobs:
 
       - name: peter-evans/create-or-update-comment
         id: comment
+        continue-on-error: true
         uses: peter-evans/create-or-update-comment@v5
         with:
           issue-number: ${{ github.event.pull_request.number }}
@@ -213,7 +214,7 @@ jobs:
           echo "Comment URL: ${{ steps.comment.outputs.comment-url }}"
 
       - name: Comment post failed notification
-        if: steps.comment.outputs.comment-id == ''
+        if: always() && steps.comment.outputs.comment-id == ''
         run: |
           echo "::warning::peter-evans/create-or-update-comment did not return a comment-id. Check if this is a fork PR (GITHUB_TOKEN may lack write permission)."
           echo "Outcome: ${{ steps.comment.outcome }}"
