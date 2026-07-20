@@ -224,8 +224,6 @@ nav:
         - tutorials/features/dynamic_chunked_pipeline_parallel.md
         - tutorials/features/suffix_speculative_decoding.md
         - tutorials/features/ray.md
-    - Hardware Tutorials:
-        - tutorials/hardwares/index.md
     - faqs.md
   - User Guide:
     - user_guide/index.md

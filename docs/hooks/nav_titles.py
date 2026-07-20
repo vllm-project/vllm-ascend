@@ -218,7 +218,6 @@ SECTION_TITLES = {
     "Getting Started": {"en": "Getting Started", "zh": "快速开始"},
     "Model Tutorials": {"en": "Model Tutorials", "zh": "模型教程"},
     "Feature Tutorials": {"en": "Feature Tutorials", "zh": "功能教程"},
-    "Hardware Tutorials": {"en": "Hardware Tutorials", "zh": "硬件教程"},
     "User Guide": {"en": "User Guide", "zh": "用户指南"},
     "Support Matrix": {"en": "Support Matrix", "zh": "支持矩阵"},
     "Configuration": {"en": "Configuration", "zh": "配置"},
