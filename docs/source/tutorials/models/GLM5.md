@@ -763,7 +763,7 @@ Before you start, please
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
-            --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager": true}' \
+            --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp", "enforce_eager": true}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
@@ -771,7 +771,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
-            --additional-config '{"multistream_overlap_shared_expert": true, "enable_dsa_cp": true}' \
+            --additional-config '{"enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -843,7 +843,7 @@ Before you start, please
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
-            --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager": true}' \
+            --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp", "enforce_eager": true}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
@@ -851,7 +851,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
-            --additional-config '{"multistream_overlap_shared_expert": true, "enable_dsa_cp": true}' \
+            --additional-config '{"enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -935,7 +935,7 @@ Before you start, please
             --max-model-len 200000 \
             --max-num-batched-tokens 32 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-            --additional-config '{"multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
+            --additional-config '{"recompute_scheduler_enable": true}' \
             --trust-remote-code \
             --max-num-seqs 8 \
             --gpu-memory-utilization 0.92 \
@@ -1015,7 +1015,7 @@ Before you start, please
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-             --additional-config '{"multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
+             --additional-config '{"recompute_scheduler_enable": true}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
@@ -1095,7 +1095,7 @@ Before you start, please
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-             --additional-config '{"multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
+             --additional-config '{"recompute_scheduler_enable": true}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
@@ -1175,7 +1175,7 @@ Before you start, please
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-             --additional-config '{"multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
+             --additional-config '{"recompute_scheduler_enable": true}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
@@ -1290,8 +1290,8 @@ python load_balance_proxy_server_example.py \
 
 Some configurations for optimization are shown below:
 
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node.
-- `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable following fused operators: dispatch_gmm_combine_decode and dispatch_ffn_combine operator.
+- `VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node. With FlashComm enabled, layer_sharding list cannot include o_proj as an element.
+- `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable the dispatch_ffn_combine fused operator.
 - `VLLM_ASCEND_ENABLE_MLAPO`: Enable fused operator MlaPreprocessOperation.
 
 Please refer to the following python file for further explanation and restrictions of the environment variables above: [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py)

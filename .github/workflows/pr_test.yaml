@@ -166,6 +166,9 @@ jobs:
           FORCE_COLOR: "1"
           TERM: xterm-256color
           SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086"
+          # Keep golang-based pre-commit hooks on a domestic module proxy.
+          GOPROXY: https://repo.huaweicloud.com/repository/goproxy/
+          GONOSUMDB: '*'
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           pre-commit run --all-files --hook-stage manual --show-diff-on-failure
@@ -220,6 +223,16 @@ jobs:
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
       test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
+
+  generate-hitest:
+    name: Generate hitest recommendations
+    needs: lint-and-select-tests
+    if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' }}
+    uses: ./.github/workflows/_manual-hitest.yaml
+    secrets:
+      HITEST_APIG_APPCODE: ${{ secrets.HITEST_APIG_APPCODE }}
+      HITEST_KEY: ${{ secrets.HITEST_KEY }}
+      HITEST_SECRET: ${{ secrets.HITEST_SECRET }}
 
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.

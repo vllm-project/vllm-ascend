@@ -290,7 +290,9 @@
       "vllm-ascend/Qwen3-14B-w8a8sc-310-vllm-tp1",
       "vllm-ascend/Qwen3-32B-w8a8sc-310-vllm-tp4",
       "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp",
-      "Eco-Tech/DeepSeek-V3.1-Terminus-w8a8-mtp-QuaRot"
+      "Eco-Tech/DeepSeek-V3.1-Terminus-w8a8-mtp-QuaRot",
+      "Eco-Tech/Kimi-K2.6-w4a8",
+      "lightseekorg/kimi-k2.6-eagle3"
     ],
     "datasets": [
       "vllm-ascend/GSM8K-in1024-bs210",
