@@ -1,12 +1,18 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-# Fixed tile size keeps BLOCK_M in the compile-time key space so that batch
-# size changes do not trigger recompilation (see do_not_specialize below).
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+
 _ROW_BLOCK_SIZE = 16
 
 
-@triton.jit(do_not_specialize=["total_batch"])
+@triton.jit(
+    do_not_specialize=[
+        "total_batch",
+        "hidden_state_stride_bs",
+        "variance_epsilon",
+    ],
+)
 def triton_rms_kernel(
     hidden_state_ptr,
     hidden_state_stride_bs,
@@ -46,11 +52,9 @@ def triton_q_rms(
     q = q.view(total_batch, dim)
 
     if dim > 2048:
-        raise NotImplementedError("dim > 2048 not supported")
+        raise NotImplementedError(f"triton_q_rms: dim > 2048 not supported, got {dim}")
 
-    device_properties = triton.runtime.driver.active.utils.get_device_properties(q.device)
-    num_vectorcore = device_properties.get("num_vectorcore", -1)
-
+    num_vectorcore = max(get_vectorcore_num(), 1)
     grid = (num_vectorcore,)
     norm_output = torch.empty_like(q)
 
@@ -62,5 +66,6 @@ def triton_q_rms(
         total_batch,
         dim,
         BLOCK_M=_ROW_BLOCK_SIZE,
+        multibuffer=False,
     )
     return norm_output.view(bs, head_num, dim)
