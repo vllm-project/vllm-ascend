@@ -38,7 +38,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | MiniMax-M2.5/2.7 | ✅ |  | ✅ | A2/A3/Ascend950 (Ascend950 experimental) | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ | 🟡 | ✅ | 200k | [MiniMax-M2](../../tutorials/models/MiniMax-M2.md) |
     | Qwen2.5-Math-RM-72B | ✅ | vllm-rm, tensor_parallel_size=4, max_model_len=4096 | ✅ | A2 | ✅ | 🟡 | 🟡 | ❌ | 🟡 | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 4096 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |
 
-=== "310P"
+=== "Atlas inference products"
 
     | Model | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
     |-------|---------|------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------|-----------------|---------------|-------------------------------|--------------------|--------------------|---------------|-----|
@@ -90,7 +90,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | Bert                          | 🔵        |                                                                      |         A2/A3            |      |
     | Qwen2.5-Math-RM-72B           | ✅        | Reward Model, gsm8k_correctness accuracy=0.80 | A2 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |
 
-=== "310P"
+=== "Atlas inference products"
 
     | Model | Support | Note | Supported Hardware | Doc |
     |-------|---------|------|--------------------|-----|
@@ -116,7 +116,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | Qwen3-Omni-30B-A3B-Thinking | 🔵 |  |  | A2/A3 |  |  |  |  |  |  | ✅ |  | ✅ |  |  |  |  |  | [Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md) |
     | Kimi-K2.5/Kimi-K2.6 | ✅ |  |  | A2/A3 |  | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 262144 | [Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)/[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md) |
 
-=== "310P"
+=== "Atlas inference products"
 
     | Model | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
     |-------|---------|------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------|-----------------|---------------|-------------------------------|--------------------|--------------------|---------------|-----|
