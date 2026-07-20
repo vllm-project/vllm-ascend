@@ -112,6 +112,7 @@ class MoECommMethod(ABC):
         enable_shared_expert_dp: bool = False,
         replace_allreduce: bool = False,
         quant_type: QuantType = QuantType.NONE,
+        token_top_ks: torch.Tensor | None = None,
     ) -> MoEPrepareOutput:
         return self.prepare_finalize.prepare(
             hidden_states,
@@ -119,6 +120,7 @@ class MoECommMethod(ABC):
             enable_shared_expert_dp,
             replace_allreduce,
             quant_type,
+            token_top_ks,
         )
 
     def finalize(

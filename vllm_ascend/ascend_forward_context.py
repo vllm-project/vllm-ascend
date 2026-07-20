@@ -111,6 +111,7 @@ def set_ascend_forward_context(
     has_sinks=False,
     input_ids=None,
     eplb_heat_collection_status: bool = False,
+    token_top_ks: torch.Tensor | None = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -127,6 +128,7 @@ def set_ascend_forward_context(
     }
     with set_forward_context(**forward_context_kwargs):
         forward_context = get_forward_context()
+        _EXTRA_CTX.token_top_ks = token_top_ks
         forward_context.draft_attn_metadatas = draft_attn_metadatas
 
         forward_context.input_ids = input_ids
@@ -371,10 +373,15 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
     if not is_moe_model(vllm_config):
         return None
 
+    ascend_config = get_ascend_config()
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     soc_version = get_ascend_device_type()
     lora_config = getattr(vllm_config, "lora_config", None)
-    if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
+    if (
+        ascend_config.spec_k_config.enabled
+        or not vllm_config.parallel_config.enable_expert_parallel
+        or get_ep_group().world_size == 1
+    ):
         moe_comm_type = MoECommType.ALLGATHER
     elif lora_config is not None and vllm_config.parallel_config.enable_expert_parallel:
         # LoRA + EP requires AlltoAll because the MC2/FusedMC2 paths
@@ -434,6 +441,7 @@ class _ExtraForwardContextProxy:
         "padded_num_tokens",
         "sinks",
         "eplb_heat_collection_status",
+        "token_top_ks",
     )
 
     def check_extra_attr(self, name: str):
