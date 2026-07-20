@@ -26,7 +26,7 @@ It is recommended to download the model weight to the shared directory of multip
 ### Installation
 
 - You can use our official docker image to run GLM-5.2 directly.
-- KV Cache Pool（Ascend Store）Deployment Guide.[Deployment Guide](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/feature_guide/kv_pool.html)
+- KV Cache Pool（Ascend Store）Deployment Guide(https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/feature_guide/kv_pool.html)
 
 === "A3 series"
 
@@ -78,7 +78,7 @@ It is recommended to download the model weight to the shared directory of multip
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.23.0rc1-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.23.0rc1
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -239,7 +239,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --port 8077 \
     --headless \
     --data-parallel-size 4 \
-    --data-parallel-start-rank 0 \
+    --data-parallel-start-rank 2 \
     --data-parallel-size-local 2 \
     --data-parallel-address $node0_ip \
     --data-parallel-rpc-port 12980 \
@@ -888,7 +888,6 @@ export MOONCAKE_CONFIG_PATH="/mnt/share/scripts/mooncake.json"
 export HCCL_INTRA_ROCE_ENABLE=1
 export ACL_OP_INIT_MODE=1
 
-# vllm起服务配置
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     --host 0.0.0.0 \
     --port $2 \
@@ -989,13 +988,12 @@ export LD_LIBRARY_PATH=/usr/local/python3.11.10/lib:/usr/local/lib:$LD_LIBRARY_P
 #export LD_LIBRARY_PATH=/usr/local/python3.11.10/lib/python3.11/site-packages/mooncake:$LD_LIBRARY_PATH
 
 export PYTHONHASHSEED=0
-export MOONCAKE_CONFIG_PATH="/mnt/share/s00835984/scripts/mooncake.json"
+export MOONCAKE_CONFIG_PATH="/mnt/share/scripts/mooncake.json"
 export HCCL_INTRA_ROCE_ENABLE=1
 
 export ACL_OP_INIT_MODE=1
 
-# vllm起服务配置
-vllm serve /mnt/share/weight/GLM-5.2-W4A8C8-0713-MTP \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     --host 0.0.0.0 \
     --port $2 \
     --data-parallel-size $3 \
