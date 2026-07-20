@@ -9,6 +9,9 @@ from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.model_executor.warmup.dsa_triton_warmup import dsa_triton_warmup
+from vllm_ascend.model_executor.warmup.penalties_triton_warmup import (
+    penalties_triton_warmup,
+)
 from vllm_ascend.model_executor.warmup.spec_decode_triton_warmup import (
     spec_decode_triton_warmup,
 )
@@ -30,4 +33,5 @@ def kernel_warmup(worker: "NPUWorker") -> None:
         return
 
     _run_warmup("spec_decode", spec_decode_triton_warmup, worker)
+    _run_warmup("penalties", penalties_triton_warmup, worker)
     _run_warmup("dsa", dsa_triton_warmup, worker)
