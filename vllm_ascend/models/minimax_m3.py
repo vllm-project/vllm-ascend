@@ -25,9 +25,11 @@
 
 from collections.abc import Iterable, Mapping, Sequence
 from itertools import islice
+from pathlib import Path
 from typing import Any
 
 import torch
+import vllm
 from torch import nn
 from transformers import BatchFeature, PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
@@ -95,9 +97,37 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.import_utils import import_from_path
 
 from vllm_ascend.attention.msa_m3 import MiniMaxM3SparseAttention
-from vllm_ascend.models.minimax_m3_vllm_vision import MiniMaxVLVisionModel
+
+
+def _load_vllm_minimax_m3_vision_model() -> type[nn.Module]:
+    """Load vLLM's MiniMax-M3 vision tower without importing its platform entry."""
+    if vllm.__file__ is None:
+        raise ImportError("Unable to locate the installed vLLM package.")
+
+    vision_tower_path = (
+        Path(vllm.__file__).resolve().parent
+        / "models"
+        / "minimax_m3"
+        / "common"
+        / "vision_tower.py"
+    )
+    if not vision_tower_path.is_file():
+        raise ImportError(
+            "The vLLM MiniMax M3 vision tower source was not found at "
+            f"{vision_tower_path}. This vllm-ascend adapter requires vLLM 0.24."
+        )
+
+    vision_tower_module = import_from_path(
+        "vllm_ascend.models._vllm_024_minimax_m3_vision_tower",
+        vision_tower_path,
+    )
+    return vision_tower_module.MiniMaxVLVisionModel
+
+
+MiniMaxVLVisionModel = _load_vllm_minimax_m3_vision_model()
 
 
 def _sparse_attention_layer_ids(config: PretrainedConfig) -> set[int]:
