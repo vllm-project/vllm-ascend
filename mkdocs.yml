@@ -141,6 +141,10 @@ markdown_extensions:
 extra_css:
   - stylesheets/extra.css
 
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+
 extra:
   # Toggle via DOCS_IS_RELEASE env var (set by .readthedocs.yaml for tag builds).
   is_release: !ENV [DOCS_IS_RELEASE, false]
