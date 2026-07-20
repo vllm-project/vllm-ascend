@@ -1134,9 +1134,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor | None = None,
     ):
-        # Draft model (Gemma4 MTP dual-graph) uses its own GraphParams bucket so
-        # capture/replay state is separate from the target's. Mirrors the
-        # is_draft_model branch in full_graph_fia (see :860-866).
         if _EXTRA_CTX.is_draft_model:
             graph_params = get_draft_graph_params()
         else:
@@ -1507,15 +1504,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
     ):
         num_tokens = query.shape[0]
-        from vllm_ascend.utils import is_950
-        _pa_gate = (
-            attn_metadata.attn_state in (AscendAttentionState.DecodeOnly,
-                                         AscendAttentionState.SpecDecoding)
+        if (
+            attn_metadata.attn_state == AscendAttentionState.DecodeOnly
             and self.sliding_window is None
             and using_paged_attention(num_tokens, self.vllm_config, self.head_size)
-            and not is_950()
-        )
-        if _pa_gate:
+        ):
             output = self.forward_paged_attention(query, attn_metadata, output)
         else:
             output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache)

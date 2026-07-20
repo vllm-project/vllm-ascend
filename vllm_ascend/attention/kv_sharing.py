@@ -18,10 +18,9 @@ A5 (is_950) -- the supported path:
 
 The A2/A3 PagedAttention capture/verify KV-routing (bind / binding_of /
 resolve_capture_kv / maybe_expand_paged_kv_for_verify) has been removed from
-this branch: the PR focuses on A5 Gemma4 MTP, and A5 does not capture (the
-PA gate ``not is_950()`` never fires).  That machinery is preserved as a
-patch reference for re-introducing A2/A3 Gemma4 MTP support; see commit
-``c03b2713`` for the original implementation.
+this branch: the PR focuses on A5 Gemma4 MTP, and A5 never enters the PA
+path (``using_paged_attention`` returns False on A5).  That machinery is
+preserved as a patch reference for re-introducing A2/A3 Gemma4 MTP support.
 
 The helpers self-gate on ``kv_sharing_target_layer_name is not None``, so they
 are generic to any cross-model KV-sharing draft model (Gemma4 MTP is the
