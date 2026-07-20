@@ -29,6 +29,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_b
     _parse_global_segment_size,
     _ssd_setup_kwargs,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.ssd_chunking import (
+    DEFAULT_SSD_OBJECT_CHUNK_BYTES,
+    aggregate_chunk_results,
+    iter_ssd_read_batches,
+    split_ssd_batch,
+    ssd_chunk_head_keys,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend import (
     YuanrongConfig,
     YuanrongHelper,
@@ -173,6 +180,20 @@ class TestMooncakeStoreConfig(unittest.TestCase):
             },
         )
 
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend."
+        "mooncake_backend._mooncake_setup_supports_ssd_offload",
+        return_value=True,
+    )
+    def test_ssd_setup_kwargs_scheduler_does_not_mount_ssd(self, _mock_supports):
+        ssd_path = TestMooncakeStoreConfig._writable_ssd_path()
+        self.addCleanup(lambda: os.rmdir(ssd_path))
+        cfg = _make_mooncake_store_config(
+            enable_ssd_offload=True,
+            ssd_offload_path=ssd_path,
+        )
+        self.assertEqual(_ssd_setup_kwargs(cfg, contribute_memory=False), {})
+
     def test_load_from_env_missing(self):
         with patch.dict(os.environ, {}, clear=True):
             os.environ.pop("MOONCAKE_CONFIG_PATH", None)
@@ -240,6 +261,69 @@ class TestConvertToBytes(unittest.TestCase):
     def test_invalid_number(self):
         with self.assertRaises(ValueError):
             _convert_to_bytes("abc", 1, "abc")
+
+
+# =========================================================================
+# Mooncake SSD object chunking
+# =========================================================================
+class TestMooncakeSSDChunking(unittest.TestCase):
+    def test_split_hybrid_kv_group(self):
+        layer_bytes = 1536 * 2 * 256 * 2
+        keys, addrs, sizes, ranges = split_ssd_batch(
+            ["hybrid-group"],
+            [[1000 + index * layer_bytes for index in range(16)]],
+            [[layer_bytes] * 16],
+        )
+
+        self.assertEqual(len(keys), 8)
+        self.assertEqual(ranges, [(0, 8)])
+        self.assertEqual(keys[0], "hybrid-group@mcssd1:0")
+        self.assertEqual(keys[-1], "hybrid-group@mcssd1:7")
+        self.assertTrue(all(sum(chunk) <= DEFAULT_SSD_OBJECT_CHUNK_BYTES for chunk in sizes))
+        self.assertEqual(sum(map(sum, sizes)), 16 * layer_bytes)
+        self.assertEqual(len(addrs), len(sizes))
+
+    def test_split_single_large_buffer_preserves_offsets(self):
+        mib = 1024**2
+        keys, addrs, sizes, ranges = split_ssd_batch(
+            ["large"],
+            [[100]],
+            [[7 * mib]],
+        )
+
+        self.assertEqual(keys, ["large@mcssd1:0", "large@mcssd1:1", "large@mcssd1:2"])
+        self.assertEqual(addrs, [[100], [100 + 3 * mib], [100 + 6 * mib]])
+        self.assertEqual(sizes, [[3 * mib], [3 * mib], [mib]])
+        self.assertEqual(ranges, [(0, 3)])
+
+    def test_read_batches_bound_bytes_and_object_count(self):
+        mib = 1024**2
+        self.assertEqual(
+            list(iter_ssd_read_batches([[3 * mib], [3 * mib], [mib]], 3 * mib)),
+            [(0, 1), (1, 2), (2, 3)],
+        )
+        self.assertEqual(
+            list(iter_ssd_read_batches([[1], [1], [1]], 10, max_batch_objects=2)),
+            [(0, 2), (2, 3)],
+        )
+
+    def test_aggregate_chunk_results(self):
+        self.assertEqual(
+            aggregate_chunk_results([1, 1, -7, 0, 4], [(0, 2), (2, 5)]),
+            [0, -7],
+        )
+
+    def test_chunking_rejects_mismatched_shapes(self):
+        with self.assertRaises(ValueError):
+            split_ssd_batch(["key"], [[100]], [])
+        with self.assertRaises(ValueError):
+            split_ssd_batch(["key"], [[100]], [[1, 2]])
+
+    def test_chunk_head_keys(self):
+        self.assertEqual(
+            ssd_chunk_head_keys(["k1", "k2"]),
+            ["k1@mcssd1:0", "k2@mcssd1:0"],
+        )
 
 
 # =========================================================================
@@ -353,6 +437,9 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             backend._use_fabric_mem = False
             backend._store_init_lock = MagicMock()
             backend.local_seg = None
+            backend.config.enable_ssd_offload = False
+            backend._ssd_chunk_bytes = DEFAULT_SSD_OBJECT_CHUNK_BYTES
+            backend._ssd_read_batch_bytes = 512 * 1024**2
             return backend
 
     def test_exists(self):
@@ -360,6 +447,15 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         b.store.batch_is_exist.return_value = [1, 0]
         result = b.exists(["k1", "k2"])
         self.assertEqual(result, [1, 0])
+        b.store.batch_is_exist.assert_called_once_with(["k1", "k2"])
+
+    def test_exists_ssd_uses_chunk_head(self):
+        b = self._make_backend()
+        b.config.enable_ssd_offload = True
+        b.store.batch_is_exist.return_value = [1]
+        result = b.exists(["k1"])
+        self.assertEqual(result, [1])
+        b.store.batch_is_exist.assert_called_once_with(["k1@mcssd1:0"])
 
     def test_put(self):
         b = self._make_backend()
@@ -377,6 +473,19 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         b.store.batch_put_from_multi_buffers.side_effect = Exception("fail")
         b.put(["k1"], [[100]], [[10]])  # Should log error but not raise
 
+    def test_put_ssd_splits_large_object(self):
+        b = self._make_backend()
+        b.config.enable_ssd_offload = True
+        b.store.batch_put_from_multi_buffers.return_value = [0, 0, 0]
+        mib = 1024**2
+
+        b.put(["large"], [[100]], [[7 * mib]])
+
+        keys, addrs, sizes, _config = b.store.batch_put_from_multi_buffers.call_args.args
+        self.assertEqual(keys, ["large@mcssd1:0", "large@mcssd1:1", "large@mcssd1:2"])
+        self.assertEqual(addrs, [[100], [100 + 3 * mib], [100 + 6 * mib]])
+        self.assertEqual(sizes, [[3 * mib], [3 * mib], [mib]])
+
     def test_get(self):
         b = self._make_backend()
         b.store.batch_get_into_multi_buffers.return_value = [0]
@@ -392,6 +501,22 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         b = self._make_backend()
         b.store.batch_get_into_multi_buffers.side_effect = Exception("fail")
         b.get(["k1"], [[100]], [[10]])
+
+    def test_get_ssd_splits_and_batches_large_object(self):
+        b = self._make_backend()
+        b.config.enable_ssd_offload = True
+        b._ssd_read_batch_bytes = DEFAULT_SSD_OBJECT_CHUNK_BYTES
+        b.store.batch_get_into_multi_buffers.side_effect = [[1], [1], [1]]
+        mib = 1024**2
+
+        result = b.get(["large"], [[100]], [[7 * mib]])
+
+        self.assertEqual(result, [0])
+        self.assertEqual(b.store.batch_get_into_multi_buffers.call_count, 3)
+        calls = b.store.batch_get_into_multi_buffers.call_args_list
+        self.assertEqual(calls[0].args[0], ["large@mcssd1:0"])
+        self.assertEqual(calls[1].args[0], ["large@mcssd1:1"])
+        self.assertEqual(calls[2].args[0], ["large@mcssd1:2"])
 
     def test_register_buffer(self):
         b = self._make_backend()
