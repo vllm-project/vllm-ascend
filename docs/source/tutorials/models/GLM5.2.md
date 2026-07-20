@@ -243,6 +243,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --headless \
     --data-parallel-size 8 \
     --data-parallel-size-local 4 \
+    --data-parallel-start-rank 4 \
     --data-parallel-address $node0_ip \
     --enable-expert-parallel \
     --data-parallel-rpc-port 12980 \
