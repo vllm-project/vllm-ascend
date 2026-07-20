@@ -30,6 +30,7 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 @triton.jit(
     do_not_specialize=[
         "num_seqs",
+        "vocab_size",
         "stride_logits_seq",
         "stride_logits_vocab",
         "stride_prompt_mask_seq",
