@@ -722,11 +722,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             global_lora_permutation = torch.argsort(reversed_global_input_permutation_mapping.reshape(-1).long())
             exchanged_lora_indices = exchanged_lora_indices[global_lora_permutation]
             lora_context.exchanged_lora_indices = exchanged_lora_indices
-        return (
-            global_input_tokens,
-            dynamic_scale_after_all2all,
-            reversed_global_input_permutation_mapping,
-        )
+        return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
 
     def _combine_preprocess(
         self, hidden_states: torch.Tensor, combine_metadata: MoEAllToAllCombineMetadata
