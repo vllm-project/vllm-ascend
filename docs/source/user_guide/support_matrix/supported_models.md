@@ -46,7 +46,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | Qwen3-30B-A3B | 🔵 |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | 🟡 | 🟡 | ✅ | ✅ | ❌ | ❌ | ✅ | 16k | [Qwen3-30B-A3B](../../tutorials/models/Qwen3-30B-A3B.md) |
     | Qwen3.5-Dense | 🔵 |  | ❌ | Atlas inference products | 🟡 | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | 16k | [Qwen3.5-Dense](../../tutorials/models/Qwen3.5-Dense.md) |
     | Qwen3.5-35B-A3B | 🔵 |  | ❌ | Atlas inference products | 🟡 | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | 16k | |
-    | Qwen3.6-27B | 🔵 |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | 16k | [Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
+    | Qwen3.6-27B | 🔵 |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
     | Qwen3.6-35B-A3B | 🔵 |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | 16k | [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
 
 #### Extended Compatible Models
