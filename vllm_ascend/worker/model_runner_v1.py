@@ -17,9 +17,11 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
+import fcntl
 import json
 import logging
 import math
+import os
 import sys
 import time
 from collections import defaultdict, deque
@@ -2641,7 +2643,6 @@ class NPUModelRunner(GPUModelRunner):
                 req_idx,
                 req_id,
                 req_state,
-                sampling_metadata=self.input_batch.sampling_metadata,
                 sampled_ids=sampled_ids,
                 debug_log_full_by_req_id=self._current_step_debug_log_full_requests,
             )
@@ -2735,14 +2736,31 @@ class NPUModelRunner(GPUModelRunner):
         req_idx: int,
         req_id: str,
         req_state: Any,
-        sampling_metadata: Any = None,
         sampled_ids: list[int] | torch.Tensor | None = None,
         debug_log_full_by_req_id: dict[str, bool] | None = None,
     ) -> None:
+        if self._msprobe_dump_max_times == 0:
+            return
+        if not req_id or not self.need_accepted_tokens:
+            return
+        if not get_pp_group().is_last_rank:
+            logger.warning(
+                "[Anomaly MTP] req_id=%s not last pp rank",
+                req_id,
+            )
+            return
+        log_leader = self.tp_rank == 0
+        draft_len = getattr(req_state, "prev_num_draft_len", 0) or 0
+        if draft_len <= 0:
+            if log_leader:
+                logger.warning(
+                    "[Anomaly MTP] req_id=%s draft_len=%d",
+                    req_id,
+                    draft_len,
+                )
+            return
         if debug_log_full_by_req_id is not None:
             debug_log_full_by_req_id.pop(req_id, None)
-        if not req_id or not self.need_accepted_tokens or self.tp_rank != 0:
-            return
 
         def _normalize_token_ids(token_ids: Any) -> list[int]:
             if token_ids is None:
@@ -2751,14 +2769,6 @@ class NPUModelRunner(GPUModelRunner):
                 return token_ids.tolist()
             return list(token_ids)
 
-        draft_len = getattr(req_state, "prev_num_draft_len", 0) or 0
-        if draft_len <= 0:
-            logger.warning(
-                "[Anomaly MTP] req_id=%s draft_len=%d",
-                req_id,
-                draft_len,
-            )
-            return
         accepted_tokens = (
             int(self.input_batch.num_accepted_tokens_cpu[req_idx])
             if req_idx < len(self.input_batch.num_accepted_tokens_cpu)
@@ -2772,23 +2782,24 @@ class NPUModelRunner(GPUModelRunner):
         if len(history) > self._mtp_acceptance_window:
             history.popleft()
         prompt_token_ids_raw = getattr(req_state, "prompt_token_ids", None)
-        output_token_ids_raw = cast(list[list[int]], self.input_batch.req_output_token_ids)
+        output_token_ids_raw = cast(list[list[int]], self.input_batch.req_output_token_ids)[0]
         prompt_token_count = len(prompt_token_ids_raw) if prompt_token_ids_raw is not None else 0
         output_token_count = len(output_token_ids_raw) if output_token_ids_raw is not None else 0
         accepted_sum = sum(accepted for accepted, _ in history)
         draft_sum = sum(draft for _, draft in history)
         acceptance_rate = accepted_sum / draft_sum if draft_sum > 0 else 0.0
         acceptance_len = accepted_sum / len(history) if history else 0.0
-        logger.info(
-            "[Anomaly MTP short] req_id=%s draft_len=%d effective_draft_len=%d "
-            "invalid_spec_tokens=%d accepted_count=%d accepted_draft_count=%d "
-            "accept_rate=%.4f accept_len=%.4f window=%d accepted=%d drafted=%d "
-            "prompt_tokens=%d output_tokens=%d",
-            req_id, draft_len, effective_draft_len,
-            invalid_spec_tokens, accepted_tokens, accepted_draft_tokens,
-            acceptance_rate, acceptance_len, len(history), accepted_sum, draft_sum,
-            prompt_token_count, output_token_count,
-        )
+        if log_leader:
+            logger.info(
+                "[Anomaly MTP short] req_id=%s draft_len=%d effective_draft_len=%d "
+                "invalid_spec_tokens=%d accepted_count=%d accepted_draft_count=%d "
+                "accept_rate=%.4f accept_len=%.4f window=%d accepted=%d drafted=%d "
+                "prompt_tokens=%d output_tokens=%d",
+                req_id, draft_len, effective_draft_len,
+                invalid_spec_tokens, accepted_tokens, accepted_draft_tokens,
+                acceptance_rate, acceptance_len, len(history), accepted_sum, draft_sum,
+                prompt_token_count, output_token_count,
+            )
         if len(history) < self._mtp_acceptance_window:
             return
         should_log_full = bool(
@@ -2805,15 +2816,16 @@ class NPUModelRunner(GPUModelRunner):
             return
         if not self._enable_msprobe_dump_if_needed(req_id):
             return
-        if debug_log_full_by_req_id is not None:
+        if log_leader and debug_log_full_by_req_id is not None:
             debug_log_full_by_req_id[req_id] = True
-        self._log_mtp_token_details(
-            req_id=req_id,
-            sampled_ids=_normalize_token_ids(sampled_ids),
-            accepted_tokens=accepted_tokens,
-            prompt_token_ids_raw=prompt_token_ids_raw,
-            output_token_ids_raw=output_token_ids_raw,
-        )
+        if log_leader:
+            self._log_mtp_token_details(
+                req_id=req_id,
+                sampled_ids=_normalize_token_ids(sampled_ids),
+                accepted_tokens=accepted_tokens,
+                prompt_token_ids_raw=prompt_token_ids_raw,
+                output_token_ids_raw=output_token_ids_raw,
+            )
 
     def _log_mtp_token_details(
         self,
@@ -2853,8 +2865,19 @@ class NPUModelRunner(GPUModelRunner):
             output_token_ids,
         )
 
+    @contextmanager
+    def _lock_msprobe_config(self, config_path: Path):
+        lock_path = Path(f"{config_path}.lock")
+        os.makedirs(lock_path.parent, exist_ok=True)
+        with lock_path.open("w", encoding="utf-8") as lock_fd:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+
     def _disable_msprobe_dump_if_needed(self) -> None:
-        if self.tp_rank != 0:
+        if self.debugger is None:
             return
         if not self._msprobe_dump_changed_by_runner:
             return
@@ -2879,37 +2902,31 @@ class NPUModelRunner(GPUModelRunner):
             return
 
         try:
-            with config_path.open("r", encoding="utf-8") as f:
-                config_obj = json.load(f)
+            with self._lock_msprobe_config(config_path):
+                with config_path.open("r", encoding="utf-8") as f:
+                    config_obj = json.load(f)
+
+                if not isinstance(config_obj, dict):
+                    logger.error(
+                        "[Anomaly msprobe] rollback failed: json root is not object. path=%s type=%s",
+                        str(config_path),
+                        type(config_obj).__name__,
+                    )
+                    return
+
+                curr_value = config_obj.get("dump_enable")
+                config_obj["dump_enable"] = self._msprobe_dump_restore_value
+                with config_path.open("w", encoding="utf-8") as f:
+                    json.dump(config_obj, f, ensure_ascii=False, indent=2)
+                    f.write("\n")
         except Exception as e:
             logger.error(
-                "[Anomaly msprobe] rollback failed to read json. path=%s error=%s",
+                "[Anomaly msprobe] rollback failed to update json. path=%s error=%s",
                 str(config_path),
                 e,
             )
             return
-
-        if not isinstance(config_obj, dict):
-            logger.error(
-                "[Anomaly msprobe] rollback failed: json root is not object. path=%s type=%s",
-                str(config_path),
-                type(config_obj).__name__,
-            )
-            return
-
-        curr_value = config_obj.get("dump_enable")
-        config_obj["dump_enable"] = self._msprobe_dump_restore_value
         try:
-            if self.debugger is None:
-                logger.info(
-                    "[Anomaly msprobe] rollback dump_enable to %s after "
-                    "debugger.step failed. because debugger is None",
-                    self._msprobe_dump_restore_value,
-                )
-                return
-            with config_path.open("w", encoding="utf-8") as f:
-                json.dump(config_obj, f, ensure_ascii=False, indent=2)
-                f.write("\n")
             self.debugger._maybe_reload_config(force=True)
             logger.info(
                 "[Anomaly msprobe] rollback dump_enable from %s to restore_value=%s after debugger.step. path=%s",
@@ -2922,13 +2939,15 @@ class NPUModelRunner(GPUModelRunner):
             self._msprobe_dump_disable_delay_rounds = 0
         except Exception as e:
             logger.error(
-                "[Anomaly msprobe] rollback failed to write json. path=%s error=%s",
+                "[Anomaly msprobe] rollback failed to reload debugger. path=%s error=%s",
                 str(config_path),
                 e,
             )
 
     def _enable_msprobe_dump_if_needed(self, req_id: str) -> bool:
-        if self.tp_rank != 0 or self.debugger is None:
+        if self.debugger is None:
+            return False
+        if not get_pp_group().is_last_rank:
             return False
         dump_cfg = self.ascend_config.dump_config_path
         if not dump_cfg:
@@ -2957,45 +2976,43 @@ class NPUModelRunner(GPUModelRunner):
                          str(config_path))
             return False
         try:
-            with config_path.open("r", encoding="utf-8") as f:
-                config_obj = json.load(f)
+            with self._lock_msprobe_config(config_path):
+                with config_path.open("r", encoding="utf-8") as f:
+                    config_obj = json.load(f)
+
+                if not isinstance(config_obj, dict):
+                    logger.error(
+                        "[Anomaly msprobe] req_id=%s json root is not object. path=%s type=%s",
+                        req_id,
+                        str(config_path),
+                        type(config_obj).__name__,
+                    )
+                    return False
+
+                old_value = config_obj.get("dump_enable")
+                if old_value is not True:
+                    config_obj["dump_enable"] = True
+                    with config_path.open("w", encoding="utf-8") as f:
+                        json.dump(config_obj, f, ensure_ascii=False, indent=2)
+                        f.write("\n")
         except Exception as e:
             logger.error(
-                "[Anomaly msprobe] req_id=%s failed to read json. path=%s error=%s",
+                "[Anomaly msprobe] req_id=%s failed to update json. path=%s error=%s",
                 req_id,
                 str(config_path),
                 e,
             )
             return False
-        if not isinstance(config_obj, dict):
-            logger.error(
-                "[Anomaly msprobe] req_id=%s json root is not object. path=%s type=%s",
-                req_id,
-                str(config_path),
-                type(config_obj).__name__,
-            )
-            return False
-        old_value = config_obj.get("dump_enable")
-        if old_value is True:
-            logger.info_once(
-                "[Anomaly msprobe] req_id=%s skip dump: dump_enable already true. path=%s",
-                req_id,
-                str(config_path),
-            )
-            return True
         changed_by_runner = (old_value is not True)
-        config_obj["dump_enable"] = True
         try:
-            with config_path.open("w", encoding="utf-8") as f:
-                json.dump(config_obj, f, ensure_ascii=False, indent=2)
-                f.write("\n")
             self._msprobe_dumped_req_ids.add(req_id)
             self._msprobe_dump_total_count += 1
             self._msprobe_last_dump_ts = now_ts
             self._msprobe_dump_changed_by_runner = changed_by_runner
             self._msprobe_dump_restore_value = old_value
             self._msprobe_dump_disable_delay_rounds = 1
-            self._save_sample_param(target_req_id=req_id)
+            if self.tp_rank == 0 and get_pp_group().is_last_rank:
+                self._save_sample_param(target_req_id=req_id)
             self.debugger._maybe_reload_config(force=True)
             logger.info(
                 "[Anomaly msprobe] req_id=%s set dump_enable to %s. changed_by_runner=%s dump_count=%d/%d path=%s",
@@ -3052,12 +3069,15 @@ class NPUModelRunner(GPUModelRunner):
 
             logger.info(
                 "[SamplingMeta] req_id=%s req_idx=%d "
+                "dp_rank=%d tp_rank=%d "
                 "temperature=%.4f top_k=%s top_p=%.4f "
                 "freq_pen=%.4f pres_pen=%.4f rep_pen=%.4f "
                 "bad_words_group_num=%d output_tokens_len=%d spec_tokens_len=%s logprob_target_tokens_len=%s "
                 "all_greedy=%s all_random=%s max_num_logprobs=%s",
                 req_id,
                 req_idx,
+                self.dp_rank,
+                self.tp_rank,
                 temp if temp is not None else -1,
                 topk,
                 topp if topp is not None else 1.0,

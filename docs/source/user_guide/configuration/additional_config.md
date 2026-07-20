@@ -177,7 +177,7 @@ The details of each configuration option are as follows:
 | `mtp_acceptance_high_threshold` | float | `0.96` | High acceptance-rate threshold for triggering detailed anomaly logging and dump. |
 | `mtp_acceptance_len_high_threshold` | float | `2.8` | High accepted-length threshold paired with `mtp_acceptance_high_threshold`. |
 | `msprobe_dump_cooldown_seconds` | int | `300` | Minimum cooldown between two auto-triggered dumps. |
-| `msprobe_dump_max_times` | int | `10` | Maximum number of auto-triggered dumps in one worker lifecycle. |
+| `msprobe_dump_max_times` | int | `0` | Maximum number of auto-triggered dumps in one worker lifecycle. |
 
 **short_request_first_config**
 
