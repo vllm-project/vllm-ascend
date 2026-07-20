@@ -63,8 +63,8 @@ jobs:
       fail-fast: false
       matrix:
         runner:
-          - linux-amd64-cpu-8-hk
-          - linux-arm64-cpu-16
+          - linux-amd64-cpu-32-hk
+          - linux-arm64-cpu-32-hk
     outputs:
       amd64-docker-ready: ${{ steps.check.outputs.amd64-ready }}
       arm64-docker-ready: ${{ steps.check.outputs.arm64-ready }}
@@ -123,8 +123,8 @@ jobs:
       fail-fast: false
       matrix:
         runner:
-          - linux-amd64-cpu-8-hk
-          - linux-arm64-cpu-16
+          - linux-amd64-cpu-32-hk
+          - linux-arm64-cpu-32-hk
 
     steps:
       - name: Checkout repo
@@ -207,8 +207,8 @@ jobs:
       fail-fast: false
       matrix:
         runner:
-          - linux-amd64-cpu-8-hk
-          - linux-arm64-cpu-16
+          - linux-amd64-cpu-32-hk
+          - linux-arm64-cpu-32-hk
 
     steps:
       - name: Checkout repo
@@ -278,7 +278,7 @@ jobs:
       fail-fast: false
       matrix:
         runner:
-          - linux-amd64-cpu-8-hk
+          - linux-amd64-cpu-32-hk
 
     steps:
       - name: Checkout repo
@@ -402,6 +402,6 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 注意事项" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- \`kubernetes-novolume\` 模式 (如 gy-005/gy-006) 下 Docker daemon 可能不可用" >> $GITHUB_STEP_SUMMARY
-          echo "- \`kubernetes\` 模式 (如 hk001) 下 Docker 支持更好" >> $GITHUB_STEP_SUMMARY
-          echo "- 若 Docker 不可用但仍需拉取/推送镜像，考虑用 \`skopeo\` 或 \`oras\` CLI 替代" >> $GITHUB_STEP_SUMMARY
+          echo "- \`linux-amd64-cpu-32-hk\` / \`linux-arm64-cpu-32-hk\` 通过 Vault 注入证书 + 远程 buildkitd (\`tcp://buildkitd-service-*.buildkitd:1234\`) 支持 Docker 构建" >> $GITHUB_STEP_SUMMARY
+          echo "- 若 buildx 需要本地 Docker daemon 而 runner 无 daemon，则 Docker build 相关 action 不可用" >> $GITHUB_STEP_SUMMARY
+          echo "- 替代方案: 使用 \`buildctl\` 直接调用远程 buildkitd 进行镜像构建" >> $GITHUB_STEP_SUMMARY
