@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import importlib
-import sys
 from collections.abc import Mapping
-from types import ModuleType
-from typing import Any, cast
+from typing import Any
 
 from transformers import HunYuanVLProcessor
 
@@ -79,62 +76,6 @@ class _HunYuanVLProcessorCompat(HunYuanVLProcessor):
         )
 
 
-def _import_v024_hunyuan_vision() -> Any:
-    """Import a bundled release model with native processors from vLLM PR #47872."""
-    from transformers.models.hunyuan_vl.image_processing_hunyuan_vl import (
-        HunYuanVLImageProcessor,
-        smart_resize,
-    )
-
-    aliases = {
-        _STALE_PROCESSOR_MODULES["HunYuanVLProcessor"]: {
-            "HunYuanVLProcessor": HunYuanVLProcessor,
-        },
-        _STALE_PROCESSOR_MODULES["HunYuanVLImageProcessor"]: {
-            "HunYuanVLImageProcessor": HunYuanVLImageProcessor,
-            "smart_resize": smart_resize,
-        },
-    }
-    missing = object()
-    previous_modules = {name: sys.modules.get(name, missing) for name in aliases}
-    parent_module = sys.modules.get("vllm.transformers_utils.processors")
-    previous_attributes = {
-        name.rpartition(".")[2]: (
-            vars(parent_module).get(name.rpartition(".")[2], missing) if parent_module is not None else missing
-        )
-        for name in aliases
-    }
-
-    alias_modules = {}
-    for module_name, exports in aliases.items():
-        module = ModuleType(module_name)
-        module.__package__ = module_name.rpartition(".")[0]
-        module.__dict__.update(exports)
-        module.__dict__["__all__"] = list(exports)
-        alias_modules[module_name] = module
-        sys.modules[module_name] = module
-
-    try:
-        return importlib.import_module("vllm.model_executor.models.hunyuan_vision")
-    finally:
-        for module_name, alias_module in alias_modules.items():
-            previous_module = previous_modules[module_name]
-            if previous_module is missing:
-                if sys.modules.get(module_name) is alias_module:
-                    del sys.modules[module_name]
-            else:
-                sys.modules[module_name] = cast(ModuleType, previous_module)
-
-        current_parent_module = sys.modules.get("vllm.transformers_utils.processors")
-        if current_parent_module is not None:
-            for attribute_name, previous_attribute in previous_attributes.items():
-                if previous_attribute is missing:
-                    if vars(current_parent_module).get(attribute_name) in alias_modules.values():
-                        delattr(current_parent_module, attribute_name)
-                else:
-                    setattr(current_parent_module, attribute_name, previous_attribute)
-
-
 def _remove_stale_registry_entries() -> bool:
     """Backport the lazy-registry cleanup from vLLM PR #47867."""
     import vllm.transformers_utils.processors as vllm_processors
@@ -171,8 +112,17 @@ def _patch_hunyuan_processor_loader(hunyuan_vision: Any) -> None:
     hunyuan_vision.HunYuanVLProcessingInfo.get_hf_processor = get_hf_processor
 
 
-def _patch_v024_processor_methods(hunyuan_vision: Any) -> None:
-    """Backport the Transformers 5.13 call protocol from vLLM PR #47872."""
+def _patch_image_token_wrapping(hunyuan_vision: Any) -> None:
+    """Wrap bare image tokens with start/end tokens for HunYuanVLProcessor.
+
+    Transformers' ``HunYuanVLProcessor.validate_inputs`` requires every image
+    placeholder to be surrounded by the image start/end tokens, i.e.
+    ``<no_100><no_102><no_101>``. vLLM main folds this wrapping into
+    ``hunyuan_vision._call_hf_processor`` natively, but vLLM v0.25.0 does not,
+    so prompts built with a bare image token (e.g. the dummy mm batch during
+    ``profile_run``) are rejected by ``validate_inputs``. Backport the wrapping
+    on v0.25.0 only; the ``wrapped not in prompt`` guard keeps it idempotent.
+    """
 
     def call_hf_processor(
         self: Any,
@@ -198,18 +148,13 @@ def _patch_v024_processor_methods(hunyuan_vision: Any) -> None:
 
 def install_hunyuan_vl_processor_compat() -> None:
     """Align both supported vLLM refs with Transformers 5.13 Hunyuan APIs."""
-    # Keep each target's native, image-token-only prompt replacement. The
-    # cached processor path applies it inside an existing start/image/end
-    # wrapper; using a full-wrapper replacement here would duplicate wrappers.
-    if vllm_version_is("0.24.0"):
-        v024_hunyuan_vision = _import_v024_hunyuan_vision()
-        _remove_stale_registry_entries()
-        _patch_hunyuan_processor_loader(v024_hunyuan_vision)
-        _patch_v024_processor_methods(v024_hunyuan_vision)
-        return
-
     if not _remove_stale_registry_entries():
         return
     from vllm.model_executor.models import hunyuan_vision as main_hunyuan_vision
 
     _patch_hunyuan_processor_loader(main_hunyuan_vision)
+    # vLLM v0.25.0 does not wrap bare image tokens with start/end tokens inside
+    # ``_call_hf_processor`` (that landed on main only), so backport it here.
+    # Main already does this natively, so the patch is v0.25.0-only.
+    if vllm_version_is("0.25.0"):
+        _patch_image_token_wrapping(main_hunyuan_vision)

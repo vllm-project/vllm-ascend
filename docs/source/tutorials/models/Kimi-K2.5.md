@@ -115,7 +115,7 @@ If you don't want to use the docker image as above, you can also build all from 
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
 
@@ -146,7 +146,7 @@ export VLLM_ASCEND_ENABLE_MLAPO=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 
-vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
+vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
   --host 0.0.0.0 \
   --port 8088 \
   --quantization ascend \
@@ -276,7 +276,7 @@ Run the following scripts on two nodes respectively.
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export VLLM_ASCEND_BALANCE_SCHEDULING=1
 
-    vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
+    vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
     --host 0.0.0.0 \
     --port 8088 \
     --quantization ascend \
@@ -344,7 +344,7 @@ Run the following scripts on two nodes respectively.
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export VLLM_ASCEND_BALANCE_SCHEDULING=1
 
-    vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
+    vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
     --host 0.0.0.0 \
     --port 8088 \
     --quantization ascend \
@@ -481,7 +481,7 @@ Parameter descriptions:
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
+    vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
         --host 0.0.0.0 \
         --port $2 \
         --data-parallel-size $3 \
@@ -562,7 +562,7 @@ Parameter descriptions:
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
+    vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
         --host 0.0.0.0 \
         --port $2 \
         --data-parallel-size $3 \
@@ -643,7 +643,7 @@ Parameter descriptions:
     export VLLM_ASCEND_ENABLE_MLAPO=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
+    vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
         --host 0.0.0.0 \
         --port $2 \
         --data-parallel-size $3 \
@@ -723,7 +723,7 @@ Parameter descriptions:
     export VLLM_ASCEND_ENABLE_MLAPO=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
+    vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
         --host 0.0.0.0 \
         --port $2 \
         --data-parallel-size $3 \
