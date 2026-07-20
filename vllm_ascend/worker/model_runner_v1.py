@@ -31,7 +31,7 @@ from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
 from multiprocessing import Manager
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
 
 import numpy as np
 import torch
@@ -379,9 +379,8 @@ class NPUModelRunner(GPUModelRunner):
         self._msprobe_dump_total_count = 0
         self._msprobe_dumped_req_ids: set[str] = set()
         self._msprobe_last_dump_ts: float | None = None
-        self._msprobe_dump_changed_by_runner = False
-        self._msprobe_dump_restore_value: Any = None
         self._msprobe_dump_disable_delay_rounds = 0
+        self._msprobe_dump_active = False
         logger.info_once(
             "Dynamic dump config applied: mtp_acceptance_window=%d "
             "mtp_acceptance_low_threshold=%.4f "
@@ -2782,7 +2781,12 @@ class NPUModelRunner(GPUModelRunner):
         if len(history) > self._mtp_acceptance_window:
             history.popleft()
         prompt_token_ids_raw = getattr(req_state, "prompt_token_ids", None)
-        output_token_ids_raw = cast(list[list[int]], self.input_batch.req_output_token_ids)[0]
+        req_output_token_ids = self.input_batch.req_output_token_ids
+        output_token_ids_raw = (
+            req_output_token_ids[req_idx]
+            if 0 <= req_idx < len(req_output_token_ids)
+            else None
+        )
         prompt_token_count = len(prompt_token_ids_raw) if prompt_token_ids_raw is not None else 0
         output_token_count = len(output_token_ids_raw) if output_token_ids_raw is not None else 0
         accepted_sum = sum(accepted for accepted, _ in history)
@@ -2877,9 +2881,9 @@ class NPUModelRunner(GPUModelRunner):
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
 
     def _disable_msprobe_dump_if_needed(self) -> None:
-        if self.debugger is None:
+        if not self._msprobe_dump_active:
             return
-        if not self._msprobe_dump_changed_by_runner:
+        if self.debugger is None:
             return
         if self._msprobe_dump_disable_delay_rounds > 0:
             self._msprobe_dump_disable_delay_rounds -= 1
@@ -2889,18 +2893,25 @@ class NPUModelRunner(GPUModelRunner):
             )
             return
 
+        if not self._set_msprobe_dump_state(False):
+            return
+        self._msprobe_dump_active = False
+        self._msprobe_dump_disable_delay_rounds = 0
+        logger.info("[Anomaly msprobe] disable msprobe dump succeeded.")
+        self.debugger._maybe_reload_config(force=True)
+
+    def _set_msprobe_dump_state(self, dump_state: bool) -> bool:
         dump_cfg = self.ascend_config.dump_config_path
         if not dump_cfg:
-            logger.error("[Anomaly msprobe] rollback failed: dump_config_path is empty")
-            return
+            logger.error("[Anomaly msprobe] set msprobe dump state failed, because dump_config_path is empty")
+            return False
         config_path = Path(dump_cfg)
         if not config_path.exists():
             logger.error(
-                "[Anomaly msprobe] rollback failed: config file not found. path=%s",
+                "[Anomaly msprobe] set msprobe dump state failed, because config file not found. path=%s",
                 str(config_path),
             )
-            return
-
+            return False
         try:
             with self._lock_msprobe_config(config_path):
                 with config_path.open("r", encoding="utf-8") as f:
@@ -2908,50 +2919,31 @@ class NPUModelRunner(GPUModelRunner):
 
                 if not isinstance(config_obj, dict):
                     logger.error(
-                        "[Anomaly msprobe] rollback failed: json root is not object. path=%s type=%s",
+                        "[Anomaly msprobe] set msprobe dump state failed, because json root is not object. type=%s",
                         str(config_path),
                         type(config_obj).__name__,
                     )
-                    return
+                    return False
 
-                curr_value = config_obj.get("dump_enable")
-                config_obj["dump_enable"] = self._msprobe_dump_restore_value
-                with config_path.open("w", encoding="utf-8") as f:
-                    json.dump(config_obj, f, ensure_ascii=False, indent=2)
-                    f.write("\n")
+                ori_value = config_obj.get("dump_enable")
+                if ori_value != dump_state:
+                    config_obj["dump_enable"] = dump_state
+                    with config_path.open("w", encoding="utf-8") as f:
+                        json.dump(config_obj, f, ensure_ascii=False, indent=2)
+                        f.write("\n")
+            return True
         except Exception as e:
             logger.error(
-                "[Anomaly msprobe] rollback failed to update json. path=%s error=%s",
+                "[Anomaly msprobe] set msprobe dump state failed, path=%s error=%s",
                 str(config_path),
                 e,
             )
-            return
-        try:
-            self.debugger._maybe_reload_config(force=True)
-            logger.info(
-                "[Anomaly msprobe] rollback dump_enable from %s to restore_value=%s after debugger.step. path=%s",
-                curr_value,
-                self._msprobe_dump_restore_value,
-                str(config_path),
-            )
-            self._msprobe_dump_changed_by_runner = False
-            self._msprobe_dump_restore_value = None
-            self._msprobe_dump_disable_delay_rounds = 0
-        except Exception as e:
-            logger.error(
-                "[Anomaly msprobe] rollback failed to reload debugger. path=%s error=%s",
-                str(config_path),
-                e,
-            )
+            return False
 
     def _enable_msprobe_dump_if_needed(self, req_id: str) -> bool:
         if self.debugger is None:
             return False
         if not get_pp_group().is_last_rank:
-            return False
-        dump_cfg = self.ascend_config.dump_config_path
-        if not dump_cfg:
-            logger.error("[Anomaly msprobe] req_id=%s skip dump: dump_config_path is empty", req_id)
             return False
         if req_id in self._msprobe_dumped_req_ids:
             logger.info_once("[Anomaly msprobe] req_id=%s skip dump: request already dumped once", req_id)
@@ -2970,68 +2962,24 @@ class NPUModelRunner(GPUModelRunner):
                 self._msprobe_dump_cooldown_seconds - elapsed,
             )
             return False
-        config_path = Path(dump_cfg)
-        if not config_path.exists():
-            logger.error("[Anomaly msprobe] req_id=%s config file not found. searched_path=%s", req_id,
-                         str(config_path))
+        
+        if not self._set_msprobe_dump_state(True):
             return False
-        try:
-            with self._lock_msprobe_config(config_path):
-                with config_path.open("r", encoding="utf-8") as f:
-                    config_obj = json.load(f)
-
-                if not isinstance(config_obj, dict):
-                    logger.error(
-                        "[Anomaly msprobe] req_id=%s json root is not object. path=%s type=%s",
-                        req_id,
-                        str(config_path),
-                        type(config_obj).__name__,
-                    )
-                    return False
-
-                old_value = config_obj.get("dump_enable")
-                if old_value is not True:
-                    config_obj["dump_enable"] = True
-                    with config_path.open("w", encoding="utf-8") as f:
-                        json.dump(config_obj, f, ensure_ascii=False, indent=2)
-                        f.write("\n")
-        except Exception as e:
-            logger.error(
-                "[Anomaly msprobe] req_id=%s failed to update json. path=%s error=%s",
-                req_id,
-                str(config_path),
-                e,
-            )
-            return False
-        changed_by_runner = (old_value is not True)
-        try:
-            self._msprobe_dumped_req_ids.add(req_id)
-            self._msprobe_dump_total_count += 1
-            self._msprobe_last_dump_ts = now_ts
-            self._msprobe_dump_changed_by_runner = changed_by_runner
-            self._msprobe_dump_restore_value = old_value
-            self._msprobe_dump_disable_delay_rounds = 1
-            if self.tp_rank == 0 and get_pp_group().is_last_rank:
-                self._save_sample_param(target_req_id=req_id)
-            self.debugger._maybe_reload_config(force=True)
-            logger.info(
-                "[Anomaly msprobe] req_id=%s set dump_enable to %s. changed_by_runner=%s dump_count=%d/%d path=%s",
-                req_id,
-                config_obj["dump_enable"],
-                changed_by_runner,
-                self._msprobe_dump_total_count,
-                self._msprobe_dump_max_times,
-                str(config_path),
-            )
-            return True
-        except Exception as e:
-            logger.error(
-                "[Anomaly msprobe] req_id=%s failed to write json. path=%s error=%s",
-                req_id,
-                str(config_path),
-                e,
-            )
-            return False
+        self._msprobe_dump_active = True
+        self._msprobe_dumped_req_ids.add(req_id)
+        self._msprobe_dump_total_count += 1
+        self._msprobe_last_dump_ts = now_ts
+        self._msprobe_dump_disable_delay_rounds = 1
+        if self.tp_rank == 0 and get_pp_group().is_last_rank:
+            self._save_sample_param(target_req_id=req_id)
+        logger.info(
+            "[Anomaly msprobe] req_id=%s set msprobe dump state succeeded. dump_count=%d/%d",
+            req_id,
+            self._msprobe_dump_total_count,
+            self._msprobe_dump_max_times,
+        )
+        self.debugger._maybe_reload_config(force=True)
+        return True
 
     def _save_sample_param(self, target_req_id: str) -> None:
         sampling_metadata = self.input_batch.sampling_metadata
