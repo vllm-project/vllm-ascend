@@ -32,10 +32,7 @@ from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 
 
 def _uses_dspark_drafter(vllm_config):
-    speculative_config = vllm_config.speculative_config
-    draft_model_config = speculative_config.draft_model_config
-    draft_hf_config = draft_model_config.hf_config
-    return bool(getattr(draft_hf_config, "dspark_block_size", 0))
+    return bool(getattr(vllm_config.speculative_config.draft_model_config.hf_config, "dspark_block_size", 0))
 
 
 def get_spec_decode_method(method, vllm_config, device, runner):

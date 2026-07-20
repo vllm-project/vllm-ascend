@@ -13,22 +13,7 @@ from vllm_ascend.distributed.parallel_state import get_p_tp_group
 
 MAX_HCCL_REGISTER_REGIONS = 256
 REGISTER_MERGE_GAP_BYTES = 4096
-DSPARK_DEFAULT_NUM_LAYERS = 3
-
-
-def get_dspark_num_kv_cache_layers(vllm_config) -> int | None:
-    """Return the number of independently cached DSpark draft layers."""
-    speculative_config = getattr(vllm_config, "speculative_config", None)
-    draft_model_config = getattr(speculative_config, "draft_model_config", None)
-    draft_hf_config = getattr(draft_model_config, "hf_config", None)
-    dspark_block_size = getattr(draft_hf_config, "dspark_block_size", 0)
-    if not isinstance(dspark_block_size, int) or dspark_block_size <= 0:
-        return None
-    for attr in ("dspark_num_layers", "n_mtp_layers", "dspark_num_mtp_layers"):
-        value = getattr(draft_hf_config, attr, None)
-        if isinstance(value, int) and value > 0:
-            return value
-    return DSPARK_DEFAULT_NUM_LAYERS
+DSPARK_NUM_KV_CACHE_LAYERS = 3
 
 
 def kv_alltoall_and_rearrange(pd_tp_ratio: int, key: torch.Tensor, value: torch.TensorType):

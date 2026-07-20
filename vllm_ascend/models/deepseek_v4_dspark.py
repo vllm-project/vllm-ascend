@@ -12,16 +12,18 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.logger import logger
+from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader, maybe_remap_kv_scale_name
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.utils import enable_dsa_cp
 
 from .deepseek_v4 import (
@@ -29,14 +31,8 @@ from .deepseek_v4 import (
     DeepseekV2DecoderLayer,
     DeepseekV2MixtureOfExperts,
     DeepseekV4Attention,
-    _apply_dsv4_rope,
-    _apply_dsv4_rope_tail,
-    _grouped_wo_a_projection,
     _hc_head_torch,
-    _linear_output,
-    _make_deepseek_v4_expert_params_mapping,
     _normalize_dsv4_layer_weight_name,
-    _wo_a_weight_for_eager_projection,
 )
 
 FP8_E4M3_EXP_MIN = -6
@@ -67,16 +63,81 @@ def _dequant_dspark_wo_a_weight(weight: torch.Tensor, scale: torch.Tensor) -> to
 
 
 def _get_dspark_num_layers(config: PretrainedConfig) -> int:
-    for attr in ("dspark_num_layers", "n_mtp_layers", "dspark_num_mtp_layers"):
+    for attr in ("dspark_num_layers", "dspark_num_mtp_layers"):
         value = getattr(config, attr, None)
-        if value:
-            return int(value)
+        if value not in (None, 0) and int(value) != DSPARK_DEFAULT_NUM_LAYERS:
+            raise ValueError(f"DSpark requires exactly {DSPARK_DEFAULT_NUM_LAYERS} draft layers, but {attr} is {value}")
     return DSPARK_DEFAULT_NUM_LAYERS
 
 
+def _make_deepseek_v4_expert_params_mapping(
+    model: nn.Module,
+    num_experts: int,
+    num_redundant_experts: int = 0,
+) -> list[tuple[str, str, int, str]]:
+    return fused_moe_make_expert_params_mapping(
+        model,
+        ckpt_gate_proj_name="gate_proj",
+        ckpt_down_proj_name="down_proj",
+        ckpt_up_proj_name="up_proj",
+        num_experts=num_experts,
+        num_redundant_experts=num_redundant_experts,
+    )
+
+
+def _linear_output(layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    out = layer(x)
+    return out[0] if isinstance(out, tuple) else out
+
+
+def _apply_dsv4_rope(
+    rotary_emb: nn.Module,
+    positions: torch.Tensor,
+    x: torch.Tensor,
+    *,
+    inverse: bool = False,
+) -> torch.Tensor:
+    cos, sin = get_cos_and_sin_dsa(positions)
+    cos_t = cos[rotary_emb.layername]
+    sin_t = sin[rotary_emb.layername]
+    if inverse:
+        sin_t = -sin_t
+    return rotary_emb(x, cos_t, sin_t)
+
+
+def _apply_dsv4_rope_tail(
+    rotary_emb: nn.Module,
+    positions: torch.Tensor,
+    x: torch.Tensor,
+    *,
+    inverse: bool = False,
+) -> torch.Tensor:
+    rotary_dim = rotary_emb.rotary_dim
+    if x.shape[-1] == rotary_dim:
+        return _apply_dsv4_rope(rotary_emb, positions, x, inverse=inverse)
+    x_pass, x_rot = x[..., :-rotary_dim], x[..., -rotary_dim:]
+    x_rot = _apply_dsv4_rope(rotary_emb, positions, x_rot, inverse=inverse)
+    return torch.cat([x_pass, x_rot], dim=-1)
+
+
+def _wo_a_weight_for_eager_projection(
+    wo_a_weight: torch.Tensor,
+    n_local_groups: int,
+    o_lora_rank: int,
+    group_dim: int,
+) -> torch.Tensor:
+    if wo_a_weight.ndim == 3:
+        return wo_a_weight.transpose(1, 2).contiguous()
+    return wo_a_weight.view(n_local_groups, o_lora_rank, group_dim)
+
+
+def _grouped_wo_a_projection(attn_out: torch.Tensor, wo_a: torch.Tensor) -> torch.Tensor:
+    return torch.matmul(attn_out.transpose(0, 1), wo_a.transpose(1, 2)).transpose(0, 1)
+
+
 def _fp8_e4m3fn_quantized_abs(abs_scaled: torch.Tensor) -> torch.Tensor:
-    subnormal_step = 2.0 ** FP8_E4M3_SUBNORMAL_EXP
-    min_normal = 2.0 ** FP8_E4M3_EXP_MIN
+    subnormal_step = 2.0**FP8_E4M3_SUBNORMAL_EXP
+    min_normal = 2.0**FP8_E4M3_EXP_MIN
     subnormal_normal_midpoint = (FP8_E4M3_MANTISSA_MAX * subnormal_step + min_normal) * 0.5
     subnormal = torch.floor(abs_scaled / subnormal_step + 0.5).clamp(0, FP8_E4M3_MANTISSA_MAX) * subnormal_step
     normal_exp = torch.floor(torch.log2(abs_scaled.clamp_min(min_normal))).clamp(FP8_E4M3_EXP_MIN, FP8_E4M3_EXP_MAX)
@@ -85,7 +146,11 @@ def _fp8_e4m3fn_quantized_abs(abs_scaled: torch.Tensor) -> torch.Tensor:
     carry = mantissa >= FP8_E4M3_MANTISSA_STEPS
     normal_exp = torch.where(carry, normal_exp + 1.0, normal_exp).clamp(FP8_E4M3_EXP_MIN, FP8_E4M3_EXP_MAX)
     mantissa = torch.where(carry, torch.zeros_like(mantissa), mantissa)
-    mantissa = torch.where(normal_exp >= FP8_E4M3_EXP_MAX, mantissa.clamp(0, FP8_E4M3_MAX_EXP_MANTISSA_MAX), mantissa.clamp(0, FP8_E4M3_MANTISSA_MAX))
+    mantissa = torch.where(
+        normal_exp >= FP8_E4M3_EXP_MAX,
+        mantissa.clamp(0, FP8_E4M3_MAX_EXP_MANTISSA_MAX),
+        mantissa.clamp(0, FP8_E4M3_MANTISSA_MAX),
+    )
     normal = (1.0 + mantissa / FP8_E4M3_MANTISSA_STEPS) * torch.exp2(normal_exp)
     return torch.where(abs_scaled < subnormal_normal_midpoint, subnormal, normal)
 
@@ -100,7 +165,9 @@ def _fp8_e4m3fn_qdq(x: torch.Tensor, block_size: int) -> torch.Tensor:
     x_view = x.float().reshape(-1, last_dim)
     blocks = x_view.reshape(-1, last_dim // block_size, block_size)
     amax = blocks.abs().amax(dim=-1, keepdim=True).clamp_min(DSPARK_FP8_AMAX_EPS)
-    scale = torch.pow(torch.full((), 2.0, dtype=torch.float32, device=x.device), torch.ceil(torch.log2(amax / FP8_E4M3_MAX_VALUE)))
+    scale = torch.pow(
+        torch.full((), 2.0, dtype=torch.float32, device=x.device), torch.ceil(torch.log2(amax / FP8_E4M3_MAX_VALUE))
+    )
     scaled = (blocks / scale).clamp(-FP8_E4M3_MAX_VALUE, FP8_E4M3_MAX_VALUE)
     quantized_abs = _fp8_e4m3fn_quantized_abs(scaled.abs())
     qdq = torch.where(scaled < 0, -quantized_abs, quantized_abs) * scale
@@ -290,9 +357,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         ctx_positions = context_start + self._dspark_window_offsets
         within_ctx = ctx_positions <= context_end
         cache_indices = ctx_positions.remainder(self.window_size)
-        slot_indices = request_slots[:, :1].to(device=draft_kv.device, dtype=torch.long).expand(
-            -1, self.window_size
-        )
+        slot_indices = request_slots[:, :1].to(device=draft_kv.device, dtype=torch.long).expand(-1, self.window_size)
         cached_positions = self._dspark_cache_positions[slot_indices, cache_indices].to(torch.long)
         ctx_valid = within_ctx & (cached_positions == ctx_positions)
         ctx_kv = self._dspark_kv_cache[slot_indices, cache_indices]
@@ -402,7 +467,9 @@ class DeepseekV4DSparkDecoderLayer(DeepseekV2DecoderLayer):
 class DSparkMarkovHead(nn.Module):
     def __init__(self, config: PretrainedConfig, prefix: str) -> None:
         super().__init__()
-        self.markov_w1 = VocabParallelEmbedding(config.vocab_size, config.dspark_markov_rank, prefix=f"{prefix}.markov_w1")
+        self.markov_w1 = VocabParallelEmbedding(
+            config.vocab_size, config.dspark_markov_rank, prefix=f"{prefix}.markov_w1"
+        )
         self.markov_w2 = ParallelLMHead(
             config.vocab_size,
             config.dspark_markov_rank,
@@ -422,7 +489,9 @@ class DSparkMarkovHead(nn.Module):
 class DSparkConfidenceHead(nn.Module):
     def __init__(self, input_dim: int, prefix: str) -> None:
         super().__init__()
-        self.proj = ReplicatedLinear(input_dim, 1, bias=False, params_dtype=torch.float32, quant_config=None, prefix=f"{prefix}.proj")
+        self.proj = ReplicatedLinear(
+            input_dim, 1, bias=False, params_dtype=torch.float32, quant_config=None, prefix=f"{prefix}.proj"
+        )
 
     def forward(self, hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
         return _linear_output(self.proj, torch.cat([hidden, markov_embed], dim=-1).float()).squeeze(-1)
@@ -539,9 +608,18 @@ class DeepseekV4DSparkModel(nn.Module):
     def compute_head_hidden(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if hidden_states.dim() == 2:
             return hidden_states
-        return _hc_head_torch(hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base, self.config.rms_norm_eps, self.config.hc_eps)
+        return _hc_head_torch(
+            hidden_states,
+            self.hc_head_fn,
+            self.hc_head_scale,
+            self.hc_head_base,
+            self.config.rms_norm_eps,
+            self.config.hc_eps,
+        )
 
-    def compute_logits(self, hidden_states: torch.Tensor, lm_head: ParallelLMHead, logits_processor: LogitsProcessor) -> torch.Tensor:
+    def compute_logits(
+        self, hidden_states: torch.Tensor, lm_head: ParallelLMHead, logits_processor: LogitsProcessor
+    ) -> torch.Tensor:
         return logits_processor(lm_head, self.norm(self.compute_head_hidden(hidden_states)))
 
     def markov_embed(self, token_ids: torch.Tensor) -> torch.Tensor:
@@ -620,8 +698,12 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
     def confidence(self, hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
         return self.model.confidence(hidden, markov_embed)
 
-    def precompute_and_store_context_kv(self, context_states, context_positions, context_slot_mapping=None, context_request_slots=None) -> None:
-        self.model.precompute_and_store_context_kv(context_states, context_positions, context_slot_mapping, context_request_slots)
+    def precompute_and_store_context_kv(
+        self, context_states, context_positions, context_slot_mapping=None, context_request_slots=None
+    ) -> None:
+        self.model.precompute_and_store_context_kv(
+            context_states, context_positions, context_slot_mapping, context_request_slots
+        )
 
     def reset_request_slots(self, request_slots: torch.Tensor | None) -> None:
         self.model.reset_request_slots(request_slots)
@@ -719,7 +801,14 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                             continue
                         param = params_dict[mapped]
                         weight_loader = typing.cast(typing.Callable[..., bool], param.weight_loader)
-                        success = weight_loader(param, loaded_weight, mapped, shard_id=expert_shard_id, expert_id=expert_id, return_success=True)
+                        success = weight_loader(
+                            param,
+                            loaded_weight,
+                            mapped,
+                            shard_id=expert_shard_id,
+                            expert_id=expert_id,
+                            return_success=True,
+                        )
                         if success:
                             loaded_params.add(mapped)
                             break
@@ -757,7 +846,9 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
         }
         missing_required = sorted(required_params - loaded_params)
         if missing_required:
-            raise ValueError(f"DSpark speculative decoding required weights missing from checkpoint load: {missing_required}")
+            raise ValueError(
+                f"DSpark speculative decoding required weights missing from checkpoint load: {missing_required}"
+            )
         missing_params = set(params_dict) - loaded_params
         optional_keys = (
             "q_norm_without_weight.",

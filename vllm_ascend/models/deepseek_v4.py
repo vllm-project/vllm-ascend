@@ -74,7 +74,7 @@ from vllm.v1.kv_cache_interface import KVCacheSpec, SlidingWindowMLASpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
-from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding, get_cos_and_sin_dsa
+from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import (
     AscendDeviceType,
@@ -83,8 +83,6 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     get_dsv4_compress_ratio,
 )
-from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
-
 
 DSV4_STACKED_PARAMS_MAPPING = (
     ("gate_up_proj", "gate_proj", 0),
@@ -104,26 +102,9 @@ def _normalize_dsv4_layer_weight_name(
     name = name.replace(".ffn_norm.", ".post_attention_layernorm.")
     name = name.replace(".attn_norm.", ".input_layernorm.")
     name = name.replace(".ffn.", ".mlp.")
-    if name.endswith(".scale") and not (
-        preserve_wo_a_scale and name.endswith(".self_attn.wo_a.scale")
-    ):
+    if name.endswith(".scale") and not (preserve_wo_a_scale and name.endswith(".self_attn.wo_a.scale")):
         name = name.removesuffix(".scale") + ".weight_scale"
     return name.replace(".gate.bias", ".gate.e_score_correction_bias")
-
-
-def _make_deepseek_v4_expert_params_mapping(
-    model: nn.Module,
-    num_experts: int,
-    num_redundant_experts: int = 0,
-) -> list[tuple[str, str, int, str]]:
-    return fused_moe_make_expert_params_mapping(
-        model,
-        ckpt_gate_proj_name="gate_proj",
-        ckpt_down_proj_name="down_proj",
-        ckpt_up_proj_name="up_proj",
-        num_experts=num_experts,
-        num_redundant_experts=num_redundant_experts,
-    )
 
 
 def _hc_head_torch(
@@ -141,56 +122,6 @@ def _hc_head_torch(
     pre = torch.sigmoid(mixes * hc_scale + hc_base) + hc_eps
     y = torch.sum(pre.unsqueeze(-1) * x_flat.view(shape), dim=1)
     return y.to(dtype)
-
-
-def _linear_output(layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
-    out = layer(x)
-    return out[0] if isinstance(out, tuple) else out
-
-
-def _apply_dsv4_rope(
-    rotary_emb: nn.Module,
-    positions: torch.Tensor,
-    x: torch.Tensor,
-    *,
-    inverse: bool = False,
-) -> torch.Tensor:
-    cos, sin = get_cos_and_sin_dsa(positions)
-    cos_t = cos[rotary_emb.layername]
-    sin_t = sin[rotary_emb.layername]
-    if inverse:
-        sin_t = -sin_t
-    return rotary_emb(x, cos_t, sin_t)
-
-
-def _apply_dsv4_rope_tail(
-    rotary_emb: nn.Module,
-    positions: torch.Tensor,
-    x: torch.Tensor,
-    *,
-    inverse: bool = False,
-) -> torch.Tensor:
-    rotary_dim = rotary_emb.rotary_dim
-    if x.shape[-1] == rotary_dim:
-        return _apply_dsv4_rope(rotary_emb, positions, x, inverse=inverse)
-    x_pass, x_rot = x[..., :-rotary_dim], x[..., -rotary_dim:]
-    x_rot = _apply_dsv4_rope(rotary_emb, positions, x_rot, inverse=inverse)
-    return torch.cat([x_pass, x_rot], dim=-1)
-
-
-def _wo_a_weight_for_eager_projection(
-    wo_a_weight: torch.Tensor,
-    n_local_groups: int,
-    o_lora_rank: int,
-    group_dim: int,
-) -> torch.Tensor:
-    if wo_a_weight.ndim == 3:
-        return wo_a_weight.transpose(1, 2).contiguous()
-    return wo_a_weight.view(n_local_groups, o_lora_rank, group_dim)
-
-
-def _grouped_wo_a_projection(attn_out: torch.Tensor, wo_a: torch.Tensor) -> torch.Tensor:
-    return torch.matmul(attn_out.transpose(0, 1), wo_a.transpose(1, 2)).transpose(0, 1)
 
 
 def _get_ascend_dsa_backend():
