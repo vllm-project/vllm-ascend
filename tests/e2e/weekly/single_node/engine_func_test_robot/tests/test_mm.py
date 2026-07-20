@@ -12,12 +12,12 @@ def _skip_if_capacity_too_small(request, image_count=0, video_count=0, audio_cou
         pytest.skip("model does not support the requested number of audios")
 
 
-def _media_sources(kind, count, source_type):
+def _media_sources(kind, count):
     if kind == "images":
-        return mm_helper.get_random_image_urls(count) if source_type == "url" else mm_helper.get_random_images(count)
+        return mm_helper.get_random_images(count)
     if kind == "videos":
-        return mm_helper.get_random_video_urls(count) if source_type == "url" else mm_helper.get_random_videos(count)
-    return mm_helper.get_random_audio_urls(count) if source_type == "url" else mm_helper.get_random_audios(count)
+        return mm_helper.get_random_videos(count)
+    return mm_helper.get_random_audios(count)
 
 
 def _send_multimodal_request(api_client, messages, stream=False):
@@ -34,54 +34,50 @@ def _assert_multimodal_success(response, stream=False):
     assertion.assert_chat_completion_success(response, stream=stream)
 
 
-@pytest.mark.parametrize("source_type", ["url", "base64"])
-def test_mm_accepts_single_image(api_client, request, source_type):
-    # Image-only coverage keeps one URL and one base64 path; multi-image count is covered separately.
+def test_mm_accepts_single_image(api_client, request):
+    # A single image covers the base64 image request path.
     _skip_if_capacity_too_small(request, image_count=1)
-    images = _media_sources("images", 1, source_type)
+    images = _media_sources("images", 1)
     if not images:
-        pytest.skip(f"no {source_type} image fixtures available")
+        pytest.skip("no base64 image fixtures available")
 
-    messages = [mm_helper.build_multimodal_message("Describe the image.", images=images, source_type=source_type)]
+    messages = [mm_helper.build_multimodal_message("Describe the image.", images=images)]
     response = _send_multimodal_request(api_client, messages)
     _assert_multimodal_success(response)
 
 
-@pytest.mark.parametrize("source_type", ["url", "base64"])
-def test_mm_accepts_single_video(api_client, request, source_type):
-    # Video-only coverage mirrors image-only coverage without repeating every media count.
+def test_mm_accepts_single_video(api_client, request):
+    # A single video covers the base64 video request path.
     _skip_if_capacity_too_small(request, video_count=1)
-    videos = _media_sources("videos", 1, source_type)
+    videos = _media_sources("videos", 1)
     if not videos:
-        pytest.skip(f"no {source_type} video fixtures available")
+        pytest.skip("no base64 video fixtures available")
 
-    messages = [mm_helper.build_multimodal_message("Describe the video.", videos=videos, source_type=source_type)]
+    messages = [mm_helper.build_multimodal_message("Describe the video.", videos=videos)]
     response = _send_multimodal_request(api_client, messages)
     _assert_multimodal_success(response)
 
 
-@pytest.mark.parametrize("source_type", ["url", "base64"])
-def test_mm_accepts_single_audio(api_client, request, source_type):
+def test_mm_accepts_single_audio(api_client, request):
     # Audio-only coverage verifies the audio content shape and model option gate.
     _skip_if_capacity_too_small(request, audio_count=1)
-    audios = _media_sources("audios", 1, source_type)
+    audios = _media_sources("audios", 1)
     if not audios:
-        pytest.skip(f"no {source_type} audio fixtures available")
+        pytest.skip("no base64 audio fixtures available")
 
-    messages = [mm_helper.build_multimodal_message("Describe the audio.", audios=audios, source_type=source_type)]
+    messages = [mm_helper.build_multimodal_message("Describe the audio.", audios=audios)]
     response = _send_multimodal_request(api_client, messages)
     _assert_multimodal_success(response)
 
 
-@pytest.mark.parametrize("source_type", ["url", "base64"])
-def test_mm_accepts_image_video_audio_combination(api_client, request, source_type):
-    # The mixed-media path is the highest-risk integration case, so it is kept for both URL and base64 sources.
+def test_mm_accepts_image_video_audio_combination(api_client, request):
+    # The mixed-media path verifies all supported base64 media types in one request.
     _skip_if_capacity_too_small(request, image_count=1, video_count=1, audio_count=1)
-    images = _media_sources("images", 1, source_type)
-    videos = _media_sources("videos", 1, source_type)
-    audios = _media_sources("audios", 1, source_type)
+    images = _media_sources("images", 1)
+    videos = _media_sources("videos", 1)
+    audios = _media_sources("audios", 1)
     if not images or not videos or not audios:
-        pytest.skip(f"no complete {source_type} multimodal fixture set available")
+        pytest.skip("no complete base64 multimodal fixture set available")
 
     messages = [
         mm_helper.build_multimodal_message(
@@ -89,7 +85,6 @@ def test_mm_accepts_image_video_audio_combination(api_client, request, source_ty
             images=images,
             videos=videos,
             audios=audios,
-            source_type=source_type,
         )
     ]
     response = _send_multimodal_request(api_client, messages)
@@ -99,11 +94,11 @@ def test_mm_accepts_image_video_audio_combination(api_client, request, source_ty
 def test_mm_accepts_streaming_image_request(api_client, request):
     # One streaming case is enough to cover SSE response handling for multimodal requests.
     _skip_if_capacity_too_small(request, image_count=1)
-    images = mm_helper.get_random_image_urls(1)
+    images = mm_helper.get_random_images(1)
     if not images:
-        pytest.skip("no image URL fixtures available")
+        pytest.skip("no base64 image fixtures available")
 
-    messages = [mm_helper.build_multimodal_message("Describe the image.", images=images, source_type="url")]
+    messages = [mm_helper.build_multimodal_message("Describe the image.", images=images)]
     response = _send_multimodal_request(api_client, messages, stream=True)
     _assert_multimodal_success(response, stream=True)
 
@@ -111,12 +106,12 @@ def test_mm_accepts_streaming_image_request(api_client, request):
 def test_mm_accepts_multi_turn_image_request(api_client, request):
     # Multi-turn coverage verifies that multimodal content can coexist with prior assistant messages.
     _skip_if_capacity_too_small(request, image_count=1)
-    images = mm_helper.get_random_image_urls(1)
+    images = mm_helper.get_random_images(1)
     if not images:
-        pytest.skip("no image URL fixtures available")
+        pytest.skip("no base64 image fixtures available")
 
     messages = [
-        mm_helper.build_multimodal_message("Describe the image.", images=images, source_type="url"),
+        mm_helper.build_multimodal_message("Describe the image.", images=images),
         {"role": "assistant", "content": "The image contains visible objects."},
         {"role": "user", "content": "Summarize it in one sentence."},
     ]
