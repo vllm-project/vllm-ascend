@@ -78,6 +78,7 @@ jobs:
       matrix:
         group: ${{ fromJSON(inputs.test_groups) }}
     runs-on: ${{ matrix.group.runner }}
+    timeout-minutes: 240
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}
       env:
@@ -260,6 +261,7 @@ jobs:
           . /usr/local/Ascend/ascend-toolkit/set_env.sh
           if [ "${{ inputs.enable-coverage }}" = "true" ]; then
             export ENABLE_COVERAGE=true
+            export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=600
           fi
           TIMING_FLAG=""
           if [ "${{ inputs.upload_timing }}" = "true" ]; then
