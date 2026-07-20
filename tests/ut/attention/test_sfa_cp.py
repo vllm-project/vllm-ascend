@@ -1515,11 +1515,14 @@ class TestAscendSFADCPImpl(TestBase):
             query_gather_context=MagicMock(),
         )
         sfa_output = torch.randn(2, 2, 8)
-        softmax_lse = torch.randn(2, 2, 1)
+        softmax_max = torch.randn(2, 2, 1)
+        softmax_sum = torch.randn(2, 2, 1)
+        softmax_lse = softmax_max + torch.log(softmax_sum)
+        softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
 
         with patch(
             "vllm_ascend.attention.context_parallel.sfa_cp.DeviceOperator.execute_sparse_flash_attention_process",
-            return_value=(sfa_output, softmax_lse),
+            return_value=(sfa_output, softmax_max, softmax_sum),
         ) as mock_execute_sfa:
             result = impl._execute_sparse_flash_attention_process(
                 ql_nope,
