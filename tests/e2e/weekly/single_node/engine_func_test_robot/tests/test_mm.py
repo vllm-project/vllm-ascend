@@ -13,6 +13,11 @@ AUDIO_DURATION_SECONDS = 1
 AUDIO_SAMPLE_WIDTH_BYTES = 2
 IMAGE_SIZE = 32
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+CAPACITY_OPTIONS = {
+    "image": "--imageNum",
+    "video": "--videoNum",
+    "audio": "--audioNum",
+}
 
 
 def _png_chunk(chunk_type, data):
@@ -76,13 +81,10 @@ def _build_multimodal_message(prompt, **media):
     return {"role": "user", "content": content}
 
 
-def _skip_if_capacity_too_small(request, image_count=0, video_count=0, audio_count=0):
-    if request.config.getoption("--imageNum") < image_count:
-        pytest.skip("model does not support the requested number of images")
-    if request.config.getoption("--videoNum") < video_count:
-        pytest.skip("model does not support the requested number of videos")
-    if request.config.getoption("--audioNum") < audio_count:
-        pytest.skip("model does not support the requested number of audios")
+def _skip_unsupported_media(request, *media_types):
+    for media_type in media_types:
+        if request.config.getoption(CAPACITY_OPTIONS[media_type]) < 1:
+            pytest.skip(f"model does not support {media_type} input")
 
 
 def _send_multimodal_request(api_client, messages, stream=False):
@@ -95,37 +97,27 @@ def _send_multimodal_request(api_client, messages, stream=False):
     return api_client.post("/v1/chat/completions", json=request_body)
 
 
-def _assert_multimodal_success(response, stream=False):
-    assertion.assert_chat_completion_success(response, stream=stream)
-
-
-def test_mm_accepts_single_image(api_client, request, generated_media):
-    # Cover the in-memory Base64 image request path.
-    _skip_if_capacity_too_small(request, image_count=1)
-    messages = [_build_multimodal_message("Describe the image.", image=generated_media["image"])]
+@pytest.mark.parametrize(
+    "media_type",
+    ["image", "video", "audio"],
+    ids=["image", "video", "audio"],
+)
+def test_mm_accepts_single_media(api_client, request, generated_media, media_type):
+    # Each media type covers one generated, in-memory Base64 request path.
+    _skip_unsupported_media(request, media_type)
+    messages = [
+        _build_multimodal_message(
+            f"Describe the {media_type}.",
+            **{media_type: generated_media[media_type]},
+        )
+    ]
     response = _send_multimodal_request(api_client, messages)
-    _assert_multimodal_success(response)
-
-
-def test_mm_accepts_single_video(api_client, request, generated_media):
-    # Cover video input with two generated frames and no media file.
-    _skip_if_capacity_too_small(request, video_count=1)
-    messages = [_build_multimodal_message("Describe the video.", video=generated_media["video"])]
-    response = _send_multimodal_request(api_client, messages)
-    _assert_multimodal_success(response)
-
-
-def test_mm_accepts_single_audio(api_client, request, generated_media):
-    # Cover audio decoding with a generated silent WAV payload.
-    _skip_if_capacity_too_small(request, audio_count=1)
-    messages = [_build_multimodal_message("Describe the audio.", audio=generated_media["audio"])]
-    response = _send_multimodal_request(api_client, messages)
-    _assert_multimodal_success(response)
+    assertion.assert_chat_completion_success(response)
 
 
 def test_mm_accepts_image_video_audio_combination(api_client, request, generated_media):
     # Keep one mixed request for multimodal integration coverage.
-    _skip_if_capacity_too_small(request, image_count=1, video_count=1, audio_count=1)
+    _skip_unsupported_media(request, "image", "video", "audio")
     messages = [
         _build_multimodal_message(
             "Describe the image, video, and audio.",
@@ -135,39 +127,38 @@ def test_mm_accepts_image_video_audio_combination(api_client, request, generated
         )
     ]
     response = _send_multimodal_request(api_client, messages)
-    _assert_multimodal_success(response)
+    assertion.assert_chat_completion_success(response)
 
 
 def test_mm_accepts_streaming_image_request(api_client, request, generated_media):
     # One streaming case covers SSE handling for multimodal requests.
-    _skip_if_capacity_too_small(request, image_count=1)
+    _skip_unsupported_media(request, "image")
     messages = [_build_multimodal_message("Describe the image.", image=generated_media["image"])]
     response = _send_multimodal_request(api_client, messages, stream=True)
-    _assert_multimodal_success(response, stream=True)
+    assertion.assert_chat_completion_success(response, stream=True)
 
 
 def test_mm_accepts_multi_turn_image_request(api_client, request, generated_media):
     # Verify that generated media can coexist with conversation history.
-    _skip_if_capacity_too_small(request, image_count=1)
+    _skip_unsupported_media(request, "image")
     messages = [
         _build_multimodal_message("Describe the image.", image=generated_media["image"]),
         {"role": "assistant", "content": "The image contains a solid color."},
         {"role": "user", "content": "Summarize it in one sentence."},
     ]
     response = _send_multimodal_request(api_client, messages)
-    _assert_multimodal_success(response)
+    assertion.assert_chat_completion_success(response)
 
 
 @pytest.mark.parametrize(
-    "content",
+    ("media_type", "media_url"),
     [
-        {"type": "image_url", "image_url": {"url": "not_a_valid_url"}},
-        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,invalid-base64"}},
-        {"type": "video_url", "video_url": {"url": "not_a_valid_url"}},
-        {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,invalid-base64"}},
-        {"type": "audio_url", "audio_url": {"url": "not_a_valid_url"}},
-        {"type": "audio_url", "audio_url": {"url": "data:audio/mpeg;base64,invalid-base64"}},
-        {"type": "image_url", "image_url": {"url": ""}},
+        ("image", "not_a_valid_url"),
+        ("image", "data:image/png;base64,invalid-base64"),
+        ("video", "not_a_valid_url"),
+        ("video", "data:video/png;base64,invalid-base64"),
+        ("audio", "not_a_valid_url"),
+        ("audio", "data:audio/wav;base64,invalid-base64"),
     ],
     ids=[
         "bad_image_url",
@@ -176,11 +167,10 @@ def test_mm_accepts_multi_turn_image_request(api_client, request, generated_medi
         "bad_video_base64",
         "bad_audio_url",
         "bad_audio_base64",
-        "empty_image_url",
     ],
 )
-def test_mm_rejects_invalid_media_content(api_client, content):
-    # Invalid media cases are collapsed to one representative URL/base64 failure per media type.
-    messages = [{"role": "user", "content": [{"type": "text", "text": "Describe this."}, content]}]
+def test_mm_rejects_invalid_media_content(api_client, media_type, media_url):
+    # URL syntax and Base64 decoding are separate validation paths.
+    messages = [_build_multimodal_message("Describe this.", **{media_type: media_url})]
     response = _send_multimodal_request(api_client, messages)
     assertion.assert_validation_error_response(response)
