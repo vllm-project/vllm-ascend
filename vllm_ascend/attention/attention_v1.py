@@ -53,13 +53,11 @@ from vllm_ascend.attention.utils import (
     PagedAttentionGraphParam,
     cache_graph_workspace,
     enable_cp,
-    maybe_route_512_capture,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
     update_paged_attention_graph_param,
     using_paged_attention,
-    expand_paged_kv_to_per_query,
 )
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
@@ -727,16 +725,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                             metadata_key = layer_name if layer_name is not None and layer_name in attn_metadata else key
                             block_table = attn_metadata[metadata_key].block_tables
                             seq_lens = attn_metadata[metadata_key].seq_lens
-                            # MTP verify: expand per-seq to per-query to match the
-                            # captured shapes (see expand_paged_kv_to_per_query).
-                            if (attn_metadata[metadata_key].attn_state == AscendAttentionState.SpecDecoding
-                                    and speculative_config is not None):
-                                _q = param.params[0]
-                                _num_tokens = _q.shape[0] if _q is not None else 0
-                                _k = speculative_config.num_speculative_tokens
-                                if _num_tokens == seq_lens.shape[0] * (_k + 1):
-                                    block_table, seq_lens = expand_paged_kv_to_per_query(
-                                        block_table, seq_lens, _k)
                         update_paged_attention_graph_param(
                             update_stream,
                             handle,
@@ -1155,11 +1143,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
             graph_params = get_graph_params()
         num_tokens = query.shape[0]
         if _EXTRA_CTX.capturing:
-            # Resolve KV sources (KV-sharing swap + MTP-verify expand) in one
-            # place; see attention.kv_sharing.resolve_capture_kv.
-            key_cache, value_cache, block_table, context_lens = kv_sharing.resolve_capture_kv(
-                self, attn_metadata, num_tokens
-            )
+            # KV sources for the PA workspace.  General A2/A3 PA decode uses
+            # the layer's own cache.  (The A2/A3 Gemma4 MTP cross-model KV
+            # swap + per-query verify expand previously routed through
+            # kv_sharing.resolve_capture_kv; removed for the A5-focused PR.)
+            key_cache = self.key_cache
+            value_cache = self.value_cache
+            block_table = attn_metadata.block_tables
+            context_lens = attn_metadata.seq_lens
             # Get workspace from cache or calculate it if not present.
             workspace = graph_params.workspaces.get(num_tokens)
             if workspace is None:
@@ -1290,14 +1281,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.
         if _EXTRA_CTX.capturing:
-            # head_dim=512 global attention (Gemma4) cannot use FIA TND during
-            # graph capture, so route to PagedAttention. The helper self-gates on
-            # head_size==512 (A5 is skipped via is_950); no outer Gemma4 gate is
-            # needed. A config-based gate would be wrong: during draft forward
-            # _EXTRA_CTX.vllm_config is the draft config, which has no
-            # speculative_config, so the gate would misfire as False.
-            if maybe_route_512_capture(self, attn_metadata):
-                return self.full_graph_pa(query, attn_metadata, output)
             if self.sinks is not None:
                 attn_output, num_tokens = self.full_graph_fia_v2(query, key, value, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
@@ -1422,11 +1405,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ) -> torch.Tensor:
         if _EXTRA_CTX.capturing:
             return self.full_graph_pa(query, attn_metadata, output)
-        # MTP verify: expand per-seq block_table/seq_lens to per-query so token0
-        # does not attend draft1's KV (future leak). See kv_sharing.
-        block_table, context_lens = kv_sharing.maybe_expand_paged_kv_for_verify(
-            self, attn_metadata, query.shape[0]
-        )
+        block_table = attn_metadata.block_tables
+        context_lens = attn_metadata.seq_lens
         torch_npu._npu_paged_attention(
             query=query,
             key_cache=self.key_cache,

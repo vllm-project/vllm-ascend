@@ -33,34 +33,6 @@ class PagedAttentionGraphParam:
         return iter(self.params)
 
 
-def expand_paged_kv_to_per_query(
-    block_table: torch.Tensor,
-    seq_lens: torch.Tensor,
-    num_speculative_tokens: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Expand per-seq block_table/seq_lens to per-query for MTP verify.
-
-    MTP verify: target processes K+1 query tokens per seq (positions c..c+K).
-    seq_lens[i] = c + K + 1 (KV already written for all K+1 tokens). The PA
-    kernel is per-query-row: a single context_len makes all K+1 query rows
-    attend the full KV, so token0 sees draft1's KV (future leak) -> logits[0]
-    polluted. Expand so token j (j=0..K) attends positions 0..c+j:
-        context_len = seq_lens - K + j   (i.e. [s-K, s-K+1, ..., s])
-        block_table row repeated K+1 times (same blocks, context_len truncates).
-    No-op when shapes already match (num_tokens == num_seqs) or K == 0.
-    """
-    k = num_speculative_tokens
-    num_seqs = seq_lens.shape[0]
-    num_tokens = num_seqs * (k + 1)
-    if k <= 0 or block_table.shape[0] == num_tokens:
-        return block_table, seq_lens
-    base = seq_lens.to(torch.int32) - k
-    offsets = torch.arange(k + 1, dtype=torch.int32, device=seq_lens.device)
-    context_lens = (base.unsqueeze(1) + offsets.unsqueeze(0)).reshape(-1)
-    block_table = block_table.repeat_interleave(k + 1, dim=0)
-    return block_table, context_lens
-
-
 def update_paged_attention_graph_param(
     update_stream,
     handle,
@@ -595,29 +567,4 @@ def notify_kv_cache_written(layer_name: str = ""):
         on_kv_cache_written(layer_name)
 
 
-def maybe_route_512_capture(impl, attn_metadata) -> bool:
-    """True if a head_dim=512 non-sliding layer should route to PagedAttention
-    during graph capture.
 
-    FIA TND does not support head_dim=512 (Gemma4 global attention).  During
-    graph capture the eager device-adaptor fallback
-    (npu_large_head_prefill_attention) is bypassed, and forward_impl's PA
-    routing requires attn_state==DecodeOnly which excludes MTP's SpecDecoding
-    capture step.  Route 512-dim non-sliding layers to the paged-attention
-    graph path here, mirroring using_paged_attention(head_size=512) in
-    forward_impl.  KV-sharing draft 512 layers are excluded by the
-    ``is_draft_model`` gate below (draft routes to FIA) and never reach here.
-
-    A5 gate: on A5 (950) full_graph_pa segfaults in atb::_npu_paged_attention
-    during capture for this layer; A5's original path (full_graph_fia) works.
-    This fix targets A2/A3 (910B4) where FIA TND raises error 561002.
-    """
-    from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-    from vllm_ascend.utils import is_950
-
-    return (
-        getattr(impl, "head_size", None) == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
-        and getattr(impl, "sliding_window", None) is None
-        and not getattr(_EXTRA_CTX, "is_draft_model", False)
-        and not is_950()
-    )
