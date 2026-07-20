@@ -47,6 +47,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
+from vllm.model_executor.offloader.base import get_offloader, set_offloader
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv, round_up
@@ -125,6 +126,7 @@ from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
+from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -286,20 +288,7 @@ class NPUModelRunner(GPUModelRunner):
 
         self.pin_memory = PIN_MEMORY
 
-        # Replace the CUDA PrefetchOffloader set by parent __init__ with NPU version.
-        offload_cfg = vllm_config.offload_config
-        if (offload_cfg is not None
-                and getattr(offload_cfg, "prefetch", None) is not None
-                and getattr(offload_cfg.prefetch, "offload_group_size", 0) > 0):
-            from vllm.model_executor.offloader.base import set_offloader
-
-            from vllm_ascend.model_executor.offloader.prefetch import NPUPrefetchOffloader
-            set_offloader(NPUPrefetchOffloader(
-                group_size=offload_cfg.prefetch.offload_group_size,
-                num_in_group=offload_cfg.prefetch.offload_num_in_group,
-                prefetch_step=offload_cfg.prefetch.offload_prefetch_step,
-                offload_params=offload_cfg.prefetch.offload_params,
-            ))
+        set_offloader(create_offloader(self.offload_config))
 
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
@@ -585,14 +574,6 @@ class NPUModelRunner(GPUModelRunner):
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: Any | None = None
         self._mamba_copy_bufs: Any | None = None
-        self.enable_hamming_sparse = (self.ascend_config.enable_hamming_sparse is True)
-        self.enable_hamming_sparse = self.enable_hamming_sparse and not vllm_config.speculative_config
-        if self.enable_hamming_sparse is True:
-            from vllm_ascend.worker.kvcomp_utils import initialize_kvcomp_metadata
-            self.kvcomp_meta_data = initialize_kvcomp_metadata(max_num_reqs=self.max_num_reqs,
-                block_size=self.block_size, device=self.device, vllm_config=self.vllm_config,
-                parallel_config=self.parallel_config, dtype=self.dtype)
-
     @property
     def use_cp(self) -> bool:
         return self.pcp_size * self.dcp_size > 1
@@ -1996,13 +1977,13 @@ class NPUModelRunner(GPUModelRunner):
             if self.routed_experts_initialized:
                 self.routed_experts_capturer.clear_buffer()
 
-        if self.ascend_config.profiling_chunk_config.need_timing:
+        if self.ascend_config.scheduler_config.profiling_chunk_config.need_timing:
             # Check if the scheduler signaled that calibration is complete.
             # This flag is set cross-process via scheduler_output because
             # modifying the config singleton in the scheduler process does
             # not affect this worker process.
             if getattr(scheduler_output, "disable_profiling_timing", False):
-                self.ascend_config.profiling_chunk_config.need_timing = False
+                self.ascend_config.scheduler_config.profiling_chunk_config.need_timing = False
             else:
                 self._sync_device()
                 self._execution_start_time = time.perf_counter()
@@ -2318,13 +2299,6 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_mode = CUDAGraphMode.NONE
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False  # type: ignore[has-type]
-        if self.ascend_config.enable_async_exponential:
-            self.sampler.do_async_exponential(
-                b_s=logits_indices.shape[0],
-                head_dim=self.model_config.get_vocab_size(),
-                generators=self.input_batch.sampling_metadata.generators,
-            )
-
         # Encoder-decoder models can only compile the pure decode steps where no
         # encoder inputs are present. Use eager for the first pass.
         num_encoder_reqs = len(scheduler_output.scheduled_encoder_inputs)
@@ -2605,7 +2579,9 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_stats=cudagraph_stats,
             routed_experts=None,
         )
-        if self.ascend_config.profiling_chunk_config.need_timing and hasattr(self, '_execution_start_time'):
+        if self.ascend_config.scheduler_config.profiling_chunk_config.need_timing and hasattr(
+            self, "_execution_start_time"
+        ):
             self._sync_device()
             model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
 
@@ -3292,7 +3268,6 @@ class NPUModelRunner(GPUModelRunner):
                     block_size=attn_group.kv_cache_spec.block_size,
                 )
 
-            # add kvcomp_metadata into common_attn_metadata
             if (for_cudagraph_capture
                     and not isinstance(builder, (
                         AscendDSAMetadataBuilder,
@@ -3371,9 +3346,6 @@ class NPUModelRunner(GPUModelRunner):
                         spec_decode_common_attn_metadata = cm
                 else:
                     spec_decode_common_attn_metadata = cm
-            if self.enable_hamming_sparse is True:
-                from vllm_ascend.attention.kvcomp_attn.attention_utils import build_kvcomp_metadata
-                build_kvcomp_metadata(self.kvcomp_meta_data, cm)
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
                 _build_attn_group_metadata(
                     kv_cache_gid,
@@ -3847,7 +3819,6 @@ class NPUModelRunner(GPUModelRunner):
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
 
-        from vllm.model_executor.offloader.base import get_offloader
         get_offloader().post_init()
 
         mm_config = self.model_config.multimodal_config
@@ -4007,17 +3978,6 @@ class NPUModelRunner(GPUModelRunner):
                 self.compilation_config.static_forward_context,
                 self.kv_caches,
                 num_attn_module,
-            )
-
-        if self.enable_hamming_sparse is True:
-            from vllm_ascend.worker.kvcomp_utils import init_and_bind_hashk_cache
-            init_and_bind_hashk_cache(
-                kv_caches=kv_caches,
-                num_attn_module=num_attn_module,
-                vllm_config=self.vllm_config,
-                device=self.device,
-                compilation_config=self.compilation_config,
-                kvcomp_meta_data=self.kvcomp_meta_data
             )
 
         return kv_caches
@@ -5170,6 +5130,7 @@ def _torch_cuda_wrapper():
         torch.cuda.stream = torch.npu.stream
         torch.cuda.synchronize = torch.npu.synchronize
         torch.cuda.mem_get_info = torch.npu.mem_get_info
+        torch.cuda.is_current_stream_capturing = torch.npu.is_current_stream_capturing
         yield
     except Exception as e:
         torch.cuda.Event = _EventPlaceholder
@@ -5179,6 +5140,7 @@ def _torch_cuda_wrapper():
         torch.cuda.stream = _StreamPlaceholder
         torch.cuda.synchronize = _StreamPlaceholder
         torch.cuda.mem_get_info = _StreamPlaceholder
+        torch.cuda.is_current_stream_capturing = lambda: False
         raise RuntimeError(f"NPUModelRunner init failed, error is {e}")
     finally:
         # Async model-runner outputs are created after runner initialization.
@@ -5191,6 +5153,7 @@ def _torch_cuda_wrapper():
         torch.cuda.stream = torch.npu.stream
         torch.cuda.synchronize = torch.npu.synchronize
         torch.cuda.mem_get_info = torch.npu.mem_get_info
+        torch.cuda.is_current_stream_capturing = torch.npu.is_current_stream_capturing
 
 
 # TODO: This method will be removed subsequently and implemented in platform.

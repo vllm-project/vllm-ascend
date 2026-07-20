@@ -60,7 +60,7 @@ vllm serve path/to/target/model \
 ```
 
 > [!NOTE]
-> On Ascend NPUs, the `npu_fused_infer_attention_score` operator supports a maximum of 16 tokens per decode round. Therefore, `(num_speculative_tokens + 1)` must be ≤ 15.
+> On Ascend NPUs, the `npu_fused_infer_attention_score` operator supports a maximum of 16 tokens per decode round. Therefore, `(num_speculative_tokens + 1)` must be ≤ 16.
 
 ## Speculating by matching n-grams in the prompt
 
@@ -289,7 +289,7 @@ Key configuration parameters:
 
 5. **`shared_storage_path`**: Directory where hidden states will be saved as `.safetensors` files (one per request).
 
-## Block Verify and Entropy Verify
+## Block Verify and Entropy Verify {: #block-verify-and-entropy-verify }
 
 vLLM Ascend provides two optional optimizations for the rejection sampler in speculative decoding: **Block Verify** and **Entropy Verify**. These features trade a small amount of output precision for improved inference throughput.
 
