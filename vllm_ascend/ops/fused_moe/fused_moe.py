@@ -383,9 +383,10 @@ else:
                 and self.e_score_correction_bias is not None
                 and not vllm_config.model_config.is_deepseek_mla
             ):
-                self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
-                    dtype=vllm_config.model_config.dtype
-                )
+                # self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
+                #     dtype=vllm_config.model_config.dtype
+                # )
+                pass
 
             self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
             self.multistream_overlap_shared_expert = (
