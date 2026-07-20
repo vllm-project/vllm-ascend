@@ -7,7 +7,13 @@
 # and https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/mamba/ops/causal_conv1d.py
 # mypy: ignore-errors
 
+from typing import Any
+
 import torch
+import torch.nn.functional as F
+import vllm.model_executor.layers.mamba.ops.causal_conv1d as _causal_conv1d
+from vllm.distributed import get_pcp_group
+from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 
@@ -20,12 +26,144 @@ if not HAS_TRITON:
 else:
     _pytorch_update = None
 
+_ORIGINAL_CAUSAL_CONV1D_FN = _causal_conv1d.causal_conv1d_fn
+
+
+def causal_conv1d_ref(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    initial_states: torch.Tensor | None = None,
+    return_final_states: bool = False,
+    final_states_out: torch.Tensor | None = None,
+    activation: str | None = "silu",
+):
+    """
+    x: (batch, dim, seqlen)
+    weight: (dim, width)
+    bias: (dim,)
+    initial_states: (batch, dim, width - 1)
+    final_states_out: (batch, dim, width - 1)
+    out: (batch, dim, seqlen)
+    """
+    if activation not in [None, "silu", "swish"]:
+        logger.error("[TritonOps] activation must be None, silu, or swish, got activation=%s.", activation)
+        raise NotImplementedError("activation must be None, silu, or swish, got activation=%s.", activation)
+    dtype_in = x.dtype
+    x = x.to(weight.dtype)
+    seqlen = x.shape[-1]
+    dim, width = weight.shape
+
+    if initial_states is None:
+        out = F.conv1d(x, weight.unsqueeze(1), bias, padding=width - 1, groups=dim)
+    else:
+        x = torch.cat([initial_states, x], dim=-1)
+        out = F.conv1d(x, weight.unsqueeze(1), bias, padding=0, groups=dim)
+    out = out[..., :seqlen]
+
+    if return_final_states:
+        final_states = F.pad(x, (width - 1 - x.shape[-1], 0)).to(dtype_in)
+        if final_states_out is not None:
+            final_states_out.copy_(final_states)
+        else:
+            final_states_out = final_states
+    out = (out if activation is None else F.silu(out)).to(dtype=dtype_in)
+    return (out, None) if not return_final_states else (out, final_states_out)
+
+
+def causal_conv1d_fn(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    activation: str | None = "silu",
+    conv_states: torch.Tensor | None = None,
+    has_initial_state: torch.Tensor | None = None,
+    cache_indices: torch.Tensor | None = None,
+    query_start_loc: torch.Tensor | None = None,
+    metadata: Any | None = None,
+    pad_slot_id: int = PAD_SLOT_ID,
+    null_block_id: int | None = None,
+    block_idx_first_scheduled_token: torch.Tensor | None = None,
+    block_idx_last_scheduled_token: torch.Tensor | None = None,
+    initial_state_idx: torch.Tensor | None = None,
+    num_computed_tokens: torch.Tensor | None = None,
+    block_size_to_align: int = 0,
+    validate_data: bool = False,
+):
+    """
+    x: (batch, dim, seqlen) or (dim, cu_seq_len) for varlen
+    weight: (dim, width)
+    bias: (dim,)
+    query_start_loc: (batch + 1) int32
+    cache_indices: (batch) int32
+    conv_states: (..., dim, width - 1), updated in place if provided
+    activation: either None or "silu" or "swish"
+    out: (batch, dim, seqlen)
+    """
+    if cache_indices is None or cache_indices.dim() != 1 or get_pcp_group().world_size > 1:
+        return _ORIGINAL_CAUSAL_CONV1D_FN(
+            x=x,
+            weight=weight,
+            bias=bias,
+            conv_states=conv_states,
+            query_start_loc=query_start_loc,
+            cache_indices=cache_indices,
+            has_initial_state=has_initial_state,
+            activation=activation,
+            pad_slot_id=pad_slot_id,
+            null_block_id=null_block_id,
+            block_idx_first_scheduled_token=block_idx_first_scheduled_token,
+            block_idx_last_scheduled_token=block_idx_last_scheduled_token,
+            initial_state_idx=initial_state_idx,
+            num_computed_tokens=num_computed_tokens,
+            block_size_to_align=block_size_to_align,
+            metadata=metadata,
+            validate_data=validate_data,
+        )
+
+    if activation not in [None, "silu", "swish"]:
+        logger.error("[TritonOps] activation must be None, silu, or swish, got activation=%s.", activation)
+        raise NotImplementedError("[TritonOps] activation must be None, silu, or swish, got activation=%s.", activation)
+    if x.stride(-1) != 1:
+        x = x.contiguous()
+    bias = bias.contiguous() if bias is not None else None
+
+    assert conv_states is not None
+    assert query_start_loc is not None
+
+    seqlens = query_start_loc[1:] - query_start_loc[:-1]
+    splits = torch.split(x, seqlens.tolist(), dim=-1)
+    width = weight.shape[1]
+    state_len = width - 1
+
+    out_ref_b = []
+    for idx, x_s in enumerate(splits):
+        state_index = int(cache_indices[idx].item())
+        if state_index == pad_slot_id or (null_block_id is not None and state_index == null_block_id):
+            continue
+        cached_state = conv_states[state_index][..., :state_len]
+        use_initial_state = has_initial_state is None or bool(has_initial_state[idx].item())
+        out_ref_b.append(
+            causal_conv1d_ref(
+                x_s,
+                weight,
+                bias,
+                activation=activation,
+                return_final_states=True,
+                final_states_out=cached_state.unsqueeze(0),
+                initial_states=cached_state if use_initial_state else None,
+            )
+        )
+
+    if not out_ref_b:
+        return x[..., :0]
+    return torch.cat([item[0] for item in out_ref_b], dim=-1)
+
 
 def extract_last_width(x, start_loc, width):
     end_loc = start_loc[1:]
     offsets = torch.arange(width, device=x.device)
-    indices = end_loc.unsqueeze(1) - width + offsets.unsqueeze(0)  # (num_seqs, width)
-
+    indices = end_loc.unsqueeze(1) - width + offsets.unsqueeze(0)
     return x[:, indices].permute(1, 0, 2)
 
 

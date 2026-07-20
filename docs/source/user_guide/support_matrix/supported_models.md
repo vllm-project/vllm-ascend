@@ -27,6 +27,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Qwen3-Coder-30B-A3B | ✅ |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ |  | ✅ | ✅ |  | [Qwen3-Coder-30B-A3B](../../tutorials/models/Qwen3-Coder-30B-A3B.md) |
 | Qwen3-235B-A22B | ✅ |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  |  | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 256k | [Qwen3-235B-A22B](../../tutorials/models/Qwen3-235B-A22B.md) |
 | Qwen3-Next | 🔵 |  | ✅ | A2/A3 | ✅ |  |  |  |  |  | ✅ |  |  | ✅ |  | ✅ | ✅ |  | [Qwen3-Next](../../tutorials/models/Qwen3-Next.md) |
+| NVIDIA Nemotron-3 Super | 🔵 | Nemotron-H hybrid Mamba2/attention/latent MoE; TP8 eager, FULL_DECODE_ONLY, and 1M context validated | ✅ | A2 | 🟡 | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | ✅ | 1M | [NVIDIA-Nemotron-3-Super-120B-A12B-BF16](../../tutorials/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16.md) |
 | GLM-4.x | 🔵 |  |  | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 198k | [GLM-4.x](../../tutorials/models/GLM4.x.md) |
 | GLM-5/5.1 | 🔵 |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5](../../tutorials/models/GLM5.md) |
 | GLM-5.2 | 🔵 |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5.2](../../tutorials/models/GLM5.2.md) |

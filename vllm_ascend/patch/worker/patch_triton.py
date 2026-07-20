@@ -1,5 +1,8 @@
 import vllm.model_executor.layers.fla.ops
 import vllm.model_executor.layers.mamba.ops.causal_conv1d
+import vllm.model_executor.layers.mamba.ops.mamba_ssm
+import vllm.model_executor.layers.mamba.ops.ssd_chunk_scan
+import vllm.model_executor.layers.mamba.ops.ssd_combined
 import vllm.v1.worker.gpu.sample.gumbel
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import next_power_of_2
@@ -7,11 +10,24 @@ from vllm.utils.math_utils import next_power_of_2
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.layernorm_guard import LayerNormFn
 from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_recurrent_gated_delta_rule_fwd_kernel
-from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_npu
+from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_fn, causal_conv1d_update_npu
+from vllm_ascend.ops.triton.mamba.selective_state_update import try_get_optimal_ssm_config_npu
+from vllm_ascend.ops.triton.mamba.ssd_chunk_scan import (
+    _chunk_scan_fwd_npu,
+)
 
 triton.next_power_of_2 = next_power_of_2
 
+_ssd_chunk_scan = vllm.model_executor.layers.mamba.ops.ssd_chunk_scan
+_ssd_combined = vllm.model_executor.layers.mamba.ops.ssd_combined
+_mamba_ssm = vllm.model_executor.layers.mamba.ops.mamba_ssm
+
+
 vllm.model_executor.layers.mamba.ops.causal_conv1d.causal_conv1d_update = causal_conv1d_update_npu
+vllm.model_executor.layers.mamba.ops.causal_conv1d.causal_conv1d_fn = causal_conv1d_fn
+_ssd_chunk_scan._chunk_scan_fwd = _chunk_scan_fwd_npu
+_ssd_combined._chunk_scan_fwd = _chunk_scan_fwd_npu
+_mamba_ssm.try_get_optimal_ssm_config = try_get_optimal_ssm_config_npu
 vllm.model_executor.layers.fla.ops.fused_recurrent.fused_recurrent_gated_delta_rule_fwd_kernel = (
     fused_recurrent_gated_delta_rule_fwd_kernel
 )

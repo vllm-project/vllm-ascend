@@ -17,6 +17,9 @@
 
 from vllm.triton_utils import HAS_TRITON
 
+# Worker processes can reach vLLM memory profiling before the platform-level
+# patch is applied in that process.
+import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
 from vllm_ascend.utils import is_310p, vllm_version_is
 
 # The v2 model runner tracks only the verified vLLM main commit. The v0.24.0

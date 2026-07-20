@@ -16,6 +16,7 @@
 
 
 import torch
+import torch.nn.functional as F
 import torch_npu
 from torch.nn.functional import pad
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -464,11 +465,21 @@ def unquant_apply_mlp(
             topk_ids=topk_ids,
         )
 
+    activation_value = activation.value if isinstance(activation, MoEActivation) else activation
+
     if activation == MoEActivation.SWIGLUOAI:
         num_experts, _, hidden_size = w1.shape
         gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size))
     elif activation == MoEActivation.SWIGLUSTEP:
         gate_up_out = AscendSwigluStepAndMul.swiglustep_forward(gate_up_out, limit=swiglu_limit or 7.0)
+    elif activation_value == "silu_no_mul":
+        gate_up_out = F.silu(gate_up_out)
+    elif activation_value == "gelu_no_mul":
+        gate_up_out = F.gelu(gate_up_out)
+    elif activation_value == "gelu_tanh_no_mul":
+        gate_up_out = F.gelu(gate_up_out, approximate="tanh")
+    elif activation_value == "relu2_no_mul":
+        gate_up_out = F.relu(gate_up_out).pow(2)
     elif activation == MoEActivation.GELU:
         gate, up = gate_up_out.chunk(2, dim=-1)
         gate_up_out = torch.nn.functional.gelu(gate) * up
