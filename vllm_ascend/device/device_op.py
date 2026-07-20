@@ -22,7 +22,6 @@ import torch.nn.functional as F
 import torch_npu
 from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend.device import utils as device_utils
 from vllm_ascend.device.mxfp_compat import (
     FLOAT8_E8M0FNU_DTYPE,
     QUANT_DTYPES,
@@ -69,25 +68,6 @@ class BaseDeviceAdaptor:
         is_prefill_no_cache: bool,
         **kwargs,
     ):
-        # TODO: Remove this fallback when A2/A3 FIA TND supports Gemma4's
-        # 512-dim global attention heads. The FIA path slices/replaces
-        # query/key/value before this wrapper, so large-head prefill fallback
-        # must use the original current-token K/V.
-        if head_size == device_utils.FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE:
-            return device_utils.npu_large_head_prefill_attention(
-                query,
-                current_key,
-                current_value,
-                attn_metadata,
-                key_cache=key_cache,
-                value_cache=value_cache,
-                num_heads=num_heads,
-                num_kv_heads=num_key_value_heads,
-                head_size=head_size,
-                scale=scale,
-                is_prefill_no_cache=is_prefill_no_cache,
-            )
-
         return torch_npu.npu_fused_infer_attention_score(
             query=query,
             key=key,

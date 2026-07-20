@@ -10,9 +10,6 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
-from vllm_ascend.device.utils import (
-    FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE,
-)
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_config,
@@ -20,64 +17,6 @@ from vllm_ascend.utils import (
     is_pd_decode_recompute_scheduler_enabled,
 )
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
-
-
-@dataclass
-class PagedAttentionGraphParam:
-    """Mark PA params when PA and FIA share one graph replay list."""
-
-    params: tuple
-    layer_name: str | None
-
-    def __iter__(self):
-        return iter(self.params)
-
-
-def update_paged_attention_graph_param(
-    update_stream,
-    handle,
-    event,
-    param: PagedAttentionGraphParam,
-    block_table: torch.Tensor,
-    seq_lens: torch.Tensor,
-) -> None:
-    (
-        query,
-        key_cache,
-        value_cache,
-        num_kv_heads,
-        num_heads,
-        scale,
-        _captured_block_table,
-        _captured_seq_lens,
-        output,
-    ) = param.params
-    workspace = torch_npu._npu_paged_attention_get_workspace(
-        query=query,
-        key_cache=key_cache,
-        value_cache=value_cache,
-        num_kv_heads=num_kv_heads,
-        num_heads=num_heads,
-        scale_value=scale,
-        block_table=block_table,
-        context_lens=seq_lens,
-        out=output,
-    )
-    torch.npu.graph_task_update_begin(update_stream, handle)
-    torch_npu._npu_paged_attention(
-        query=query,
-        key_cache=key_cache,
-        value_cache=value_cache,
-        num_kv_heads=num_kv_heads,
-        num_heads=num_heads,
-        scale_value=scale,
-        block_table=block_table,
-        context_lens=seq_lens,
-        out=output,
-        workspace=workspace,
-    )
-    torch.npu.graph_task_update_end(update_stream)
-    event.record(update_stream)
 
 
 def cache_graph_workspace(
@@ -145,19 +84,10 @@ def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
     return chunked_prefill_workspace_size
 
 
-def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig, head_size: int | None = None) -> bool:
-    if get_ascend_device_type() == AscendDeviceType.A5:
-        return False
-    # A2/A3 FIA (TND) does not support head_dim=512 (Gemma4 global attention):
-    # 512-dim decode must go through PagedAttention even with MTP enabled,
-    # because FIA TND is semantically/numerically wrong for 512 and drops
-    # MTP pos0 acceptance from ~80% to ~60%.
-    # TODO: Remove this fallback when A2/A3 FIA TND supports Gemma4's
-    # 512-dim global attention heads. Prefill is handled by the device adaptor.
-    if head_size == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE:
-        return True
-    # Non-512 heads: keep PA disabled under MTP (original behavior).
+def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig) -> bool:
     if vllm_config.speculative_config is not None:
+        return False
+    if get_ascend_device_type() == AscendDeviceType.A5:
         return False
     from vllm.config.compilation import CUDAGraphMode
 
