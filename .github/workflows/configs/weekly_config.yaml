@@ -119,6 +119,9 @@ a3:
       - name: MiniMax-M2.5-w8a8
         os: linux-aarch64-a3-16
         config_file_path: MiniMax-M2.5-W8A8-A3.yaml
+      - name: Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3
+        os: linux-aarch64-a3-16
+        config_file_path: Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3.yaml
 
 310p:
   single_node:
