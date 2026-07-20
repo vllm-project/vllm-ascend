@@ -25,7 +25,12 @@ The following model variants are available. It is recommended to download the mo
 | Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)          |
 | Qwen3-30B-A3B-W8A8   | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards)                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
 | Eagle3 Draft Model   | NA                                                                                               | [Download](https://modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
-| Qwen3-30B-A3B-w8a8-QuaRot-310   | Atlas inference products (TP2)                                                                                               | [Download](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3)            |
+
+**Quantized Versions for Atlas inference products:**
+
+| Model | Quantization | Hardware Requirement | Download |
+|-------|-------------|---------------------|----------|
+| Qwen3-30B-A3B-w8a8-QuaRot-310  |W8A8 | Atlas inference products (TP2)                                                                                               | [Download](https://modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -219,7 +224,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 
 > The following command is an example configuration. Adjust the parameters based on your actual scenario.
 
-**Atlas 800I A2/A3:**
+=== "Atlas 800I A2/A3"
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
