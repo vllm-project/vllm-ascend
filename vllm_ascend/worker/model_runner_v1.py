@@ -3674,18 +3674,66 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 hidden_states = outputs
             dummy_compute_logits(hidden_states)
-
+            
+            drafter_context_tokens = None
             if self.drafter and not profile_cpp:
+                drafter_num_tokens = int(num_tokens_padded)
+                drafter_num_reqs = int(num_reqs_padded)
+                drafter_batch_desc = batch_desc
+                drafter_num_tokens_across_dp = num_tokens_across_dp
+
+                is_dspark = (
+                    self.speculative_config is not None
+                    and getattr(self.speculative_config, "method", None) == "dspark"
+                ) or getattr(self.drafter, "_is_dspark", False)
+
+                # The target FULL descriptor is B * (K + 1).
+                # DSpark draft FULL descriptor must be B * K.
+                if (
+                    is_dspark
+                    and cudagraph_runtime_mode == CUDAGraphMode.FULL
+                    and batch_desc is not None
+                    and bool(batch_desc.uniform)
+                ):
+                    draft_query_per_req =  int(self.speculative_config.num_speculative_tokens)
+
+                    # Preserve target padded batch size B.
+                    drafter_num_reqs = int(num_reqs_padded)
+
+                    # Remap tokens from B * (K + 1) to B * K.
+                    drafter_num_tokens = drafter_num_reqs * draft_query_per_req
+                    drafter_context_tokens = int(num_tokens_padded)
+                    # Build DSpark-correct FULL descriptor.
+
+                    draft_mode, drafter_batch_desc = (
+                        self.drafter.cudagraph_dispatcher.dispatch(
+                            num_tokens=drafter_num_tokens,
+                            uniform_decode=True,
+                            has_lora=num_active_loras > 0,
+                            num_active_loras=num_active_loras,
+                            valid_modes={CUDAGraphMode.FULL},
+                        )
+                    )
+
+                    assert draft_mode == CUDAGraphMode.FULL
+                    assert drafter_batch_desc.num_reqs == drafter_num_reqs
+
+                    # Avoid passing target num_tokens_across_dp into draft capture.
+                    # DSpark dummy_run should sync its own draft token count.
+                    drafter_num_tokens_across_dp = None
+
+
                 self.drafter.dummy_run(
-                    num_tokens=num_tokens_padded,
+                    num_tokens=drafter_num_tokens, #    was num_tokens_padded
                     with_prefill=with_prefill,
-                    num_reqs=num_reqs_padded,
-                    num_tokens_across_dp=num_tokens_across_dp,
+                    num_reqs=drafter_num_reqs, #    was num_reqs_padded
+                    num_tokens_across_dp=drafter_num_tokens_across_dp, #    was num_tokens_across_dp
                     aclgraph_runtime_mode=cudagraph_runtime_mode,
-                    batch_descriptor=batch_desc,
+                    batch_descriptor=drafter_batch_desc, #  was batch_desc
                     dummy_compute_logits=dummy_drafter_compute_logits,
                     in_graph_capturing=not force_attention,
                     is_profile=is_profile,
+                    dspark_num_context_tokens=drafter_context_tokens, # additional param
                 )
             if is_profile and self.dynamic_eplb:
                 self.eplb_updator.adaptor.clear_all_moe_loads()
@@ -4991,58 +5039,127 @@ class NPUModelRunner(GPUModelRunner):
                     min_cg_support = cg_support
                     min_cg_attn_backend = attn_backend.__name__
 
+        #   target dispatcher, for speculative decode target width = K + 1
         with update_pass_config(self):
-            if vllm_version_is("0.24.0"):
-                cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
-                    min_cg_support=min_cg_support,
-                    min_cg_attn_backend=min_cg_attn_backend,
-                    uniform_decode_query_len=self.uniform_decode_query_len,
-                    tensor_parallel_size=self.parallel_config.tensor_parallel_size,
-                    kv_cache_config=self.kv_cache_config,
-                    max_num_reqs=self.max_num_reqs,
-                )
-            else:
-                cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
-                    min_cg_support=min_cg_support,
-                    min_cg_attn_backend=min_cg_attn_backend,
-                    uniform_decode_query_len=self.uniform_decode_query_len,
-                    use_v2_model_runner=False,
-                    tensor_parallel_size=self.parallel_config.tensor_parallel_size,
-                    kv_cache_config=self.kv_cache_config,
-                    max_num_reqs=self.max_num_reqs,
-                )
+            cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
+                min_cg_support,
+                min_cg_attn_backend,
+                self.uniform_decode_query_len,
+                self.parallel_config.tensor_parallel_size,
+                self.kv_cache_config,
+                self.max_num_reqs,
+            )
             self.cudagraph_dispatcher.initialize_cudagraph_keys(
                 cudagraph_mode, self.uniform_decode_query_len
             )
 
-        if (
-            self.speculative_config
+        has_drafter = (
+            self.speculative_config is not None
             and self.drafter is not None
-            and (
-                self.speculative_config.use_eagle()
-                or self.speculative_config.uses_extract_hidden_states()
-            )
+        )
+        
+        #   draft dispatcher, the AscendDsparkProposer override must initialize its dispatcher with draft width = K
+        #   other proposers retain their existing behavior
+        if has_drafter and (
+            self.speculative_config.use_eagle()
+            or self.speculative_config.uses_extract_hidden_states()
+            or self.speculative_config.use_dspark()
         ):
             assert isinstance(
                 self.drafter,
-                AscendEagleProposer | AscendDflashProposer | AscendExtractHiddenStatesProposer,
+                (
+                    AscendEagleProposer,
+                    AscendDflashProposer,
+                    AscendExtractHiddenStatesProposer,
+                ),
             )
+
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
-        capture_descs = self.cudagraph_dispatcher.get_capture_descs()
-        capture_sizes = sorted({
-            desc.num_tokens
-            for _, descs in capture_descs
+        #   read target sizes from the target dispatcher.
+        target_capture_descs = (
+            self.cudagraph_dispatcher.get_capture_descs()
+        )
+        target_capture_sizes = sorted({
+            int(desc.num_tokens)
+            for _, descs in target_capture_descs
             for desc in descs
         })
 
+        #   non-speculative/default case
+        draft_capture_sizes = target_capture_sizes
+
+        #   read draft sizes from the draft dispatcher
+        if has_drafter:
+            draft_dispatcher = self.drafter.cudagraph_dispatcher
+
+            draft_capture_descs = (
+                draft_dispatcher.get_capture_descs()
+            )
+
+            draft_capture_sizes = sorted({
+                int(desc.num_tokens)
+                for _, descs in draft_capture_descs
+                for desc in descs
+            })
+
+            if not draft_capture_sizes:
+                raise RuntimeError(
+                    "Drafter cudagraph dispatcher produced no capture "
+                    f"descriptors. cudagraph_mode={cudagraph_mode}"
+                )
+
+        #   DSPARK validation
+        #   FULL descriptors must represent B requests with width K: num_tokens = B * K, num_reqs   = B
+        if has_drafter and self.speculative_config.use_dspark():
+            draft_query_len = int(
+                self.speculative_config.num_speculative_tokens
+            )
+
+            draft_dispatcher = self.drafter.cudagraph_dispatcher
+
+            assert (
+                draft_dispatcher.uniform_decode_query_len
+                == draft_query_len
+            ), (
+                "DSpark dispatcher has incorrect query width: "
+                f"dispatcher={draft_dispatcher.uniform_decode_query_len}, "
+                f"expected={draft_query_len}"
+            )
+
+            for mode, descs in draft_capture_descs:
+                if mode != CUDAGraphMode.FULL:
+                    continue
+
+                for desc in descs:
+                    assert desc.uniform, (
+                        "DSpark FULL descriptor must be uniform: "
+                        f"{desc}"
+                    )
+
+                    assert desc.num_tokens % draft_query_len == 0, (
+                        "DSpark FULL num_tokens must be divisible by K: "
+                        f"desc={desc}, K={draft_query_len}"
+                    )
+
+                    expected_num_reqs = (
+                        desc.num_tokens // draft_query_len
+                    )
+
+                    assert desc.num_reqs == expected_num_reqs, (
+                        "Incorrect DSpark FULL descriptor: "
+                        f"desc={desc}, "
+                        f"expected_num_reqs={expected_num_reqs}"
+                    )
+
         # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
         # we set the graph params right before initializing the keys.
+        #   configure Ascend graph pools
         if self.use_aclgraph:
-            set_graph_params(capture_sizes)
-            if self.speculative_config:
-                set_draft_graph_params(capture_sizes)
+            set_graph_params(target_capture_sizes)
 
+            if self.speculative_config:
+                set_draft_graph_params(draft_capture_sizes)
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""
         parent_module_name = _get_gpu_model_runner_module_name(self)
