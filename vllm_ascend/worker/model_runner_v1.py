@@ -613,7 +613,7 @@ class NPUModelRunner(GPUModelRunner):
                 elif self.speculative_config.method == "extract_hidden_states":
                     assert isinstance(self.drafter, AscendExtractHiddenStatesProposer)
                     self.use_aux_hidden_state_outputs = True
-                elif self.speculative_config.use_dspark():
+                elif not vllm_version_is("0.24.0") and self.speculative_config.use_dspark():
                     assert isinstance(self.drafter, AscendDSparkProposer)
                     self.use_aux_hidden_state_outputs = True
                 self.rejection_sampler = AscendRejectionSampler(self.sampler)
@@ -640,16 +640,16 @@ class NPUModelRunner(GPUModelRunner):
         layer_ids = super()._get_eagle3_aux_layers_from_config()
         if layer_ids:
             return layer_ids
-        assert self.speculative_config.use_dspark()
-        hf_config = self.speculative_config.draft_model_config.hf_config
-        # deepseek v4 dspark
-        dspark_layer_ids = getattr(hf_config, "dspark_target_layer_ids", None)
-        if dspark_layer_ids:
-            return tuple(i + 1 for i in dspark_layer_ids)
-        # gqa backend dspark
-        dspark_layer_ids = getattr(hf_config, "target_layer_ids", None)
-        if dspark_layer_ids:
-            return tuple(i + 1 for i in dspark_layer_ids)
+        if not vllm_version_is("0.24.0") and self.speculative_config.use_dspark():
+            hf_config = self.speculative_config.draft_model_config.hf_config
+            # deepseek v4 dspark
+            dspark_layer_ids = getattr(hf_config, "dspark_target_layer_ids", None)
+            if dspark_layer_ids:
+                return tuple(i + 1 for i in dspark_layer_ids)
+            # gqa backend dspark
+            dspark_layer_ids = getattr(hf_config, "target_layer_ids", None)
+            if dspark_layer_ids:
+                return tuple(i + 1 for i in dspark_layer_ids)
         return None
 
     def _use_aclgraph(self) -> bool:
