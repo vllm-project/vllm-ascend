@@ -13,8 +13,10 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.outputs import DraftTokenIds
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.spec_decode.spec_k import SpecKHistoryUpdate
 from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -526,6 +528,121 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         self.assertEqual(spec_decode_metadata.draft_token_ids.tolist(), [-1, -1, -1])
         self.assertEqual(runner.input_ids.gpu.tolist(), [11, 0, 0, 0])
         self.assertEqual(runner.input_ids.cpu.tolist(), [11, -1, -1, -1])
+
+    def test_spec_k_uses_registered_moe_layer_top_k(self):
+        runner = self._build_runner()
+        runner._spec_k_enabled = True
+        runner.pin_memory = False
+        runner.compilation_config = SimpleNamespace(
+            static_all_moe_layers=["moe.0", "moe.1"],
+            static_forward_context={
+                "moe.0": SimpleNamespace(top_k=4),
+                "moe.1": SimpleNamespace(top_k=4),
+            },
+        )
+        runner.ascend_config = SimpleNamespace(
+            spec_k_config=SimpleNamespace(
+                ppl_thresholds=(3.0, 2.0),
+                full_top_k_layer_range=(0, 0, 1),
+                apply_last_token=False,
+            )
+        )
+        runner.max_num_tokens = 8
+        runner.max_num_reqs = 2
+        runner.num_spec_tokens = 3
+
+        runner._initialize_spec_k()
+
+        self.assertEqual(runner._spec_k_policy.base_top_k, 4)
+        self.assertEqual(runner._spec_k_input_top_ks.cpu.shape, (8,))
+        self.assertEqual(runner._spec_k_draft_top_ks_cpu.shape, (2, 4))
+
+    def test_spec_k_rejects_dense_target(self):
+        runner = self._build_runner()
+        runner._spec_k_enabled = True
+        runner.compilation_config = SimpleNamespace(
+            static_all_moe_layers=[],
+            static_forward_context={},
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires a MoE target"):
+            runner._initialize_spec_k()
+
+    def test_spec_k_rejects_310p(self):
+        runner = self._build_runner()
+        runner._spec_k_enabled = True
+
+        with (
+            patch(
+                "vllm_ascend.worker.model_runner_v1.is_310p",
+                return_value=True,
+            ),
+            self.assertRaisesRegex(ValueError, "not supported on 310P"),
+        ):
+            runner._initialize_spec_k()
+
+    def test_spec_k_history_uses_accepted_target_input_top_ks(self):
+        runner = self._build_runner()
+        runner._spec_k_enabled = True
+        runner._spec_k_input_top_ks = SimpleNamespace(cpu=torch.tensor([8, 5, 4, 3, 7, 6], dtype=torch.int32))
+        runner._spec_k_history_updates = {}
+        runner.requests = {
+            "req0": SimpleNamespace(output_token_ids=[10, 11, 12]),
+            "req1": SimpleNamespace(output_token_ids=[20]),
+        }
+        scheduler_output = SimpleNamespace(num_scheduled_tokens={"req0": 4, "req1": 2})
+
+        runner._stage_spec_k_history_updates(
+            scheduler_output,
+            ["req0", "req1"],
+            [[11, 12, 13], [21]],
+        )
+
+        update0 = runner._spec_k_history_updates["req0"]
+        update1 = runner._spec_k_history_updates["req1"]
+        self.assertEqual(update0.new_output_length, 3)
+        self.assertEqual(update0.accepted_top_ks.tolist(), [5, 4])
+        self.assertEqual(update1.new_output_length, 1)
+        self.assertEqual(update1.accepted_top_ks.shape, (0,))
+
+    def test_take_draft_token_ids_commits_runner_local_spec_k_state(self):
+        runner = self._build_runner()
+        runner._spec_k_enabled = True
+        runner._spec_k_policy = SimpleNamespace(base_top_k=8)
+        runner._spec_k_request_states = {}
+        runner._spec_k_history_updates = {
+            "req0": SpecKHistoryUpdate(
+                new_output_length=3,
+                accepted_top_ks=torch.tensor([5, 4]),
+            ),
+            "req1": SpecKHistoryUpdate(
+                new_output_length=1,
+                accepted_top_ks=torch.empty(0, dtype=torch.int32),
+            ),
+        }
+        runner._spec_k_draft_top_ks_cpu = torch.tensor(
+            [[3, 2, 1]],
+            dtype=torch.int32,
+        )
+        draft_token_ids = DraftTokenIds(
+            req_ids=["req0"],
+            draft_token_ids=[[101, 102]],
+        )
+
+        with patch(
+            "vllm.v1.worker.gpu_model_runner.GPUModelRunner.take_draft_token_ids",
+            return_value=draft_token_ids,
+        ):
+            result = runner.take_draft_token_ids()
+
+        self.assertIs(result, draft_token_ids)
+        req0_state = runner._spec_k_request_states["req0"]
+        self.assertEqual(req0_state.output_top_ks.tolist(), [5, 4, 3])
+        self.assertEqual(req0_state.pending_draft_top_ks.tolist(), [3, 2, 1])
+        req1_state = runner._spec_k_request_states["req1"]
+        self.assertEqual(req1_state.output_top_ks.tolist(), [8])
+        self.assertIsNone(req1_state.pending_draft_top_ks)
+        self.assertFalse(runner._spec_k_history_updates)
 
 
 class TestNPUModelRunnerDebugger(unittest.TestCase):

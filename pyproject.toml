@@ -26,7 +26,7 @@ requires = [
     "quart",
     "numba",
     "xgrammar>=0.1.30",
-    "fastapi<0.124.0",
+    "fastapi>=0.133.0,<0.137.0",
     "compressed_tensors>=0.11.0",
     "arctic-inference==0.1.1",
     "triton-ascend==3.2.1"

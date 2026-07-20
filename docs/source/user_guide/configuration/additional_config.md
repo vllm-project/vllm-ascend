@@ -83,6 +83,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by ROCE. |
 | `enable_prefill_mc2`                | bool | `False` | Whether to reserve mc2_token_capacity for prefill batches. When enabled, `max_num_batched_tokens` is used to calculate the mc2_token_capacity instead of the decode-only capacity. In this scenario, the recommended maximum value of `max_num_batched_tokens` is `tp_size * 512`. This is a temporary switch; once MC2 operators are complete for all scenarios, this switch will be removed and MC2 will be enabled by default. |
 | `mega_moe_max_tokens`               | int  | `65536` | Per-rank token capacity after dispatch in the mega moe (dispatch_ffn_combine) fused operator. When load imbalance causes a rank to receive more tokens than this limit, the excess tokens are dropped and skipped from computation, degrading accuracy. Do not set this too large: workspace memory scales linearly with this value. |
+| `spec_k_config`                     | dict | `{}`    | Engine-global Spec-K dynamic expert-routing policy. See [Speculative Decoding](../feature_guide/speculative_decoding.md#spec-k-dynamic-expert-routing). |
 | `enable_flashcomm1`                 | bool | `False` | Whether to enable FlashComm1 optimization. Can also be configured via the `VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable during the migration period. |
 | `msmonitor_use_daemon`              | bool | `False` | Whether to use daemon mode for msmonitor. Can also be configured via the `MSMONITOR_USE_DAEMON` environment variable during the migration period. |
 | `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). Can also be configured via the `VLLM_ASCEND_ENABLE_MLAPO` environment variable during the migration period. |
@@ -168,6 +169,17 @@ The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, 
 | `enable_entropy_verify` | bool  | `False` | Whether to enable entropy verify mode. Entropy verify adjusts the acceptance threshold based on the entropy of the target distribution — higher entropy (uncertain) tokens get a lower threshold (easier to accept), while lower entropy (confident) tokens get a stricter threshold. |
 | `posterior_threshold`   | float | `0.95`  | Upper bound for the entropy-adjusted acceptance threshold. Must be in (0, 1]. The effective threshold is `min(exp(-entropy * posterior_alpha), posterior_threshold)`. |
 | `posterior_alpha`       | float | `0.4`   | Scaling factor for entropy in the threshold computation. Must be >= 0. Higher values make the threshold more sensitive to entropy — high-entropy tokens become much easier to accept, improving performance but reducing precision. |
+
+**spec_k_config**
+
+Spec-K uses the draft model's distribution perplexity to select a per-token expert budget for the target MoE model. The policy is fixed for the lifetime of the engine and applies to every request.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enabled` | bool | `False` | Whether to enable Spec-K. |
+| `ppl_thresholds` | list[float] | `[]` | Finite, positive, non-increasing perplexity thresholds. For a model top-k of `K` and `M < K` thresholds, the minimum expert budget is `K - M`; crossing a threshold adds one expert. Repeated thresholds add multiple experts at the same boundary. |
+| `full_top_k_layer_range` | list[int] | `[0, 0, 1]` | Two- or three-element Python-style slice selecting MoE layers that always use the model's full top-k. |
+| `apply_last_token` | bool | `False` | Use the mean proposal budget, rounded down, for the bonus-token position after the draft sequence. When disabled, that position uses the full model top-k. |
 
 **scheduler_config.short_request_first_config**
 

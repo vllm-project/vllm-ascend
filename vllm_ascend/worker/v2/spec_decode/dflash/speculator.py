@@ -43,8 +43,16 @@ class AscendDFlashSpeculator(DFlashSpeculator):
         model_state: Any,
         kv_cache_config: Any,
         block_tables: Any,
+        target_input_buffers: Any,
+        target_attn_groups: Any,
     ) -> None:
-        super().set_attn(model_state, kv_cache_config, block_tables)
+        super().set_attn(
+            model_state,
+            kv_cache_config,
+            block_tables,
+            target_input_buffers,
+            target_attn_groups,
+        )
         self._context_slot_mappings = torch.zeros(
             len(self.draft_kv_cache_group_ids),
             self.max_num_tokens,
@@ -71,12 +79,15 @@ class AscendDFlashSpeculator(DFlashSpeculator):
     # keep the current name for now as upstream may change it again.
     def build_draft_attn_metadatas(self, num_reqs_padded):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
+        assert self.input_batch is not None
         with build_attn_metadata_wrapper():
             attn_metadata = self._build_draft_attn_metadata(
                 num_reqs=num_reqs_padded,
                 num_reqs_padded=num_reqs_padded,
                 num_tokens_padded=num_tokens_padded,
-                causal=self.dflash_causal,
+                seq_lens_cpu_upper_bound=self.input_batch.seq_lens_cpu_upper_bound,
+                step=self.num_query_per_req,
+                causal=self._group_causal,
             )
         return [attn_metadata]
 

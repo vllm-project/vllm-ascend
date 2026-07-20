@@ -105,6 +105,30 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_spec_k_rejects_eplb(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.scheduler_config.async_scheduling = False
+        test_vllm_config.cache_config.enable_prefix_caching = False
+        test_vllm_config.speculative_config = SimpleNamespace(
+            uses_draft_model=lambda: True,
+            use_eagle=lambda: False,
+            use_step3p5_mtp=lambda: False,
+            enforce_eager=True,
+        )
+        test_vllm_config.additional_config = {
+            "spec_k_config": {"enabled": True, "ppl_thresholds": [2.0]},
+            "eplb_config": {"dynamic_eplb": True},
+            "refresh": True,
+        }
+
+        with (
+            patch.dict(os.environ, {"DYNAMIC_EPLB": "true"}),
+            self.assertRaisesRegex(ValueError, "does not yet support EPLB"),
+        ):
+            init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_with_nested_scheduler_config(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {

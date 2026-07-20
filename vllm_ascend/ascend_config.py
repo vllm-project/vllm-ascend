@@ -14,7 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import math
 import os
+from numbers import Real
 from typing import TYPE_CHECKING, Any
 
 from vllm.logger import logger
@@ -55,6 +57,14 @@ class AscendConfig:
             additional_config,
             balance_env_value=ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING,
         )
+        self.spec_k_config = SpecKConfig(
+            additional_config.get("spec_k_config", {}),
+            vllm_config,
+        )
+        if self.spec_k_config.enabled and (
+            self.eplb_config.dynamic_eplb or self.eplb_config.expert_map_path is not None
+        ):
+            raise ValueError("Spec-K does not yet support EPLB or custom expert maps.")
         if self.scheduler_config.profiling_chunk_config.enabled:
             max_batched = vllm_config.scheduler_config.max_num_batched_tokens
             if max_batched < self.scheduler_config.profiling_chunk_config.min_chunk:
@@ -418,6 +428,89 @@ class AscendConfig:
 
     def update_compile_ranges_split_points(self):
         return
+
+
+class SpecKConfig:
+    """Engine-global configuration for Spec-K dynamic expert routing."""
+
+    _VALID_KEYS = {
+        "enabled",
+        "ppl_thresholds",
+        "full_top_k_layer_range",
+        "apply_last_token",
+    }
+
+    def __init__(self, config: dict[str, Any], vllm_config: "VllmConfig"):
+        if not isinstance(config, dict):
+            raise ValueError(f"additional_config.spec_k_config must be a dict, got {type(config).__name__}.")
+        unknown_keys = set(config) - self._VALID_KEYS
+        if unknown_keys:
+            raise ValueError(f"Unknown additional_config.spec_k_config keys: {sorted(unknown_keys)}.")
+
+        enabled = config.get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise ValueError("spec_k_config.enabled must be a bool.")
+        self.enabled = enabled
+
+        ppl_thresholds = config.get("ppl_thresholds", ())
+        if not isinstance(ppl_thresholds, (list, tuple)):
+            raise ValueError("spec_k_config.ppl_thresholds must be a list of numbers.")
+        if any(not isinstance(value, Real) or isinstance(value, bool) for value in ppl_thresholds):
+            raise ValueError("spec_k_config.ppl_thresholds must be a list of numbers.")
+        self.ppl_thresholds = tuple(float(value) for value in ppl_thresholds)
+
+        layer_range = config.get("full_top_k_layer_range", (0, 0, 1))
+        if not isinstance(layer_range, (list, tuple)) or len(layer_range) not in (
+            2,
+            3,
+        ):
+            raise ValueError("spec_k_config.full_top_k_layer_range must contain 2 or 3 integers.")
+        if len(layer_range) == 2:
+            layer_range = (*layer_range, 1)
+        if any(not isinstance(value, int) or isinstance(value, bool) for value in layer_range):
+            raise ValueError("spec_k_config.full_top_k_layer_range must contain only integers.")
+        self.full_top_k_layer_range = tuple(int(value) for value in layer_range)
+        if self.full_top_k_layer_range[2] == 0:
+            raise ValueError("spec_k_config.full_top_k_layer_range step must not be zero.")
+        self.apply_last_token = config.get("apply_last_token", False)
+        if not isinstance(self.apply_last_token, bool):
+            raise ValueError("spec_k_config.apply_last_token must be a bool.")
+
+        if not self.enabled:
+            return
+        if not self.ppl_thresholds:
+            raise ValueError("spec_k_config.ppl_thresholds must not be empty when Spec-K is enabled.")
+        if any(not math.isfinite(value) or value <= 0 for value in self.ppl_thresholds):
+            raise ValueError("spec_k_config.ppl_thresholds must contain finite, positive values.")
+        if any(left < right for left, right in zip(self.ppl_thresholds, self.ppl_thresholds[1:])):
+            raise ValueError("spec_k_config.ppl_thresholds must be in non-increasing order.")
+        if vllm_config.speculative_config is None:
+            raise ValueError("Spec-K requires speculative decoding to be enabled.")
+        speculative_config = vllm_config.speculative_config
+        if not speculative_config.uses_draft_model():
+            raise ValueError("Spec-K requires speculative method='draft_model'.")
+        if not speculative_config.enforce_eager:
+            raise ValueError("Spec-K requires the draft proposer to set enforce_eager=true.")
+        if getattr(vllm_config.model_config, "quantization", None) is not None:
+            raise ValueError("Spec-K does not yet support quantized target models.")
+        if vllm_config.scheduler_config.async_scheduling:
+            raise ValueError("Spec-K does not yet support async scheduling.")
+        if vllm_config.cache_config.enable_prefix_caching:
+            raise ValueError("Spec-K does not yet support prefix caching.")
+        if getattr(vllm_config, "use_v2_model_runner", False):
+            raise ValueError("Spec-K does not yet support model runner V2.")
+        if vllm_config.parallel_config.pipeline_parallel_size != 1:
+            raise ValueError("Spec-K does not yet support pipeline parallelism.")
+        if (
+            vllm_config.parallel_config.prefill_context_parallel_size != 1
+            or vllm_config.parallel_config.decode_context_parallel_size != 1
+        ):
+            raise ValueError("Spec-K does not yet support context parallelism.")
+
+        logger.info_once(
+            "Spec-K is enabled with engine-global perplexity thresholds %s.",
+            self.ppl_thresholds,
+        )
 
 
 class FinegrainedTPConfig:

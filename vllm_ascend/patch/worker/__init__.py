@@ -17,7 +17,7 @@
 
 from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend.utils import is_310p
+from vllm_ascend.utils import is_310p, vllm_version_is
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
@@ -70,8 +70,12 @@ import vllm_ascend.patch.worker.patch_v2.patch_input_batch  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_eagle_speculator  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa
+
+# These graph-manager patches follow vLLM main. The v0.25.1 release uses the
+# older, separate prefill and decode graph managers.
+if not vllm_version_is("0.25.1"):
+    import vllm_ascend.patch.worker.patch_v2.patch_eagle_speculator  # noqa
+    import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa
 
 # only patch routed experts capture in main2main.
 import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa

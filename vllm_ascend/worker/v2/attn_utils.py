@@ -106,6 +106,7 @@ def build_attn_metadata(
     block_tables: Sequence[torch.Tensor],
     slot_mappings: torch.Tensor,
     kv_cache_config: KVCacheConfig,
+    seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     dcp_local_seq_lens: torch.Tensor | None = None,
     # extra attributes for ascend npus.
     seq_lens_np: np.ndarray | None = None,
@@ -128,6 +129,10 @@ def build_attn_metadata(
     if seq_lens_np is None:
         seq_lens_np = np.full(num_reqs, max_seq_len, dtype=np.int32)
     seq_lens_cpu = torch.from_numpy(seq_lens_np)[:num_reqs]
+    if seq_lens_cpu_upper_bound is None:
+        seq_lens_cpu_upper_bound = seq_lens_cpu
+    else:
+        seq_lens_cpu_upper_bound = seq_lens_cpu_upper_bound[:num_reqs]
 
     attn_metadata: dict[str, Any] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
@@ -146,7 +151,7 @@ def build_attn_metadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens_cpu=seq_lens_cpu,
-            seq_lens_cpu_upper_bound=seq_lens_cpu,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             seq_lens=seq_lens[:num_reqs],
             num_reqs=num_reqs,
             num_actual_tokens=num_tokens,

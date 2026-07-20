@@ -75,6 +75,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
+    DraftTokenIds,
     ECConnectorOutput,
     LogprobsLists,
     LogprobsTensors,
@@ -90,11 +91,8 @@ from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID, RejectionSamp
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer_gpu import copy_num_valid_draft_tokens
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
-from vllm.v1.utils import record_function_or_nullcontext
+from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
-from vllm.v1.worker.cp_utils import (
-    get_total_cp_world_size,
-)
 from vllm.v1.worker.gpu_model_runner import AsyncGPUModelRunnerOutput, GPUModelRunner
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
@@ -143,6 +141,11 @@ from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
+from vllm_ascend.spec_decode.spec_k import (
+    SpecKHistoryUpdate,
+    SpecKPolicy,
+    SpecKRequestState,
+)
 from vllm_ascend.spec_decode.step3p5 import AscendStep3p5MTPProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 from vllm_ascend.spec_decode.utils import (
@@ -160,13 +163,21 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     get_c_env,
     global_stream,
+    is_310p,
     is_hidden_state_cache_spec,
     kv_cache_spec_uses_sparse_c8,
     lmhead_tp_enable,
     oproj_tp_enable,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
+    vllm_version_is,
 )
+
+if vllm_version_is("0.25.1"):
+    from vllm.v1.worker.cp_utils import get_total_cp_world_size as get_kv_cache_shard_count
+else:
+    from vllm.v1.worker.cp_utils import get_kv_cache_shard_count
+
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPAsyncSpecDecodeRebuildResult, PCPManager
 from vllm_ascend.worker.utils import AscendKVBlockZeroer, copy_snapshot_to_gpu
@@ -332,6 +343,13 @@ class NPUModelRunner(GPUModelRunner):
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        self._spec_k_enabled = self.ascend_config.spec_k_config.enabled
+        self._spec_k_policy: SpecKPolicy | None = None
+        self._spec_k_request_states: dict[str, SpecKRequestState] = {}
+        self._spec_k_history_updates: dict[str, SpecKHistoryUpdate] = {}
+        self._spec_k_draft_top_ks_cpu: torch.Tensor | None = None
+        self._spec_k_input_top_ks: CpuGpuBuffer | None = None
+        self._spec_k_draft_top_ks: torch.Tensor | None = None
 
         # Dump / PrecisionDebugger configuration now comes from AscendConfig
         dump_cfg = self.ascend_config.dump_config_path
@@ -699,6 +717,170 @@ class NPUModelRunner(GPUModelRunner):
             return self.model.unwrap()
         return self.model
 
+    def _initialize_spec_k(self) -> None:
+        if not self._spec_k_enabled:
+            return
+        if is_310p():
+            raise ValueError("Spec-K is not supported on 310P.")
+
+        moe_layer_names = self.compilation_config.static_all_moe_layers
+        moe_layers = self.compilation_config.static_forward_context
+        if not moe_layer_names:
+            raise ValueError("Spec-K requires a MoE target model.")
+        layer_top_ks = {int(moe_layers[name].top_k) for name in moe_layer_names}
+        if len(layer_top_ks) != 1:
+            raise ValueError("Spec-K requires all target MoE layers to use the same top-k.")
+        base_top_k = layer_top_ks.pop()
+        self._spec_k_policy = SpecKPolicy(
+            self.ascend_config.spec_k_config,
+            base_top_k=base_top_k,
+            device=self.device,
+        )
+        self._spec_k_input_top_ks = self._make_buffer(
+            self.max_num_tokens,
+            dtype=torch.int32,
+        )
+        self._spec_k_draft_top_ks_cpu = torch.empty(
+            (
+                self.max_num_reqs,
+                self.num_spec_tokens + 1,
+            ),
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=self.pin_memory,
+        )
+
+    def _get_or_create_spec_k_state(self, req_id: str) -> SpecKRequestState:
+        state = self._spec_k_request_states.get(req_id)
+        if state is not None:
+            return state
+        policy = self._spec_k_policy
+        if policy is None:
+            raise RuntimeError("Spec-K policy is not initialized.")
+        state = SpecKRequestState(
+            base_top_k=policy.base_top_k,
+        )
+        self._spec_k_request_states[req_id] = state
+        return state
+
+    def _prepare_spec_k_input_top_ks(
+        self,
+        scheduler_output: "SchedulerOutput",
+        positions: np.ndarray,
+        num_scheduled_tokens: np.ndarray,
+        total_num_scheduled_tokens: int,
+    ) -> None:
+        policy = self._spec_k_policy
+        if policy is None:
+            return
+
+        if self._spec_k_input_top_ks is None:
+            raise RuntimeError("Spec-K input buffer is not initialized.")
+        output = self._spec_k_input_top_ks.cpu[:total_num_scheduled_tokens]
+        output.fill_(policy.base_top_k)
+        offset = 0
+        scheduled_drafts = scheduler_output.scheduled_spec_decode_tokens
+        for req_index, req_id in enumerate(self.input_batch.req_ids):
+            count = int(num_scheduled_tokens[req_index])
+            end = offset + count
+            if count == 0:
+                continue
+            request = self.requests[req_id]
+            state = self._get_or_create_spec_k_state(req_id)
+            state.reconcile_output_length(len(request.output_token_ids))
+            output[offset:end].copy_(
+                state.top_ks_for_positions(
+                    positions[offset:end],
+                    num_prompt_tokens=request.num_prompt_tokens,
+                    pending_draft_start_position=int(
+                        self.input_batch.num_tokens_no_spec[req_index]
+                    )
+                    - 1,
+                    use_pending_draft=bool(scheduled_drafts.get(req_id)),
+                )
+            )
+            offset = end
+        self._spec_k_input_top_ks.copy_to_gpu(total_num_scheduled_tokens)
+
+    def _stage_spec_k_history_updates(
+        self,
+        scheduler_output: "SchedulerOutput",
+        req_ids: list[str],
+        sampled_token_ids: list[list[int]],
+    ) -> None:
+        if not self._spec_k_enabled:
+            return
+
+        offset = 0
+        if self._spec_k_input_top_ks is None:
+            raise RuntimeError("Spec-K input buffer is not initialized.")
+        input_top_ks = self._spec_k_input_top_ks.cpu
+        for req_id, token_ids in zip(req_ids, sampled_token_ids):
+            num_scheduled_tokens = int(
+                scheduler_output.num_scheduled_tokens[req_id]
+            )
+            if not token_ids:
+                offset += num_scheduled_tokens
+                continue
+            num_computed_tokens = len(token_ids) - 1
+            if num_computed_tokens >= num_scheduled_tokens:
+                raise RuntimeError(
+                    "Spec-K accepted-token count exceeds the target input "
+                    f"span for request {req_id!r}: {num_computed_tokens} "
+                    f">= {num_scheduled_tokens}."
+                )
+            accepted_top_ks = input_top_ks[
+                offset + 1 : offset + 1 + num_computed_tokens
+            ].clone()
+            new_output_length = len(self.requests[req_id].output_token_ids)
+            self._spec_k_history_updates[req_id] = SpecKHistoryUpdate(
+                new_output_length=new_output_length,
+                accepted_top_ks=accepted_top_ks,
+            )
+            offset += num_scheduled_tokens
+
+    def _finalize_spec_k_step(
+        self,
+        req_id: str,
+        draft_top_ks: torch.Tensor | None,
+    ) -> None:
+        state = self._get_or_create_spec_k_state(req_id)
+        update = self._spec_k_history_updates.pop(req_id, None)
+        policy = self._spec_k_policy
+        assert policy is not None
+        if draft_top_ks is None:
+            state.pending_draft_top_ks = None
+            sampled_token_top_k = torch.tensor(policy.base_top_k, dtype=torch.int32)
+        else:
+            state.set_pending_draft_top_ks(draft_top_ks)
+            sampled_token_top_k = draft_top_ks[0]
+        if update is not None:
+            state.finalize_step(update, sampled_token_top_k)
+
+    def take_draft_token_ids(self) -> DraftTokenIds | None:
+        draft_token_ids = super().take_draft_token_ids()
+        if not self._spec_k_enabled:
+            return draft_token_ids
+
+        finalized_req_ids: set[str] = set()
+        draft_top_ks_cpu = self._spec_k_draft_top_ks_cpu
+        if draft_token_ids is not None:
+            if draft_top_ks_cpu is None:
+                raise RuntimeError("Spec-K draft top-k buffer is not initialized.")
+            for row, (req_id, token_ids) in enumerate(
+                zip(draft_token_ids.req_ids, draft_token_ids.draft_token_ids)
+            ):
+                top_k_width = len(token_ids) + 1
+                self._finalize_spec_k_step(
+                    req_id, draft_top_ks_cpu[row, :top_k_width]
+                )
+                finalized_req_ids.add(req_id)
+
+        for req_id in list(self._spec_k_history_updates):
+            if req_id not in finalized_req_ids:
+                self._finalize_spec_k_step(req_id, None)
+        return draft_token_ids
+
     def _is_pd_prefill_worker(self) -> bool:
         return self.is_kv_producer and not self.is_kv_consumer
 
@@ -783,7 +965,18 @@ class NPUModelRunner(GPUModelRunner):
                     req_state.prev_num_draft_len = 0
 
         self._apply_pp_sampled_tokens_from_scheduler_output(scheduler_output)
-        return super()._update_states(scheduler_output)
+        deferred_corrections = super()._update_states(scheduler_output)
+        if self._spec_k_enabled:
+            for req_id in scheduler_output.finished_req_ids:
+                self._spec_k_request_states.pop(req_id, None)
+                self._spec_k_history_updates.pop(req_id, None)
+            for req_id, request in self.requests.items():
+                state = self._spec_k_request_states.get(req_id)
+                if state is not None:
+                    state.reconcile_output_length(
+                        len(request.output_token_ids)
+                    )
+        return deferred_corrections
 
     def _pad_query_start_loc_for_fia(
         self,
@@ -1068,6 +1261,13 @@ class NPUModelRunner(GPUModelRunner):
         self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
 
         # Copy the tensors to the NPU.
+        if self._spec_k_enabled:
+            self._prepare_spec_k_input_top_ks(
+                scheduler_output,
+                positions_np,
+                num_scheduled_tokens,
+                total_num_scheduled_tokens,
+            )
         self._prepare_input_ids(scheduler_output, num_reqs, total_num_scheduled_tokens, cu_num_tokens)
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -1666,7 +1866,7 @@ class NPUModelRunner(GPUModelRunner):
         target_model_batch_desc: BatchDescriptor = None,
     ) -> list[list[int]] | None:
         self._log_propose_draft_token_ids_entry(spec_decode_metadata, num_scheduled_tokens)
-
+        draft_token_top_ks = None
         if not self.drafter:
             # Speculative decoding is not enabled.
             draft_token_ids = None
@@ -1873,7 +2073,7 @@ class NPUModelRunner(GPUModelRunner):
                     else:
                         target_hidden_states = hidden_states[token_indices]
             assert self.drafter is not None
-            draft_token_ids = self.drafter._propose(
+            draft_output = self.drafter._propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
@@ -1890,6 +2090,24 @@ class NPUModelRunner(GPUModelRunner):
                 num_scheduled_tokens=num_scheduled_tokens,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
+            if isinstance(draft_output, tuple):
+                draft_token_ids, draft_token_logits = draft_output
+            else:
+                draft_token_ids = draft_output
+                draft_token_logits = None
+            if self._spec_k_enabled:
+                if draft_token_logits is None:
+                    raise RuntimeError("Spec-K requires draft logits from the proposer.")
+                if not isinstance(draft_token_ids, torch.Tensor):
+                    raise RuntimeError("Spec-K requires tensor output from the proposer.")
+                if draft_token_ids.shape[:2] != draft_token_logits.shape[:2]:
+                    raise ValueError(
+                        "Draft token IDs and logits must have matching batch and "
+                        f"sequence dimensions, got {draft_token_ids.shape} and {draft_token_logits.shape}."
+                    )
+                policy = self._spec_k_policy
+                assert policy is not None
+                draft_token_top_ks = policy.top_ks_from_logits(draft_token_logits)
             if get_pp_group().world_size > 1 and hasattr(
                 self.drafter, "take_last_draft_probs"
             ):
@@ -1900,6 +2118,7 @@ class NPUModelRunner(GPUModelRunner):
         else:
             raise ValueError(f"Unknown speculative decoding method: {self.speculative_config.method}")
 
+        self._spec_k_draft_top_ks = draft_token_top_ks
         return draft_token_ids
 
     def _log_propose_draft_token_ids_entry(
@@ -1955,6 +2174,9 @@ class NPUModelRunner(GPUModelRunner):
         draft_token_ids: torch.Tensor = self._draft_token_ids  # type: ignore[has-type]
         if not torch.is_tensor(draft_token_ids):
             return
+        draft_token_top_ks = self._spec_k_draft_top_ks
+        if self._spec_k_enabled and not torch.is_tensor(draft_token_top_ks):
+            raise RuntimeError("Spec-K draft top-k values were not produced.")
         assert self.draft_token_ids_event is not None
         assert self.draft_token_ids_copy_stream is not None
         assert self.draft_token_ids_cpu is not None
@@ -1963,11 +2185,21 @@ class NPUModelRunner(GPUModelRunner):
         with torch.npu.stream(self.draft_token_ids_copy_stream):
             if not zeros_only:
                 self.draft_token_ids_copy_stream.wait_stream(default_stream)
-                self.draft_token_ids_cpu[:num_reqs].copy_(
-                    draft_token_ids, non_blocking=True
-                )
+                self.draft_token_ids_cpu[:num_reqs].copy_(draft_token_ids, non_blocking=True)
+                if self._spec_k_enabled:
+                    assert self._spec_k_draft_top_ks_cpu is not None
+                    self._spec_k_draft_top_ks_cpu[:num_reqs].copy_(
+                        draft_token_top_ks, non_blocking=True
+                    )
             else:
                 self.draft_token_ids_cpu[:num_reqs] = 0
+                if self._spec_k_enabled:
+                    policy = self._spec_k_policy
+                    assert policy is not None
+                    assert self._spec_k_draft_top_ks_cpu is not None
+                    self._spec_k_draft_top_ks_cpu[:num_reqs].fill_(
+                        policy.base_top_k
+                    )
             self.draft_token_ids_event.record()
 
     @torch.inference_mode()
@@ -2288,6 +2520,17 @@ class NPUModelRunner(GPUModelRunner):
                 num_tokens_padded,
                 intermediate_tensors,
             )
+            input_top_ks = None
+            if self._spec_k_enabled:
+                policy = self._spec_k_policy
+                assert policy is not None
+                if self._spec_k_input_top_ks is None:
+                    raise RuntimeError("Spec-K input buffer is not initialized.")
+                input_top_ks = self._spec_k_input_top_ks.gpu[:num_tokens_padded]
+                if num_tokens_padded > total_num_scheduled_tokens:
+                    input_top_ks[total_num_scheduled_tokens:].fill_(
+                        policy.base_top_k
+                    )
 
             # update global cos, sin
             update_cos_sin(positions)
@@ -2324,6 +2567,7 @@ class NPUModelRunner(GPUModelRunner):
                 skip_compiled=has_encoder_input,
                 has_sinks=self._has_sinks,
                 input_ids=input_ids,
+                token_top_ks=input_top_ks,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ),
             self.maybe_get_kv_connector_output(
@@ -2513,6 +2757,7 @@ class NPUModelRunner(GPUModelRunner):
             )
             if early_pp_padded_drafter:
                 self._draft_token_ids = None
+                self._spec_k_draft_top_ks = None
                 self._draft_token_req_ids = None
                 with record_function_or_nullcontext("draft_token"):
                     propose_draft_token_ids(sampler_output.sampled_token_ids)
@@ -2532,11 +2777,17 @@ class NPUModelRunner(GPUModelRunner):
             scheduler_output.total_num_scheduled_tokens,
             spec_decode_metadata,
         )
+        self._stage_spec_k_history_updates(
+            scheduler_output,
+            req_ids_output_copy,
+            valid_sampled_token_ids,
+        )
 
         with record_function_or_nullcontext("draft_token"):
             if self.speculative_config:
                 if not early_pp_padded_drafter:
                     self._draft_token_ids = None
+                    self._spec_k_draft_top_ks = None
                     self._draft_token_req_ids = None
                 if use_padded_batch and not early_pp_padded_drafter:
                     # EAGLE speculative decoding can use the GPU sampled tokens
@@ -3606,6 +3857,14 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 input_ids = self.input_ids.gpu[:num_tokens_padded]
                 inputs_embeds = None
+            input_top_ks = None
+            if self._spec_k_enabled:
+                policy = self._spec_k_policy
+                assert policy is not None
+                if self._spec_k_input_top_ks is None:
+                    raise RuntimeError("Spec-K input buffer is not initialized.")
+                input_top_ks = self._spec_k_input_top_ks.gpu[:num_tokens_padded]
+                input_top_ks.fill_(policy.base_top_k)
 
             if self.uses_mrope:
                 positions = self.mrope_positions.gpu[:, :num_tokens_padded]
@@ -3665,6 +3924,7 @@ class NPUModelRunner(GPUModelRunner):
                 model_instance=self.model,
                 has_sinks = self._has_sinks,
                 input_ids=input_ids,
+                token_top_ks=input_top_ks,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ):
                 outputs = self._model_forward(
@@ -3830,6 +4090,8 @@ class NPUModelRunner(GPUModelRunner):
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
+
+        self._initialize_spec_k()
 
         get_offloader().post_init()
 
@@ -4696,7 +4958,7 @@ class NPUModelRunner(GPUModelRunner):
         for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
             if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
                 continue
-            max_num_blocks_per_req = cdiv(max_model_len, block_sizes[i] * get_total_cp_world_size())
+            max_num_blocks_per_req = cdiv(max_model_len, block_sizes[i] * get_kv_cache_shard_count())
             if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
                 mamba_blocks_per_req = (
                     max_num_blocks_per_req if self.cache_config.enable_prefix_caching else 1
