@@ -178,7 +178,7 @@ class MoECommMethod(ABC):
         )
 
     def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
-        return unified_apply_mlp(mlp_compute_input=mlp_compute_input, lora_context=self.lora_context)
+        return unified_apply_mlp(mlp_compute_input=mlp_compute_input)
 
     @abstractmethod
     def _get_token_dispatcher(self) -> MoETokenDispatcher:

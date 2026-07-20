@@ -521,7 +521,7 @@ def unquant_apply_mlp(
     return hidden_states, None
 
 
-def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput, lora_context=None) -> torch.Tensor:
+def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
     """
     Unified MoE MLP entry.
     Quant path is dispatched by DeviceOperator with explicit typed kernel flags.
@@ -560,7 +560,7 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput, lora_context=Non
             topk_scales=topk_scales,
             need_trans=need_trans,
             swiglu_limit=swiglu_limit,
-            lora_context=lora_context,
+            lora_context=mlp_compute_input.lora_context,
             expanded_row_idx=mlp_compute_input.expanded_row_idx,
             topk_ids=mlp_compute_input.topk_ids,
         )
