@@ -303,7 +303,7 @@ Take the `text_vqa` dataset as an example, and run accuracy evaluation of `Qwen3
     ais_bench --models vllm_api_general_chat --datasets textvqa_gen_base64 --mode all --debug
     ```
 
-3. After execution, you can get the result, here is the result of `Qwen3-VL-8B-Instruct` in `vllm-ascend:0.23.0` for reference only.
+3. After execution, you can get the result, here is the result of `Qwen3-VL-8B-Instruct` in `vllm-ascend:0.23.0rc1` for reference only.
 
 | dataset  | metric   | mode | vllm-api-general-chat |
 | -------- | -------- | ---- | --------------------- |
