@@ -271,6 +271,12 @@ class KVCacheSendingThread(threading.Thread):
         self.port_send_num: dict[str, int] = {}
 
         self.task_tracker = KVCacheTaskTracker()
+        self._stop_event = threading.Event()
+
+    def stop(self) -> None:
+        """[snapshot] Signal the send loop to exit so the ROUTER socket can be
+        unbound and rebound on a new pod IP after a container snapshot restore."""
+        self._stop_event.set()
 
     def get_and_clear_finished_requests(self) -> set[str]:
         """
@@ -325,8 +331,14 @@ class KVCacheSendingThread(threading.Thread):
             logger.debug("Size of encoded MooncakeAgentMetadata: %s bytes", str(size_in_bytes))
 
         decoder = msgspec.msgpack.Decoder(type=tuple)
-        while True:
+        poller = zmq.Poller()  # type: ignore
+        poller.register(sock, zmq.POLLIN)  # type: ignore
+        while not self._stop_event.is_set():
             try:
+                # Poll with a timeout so the loop can observe stop() (needed to
+                # rebind the ROUTER on a new pod IP after snapshot restore).
+                if not dict(poller.poll(timeout=1000)).get(sock):
+                    continue
                 frames = sock.recv_multipart()
                 if len(frames) < 2:
                     logger.error(
@@ -1940,6 +1952,13 @@ class MooncakeConnectorWorker:
         # Handshake metadata of this worker
         self.xfer_handshake_metadata: MooncakeAgentMetadata | None = None
 
+        # [snapshot] cache the registered KV memory regions so they can be
+        # re-registered on a freshly rebuilt transfer engine after a container
+        # snapshot restore (PD-disaggregated, pod IP changed).
+        self._registered_regions = None
+        # [snapshot] engine device_name used at construction; preserved on rebuild.
+        self._engine_device_name = device_name
+
         # kv_transfer variables
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
@@ -2192,6 +2211,90 @@ class MooncakeConnectorWorker:
 
         return ptrs, lengths
 
+    def rebuild_kv_transfer_endpoint(self, local_ip: str) -> None:
+        """[snapshot] Rebind KV transfer endpoints on the new pod IP after resume.
+
+        Mirrors the MooncakeLayerwiseConnector rebuild: destroy the stale
+        TransferEngine (bound to the pre-snapshot pod IP), rebuild it on the new
+        IP, re-register the KV memory, and rebind the handshake socket.
+
+        The handshake ROUTER lives in the *producer* send thread, so the
+        producer restarts that thread with a metadata carrying the new
+        te_rpc_port; the consumer only re-points its recv thread at the rebuilt
+        engine (it connects out and binds nothing).
+        """
+
+        self.side_channel_host = local_ip
+
+        kv_cfg = self.vllm_config.kv_transfer_config
+        if kv_cfg is None or not (kv_cfg.is_kv_producer or kv_cfg.is_kv_consumer):
+            return
+
+        old_engine = getattr(self, "engine", None)
+
+        # A. Drop references to the old engine first so its destruction is not
+        #    held back by a thread still pointing at it.
+        self.engine = None
+        if self.kv_recv_thread is not None:
+            self.kv_recv_thread.engine = None
+
+        # B. Unregister all known regions on the old engine before destroying it.
+        if old_engine is not None and self._registered_regions is not None:
+            for ptr in dict.fromkeys(self._registered_regions.ptrs):
+                try:
+                    old_engine.unregister_memory(ptr)
+                except Exception as e:
+                    logger.warning("[snapshot][rebuild] unregister %s failed: %s", hex(ptr), e)
+
+        # C. Synchronously destroy the old engine (ref drop + gc.collect) so its
+        #    ADXL/RPC endpoint is finalized before a new one is created.
+        global_te.reset()
+        import gc
+        gc.collect()
+
+        # D. Create a fresh engine on the new IP and re-register KV memory.
+        self.engine = global_te.get_transfer_engine(local_ip, device_name=self._engine_device_name)
+        self.te_rpc_port = self.engine.get_rpc_port()
+        if self._registered_regions is not None:
+            global_te.register_buffer(self._registered_regions.ptrs, self._registered_regions.lengths)
+        else:
+            logger.warning("[snapshot][rebuild] no cached register regions; KV memory not re-registered")
+
+        # E. Producer: restart the send thread so its ROUTER rebinds on the new
+        #    IP and advertises the new te_rpc_port.
+        if kv_cfg.is_kv_producer and self.kv_send_thread is not None:
+            old_send = self.kv_send_thread
+            old_send.stop()
+            old_send.join(timeout=10)
+            if old_send.is_alive():
+                logger.warning("[snapshot][rebuild] old send thread did not stop within timeout")
+
+            metadata = self.xfer_handshake_metadata
+            if metadata is not None:
+                metadata.te_rpc_port = self.te_rpc_port
+                metadata.local_ip = local_ip
+            ready_event = threading.Event()
+            new_send = KVCacheSendingThread(
+                self.vllm_config,
+                self.tp_rank,
+                self._prefill_tp_size,
+                self.engine_id,
+                local_ip,
+                self.side_channel_port,
+                metadata,
+                ready_event,
+                self.kv_caches,
+                self.pcp_rank,
+            )
+            new_send.start()
+            ready_event.wait()
+            self.kv_send_thread = new_send
+
+        # F. Consumer: the recv thread connects out and binds nothing, so just
+        #    re-point it at the rebuilt engine.
+        if kv_cfg.is_kv_consumer and self.kv_recv_thread is not None:
+            self.kv_recv_thread.engine = self.engine
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data."""
         self.use_mla = self.vllm_config.model_config.is_deepseek_mla
@@ -2254,6 +2357,7 @@ class MooncakeConnectorWorker:
 
         validate_register_region_count(register_regions)
         global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+        self._registered_regions = register_regions
 
         logger.debug(
             "Mooncake register kv caches metadata: kv_group2layeridx=%s, kv_caches_base_addr=%s, "

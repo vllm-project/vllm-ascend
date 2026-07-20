@@ -958,8 +958,7 @@ class NPUWorker(WorkerBase):
         kv_cfg = self.vllm_config.kv_transfer_config
         if kv_cfg is None:
             return
-        connector_name = getattr(kv_cfg, "kv_connector", "") or ""
-        if "Hybrid" in connector_name or not (
+        if not (
             getattr(kv_cfg, "is_kv_producer", False) or getattr(kv_cfg, "is_kv_consumer", False)
         ):
             return
