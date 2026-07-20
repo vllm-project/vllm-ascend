@@ -202,6 +202,7 @@ jobs:
     name: docker-local-build-on-${{ matrix.runner }}
     runs-on: ${{ matrix.runner }}
     needs: validate-docker-meta-and-buildx
+    if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix:
