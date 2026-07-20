@@ -209,10 +209,6 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         super().__init__(moe_config)
         self.quant_method = scheme
         self.tid2eid = tid2eid
-        self.lora_context = None
-
-    def set_lora_context(self, lora_context) -> None:
-        self.lora_context = lora_context
 
     @property
     def is_monolithic(self) -> bool:
