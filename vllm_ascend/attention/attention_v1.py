@@ -1143,26 +1143,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
             graph_params = get_graph_params()
         num_tokens = query.shape[0]
         if _EXTRA_CTX.capturing:
-            # KV sources for the PA workspace.  General A2/A3 PA decode uses
-            # the layer's own cache.  (The A2/A3 Gemma4 MTP cross-model KV
-            # swap + per-query verify expand previously routed through
-            # kv_sharing.resolve_capture_kv; removed for the A5-focused PR.)
-            key_cache = self.key_cache
-            value_cache = self.value_cache
-            block_table = attn_metadata.block_tables
-            context_lens = attn_metadata.seq_lens
             # Get workspace from cache or calculate it if not present.
             workspace = graph_params.workspaces.get(num_tokens)
             if workspace is None:
                 workspace = torch_npu._npu_paged_attention_get_workspace(
                     query=query,
-                    key_cache=key_cache,
-                    value_cache=value_cache,
+                    key_cache=self.key_cache,
+                    value_cache=self.value_cache,
                     num_kv_heads=self.num_kv_heads,
                     num_heads=self.num_heads,
                     scale_value=self.scale,
-                    block_table=block_table,
-                    context_lens=context_lens,
+                    block_table=attn_metadata.block_tables,
+                    context_lens=attn_metadata.seq_lens,
                     out=output,
                 )
                 update_graph_params_workspaces(num_tokens, workspace)
@@ -1178,13 +1170,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 PagedAttentionGraphParam(
                     (
                         weak_ref_tensors(query),
-                        weak_ref_tensors(key_cache),
-                        weak_ref_tensors(value_cache),
+                        weak_ref_tensors(self.key_cache),
+                        weak_ref_tensors(self.value_cache),
                         self.num_kv_heads,
                         self.num_heads,
                         self.scale,
-                        block_table,
-                        context_lens,
+                        attn_metadata.block_tables,
+                        attn_metadata.seq_lens,
                         weak_ref_tensors(output),
                     ),
                     self._graph_metadata_layer_name() if self._use_layer_aware_fia_graph_replay else None,
@@ -1194,13 +1186,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
             torch.npu.graph_task_group_begin(stream)
             torch_npu._npu_paged_attention(
                 query=query,
-                key_cache=key_cache,
-                value_cache=value_cache,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
                 num_kv_heads=self.num_kv_heads,
                 num_heads=self.num_heads,
                 scale_value=self.scale,
-                block_table=block_table,
-                context_lens=context_lens,
+                block_table=attn_metadata.block_tables,
+                context_lens=attn_metadata.seq_lens,
                 out=output,
                 workspace=workspace,
             )
@@ -1405,8 +1397,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ) -> torch.Tensor:
         if _EXTRA_CTX.capturing:
             return self.full_graph_pa(query, attn_metadata, output)
-        block_table = attn_metadata.block_tables
-        context_lens = attn_metadata.seq_lens
         torch_npu._npu_paged_attention(
             query=query,
             key_cache=self.key_cache,
@@ -1414,8 +1404,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_kv_heads=self.num_kv_heads,
             num_heads=self.num_heads,
             scale_value=self.scale,
-            block_table=block_table,
-            context_lens=context_lens,
+            block_table=attn_metadata.block_tables,
+            context_lens=attn_metadata.seq_lens,
             out=output,
         )
         return output
