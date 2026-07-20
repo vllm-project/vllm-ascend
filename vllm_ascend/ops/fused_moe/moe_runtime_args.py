@@ -146,8 +146,6 @@ def build_fused_experts_input(
     w1_offset: torch.Tensor | None = None,
     w2_offset: torch.Tensor | None = None,
     swiglu_limit: float | None = 0.0,
-    lora_context=None,
-    split_lora_indices: torch.Tensor | None = None,
 ) -> MoEFusedExpertsInput:
     if swiglu_limit is None:
         swiglu_limit = 0.0
@@ -194,8 +192,6 @@ def build_fused_experts_input(
             is_per_channel_weight=is_per_channel_weight,
         ),
         swiglu_limit=swiglu_limit,
-        lora_context=lora_context,
-        split_lora_indices=split_lora_indices,
     )
 
 
@@ -210,7 +206,6 @@ def build_token_dispatch_input(
         topk_ids=fused_experts_input.topk_ids if topk_ids is None else topk_ids,
         routing=fused_experts_input.routing,
         quant=fused_experts_input.quant,
-        split_lora_indices=fused_experts_input.split_lora_indices,
     )
 
 
@@ -224,8 +219,6 @@ def build_mlp_compute_input(
         raise ValueError("fused_experts_input.quant.mxfp is required for MXFP quant types.")
 
     expanded_row_idx = getattr(token_dispatch_output.combine_metadata, "expanded_row_idx", None)
-    exchanged_lora_indices = getattr(token_dispatch_output.combine_metadata, "exchanged_lora_indices", None)
-
     return MoEMlpComputeInput(
         hidden_states=token_dispatch_output.hidden_states,
         group_list=token_dispatch_output.group_list,
@@ -250,8 +243,6 @@ def build_mlp_compute_input(
         swiglu_limit=fused_experts_input.swiglu_limit,
         expanded_row_idx=expanded_row_idx,
         topk_ids=fused_experts_input.topk_ids,
-        lora_context=fused_experts_input.lora_context,
-        exchanged_lora_indices=exchanged_lora_indices,
     )
 
 
