@@ -667,7 +667,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 
-        vllm serve /mnt/weight/GLM-5.2-W4A8C8-0713-MTP \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \ 
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -678,7 +678,7 @@ Before you start, please
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens":1, "method":"deepseek_mtp","enforce_eager":true}' \
             --seed 1024 \
-            --served-model-name glm-5 \
+            --served-model-name glm-52 \
             --max-model-len 133120 \
             --additional-config '{"recompute_scheduler_enable": false, "enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "c8_enable_reshape_optim": true}' \
             --max-num-batched-tokens 8192 \
@@ -736,7 +736,7 @@ Before you start, please
 
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-        vllm serve /mnt/weight/GLM-5.2-W4A8C8-0713-MTP \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -747,7 +747,7 @@ Before you start, please
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens":1, "method":"deepseek_mtp","enforce_eager":true}' \
             --seed 1024 \
-            --served-model-name glm-5 \
+            --served-model-name glm-52 \
             --max-model-len 133120 \
             --additional-config '{"recompute_scheduler_enable": false, "enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "c8_enable_reshape_optim": true}' \
             --max-num-batched-tokens 8192 \
@@ -803,7 +803,7 @@ Before you start, please
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-        vllm serve /mnt/weight/GLM-5.2-W4A8C8-0713-MTP \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -813,7 +813,7 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --seed 1024 \
-            --served-model-name glm-5 \
+            --served-model-name glm-52 \
             --max-model-len 133120 \
             --max-num-batched-tokens 164 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
@@ -871,7 +871,7 @@ Before you start, please
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-        vllm serve /mnt/weight/GLM-5.2-W4A8C8-0713-MTP \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -881,7 +881,7 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --seed 1024 \
-            --served-model-name glm-5 \
+            --served-model-name glm-52 \
             --max-model-len 133120 \
             --max-num-batched-tokens 164 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
