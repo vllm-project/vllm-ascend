@@ -50,57 +50,93 @@ CRITICAL RULES — violations will cause the translation to be rejected:
 --- OUTPUT FORMAT ---
 1. Return ONLY the same list of msgid/msgstr pairs with msgstr filled in.
    No markdown code fences (```), no explanations, no summaries, no greetings.
-2. Every msgid from the input MUST appear exactly once in the output with its
-   corresponding msgstr filled in. Do not drop, merge, split, or reorder entries.
-3. Keep msgid lines COMPLETELY UNCHANGED — never modify source text.
+2. The number of entries in your output MUST EQUAL the number in the input.
+   Count them: if you received N entries, you must return exactly N entries.
+   Do NOT drop, merge, split, reorder, or add entries under any circumstance.
+3. Keep msgid lines COMPLETELY UNCHANGED — copy them exactly as-is from input.
+   NEVER change `msgid ""` to anything else (not `msgstr ""`, not `msgid "..."`).
+   Multi-line entries start with `msgid ""` — that is NOT a typo, keep it.
 
---- WHAT TO PRESERVE ---
+--- WHAT TO PRESERVE (keep EXACTLY as in msgid) ---
 4. All format specifiers: %s, %d, %f, {{}}, {{{{}}}}, {{name}}, etc.
-5. All markdown syntax: **bold**, *italic*, `inline code`, ```code blocks```,
-   [links](urls), ![images](urls), # headings, - lists, 1. ordered lists,
-   > blockquotes, | tables, --- horizontal rules.
+5. All markdown syntax MUST be preserved exactly:
+   - Headings: "#", "##", "###", etc. at the start of a line
+   - Bold/italic: **bold**, *italic*
+   - Inline code: `code`
+   - Code blocks: ```code blocks```
+   - Links: [text](url), ![images](url)
+   - List markers: "- ", "* ", "1. ", "2. " at the start of each list item
+   - Blockquotes: "> "
+   - Tables: | columns |, separator rows (|:---:|)
+   - Horizontal rules: ---
 6. HTML tags and attributes: <div>, <a href>, <img>, etc.
 7. Environment variables, file paths, command names, code identifiers.
 8. Proper nouns: person names, contributor names, author names, company names,
    product names (vLLM, Ascend, CANN, Huawei, etc.).
 
+--- CONTENT THAT SHOULD NOT BE TRANSLATED ---
+9. DO NOT translate contributor names, GitHub usernames, or dates.
+   These should be copied verbatim from msgid to msgstr.
+   Example: "Xiyuan Wang [@wangxiyuan] 2025-01-15" → keep as-is.
+
+10. DO NOT translate table headers or table separator rows that are purely
+    structural. Copy them verbatim.
+    Example: "| Name | GitHub ID | Date |" → keep as-is.
+    Example: "|:-----------:|:-----:|:-----:|" → keep as-is.
+
+11. DO NOT translate code identifiers, variable names, CLI flags, or shell
+    commands. Copy them verbatim.
+    Example: "--data-parallel-size" → keep as-is.
+    Example: "vllm serve /path/to/model" → keep as-is.
+
+12. DO NOT translate URLs, email addresses, or paths.
+    Copy them verbatim from msgid to msgstr.
+
 --- MkDocs MATERIAL EXTENSIONS ---
-These are special MkDocs syntax elements. Keep the KEYWORDS and STRUCTURE
-exactly as-is; only translate the human-readable TEXT parts.
+13. ADMONITIONS (!!! type): Keep "!!!" and type keyword (note, warning, tip)
+    in English. Only translate the title text after type.
+    Example: msgid "!!! note" → msgstr "!!! note"
+    Example: msgid "!!! note \"Important\"" → msgstr "!!! note \"重要\""
 
-9. ADMONITIONS: Lines starting with "!!! type" or "!!! type \"title\"".
-   The type keyword (note, warning, tip, danger, etc.) and the "!!!" marker
-   MUST stay in English.
-   Examples:
-     msgid "!!! note"               → msgstr "!!! note"  (no translatable text)
-     msgid "!!! warning"            → msgstr "!!! warning"
-     msgid "!!! note \"Important\""  → msgstr "!!! note \"重要\""
+14. COLLAPSIBLE BLOCKS (???): Keep "???" and quote syntax. Translate only
+    the title text inside quotes.
+    Example: msgid "??? \"Click here...\"" → msgstr "??? \"点击这里...\""
 
-10. COLLAPSIBLE BLOCKS: Lines starting with "??? \"title\"".
-    Keep "???" and the quote syntax; translate only the title text inside quotes.
-    Example:
-      msgid "??? \"Click here to see 'Build from Dockerfile'\""  → msgstr "??? \"点击这里查看'从Dockerfile构建'\""
-
-11. CONTENT TABS: Lines starting with "=== \"label\"".
-    Keep "===" and the quote syntax; translate only the label text.
-    Example:
-      msgid "=== \"Before using pip\""  → msgstr "=== \"使用pip之前\""
+15. CONTENT TABS (===): Keep "===" and quote syntax. Translate only the label.
+    Example: msgid "=== \"Before using pip\"" → msgstr "=== \"使用pip之前\""
 
 --- TRANSLATION QUALITY ---
-12. Use natural, fluent Chinese technical documentation style. Avoid word-by-word
-    literal translation. Restructure long English sentences into natural Chinese
-    sentence flow.
-13. Use standard Chinese technical terminology consistently.
-14. For markdown links [text](url): translate the display text in [] but keep the
-    URL in () exactly as-is. Example: [Quick Start](quick_start.md) → [快速开始](quick_start.md)
-15. For headings (# Title): translate the heading text.
-16. DO NOT add "#, fuzzy" markers.
-17. If a msgid is purely structural (symbols, code, file paths only), copy it
-    verbatim to msgstr — do not attempt to translate.
-18. Never invent or guess content. If genuinely unsure about a term, leave it in
-    English rather than creating a wrong translation.
+16. Use natural, fluent Chinese technical documentation style. Avoid word-by-word
+    literal translation.
+17. Use standard Chinese technical terminology consistently.
+18. For markdown links [text](url): translate the display text in [] but keep
+    the URL in () exactly as-is.
+    Example: [Quick Start](quick_start.md) → [快速开始](quick_start.md)
+19. For headings: translate the heading text but KEEP the "#" / "##" / "###"
+    prefix exactly as in the msgid.
+    Example: msgid "# Quick Start" → msgstr "# 快速开始"
+    Example: msgid "## Overview" → msgstr "## 概述"
+20. DO NOT add "#, fuzzy" markers.
+21. If a msgid is purely structural (symbols, code, file paths only), copy it
+    verbatim to msgstr.
+22. Never invent or guess content. If unsure about a term, leave it in English.
 
 {content}"""
+
+
+def _normalize_msgid(text: str) -> str:
+    """Normalize a msgid for fuzzy comparison.
+
+    Strips trailing whitespace from each line, removes trailing blank lines,
+    and collapses trailing spaces within each line.  This handles common
+    API-induced differences like trailing spaces or extra blank lines, while
+    preserving the line structure needed for correct matching.
+    """
+    lines = [line.rstrip() for line in text.split("\n")]
+    # Remove trailing empty lines.
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(lines)
 
 
 class POTranslator:
@@ -123,7 +159,10 @@ class POTranslator:
             temperature=0.3,
         )
         text = response.choices[0].message.content
-        return self._clean_response(text) if text else None
+        if not text:
+            return None
+        cleaned = self._clean_response(text)
+        return cleaned if cleaned else None  # empty means retry needed
 
     async def translate_file(self, po_path: str) -> bool:
         path = Path(po_path)
@@ -155,24 +194,60 @@ class POTranslator:
                 translated_chunks = await self._translate_chunks(chunks)
                 if translated_chunks is None:
                     shutil.copy2(backup, po_path)
-                    print("FAILED")
+                    print("FAILED (all chunks)")
                     return False
-                translated_snippet = "\n\n".join(translated_chunks)
+                # Filter out failed chunks (None values).
+                successful = [c for c in translated_chunks if c is not None]
+                if not successful:
+                    shutil.copy2(backup, po_path)
+                    print("FAILED (no successful chunks)")
+                    return False
+                if len(successful) < len(chunks):
+                    print(
+                        f"({len(successful)}/{len(chunks)} chunks succeeded)",
+                        end=" ",
+                        flush=True,
+                    )
+                # Merge each chunk individually — one malformed chunk
+                # won't block the rest.
+                total_merged = 0
+                for chunk_result in successful:
+                    try:
+                        chunk_po = pofile(chunk_result)
+                    except Exception:
+                        continue
+                    chunk_map: dict[str, str] = {}
+                    for entry in chunk_po:
+                        if entry.msgid and entry.msgstr:
+                            chunk_map[entry.msgid] = entry.msgstr
+                    for entry in untranslated:
+                        if entry.msgid in chunk_map:
+                            entry.msgstr = chunk_map[entry.msgid]
+                            total_merged += 1
+                        else:
+                            matched = POTranslator._fuzzy_match(entry.msgid, chunk_map)
+                            if matched is not None:
+                                entry.msgstr = chunk_map[matched]
+                                total_merged += 1
+                merged = total_merged
             else:
                 translated_snippet = await self._call_api(snippet)
                 if translated_snippet is None:
                     shutil.copy2(backup, po_path)
                     print("FAILED")
                     return False
+                merged = self._merge_translations(po, untranslated, translated_snippet)
 
-            # Parse the translated snippet and merge back.
-            if not self._merge_translations(po, untranslated, translated_snippet):
+            if merged == 0:
                 shutil.copy2(backup, po_path)
                 print("FAILED (merge)")
                 return False
 
             po.save(str(path))
-            print("OK")
+            if merged < len(untranslated):
+                print(f"OK ({merged}/{len(untranslated)} merged)")
+            else:
+                print("OK")
             return True
         except Exception as e:
             print(f"ERROR: {e}")
@@ -183,7 +258,13 @@ class POTranslator:
 
     @staticmethod
     def _build_snippet(entries: list[POEntry]) -> str:
-        """Build a minimal PO content string containing only *entries*."""
+        """Build a minimal PO content string containing only *entries*.
+
+        Multi-line msgid values are collapsed into single-line format with
+        literal ``\\n`` escapes so that the API does not try to "translate"
+        the msgid continuation-line structure itself (which would corrupt the
+        PO format and make round-trip parsing impossible).
+        """
         parts = []
         for entry in entries:
             lines = entry.msgid.split("\n")
@@ -191,15 +272,12 @@ class POTranslator:
                 escaped = entry.msgid.replace("\\", "\\\\").replace('"', '\\"')
                 parts.append(f'msgid "{escaped}"\nmsgstr ""')
             else:
-                block = ['msgid ""']
-                for i, line in enumerate(lines):
-                    escaped = line.replace("\\", "\\\\").replace('"', '\\"')
-                    if i < len(lines) - 1:
-                        block.append(f'"{escaped}\\n"')
-                    else:
-                        block.append(f'"{escaped}"')
-                block.append('msgstr ""')
-                parts.append("\n".join(block))
+                # Collapse multi-line msgid into a single line with
+                # literal \n escapes so the API treats it as one unit.
+                collapsed = entry.msgid.replace("\\", "\\\\").replace('"', '\\"')
+                # Replace actual newlines with literal \n in the string.
+                collapsed = collapsed.replace("\n", "\\n")
+                parts.append(f'msgid "{collapsed}"\nmsgstr ""')
         return "\n\n".join(parts) + "\n"
 
     @staticmethod
@@ -225,53 +303,126 @@ class POTranslator:
         return chunks if len(chunks) > 1 else [snippet]
 
     async def _translate_chunks(self, chunks: list[str]) -> list[str] | None:
+        """Translate *chunks* concurrently with per-chunk retries.
+
+        Returns a list of translated strings (same length as *chunks*), with
+        ``None`` for chunks that failed after all retries.  Returns ``None``
+        only if *every* chunk failed.
+        """
         total = len(chunks)
         sem = asyncio.Semaphore(self.max_concurrent)
 
-        async def do_chunk(idx: int) -> tuple[int, str | None, str | None]:
+        async def do_chunk(idx: int) -> tuple[int, str | None]:
             async with sem:
                 info = f"chunk {idx + 1}/{total}"
-                try:
-                    result = await self._call_api(chunks[idx], chunk_info=info)
-                    if result is None:
-                        return (idx, None, "empty response")
-                    return (idx, result, None)
-                except Exception as e:
-                    return (idx, None, str(e)[:50])
+                for attempt in range(3):
+                    try:
+                        result = await self._call_api(chunks[idx], chunk_info=info)
+                        if result is not None:
+                            return (idx, result)
+                    except Exception:
+                        if attempt < 2:
+                            await asyncio.sleep(2)
+                            continue
+                    if attempt < 2:
+                        await asyncio.sleep(2)
+                print(f"\n    Chunk {idx + 1} failed after 3 attempts", flush=True)
+                return (idx, None)
 
         print(f"({total} chunks, {self.max_concurrent} parallel)", end=" ", flush=True)
         results = await asyncio.gather(*[do_chunk(i) for i in range(total)])
 
         translated: list[str | None] = [None] * total
-        for idx, chunk_text, error in results:
-            if error:
-                print(f"\n    Chunk {idx + 1} failed: {error}")
-                return None
-            translated[idx] = chunk_text.strip("\n")
+        failed = 0
+        for idx, chunk_text in results:
+            if chunk_text is not None:
+                translated[idx] = chunk_text.strip("\n")
+            else:
+                failed += 1
 
+        if failed == total:
+            return None  # every chunk failed
         return translated
 
     @staticmethod
-    def _merge_translations(po, untranslated: list[POEntry], translated_snippet: str) -> bool:
-        """Parse translated snippet and merge msgstr values back into *po*."""
+    def _merge_translations(po, untranslated: list[POEntry], translated_snippet: str) -> int:
+        """Parse translated snippet and merge msgstr values back into *po*.
+
+        Returns the number of entries that were successfully merged.
+        If zero entries could be merged, the translation is considered failed.
+        """
         try:
             translated_po = pofile(translated_snippet)
-        except Exception:
-            return False
+        except Exception as e:
+            print(f"\n    Parse error in translated snippet: {e}")
+            # Print the first and last 200 chars to help debug.
+            preview = translated_snippet[:200] + " ... " + translated_snippet[-200:]
+            print(f"    Snippet preview: {preview}")
+            return 0
 
         translated_map: dict[str, str] = {}
         for entry in translated_po:
             if entry.msgid and entry.msgstr:
                 translated_map[entry.msgid] = entry.msgstr
 
+        merged = 0
         for entry in untranslated:
             if entry.msgid in translated_map:
                 entry.msgstr = translated_map[entry.msgid]
+                merged += 1
             else:
-                print(f"\n    Missing translation for: {entry.msgid[:60]}...")
-                return False
+                # Exact match failed — try fuzzy matching.
+                matched = POTranslator._fuzzy_match(entry.msgid, translated_map)
+                if matched is not None:
+                    entry.msgstr = translated_map[matched]
+                    merged += 1
+                    print(f"\n    Fuzzy-matched: {entry.msgid[:60]}...")
+                else:
+                    # If there's only one untranslated entry and all
+                    # exact/fuzzy matches failed, try best-effort: check
+                    # if the API returned a single entry whose msgid looks
+                    # like a translation (different from the original
+                    # msgid but with a non-empty msgid).  The API likely
+                    # "translated" the msgid itself.
+                    if len(untranslated) == 1:
+                        if translated_map:
+                            first_key = next(iter(translated_map))
+                            entry.msgstr = translated_map[first_key]
+                            merged += 1
+                            print(f"\n    Best-effort match (only entry): {entry.msgid[:60]}...")
+                        else:
+                            # translated_map is empty because all entries
+                            # have empty msgstr.  Check if parsed entries
+                            # have a non-empty msgid (API put translation
+                            # into msgid) and take that as msgstr.
+                            for pe in translated_po:
+                                if pe.msgid and not pe.msgstr:
+                                    entry.msgstr = pe.msgid
+                                    merged += 1
+                                    print(
+                                        f"\n    Best-effort (API returned translation as msgid): {entry.msgid[:60]}..."
+                                    )
+                                    break
+                            if not merged:
+                                print(f"\n    Missing translation for: {entry.msgid[:60]}...")
+                    else:
+                        print(f"\n    Missing translation for: {entry.msgid[:60]}...")
 
-        return True
+        return merged
+
+    @staticmethod
+    def _fuzzy_match(msgid: str, translated_map: dict[str, str]) -> str | None:
+        """Try to find *msgid* in *translated_map* using normalized comparison.
+
+        Normalizes both sides by collapsing whitespace and stripping trailing
+        newlines, then returns the key from *translated_map* that matches, or
+        None.
+        """
+        norm_orig = _normalize_msgid(msgid)
+        for key in translated_map:
+            if _normalize_msgid(key) == norm_orig:
+                return key
+        return None
 
     @staticmethod
     def _clean_response(response: str) -> str:
@@ -282,14 +433,28 @@ class POTranslator:
             while lines and lines[-1].strip() == "```":
                 lines.pop()
             response = "\n".join(lines).strip()
+
+        # Fix API returning ``msgstr "..."`` instead of ``msgid "..."``
+        # for single-line entries.
+        if 'msgid "' not in response and 'msgstr "' in response:
+            response = response.replace('msgstr "', 'msgid "', 1)
+
+        # Detect when API returns plain translated text instead of PO
+        # format (e.g. a bare list of "- ..." lines).  Return an empty
+        # string so the caller retries with smaller chunks.
+        if 'msgid "' not in response and 'msgstr "' not in response:
+            return ""
+
         return response
 
 
-def validate_coverage(files_arg: str) -> int:
+def validate_coverage(files_arg: str, ignore_error: bool = False) -> int:
     """Check that every msgstr in the given PO files is non-empty.
 
     Prints a per-file summary and returns 0 when all files pass,
-    1 when any file has untranslated entries.
+    1 when any file has untranslated entries (unless *ignore_error* is True,
+    in which case untranslated entries only produce warnings and the exit
+    code is always 0).
     """
     file_list = [f.strip() for f in files_arg.split(",") if f.strip()]
     total_entries = 0
@@ -314,7 +479,8 @@ def validate_coverage(files_arg: str) -> int:
         untranslated += len(empty)
 
         if empty:
-            print(f"  FAIL: {path.name} — {len(empty)}/{file_entries} untranslated")
+            label = "WARN" if ignore_error else "FAIL"
+            print(f"  {label}: {path.name} — {len(empty)}/{file_entries} untranslated")
             for e in empty[:5]:
                 preview = e.msgid[:80].replace("\n", "\\n")
                 print(f'         msgid="{preview}..."')
@@ -328,6 +494,10 @@ def validate_coverage(files_arg: str) -> int:
         f"\nCoverage: {total_entries - untranslated}/{total_entries} translated "
         f"({untranslated} missing) in {len(file_list)} file(s)"
     )
+    if ignore_error:
+        if failed_files:
+            print("Validation errors ignored (--ignore-validation-error).")
+        return 0
     return 1 if failed_files else 0
 
 
@@ -342,10 +512,16 @@ async def async_main():
         action="store_true",
         help="Only validate translation coverage, do not translate",
     )
+    parser.add_argument(
+        "--ignore-validation-error",
+        action="store_true",
+        help="When used with --validate-only, print warnings instead of failing on untranslated entries. "
+        "When used without --validate-only, translation failures do not cause a non-zero exit code.",
+    )
     args = parser.parse_args()
 
     if args.validate_only:
-        return validate_coverage(args.files)
+        return validate_coverage(args.files, ignore_error=args.ignore_validation_error)
 
     api_key = args.api_key or os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
@@ -373,6 +549,10 @@ async def async_main():
     out.write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
 
     print(f"\nResult: {len(success_files)}/{len(file_list)} translated -> {args.output_json}")
+    if args.ignore_validation_error:
+        if len(success_files) < len(file_list):
+            print("Translation errors ignored (--ignore-validation-error), continuing with successful files.")
+        return 0
     return 0 if success_files else 1
 
 

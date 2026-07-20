@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import torch
-from vllm.config import CacheConfig, CUDAGraphMode, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig
 
 from tests.ut.base import TestBase
 
@@ -526,16 +526,14 @@ class TestNPUWorker(TestBase):
             worker.compilation_config = MagicMock()
             worker.compilation_config.cudagraph_mode = MagicMock()
             mock_model_runner = MagicMock()
-            mock_decode_token_per_req = mock_model_runner.decode_token_per_req
+            mock_uniform_decode_query_len = mock_model_runner.uniform_decode_query_len
             worker.model_runner = mock_model_runner
 
             # Test execute_dummy_batch
             worker.execute_dummy_batch()
 
             # Verify call
-            mock_model_runner._dummy_run.assert_called_once_with(
-                num_tokens=mock_decode_token_per_req, uniform_decode=True
-            )
+            mock_model_runner._dummy_run.assert_called_once_with(mock_uniform_decode_query_len, uniform_decode=True)
 
     @patch("vllm_ascend.worker.worker.memory_profiling")
     @patch("torch.npu.reset_peak_memory_stats")
@@ -582,8 +580,6 @@ class TestNPUWorker(TestBase):
             worker.requested_memory = 10000 * 0.8
             worker.model_runner = MagicMock()
             worker.model_runner.model_memory_usage = 500
-            worker.vllm_config = MagicMock()
-            worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.8
             worker.cache_config.kv_cache_memory_bytes = None
@@ -645,8 +641,6 @@ class TestNPUWorker(TestBase):
             worker.requested_memory = 10000 * 0.9
             worker.model_runner = MagicMock()
             worker.model_runner.model_memory_usage = 500
-            worker.vllm_config = MagicMock()
-            worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.9
             worker.cache_config.kv_cache_memory_bytes = None
@@ -665,14 +659,8 @@ class TestNPUWorker(TestBase):
     @patch("torch.npu.mem_get_info")
     @patch("torch.npu.reset_peak_memory_stats")
     @patch("torch.npu.empty_cache")
-    @patch("torch_npu.npu.memory_stats")
     def test_determine_available_memory_memory_profiling_error(
-        self,
-        mock_torch_memory_stats,
-        mock_torch_empty_cache,
-        mock_torch_reset_peak_memory_stats,
-        mock_torch_mem_get_info,
-        mock_memory_profiling,
+        self, mock_torch_empty_cache, mock_torch_reset_peak_memory_stats, mock_torch_mem_get_info, mock_memory_profiling
     ):
         """Test determine_available_memory throws exception on memory profiling error"""
         from vllm_ascend.worker.worker import NPUWorker
@@ -701,15 +689,10 @@ class TestNPUWorker(TestBase):
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.8
             worker.model_runner = MagicMock()
-            worker.model_runner.model_memory_usage = 0
-            worker.vllm_config = MagicMock()
-            worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.8
             worker.cache_config.kv_cache_memory_bytes = None
             worker.device = torch.device("npu:0")
-
-            mock_torch_memory_stats.return_value = {"allocated_bytes.all.peak": 0}
 
             # Test should throw assertion error
             with self.assertRaises(AssertionError) as cm:
@@ -760,8 +743,6 @@ class TestNPUWorker(TestBase):
             worker.requested_memory = 10000 * 0.8
             worker.model_runner = MagicMock()
             worker.model_runner.model_memory_usage = 500
-            worker.vllm_config = MagicMock()
-            worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.8
             worker.cache_config.kv_cache_memory_bytes = None

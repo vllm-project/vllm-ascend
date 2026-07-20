@@ -58,7 +58,6 @@
 /vllm_ascend/batch_invariant.py @wangxiyuan
 /vllm_ascend/cpu_binding.py @wangxiyuan
 /vllm_ascend/envs.py @wangxiyuan
-/vllm_ascend/flash_common3_context.py @wangxiyuan
 /vllm_ascend/meta_registration.py @wangxiyuan
 /vllm_ascend/platform.py @wangxiyuan
 /vllm_ascend/profiling_config.py @wangxiyuan

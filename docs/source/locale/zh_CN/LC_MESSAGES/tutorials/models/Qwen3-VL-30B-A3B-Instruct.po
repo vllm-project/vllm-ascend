@@ -19,241 +19,556 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:1
-msgid "Qwen3-VL-30B-A3B-Instruct"
-msgstr "Qwen3-VL-30B-A3B-Instruct"
+msgid "# Qwen3-VL-30B-A3B-Instruct"
+msgstr "# Qwen3-VL-30B-A3B-Instruct"
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:3
-msgid "Introduction"
-msgstr "简介"
+msgid "## 1 Introduction"
+msgstr "## 1 引言"
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:5
 msgid ""
-"The Qwen-VL (Vision-Language) series from Alibaba Cloud comprises a family "
-"of powerful Large Vision-Language Models (LVLMs) designed for comprehensive "
-"multimodal understanding. They accept images, text, and bounding boxes as "
-"input, and output text and detection boxes, enabling advanced functions like"
-" image detection, multi-modal dialogue, and multi-image reasoning."
+"Qwen3-VL-30B-A3B-Instruct is a sparse MoE vision-language model in the "
+"Qwen3-VL family, with about 30B total parameters and about 3B activated "
+"parameters per token. It is suitable for image understanding, video "
+"understanding, multimodal dialogue, and long-context online serving on "
+"Ascend hardware."
 msgstr ""
-"阿里云的通义千问视觉语言（Qwen-"
-"VL）系列包含一系列强大的大型视觉语言模型（LVLM），专为全面的多模态理解而设计。它们接受图像、文本和边界框作为输入，输出文本和检测框，支持图像检测、多模态对话和多图像推理等高级功能。"
+"Qwen3-VL-30B-A3B-Instruct 是 Qwen3-VL 系列中的稀疏 MoE 视觉语言模型，总参数量约 300 亿，每个 token "
+"激活约 30 亿参数。该模型适用于在 Ascend 硬件上进行图像理解、视频理解、多模态对话以及长上下文在线服务。"
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:7
 msgid ""
-"This document will show the main verification steps of the "
-"`Qwen3-VL-30B-A3B-Instruct`."
-msgstr "本文档将展示 `Qwen3-VL-30B-A3B-Instruct` 的主要验证步骤。"
+"This document describes the main validation steps for the model, including "
+"supported features, prerequisites, installation, image and video online "
+"deployment, offline inference, functional verification, accuracy and "
+"performance evaluation, performance tuning, and FAQs."
+msgstr ""
+"本文档描述了该模型的主要验证步骤，包括支持的特性、前提条件、安装、图像和视频在线部署、离线推理、功能验证、精度与性能评估、性能调优以及常见问题解答。"
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:9
-msgid "Supported Features"
-msgstr "支持的特性"
-
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:11
 msgid ""
-"Refer to [supported "
-"features](../../user_guide/support_matrix/supported_models.md) to get the "
+"The `Qwen3-VL-30B-A3B-Instruct` tutorial was introduced for the `vllm-"
+"ascend` `v0.13.0` validation cycle. Use `v0.13.0` or later for this model. "
+"The examples below use the version placeholder configured by the "
+"documentation build system."
+msgstr ""
+"`Qwen3-VL-30B-A3B-Instruct` 教程是为 `vllm-ascend` `v0.13.0` 验证周期引入的。请使用 "
+"`v0.13.0` 或更高版本来运行此模型。以下示例使用了文档构建系统配置的版本占位符。"
+
+msgid "## 2 Supported Features"
+msgstr "## 2 支持的特性"
+
+msgid ""
+"Refer to [Supported Features "
+"List](../../user_guide/support_matrix/supported_models.md) to get the "
 "model's supported feature matrix."
 msgstr ""
-"请参阅[支持的特性矩阵](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性列表。"
+"请参考[支持的特性列表](../../user_guide/support_matrix/supported_models.md)获取该模型支持的特性矩阵。"
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:12
 msgid ""
-"Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the"
+"Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the"
 " feature's configuration."
-msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
+msgstr "请参考[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:14
-msgid "Environment Preparation"
-msgstr "环境准备"
+msgid "## 3 Prerequisites"
+msgstr "## 3 前提条件"
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:16
-msgid "Prepare Model Weights"
-msgstr "准备模型权重"
-
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:18
-msgid ""
-"Running this model requires 1 Atlas 800I A2 (64G × 8) node or 1 Atlas 800 A3"
-" (64G × 16) node."
-msgstr "运行此模型需要 1 个 Atlas 800I A2（64G × 8）节点或 1 个 Atlas 800 A3（64G × 16）节点。"
-
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:20
-msgid ""
-"Download model weight at [ModelScope "
-"Website](https://modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Instruct) or "
-"download by below command:"
-msgstr ""
-"在 [ModelScope "
-"网站](https://modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Instruct) "
-"下载模型权重，或使用以下命令下载："
-
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:27
-msgid ""
-"It is recommended to download the model weights to the shared directory of "
-"multiple nodes, such as `/root/.cache/`."
-msgstr "建议将模型权重下载到多节点共享目录，例如 `/root/.cache/`。"
-
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:29
-msgid "Installation"
-msgstr "安装"
-
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:31
-msgid "Run docker container:"
-msgstr "运行 Docker 容器："
-
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:58
-msgid "Setup environment variables:"
-msgstr "设置环境变量："
-
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:69
-msgid ""
-"`max_split_size_mb` prevents the native allocator from splitting blocks "
-"larger than this size (in MB). This can reduce fragmentation and may allow "
-"some borderline workloads to complete without running out of memory. You can"
-" find more details "
-"[<u>here</u>](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/800alpha003/apiref/envref/envref_07_0061.html)."
-msgstr ""
-"`max_split_size_mb` 可防止原生分配器拆分大于此大小（以 MB "
-"为单位）的块。这可以减少碎片，并可能使一些边缘工作负载在不耗尽内存的情况下完成。更多详情请参见[此处](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/800alpha003/apiref/envref/envref_07_0061.html)。"
-
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:72
-msgid "Deployment"
-msgstr "部署"
-
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:74
-msgid "Online Serving"
-msgstr "在线服务"
-
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md
-msgid "Image Inputs"
-msgstr "图像输入"
-
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:83
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:146
-msgid ""
-"Run the following command inside the container to start the vLLM server on "
-"multi-NPU:"
-msgstr "在容器内运行以下命令在多 NPU 上启动 vLLM 服务器："
-
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:95
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:157
-msgid ""
-"vllm-ascend supports Expert Parallelism (EP) via `--enable-expert-parallel`,"
-" which allows experts in MoE models to be deployed on separate GPUs for "
-"better throughput."
-msgstr ""
-"vllm-ascend 通过 `--enable-expert-parallel` 支持专家并行（EP），允许将 MoE 模型中的专家部署到不同的 "
-"GPU 上以提高吞吐量。"
-
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:97
-msgid ""
-"It's highly recommended to specify `--limit-mm-per-prompt.video 0` if your "
-"inference server will only process image inputs since enabling video inputs "
-"consumes more memory reserved for long video embeddings."
-msgstr ""
-"如果推理服务器仅处理图像输入，强烈建议指定 `--limit-mm-per-prompt.video "
-"0`，因为启用视频输入会消耗更多预留用于长视频嵌入的内存。"
-
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:99
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:159
-msgid ""
-"You can set `--max-model-len` to preserve memory. By default the model's "
-"context length is 262K, but `--max-model-len 128000` is good for most "
-"scenarios."
-msgstr ""
-"可以设置 `--max-model-len` 来节省内存。默认情况下模型的上下文长度为 262K，但 `--max-model-len 128000` "
-"适用于大多数场景。"
-
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:102
-msgid "If your service starts successfully, you can see the info shown below:"
-msgstr "如果服务启动成功，您将看到如下所示的信息："
-
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:110
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:172
-msgid ""
-"Once your server is started, you can query the model with input prompts:"
-msgstr "服务器启动后，您可以使用输入提示词查询模型："
-
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:128
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:190
-msgid ""
-"If you query the server successfully, you can see the info shown below "
-"(client):"
-msgstr "如果查询服务器成功，您将看到如下所示的信息（客户端）："
-
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:134
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:196
-msgid "Logs of the vllm server:"
-msgstr "vLLM 服务器日志："
-
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md
-msgid "Video Inputs"
-msgstr "视频输入"
-
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:161
-msgid ""
-"Set `--allowed-local-media-path /media` to use your local video that located"
-" at `/media`, since directly download the video during serving can be "
-"extremely slow due to network issues."
-msgstr ""
-"设置 `--allowed-local-media-path /media` 以使用位于 `/media` "
-"的本地视频，因为由于网络问题，在服务期间直接下载视频可能极其缓慢。"
-
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:164
-msgid "If your service start successfully, you can see the info shown below:"
-msgstr "如果服务启动成功，您将看到如下所示的信息："
-
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:205
-msgid "Offline Inference"
-msgstr "离线推理"
-
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:207
-msgid ""
-"The usage of offline inference with `Qwen3-VL-30B-A3B-Instruct` is totally "
-"the same as that of `Qwen3-VL-8B-Instruct`, find more details at "
-"[Qwen3-VL-8B-Instruct](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Qwen-"
-"VL-Dense.html#offline-inference)."
-msgstr ""
-"`Qwen3-VL-30B-A3B-Instruct` 的离线推理用法与 `Qwen3-VL-8B-Instruct` 完全相同，更多详情请参见 "
-"[Qwen3-VL-8B-Instruct](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Qwen-"
-"VL-Dense.html#offline-inference)。"
-
-msgid "# Qwen3-VL-30B-A3B-Instruct"
-msgstr ""
-
-msgid "## Introduction"
-msgstr ""
-
-msgid "## Supported Features"
-msgstr ""
+msgid "### 3.1 Model Weight"
+msgstr "### 3.1 模型权重"
 
 msgid ""
-"- Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.\n"
-"- Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration."
+"- `Qwen3-VL-30B-A3B-Instruct` (BF16 version): requires 1 Atlas 800 A3 (64G x"
+" 16) node or 1 Atlas 800 A2 (64G x 8) node. [Model "
+"Weight](https://modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Instruct)."
 msgstr ""
+"- `Qwen3-VL-30B-A3B-Instruct`（BF16 版本）：需要 1 个 Atlas 800 A3（64G x 16）节点或 1 个 "
+"Atlas 800 A2（64G x "
+"8）节点。[模型权重](https://modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Instruct)。"
 
-msgid "## Environment Preparation"
-msgstr ""
+msgid ""
+"It is recommended to download the model weight to a shared directory across "
+"multiple nodes."
+msgstr "建议将模型权重下载到跨多个节点的共享目录中。"
 
-msgid "### Prepare Model Weights"
-msgstr ""
+msgid "## 4 Installation"
+msgstr "## 4 安装"
 
-msgid "### Installation"
-msgstr ""
+msgid "### 4.1 Docker Image Installation"
+msgstr "### 4.1 Docker 镜像安装"
 
-msgid "!!! note"
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using docker](../../installation.md#set-up-using-"
+"docker)."
 msgstr ""
+"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker](../../installation.md#set-up-"
+"using-docker)。"
 
-msgid "## Deployment"
-msgstr ""
+msgid "=== \"A3 series\""
+msgstr "=== \"A3 系列\""
 
-msgid "### Online Serving"
-msgstr ""
+msgid "Start the docker image on each node."
+msgstr "在每个节点上启动 Docker 镜像。"
 
-msgid "=== \"Image Inputs\""
-msgstr ""
+msgid "=== \"A2 series\""
+msgstr "=== \"A2 系列\""
 
-msgid "=== \"Video Inputs\""
-msgstr ""
+msgid ""
+"After starting the container, run the following command to verify the "
+"installation:"
+msgstr "启动容器后，运行以下命令验证安装："
 
-msgid "### Offline Inference"
+msgid ""
+"Expected result: The container is listed with status `Up`. You can also "
+"verify the vllm-ascend version inside the container:"
+msgstr "预期结果：容器状态显示为 `Up`。您还可以在容器内验证 vllm-ascend 版本："
+
+msgid ""
+"Expected result: The version information is displayed, matching the pulled "
+"image version."
+msgstr "预期结果：显示版本信息，与拉取的镜像版本一致。"
+
+msgid "### 4.2 Source Code Installation"
+msgstr "### 4.2 源码安装"
+
+msgid ""
+"If you prefer not to use the Docker image, you can build from source. "
+"Install vLLM from source first:"
+msgstr "如果您不想使用 Docker 镜像，可以从源码构建。首先从源码安装 vLLM："
+
+msgid "1. Clone and install vLLM:"
+msgstr "1. 克隆并安装 vLLM："
+
+msgid "2. Clone and install the vLLM-Ascend repository:"
+msgstr "2. 克隆并安装 vLLM-Ascend 仓库："
+
+msgid "**Installation Verification:**"
+msgstr "**安装验证：**"
+
+msgid ""
+"Expected result: The version information for both packages is displayed, "
+"confirming a successful installation."
+msgstr "预期结果：显示两个包的版本信息，确认安装成功。"
+
+msgid ""
+"If deploying a multi-node environment, set up the environment on each node."
+msgstr "如果部署多节点环境，请在每个节点上配置环境。"
+
+msgid ""
+"For more details, please refer to the [Installation "
+"Guide](../../installation.md)."
+msgstr "更多详情，请参考[安装指南](../../installation.md)。"
+
+msgid "## 5 Online Service Deployment"
+msgstr "## 5 在线服务部署"
+
+msgid "### 5.1 Single-Node Online Deployment"
+msgstr "### 5.1 单节点在线部署"
+
+msgid ""
+"Single-node deployment runs both Prefill and Decode on the same node. The "
+"following example is suitable for image-only online serving on 1 Atlas 800 "
+"A2 (64G x 8) node or 1 Atlas 800 A3 (64G x 16) node."
 msgstr ""
+"单节点部署将 Prefill 和 Decode 运行在同一个节点上。以下示例适用于在 1 个 Atlas 800 A2（64G x 8）节点或 1 个 "
+"Atlas 800 A3（64G x 16）节点上进行纯图像在线服务。"
+
+msgid "Run the following script to start image-only serving:"
+msgstr "运行以下脚本启动纯图像服务："
+
+msgid "Key Parameter Descriptions:"
+msgstr "关键参数说明："
+
+msgid ""
+"- `--tensor-parallel-size 2` maps the model to two NPUs. Increase TP only after validating memory, communication, and throughput on your hardware.\n"
+"- `--enable-expert-parallel` enables expert parallelism for MoE layers. Do not mix MoE tensor parallelism and expert parallelism in the same MoE layer.\n"
+"- `--max-model-len` is the maximum input plus output length for a single request. By default, the model can support long context, but `128000` is a practical validation value for many image/video workloads.\n"
+"- `--max-num-seqs` is the maximum number of active requests scheduled by each DP group. Video requests consume more memory, so the video example uses a smaller value.\n"
+"- `--max-num-batched-tokens` is the maximum number of tokens processed in one scheduler step. A larger value can improve prefill efficiency but consumes more activation memory.\n"
+"- `--gpu-memory-utilization` controls how much HBM vLLM can use to calculate KV cache capacity. Increase it only after confirming the service is stable.\n"
+"- `--limit-mm-per-prompt.video 0` disables video inputs and saves memory for image-only serving.\n"
+"- `--allowed-local-media-path /media` allows requests to use local files such as `file:///media/test.mp4`.\n"
+"- `--compilation-config '{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}'` enables full decode ACLGraph replay to reduce dispatch overhead."
+msgstr ""
+"- `--tensor-parallel-size 2` 将模型映射到两个 NPU 上。仅在验证硬件上的内存、通信和吞吐量后，再增加 TP 值。\n"
+"- `--enable-expert-parallel` 为 MoE 层启用专家并行。不要在同一个 MoE 层中混合使用 MoE 张量并行和专家并行。\n"
+"- `--max-model-len` 是单个请求的最大输入加输出长度。默认情况下，模型可以支持长上下文，但 `128000` 是许多图像/视频工作负载的实用验证值。\n"
+"- `--max-num-seqs` 是每个 DP 组调度的最大并发请求数。视频请求消耗更多内存，因此视频示例使用了较小的值。\n"
+"- `--max-num-batched-tokens` 是单个调度步骤中处理的最大 token 数。较大的值可以提高 prefill 效率，但会消耗更多激活内存。\n"
+"- `--gpu-memory-utilization` 控制 vLLM 可用于计算 KV 缓存容量的 HBM 比例。仅在确认服务稳定后再增加此值。\n"
+"- `--limit-mm-per-prompt.video 0` 禁用视频输入，为纯图像服务节省内存。\n"
+"- `--allowed-local-media-path /media` 允许请求使用本地文件，例如 `file:///media/test.mp4`。\n"
+"- `--compilation-config '{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}'` 启用完整解码 ACLGraph 重放，以减少调度开销。"
+
+msgid ""
+"Common Issues Tip: If you encounter issues, please refer to the [Public "
+"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for "
+"troubleshooting."
+msgstr ""
+"常见问题提示：如果遇到问题，请参考[公共 "
+"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) 进行故障排除。"
+
+msgid "Service Verification:"
+msgstr "服务验证："
+
+msgid "Expected Result:"
+msgstr "预期结果："
+
+msgid ""
+"The service returns HTTP 200 OK with a JSON response containing the "
+"`choices` field."
+msgstr "服务返回 HTTP 200 OK，JSON 响应中包含 `choices` 字段。"
+
+msgid "## 6 Functional Verification"
+msgstr "## 6 功能验证"
+
+msgid ""
+"After the server is started, send a request to verify basic multimodal "
+"functionality."
+msgstr "服务器启动后，发送请求以验证基本的多模态功能。"
+
+msgid ""
+"Expected result: the HTTP status is 200 and the JSON response contains a "
+"`choices` field with generated text, for example text similar to `TONGYI "
+"Qwen`."
+msgstr ""
+"预期结果：HTTP 状态码为 200，JSON 响应中包含带有生成文本的 `choices` 字段，例如类似于 `TONGYI Qwen` 的文本。"
+
+msgid "## 7 Accuracy Evaluation"
+msgstr "## 7 精度评估"
+
+msgid "### Using AISBench"
+msgstr "### 使用 AISBench"
+
+msgid ""
+"1. Refer to [Using "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr ""
+"1. 详情请参考[使用 AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
+
+msgid "2. After execution, you can get the result."
+msgstr "2. 执行后，即可获取结果。"
+
+msgid "| dataset | version | metric | mode | result |"
+msgstr "| dataset | version | metric | mode | result |"
+
+msgid "## 8 Performance Evaluation"
+msgstr "## 8 性能评估"
+
+msgid "### 8.1 Using AISBench"
+msgstr "### 8.1 使用 AISBench"
+
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details. For image or video performance, use a "
+"dataset with real multimodal payloads instead of random text-only prompts."
+msgstr ""
+"详细信息请参考[使用AISBench进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation)。对于图像或视频性能，请使用包含真实多模态负载的数据集，而非随机的纯文本提示。"
+
+msgid "### 8.2 Using vLLM Benchmark"
+msgstr "### 8.2 使用vLLM基准测试"
+
+msgid ""
+"Run performance evaluation of `Qwen3-VL-30B-A3B-Instruct` as an example. "
+"Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
+"more details."
+msgstr ""
+"以`Qwen3-VL-30B-A3B-Instruct`的性能评估为例。更多详情请参考[vLLM基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
+
+msgid "There are three `vllm bench` subcommands:"
+msgstr "`vllm bench`包含三个子命令："
+
+msgid ""
+"- `latency`: benchmark the latency of a single batch of requests.\n"
+"- `serve`: benchmark online serving throughput.\n"
+"- `throughput`: benchmark offline inference throughput."
+msgstr ""
+"- `latency`：对单批次请求的延迟进行基准测试。\n"
+"- `serve`：对在线服务吞吐量进行基准测试。\n"
+"- `throughput`：对离线推理吞吐量进行基准测试。"
+
+msgid "Take `serve` as an example:"
+msgstr "以`serve`为例："
+
+msgid ""
+"After several minutes, you can get the performance evaluation result. This "
+"random benchmark is useful for serving pipeline validation; use AISBench or "
+"a custom multimodal dataset for image/video-token performance."
+msgstr "几分钟后，即可获得性能评估结果。此随机基准测试适用于服务流水线验证；对于图像/视频令牌性能，请使用AISBench或自定义多模态数据集。"
+
+msgid "## 9 Performance Tuning"
+msgstr "## 9 性能调优"
+
+msgid "### 9.1 Recommended Configurations"
+msgstr "### 9.1 推荐配置"
+
+msgid ""
+"> **Note**: The following configurations are validated in specific test "
+"environments and are for reference only. The optimal configuration depends "
+"on hardware type, image resolution, video length, maximum input/output "
+"length, request concurrency, prefix cache hit rate, and prefill/decode "
+"ratio. Tune the parameters in Section 9.2 based on your actual workload."
+msgstr ""
+"> "
+"**注意**：以下配置在特定测试环境中验证，仅供参考。最佳配置取决于硬件类型、图像分辨率、视频长度、最大输入/输出长度、请求并发度、前缀缓存命中率以及预填充/解码比例。请根据实际工作负载调整第9.2节中的参数。"
+
+msgid "#### Table 1: Scenario Overview"
+msgstr "#### 表1：场景概览"
+
+msgid ""
+"| Scenario | Deployment Mode | *Total NPUs | Weight Version | Key "
+"Considerations |"
+msgstr "| 场景 | 部署模式 | *NPU总数 | 权重版本 | 关键考量 |"
+
+msgid ""
+"| Image-only serving | Single-node online serving | 2 or more NPUs | BF16 | "
+"Disable video, tune context length, and keep enough KV cache for visual "
+"tokens. |"
+msgstr "| 纯图像服务 | 单节点在线服务 | 2个或更多NPU | BF16 | 禁用视频，调整上下文长度，并为视觉令牌保留足够的KV缓存。 |"
+
+msgid ""
+"| Video serving | Single-node online serving | 2 or more NPUs | BF16 | Use "
+"local media paths, lower concurrency, and reduce video length or frame "
+"sampling if OOM occurs. |"
+msgstr ""
+"| 视频服务 | 单节点在线服务 | 2个或更多NPU | BF16 | 使用本地媒体路径，降低并发度，若发生OOM则减少视频长度或帧采样。 |"
+
+msgid ""
+"| Functional graph validation | Single-node PP | 2 NPUs | BF16 | Use shorter"
+" context and explicit capture sizes to validate full decode ACLGraph "
+"behavior. |"
+msgstr "| 功能图验证 | 单节点PP | 2个NPU | BF16 | 使用较短的上下文和显式捕获大小，以验证完整解码ACLGraph行为。 |"
+
+msgid ""
+"> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 "
+"node = 1 Atlas 800 A3 server (64G × 16 NPUs)."
+msgstr "> `*NPU总数`表示所有节点使用的NPU总数。1个节点 = 1台Atlas 800 A3服务器（64G × 16 NPU）。"
+
+msgid "#### Table 2: Detailed Node Configuration"
+msgstr "#### 表2：详细节点配置"
+
+msgid ""
+"| Scenario | Node Role | NPUs | TP | PP | Max Num Seqs | Max Model Len | Max"
+" Num Batched Tokens | Prefix Cache | Main Optimizations |"
+msgstr ""
+"| 场景 | 节点角色 | NPU数 | TP | PP | 最大序列数 | 最大模型长度 | 最大批处理令牌数 | 前缀缓存 | 主要优化 |"
+
+msgid ""
+"> For complete startup commands and parameter descriptions, please refer to "
+"the deployment examples in [Chapter 5](#5-online-service-deployment)."
+msgstr "> 完整的启动命令和参数说明，请参考[第5章](#5-online-service-deployment)中的部署示例。"
+
+msgid "### 9.2 Tuning Guidelines"
+msgstr "### 9.2 调优指南"
+
+msgid "#### 9.2.1 General Tuning Reference"
+msgstr "#### 9.2.1 通用调优参考"
+
+msgid ""
+"Please refer to the [Public Performance Tuning "
+"Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md)"
+" for tuning methods."
+msgstr ""
+"调优方法请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。"
+
+msgid ""
+"Please refer to the [Feature "
+"Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
+"feature descriptions."
+msgstr "详细功能描述请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)。"
+
+msgid "#### 9.2.2 Recommended tuning order"
+msgstr "#### 9.2.2 推荐调优顺序"
+
+msgid ""
+"1. Start from image-only serving. Add video only after the image path is stable.\n"
+"2. Choose the maximum context length with `--max-model-len`. Multimodal requests consume KV cache for both text tokens and visual tokens, so reduce image resolution, video length, request concurrency, or context length if OOM occurs.\n"
+"3. Tune multimodal limits. Use `--limit-mm-per-prompt.image` and `--limit-mm-per-prompt.video` to match your request shape.\n"
+"4. Tune `--max-num-batched-tokens`. Larger values usually improve prefill throughput but increase activation memory. Video-heavy workloads usually need conservative values.\n"
+"5. Tune `--max-num-seqs` according to service concurrency. Video requests are more memory intensive than image requests, so start with a smaller value.\n"
+"6. Tune `--gpu-memory-utilization`. Increase it to provide more KV cache, but leave headroom for runtime memory fluctuation and media preprocessing.\n"
+"7. Tune ACLGraph capture. `FULL_DECODE_ONLY` is recommended for decode. If you set `cudagraph_capture_sizes` manually, include common decode batch sizes."
+msgstr ""
+"1. 从纯图像服务开始。仅在图像路径稳定后，再添加视频。\n"
+"2. 使用`--max-model-len`选择最大上下文长度。多模态请求会同时消耗文本令牌和视觉令牌的KV缓存，因此如果发生OOM，请降低图像分辨率、视频长度、请求并发度或上下文长度。\n"
+"3. 调整多模态限制。使用`--limit-mm-per-prompt.image`和`--limit-mm-per-prompt.video`来匹配您的请求形状。\n"
+"4. 调整`--max-num-batched-tokens`。较大的值通常能提高预填充吞吐量，但会增加激活内存。视频密集型工作负载通常需要保守的值。\n"
+"5. 根据服务并发度调整`--max-num-seqs`。视频请求比图像请求更消耗内存，因此请从较小的值开始。\n"
+"6. 调整`--gpu-memory-utilization`。增加该值以提供更多KV缓存，但需为运行时内存波动和媒体预处理预留空间。\n"
+"7. 调整ACLGraph捕获。解码推荐使用`FULL_DECODE_ONLY`。如果手动设置`cudagraph_capture_sizes`，请包含常见的解码批次大小。"
+
+msgid "### 9.3 Model-Specific Optimizations"
+msgstr "### 9.3 模型特定优化"
+
+msgid "| Optimization | Enablement | Benefit | Notes |"
+msgstr "| 优化项 | 启用方式 | 收益 | 说明 |"
+
+msgid ""
+"| Multimodal prompt limits | `--limit-mm-per-prompt.image`, `--limit-mm-per-"
+"prompt.video` | Avoids reserving memory for unused media types. | Disable "
+"video for image-only serving. |"
+msgstr ""
+"| 多模态提示限制 | `--limit-mm-per-prompt.image`, `--limit-mm-per-prompt.video` | "
+"避免为未使用的媒体类型预留内存。 | 纯图像服务时禁用视频。 |"
+
+msgid ""
+"| Local media access | `--allowed-local-media-path /media` | Avoids slow "
+"network video downloads during serving. | Use `file:///media/...` in "
+"requests. |"
+msgstr ""
+"| 本地媒体访问 | `--allowed-local-media-path /media` | 避免服务期间缓慢的网络视频下载。 | "
+"在请求中使用`file:///media/...`。 |"
+
+msgid ""
+"| Full decode ACLGraph | `--compilation-config "
+"'{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}'` | Reduces operator dispatch "
+"overhead and stabilizes decode performance. | Recommended for decode-heavy "
+"serving. |"
+msgstr ""
+"| 完整解码ACLGraph | `--compilation-config "
+"'{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}'` | 减少算子调度开销，稳定解码性能。 | "
+"推荐用于解码密集型服务。 |"
+
+msgid ""
+"| Expert parallelism | `--enable-expert-parallel` | Improves MoE serving "
+"throughput. | Do not mix MoE tensor parallelism and expert parallelism in "
+"the same MoE layer. |"
+msgstr ""
+"| 专家并行 | `--enable-expert-parallel` | 提升MoE服务吞吐量。 | "
+"请勿在同一MoE层中混合使用MoE张量并行和专家并行。 |"
+
+msgid ""
+"| Prefix caching | `--enable-prefix-caching` | Improves repeated-prefix "
+"workloads. | Random prompts or unique media may not benefit. |"
+msgstr ""
+"| 前缀缓存 | `--enable-prefix-caching` | 提升重复前缀工作负载的性能。 | 随机提示或唯一媒体可能无法受益。 |"
+
+msgid ""
+"| Asynchronous scheduling | `--async-scheduling` | Can improve high-"
+"concurrency throughput. | Disable and compare for latency-sensitive "
+"workloads. |"
+msgstr "| 异步调度 | `--async-scheduling` | 可提升高并发吞吐量。 | 对于延迟敏感型工作负载，请禁用并进行对比。 |"
+
+msgid ""
+"| Pipeline parallel validation | `--pipeline-parallel-size 2` | Provides "
+"another two-card validation layout. | Use shorter context and lower batch "
+"tokens for functional tests. |"
+msgstr ""
+"| 流水线并行验证 | `--pipeline-parallel-size 2` | 提供另一种双卡验证布局。 | "
+"功能测试时使用较短的上下文和较低的批处理令牌数。 |"
+
+msgid "## 10 FAQ"
+msgstr "## 10 常见问题"
+
+msgid ""
+"For common environment, installation, and general parameter issues, refer to"
+" [Public FAQs](../../faqs.md). This section only covers model-specific "
+"issues for Qwen3-VL-30B-A3B-Instruct."
+msgstr ""
+"常见环境、安装及通用参数问题，请参考[公共FAQ](../../faqs.md)。本节仅涵盖Qwen3-VL-30B-A3B-Instruct的模型特定问题。"
+
+msgid "### Q1: Why does the service report OOM during startup?"
+msgstr "### Q1：为什么服务在启动时报告OOM？"
+
+msgid ""
+"**Phenomenon:** The service fails during profile run or exits before "
+"accepting requests."
+msgstr "**现象：** 服务在性能分析运行期间失败，或在接受请求之前退出。"
+
+msgid ""
+"**Cause:** Long context, high image resolution, video inputs, large `--max-"
+"num-seqs`, large `--max-num-batched-tokens`, or high `--gpu-memory-"
+"utilization` can leave insufficient HBM headroom."
+msgstr ""
+"**原因：** 长上下文、高图像分辨率、视频输入、较大的 `--max-num-seqs`、较大的 `--max-num-batched-tokens`"
+" 或较高的 `--gpu-memory-utilization` 可能导致 HBM 预留空间不足。"
+
+msgid ""
+"**Solution:** Start with image-only serving, set `--limit-mm-per-"
+"prompt.video 0`, reduce `--max-model-len`, lower `--max-num-seqs`, lower "
+"`--max-num-batched-tokens`, or reduce `--gpu-memory-utilization`. Keep "
+"`PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`."
+msgstr ""
+"**解决方案：** 从纯图像服务开始，设置 `--limit-mm-per-prompt.video 0`，减小 `--max-model-"
+"len`，降低 `--max-num-seqs`，降低 `--max-num-batched-tokens`，或降低 `--gpu-memory-"
+"utilization`。保持 `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`。"
+
+msgid "### Q2: Why is video disabled in the image-only command?"
+msgstr "### Q2：为什么在纯图像命令中禁用了视频？"
+
+msgid ""
+"**Phenomenon:** The service reserves more memory than expected even when "
+"requests only contain images."
+msgstr "**现象：** 即使请求仅包含图像，服务预留的内存也超出预期。"
+
+msgid ""
+"**Cause:** Allowing video inputs can reserve memory for long visual "
+"embeddings and preprocessing paths."
+msgstr "**原因：** 允许视频输入可能会为长视觉嵌入和预处理路径预留内存。"
+
+msgid ""
+"**Solution:** Use `--limit-mm-per-prompt.video 0` for image-only serving. "
+"Enable video only when the workload needs it."
+msgstr "**解决方案：** 对于纯图像服务，使用 `--limit-mm-per-prompt.video 0`。仅在负载需要时启用视频。"
+
+msgid "### Q3: Why does the video request fail with a local file path?"
+msgstr "### Q3：为什么使用本地文件路径的视频请求会失败？"
+
+msgid ""
+"**Phenomenon:** The request reports that the file is not allowed or cannot "
+"be found."
+msgstr "**现象：** 请求报告文件不被允许或无法找到。"
+
+msgid ""
+"**Cause:** The server can only access local media paths that are mounted "
+"into the container and allowed by `--allowed-local-media-path`."
+msgstr "**原因：** 服务器只能访问已挂载到容器中且由 `--allowed-local-media-path` 允许的本地媒体路径。"
+
+msgid ""
+"**Solution:** Mount the host media directory to `/media`, start the server "
+"with `--allowed-local-media-path /media`, and use a request URL like "
+"`file:///media/test.mp4`."
+msgstr ""
+"**解决方案：** 将主机媒体目录挂载到 `/media`，使用 `--allowed-local-media-path /media` "
+"启动服务器，并使用类似 `file:///media/test.mp4` 的请求 URL。"
+
+msgid "### Q4: Why does enabling prefix caching not improve performance?"
+msgstr "### Q4：为什么启用前缀缓存不能提升性能？"
+
+msgid ""
+"**Phenomenon:** Prefix caching is enabled, but throughput or latency does "
+"not improve."
+msgstr "**现象：** 已启用前缀缓存，但吞吐量或延迟没有改善。"
+
+msgid ""
+"**Cause:** Prefix caching only helps when requests share reusable prefixes. "
+"Unique images, unique videos, or random prompts may add memory pressure "
+"without visible gains."
+msgstr "**原因：** 前缀缓存仅在请求共享可重用前缀时才有帮助。独特的图像、独特的视频或随机提示可能会增加内存压力，但无明显收益。"
+
+msgid ""
+"**Solution:** Enable prefix caching for repeated-prefix workloads. For "
+"random benchmarks or memory-constrained video workloads, compare with prefix"
+" caching disabled."
+msgstr "**解决方案：** 为重复前缀的工作负载启用前缀缓存。对于随机基准测试或内存受限的视频工作负载，请与禁用前缀缓存的情况进行比较。"
+
+msgid ""
+"### Q5: Why does multimodal accuracy evaluation fail to insert image tokens?"
+msgstr "### Q5：为什么多模态精度评估无法插入图像标记？"
+
+msgid ""
+"**Phenomenon:** Evaluation fails because image placeholders cannot be found "
+"in the prompt."
+msgstr "**现象：** 评估失败，因为提示中找不到图像占位符。"
+
+msgid ""
+"**Cause:** Qwen3-VL multimodal tasks rely on the model chat template to "
+"insert image placeholder tokens before multimodal processing."
+msgstr "**原因：** Qwen3-VL 多模态任务依赖模型聊天模板在多模态处理前插入图像占位符标记。"
+
+msgid ""
+"**Solution:** Enable chat template application in the evaluation "
+"configuration. For lm_eval-based multimodal tasks, set `apply_chat_template`"
+" to true."
+msgstr ""
+"**解决方案：** 在评估配置中启用聊天模板应用。对于基于 lm_eval 的多模态任务，将 `apply_chat_template` 设置为 "
+"true。"
