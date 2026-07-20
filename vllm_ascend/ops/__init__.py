@@ -18,6 +18,11 @@
 import torch
 from vllm.triton_utils import HAS_TRITON
 
+try:  # noqa: SIM105
+    import custom_ops  # noqa: F401  # registers torch.ops.custom.* from cann-recipes-infer
+except ImportError:
+    pass
+
 import vllm_ascend.ops.fused_moe.fused_moe  # noqa
 import vllm_ascend.ops.layernorm  # noqa
 import vllm_ascend.ops.register_custom_ops  # noqa

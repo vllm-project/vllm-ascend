@@ -295,55 +295,6 @@ class FusedMC2CommImpl(MoECommMethod):
             "token_dispatcher must be an instance of TokenDispatcherWithMC2."
         )
 
-        # Apply log2phy if needed
-        topk_ids = fused_experts_input.topk_ids
-        if fused_experts_input.routing.log2phy is not None:
-            topk_ids = fused_experts_input.routing.log2phy[topk_ids]
-
-        expert_tokens = None
-        if get_ascend_config().enable_fused_mc2 == 1:
-            assert not (
-                fused_experts_input.weights.w1_scale_bias is None or fused_experts_input.weights.w2_scale_bias is None
-            ), "w1_scale_bias and w2_scale_bias cannot be None when enable_fused_mc2=1."
-
-            out = torch.empty_like(fused_experts_input.hidden_states)
-            torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
-                x=fused_experts_input.hidden_states,
-                weight1=fused_experts_input.weights.w1,
-                weight2=fused_experts_input.weights.w2,
-                expert_idx=topk_ids,
-                scale1=fused_experts_input.weights.w1_scale,
-                scale2=fused_experts_input.weights.w2_scale,
-                bias1=fused_experts_input.weights.w1_scale_bias,
-                bias2=fused_experts_input.weights.w2_scale_bias,
-                probs=fused_experts_input.topk_weights.to(torch.float32),
-                group=self.token_dispatcher.moe_all_to_all_group_name,
-                max_output_size=get_ascend_config().mega_moe_max_tokens,
-                swiglu_limit=fused_experts_input.swiglu_limit,
-                x_active_mask=fused_experts_input.routing.mc2_mask,
-                out=out,
-                expert_token_nums=self.expert_token_nums,
-            )
-            expert_tokens = self.expert_token_nums
-        elif get_ascend_config().enable_fused_mc2 == 2:
-            assert fused_experts_input.routing.expert_map is not None, "expert_map cannot be None."
-            out, expert_tokens = torch.ops._C_ascend.dispatch_gmm_combine_decode(  # type: ignore
-                x=fused_experts_input.hidden_states,
-                expert_ids=topk_ids,
-                gmm1_permuted_weight=fused_experts_input.weights.w1,
-                gmm1_permuted_weight_scale=fused_experts_input.weights.w1_scale,
-                gmm2_weight=fused_experts_input.weights.w2,
-                gmm2_weight_scale=fused_experts_input.weights.w2_scale,
-                expert_smooth_scales=None,
-                expert_scales=fused_experts_input.topk_weights.to(torch.float32),
-                group_ep=self.token_dispatcher.moe_all_to_all_group_name,
-                ep_rank_size=self.token_dispatcher.ep_world_size,
-                ep_rank_id=self.token_dispatcher.ep_rank_id,
-                moe_expert_num=self.moe_config.num_experts,
-                global_bs=self.token_dispatcher.global_bs,
-            )
-        else:
-            raise ValueError(f"Wrong value of {get_ascend_config().enable_fused_mc2=}")
-        return FusedExpertsResult(
-            routed_out=out, expert_tokens=expert_tokens, swiglu_limit=fused_experts_input.swiglu_limit
-        )
+        # Decompose fused dispatch_ffn_combine / dispatch_gmm_combine_decode into
+        # separate dispatch + FFN + combine, using the base class implementation.
+        return super().fused_experts(fused_experts_input)

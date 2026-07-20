@@ -145,17 +145,9 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
-        "scatter_nd_update_v2"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
         "lightning_indexer"
         "sparse_flash_attention"
-        "dispatch_ffn_combine"
-        "dispatch_ffn_combine_w4_a8"
-        "dispatch_ffn_combine_bf16"
-        "dispatch_gmm_combine_decode"
-        "moe_init_routing_custom"
-        "moe_gating_top_k"
-        "moe_gating_top_k_hash"
         "add_rms_norm_bias"
         "apply_top_k_top_p_custom"
         "transpose_kv_cache_by_block"
@@ -165,17 +157,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "lightning_indexer_quant"
         "compressor"
         "compressor_metadata"
-        "vllm_quant_lightning_indexer"
-        "vllm_quant_lightning_indexer_metadata"
-        "sparse_attn_sharedkv"
-        "sparse_attn_sharedkv_metadata"
-        "hc_pre_sinkhorn"
-        "hc_pre_inv_rms"
-        "hc_pre"
-        "hc_post"
-        "inplace_partial_rotary_mul"
-        "rms_norm_dynamic_quant"
-        "dequant_swiglu_quant"
         "grouped_matmul_swiglu_quant"
         "grouped_matmul_swiglu_quant_v2"
         "hamming_dist_top_k"
@@ -186,7 +167,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
         "store_kv_block"
-    )
+            )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
 elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
@@ -196,23 +177,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
-        "moe_gating_top_k_hash"
-        "indexer_compress_epilog"
-        "inplace_partial_rotary_mul"
-        "kv_compress_epilog"
-        "compressor"
         "compressor_metadata"
-        "vllm_quant_lightning_indexer"
-        "vllm_quant_lightning_indexer_metadata"
-        "kv_quant_sparse_attn_sharedkv"
-        "kv_quant_sparse_attn_sharedkv_metadata"
-        "hc_pre_sinkhorn"
-        "hc_pre_inv_rms"
-        "hc_post"
-        "hc_pre"
-        "swiglu_group_quant"
         "load_index_kv_cache"
-        "indexer_compress_epilog_v2"
         "causal_conv1d"
         "recurrent_gated_delta_rule"
         "chunk_fwd_o"

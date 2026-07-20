@@ -112,7 +112,7 @@ class BaseDeviceAdaptor:
         quant_mode: int = -1,
         act_quant_type: torch.dtype | None = None,
     ):
-        return torch.ops._C_ascend.npu_moe_init_routing_custom(
+        return torch.ops.custom.npu_moe_init_routing_group_quant(
             hidden_states,
             topk_ids,
             scale=scale,
@@ -122,6 +122,8 @@ class BaseDeviceAdaptor:
             expert_tokens_num_flag=expert_tokens_num_flag,
             active_expert_range=active_expert_range,
             quant_mode=quant_mode,
+            drop_pad_mode=0,
+            row_idx_type=0,
         )
 
     @staticmethod
@@ -143,9 +145,12 @@ class BaseDeviceAdaptor:
         eps: float = 1e-20,
         bias_opt: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids, out = torch.ops._C_ascend.moe_gating_top_k(
+        topk_weights, topk_ids, out = torch.ops.custom.npu_moe_gating_top_k(
             x,
-            k=k,
+            k,
+            bias=bias_opt,
+            input_ids=None,
+            tid2eid=None,
             k_group=k_group,
             group_count=group_count,
             group_select_mode=group_select_mode,
@@ -154,7 +159,6 @@ class BaseDeviceAdaptor:
             out_flag=out_flag,
             routed_scaling_factor=routed_scaling_factor,
             eps=eps,
-            bias_opt=bias_opt,
         )
         return topk_weights, topk_ids.to(torch.int32), out
 
@@ -551,12 +555,16 @@ class BaseDeviceAdaptor:
 
         return context_layer
 
+    @staticmethod
+    def dsa_compressor(*args, **kwargs):
+        return torch.ops._C_ascend.compressor(*args, **kwargs)
+
     # ===== Sparse Attention Metadata & Op Selectors =====
 
     @staticmethod
     def get_dsa_sparse_attn_metadata_op():
         """Returns the metadata-building operator for sparse attention."""
-        return torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata
+        return torch.ops.custom.npu_sparse_attn_sharedkv_metadata
 
     @staticmethod
     def get_dsa_sparse_attn_metadata_kwargs(device):
@@ -566,7 +574,7 @@ class BaseDeviceAdaptor:
     @staticmethod
     def get_dsa_sparse_attn_op():
         """Returns the sparse attention operator."""
-        return torch.ops._C_ascend.npu_sparse_attn_sharedkv
+        return torch.ops.custom.npu_sparse_attn_sharedkv
 
     @staticmethod
     def get_dsa_sparse_attn_base_kwargs():
@@ -582,8 +590,27 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def dsa_kv_compress_scatter(cache, x, slot_mapping):
-        """Scatter KV into cache. Non-A5: simple scatter of pre-quantized tensor."""
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(cache, slot_mapping, x)
+        """Scatter KV into cache. Non-A5: simple scatter of pre-quantized tensor.
+        Handles both 1D flat and 2D [block_id, block_offset] slot_mapping."""
+        if slot_mapping.dim() == 2 and slot_mapping.shape[-1] == 2:
+            # 2D [N, 2] → flat: block_id * block_size + block_offset
+            block_size = cache.shape[1]
+            flat_idx = slot_mapping[:, 0].to(torch.int64) * block_size + slot_mapping[:, 1].to(torch.int64)
+            # Reshape cache as [num_blocks * block_size, remaining] for flat indexing
+            cache_flat = cache.view(cache.shape[0] * cache.shape[1], -1)
+            x_flat = x.contiguous().view(x.shape[0], -1)
+            torch.ops.custom.scatter_nd_update_asc(
+                cache_flat,
+                flat_idx.view(-1, 1)[: x_flat.shape[0]],
+                x_flat,
+            )
+        else:
+            x_flat = x.view(-1, x.shape[-1])
+            torch.ops.custom.scatter_nd_update_asc(
+                cache.view(-1, cache.shape[-1]),
+                slot_mapping.view(-1, 1)[: x_flat.shape[0]],
+                x_flat,
+            )
 
     # ===== Indexer Quant + Scatter =====
 
@@ -596,9 +623,22 @@ class BaseDeviceAdaptor:
         return q_quant, q_scale
 
     @staticmethod
+    def _to_flat_slot_mapping(slot_mapping, cache):
+        """Convert slot_mapping to flat 1D index compatible with scatter_nd_update_asc.
+        Handles 2D [N, 2] (block_id, block_offset) → flat: block_id * block_size + block_offset.
+        Returns (cache_2d, flat_indices_2d) where cache_2d is [num_blocks*block_size, -1]."""
+        if slot_mapping.dim() == 2 and slot_mapping.shape[-1] == 2:
+            block_size = cache.shape[1]
+            flat_idx = slot_mapping[:, 0].to(torch.int64) * block_size + slot_mapping[:, 1].to(torch.int64)
+            cache_flat = cache.reshape(cache.shape[0] * cache.shape[1], -1)
+            return cache_flat, flat_idx.view(-1, 1)
+        else:
+            return cache.view(-1, cache.shape[-1]), slot_mapping.view(-1, 1)
+
+    @staticmethod
     def indexer_quant_scatter(q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping):
         """Quantize q and scatter kv into indexer cache.
-        Non-A5: int8 quant + 2x scatter_nd_update_v2 for k_cache and scale_cache."""
+        Non-A5: int8 quant + 2x scatter_nd_update_asc for k_cache and scale_cache."""
         q, q_scale = torch_npu.npu_dynamic_quant(q, dst_type=torch.int8)
         q_scale = q_scale.to(torch.float16)
 
@@ -609,13 +649,24 @@ class BaseDeviceAdaptor:
             kv_scale_out = kv_scale_out.unsqueeze(-1).to(torch.float16)
             if kv_scale_out.ndim < 4:
                 kv_scale_out = kv_scale_out.unsqueeze(-1)
-            torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_k_cache, slot_mapping, kv_out)
-            torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_scale_cache, slot_mapping, kv_scale_out)
+
+            cache_k_flat, idx_flat = BaseDeviceAdaptor._to_flat_slot_mapping(slot_mapping, indexer_k_cache)
+            torch.ops.custom.scatter_nd_update_asc(
+                cache_k_flat,
+                idx_flat,
+                kv_out.contiguous().view(kv_out.shape[0], -1),
+            )
+            cache_s_flat, _ = BaseDeviceAdaptor._to_flat_slot_mapping(slot_mapping, indexer_scale_cache)
+            torch.ops.custom.scatter_nd_update_asc(
+                cache_s_flat,
+                idx_flat,
+                kv_scale_out.contiguous().view(kv_scale_out.shape[0], -1),
+            )
 
         return q, q_scale, kv_out, kv_scale_out
 
     @staticmethod
-    def indexer_quant_scatter_part1(kv, indexer_k_cache, indexer_full_cache, slot_mapping):
+    def indexer_quant_scatter_part1(kv, indexer_k_cache, indexer_scale_cache, slot_mapping):
         """Part1 of multi-stream indexer scatter.
         Non-A5: quantize kv + scatter k_cache.
         Returns (kv_quant, kv_scale) for use in Part3, or (None, None) if kv is None."""
@@ -623,7 +674,11 @@ class BaseDeviceAdaptor:
             return None, None
         kv_out, kv_scale = torch_npu.npu_dynamic_quant(kv, dst_type=torch.int8)
         kv_scale = kv_scale.unsqueeze(-1)
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_k_cache, slot_mapping, kv_out)
+        torch.ops.custom.scatter_nd_update_asc(
+            indexer_k_cache.reshape(-1, indexer_k_cache.shape[-1]),
+            slot_mapping.view(-1, 1)[: kv_out.shape[0]],
+            kv_out.reshape(-1, indexer_k_cache.shape[-1]),
+        )
         return kv_out, kv_scale
 
     @staticmethod
@@ -633,7 +688,12 @@ class BaseDeviceAdaptor:
         kv_scale = kv_scale.to(torch.float16)
         if kv_scale.ndim < 4:
             kv_scale = kv_scale.unsqueeze(-1)
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_scale_cache, slot_mapping, kv_scale)
+        cache_flat, idx_flat = BaseDeviceAdaptor._to_flat_slot_mapping(slot_mapping, indexer_scale_cache)
+        torch.ops.custom.scatter_nd_update_asc(
+            cache_flat,
+            idx_flat,
+            kv_scale.contiguous().view(kv_scale.shape[0], -1),
+        )
 
     @staticmethod
     def warmup_indexer_quant_scatter(hidden_states, slot_mapping):
@@ -646,8 +706,18 @@ class BaseDeviceAdaptor:
         dummy_shape = (1, 1, 1, kv_dummy.shape[-1])
         indexer_k_cache = torch.zeros(dummy_shape, dtype=kv_dummy.dtype, device=hidden_states.device)
         indexer_scale_cache = torch.zeros(dummy_shape, dtype=torch.float16, device=hidden_states.device)
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_k_cache, slot_mapping, kv_dummy)
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_scale_cache, slot_mapping, kv_scale_dummy)
+        cache_k_flat, idx_flat = BaseDeviceAdaptor._to_flat_slot_mapping(slot_mapping, indexer_k_cache)
+        torch.ops.custom.scatter_nd_update_asc(
+            cache_k_flat,
+            idx_flat,
+            kv_dummy.contiguous().view(kv_dummy.shape[0], -1),
+        )
+        cache_s_flat, _ = BaseDeviceAdaptor._to_flat_slot_mapping(slot_mapping, indexer_scale_cache)
+        torch.ops.custom.scatter_nd_update_asc(
+            cache_s_flat,
+            idx_flat,
+            kv_scale_dummy.contiguous().view(kv_scale_dummy.shape[0], -1),
+        )
 
     # ===== Lightning Indexer Dtype Prep =====
 
@@ -1043,13 +1113,14 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 output_dtype=torch.bfloat16,
             )[0]
             # DSV4 need swiglu_limit input
-            out, out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
+            out, out_scale, _ = torch.ops.custom.npu_swiglu_group_quant(
                 hidden_states,
-                topk_weight=None,
+                weight=None,
                 group_index=None,
                 dst_type=torch.float8_e4m3fn,
-                quant_mode=2,
-                clamp_value=swiglu_limit,
+                quant_mode=1,
+                round_scale=True,
+                clamp_limit=swiglu_limit,
             )
         elif mxfp_quant_dtype == QuantType.W4A16MXFP4:
             hidden_states = torch_npu.npu_grouped_matmul(
@@ -1264,11 +1335,15 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )
         return decode_preprocess_res, None
 
+    @staticmethod
+    def dsa_compressor(*args, **kwargs):
+        return torch.ops.custom.compressor(*args, **kwargs)
+
     # ===== Sparse Attention Metadata & Op Selectors =====
 
     @staticmethod
     def get_dsa_sparse_attn_metadata_op():
-        return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv_metadata
+        return torch.ops.custom.npu_kv_quant_sparse_attn_sharedkv_metadata
 
     @staticmethod
     def get_dsa_sparse_attn_metadata_kwargs(device):
@@ -1276,7 +1351,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def get_dsa_sparse_attn_op():
-        return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv
+        return torch.ops.custom.npu_kv_quant_sparse_attn_sharedkv
 
     @staticmethod
     def get_dsa_sparse_attn_base_kwargs():
@@ -1294,14 +1369,14 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         """Scatter KV into cache with fused quantization+compression.
         A5: kv_compress_epilog handles quant/compress/scatter internally.
         Input x is unquantized bf16; cache shape is [..., head_dim]."""
-        torch.ops._C_ascend.kv_compress_epilog(
-            kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),
+        torch.ops.cann_ops_transformer.kv_compress_epilog(
+            cache=cache.view(torch.uint8),
             x=x.view(-1, x.shape[-1]),
-            slot_mapping=slot_mapping,
+            slot_mapping=slot_mapping.view(-1),
             quant_group_size=64,
-            quant_mode=2,
-            round_scale_flag=True,
-            layout=1,
+            quant_mode="fp8_bf16",
+            round_scale=True,
+            x_scale=1.0,
         )
 
     # ===== Indexer Quant + Scatter =====
@@ -1314,56 +1389,66 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def indexer_quant_scatter(q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping):
-        """Quantize q (fp8) and scatter kv via fused indexer_compress_epilog_v2.
-        On A5, the fused op handles kv quantization, k_cache scatter, and
-        scale_cache scatter internally. q is quantized separately for use
-        by lightning_indexer."""
+        """Quantize q (fp8) and scatter kv via indexer_quant_cache.
+        Uses separate k_cache and scale_cache tensors."""
         q, q_scale = torch_npu.npu_dynamic_quant(q, dst_type=torch.float8_e4m3fn)
 
         kv_out = kv
         kv_scale_out = None
         if kv is not None:
-            torch.ops._C_ascend.indexer_compress_epilog_v2(
-                indexer_compress_cache=indexer_full_cache.view(torch.uint8),
-                x=kv,
-                slot_mapping=slot_mapping,
-                layout=2,
+            quantized_kv, kv_scale = torch_npu.npu_dynamic_quant(kv, dst_type=torch.float8_e4m3fn)
+            torch.ops.cann_ops_transformer.indexer_quant_cache(
+                cache=indexer_k_cache,
+                cache_scale=indexer_scale_cache,
+                x=kv.reshape(-1, kv.shape[-1]),
+                slot_mapping=slot_mapping.view(-1),
+                quant_mode="fp8",
+                round_scale=True,
+                x_scale=1.0,
             )
+            kv_out = quantized_kv
+            kv_scale_out = kv_scale
 
         return q, q_scale, kv_out, kv_scale_out
 
     @staticmethod
-    def indexer_quant_scatter_part1(kv, indexer_k_cache, indexer_full_cache, slot_mapping):
+    def indexer_quant_scatter_part1(kv, indexer_k_cache, indexer_scale_cache, slot_mapping):
         """Part1 of multi-stream indexer scatter.
-        A5: fused indexer_compress_epilog_v2 handles both k_cache and scale_cache.
-        Returns (kv, None) to signal Part3 is a no-op."""
+        Uses indexer_quant_cache with separate k_cache and scale_cache."""
         if kv is None:
             return None, None
-        torch.ops._C_ascend.indexer_compress_epilog_v2(
-            indexer_compress_cache=indexer_full_cache.view(torch.uint8),
-            x=kv,
-            slot_mapping=slot_mapping,
-            layout=2,
+        torch.ops.cann_ops_transformer.indexer_quant_cache(
+            cache=indexer_k_cache,
+            cache_scale=indexer_scale_cache,
+            x=kv.reshape(-1, kv.shape[-1]),
+            slot_mapping=slot_mapping.view(-1),
+            quant_mode="fp8",
+            round_scale=True,
+            x_scale=1.0,
         )
         return kv, None
 
     @staticmethod
     def dsa_indexer_scatter_scale_part3(kv_scale, indexer_scale_cache, slot_mapping):
         """Part3 of multi-stream indexer scatter.
-        A5: no-op — fused op in Part1 already handled scale_cache."""
+        scale_cache already handled in Part1, no-op."""
         pass
 
     @staticmethod
     def warmup_indexer_quant_scatter(hidden_states, slot_mapping):
         """Warmup profiling for indexer quant+scatter.
-        A5: fused indexer_compress_epilog_v2 with dummy cache tensor."""
+        Uses indexer_quant_cache with dummy cache tensors."""
         dummy_cache_shape = (1, 1, 1, hidden_states.shape[-1])
-        indexer_full_cache_dummy = torch.zeros(dummy_cache_shape, dtype=torch.uint8, device=hidden_states.device)
-        torch.ops._C_ascend.indexer_compress_epilog_v2(
-            indexer_compress_cache=indexer_full_cache_dummy,
-            x=hidden_states,
-            slot_mapping=slot_mapping,
-            layout=2,
+        dummy_k_cache = torch.zeros(dummy_cache_shape, dtype=torch.float8_e4m3fn, device=hidden_states.device)
+        dummy_scale_cache = torch.zeros(dummy_cache_shape, dtype=torch.float32, device=hidden_states.device)
+        torch.ops.cann_ops_transformer.indexer_quant_cache(
+            cache=dummy_k_cache,
+            cache_scale=dummy_scale_cache,
+            x=hidden_states.reshape(-1, hidden_states.shape[-1]),
+            slot_mapping=slot_mapping.view(-1),
+            quant_mode="fp8",
+            round_scale=True,
+            x_scale=1.0,
         )
 
     # ===== Lightning Indexer Dtype Prep =====

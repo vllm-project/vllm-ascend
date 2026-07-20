@@ -36,6 +36,11 @@ from vllm_ascend.utils import (
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
+try:  # noqa: SIM105
+    import cann_ops_transformer  # noqa: F401  # registers torch.ops.cann_ops_transformer.*
+except ImportError:
+    pass
+
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -817,12 +822,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 )
             sas_metadata = self.prefill_ratio_to_sas_metadata[layer_name]
         if self.prefill_ratio_to_sas_metadata.get("qli") is None:
-            self.prefill_ratio_to_sas_metadata["qli"] = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer_metadata(
+            self.prefill_ratio_to_sas_metadata["qli"] = torch.ops.custom.npu_quant_lightning_indexer_metadata(
                 actual_seq_lengths_query=prefill_query_start_loc[1:].clone(),
                 actual_seq_lengths_key=self.seq_lens[reqs_start:].clone(),
-                num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
+                num_heads_q=self.model_config.hf_config.index_n_heads,
                 num_heads_k=1,
-                head_dim=self.model_config.hf_config.index_head_dim,  # 128
+                head_dim=self.model_config.hf_config.index_head_dim,
                 query_quant_mode=0,
                 key_quant_mode=0,
                 batch_size=len(self.seq_lens[reqs_start:]),
@@ -830,7 +835,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 max_seqlen_k=self.seq_lens[reqs_start:].max().item(),
                 layout_query="TND",
                 layout_key="PA_BSND",
-                sparse_count=self.model_config.hf_config.index_topk,  # 512
+                sparse_count=self.model_config.hf_config.index_topk,
                 sparse_mode=3,
                 pre_tokens=(1 << 63) - 1,
                 next_tokens=(1 << 63) - 1,
@@ -1048,12 +1053,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.decode_sas_metadata[:1024] = self.decode_ratio_to_sas_metadata[layer_name]
         assert self.decode_qli_metadata is not None
         if self.decode_ratio_to_sas_metadata.get("qli") is None:
-            self.decode_ratio_to_sas_metadata["qli"] = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer_metadata(
+            self.decode_ratio_to_sas_metadata["qli"] = torch.ops.custom.npu_quant_lightning_indexer_metadata(
                 actual_seq_lengths_query=query_start_loc[1:].clone(),
                 actual_seq_lengths_key=self.seq_lens[: self.num_decodes].clone(),
-                num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
+                num_heads_q=self.model_config.hf_config.index_n_heads,
                 num_heads_k=1,
-                head_dim=self.model_config.hf_config.index_head_dim,  # 128
+                head_dim=self.model_config.hf_config.index_head_dim,
                 query_quant_mode=0,
                 key_quant_mode=0,
                 batch_size=len(self.seq_lens[: self.num_decodes]),
@@ -1061,7 +1066,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 max_seqlen_k=max_seqlen_kv,
                 layout_query="TND",
                 layout_key="PA_BSND",
-                sparse_count=self.model_config.hf_config.index_topk,  # 512
+                sparse_count=self.model_config.hf_config.index_topk,
                 sparse_mode=3,
                 pre_tokens=(1 << 63) - 1,
                 next_tokens=(1 << 63) - 1,
@@ -1714,7 +1719,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         cos = attn_metadata[0].cos[layer_name]
         sin = attn_metadata[0].sin[layer_name]
 
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
+        torch.ops.cann_ops_transformer.inplace_partial_rotary_mul(
             o_proj_input.unsqueeze(1),
             cos,
             -sin,
@@ -1768,7 +1773,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             q_b_quant, q_b_scale = self.cv_wq_b.quantize(qr)
             qr_pertoken_scale = None
         elif is_w8a8:
-            qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
+            qr, qr_pertoken_scale = torch.ops.custom.npu_rms_norm_dynamic_quant(
                 wq_a_result, self.q_norm.weight, epsilon=self.eps
             )
             q_b_quant, q_b_scale = qr, qr_pertoken_scale
@@ -1787,7 +1792,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             kv = self.kv_norm(kv)
             assert self.rope_head_dim is not None
             kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
-            torch.ops._C_ascend.inplace_partial_rotary_mul(
+            torch.ops.cann_ops_transformer.inplace_partial_rotary_mul(
                 kv.unsqueeze(1),
                 cos,
                 sin,
@@ -1814,7 +1819,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         main_stream.wait_stream(aux_stream)
 
         q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
+        torch.ops.cann_ops_transformer.inplace_partial_rotary_mul(
             q.unsqueeze(1),
             cos,
             sin,
@@ -1881,7 +1886,7 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             # q
             if _is_w8a8_dynamic(self.wq_b):
-                qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
+                qr, qr_pertoken_scale = torch.ops.custom.npu_rms_norm_dynamic_quant(
                     q_a, self.q_norm.weight, epsilon=self.eps
                 )
                 q = torch_npu.npu_quant_matmul(
@@ -1898,7 +1903,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 qr_pertoken_scale = None
             q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
 
-            torch.ops._C_ascend.inplace_partial_rotary_mul(
+            torch.ops.cann_ops_transformer.inplace_partial_rotary_mul(
                 q.unsqueeze(1),
                 cos,
                 sin,
@@ -1921,7 +1926,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             assert self.rope_head_dim is not None
             kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
 
-            torch.ops._C_ascend.inplace_partial_rotary_mul(
+            torch.ops.cann_ops_transformer.inplace_partial_rotary_mul(
                 kv.unsqueeze(1),
                 cos,
                 sin,
@@ -2000,7 +2005,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             )
 
             # Inline compressor + scatter (c128, c4 non-dual)
-            compressed_kv = torch.ops._C_ascend.compressor(
+            compressed_kv = DeviceOperator.dsa_compressor(
                 hidden_states,
                 self.compressor_wkv.weight,
                 self.compressor_wgate.weight,
@@ -2049,7 +2054,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 kvlens = indexer_scale_prefill_metadata.seq_lens
                 block_table = indexer_scale_prefill_metadata.block_table
                 qli_metadata = indexer_scale_prefill_metadata.qli_metadata
-                compress_topk_idxs, _ = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer(
+                compress_topk_idxs, _ = torch.ops.custom.npu_quant_lightning_indexer(
                     query=q_quant,
                     key=indexer_k_cache,
                     weights=DeviceOperator.prepare_dsa_indexer_weights(weights),
@@ -2185,7 +2190,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                     )
                 else:
                     q_a = self.wq_a(hidden_states)
-                qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
+                qr, qr_pertoken_scale = torch.ops.custom.npu_rms_norm_dynamic_quant(
                     q_a, self.q_norm.weight, epsilon=self.eps
                 )
                 q = torch_npu.npu_quant_matmul(
@@ -2214,7 +2219,7 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
 
-            torch.ops._C_ascend.inplace_partial_rotary_mul(
+            torch.ops.cann_ops_transformer.inplace_partial_rotary_mul(
                 q.unsqueeze(1),
                 cos,
                 sin,
@@ -2238,7 +2243,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             assert self.rope_head_dim is not None
             kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
 
-            torch.ops._C_ascend.inplace_partial_rotary_mul(
+            torch.ops.cann_ops_transformer.inplace_partial_rotary_mul(
                 kv.unsqueeze(1),
                 cos,
                 sin,
@@ -2291,7 +2296,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             )
 
             # Inline compressor + scatter (c128, c4 non-dual)
-            compressed_kv = torch.ops._C_ascend.compressor(
+            compressed_kv = DeviceOperator.dsa_compressor(
                 hidden_states,
                 self.compressor_wkv.weight,
                 self.compressor_wgate.weight,
@@ -2340,7 +2345,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 kvlens = indexer_scale_decode_metadata.seq_lens
                 block_table = indexer_scale_decode_metadata.block_table
                 qli_metadata = indexer_scale_decode_metadata.qli_metadata
-                compress_topk_idxs, _ = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer(
+                compress_topk_idxs, _ = torch.ops.custom.npu_quant_lightning_indexer(
                     query=q_quant,
                     key=indexer_k_cache,
                     weights=DeviceOperator.prepare_dsa_indexer_weights(weights),
@@ -2471,7 +2476,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             q = self.inderxer_wq_b(qr)
         q = q.view(-1, self.indexer_heads, self.indexcom_head_dim)  # [T, N, D]
 
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
+        torch.ops.cann_ops_transformer.inplace_partial_rotary_mul(
             q.unsqueeze(1),
             cos,
             sin,
@@ -2499,7 +2504,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 indexer_scale_decode_metadata,
             )
 
-        kv = torch.ops._C_ascend.compressor(
+        kv = DeviceOperator.dsa_compressor(
             x,
             self.indexcom_wkv.weight,
             self.indexcom_wgate.weight,
@@ -2604,7 +2609,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             block_table = indexer_kv_scale_metadata.decode.block_table
             qli_metadata = indexer_kv_scale_metadata.decode.qli_metadata
 
-        topk_idxs, _ = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer(
+        topk_idxs, _ = torch.ops.custom.npu_quant_lightning_indexer(
             query=q,
             key=indexer_k_cache,
             weights=DeviceOperator.prepare_dsa_indexer_weights(weights),
@@ -2725,7 +2730,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 indexer_scale_decode_metadata,
             )
 
-        kv = torch.ops._C_ascend.compressor(
+        kv = DeviceOperator.dsa_compressor(
             x,
             self.indexcom_wkv.weight,
             self.indexcom_wgate.weight,
@@ -2760,7 +2765,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             with npu_stream_switch(aux_stream, enabled=True):
                 torch.npu.current_stream().wait_event(e_kv_ready)
                 kv, kv_scale = DeviceOperator.indexer_quant_scatter_part1(
-                    kv, indexer_k_cache, indexer_full_cache, slot_mapping_indexer
+                    kv, indexer_k_cache, indexer_scale_cache, slot_mapping_indexer
                 )
 
         # Main: matmul q from qr (directly submit, V/C different engines dispatch naturally)
@@ -2782,7 +2787,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         q = q.view(-1, self.indexer_heads, self.indexcom_head_dim)
 
         # ===== Part2: rope[V] (main only) =====
-        torch.ops._C_ascend.inplace_partial_rotary_mul(  # rope
+        torch.ops.cann_ops_transformer.inplace_partial_rotary_mul(  # rope
             q.unsqueeze(1),
             cos,
             sin,
