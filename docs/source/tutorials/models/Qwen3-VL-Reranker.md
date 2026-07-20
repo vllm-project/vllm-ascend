@@ -12,15 +12,15 @@ Refer to [supported features](../../user_guide/support_matrix/supported_models.m
 
 ### 3.1 Model Weight
 
-- `Qwen3-VL-Reranker-2B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-2B)
+- `Qwen3-VL-Reranker-2B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-8B)
 - `Qwen3-VL-Reranker-2B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-2B)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
-
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
+
 You can use our official docker image to run `Qwen3-VL-Reranker` model directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
@@ -102,7 +102,6 @@ Select an image based on your machine type and start the docker image on your no
 
 After a successful docker run, you can verify the running container service by executing the `docker ps` command.
 
-
 ### 4.2 Source Code Installation
 
 If you don't want to use the docker image as above, you can also build all from source:
@@ -111,10 +110,7 @@ If you don't want to use the docker image as above, you can also build all from 
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
-
-
 ## 5 Online Service Deployment
-
 
 ### 5.1 Chat Template
 
@@ -201,17 +197,17 @@ Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
 
     The `--max-model-len` option is added to prevent errors when generating the attention operator mask on the Atlas inference products.
 
-
 ## 6 Functional Verification
 
 Once your server is started, you can verify by follow command:
 
 Service Verification:
+
 ```bash
 curl  http://localhost:8000/v1/rerank \
     -X POST \
     -d '{"query":"What is the capital of China?", "documents": ["The capital of China is Beijing.", "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun."]}' \
-    -H 'Content-Type: application/json'	
+    -H 'Content-Type: application/json'
 ```
 
 Expected Result:
@@ -296,7 +292,7 @@ Here are two accuracy evaluation methods.
 
 ### Using vLLM Benchmark
 
-Run performance of `Qwen3-VL-Embedding-2B` as an example.
+Run performance of `Qwen3-VL-Reranker-2B` as an example.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/cli/) for more details.
 
 Take the `serve` as an example. Run the code as follows.

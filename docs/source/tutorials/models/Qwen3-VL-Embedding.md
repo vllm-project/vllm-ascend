@@ -12,7 +12,7 @@ Refer to [supported features](../../user_guide/support_matrix/supported_models.m
 
 ### 3.1 Model Weight
 
-- `Qwen3-VL-Embedding-2B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-2B)
+- `Qwen3-VL-Embedding-2B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-8B)
 - `Qwen3-VL-Embedding-2B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-2B)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
@@ -20,6 +20,7 @@ It is recommended to download the model weight to the shared directory of multip
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
+
 You can use our official docker image to run `Qwen3-VL-Embedding` model directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
@@ -101,7 +102,6 @@ Select an image based on your machine type and start the docker image on your no
 
 After a successful docker run, you can verify the running container service by executing the `docker ps` command.
 
-
 ### 4.2 Source Code Installation
 
 If you don't want to use the docker image as above, you can also build all from source:
@@ -124,7 +124,6 @@ If you want to deploy multi-node environment, you need to set up environment on 
       --port 8000 \
       --max-model-len 1024
     ```
-
 
 === "Atlas A2 inference products"
 
@@ -157,12 +156,12 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
     The `--max-model-len` option is added to prevent errors when generating the attention operator mask on the Atlas inference products.
 
-
 ## 6 Functional Verification
 
 Once your server is started, you can verify by follow command:
 
 Service Verification:
+
 ```bash
 curl -X POST http://localhost:8000/v1/embeddings -H "Content-Type: application/json" -d '{
   "input": [
