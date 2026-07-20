@@ -166,7 +166,7 @@ If you run this script successfully, you will see a list of scores printed to th
 ## Performance
 
 Run performance of `Qwen3-Reranker-8B` as an example.
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 Take the `serve` as an example. Run the code as follows.
 

@@ -22,8 +22,8 @@ The support matrix records the maximum verified capability for this model. The s
 
 ### 3.1 Model Weight
 
-- `Qwen3.5-397B-A17B` (BF16 version): requires 2 Atlas 800 A3 (64G x 16) nodes or 4 Atlas 800 A2 (64G x 8) nodes. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.5-397B-A17B).
-- `Qwen3.5-397B-A17B-w8a8` (quantized version): requires 1 Atlas 800 A3 (64G x 16) node or 2 Atlas 800 A2 (64G x 8) nodes. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp).
+- `Qwen3.5-397B-A17B` (BF16 version): requires 2 Atlas 800 A3 (64GB x 16) nodes or 4 Atlas 800 A2 (64GB x 8) nodes. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.5-397B-A17B).
+- `Qwen3.5-397B-A17B-w8a8` (quantized version): requires 1 Atlas 800 A3 (64GB x 16) node or 2 Atlas 800 A2 (64GB x 8) nodes. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp).
 
 It is recommended to download the model weight to a shared directory across multiple nodes, such as `/root/.cache/`, so that all serving nodes can load the same path.
 
@@ -92,9 +92,9 @@ If you want to deploy a multi-node service, install the same version of vLLM and
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment runs both Prefill and Decode on the same node. It is suitable for functional validation, long-context single-cluster serving, and W8A8 deployment on 1 Atlas 800 A3 (64G x 16) node. The W8A8 version needs `--quantization ascend`.
+Single-node deployment runs both Prefill and Decode on the same node. It is suitable for functional validation, long-context single-cluster serving, and W8A8 deployment on 1 Atlas 800 A3 (64GB x 16) node. The W8A8 version needs `--quantization ascend`.
 
-Run the following script to execute online 128K inference on 1 Atlas 800 A3 (64G x 16).
+Run the following script to execute online 128K inference on 1 Atlas 800 A3 (64GB x 16).
 
 ```shell
 #!/bin/sh
@@ -153,7 +153,7 @@ Common Issues Tip: If the service fails to start, HBM is insufficient, or reques
 
 ### 5.2 Multi-Node Deployment with MP (Recommended)
 
-Multi-node MP deployment uses vLLM data parallelism across nodes and tensor parallelism within each node. It is recommended for the W8A8 model on 2 Atlas 800 A2 (64G x 8) nodes.
+Multi-node MP deployment uses vLLM data parallelism across nodes and tensor parallelism within each node. It is recommended for the W8A8 model on 2 Atlas 800 A2 (64GB x 8) nodes.
 
 Assume you have 2 Atlas 800 A2 nodes and want to deploy `Qwen3.5-397B-A17B-w8a8-mtp` across them. Replace `nic_name`, `local_ip`, and `node0_ip` with the actual network interface and IP addresses in your environment.
 
@@ -293,10 +293,10 @@ PD disaggregation separates Prefill and Decode into different service groups. Pr
 
 We recommend using Mooncake for deployment. Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow.
 
-Take Atlas 800 A3 (64G x 16) as an example. We recommend deploying 1P1D with 3 nodes for `Qwen3.5-397B-A17B-w8a8-mtp`:
+Take Atlas 800 A3 (64GB x 16) as an example. We recommend deploying 1P1D with 3 nodes for `Qwen3.5-397B-A17B-w8a8-mtp`:
 
-- 1 Prefill node: 1 Atlas 800 A3 (64G x 16).
-- 2 Decode nodes: 2 Atlas 800 A3 (64G x 16).
+- 1 Prefill node: 1 Atlas 800 A3 (64GB x 16).
+- 2 Decode nodes: 2 Atlas 800 A3 (64GB x 16).
 
 Deploy `run_p.sh`, `run_d0.sh`, and `run_d1.sh` on the corresponding nodes, and deploy a proxy script on the prefill master node to forward requests.
 
@@ -693,7 +693,7 @@ Recommended tuning order:
 
 | Optimization | Enablement | Benefit | Notes |
 | ------------ | ---------- | ------- | ----- |
-| Rope optimization | Enabled by default | Reuses position encoding work across layers to reduce decode overhead. | No extra configuration is required. |
+| RoPE optimization | Enabled by default | Reuses position encoding work across layers to reduce decode overhead. | No extra configuration is required. |
 | AddRMSNormQuant fusion | Enabled by default | Fuses normalization and quantization to reduce memory access. | Applies to quantized paths. |
 | Zero-like elimination | Enabled by default | Removes unnecessary zero-like tensor operations in attention. | No extra configuration is required. |
 | Qwen3.5 MTP speculative decoding | `--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'` | Improves decode throughput when acceptance rate is good. | Reduce speculative tokens if latency or stability regresses. |

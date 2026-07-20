@@ -213,7 +213,9 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 
 ## 5 Online Service Deployment
 
-PS:Because the model has fewer parameters, it doesn’t involve the PD separation scenario.
+> **Note**:
+>
+> Because the model has fewer parameters, it doesn’t involve the PD separation scenario.
 
 ### 5.1 Single-Node Online Deployment
 
@@ -307,7 +309,6 @@ curl http://localhost:8000/v1/chat/completions \
                     "video_url": {
                         "url": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4"
                     }
-
                 },
                 {
                     "type": "text",
@@ -358,9 +359,9 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 
 ### Using EvalScope
 
-As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test dataset, and run accuracy evaluation of `Qwen3-Omni-30B-A3B-Thinking` in online mode.
+As an example, take the `gsm8k` `omni_bench` `bbh` dataset as a test dataset, and run accuracy evaluation of `Qwen3-Omni-30B-A3B-Thinking` in online mode.
 
-1. Refer to [Using evalscope](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_evalscope.html#install-evalscope-using-pip) for `evalscope`installation.
+1. Refer to [Using evalscope](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_evalscope.html#install-evalscope-using-pip) for `evalscope` installation.
 2. Run `evalscope` to execute the accuracy evaluation.
 
     ```bash
@@ -392,7 +393,7 @@ As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test dataset, and
 
 ## 8 Performance Evaluation
 
-### Using vLLM Benchmark  
+### Using vLLM Benchmark
 
 Run performance evaluation of `Qwen3-Omni-30B-A3B-Thinking` as an example.
 Refer to vllm benchmark for more details.

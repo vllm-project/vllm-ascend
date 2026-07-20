@@ -22,8 +22,8 @@ The following model variants are available. It is recommended to download the mo
 
 | Model                | Hardware Requirement                                                                             | Download                                                                 |
 | -------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
-| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)          |
-| Qwen3-30B-A3B-W8A8   | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards)                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
+| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)          |
+| Qwen3-30B-A3B-W8A8   | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards)                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
 | Eagle3 Draft Model   | NA                                                                                               | [Download](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3)            |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.

@@ -24,7 +24,7 @@ You can use our official docker image to run `Qwen3-Embedding` series models.
 
 - Start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-if you don't want to use the docker image as above, you can also build all from source:
+If you don't want to use the docker image as above, you can also build all from source:
 
 - Install `vllm-ascend` from source, refer to [installation](../../installation.md).
 
@@ -96,7 +96,7 @@ Processed prompts: 100%|██████████████████�
 ## Performance
 
 Run performance of `Qwen3-Embedding-8B` as an example.
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 Take the `serve` as an example. Run the code as follows.
 
