@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+import torch
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import get_element, get_vectorcore_num
@@ -454,6 +455,7 @@ def rejection_greedy_sample_with_triton(
             BLOCK_SIZE=block_size,
         )
     else:
+        cu_num_draft_tokens = cu_num_draft_tokens.to(torch.int32) if cu_num_draft_tokens.dtype != torch.int32 else cu_num_draft_tokens
         rejection_greedy_sample_triton[(grid,)](
             output_token_ids,
             cu_num_draft_tokens,
