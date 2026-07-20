@@ -180,16 +180,17 @@ class ModelWithContext(nn.Module):
         # draft model has `compute_logits`, which is not in ModelWithContext
         return self.original_model.compute_logits(hidden_states)
 
-    def __getattr__(self, name: str):
-        # Delegate any attribute/method not defined on the wrapper (e.g.
-        # DSpark's compute_draft_logits, markov_embed, markov_bias,
-        # map_draft_to_target) to the wrapped model. nn.Module.__getattr__ only
-        # handles registered params/buffers/submodules, so fall through to the
-        # original model for everything else.
-        try:
-            return super().__getattr__(name)
-        except AttributeError:
-            return getattr(self._modules["original_model"], name)
+    def compute_draft_logits(self, hidden_states: torch.Tensor):
+        return self.original_model.compute_draft_logits(hidden_states)
+
+    def markov_embed(self, token_ids: torch.Tensor):
+        return self.original_model.markov_embed(token_ids)
+
+    def markov_bias(self, markov_embed: torch.Tensor):
+        return self.original_model.markov_bias(markov_embed)
+
+    def map_draft_to_target(self, draft_ids: torch.Tensor):
+        return self.original_model.map_draft_to_target(draft_ids)
 
 
 @contextmanager
