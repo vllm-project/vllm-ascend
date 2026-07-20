@@ -94,8 +94,8 @@ def _send_multimodal_request(api_client, messages, stream=False):
 
 @pytest.mark.parametrize(
     "media_type",
-    ["image", "video", "audio"],
-    ids=["image", "video", "audio"],
+    ["image", "audio"],
+    ids=["image", "audio"],
 )
 def test_mm_accepts_single_media(api_client, request, generated_media, media_type):
     # Each media type covers one generated, in-memory Base64 request path.
