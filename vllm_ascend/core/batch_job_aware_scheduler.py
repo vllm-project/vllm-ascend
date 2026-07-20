@@ -52,6 +52,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
 
 from vllm_ascend.ascend_config import BatchJobSchedConfig
+from vllm_ascend.utils import vllm_version_is
 
 
 class JobNameParser:
@@ -652,13 +653,18 @@ class BatchJobAwareScheduler(Scheduler):
         self._block_reserver.invalidate_cache()
         return super().schedule(*args, **kwargs)
 
-    def _free_request(self, request: Request, delay_free_blocks: bool = False) -> dict[str, Any] | None:
+    def _free_request(
+        self, request: Request, delay_free_blocks: bool = False
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         """Observe the decode length for naturally stopped requests."""
         if request.status == RequestStatus.FINISHED_STOPPED:
             job_name = self._job_name_parser.parse(request.request_id)
             self._job_decode_estimator.observe(job_name, request.num_output_tokens)
         self._job_name_parser.remove(request.request_id)
-        return super()._free_request(request, delay_free_blocks)
+        result = super()._free_request(request, delay_free_blocks)
+        if vllm_version_is("0.25.1"):
+            return result
+        return result, None
 
 
 class BatchJobAwareAsyncScheduler(AsyncScheduler, BatchJobAwareScheduler):
