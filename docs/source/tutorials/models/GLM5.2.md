@@ -378,7 +378,6 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
-
 ### Prefill-Decode Disaggregation
 
 We'd like to show the deployment guide of `GLM-5` on multi-node environment with 1P1D for better performance.
