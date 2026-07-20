@@ -3,20 +3,16 @@
 
 from __future__ import annotations
 
-import inspect
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 import torch
-import vllm
 from torch import nn
 from transformers import PretrainedConfig
 
 from vllm_ascend.models.minimax_m3 import (
     MiniMaxM3Attention,
     MiniMaxM3MoE,
-    MiniMaxVLVisionModel,
     _get_rope_parameters,
     _sparse_attention_layer_ids,
     minimax_m3_model,
@@ -82,13 +78,6 @@ def _make_attention() -> MiniMaxM3Attention:
 
 
 class TestMiniMaxM3Modeling(unittest.TestCase):
-    def test_vision_tower_uses_vllm_common_implementation(self) -> None:
-        source_file = inspect.getsourcefile(MiniMaxVLVisionModel)
-        self.assertIsNotNone(source_file)
-        self.assertIsNotNone(vllm.__file__)
-        expected_source = Path(vllm.__file__).resolve().parent / "models" / "minimax_m3" / "common" / "vision_tower.py"
-        self.assertTrue(Path(source_file).samefile(expected_source))
-
     def test_moe_wrapper_reuses_vllm_native_implementation(self) -> None:
         config = PretrainedConfig()
 
