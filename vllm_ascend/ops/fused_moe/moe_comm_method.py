@@ -93,6 +93,12 @@ class MoECommMethod(ABC):
         self.token_dispatcher = self._get_token_dispatcher()
         self.prepare_finalize = self._get_prepare_finalize()
         self.use_fusion_ops = set_gmmswigluquant_method()
+        self.lora_context = None
+
+    def set_lora_context(self, lora_context) -> None:
+        self.lora_context = lora_context
+        self.prepare_finalize.set_lora_context(lora_context)
+        self.token_dispatcher.set_lora_context(lora_context)
 
     def prepare(
         self,
@@ -101,7 +107,6 @@ class MoECommMethod(ABC):
         enable_shared_expert_dp: bool = False,
         replace_allreduce: bool = False,
         quant_type: QuantType = QuantType.NONE,
-        token_lora_indices: torch.Tensor | None = None,
     ) -> MoEPrepareOutput:
         return self.prepare_finalize.prepare(
             hidden_states,
@@ -109,7 +114,6 @@ class MoECommMethod(ABC):
             enable_shared_expert_dp,
             replace_allreduce,
             quant_type,
-            token_lora_indices,
         )
 
     def finalize(
@@ -174,7 +178,7 @@ class MoECommMethod(ABC):
         )
 
     def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
-        return unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+        return unified_apply_mlp(mlp_compute_input=mlp_compute_input, lora_context=self.lora_context)
 
     @abstractmethod
     def _get_token_dispatcher(self) -> MoETokenDispatcher:

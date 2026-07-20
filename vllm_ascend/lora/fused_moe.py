@@ -49,20 +49,19 @@ from vllm.lora.layers.utils import _get_lora_device
 
 import vllm_ascend.envs as envs_ascend
 
+_MOE_LORA_INDEX_FIELDS = (
+    "split_lora_indices",
+    "permuted_lora_indices",
+    "exchanged_lora_indices",
+)
+
+
+def initialize_moe_lora_context_indices(lora_context) -> None:
+    for field in _MOE_LORA_INDEX_FIELDS:
+        setattr(lora_context, field, None)
+
 
 def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
-    # AlltoAll + EP + LoRA is supported.
-    # Other expert-parallel backends (MC2, FusedMC2) are NOT supported.
-    if getattr(base_layer, "use_ep", False):
-        from vllm_ascend.ascend_forward_context import MoECommType
-
-        comm_type = getattr(base_layer, "moe_comm_type", None)
-        if comm_type not in (None, MoECommType.ALLTOALL):
-            raise AssertionError(
-                "Ascend MoE LoRA only supports AlltoAll EP. "
-                f"Got moe_comm_type={comm_type}. "
-                "Disable --enable-expert-parallel or use AlltoAll."
-            )
     if getattr(base_layer, "dynamic_eplb", False):
         raise AssertionError(
             "Ascend MoE LoRA is incompatible with dynamic EPLB "
@@ -99,7 +98,8 @@ def _recover_moe_lora_routing_allgather(lora_context, expanded_row_idx, topk_ids
     inv_perm = torch.argsort(expanded)
     expert_per_row = topk_ids.reshape(-1)[inv_perm].to(torch.long)
 
-    # token_lora_indices is a 1D LongTensor sized to max_num_batched_tokens
+    # punica_wrapper.token_lora_indices is a 1D LongTensor sized to
+    # max_num_batched_tokens
     # (host-known constant). Clamping defensively to the last index is a no-op
     # in normal operation but keeps the gather graph-safe.
     orig_token = inv_perm // top_k
@@ -112,21 +112,22 @@ def _recover_moe_lora_routing_allgather(lora_context, expanded_row_idx, topk_ids
 def _recover_moe_lora_routing_all2all(
     lora_context,
     group_list: torch.Tensor,
-    exchanged_lora_indices: torch.Tensor,
 ):
     """Recover per-row (expert_id, lora_id) for the AlltoAll dispatched tokens.
 
     In the AlltoAll + EP path, tokens have already been exchanged via
     all_to_all and sorted by local expert.  ``group_list`` tells us how
-    many tokens belong to each local expert, and ``exchanged_lora_indices``
-    contains the lora_id for each dispatched row (already permuted and
-    exchanged alongside the hidden states).
+    many tokens belong to each local expert. The LoRA indices for those
+    dispatched rows are stored on ``lora_context.exchanged_lora_indices``.
 
     Returns:
         expert_per_row: [num_dispatched_tokens] local expert id (0..E-1)
         lora_per_row:   [num_dispatched_tokens] lora adapter id (-1 = none)
     """
     num_local_experts = lora_context.local_num_experts
+    exchanged_lora_indices = getattr(lora_context, "exchanged_lora_indices", None)
+    if exchanged_lora_indices is None:
+        raise AssertionError("AlltoAll MoE LoRA requires exchanged_lora_indices in lora_context.")
 
     # Build per-token expert IDs
     expert_per_row = torch.repeat_interleave(
@@ -239,14 +240,14 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         # deliberately skip in __init__. We instead build the per-layer
         # MoELoRAContext (now that punica_wrapper is available) and publish it
         # on the module that ``AscendUnquantizedFusedMoEMethod.apply`` reads via
-        # ``getattr(layer, "_ascend_moe_lora_context", None)`` -- the base layer
-        # itself on 0.23.0, but ``base_layer.routed_experts`` on main (there the
-        # runner *is* the layer and it calls apply with ``layer=routed_experts``).
-        # The context holds stable references (the in-place-updated LoRA stacks,
-        # adapter_enabled and the punica wrapper), so building it once here is
-        # sufficient.
+        # ``getattr(layer, "_ascend_moe_lora_context", None)``
+        # Build the per-layer MoELoRAContext once punica_wrapper is available and
+        # publish it through the Ascend MoE runner. The runner stores it on
+        # routed_experts; batch-local LoRA indices are refreshed before each forward.
         BaseLayerWithLoRA.set_mapping(self, punica_wrapper)
-        self.base_layer.set_lora_context(self._build_lora_context())
+        lora_context = self._build_lora_context()
+        initialize_moe_lora_context_indices(lora_context)
+        self.base_layer.set_lora_context(lora_context)
 
 
 class AscendFusedMoE3DWithLoRA(AscendFusedMoEWithLoRA, FusedMoE3DWithLoRA):

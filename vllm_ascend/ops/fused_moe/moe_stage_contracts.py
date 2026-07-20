@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Generic, TypeVar
+from typing import Generic, TypeVar
 
 import numpy as np
 import torch
@@ -37,7 +37,6 @@ class MoEPrepareOutput:
     mc2_mask: torch.Tensor | None
     padded_hidden_states_shape: torch.Size | None
     pertoken_scale: torch.Tensor | None = None
-    split_lora_indices: torch.Tensor | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,16 +69,6 @@ class MoEFusedExpertsInput:
     need_trans: bool = False
     dynamic_eplb: bool = False
     swiglu_limit: float = 0.0
-    # Optional per-layer MoE LoRA state (vllm_ascend.lora MoELoRAContext).
-    # ``Any`` avoids coupling the core contracts to the LoRA module; only the
-    # unquant MLP path reads it, and only when a LoRA adapter is active.
-    lora_context: Any = None
-    # TP-split per-token LoRA indices for AlltoAll/EP paths.
-    # When TP>1, each rank owns a subset of tokens; this is the corresponding
-    # subset of lora_ids so that the all_to_all exchange can carry them
-    # alongside the hidden states to the correct expert-owning rank.
-    # ``None`` for AllGather / non-LoRA layers.
-    split_lora_indices: torch.Tensor | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,10 +80,6 @@ class MoETokenDispatchInput:
     topk_ids: torch.Tensor
     routing: MoERoutingParams
     quant: MoEQuantParams
-    # TP-split per-token LoRA indices (only for AlltoAll + EP + LoRA paths).
-    # Exchanged alongside hidden_states via all_to_all so each EP rank
-    # receives the lora_ids belonging to the tokens it owns.
-    split_lora_indices: torch.Tensor | None = None
 
 
 # dispatch carry-over state consumed by combine
@@ -127,10 +112,6 @@ class MoEAllToAllCombineMetadata:
     reversed_global_input_permutation_mapping: torch.Tensor | None
     hidden_shape: torch.Size
     hidden_shape_before_permute: torch.Size
-    # Exchanged per-token LoRA indices after all_to_all + expert-sort permute.
-    # Each entry is the lora_id for the corresponding dispatched token row;
-    # -1 means no LoRA for that token.  ``None`` when no LoRA adapter is active.
-    exchanged_lora_indices: torch.Tensor | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,12 +143,6 @@ class MoEMlpComputeInput:
     swiglu_limit: float = 0.0
     expanded_row_idx: torch.Tensor | None = None
     topk_ids: torch.Tensor | None = None
-    # Optional per-layer MoE LoRA state, propagated from MoEFusedExpertsInput.
-    lora_context: Any = None
-    # Exchanged per-token LoRA indices after AlltoAll dispatch + expert-sort.
-    # Only set when the AlltoAll communication path is used with LoRA.
-    # Each entry is the lora_id for the corresponding dispatched row; -1 = no LoRA.
-    exchanged_lora_indices: torch.Tensor | None = None
 
 
 __all__ = [
