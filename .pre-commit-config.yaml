@@ -60,6 +60,17 @@ repos:
 
 - repo: local
   hooks:
+  - id: gitleaks-offline-scan
+    name: Gitleaks Secret Scan(Local Binary)
+    entry: gitleaks
+    language: system
+    pass_filenames: true
+    args:
+      - protect
+      - --verbose
+      - --redact
+      - --config=pre-commit/.gitleaks.toml
+    stages: [pre-commit]
   - id: shellcheck
     name: Lint shell scripts
     entry: tools/shellcheck.sh
@@ -132,16 +143,3 @@ repos:
     verbose: true
     pass_filenames: false
   # Insert new entries above the `suggestion` entry
-- repo: local
-  hooks:
-    - id: gitleaks-offline-scan
-      name: Gitleaks Secret Scan(Local Binary)
-      entry: gitleaks
-      language: system
-      pass_filenames: true
-      args:
-        - protect
-        - --verbose
-        - --redact
-        - --config=pre-commit/.gitleaks.toml
-      stages: [pre-commit]
