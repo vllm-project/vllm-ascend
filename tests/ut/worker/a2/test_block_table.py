@@ -28,9 +28,9 @@ from tests.ut.base import TestBase
 class TestBlockTableComputeSlotMapping(TestBase):
     """Test suite for BlockTable.compute_slot_mapping() method
 
-    This test suite covers different configurations of DCP (Decode Context Parallelism),
-    PCP (Prefill Context Parallelism), and cp_kv_cache_interleave_size to ensure
-    correct slot_mapping calculation on different ranks.
+    This test suite covers different configurations of DCP (Decode Context
+    Parallelism) and cp_kv_cache_interleave_size to ensure correct slot_mapping
+    calculation on different ranks.
     """
 
     def setUp(self):
@@ -44,24 +44,15 @@ class TestBlockTableComputeSlotMapping(TestBase):
         self.kernel_sizes = [128]
         self._skip_triton_kernel = True
 
-    def create_block_table(self, dcp_world_size, dcp_rank, pcp_world_size, pcp_rank, cp_kv_cache_interleave_size):
+    def create_block_table(self, dcp_world_size, dcp_rank, cp_kv_cache_interleave_size):
         """Helper method to create BlockTable with mocked distributed groups"""
 
-        with (
-            patch("vllm_ascend.worker.block_table.get_dcp_group") as mock_get_dcp_group,
-            patch("vllm_ascend.worker.block_table.get_pcp_group") as mock_get_pcp_group,
-        ):
+        with patch("vllm_ascend.worker.block_table.get_dcp_group") as mock_get_dcp_group:
             # Mock DCP group
             mock_dcp_group = MagicMock(spec=GroupCoordinator)
             mock_dcp_group.world_size = dcp_world_size
             mock_dcp_group.rank_in_group = dcp_rank
             mock_get_dcp_group.return_value = mock_dcp_group
-
-            # Mock PCP group
-            mock_pcp_group = MagicMock(spec=GroupCoordinator)
-            mock_pcp_group.world_size = pcp_world_size
-            mock_pcp_group.rank_in_group = pcp_rank
-            mock_get_pcp_group.return_value = mock_pcp_group
 
             from vllm_ascend.worker.block_table import BlockTable
 
@@ -86,20 +77,18 @@ class TestBlockTableComputeSlotMapping(TestBase):
             block_ids = list(range(i * 4, (i + 1) * 4))  # [0,1,2,3], [4,5,6,7], etc.
             block_table.add_row(block_ids, i)
 
-    def _test_slot_mapping_for_ranks(self, dcp_world_size, pcp_world_size, cp_kv_cache_interleave_size, test_configs):
+    def _test_slot_mapping_for_ranks(self, dcp_world_size, cp_kv_cache_interleave_size, test_configs):
         """Helper method to test slot_mapping across multiple ranks
 
         Args:
             dcp_world_size: Number of DCP ranks
-            pcp_world_size: Number of PCP ranks
             cp_kv_cache_interleave_size: Interleave size for KV cache
-            test_configs: List of tuples (dcp_rank, pcp_rank, req_indices, positions, expected_result)
+            test_configs: List of tuples
+                (dcp_rank, req_indices, positions, expected_result)
         """
-        for dcp_rank, pcp_rank, req_indices, positions, expected_result in test_configs:
-            with self.subTest(dcp_rank=dcp_rank, pcp_rank=pcp_rank):
-                block_table = self.create_block_table(
-                    dcp_world_size, dcp_rank, pcp_world_size, pcp_rank, cp_kv_cache_interleave_size
-                )
+        for dcp_rank, req_indices, positions, expected_result in test_configs:
+            with self.subTest(dcp_rank=dcp_rank):
+                block_table = self.create_block_table(dcp_world_size, dcp_rank, cp_kv_cache_interleave_size)
 
                 num_reqs = max(req_indices) + 1 if len(req_indices) > 0 else 1
                 self.setup_block_table_data(block_table, num_reqs=num_reqs)
@@ -118,8 +107,8 @@ class TestBlockTableComputeSlotMapping(TestBase):
                 # Triton kernel requires NPU device; mock it and compute on CPU
                 with patch.object(block_table, "compute_slot_mapping"):
                     slot_mapping = block_table.slot_mapping.cpu
-                    total_cp_world_size = pcp_world_size * dcp_world_size
-                    total_cp_rank = pcp_rank * dcp_world_size + dcp_rank
+                    total_cp_world_size = dcp_world_size
+                    total_cp_rank = dcp_rank
                     bs = block_table.physical_block_size
                     interleave = cp_kv_cache_interleave_size
                     for token_idx in range(num_tokens):
@@ -167,15 +156,15 @@ class TestBlockTableComputeSlotMapping(TestBase):
                 np.testing.assert_array_equal(
                     actual_result,
                     expected_result,
-                    f"DCP={dcp_world_size}, PCP={pcp_world_size}, "
+                    f"DCP={dcp_world_size}, "
                     f"interleave={cp_kv_cache_interleave_size}, "
-                    f"dcp_rank={dcp_rank}, pcp_rank={pcp_rank}",
+                    f"dcp_rank={dcp_rank}",
                 )
 
-    def test_compute_slot_mapping_dcp1_pcp1_interleave1(self):
-        """Test compute_slot_mapping with DCP=1, PCP=1, interleave_size=1
+    def test_compute_slot_mapping_dcp1_interleave1(self):
+        """Test compute_slot_mapping with DCP=1, interleave_size=1
 
-        With no parallelism (DCP=1, PCP=1), all tokens are local to the single rank.
+        With no parallelism, all tokens are local to the single rank.
 
         Setup:
         - Block size: 16
@@ -194,15 +183,15 @@ class TestBlockTableComputeSlotMapping(TestBase):
         expected_result = np.array([0, 1, 512, 513], dtype=np.int32)
 
         test_configs = [
-            (0, 0, req_indices, positions, expected_result),
+            (0, req_indices, positions, expected_result),
         ]
 
         self._test_slot_mapping_for_ranks(
-            dcp_world_size=1, pcp_world_size=1, cp_kv_cache_interleave_size=1, test_configs=test_configs
+            dcp_world_size=1, cp_kv_cache_interleave_size=1, test_configs=test_configs
         )
 
-    def test_compute_slot_mapping_dcp4_pcp2_interleave1(self):
-        """Test compute_slot_mapping with DCP=4, PCP=2, interleave_size=1
+    def test_compute_slot_mapping_dcp8_interleave1(self):
+        """Test compute_slot_mapping with DCP=8, interleave_size=1
 
         With interleave_size=1, tokens are distributed round-robin across all 8 ranks:
         - Position 0 → Rank 0
@@ -216,44 +205,41 @@ class TestBlockTableComputeSlotMapping(TestBase):
         positions = np.array(list(range(16)), dtype=np.int32)
 
         # Manually computed expected values for each rank
-        # Rank assignment: current_rank = 4 * pcp_rank + dcp_rank
         test_configs = []
 
         # For each rank, specify which positions it owns and their local slot mapping
         rank_expectations = {
-            # Rank 0 (pcp=0, dcp=0): positions 0, 8
+            # Rank 0: positions 0, 8
             0: [0, -1, -1, -1, -1, -1, -1, -1, 1, -1, -1, -1, -1, -1, -1, -1],
-            # Rank 1 (pcp=0, dcp=1): positions 1, 9
+            # Rank 1: positions 1, 9
             1: [-1, 0, -1, -1, -1, -1, -1, -1, -1, 1, -1, -1, -1, -1, -1, -1],
-            # Rank 2 (pcp=0, dcp=2): positions 2, 10
+            # Rank 2: positions 2, 10
             2: [-1, -1, 0, -1, -1, -1, -1, -1, -1, -1, 1, -1, -1, -1, -1, -1],
-            # Rank 3 (pcp=0, dcp=3): positions 3, 11
+            # Rank 3: positions 3, 11
             3: [-1, -1, -1, 0, -1, -1, -1, -1, -1, -1, -1, 1, -1, -1, -1, -1],
-            # Rank 4 (pcp=1, dcp=0): positions 4, 12
+            # Rank 4: positions 4, 12
             4: [-1, -1, -1, -1, 0, -1, -1, -1, -1, -1, -1, -1, 1, -1, -1, -1],
-            # Rank 5 (pcp=1, dcp=1): positions 5, 13
+            # Rank 5: positions 5, 13
             5: [-1, -1, -1, -1, -1, 0, -1, -1, -1, -1, -1, -1, -1, 1, -1, -1],
-            # Rank 6 (pcp=1, dcp=2): positions 6, 14
+            # Rank 6: positions 6, 14
             6: [-1, -1, -1, -1, -1, -1, 0, -1, -1, -1, -1, -1, -1, -1, 1, -1],
-            # Rank 7 (pcp=1, dcp=3): positions 7, 15
+            # Rank 7: positions 7, 15
             7: [-1, -1, -1, -1, -1, -1, -1, 0, -1, -1, -1, -1, -1, -1, -1, 1],
         }
 
-        for pcp_rank in range(2):
-            for dcp_rank in range(4):
-                current_rank = 4 * pcp_rank + dcp_rank
-                expected_result = np.array(rank_expectations[current_rank], dtype=np.int32)
-                test_configs.append((dcp_rank, pcp_rank, req_indices, positions, expected_result))
+        for dcp_rank in range(8):
+            expected_result = np.array(rank_expectations[dcp_rank], dtype=np.int32)
+            test_configs.append((dcp_rank, req_indices, positions, expected_result))
 
         self._test_slot_mapping_for_ranks(
-            dcp_world_size=4, pcp_world_size=2, cp_kv_cache_interleave_size=1, test_configs=test_configs
+            dcp_world_size=8, cp_kv_cache_interleave_size=1, test_configs=test_configs
         )
 
-    def test_compute_slot_mapping_dcp4_pcp2_interleave128(self):
-        """Test compute_slot_mapping with DCP=4, PCP=2, interleave_size=128
+    def test_compute_slot_mapping_dcp8_interleave128(self):
+        """Test compute_slot_mapping with DCP=8, interleave_size=128
 
         With interleave_size=128, tokens are distributed in chunks of 128 across ranks.
-        Virtual block size = 16 * 4 * 2 = 128
+        Virtual block size = 16 * 8 = 128
 
         Token distribution with interleave_size=128:
         - Positions 0-127 belong to rank 0 (first chunk of 128)
@@ -273,39 +259,36 @@ class TestBlockTableComputeSlotMapping(TestBase):
         test_configs = []
 
         # Build expected results for each rank
-        for pcp_rank in range(2):
-            for dcp_rank in range(4):
-                current_rank = 4 * pcp_rank + dcp_rank
-                expected_result = []
+        for dcp_rank in range(8):
+            current_rank = dcp_rank
+            expected_result = []
 
-                if current_rank == 0:
-                    # Rank 0 gets positions 0-127
-                    # Each maps to its local slot: 0, 1, 2, ..., 127
-                    for pos in range(130):
-                        if pos < 128:
-                            expected_result.append(pos)
-                        else:
-                            expected_result.append(-1)
-                elif current_rank == 1:
-                    # Rank 1 gets positions 128-129
-                    # Position 128 maps to local slot 0, position 129 to local slot 1
-                    for pos in range(130):
-                        if pos == 128:
-                            expected_result.append(0)
-                        elif pos == 129:
-                            expected_result.append(1)
-                        else:
-                            expected_result.append(-1)
-                else:
-                    # All other ranks get no positions
-                    expected_result = [-1] * 130
+            if current_rank == 0:
+                # Rank 0 gets positions 0-127
+                # Each maps to its local slot: 0, 1, 2, ..., 127
+                for pos in range(130):
+                    if pos < 128:
+                        expected_result.append(pos)
+                    else:
+                        expected_result.append(-1)
+            elif current_rank == 1:
+                # Rank 1 gets positions 128-129
+                # Position 128 maps to local slot 0, position 129 to local slot 1
+                for pos in range(130):
+                    if pos == 128:
+                        expected_result.append(0)
+                    elif pos == 129:
+                        expected_result.append(1)
+                    else:
+                        expected_result.append(-1)
+            else:
+                # All other ranks get no positions
+                expected_result = [-1] * 130
 
-                test_configs.append(
-                    (dcp_rank, pcp_rank, req_indices, positions, np.array(expected_result, dtype=np.int32))
-                )
+            test_configs.append((dcp_rank, req_indices, positions, np.array(expected_result, dtype=np.int32)))
 
         self._test_slot_mapping_for_ranks(
-            dcp_world_size=4, pcp_world_size=2, cp_kv_cache_interleave_size=128, test_configs=test_configs
+            dcp_world_size=8, cp_kv_cache_interleave_size=128, test_configs=test_configs
         )
 
 

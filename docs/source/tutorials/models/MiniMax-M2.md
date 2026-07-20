@@ -210,9 +210,8 @@ Remarks:
 
 ```bash
     --tensor-parallel-size 8 \
-    --data-parallel-size 1 \
+    --data-parallel-size 2 \
     --decode-context-parallel-size 1 \
-    --prefill-context-parallel-size 2 \
     --cp-kv-cache-interleave-size 128 \
     --max-num-seqs 16 \
     --max-model-len 138000 \

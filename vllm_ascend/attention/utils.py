@@ -179,94 +179,18 @@ def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig, head_size
 
 
 @lru_cache(maxsize=1)
-def enable_cp():
-    prefill_config = get_current_vllm_config().parallel_config
-    return prefill_config.prefill_context_parallel_size > 1 or prefill_config.decode_context_parallel_size > 1
+def enable_dcp():
+    parallel_config = get_current_vllm_config().parallel_config
+    return parallel_config.decode_context_parallel_size > 1
 
 
 @dataclass
-class AscendPrefillContextParallelMetadata:
-    """
-    Metadata for Prefill Context Parallelism (PCP) in CommonAttentionMetadata.
+class AscendDCPMetadata:
+    """Per-batch metadata required by decode context parallelism."""
 
-    Contains index tensors and sequence lengths for PCP operations.
-    """
-
-    pcp_allgather_restore_idx: torch.Tensor = None
-
-    num_actual_tokens_pcp_padded: int = 0
-
-    num_computed_tokens_of_pcp_dcp: list[list[list[int]]] | None = None
-
-    q_head_idx_tensor: torch.Tensor = None
-
-    q_tail_idx_tensor: torch.Tensor = None
-
-    kv_with_q_head_nomask_idx_tensor: torch.Tensor = None
-
-    kv_with_q_head_mask_idx_tensor: torch.Tensor = None
-
-    kv_with_q_tail_nomask_idx_tensor: torch.Tensor = None
-
-    kv_with_q_tail_mask_idx_tensor: torch.Tensor = None
-
-    kv_tail_proj_idx_tensor: torch.Tensor = None
-
-    kv_with_q_head_attn_idx_in_tail_tensor: torch.Tensor = None
-
-    kv_with_q_tail_attn_idx_in_tail_tensor: torch.Tensor = None
-
-    attn_mask_seqlens: torch.Tensor = None
-
-    head_attn_nomask_seqlens: torch.Tensor = None
-
-    tail_attn_nomask_seqlens: torch.Tensor = None
-
-    head_actual_seq_lengths_kv: list[int] | None = None
-
-    tail_actual_seq_lengths_kv: list[int] | None = None
-
-    q_full_idx: torch.Tensor = None
-
-    # original query_lens before pcp split
-    query_lens_pcp_full_cpu: torch.Tensor = None
-
-    # original max_query_len before pcp split
-    max_query_len_pcp_full: int = 0
-
-    # the following attributes are specifically used in hybrid-attn models.
-    pcp_use_hybrid_attn: bool = False
-
-    pcp_unpad_mask: torch.Tensor = None
-
-    # to get the right order of query in prefill per rank
-    pcp_fa_query_idx: torch.Tensor = None
-
-    # restore the full sequence across all pcp ranks
-    # when entering from linear-attention to attention
-    pcp_enter_fa_restore_idx: torch.Tensor = None
-
-    # restore the original FA padded layout without boolean-mask scatter
-    pcp_fa_padding_restore_idx: torch.Tensor = None
-
-    # scatter the full sequence across all pcp ranks
-    # when exiting from attention to linear-attention
-    pcp_exit_fa_scatter_idx: torch.Tensor = None
-
-    # the number of tokens padded in linear-attn per rank
-    pcp_padded_tokens_fla: int = 0
-
-    # the max number of unpadded tokens in all ranks
-    max_num_tokens_across_pcp: int = 0
-
-    # the number of scheduled tokens on the current rank before padding
-    total_num_scheduled_tokens: int = 0
-
-    # Because the sequence shard in linear attention layers does not include padding,
-    # the full attention layers cannot obtain the correct query_lens with pcp pad for
-    # chunked prefill calculation. Therefore, this value needs to be passed to the backend.
-    # TODO:To be refactored.
-    attn_chunk_seqlens: torch.Tensor = None
+    num_computed_tokens_of_dcp: list[list[int]] | None = None
+    query_lens_cpu: torch.Tensor = None
+    max_query_len: int = 0
     dcp_mtp_attn_mask: torch.Tensor = None
 
 
@@ -309,8 +233,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # Total number of tokens including padding, used for padding operations.
     num_input_tokens: int = 0
 
-    # Metadata for Prefill Context Parallelism (PCP) operations.
-    prefill_context_parallel_metadata: AscendPrefillContextParallelMetadata | None = None
+    # Metadata for Decode Context Parallelism (DCP) operations.
+    context_parallel_metadata: AscendDCPMetadata | None = None
     group_len: torch.Tensor = None
     group_key_idx: torch.Tensor = None
     group_key_cache_idx: torch.Tensor = None
@@ -344,7 +268,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             attn_state=self.attn_state,
             graph_pad_size=-1,  # It should be -1 when not run in fullgraph mode.
             num_input_tokens=self.num_input_tokens,
-            prefill_context_parallel_metadata=self.prefill_context_parallel_metadata,
+            context_parallel_metadata=self.context_parallel_metadata,
             seq_lens_cpu_upper_bound=self.seq_lens_cpu_upper_bound[:num_actual_reqs]
             if self.seq_lens_cpu_upper_bound is not None
             else None,
@@ -406,8 +330,8 @@ def split_decodes_and_prefills(
     """
     Assuming a reordered batch, finds the boundary between prefill and decode
     requests.
-    While pcp > 1, query_lens is split across pcp ranks, so we pass in the
-    original query_lens and max_query_len to distinguish prefills and decodes.
+    DCP metadata may carry a stable CPU copy of query lengths for asynchronous
+    speculative-decoding updates.
 
     The batch is expected to be ordered as:
     decode -> short_extend -> long_extend -> prefill
@@ -430,10 +354,10 @@ def split_decodes_and_prefills(
         num_decode_tokens: The number of tokens in the decode requests.
         num_prefill_tokens: The number of tokens in the prefill requests.
     """
-    long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
-    query_lens_pcp_full = long_seq_metadata.query_lens_pcp_full_cpu if long_seq_metadata else None
-    max_query_len_pcp_full = long_seq_metadata.max_query_len_pcp_full if long_seq_metadata else 0
-    max_query_len = common_attn_metadata.max_query_len if max_query_len_pcp_full == 0 else max_query_len_pcp_full
+    dcp_metadata = common_attn_metadata.context_parallel_metadata
+    query_lens_dcp = dcp_metadata.query_lens_cpu if dcp_metadata else None
+    max_query_len_dcp = dcp_metadata.max_query_len if dcp_metadata else 0
+    max_query_len = common_attn_metadata.max_query_len if max_query_len_dcp == 0 else max_query_len_dcp
     num_reqs = common_attn_metadata.num_reqs
     if num_reqs == 0:
         return 0, 0, 0, 0
@@ -454,7 +378,7 @@ def split_decodes_and_prefills(
         return num_reqs, 0, num_tokens, 0
 
     query_lens_sharded = query_start_loc[1:] - query_start_loc[:-1]
-    query_lens = query_lens_sharded if query_lens_pcp_full is None else query_lens_pcp_full
+    query_lens = query_lens_sharded if query_lens_dcp is None else query_lens_dcp
     if query_lens[0].item() > decode_threshold:
         return 0, num_reqs, 0, num_tokens
 

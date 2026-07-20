@@ -65,9 +65,9 @@ class TestAscendAttentionBackend(TestBase):
         self.utils_patcher = patch("vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_config)
         self.utils_patcher.start()
 
-        from vllm_ascend.attention.utils import enable_cp
+        from vllm_ascend.attention.utils import enable_dcp
 
-        enable_cp.cache_clear()
+        enable_dcp.cache_clear()
 
     def test_get_name(self):
         self.assertEqual(AscendAttentionBackend.get_name(), "CUSTOM")
@@ -146,7 +146,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.assertTrue(torch.equal(unpadded_metadata._seq_lens_cpu, internal_seq_lens_cpu[:2]))
         self.assertIsNone(unpadded_metadata.seq_lens_cpu)
 
-    @patch("vllm_ascend.attention.attention_v1.AscendMetadata")
+    @patch.object(AscendAttentionMetadataBuilder, "metadata_cls")
     def test_build(self, mock_ascend_metadata):
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=torch.tensor([0, 2, 5, 9]),

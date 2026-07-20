@@ -80,7 +80,6 @@ ALLOWED_VALUES: dict[str, set[str]] = {
         "PP",
         "EP",
         "DP",
-        "PCP",
         "DCP",
         "SP",
     },

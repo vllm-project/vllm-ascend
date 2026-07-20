@@ -1,106 +1,79 @@
-# Context Parallel (CP)
+# Decode Context Parallel (DCP)
 
-TL;DR: PCP accelerates prefill via sequence splitting. DCP eliminates KV cache redundancy.
+Decode Context Parallel shards the KV cache along the sequence dimension across devices in a Tensor Parallel (TP) group. It eliminates redundant KV-cache storage without adding devices to the process world.
 
-![ContextParallel](../../assets/cp/overview.png)
+Prefill Context Parallel is not supported by vLLM Ascend. This document describes only DCP and the separate DSA-CP sparse-attention path.
 
-For the main discussions during the development process, please refer to the [RFC](https://github.com/vllm-project/vllm/issues/25749) and the relevant links referenced by or referencing this RFC.
+## KV-cache layout
 
-## What is CP?
+DCP stores tokens in an interleaved layout across ranks. The interleaving granularity is controlled by `cp_kv_cache_interleave_size`, whose default value is `1`.
 
-**Context Parallel (CP)** is a strategy for parallelizing computation along the sequence dimension across multiple devices.
+For a DCP size of `dcp_size`, a virtual block contains `block_size * dcp_size` tokens. For token `x`:
 
-**Prefill Context Parallel (PCP)** expands the world size of devices and uses dedicated communication domains.
-Its primary goal is to partition the sequence dimension during the prefill phase, enabling different devices to compute distinct chunks of the sequence simultaneously.
-The KV cache is sharded along the sequence dimension across devices.
-This approach impacts the computational logic of both the Prefill and Decode stages to varying degrees.
+- `virtual_block_index = x // (block_size * dcp_size)`
+- `offset_in_virtual_block = x % (block_size * dcp_size)`
+- `local_block_index = offset_in_virtual_block // cp_kv_cache_interleave_size`
+- `target_rank = local_block_index % dcp_size`
 
-**Decode Context Parallel (DCP)** reuses the communication domain of Tensor Parallelism (TP) and does not require additional devices.
-Its main objective is to eliminate duplicated storage of the KV cache by sharding it along the sequence dimension across devices within the TP domain that would otherwise hold redundant copies.
-DCP primarily influences the Decode logic, as well as the logic for chunked prefill and cached prefill.
+The slot-mapping calculation uses this layout so each DCP rank stores only its local sequence shard. The current implementation requires `block_size % cp_kv_cache_interleave_size == 0`.
 
-## How to Use CP?
+![DCP block table](../../assets/cp/blocktable.png)
 
-Please refer to the [context parallel user guide](../../user_guide/feature_guide/context_parallel.md) for detailed information.
+## Attention execution
 
-## How It Works?
+### Backend structure
 
-### Device Distribution
+DCP is implemented as a specialization of the corresponding v1 attention
+backend rather than as a parallel copy of it:
 
-We introduce new communication domains for PCP and reuse TP for DCP, and this is the new layout of devices for PCP2, DCP2, and TP4.
-![device_world](../../assets/cp/device_world.png)
+- `DCPMetadataBuilderMixin` owns DCP group/rank discovery and access to the
+  per-rank context-length matrix.
+- `DCPImplMixin` owns DCP collectives and the common partial-output/LSE merge.
+- GQA, MLA, and SFA DCP builders inherit their v1 metadata builders. They only
+  add DCP metadata fields or temporarily expose the DCP-specific cache view.
+- GQA, MLA, and SFA DCP implementations inherit their v1 implementations and
+  override only the kernel stages whose communication or cache layout differs.
 
-### Block Table
+The normal v1 builders remain the source of truth for request classification,
+padding, masks, graph metadata, and common KV-cache metadata. DCP-specific
+metadata is kept out of the normal GQA metadata schema.
 
-CP performs sequence sharding on the KV cache storage. To facilitate efficient storage and access, tokens are stored in an interleaved manner across devices, with the interleaving granularity determined by `cp_kv_cache_interleave_size`, whose default value is `cp_kv_cache_interleave_size=1`, a.k.a. 'token interleave'.
+### Prefill and chunked prefill
 
-Given that PCP and DCP behave similarly for KV cache sharding, we refer to them collectively as CP. Specifically, `cp_size = pcp_size * dcp_size`, and `cp_rank = pcp_rank * dcp_size + dcp_rank`.
+During chunked or cached prefill, the local query must attend to KV-cache shards distributed across the DCP group.
 
-As illustrated, a virtual block is defined in the block table, where blocks within the same CP device group form a virtual block. The virtual block size is `virtual_block_size = block_size * cp_size`.
+- MLA gathers the context KV cache, restores request-contiguous order, and computes attention for the current query chunk.
+- GQA gathers query heads across the DCP group, computes attention against each local KV shard, and combines partial outputs and LSE values.
 
-For any token `x`, referencing the following figure, its (virtual) block index is `x // virtual_block_size`, and the offset within the virtual block is `offset_within_virtual_block = x % virtual_block_size`.
-The local block index is `local_block_index = offset_within_virtual_block // cp_kv_cache_interleave_size`, and the device number is `target_rank = local_block_index % cp_size`.
-The offset within the local block is `(local_block_index // cp_size) * cp_kv_cache_interleave_size + offset_within_virtual_block % cp_kv_cache_interleave_size`.
+![DCP prefill](../../assets/cp/dcp-prefill.png)
 
-![BlockTable](../../assets/cp/blocktable.png)
+### Decode
 
-Based on the logic above, the `slot_mapping` calculation process is adjusted, and the `slot_mapping` values on each device are modified to ensure the KV cache is sharded along the sequence dimension and stored across different devices as expected.
+Decode gathers the query heads required by each DCP rank, computes attention against the local KV-cache shard, and combines partial outputs and LSE values across the DCP group.
 
-The current implementation requires that `block_size % cp_kv_cache_interleave_size == 0`.
+![DCP decode](../../assets/cp/dcp-decode.png)
 
-### Decode Context Parallel (DCP)
+### GLM-5.2 SFA DCP replicated indexer
 
-As mentioned above, the primary function of DCP is to shard the KV cache along the sequence dimension for storage. Its impact lies in the logic of the decode and chunked prefill phases.
-
-**Prefill Phase:**  
-As illustrated, during the Chunked Prefill computation, two distinct logic implementations are employed for MLA and GQA backends.  
-
-- In the **MLA backend**, a Context KV Cache `all_gather` operation is performed to aggregate the full KV values.
-These are then used for attention computation with the Q values of the current chunk.
-Note that in multi-request scenarios, the directly gathered KV results are interleaved across requests.
-The `reorg_kvcache` function is used to reorganize the KV cache, ensuring that the KV cache of the same request is stored contiguously.  
-
-- In the **GQA backend**, an `all_gather` is performed along the head dimension for Q.
-This is because DCP overlaps with the TP communication domain, and the Q heads within a DCP group differ.
-However, they need to exchange results with the locally computed KV cache for online Softmax updates.
-To ensure correctness during result updates, the Q values are synchronized across the DCP group via head-dimension `all_gather`.
-During the result update process, `cp_lse_ag_out_rs` is invoked to aggregate `attn_output` and `attn_lse`, update the results, and perform a reduce-scatter operation on the outputs.
-Alternatively, we can use an all-to-all communication to exchange the output and LSE results, followed by direct local updates. This approach aligns with the logic adapted for PCP compatibility.
-
-![DCP-Prefill](../../assets/cp/dcp-prefill.png)
-
-**Decode Phase:**
-The logic during the decode phase is consistent with that of GQA's chunked prefill: an all-gather operation is first performed along the Q head dimension to ensure consistency within the DCP group.
-After computing the results with the local KV cache, the results are updated via the `cp_lse_ag_out_rs` function.
-
-![DCP-Decode](../../assets/cp/dcp-decode.png)
-
-### GLM-5.2 SFA DCP Replicated Indexer
-
-GLM-5.2 uses Sparse Flash Attention (SFA) with a LightningIndexer.  For DCP,
+GLM-5.2 uses Sparse Flash Attention (SFA) with a LightningIndexer. For DCP,
 the indexer needs a full-sequence view to select the same sparse top-k blocks
 as non-DCP SFA, while the much larger SFA KV cache should remain sharded to
-retain DCP's memory benefit.  The replicated-indexer path provides this split
-layout:
+retain DCP's memory benefit:
 
-- The LightningIndexer cache is replicated on every DCP rank.  Index selection
-  therefore uses the complete sequence and produces globally consistent sparse
-  top-k indices.
-- The SFA KV cache remains DCP-local.  The global indices from the replicated
+- The LightningIndexer cache is replicated on every DCP rank, so index
+  selection uses the complete sequence.
+- The SFA KV cache remains DCP-local. Global indices from the replicated
   indexer view are remapped to local KV indices before SFA runs.
-- During prefill or a mixed batch, only the KV blocks referenced by the sparse
-  block table are compacted and all-gathered after the current layer has
-  written its KV cache.  The gathered KV uses a remapped block table for SFA,
-  so this path does not all-gather Q and does not need LSE or output
-  post-processing.
+- During prefill or a mixed batch, only KV blocks referenced by the sparse
+  block table are compacted and all-gathered after the current layer writes its
+  KV cache.
 - Decode-only batches retain the DCP SFA Q-gather and result-merge path.
 
 This mode is selected automatically for SFA sparse models when
-`prefill_context_parallel_size=1` and `decode_context_parallel_size>1`.  It
-requires `decode_context_parallel_size == tensor_parallel_size`; PCP combined
-with this replicated-indexer path is not supported.
+`prefill_context_parallel_size=1` and `decode_context_parallel_size>1`. It
+requires `decode_context_parallel_size == tensor_parallel_size`.
 
-For a GLM-5.2 DSA-CP deployment, enable FlashComm1 and DSA CP and keep the CP
+For a GLM-5.2 DSA-CP deployment, enable FlashComm1 and DSA-CP and keep the CP
 interleave size equal to the KV-cache block size:
 
 ```bash
@@ -116,82 +89,23 @@ vllm serve <glm-5.2-model> \
 ```
 
 The replicated indexer increases indexer-cache memory in proportion to the
-DCP world size; the SFA KV cache itself remains sharded.  For this SFA CP path,
-`cp_kv_cache_interleave_size` must equal `block_size`.  A mismatched setting is
-overridden during configuration validation, but deployments should set both
-values explicitly to avoid relying on that fallback.
+DCP world size; the SFA KV cache itself remains sharded.
 
-### Prefill Context Parallel (PCP)
+## SFA DSA-CP mixed `o_proj` path
 
-**Tokens Partition in Head-Tail Style**
+SFA DSA-CP mixed execution reuses the normal TP-sharded `o_proj`. DSA-CP is controlled independently through `additional_config.enable_dsa_cp`; it is not Prefill Context Parallel.
 
-PCP requires splitting the input sequence and ensuring balanced computational load across devices during the prefill phase.
-We employ a head-tail style for splitting and concatenation: specifically, the sequence is first padded to a length of `2*pcp_size`, then divided into `2*pcp_size` equal parts.
-The first part is merged with the last part, the second part with the second last part, and so on, thereby assigning computationally balanced chunks to each device.
-Additionally, since allgather aggregation of KV or Q results in interleaved chunks from different requests, we compute `pcp_allgather_restore_idx` to quickly restore the original order.
+- Decode-only batches keep the decode TP path. SFA outputs are exchanged with an all-to-all in the TP group, then the TP-sharded `o_proj` runs normally.
+- Prefill or mixed batches all-gather the TP-sharded `o_proj` weight and input-sharded quantization parameters into reusable temporary full-weight buffers before the projection.
 
-These logics are implemented in the function `_update_tokens_for_pcp`.
+The original TP-sharded parameter remains the only persistent source of truth. Temporary full-weight buffers must not become a second persistent parameter copy.
 
-![PCP-Partition](../../assets/cp/head-tail-style.png)
+## Related files
 
-**Prefill Phase:**
-
-During the Prefill phase (excluding chunked prefill), we employ an all-gather KV approach to address the issue of incomplete sequences on individual GPUs.
-It is important to note that we only aggregate the KV values for the current layer at a time, and these are discarded immediately after use, avoiding excessive peak memory usage.
-This method can also be directly applied to KV cache storage (since the KV cache partitioning method differs from PCP sequence partitioning, it is inevitable that each GPU requires a complete copy of the KV values).
-All attention backends maintain consistency in this logic.
-
-Note: While a Ring Attention approach could also facilitate information exchange with lower peak memory and enable computation-communication overlap, we prioritized the all-gather KV implementation after evaluating that the development complexity was high and the benefits of overlap were limited.
-
-![PCP-Prefill](../../assets/cp/pcp-prefill.png)
-
-**Decode Phase:**
-
-During the decode phase, we only need to add an allgather within the PCP group after the DCP all-to-all communication exchanges the output and LSE, before proceeding with the output update.
-
-![PCP-Decode](../../assets/cp/pcp-decode.png)
-
-**Chunked Prefill:**
-
-Currently, there are three viable approaches for Chunked Prefill compatibility: **AllGatherQ**, **AllGatherKV**, and **Ring-Attn**.
-Since PCP performs sequence sharding on both the query sequence and the KV cache, we need to ensure that one side has complete information or employ a method like Ring-Attn to perform computations sequentially.
-The advantages and disadvantages of Ring-Attn will not be elaborated here.
-
-We have implemented the **AllGatherQ** approach in the GQA attention backend and the **AllGatherKV** approach in the MLA attention backend.
-The workflow after **AllGatherQ** is identical to the decode phase, while the workflow after **AllGatherKV** is the same as the standard prefill phase.
-For details, please refer to the diagram below; specific steps will not be repeated.
-
-One important note: **AllGatherKV** may lead to significant peak memory usage when the context length becomes excessively long.
-To mitigate this, we adopt a segmented processing strategy.
-By predefining the maximum amount of KV cache processed per round, we sequentially complete the attention computation and online softmax updates for each segment.
-
-![PCP-ChunkedPrefill](../../assets/cp/chunkedprefill.png)
-
-### SFA DSA-CP `o_proj` Path
-
-SFA DSA-CP execution intentionally reuses the normal TP-sharded `o_proj`.
-This applies both to a mixed-role instance and to a PD-disaggregated P node; it is not a standalone user-facing `o_proj` TP switch.
-The runtime path supports two layouts:
-
-- **Decode-only batches** keep the decode TP path.
-  SFA outputs are exchanged with an all-to-all in the TP group, then the original TP-sharded `o_proj` runs normally.
-- **Prefill or mixed batches**, including batches on a PD-disaggregated P node, produce SFA outputs that are not directly compatible with the TP-sharded `o_proj` input layout.
-  Before `o_proj` forward, each rank all-gathers the TP-sharded `o_proj` weight and all input-sharded quantization parameters into temporary full-weight buffers.
-  The full-weight `o_proj` forward runs once for that batch, and the module is then restored to the TP parameter aliases.
-
-The storage invariant is that the original TP-sharded `o_proj` parameter remains the only persistent source of truth.
-`o_proj_tp_*` tensors are aliases of the original parameter storage.
-`o_proj_full_*` tensors are reusable communication buffers for prefill/mixed full-gather execution only.
-They must not become a second persistent copy of the TP weight.
-
-This coupling preserves the existing decode TP behavior, supports prefill/mixed DSA-CP batches on both mixed-role and P-only instances, and avoids a persistent full-weight copy on every TP rank.
-
-### Related Files
-
-- slot_mapping computation: `vllm_ascend/worker/block_table.py`
-- sequences splitting and metadata prepare: `vllm_ascend/worker/model_runner_v1.py`
-- PCP token splitting and metadata generation: `vllm_ascend/worker/pcp_utils.py`
-- GQA backend: `vllm_ascend/attention/context_parallel/attention_cp.py`
-- MLA backend: `vllm_ascend/attention/context_parallel/mla_cp.py`
-- DSA backend: `vllm_ascend/attention/context_parallel/dsa_cp.py`
-- SFA backend: `vllm_ascend/attention/context_parallel/sfa_cp.py`
+- Slot mapping: `vllm_ascend/worker/block_table.py`
+- Input and attention metadata: `vllm_ascend/worker/model_runner_v1.py`
+- Shared DCP backend capabilities: `vllm_ascend/attention/context_parallel/common_cp.py`
+- GQA DCP backend: `vllm_ascend/attention/context_parallel/attention_cp.py`
+- MLA DCP backend: `vllm_ascend/attention/context_parallel/mla_cp.py`
+- SFA DCP backend: `vllm_ascend/attention/context_parallel/sfa_cp.py`
+- DSA-CP backend: `vllm_ascend/attention/context_parallel/dsa_cp.py`

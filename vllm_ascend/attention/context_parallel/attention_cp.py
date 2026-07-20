@@ -15,18 +15,12 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from dataclasses import dataclass
+
 import numpy as np
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 import torch_npu
-from vllm.config import VllmConfig
-from vllm.distributed import (
-    get_dcp_group,
-    get_pcp_group,
-)
-from vllm.v1.attention.backend import AttentionCGSupport
-from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import (
@@ -37,16 +31,14 @@ from vllm_ascend.attention.attention_v1 import (
 from vllm_ascend.attention.context_parallel.common_cp import (
     AscendMetadataForDecode,
     AscendMetadataForPrefill,
-    AscendPCPMetadata,
-    _npu_attention_update,
+    DCPImplMixin,
+    DCPMetadataBuilderMixin,
     _npu_attn_out_lse_update,
-    _process_attn_out_lse,
     _update_out_and_lse,
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     filter_chunked_req_indices,
-    notify_kv_cache_written,
     split_decodes_and_prefills,
 )
 from vllm_ascend.compilation.acl_graph import (
@@ -56,266 +48,111 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.distributed.utils import (
-    get_decode_context_model_parallel_rank,
-    get_decode_context_model_parallel_world_size,
-)
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.utils import cp_chunkedprefill_comm_stream, weak_ref_tensors
 
 
-class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
-    """
-    Builder for constructing AscendMetadata with Context Parallelism support.
+@dataclass
+class AscendAttentionDCPMetadata(AscendMetadata):
+    """GQA metadata fields used only by the DCP execution path."""
 
-    Extends AscendAttentionMetadataBuilder with PCP/DCP metadata handling.
-    """
+    prefill: AscendMetadataForPrefill | None = None
+    decode_meta: AscendMetadataForDecode | None = None
 
-    def __init__(
+
+class AscendAttentionDCPMetadataBuilder(
+    DCPMetadataBuilderMixin,
+    AscendAttentionMetadataBuilder,
+):
+    """Build attention metadata for decode context parallelism."""
+
+    metadata_cls = AscendAttentionDCPMetadata
+
+    def _split_decodes_and_prefills(
         self,
-        kv_cache_spec: AttentionSpec,
-        layer_names: list[str],
-        vllm_config: VllmConfig,
-        device: torch.device,
-    ):
-        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.pcp_size = get_pcp_group().world_size
-        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
-        self.dcp_size = get_decode_context_model_parallel_world_size()
-        self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
-
-    @classmethod
-    def get_cudagraph_support(
-        cls: type["AscendAttentionCPMetadataBuilder"],
-        vllm_config: VllmConfig,
-        kv_cache_spec: AttentionSpec,
-    ) -> AttentionCGSupport:
-        # Explicit override in case the underlying builder specialized this getter.
-        # @override omitted only because of mypy limitation due to type variable.
-        return AttentionCGSupport.ALWAYS
-
-    def _get_chunked_req_mask(self, local_context_lens_allranks) -> list[bool]:
-        """
-        given 4-d list [req][pcp][dcp], return:
-        1. if each req has any chunk (list[bool])
-        """
-        assert local_context_lens_allranks is not None
-        if len(local_context_lens_allranks) == 0:
-            return []
-        chunked_req_mask = [(req.sum() > 0).item() for req in local_context_lens_allranks if req is not None]
-        return chunked_req_mask
-
-    def build(
-        self,
-        common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
-        fast_build: bool = False,
-    ):
-        num_reqs = common_attn_metadata.num_reqs
-        num_actual_tokens = common_attn_metadata.num_actual_tokens
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
-
-        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
+    ) -> tuple[int, int, int, int]:
+        return split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=self.decode_threshold,
             treat_short_extends_as_decodes=False,
         )
-        assert num_decodes + num_prefills == num_reqs
-        assert num_decode_tokens + num_prefill_tokens == num_actual_tokens
 
-        block_table = common_attn_metadata.block_table_tensor
-        query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-        # Prefer ``_seq_lens_cpu`` (upstream-canonical, always populated by
-        # the model runner via optimistic_seq_lens_cpu); fall back to the
-        # Ascend subclass field, then to a GPU->CPU copy if both are absent.
-        # The last branch is purely defensive: a hot-path D2H sync here would
-        # block AsyncScheduler, so producers must keep one of the CPU mirrors
-        # populated.
-        if common_attn_metadata._seq_lens_cpu is not None:
-            seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
-        elif common_attn_metadata.seq_lens_cpu is not None:
-            seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
-        else:
-            seq_lens = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
-        long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
-        num_actual_tokens_pcp_padded = long_seq_metadata.num_actual_tokens_pcp_padded if long_seq_metadata else None
-        if num_actual_tokens_pcp_padded is None:
-            num_actual_tokens_pcp_padded = num_actual_tokens
+    @staticmethod
+    def _get_chunked_req_mask(local_context_lens_allranks) -> list[bool]:
+        if len(local_context_lens_allranks) == 0:
+            return []
+        return [(req.sum() > 0).item() for req in local_context_lens_allranks if req is not None]
 
-        slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens_pcp_padded]
-        attn_mask = self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config)
-        attn_state = common_attn_metadata.attn_state
-        num_computed_tokens_cpu = seq_lens - query_lens
-
-        query_start_loc = query_start_loc_cpu.to(self.device, non_blocking=True)
-
-        common_long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
-        prefill_metadata = None
-        decode_metadata = None
-        if common_long_seq_metadata is None:
-            raise AssertionError("common_long_seq_metadata should not be None.")
-        num_computed_tokens_of_pcp_dcp = common_long_seq_metadata.num_computed_tokens_of_pcp_dcp
-        assert num_computed_tokens_of_pcp_dcp is not None
-        chunked_context_metadata = None
-        attn_mask_seqlens = common_long_seq_metadata.attn_mask_seqlens
-        attn_chunk_seqlens = common_long_seq_metadata.attn_chunk_seqlens
-        if num_prefills > 0:
-            query_lens = query_lens[num_decodes:]
-            context_lens_cpu = num_computed_tokens_cpu[num_decodes:num_reqs]
-            max_context_len_cpu = context_lens_cpu.max().item()
-            if self.chunked_prefill_enabled and max_context_len_cpu > 0:
-                if self.pcp_size > 1 and common_long_seq_metadata.pcp_use_hybrid_attn:
-                    query_lens = attn_chunk_seqlens * 2
-                local_context_lens_allranks = (
-                    torch.tensor(num_computed_tokens_of_pcp_dcp)[num_decodes:].to(self.device).to(dtype=torch.int32)
-                )
-                local_chunked_kv_lens_rank = local_context_lens_allranks[:, self.pcp_rank, self.dcp_rank]
-                actual_seq_lengths_kv = torch.cumsum(local_chunked_kv_lens_rank, dim=0).tolist()
-                local_total_toks = local_chunked_kv_lens_rank.sum()
-                chunked_req_mask = self._get_chunked_req_mask(local_context_lens_allranks)
-                local_chunk_starts = torch.zeros(
-                    (len(local_context_lens_allranks),), dtype=torch.int32, device=self.device
-                )
-                # Note(qcs): we only do restore and recover for pcp, and set these vars to None
-                # when only using dcp.
-                if self.pcp_size > 1:
-                    kv_inverse_idx_for_chunk = torch.argsort(
-                        common_long_seq_metadata.pcp_allgather_restore_idx[self.pcp_size * num_decode_tokens :].to(
-                            torch.float32
-                        )
-                    )
-                    cp_kv_recover_idx_for_chunk = torch.argsort(kv_inverse_idx_for_chunk)
-                else:
-                    kv_inverse_idx_for_chunk = None
-                    cp_kv_recover_idx_for_chunk = None
-
-                chunk_seq_mask_filtered_indices = filter_chunked_req_indices(query_lens, chunked_req_mask).to(
-                    self.device
-                )
-                chunked_context_metadata = AscendMetadataForPrefill.ChunkedContextMetadata(
-                    actual_chunk_seq_lengths=torch.cumsum(query_lens * self.pcp_size, dim=0),
-                    actual_seq_lengths_kv=actual_seq_lengths_kv,
-                    chunked_req_mask=chunked_req_mask,
-                    starts=local_chunk_starts,
-                    local_context_lens_allranks=local_context_lens_allranks,
-                    cp_kv_recover_idx_for_chunk=cp_kv_recover_idx_for_chunk,
-                    kv_inverse_idx_for_chunk=kv_inverse_idx_for_chunk,
-                    chunk_seq_mask_filtered_indices=chunk_seq_mask_filtered_indices,
-                    local_total_toks=local_total_toks.item(),
-                )
-            head_attn_nomask_seqlens = common_long_seq_metadata.head_attn_nomask_seqlens
-            tail_attn_nomask_seqlens = common_long_seq_metadata.tail_attn_nomask_seqlens
-
-            pcp_metadata = AscendPCPMetadata(
-                q_head_idx=common_long_seq_metadata.q_head_idx_tensor,
-                q_tail_idx=common_long_seq_metadata.q_tail_idx_tensor,
-                kv_with_q_head_nomask_idx=common_long_seq_metadata.kv_with_q_head_nomask_idx_tensor,
-                kv_with_q_head_mask_idx=common_long_seq_metadata.kv_with_q_head_mask_idx_tensor,
-                kv_with_q_tail_nomask_idx=common_long_seq_metadata.kv_with_q_tail_nomask_idx_tensor,
-                kv_with_q_tail_mask_idx=common_long_seq_metadata.kv_with_q_tail_mask_idx_tensor,
-                attn_mask_seqlens=attn_mask_seqlens,
-                head_attn_nomask_seqlens=head_attn_nomask_seqlens,
-                tail_attn_nomask_seqlens=tail_attn_nomask_seqlens,
-                q_full_idx=common_long_seq_metadata.q_full_idx,
-                pcp_use_hybrid_attn=common_long_seq_metadata.pcp_use_hybrid_attn,
-                pcp_unpad_mask=common_long_seq_metadata.pcp_unpad_mask,
-                pcp_allgather_restore_idx=common_long_seq_metadata.pcp_allgather_restore_idx,
-                pcp_fa_query_idx=common_long_seq_metadata.pcp_fa_query_idx,
-                pcp_padded_tokens_fla=common_long_seq_metadata.pcp_padded_tokens_fla,
-                pcp_enter_fa_restore_idx=common_long_seq_metadata.pcp_enter_fa_restore_idx,
-                pcp_fa_padding_restore_idx=common_long_seq_metadata.pcp_fa_padding_restore_idx,
-                max_num_tokens_across_pcp=common_long_seq_metadata.max_num_tokens_across_pcp,
-                total_num_scheduled_tokens=common_long_seq_metadata.total_num_scheduled_tokens,
-            )
-
-            prefill_metadata = AscendMetadataForPrefill(
-                pcp_metadata=pcp_metadata,
-                pcp_exit_fa_scatter_idx=common_long_seq_metadata.pcp_exit_fa_scatter_idx,
-                chunked_context=chunked_context_metadata,
-                block_tables=block_table[num_decodes:, ...],
-                actual_seq_lengths_q=torch.cumsum(query_lens, dim=0),
-            )
-
-        if num_decodes > 0:
-            num_computed_tokens_array = np.array(num_computed_tokens_of_pcp_dcp)
-            num_computed_tokens_array = num_computed_tokens_array[:num_decodes]
-            # TODO: numpy array mode of the shared memory is used to improve performance
-            if common_long_seq_metadata.dcp_mtp_attn_mask is not None:
-                dcp_mtp_attn_mask = common_long_seq_metadata.dcp_mtp_attn_mask
-            else:
-                dcp_mtp_attn_mask = None
-            decode_metadata = AscendMetadataForDecode(
-                num_computed_tokens_of_pcp_dcp=num_computed_tokens_array,
-                block_tables=block_table[:num_decodes],
-                dcp_mtp_attn_mask=dcp_mtp_attn_mask,
-            )
-
-        if self.decode_threshold == 1:
-            actual_seq_lengths_q = (torch.arange(num_decodes) + 1).tolist() + query_start_loc_cpu[1:].tolist()[
-                num_decodes:
-            ]
-        else:
-            actual_seq_lengths_q = (
-                query_start_loc_cpu[1 : num_decodes + 1].tolist() + query_start_loc_cpu[num_decodes + 1 :].tolist()
-            )
-
-        attn_metadata = AscendMetadata(
-            num_actual_tokens=num_actual_tokens,
-            num_decode_tokens=num_decode_tokens,
-            num_actual_tokens_pcp_padded=num_actual_tokens_pcp_padded,
-            block_tables=block_table,
-            query_start_loc=query_start_loc,
-            seq_lens=seq_lens,
-            seq_lens_cpu=seq_lens,
-            seq_lens_list=seq_lens.tolist(),
-            max_query_len=common_attn_metadata.max_query_len,
-            actual_seq_lengths_q=actual_seq_lengths_q,
-            slot_mapping=slot_mapping,
-            attn_mask=attn_mask,
-            attn_state=attn_state,
-            num_prefills=num_prefills,
-            num_decodes=num_decodes,
-            prefill=prefill_metadata,
-            decode_meta=decode_metadata,
-        )
-        return attn_metadata
-
-
-class AscendAttentionCPImpl(AscendAttentionBackendImpl):
-    def __init__(
+    def _build_backend_metadata(
         self,
-        num_heads: int,
-        head_size: int,
-        scale: float,
-        num_kv_heads: int,
-        alibi_slopes: list[float] | None,
-        sliding_window: int | None,
-        kv_cache_dtype: str,
-        logits_soft_cap: float | None,
-        attn_type: str,
-        kv_sharing_target_layer_name: str | None,
-        **kwargs,
-    ) -> None:
-        super().__init__(
-            num_heads,
-            head_size,
-            scale,
-            num_kv_heads,
-            alibi_slopes,
-            sliding_window,
-            kv_cache_dtype,
-            logits_soft_cap,
-            attn_type,
-            kv_sharing_target_layer_name,
-            **kwargs,
-        )
-        self.pcp_size = get_pcp_group().world_size
-        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
-        self.pcp_group = get_pcp_group().device_group if self.pcp_size > 1 else None
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        *,
+        block_table: torch.Tensor,
+        query_lens: torch.Tensor,
+        seq_lens: torch.Tensor,
+        num_decodes: int,
+        num_prefills: int,
+    ) -> dict[str, object]:
+        dcp_metadata = self._require_dcp_metadata(common_attn_metadata)
+        prefill_metadata = None
+        if num_prefills > 0:
+            prefill_query_lens = query_lens[num_decodes:]
+            context_lens_cpu = (seq_lens - query_lens)[num_decodes:]
+            chunked_context_metadata = None
+            if (
+                self.chunked_prefill_enabled
+                and context_lens_cpu.numel() > 0
+                and context_lens_cpu.max().item() > 0
+            ):
+                local_context_lens_allranks = self._get_dcp_context_lens(
+                    common_attn_metadata,
+                    start=num_decodes,
+                    device=self.device,
+                )
+                local_chunked_kv_lens = local_context_lens_allranks[
+                    :, self.dcp_rank
+                ]
+                chunked_req_mask = self._get_chunked_req_mask(local_context_lens_allranks)
+                chunked_context_metadata = AscendMetadataForPrefill.ChunkedContextMetadata(
+                    actual_chunk_seq_lengths=torch.cumsum(prefill_query_lens, dim=0),
+                    actual_seq_lengths_kv=torch.cumsum(local_chunked_kv_lens, dim=0).tolist(),
+                    chunked_req_mask=chunked_req_mask,
+                    starts=torch.zeros(
+                        len(local_context_lens_allranks),
+                        dtype=torch.int32,
+                        device=self.device,
+                    ),
+                    local_context_lens_allranks=local_context_lens_allranks,
+                    chunk_seq_mask_filtered_indices=filter_chunked_req_indices(
+                        prefill_query_lens,
+                        chunked_req_mask,
+                    ).to(self.device),
+                    local_total_toks=local_chunked_kv_lens.sum().item(),
+                )
+            prefill_metadata = AscendMetadataForPrefill(
+                chunked_context=chunked_context_metadata,
+                block_tables=block_table[num_decodes:],
+                actual_seq_lengths_q=torch.cumsum(prefill_query_lens, dim=0),
+            )
 
-        self.dcp_size = get_decode_context_model_parallel_world_size()
-        self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
-        self.dcp_group = get_dcp_group().device_group if self.dcp_size > 1 else None
+        decode_metadata = None
+        if num_decodes > 0:
+            decode_metadata = AscendMetadataForDecode(
+                num_computed_tokens_of_dcp=np.asarray(
+                    dcp_metadata.num_computed_tokens_of_dcp
+                )[:num_decodes],
+                block_tables=block_table[:num_decodes],
+                dcp_mtp_attn_mask=dcp_metadata.dcp_mtp_attn_mask,
+            )
+
+        return {
+            "prefill": prefill_metadata,
+            "decode_meta": decode_metadata,
+        }
+
+
+class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
 
     @staticmethod
     def update_graph_params(
@@ -324,7 +161,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         num_tokens,
         vllm_config=None,
         speculative_config=None,
-        num_dcp_pcp_tokens=None,
+        num_dcp_tokens=None,
         draft_attn_metadatas=None,
     ):
         if _EXTRA_CTX.is_draft_model:
@@ -364,15 +201,14 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     attn_output,
                     softmax_lse,
                     dcp_size,
-                    pcp_rank,
                     dcp_rank,
                     attn_mask,
                 ) = param
 
                 if _EXTRA_CTX.is_draft_model:
                     draft_step = attn_count // num_layers
-                    actual_seq_lengths_kv = attn_metadata[draft_step][key].decode_meta.num_computed_tokens_of_pcp_dcp[
-                        :, pcp_rank, dcp_rank
+                    actual_seq_lengths_kv = attn_metadata[draft_step][key].decode_meta.num_computed_tokens_of_dcp[
+                        :, dcp_rank
                     ]
                     pad_length = num_tokens - len(actual_seq_lengths_kv)
                     if pad_length > 0:
@@ -382,9 +218,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
                     attn_count = attn_count + 1
                 else:
-                    actual_seq_lengths_kv = attn_metadata[key].decode_meta.num_computed_tokens_of_pcp_dcp[
-                        :, pcp_rank, dcp_rank
-                    ]
+                    actual_seq_lengths_kv = attn_metadata[key].decode_meta.num_computed_tokens_of_dcp[:, dcp_rank]
                     pad_length = num_tokens - len(actual_seq_lengths_kv)
                     if pad_length > 0:
                         pad_tensor = np.zeros(pad_length, dtype=actual_seq_lengths_kv.dtype)
@@ -425,157 +259,16 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
                 event.record(update_stream)
 
-    def _attention_with_nomask_and_mask(
+    def _forward_decode_dcp(
         self,
-        q: torch.Tensor,
-        q_seqlens: list[int],
-        k_nomask: torch.Tensor,
-        v_nomask: torch.Tensor,
-        kv_seqlens_nomask: list[int],
-        k_mask: torch.Tensor,
-        v_mask: torch.Tensor,
-        kv_seqlens_mask: list[int],
-        mask: torch.Tensor,
-        attn_metadata,
+        query: torch.Tensor,
+        attn_metadata: AscendAttentionDCPMetadata,
     ) -> torch.Tensor:
-        # nomask Attention
-        if k_nomask is not None:
-            attn_out_nomask, attn_lse_nomask = torch.ops.npu.npu_fused_infer_attention_score(
-                q,
-                k_nomask.contiguous(),
-                v_nomask.contiguous(),
-                num_heads=self.num_heads,
-                num_key_value_heads=self.num_kv_heads,
-                input_layout="TND",
-                atten_mask=None,
-                scale=self.scale,
-                sparse_mode=0,
-                antiquant_mode=0,
-                antiquant_scale=None,
-                softmax_lse_flag=True,
-                actual_seq_lengths_kv=kv_seqlens_nomask,
-                actual_seq_lengths=q_seqlens,
-            )
-
-        # mask Attention
-        attn_out_mask, attn_lse_mask = torch.ops.npu.npu_fused_infer_attention_score(
-            q,
-            k_mask.contiguous(),
-            v_mask.contiguous(),
-            num_heads=self.num_heads,
-            num_key_value_heads=self.num_kv_heads,
-            input_layout="TND",
-            atten_mask=mask,
-            scale=self.scale,
-            sparse_mode=3,
-            antiquant_mode=0,
-            antiquant_scale=None,
-            softmax_lse_flag=True,
-            actual_seq_lengths_kv=kv_seqlens_mask,
-            actual_seq_lengths=q_seqlens,
-        )
-        # update
-        output = attn_out_mask
-        attn_lse = attn_lse_mask
-        if k_nomask is not None:
-            if attn_metadata.prefill is not None and attn_metadata.prefill.chunked_context is None:
-                output = _npu_attn_out_lse_update(attn_lse_mask, attn_lse_nomask, attn_out_mask, attn_out_nomask)
-                attn_lse = None
-            else:
-                output, attn_lse = _update_out_and_lse(
-                    torch.stack([attn_out_nomask, attn_out_mask], dim=0),
-                    torch.stack([attn_lse_nomask, attn_lse_mask], dim=0),
-                )
-
-        return output, attn_lse
-
-    def _forward_prefill_cp(
-        self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata
-    ) -> torch.Tensor:
-        data_head, data_tail = self._forward_prefill_cp_pre(query, key, value, attn_metadata)
-
-        output_head, lse_head = self._forward_prefill_cp_attn(data_head, True, attn_metadata)
-        output_tail, lse_tail = self._forward_prefill_cp_attn(data_tail, False, attn_metadata)
-
-        output, attn_lse = self._forward_prefill_cp_post(
-            [output_head, output_tail],
-            [lse_head, lse_tail],
-            attn_metadata,
-        )
-        return output, attn_lse
-
-    def _forward_prefill_cp_pre(
-        self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata
-    ) -> torch.Tensor:
-        assert attn_metadata is not None
-        assert attn_metadata.prefill is not None
-        assert attn_metadata.prefill.pcp_metadata is not None
-        # Use precomputed indices from the metadata (already converted to tensors and on device)
-        q_head_idx = attn_metadata.prefill.pcp_metadata.q_head_idx
-        q_tail_idx = attn_metadata.prefill.pcp_metadata.q_tail_idx
-        kv_with_q_head_nomask_idx = attn_metadata.prefill.pcp_metadata.kv_with_q_head_nomask_idx
-        kv_with_q_head_mask_idx = attn_metadata.prefill.pcp_metadata.kv_with_q_head_mask_idx
-        kv_with_q_tail_nomask_idx = attn_metadata.prefill.pcp_metadata.kv_with_q_tail_nomask_idx
-        kv_with_q_tail_mask_idx = attn_metadata.prefill.pcp_metadata.kv_with_q_tail_mask_idx
-
-        q_head = torch.index_select(query, 0, q_head_idx)
-        q_tail = torch.index_select(query, 0, q_tail_idx)
-        k_head_nomask = torch.index_select(key, 0, kv_with_q_head_nomask_idx) if self.pcp_rank > 0 else None
-        v_head_nomask = torch.index_select(value, 0, kv_with_q_head_nomask_idx) if self.pcp_rank > 0 else None
-        k_head_mask = torch.index_select(key, 0, kv_with_q_head_mask_idx)
-        v_head_mask = torch.index_select(value, 0, kv_with_q_head_mask_idx)
-        k_tail_nomask = torch.index_select(key, 0, kv_with_q_tail_nomask_idx)
-        v_tail_nomask = torch.index_select(value, 0, kv_with_q_tail_nomask_idx)
-        k_tail_mask = torch.index_select(key, 0, kv_with_q_tail_mask_idx)
-        v_tail_mask = torch.index_select(value, 0, kv_with_q_tail_mask_idx)
-        return (
-            {
-                "q": q_head,
-                "k_nomask": k_head_nomask,
-                "v_nomask": v_head_nomask,
-                "k_mask": k_head_mask,
-                "v_mask": v_head_mask,
-            },
-            {
-                "q": q_tail,
-                "k_nomask": k_tail_nomask,
-                "v_nomask": v_tail_nomask,
-                "k_mask": k_tail_mask,
-                "v_mask": v_tail_mask,
-            },
-        )
-
-    def _forward_prefill_cp_attn(self, data, is_head, attn_metadata):
-        attn_mask_seqlens = attn_metadata.prefill.pcp_metadata.attn_mask_seqlens
-        nomask_seqlens = (
-            attn_metadata.prefill.pcp_metadata.head_attn_nomask_seqlens
-            if is_head
-            else attn_metadata.prefill.pcp_metadata.tail_attn_nomask_seqlens
-        )
-        output, lse = self._attention_with_nomask_and_mask(
-            **data,
-            q_seqlens=attn_mask_seqlens,
-            kv_seqlens_nomask=nomask_seqlens,
-            kv_seqlens_mask=attn_mask_seqlens,
-            mask=attn_metadata.attn_mask,
-            attn_metadata=attn_metadata,
-        )
-        return output, lse
-
-    def _forward_prefill_cp_post(self, outputs, lses, attn_metadata):
-        q_full_idx = attn_metadata.prefill.pcp_metadata.q_full_idx
-        output = torch.index_select(torch.cat(outputs, dim=0), 0, q_full_idx)
-        attn_lse = None
-        if attn_metadata.prefill is not None and attn_metadata.prefill.chunked_context is not None:
-            attn_lse = torch.index_select(torch.cat(lses, dim=0), 0, q_full_idx)
-        return output, attn_lse
-
-    def _forward_decode_pcp_dcp(self, query: torch.Tensor, attn_metadata: AscendMetadata) -> torch.Tensor:
         assert self.key_cache is not None
         assert self.value_cache is not None
 
         if self.dcp_size > 1:
-            query = get_dcp_group().all_gather(query.contiguous(), 1)
+            query = self._dcp_all_gather(query, 1)
             num_heads = self.num_heads * self.dcp_size
         else:
             num_heads = self.num_heads
@@ -607,8 +300,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             "softmax_lse_flag": True,
             "block_table": attn_metadata.decode_meta.block_tables,
             "block_size": self.key_cache.shape[1],
-            "actual_seq_lengths_kv": attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[
-                : attn_metadata.num_decodes, self.pcp_rank, self.dcp_rank
+            "actual_seq_lengths_kv": attn_metadata.decode_meta.num_computed_tokens_of_dcp[
+                : attn_metadata.num_decodes, self.dcp_rank
             ],
             "actual_seq_lengths": actual_seq_lengths_q,
         }
@@ -657,14 +350,11 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     self.scale,
                     attn_metadata.block_tables,
                     self.key_cache.shape[1],
-                    attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[
-                        : attn_metadata.num_decodes, self.pcp_rank, self.dcp_rank
-                    ],
+                    attn_metadata.decode_meta.num_computed_tokens_of_dcp[: attn_metadata.num_decodes, self.dcp_rank],
                     actual_seq_lengths_q,
                     weak_ref_tensors(attn_out),
                     weak_ref_tensors(attn_lse),
                     self.dcp_size,
-                    self.pcp_rank,
                     self.dcp_rank,
                     attn_mask,
                 )
@@ -680,9 +370,11 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         if input_layerout == "BSND":
             attn_out = attn_out.view(-1, attn_out.shape[2], attn_out.shape[3])
             attn_lse = attn_lse.transpose(1, 2).reshape(-1, attn_lse.shape[1], 1)
-        attn_out_lse = _process_attn_out_lse(attn_out, attn_lse)
-        attn_out = _npu_attention_update(self.head_size, attn_out_lse)
-        return attn_out
+        return self._merge_dcp_attention_output(
+            attn_out,
+            attn_lse,
+            self.head_size,
+        )
 
     def _update_chunk_attn_out_lse_with_current_attn_out_lse(
         self,
@@ -693,15 +385,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         prefill_query,
         attn_metadata,
     ):
-        if self.pcp_size > 1:
-            inverse_idx = attn_metadata.prefill.chunked_context.kv_inverse_idx_for_chunk
-            attn_output_full_chunk = torch.index_select(attn_output_full_chunk, 0, inverse_idx)
-            attn_lse_full_chunk = torch.index_select(attn_lse_full_chunk, 0, inverse_idx)
         num_tokens = prefill_query.size(0)
-        attn_output_full_chunk = attn_output_full_chunk[
-            self.pcp_rank * num_tokens : (self.pcp_rank + 1) * num_tokens, :, :
-        ]
-        attn_lse_full_chunk = attn_lse_full_chunk[self.pcp_rank * num_tokens : (self.pcp_rank + 1) * num_tokens, :, :]
+        attn_output_full_chunk = attn_output_full_chunk[:num_tokens]
+        attn_lse_full_chunk = attn_lse_full_chunk[:num_tokens]
 
         assert (
             attn_output_full_chunk.shape == current_attn_output_prefill.shape
@@ -721,17 +407,13 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         current_attn_output_prefill[filtered_indices, :, :] = attn_output_filtered.to(current_attn_output_prefill.dtype)
 
     def _prefill_query_all_gather(self, attn_metadata, prefill_query):
-        if self.pcp_size > 1:
-            prefill_query = get_pcp_group().all_gather(prefill_query, 0)
-            prefill_query = torch.index_select(
-                prefill_query, 0, attn_metadata.prefill.chunked_context.cp_kv_recover_idx_for_chunk
-            )
-        if self.dcp_size > 1:
-            prefill_query = get_dcp_group().all_gather(prefill_query, 1)
-        return prefill_query
+        return self._dcp_all_gather(prefill_query, 1)
 
     def _compute_prefill_context(
-        self, query: torch.Tensor, kv_cache: tuple[torch.Tensor], attn_metadata: AscendMetadata
+        self,
+        query: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: AscendAttentionDCPMetadata,
     ):
         assert len(kv_cache) > 1
         assert attn_metadata is not None
@@ -741,7 +423,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         local_chunked_kv_lens = prefill_metadata.chunked_context.local_context_lens_allranks
         assert local_chunked_kv_lens is not None
 
-        local_chunked_kv_lens_rank = local_chunked_kv_lens[:, self.pcp_rank, self.dcp_rank]
+        local_chunked_kv_lens_rank = local_chunked_kv_lens[:, self.dcp_rank]
         total_toks = prefill_metadata.chunked_context.local_total_toks
         key, value = self._load_kv_for_chunk(attn_metadata, kv_cache, local_chunked_kv_lens_rank, query, total_toks)
         if self.dcp_size > 1:
@@ -799,159 +481,27 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             )
         return key, value
 
-    def reshape_and_cache(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        kv_cache: tuple[torch.Tensor],
-        attn_metadata: AscendMetadata,
-        output: torch.Tensor,
-    ):
-        num_decode_tokens = attn_metadata.num_decode_tokens
-        has_decode = attn_metadata.num_decodes > 0
-        has_prefill = attn_metadata.num_prefills > 0
-        output_padded = output
-
-        if len(kv_cache) > 1:
-            if self.key_cache is None:
-                self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
-
-            if has_decode:
-                slot_mapping = attn_metadata.slot_mapping[: num_decode_tokens * self.pcp_size : self.pcp_size]
-                DeviceOperator.reshape_and_cache(
-                    key=key[:num_decode_tokens],
-                    value=value[:num_decode_tokens],
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
-                    slot_mapping=slot_mapping,
-                )
-
-            if has_prefill:
-                if self.pcp_size > 1:
-                    assert attn_metadata.prefill is not None and attn_metadata.prefill.pcp_metadata is not None
-                    if not attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn:
-                        kv = torch.cat([key, value], dim=-1)
-                        num_actual_tokens_pcp_padded = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
-                        all_kv = get_pcp_group().all_gather(kv[:num_actual_tokens_pcp_padded].contiguous(), dim=0)
-                        pcp_allgather_restore_idx = attn_metadata.prefill.pcp_metadata.pcp_allgather_restore_idx
-                        all_kv = torch.index_select(all_kv, 0, pcp_allgather_restore_idx)
-                        key, value = all_kv.split([self.head_size, self.head_size], dim=-1)
-                    else:
-                        query, key, value = self._gather_and_restore_pcp_qkv(query, key, value, attn_metadata)
-                        output_local_padded_tokens_fa = (
-                            attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size - output_padded.shape[0]
-                        )
-                        if output_local_padded_tokens_fa > 0:
-                            output_padded = F.pad(
-                                output, pad=(0, 0, 0, 0, 0, output_local_padded_tokens_fa), mode="constant", value=0
-                            )
-
-                prefill_key = key[self.pcp_size * num_decode_tokens : attn_metadata.num_actual_tokens_pcp_padded]
-                prefill_value = value[self.pcp_size * num_decode_tokens : attn_metadata.num_actual_tokens_pcp_padded]
-                slot_mapping = attn_metadata.slot_mapping[
-                    self.pcp_size * num_decode_tokens : attn_metadata.num_actual_tokens_pcp_padded
-                ]
-                DeviceOperator.reshape_and_cache(
-                    key=prefill_key,
-                    value=prefill_value,
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
-                    slot_mapping=slot_mapping,
-                )
-            notify_kv_cache_written()
-        return query, key, value, output_padded
-
-    def _gather_and_restore_pcp_qkv(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        attn_metadata: AscendMetadata,
-    ):
-        """
-        Gathers QKV chunks from all GPUs in the PCP group and restores the original
-        sequence order for Context Parallelism (CP).
-        """
-        num_tokens = query.shape[0]
-        num_actual_tokens_pcp_padded = attn_metadata.num_actual_tokens_pcp_padded
-        assert attn_metadata.prefill is not None and attn_metadata.prefill.pcp_metadata is not None
-        pcp_padded_tokens_fla = attn_metadata.prefill.pcp_metadata.pcp_padded_tokens_fla
-        qkv_fla = torch.cat(
-            [query.reshape(num_tokens, -1), key.reshape(num_tokens, -1), value.reshape(num_tokens, -1)],
-            dim=-1,
-        )
-        # The hybrid linear partitioning may result in different data on two cards, so padding is required here.
-        real_num_tokens = attn_metadata.prefill.pcp_metadata.total_num_scheduled_tokens
-        qkv_fla = qkv_fla[:real_num_tokens]
-        if pcp_padded_tokens_fla > 0:
-            qkv_fla = F.pad(qkv_fla, pad=(0, 0, 0, pcp_padded_tokens_fla), mode="constant", value=0)
-        all_qkv = get_pcp_group().all_gather(
-            qkv_fla[: attn_metadata.prefill.pcp_metadata.max_num_tokens_across_pcp].contiguous(), dim=0
-        )
-        # Restore the original sequence order using pre-computed indices
-        pcp_enter_fa_restore_idx = (
-            attn_metadata.prefill.pcp_metadata.pcp_enter_fa_restore_idx if attn_metadata.prefill.pcp_metadata else None
-        )
-        actual_qkv = torch.index_select(all_qkv, 0, pcp_enter_fa_restore_idx)
-        decode_offset = attn_metadata.num_decode_tokens * self.pcp_size
-        pcp_fa_padding_restore_idx = attn_metadata.prefill.pcp_metadata.pcp_fa_padding_restore_idx
-        if actual_qkv.shape[0] == num_actual_tokens_pcp_padded:
-            qkv_fa_padding_workspace = actual_qkv[:num_actual_tokens_pcp_padded]
-        else:
-            assert pcp_fa_padding_restore_idx is not None
-            actual_qkv_with_zero = F.pad(actual_qkv, pad=(0, 0, 0, 1), mode="constant", value=0)
-            qkv_fa_padding_workspace = torch.index_select(
-                actual_qkv_with_zero,
-                0,
-                pcp_fa_padding_restore_idx,
-            )
-
-        q, k, v = qkv_fa_padding_workspace.split(
-            [
-                self.num_heads * self.head_size,
-                self.num_kv_heads * self.head_size,
-                self.num_kv_heads * self.head_size,
-            ],
-            dim=-1,
-        )
-        q_fa = query.new_empty((num_actual_tokens_pcp_padded // self.pcp_size, self.num_heads * self.head_size))
-        q_fa[: attn_metadata.num_decode_tokens] = q[: decode_offset : self.pcp_size]
-        pcp_fa_query_idx = attn_metadata.prefill.pcp_metadata.pcp_fa_query_idx
-        q_fa[attn_metadata.num_decode_tokens :] = torch.index_select(q[decode_offset:], 0, pcp_fa_query_idx)
-        return (
-            q_fa.reshape(-1, self.num_heads, self.head_size),
-            k.reshape(-1, self.num_kv_heads, self.head_size),
-            v.reshape(-1, self.num_kv_heads, self.head_size),
-        )
-
     def _gather_global_context_output(self, local_context_attn_output):
         if self.dcp_size > 1:
             dcp_context_attn_output = torch.empty_like(local_context_attn_output)
-            dist.all_to_all_single(dcp_context_attn_output, local_context_attn_output, group=self.dcp_group)
+            dist.all_to_all_single(
+                dcp_context_attn_output,
+                local_context_attn_output,
+                group=self.dcp_device_group,
+            )
         else:
             dcp_context_attn_output = local_context_attn_output
 
-        if self.pcp_size > 1:
-            # AllGather out&lse within CP group
-            global_context_attn_output = get_pcp_group().all_gather(dcp_context_attn_output, dim=-1)
-        else:
-            global_context_attn_output = dcp_context_attn_output
-
-        return global_context_attn_output
+        return dcp_context_attn_output
 
     def _update_global_context_output(self, global_context_output):
         B_total, H_total, D_plus_1 = global_context_output.shape
-        S = B_total // self.pcp_size
+        S = B_total
         H = H_total // self.dcp_size
         D = self.head_size
         assert D_plus_1 == D + 1
-        # [PCP, S, DCP, H, D+1]
-        x = global_context_output.view(self.pcp_size, S, self.dcp_size, H, D_plus_1)
-        # [PCP, DCP, S, H, D+1]
-        x = x.permute(0, 2, 1, 3, 4).contiguous()
-        # Flatten [N, S, H, D+1], N = pcp_size * dcp_size
-        x = x.view(-1, S, H, D_plus_1)
+        x = global_context_output.view(S, self.dcp_size, H, D_plus_1)
+        x = x.permute(1, 0, 2, 3).contiguous()
         # Split out lse
         attn_out_allgather, attn_lse_allgather = torch.split(x, [D, 1], dim=-1)  # [N, S, H, D], [N, S, H, 1]
         context_output, context_lse = _update_out_and_lse(attn_out_allgather, attn_lse_allgather)
@@ -963,20 +513,16 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: tuple[torch.Tensor],
-        attn_metadata: AscendMetadata,
+        attn_metadata: AscendAttentionDCPMetadata,
         output: torch.Tensor,
     ) -> torch.Tensor:
         assert attn_metadata is not None
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
-        pcp_use_hybrid_attn = False
-        if has_prefill:
-            assert attn_metadata.prefill is not None and attn_metadata.prefill.pcp_metadata is not None
-            pcp_use_hybrid_attn = attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn
         if has_decode:
             decode_query = query[:num_decode_tokens].contiguous()
-            output_decode = self._forward_decode_pcp_dcp(decode_query, attn_metadata)
+            output_decode = self._forward_decode_dcp(decode_query, attn_metadata)
             output[:num_decode_tokens] = output_decode
         if has_prefill:
             assert attn_metadata.prefill is not None
@@ -991,10 +537,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             # COMM_STREAM:         \-- all_gather Q --/                  \-- a2a ag output --/
 
             # qkv init
-            num_actual_tokens_pcp_padded = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
-            prefill_query = query[num_decode_tokens:num_actual_tokens_pcp_padded].contiguous()
-            key = key[self.pcp_size * num_decode_tokens : attn_metadata.num_actual_tokens_pcp_padded].contiguous()
-            value = value[self.pcp_size * num_decode_tokens : attn_metadata.num_actual_tokens_pcp_padded].contiguous()
+            prefill_query = query[num_decode_tokens : attn_metadata.num_actual_tokens].contiguous()
+            key = key[num_decode_tokens : attn_metadata.num_actual_tokens].contiguous()
+            value = value[num_decode_tokens : attn_metadata.num_actual_tokens].contiguous()
 
             if has_chunked_context:
                 # all_gather q for chunked prefill // overlap the computation inner current chunk
@@ -1007,29 +552,22 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             # with the prefill computation.
             record_attention_compute_start()
 
-            if self.pcp_size > 1:
-                # Scenario of Enabling PCP or PCP&DCP
-                # prepare qkv and compute the head part // overlap the communication of all gather q
-                data_head, data_tail = self._forward_prefill_cp_pre(prefill_query, key, value, attn_metadata)
-                output_head, lse_head = self._forward_prefill_cp_attn(data_head, True, attn_metadata)
-            else:
-                # Scenario of Enabling DCP Individually
-                attn_output_prefill, attn_lse_prefill = torch.ops.npu.npu_fused_infer_attention_score(
-                    prefill_query,
-                    key.contiguous(),
-                    value.contiguous(),
-                    num_heads=self.num_heads,
-                    num_key_value_heads=self.num_kv_heads,
-                    input_layout="TND",
-                    atten_mask=attn_metadata.attn_mask,
-                    scale=self.scale,
-                    sparse_mode=3,
-                    antiquant_mode=0,
-                    antiquant_scale=None,
-                    softmax_lse_flag=True,
-                    actual_seq_lengths_kv=attn_metadata.prefill.actual_seq_lengths_q,
-                    actual_seq_lengths=attn_metadata.prefill.actual_seq_lengths_q,
-                )
+            attn_output_prefill, attn_lse_prefill = torch.ops.npu.npu_fused_infer_attention_score(
+                prefill_query,
+                key.contiguous(),
+                value.contiguous(),
+                num_heads=self.num_heads,
+                num_key_value_heads=self.num_kv_heads,
+                input_layout="TND",
+                atten_mask=attn_metadata.attn_mask,
+                scale=self.scale,
+                sparse_mode=3,
+                antiquant_mode=0,
+                antiquant_scale=None,
+                softmax_lse_flag=True,
+                actual_seq_lengths_kv=attn_metadata.prefill.actual_seq_lengths_q,
+                actual_seq_lengths=attn_metadata.prefill.actual_seq_lengths_q,
+            )
 
             if has_chunked_context:
                 torch.npu.current_stream().wait_stream(cp_chunkedprefill_comm_stream())
@@ -1043,16 +581,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 with torch_npu.npu.stream(cp_chunkedprefill_comm_stream()):
                     global_context_output = self._gather_global_context_output(local_context_output)
 
-            if self.pcp_size > 1:
-                # compute the tail part and reorg output&lse // overlap the communication of output
-                output_tail, lse_tail = self._forward_prefill_cp_attn(data_tail, False, attn_metadata)
-
-                attn_output_prefill, attn_lse_prefill = self._forward_prefill_cp_post(
-                    [output_head, output_tail],
-                    [lse_head, lse_tail],
-                    attn_metadata,
-                )
-
             if has_chunked_context:
                 # update the output of current chunk with context part
                 torch.npu.current_stream().wait_stream(cp_chunkedprefill_comm_stream())
@@ -1061,13 +589,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 self._update_chunk_attn_out_lse_with_current_attn_out_lse(
                     attn_output_prefill, attn_lse_prefill, context_output, context_lse, prefill_query, attn_metadata
                 )
-
-            if self.pcp_size > 1 and pcp_use_hybrid_attn:
-                # layer_idx != num_layers - 1
-                assert attn_metadata.prefill.pcp_metadata is not None
-                pcp_exit_fa_scatter_idx = attn_metadata.prefill.pcp_exit_fa_scatter_idx
-                attn_output_prefill = get_pcp_group().all_gather(attn_output_prefill.contiguous(), dim=0)
-                attn_output_prefill = torch.index_select(attn_output_prefill, 0, pcp_exit_fa_scatter_idx)
 
             output[num_decode_tokens : attn_output_prefill.shape[0] + num_decode_tokens] = attn_output_prefill
         return output

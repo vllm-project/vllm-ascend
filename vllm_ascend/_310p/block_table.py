@@ -22,20 +22,20 @@ class BlockTable(AscendBlockTable):
             self.slot_mapping.copy_to_gpu(0)
             return
 
-        if self.dcp_world_size * self.pcp_world_size > 1:
-            virtual_block_size = self.block_size * self.dcp_world_size * self.pcp_world_size
+        if self.dcp_world_size > 1:
+            virtual_block_size = self.block_size * self.dcp_world_size
             logical_block_idx = positions // virtual_block_size
             block_table_indices = self._get_block_table_indices(req_indices, logical_block_idx)
             block_numbers = self.block_table.np.ravel()[block_table_indices]
             virtual_block_offsets = positions % virtual_block_size
-            current_rank = self.dcp_world_size * self.pcp_rank + self.dcp_rank
+            current_rank = self.dcp_rank
             mask = (
-                virtual_block_offsets // self.cp_kv_cache_interleave_size % (self.dcp_world_size * self.pcp_world_size)
+                virtual_block_offsets // self.cp_kv_cache_interleave_size % self.dcp_world_size
                 == current_rank
             )
             block_offsets = (
                 virtual_block_offsets
-                // (self.dcp_world_size * self.pcp_world_size * self.cp_kv_cache_interleave_size)
+                // (self.dcp_world_size * self.cp_kv_cache_interleave_size)
                 * self.cp_kv_cache_interleave_size
                 + virtual_block_offsets % self.cp_kv_cache_interleave_size
             )
