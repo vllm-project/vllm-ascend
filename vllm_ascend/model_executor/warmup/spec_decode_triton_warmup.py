@@ -216,7 +216,7 @@ def _make_rejection_tensors(
     q = torch.full(
         (batch_size, prob_vocab),
         1.0,
-        dtype=torch.float32,
+        dtype=torch.int32,
         device=device,
     )
 
@@ -338,7 +338,7 @@ def _warm_greedy_rejection_kernels(
         dim=0,
     )
     draft_token_ids = torch.zeros(num_tokens, dtype=torch.int32, device=device)
-    target_argmax = torch.zeros(num_tokens, dtype=torch.int32, device=device)
+    target_argmax = torch.zeros(num_tokens, dtype=torch.int64, device=device)
     bonus_token_ids = torch.zeros(batch_size, 1, dtype=torch.int32, device=device)
 
     output_all_greedy = torch.full(
