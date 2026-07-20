@@ -370,6 +370,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self.model.config.image_token_index = model.config.vision_config.image_token_id
             elif self.get_model_name(model) == "KimiK25ForConditionalGeneration":
                 self.model.config.image_token_index = model.config.media_placeholder_token_id
+            elif self.get_model_name(model) == "Gemma4ForConditionalGeneration":
+                # Gemma4 target has image_token_id but no image_token_index;
+                # the draft (Gemma4MTP) receives hidden states from the target
+                # and does not handle multimodal inputs directly, so skip.
+                pass
             else:
                 self.model.config.image_token_index = model.config.image_token_index
             target_language_model = model.get_language_model()
@@ -724,6 +729,35 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if forward_context is not None:
                 forward_context.moe_layer_index = 0
 
+            # Gemma4 MTP target->draft KV sync.
+            #
+            # Upstream vLLM does NOT synchronize the target's KV write with the
+            # draft's KV read — it relies on the backend's stream ordering.
+            # On CUDA this is safe: the CUDA Programming Guide (§2.5.5 CUDA
+            # Stream Ordering) explicitly guarantees that "CUDA streams are
+            # in-order streams" and "Memory operations ... will always complete
+            # before the next operation in order to allow dependent kernels
+            # safe access to the data being transferred." So the target's
+            # `reshape_and_cache` (async on the stream) is guaranteed to be
+            # visible to the draft's subsequent attention read on the same
+            # stream, with no explicit sync needed.
+            #
+            # Ascend CANN does NOT provide an equivalent in-stream ordering
+            # guarantee. The AscendCL "Synchronous/Asynchronous API" reference
+            # only documents host-device synchronization
+            # (aclrtSynchronizeDevice/Stream/Event) and explicitly warns that
+            # "you must call an explicit synchronization API to block the host
+            # thread and wait for the task to complete; otherwise training or
+            # inference may behave abnormally, the device may disconnect, etc."
+            # It says nothing about dependent kernels on the same stream being
+            # automatically ordered. To be safe, we record an NPU event after
+            # the target forward and wait on it before the draft forward.
+            #
+            # `_sync_wait_target_events` is defined only on AscendGemma4Proposer
+            # (the only proposer that reads the target's KV cache in-process);
+            # `_is_gemma4_mtp` gates the call so other draft proposers pay no cost.
+            if self._is_gemma4_mtp:
+                self._sync_wait_target_events()
             self._runnable(
                 num_input_tokens=num_tokens,
                 batch_size=batch_size,
@@ -746,6 +780,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     ) -> None:
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
             self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
+
+    @property
+    def _is_gemma4_mtp(self) -> bool:
+        """True only for Gemma4 MTP. Gates Gemma4-only hooks (defined on
+        AscendGemma4Proposer) in the shared base so other draft proposers
+        hit no extra work on the hot path."""
+        return (
+            self.speculative_config is not None and getattr(self.speculative_config, "use_gemma4_mtp", lambda: False)()
+        )
 
     def _propose(
         self,
@@ -931,6 +974,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata, num_input_tokens, num_tokens
         )
         self._pad_draft_buffers(num_tokens, num_input_tokens)
+        # MTP draft runs in decode-like mode (1 token per request per step)
+        # regardless of the target's attention state. Without this override
+        # the draft inherits ChunkedPrefill from the target during chunked
+        # prefill, causing incorrect attention routing.
+        if self.method == "mtp":
+            attn_metadata_i.attn_state = AscendAttentionState.SpecDecoding
+
+        if hasattr(attn_metadata_i, "causal") and not attn_metadata_i.causal:
+            attn_metadata_i.attn_mask = None
 
         if self.uses_mrope:
             used_update_positions = self.mrope_positions[:, token_indices_to_sample]
@@ -1035,6 +1087,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             }
             runnable = cast(Callable[..., Any], self._runnable)
             run_draft: Callable[[], Any] = partial(runnable, **model_inputs)
+            # See comment in dummy_run: Ascend lacks GPU's implicit stream ordering
+            # for the target's async KV write vs the draft's KV read.
+            if self._is_gemma4_mtp:
+                self._sync_wait_target_events()
 
             if self.enable_enpu:
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
