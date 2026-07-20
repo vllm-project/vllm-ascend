@@ -122,16 +122,23 @@ def test_dp_engine_core_initializes_ascend_config(monkeypatch, capsys):
 
 
 def test_balance_load_runs_before_engine_step(monkeypatch):
-    events = []
+    events: list[str] = []
+
+    def process_engine_step(_self: object) -> bool:
+        events.append("engine_step")
+        return True
+
+    def run_balance_load() -> None:
+        events.append("balance_load")
 
     monkeypatch.setattr(
         nonbsp_core.DPEngineCoreProc,
         "_process_engine_step",
-        lambda self: events.append("engine_step") or True,
+        process_engine_step,
     )
 
     engine_core = object.__new__(nonbsp_core.NonBSPDPEngineCoreProc)
-    engine_core.run_balance_load = lambda: events.append("balance_load")
+    engine_core.run_balance_load = run_balance_load
 
     assert engine_core._process_engine_step() is True
     assert events == ["balance_load", "engine_step"]

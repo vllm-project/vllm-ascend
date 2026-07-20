@@ -16,6 +16,7 @@
 import json
 import os
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 from vllm.config import KVTransferConfig, VllmConfig
@@ -504,7 +505,7 @@ class TestNonBSPConfig(TestBase):
         self.assertEqual(config.dynamic_max_step, 128)
 
     def test_rejects_invalid_config(self):
-        invalid_configs = (
+        invalid_configs: tuple[tuple[Any, str], ...] = (
             ([], "must be a dict"),
             ({"unknown": True}, "Unknown nonbsp_config keys"),
             ({"enabled": 1}, "enabled must be a bool"),
