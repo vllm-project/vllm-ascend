@@ -36,11 +36,18 @@ defaults:
   run:
     shell: bash -el {0}
 
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  actions: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  # ─── Job 1: dorny/paths-filter 验证 ───
   validate-paths-filter:
     name: validate-dorny-paths-filter
     runs-on: linux-amd64-cpu-4-hk
@@ -59,11 +66,11 @@ jobs:
             workflows:
               - '.github/workflows/**'
             source:
-              - 'vllm_ascend/**'
-              - 'csrc/**'
+              - 'vllm_ascend/**
+              - 'csrc/**
               - 'setup.py'
             docs:
-              - 'docs/**'
+              - 'docs/**
               - '*.md'
             tests:
               - 'tests/**'
@@ -76,6 +83,7 @@ jobs:
           echo "tests changed: ${{ steps.filter.outputs.tests }}"
           echo "dorny/paths-filter validation OK"
 
+  # ─── Job 2: tj-actions/changed-files 验证 (含安全提醒) ───
   validate-changed-files:
     name: validate-tj-actions-changed-files
     runs-on: linux-amd64-cpu-4-hk
@@ -103,10 +111,11 @@ jobs:
 
       - name: Security note
         run: |
-          echo "::notice title=Security Reminder::tj-actions/changed-files@v47 has had supply chain security incidents. Consider replacing with dorny/paths-filter@v4 or native git diff commands."
+          echo "::notice title=Security Reminder::tj-actions/changed-files@v47 had supply chain security incidents in March 2025. Consider replacing with dorny/paths-filter@v4 or native 'git diff --name-only'."
 
+  # ─── Job 3: ascend-gha-runners/artifact/upload 验证 ───
   validate-ascend-artifact-upload:
-    name: validate-ascend-gha-runners-artifact-upload
+    name: validate-ascend-gha-upload
     runs-on: linux-amd64-cpu-4-hk
 
     steps:
@@ -117,8 +126,10 @@ jobs:
         run: |
           mkdir -p /tmp/ascend-artifact-test
           echo "ascend-gha-runners/artifact/upload validation test" > /tmp/ascend-artifact-test/test.txt
-          echo "runner=$(uname -m)" >> /tmp/ascend-artifact-test/test.txt
+          echo "arch=$(uname -m)" >> /tmp/ascend-artifact-test/test.txt
           echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /tmp/ascend-artifact-test/test.txt
+          ls -la /tmp/ascend-artifact-test/
+          echo "Test content created at /tmp/ascend-artifact-test/"
 
       - name: Upload via ascend-gha-runners/artifact/upload
         id: ascend-upload
@@ -131,6 +142,7 @@ jobs:
           retention-days: 1
 
       - name: Upload via standard actions/upload-artifact (fallback)
+        if: steps.ascend-upload.outcome != 'success'
         uses: actions/upload-artifact@v7
         with:
           name: validate-ascend-artifact-${{ github.run_id }}
@@ -140,15 +152,20 @@ jobs:
 
       - name: Report ascend-gha-runners result
         run: |
-          if [ "${{ steps.ascend-upload.outcome }}" == "success" ]; then
-            echo "ascend-gha-runners/artifact/upload@v0.3 works on self-hosted"
-          elif [ "${{ steps.ascend-upload.outcome }}" == "skipped" ]; then
-            echo "::notice::ascend-gha-runners/artifact/upload skipped (missing OBS credentials)"
-          else
-            echo "::warning::ascend-gha-runners/artifact/upload failed - check OBS credentials and network"
-          fi
+          case "${{ steps.ascend-upload.outcome }}" in
+            success)
+              echo "::notice::ascend-gha-runners/artifact/upload@v0.3 works on self-hosted"
+              ;;
+            skipped)
+              echo "::notice::ascend-gha-runners/artifact/upload@v0.3 skipped (likely missing OBS credentials)"
+              ;;
+            *)
+              echo "::warning::ascend-gha-runners/artifact/upload@v0.3 failed (outcome=${{ steps.ascend-upload.outcome }}). Check OBS credentials and network."
+              ;;
+          esac
 
-  validate-pr-context-actions:
+  # ─── Job 4: peter-evans/create-or-update-comment 验证 ───
+  validate-pr-comment:
     name: validate-peter-evans-comment
     runs-on: linux-amd64-cpu-4-hk
     if: github.event_name == 'pull_request'
@@ -157,26 +174,55 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v7
 
+      # 获取 runner 信息用于评论 (自行获取，不依赖 runner.name/runner.arch)
+      - name: Collect runner info
+        id: runner-info
+        run: |
+          echo "hostname=$(hostname)" >> $GITHUB_OUTPUT
+          echo "arch=$(uname -m)" >> $GITHUB_OUTPUT
+          echo "os=$(uname -s)" >> $GITHUB_OUTPUT
+          echo "docker-version=$(docker --version 2>/dev/null || echo 'not-available')" >> $GITHUB_OUTPUT
+          echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
+
       - name: peter-evans/create-or-update-comment
+        id: comment
         uses: peter-evans/create-or-update-comment@v5
         with:
           issue-number: ${{ github.event.pull_request.number }}
           body: |
             ## Third-Party Actions Validation
 
-            ✅ `peter-evans/create-or-update-comment@v5` works on self-hosted runner `${{ runner.name }}`
+            ✅ `peter-evans/create-or-update-comment@v5` works on self-hosted runner.
 
-            - Runner: `${{ runner.name }}`
-            - Arch: `${{ runner.arch }}`
-            - OS: `${{ runner.os }}`
+            | Field | Value |
+            |-------|-------|
+            | Runner label | `linux-amd64-cpu-4-hk` |
+            | Hostname | `${{ steps.runner-info.outputs.hostname }}` |
+            | Arch | `${{ steps.runner-info.outputs.arch }}` |
+            | OS | `${{ steps.runner-info.outputs.os }}` |
+            | Docker | `${{ steps.runner-info.outputs.docker-version }}` |
+            | Timestamp | `${{ steps.runner-info.outputs.timestamp }}` |
+
+            > This comment was posted by the self-hosted runner validation workflow.
 
       - name: Verify comment posted
-        run: echo "peter-evans/create-or-update-comment@v5 validation OK"
+        if: steps.comment.outputs.comment-id != ''
+        run: |
+          echo "Comment posted successfully!"
+          echo "Comment ID: ${{ steps.comment.outputs.comment-id }}"
+          echo "Comment URL: ${{ steps.comment.outputs.comment-url }}"
 
+      - name: Comment post failed notification
+        if: steps.comment.outputs.comment-id == ''
+        run: |
+          echo "::warning::peter-evans/create-or-update-comment did not return a comment-id. Check if this is a fork PR (GITHUB_TOKEN may lack write permission)."
+          echo "Outcome: ${{ steps.comment.outcome }}"
+
+  # ─── Job 5: push 事件触发的文档化 (workflow 修改时自动运行) ───
   documentation:
     name: actions-validation-documentation
     runs-on: linux-amd64-cpu-4-hk
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name != 'pull_request'
 
     steps:
       - name: Print validation documentation
@@ -188,8 +234,8 @@ jobs:
 
             The following actions require a PR/issue context and **cannot be validated** via \`workflow_dispatch\`:
 
-            | Action | Context | Validation Method |
-            |--------|---------|-------------------|
+            | Action | Context | How to Validate |
+            |--------|---------|-----------------|
             | \`peter-evans/create-or-update-comment@v5\` | PR/Issue | Trigger via PR event |
             | \`peter-evans/slash-command-dispatch@v5\` | Issue Comment | Use slash command in PR |
             | \`actions/stale@v10\` | Issue/PR | Schedule or manual trigger |
@@ -197,14 +243,12 @@ jobs:
             | \`github/issue-labeler@v3.4\` | Issue | Trigger via issue event |
             | \`eps1lon/actions-label-merge-conflict@v3\` | PR | Trigger via PR event |
 
-            **Recommended**: Create a test PR with the \`pull_request\` trigger to validate these actions.
-
             ## Actions with Security Concerns
 
             | Action | Concern | Recommendation |
             |--------|---------|----------------|
-            | \`tj-actions/changed-files@v47\` | Past supply chain security incidents | Replace with \`dorny/paths-filter@v4\` or native \`git diff\` |
-            | \`jlumbroso/free-disk-space\` | Destructive on self-hosted runners (removes system packages) | **Remove entirely** from self-hosted workflows |
+            | \`tj-actions/changed-files@v47\` | Past supply chain security incidents (March 2025) | Replace with \`dorny/paths-filter@v4\` or native \`git diff --name-only\` |
+            | \`jlumbroso/free-disk-space\` | Destructive on self-hosted (removes system packages) | **Remove entirely** from self-hosted workflows |
 
             ## Actions Requiring Special Credentials
 
@@ -215,3 +259,44 @@ jobs:
             `;
             console.log(summary);
             return summary;
+
+      - name: Write summary to step summary
+        run: |
+          echo "## Actions Requiring Special Context" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The following actions require PR/issue context and can only be validated by creating a test PR:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- \`peter-evans/create-or-update-comment@v5\` (7 usages)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`peter-evans/slash-command-dispatch@v5\` (1 usage)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`actions/stale@v10\` (2 usages)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`actions/labeler@v6\` (1 usage)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`github/issue-labeler@v3.4\` (1 usage)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`eps1lon/actions-label-merge-conflict@v3\` (1 usage)" >> $GITHUB_STEP_SUMMARY
+
+  # ─── Job 6: 汇总 ───
+  summary:
+    name: third-party-validation-summary
+    runs-on: linux-amd64-cpu-4-hk
+    needs:
+      - validate-paths-filter
+      - validate-changed-files
+      - validate-ascend-artifact-upload
+    if: always()
+    steps:
+      - name: Generate summary
+        run: |
+          echo "## Third-Party Actions Validation Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Result | Action |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| validate-dorny-paths-filter | ${{ needs.validate-paths-filter.result }} | dorny/paths-filter@v4 |" >> $GITHUB_STEP_SUMMARY
+          echo "| validate-tj-actions-changed-files | ${{ needs.validate-changed-files.result }} | tj-actions/changed-files@v47 |" >> $GITHUB_STEP_SUMMARY
+          echo "| validate-ascend-gha-upload | ${{ needs.validate-ascend-artifact-upload.result }} | ascend-gha-runners/artifact/upload@v0.3 |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Key Changes from Original PR #11619" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "1. **Fixed peter-evans comment** — 不再依赖 \`runner.name\`/\`runner.arch\`（self-hosted 上可能为空），改用 \`hostname\`/\`uname -m\` 自行收集" >> $GITHUB_STEP_SUMMARY
+          echo "2. **Fixed verify step** — 检查 \`comment-id\` 实际输出来验证评论是否发布成功" >> $GITHUB_STEP_SUMMARY
+          echo "3. **Added fallback** — ascend-gha-runners/upload 失败时自动用标准 actions/upload-artifact 兜底" >> $GITHUB_STEP_SUMMARY
+          echo "4. **Explicit permissions** — 添加 \`pull-requests: write\` 和 \`issues: write\` 权限" >> $GITHUB_STEP_SUMMARY
+          echo "5. **Fork PR 兼容** — 当评论因 fork PR 无写权限失败时，输出 warning 而非 fail" >> $GITHUB_STEP_SUMMARY
