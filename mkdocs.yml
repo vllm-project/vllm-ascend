@@ -153,10 +153,10 @@ extra:
   vllm_ascend_version: v0.22.1rc1
   pip_vllm_ascend_version: 0.22.1rc1
   pip_vllm_version: 0.22.1
-  cann_image_tag: 9.0.0-910b-ubuntu22.04-py3.12
+  cann_image_tag: 9.0.1-910b-ubuntu22.04-py3.12
   main_python_version: ">= 3.10, < 3.13"
-  main_cann_version: "9.0.0"
-  main_pytorch_torch_npu_version: "2.10.0 / 2.10.0"
+  main_cann_version: "9.0.1"
+  main_pytorch_torch_npu_version: "2.10.0 / 2.10.0.post2"
   main_triton_ascend_version: "3.2.1"
   social:
     - icon: fontawesome/brands/github
@@ -250,7 +250,6 @@ nav:
         - user_guide/feature_guide/expert_parallelism_load_balancer.md
         - user_guide/feature_guide/netloader.md
         - user_guide/feature_guide/rfork.md
-        - user_guide/feature_guide/dynamic_batch.md
         - user_guide/feature_guide/epd_disaggregation.md
         - user_guide/feature_guide/short_request_first.md
         - user_guide/feature_guide/kv_pool.md
@@ -260,10 +259,8 @@ nav:
         - user_guide/feature_guide/large_scale_ep.md
         - user_guide/feature_guide/ucm_deployment.md
         - user_guide/feature_guide/Fine_grained_TP.md
-        - user_guide/feature_guide/layer_sharding.md
         - user_guide/feature_guide/speculative_decoding.md
         - user_guide/feature_guide/context_parallel.md
-        - user_guide/feature_guide/weight_prefetch.md
         - user_guide/feature_guide/sequence_parallelism.md
         - user_guide/feature_guide/batch_invariance.md
         - user_guide/feature_guide/lmcache_ascend_deployment.md
