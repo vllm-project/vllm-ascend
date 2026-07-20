@@ -105,7 +105,7 @@ class TestAscendSFADeviceOperator(TestBase):
             actual_seq_lengths_key,
         )
 
-    def test_execute_sparse_flash_attention_returns_lse(self):
+    def test_execute_sparse_flash_attention_returns_softmax_components(self):
         (
             impl,
             ql_nope,
@@ -129,7 +129,7 @@ class TestAscendSFADeviceOperator(TestBase):
             create=True,
             return_value=(attn_output, softmax_max, softmax_sum),
         ) as mock_sfa:
-            output, softmax_lse = DeviceOperator.execute_sparse_flash_attention_process(
+            output, actual_softmax_max, actual_softmax_sum = DeviceOperator.execute_sparse_flash_attention_process(
                 impl,
                 ql_nope,
                 q_pe,
@@ -142,12 +142,11 @@ class TestAscendSFADeviceOperator(TestBase):
             )
 
         self.assertIs(output, attn_output)
-        self.assertEqual(softmax_lse.shape, (3, 4, 1))
-        expected_lse = torch.full((3, 4, 1), torch.log(torch.tensor(2.0)).item())
-        self.assertTrue(torch.allclose(softmax_lse, expected_lse))
+        self.assertIs(actual_softmax_max, softmax_max)
+        self.assertIs(actual_softmax_sum, softmax_sum)
         self.assertTrue(mock_sfa.call_args.kwargs["return_softmax_lse"])
 
-    def test_execute_sparse_flash_attention_c8_returns_lse(self):
+    def test_execute_sparse_flash_attention_c8_returns_softmax_components(self):
         (
             impl,
             ql_nope,
@@ -175,7 +174,7 @@ class TestAscendSFADeviceOperator(TestBase):
                 side_effect=AssertionError("C8 SFA with LSE must use the custom op"),
             ),
         ):
-            output, softmax_lse = DeviceOperator.execute_sparse_flash_attention_process(
+            output, actual_softmax_max, actual_softmax_sum = DeviceOperator.execute_sparse_flash_attention_process(
                 impl,
                 ql_nope,
                 q_pe,
@@ -189,8 +188,8 @@ class TestAscendSFADeviceOperator(TestBase):
             )
 
         self.assertIs(output, attn_output)
-        expected_lse = torch.full((3, 4, 1), 1.0 + torch.log(torch.tensor(3.0)).item())
-        self.assertTrue(torch.allclose(softmax_lse, expected_lse))
+        self.assertIs(actual_softmax_max, softmax_max)
+        self.assertIs(actual_softmax_sum, softmax_sum)
         call_kwargs = mock_qsfa.call_args.kwargs
         self.assertIs(call_kwargs["key"], packed_kv_cache[0])
         self.assertIs(call_kwargs["value"], packed_kv_cache[0])
@@ -270,7 +269,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
         self.assertEqual(call_kwargs["query"].shape, (3, 2, 48))
         self.assertEqual(call_kwargs["key_quant_mode"], 2)
         self.assertEqual(call_kwargs["tile_size"], 128)
-        self.assertNotIn("return_softmax_lse", call_kwargs)
+        self.assertFalse(call_kwargs["return_softmax_lse"])
 
     def test_prolog_v3_enables_packed_int8_kv_cache(self):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
