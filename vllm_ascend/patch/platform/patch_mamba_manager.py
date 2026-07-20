@@ -34,10 +34,11 @@ class AscendMambaManager(MambaManager):
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
         drop_eagle_block: bool = False,
-    ) -> tuple[list[KVCacheBlock], ...]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:  # type: ignore[override]
         assert isinstance(kv_cache_spec, MambaSpec), "MambaManager can only be used for mamba groups"
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple([] for _ in range(len(kv_cache_group_ids)))
         block_size = kv_cache_spec.block_size
+        hit_length = 0
         max_num_blocks = max_length // block_size
         for i in range(max_num_blocks - 1, -1, -1):
             if cached_block := block_pool.get_cached_block(block_hashes[i], kv_cache_group_ids):
@@ -46,8 +47,9 @@ class AscendMambaManager(MambaManager):
                 for computed, cached in zip(computed_blocks, cached_block):
                     computed.extend([block_pool.null_block] * i)
                     computed.append(cached)
+                hit_length = (i + 1) * block_size
                 break
-        return computed_blocks
+        return computed_blocks, hit_length
 
     def get_num_blocks_to_allocate(
         self,
@@ -55,6 +57,7 @@ class AscendMambaManager(MambaManager):
         num_tokens: int,
         new_computed_blocks: Sequence[KVCacheBlock],
         total_computed_tokens: int,
+        num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
     ) -> int:
@@ -63,6 +66,7 @@ class AscendMambaManager(MambaManager):
             num_tokens,
             new_computed_blocks,
             total_computed_tokens,
+            num_local_computed_tokens,
             num_tokens_main_model,
             apply_admission_cap,
         )

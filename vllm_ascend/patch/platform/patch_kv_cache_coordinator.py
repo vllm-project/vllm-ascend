@@ -329,6 +329,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     dcp_world_size=self.dcp_world_size,
                     pcp_world_size=self.pcp_world_size,
                 )
+                if vllm_version_is("0.25.1"):
+                    hit_blocks, _ = hit_blocks
                 _new_hit_length = len(hit_blocks[0]) * effective_block_size
                 if use_eagle:
                     eagle_verified.add(idx)
@@ -431,6 +433,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     dcp_world_size=self.dcp_world_size,
                     pcp_world_size=self.pcp_world_size,
                 )
+                if vllm_version_is("0.25.1"):
+                    hit_blocks, _ = hit_blocks
                 _new_hit_length = len(hit_blocks[0]) * effective_block_size
                 if use_eagle:
                     eagle_verified.add(idx)

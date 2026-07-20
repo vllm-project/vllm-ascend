@@ -19,6 +19,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     _block_hash_to_bytes,
     get_block_hashes,
 )
+from vllm_ascend.utils import vllm_version_is
 
 _CACHE_MISSING = object()
 _MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
@@ -27,10 +28,15 @@ _MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
 class ExternalCachedBlockPool:
     """Duck-typed BlockPool backed by external AscendStore key existence."""
 
-    def __init__(self, exists: set[tuple[int, bytes]] | None = None) -> None:
+    def __init__(
+        self,
+        hash_block_size: int,
+        exists: set[tuple[int, bytes]] | None = None,
+    ) -> None:
         # exists=None is used for load/store masks where hit length has already
         # been decided and each manager only needs to apply its own reachability.
         self._exists = exists
+        self.hash_block_size = hash_block_size
         self.null_block = KVCacheBlock(block_id=0)
         self._present_block = KVCacheBlock(block_id=1)
 
@@ -161,7 +167,7 @@ class AscendStoreCoordinator:
         masks, _ = self.find_longest_cache_hit(
             block_hashes,
             token_len,
-            ExternalCachedBlockPool(),
+            ExternalCachedBlockPool(self.hash_block_size),
             apply_eagle=False,
         )
         return tuple(
@@ -365,12 +371,16 @@ def _find_longest_cache_hit(
     **kwargs: Any,
 ) -> tuple[list[KVCacheBlock], ...]:
     try:
-        return manager_cls.find_longest_cache_hit(**kwargs)
+        result = manager_cls.find_longest_cache_hit(**kwargs)
     except TypeError as exc:
         if "drop_eagle_block" not in str(exc):
             raise
         kwargs["use_eagle"] = kwargs.pop("drop_eagle_block")
-        return manager_cls.find_longest_cache_hit(**kwargs)
+        result = manager_cls.find_longest_cache_hit(**kwargs)
+    # On 0.25.1+, upstream returns (blocks, hit_length); strip the hit_length
+    if vllm_version_is("0.25.1"):
+        result, _ = result
+    return result
 
 
 def _reachable_block_mask(
