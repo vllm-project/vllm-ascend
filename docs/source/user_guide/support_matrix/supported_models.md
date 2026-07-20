@@ -42,12 +42,8 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
     | Model | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
     |-------|---------|------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------------------|--------------------|--------------------|---------------|-----|
-    | Qwen3-Dense | 🔵 |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | 🟡 | 🟡 | ✅ | ✅ | ❌ | ❌ | ✅ | 20k | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
-    | Qwen3-30B-A3B | 🔵 |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | 🟡 | 🟡 | ✅ | ✅ | ❌ | ❌ | ✅ | 16k | [Qwen3-30B-A3B](../../tutorials/models/Qwen3-30B-A3B.md) |
-    | Qwen3.5-Dense | 🔵 |  | ❌ | Atlas inference products | 🟡 | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | 16k | [Qwen3.5-Dense](../../tutorials/models/Qwen3.5-Dense.md) |
-    | Qwen3.5-35B-A3B | 🔵 |  | ❌ | Atlas inference products | 🟡 | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | 16k | |
-    | Qwen3.6-27B | 🔵 |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
-    | Qwen3.6-35B-A3B | 🔵 |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | 16k | [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
+    | Qwen3-Dense | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 20k | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
+    | Qwen3-30B-A3B | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 16k | [Qwen3-30B-A3B](../../tutorials/models/Qwen3-30B-A3B.md) |
 
 #### Extended Compatible Models
 
@@ -112,9 +108,13 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
     | Model | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
     |-------|---------|------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------------------|--------------------|--------------------|---------------|-----|
-    | Qwen3-VL | 🔵 |  | ❌ | Atlas inference products | 🟡 | ✅ | ✅ | 🟡 | 🟡 | ✅ | ✅ | ❌ | ❌ | ✅ | 16k | [Qwen-VL-Dense](../../tutorials/models/Qwen-VL-Dense.md) |
-    | PaddleOCR-VL | 🔵 |  | ❌ | Atlas inference products | 🟡 | ✅ | ✅ | 🟡 | 🟡 | ✅ | 🟡 | ❌ | ❌ | ✅ | 16k | [PaddleOCR-VL](../../tutorials/models/PaddleOCR-VL.md) |
-    | Qwen3-ASR | 🔵 |  | ❌ | Atlas inference products | 🟡 | ✅ | ✅ | 🟡 | 🟡 | ✅ | 🟡 | ❌ | ❌ | ✅ | 4096 | [Qwen3-ASR-1.7B](../../tutorials/models/Qwen3-ASR-1.7B.md) |
+    | Qwen3-VL | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 16k | [Qwen-VL-Dense](../../tutorials/models/Qwen-VL-Dense.md) |
+    | Qwen3.5-Dense | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 16k | [Qwen3.5-Dense](../../tutorials/models/Qwen3.5-Dense.md) |
+    | Qwen3.5-35B-A3B | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 16k | |
+    | Qwen3.6-27B | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
+    | Qwen3.6-35B-A3B | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 16k | [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
+    | PaddleOCR-VL | ✅ |  | ❌ | Atlas inference products | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | 16k | [PaddleOCR-VL](../../tutorials/models/PaddleOCR-VL.md) |
+    | Qwen3-ASR | ✅ |  | ❌ | Atlas inference products | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | 🟡 | ❌ | ✅ | ✅ | 4096 | [Qwen3-ASR-1.7B](../../tutorials/models/Qwen3-ASR-1.7B.md) |
 
 #### Extended Compatible Models
 
