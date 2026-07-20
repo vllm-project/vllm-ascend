@@ -167,20 +167,7 @@ def rope_forward_oot(
     query_shape, key_shape = query.shape, key.shape
     if offsets is not None:
         raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
-    # The triton RoPE kernel (vllm_ascend/ops/triton/rope.py) tiles a basic
-    # block sized BLOCK_SIZE_HEAD * pad_rope_dim.  For Gemma4 global head
-    # (rope_dim >= 512) the tile exceeds the Ascend A2 uniform-buffer budget
-    # (1572864 bits) and BiShengHIR compilation fails with "ub overflow".
-    # The triton RoPE kernel tiles a basic block of BLOCK_SIZE_HEAD *
-    # pad_rope_dim.  For rope_dim >= 512 the tile exceeds the Ascend A2
-    # uniform-buffer budget (1572864 bits) and BiShengHIR compilation fails
-    # with "ub overflow".  Fall back to the CANN native op for large
-    # rope_dim; smaller dims keep the triton path.  This is a generic
-    # kernel limitation, NOT Gemma4-specific — gate on rotary_dim alone so
-    # it applies to target AND draft (a config-based gate would miss the
-    # draft forward, whose current config has no speculative_config).
-    _use_triton = HAS_TRITON and rotary_dim < 512
-    if _use_triton:
+    if HAS_TRITON:
         num_tokens = query.shape[0]
         query, key = rope_forward_triton(
             query.view(num_tokens, -1, head_size),
