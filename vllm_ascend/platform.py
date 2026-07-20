@@ -538,39 +538,6 @@ class NPUPlatform(Platform):
                 compilation_config.cudagraph_capture_sizes = sp_aclgraph_sizes
                 update_cudagraph_capture_sizes(vllm_config, sp_aclgraph_sizes)
 
-        # Gemma4 MTP: FULL_AND_PIECEWISE is not yet fully supported for our
-        # MTP path; downgrade to PIECEWISE. FULL_DECODE_ONLY is allowed
-        # through for FDO graph mode. Scoped to gemma4 MTP so other models
-        # keep the upstream FULL_AND_PIECEWISE behavior.
-        _spec = getattr(vllm_config, "speculative_config", None)
-        _is_gemma4_mtp = _spec is not None and hasattr(_spec, "use_gemma4_mtp") and _spec.use_gemma4_mtp()
-        if _is_gemma4_mtp and compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
-            compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-
-        # Gemma4 MTP on A2/A3 with graph mode (FULL / FULL_DECODE_ONLY):
-        # the head_dim=512 global-attention layers cannot use FIA TND (no
-        # 512 support) and have no block_table-capable 512 op, so the graph
-        # capture path routes them to the decode paged-attention kernel.
-        # That kernel assumes 1 query token per req; MTP verify with K>1
-        # sends K+1 query tokens per req, which the decode PA misreads as
-        # K+1 separate single-token requests -> pos1/pos2 attention is wrong
-        # -> pos1/pos2 acceptance collapses (observed ~3%/0.1% vs eager ~58%).
-        # pos0 is unaffected (~80-95%).  K=1 only uses pos0, so K=1 graph
-        # mode works well (observed 80% acceptance, 36.9 tok/s on 910B4).
-        # Recommend K=1 on A2/A3 graph mode until a 512-capable graph
-        # attention path (padded-dense npu_fusion_attention) is available.
-        if (
-            _is_gemma4_mtp
-            and _spec is not None
-            and getattr(_spec, "num_speculative_tokens", 0) > 1
-            and get_ascend_device_type() in (AscendDeviceType.A2, AscendDeviceType.A3)
-            and compilation_config.cudagraph_mode in (CUDAGraphMode.FULL, CUDAGraphMode.FULL_DECODE_ONLY)
-        ):
-            logger.warning(
-                "Gemma4 MTP on A2/A3 graph mode: recommend num_speculative_tokens=1 "
-                "(K>1 has low pos1/pos2 acceptance here).",
-            )
-
         # Encoder-decoder models currently only support PIECEWISE mode
         # TODO(Jian Li): Confirm this behavior and explain why
         if (
