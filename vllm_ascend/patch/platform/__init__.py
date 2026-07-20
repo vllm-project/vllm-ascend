@@ -14,8 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-
 import vllm_ascend.patch.platform.patch_camem_allocator  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
@@ -38,8 +36,11 @@ import vllm_ascend.patch.platform.patch_weight_transfer_engine  # noqa
 import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
 import vllm_ascend.patch.platform.patch_mamba_manager  # noqa
 
-if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXPERT_MAP_RECORD", "false") == "true":
-    import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
+# TP worker async spawn + DP EngineCore async start (aligned with upstream
+# multiprocess/async patterns); replaces legacy EPLB-only load of multiprocess patch.
+# Order: multiproc first (no dependency on engine.utils), then optional CoreEngineProcManager backport.
+import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
+import vllm_ascend.patch.platform.patch_engine_core_parallel_startup  # noqa
 
 import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
 
