@@ -240,7 +240,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
     --host 0.0.0.0 \
     --port 8077 \
-    --api-server-count 1 \
+    --headless \
     --data-parallel-size 8 \
     --data-parallel-size-local 4 \
     --data-parallel-address $node0_ip \
@@ -414,7 +414,6 @@ export CPU_AFFINITY_CONF=1
 export VLLM_ENGINE_READY_TIMEOUT_S=1200
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-export VLLM_VERSION=0.21.0
 
 vllm serve <MODEL_PATH> \
   --max_model_len 200000 \
@@ -473,7 +472,6 @@ export CPU_AFFINITY_CONF=1
 export VLLM_ENGINE_READY_TIMEOUT_S=1200
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-export VLLM_VERSION=0.21.0
 
 vllm serve <MODEL_PATH> \
   --max_model_len 200000 \
