@@ -561,7 +561,6 @@ def attention_calculation_stream() -> torch.npu.Stream:
 
 
 def adapt_patch(is_global_patch: bool = False):
-    print("[vllm_ascend] adapt_patch: hf_overrides patch removed (53de8f70)", flush=True)
     if is_global_patch:
         from vllm_ascend.patch import platform  # noqa: F401
     else:
