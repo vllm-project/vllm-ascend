@@ -26,7 +26,7 @@ It is recommended to download the model weight to the shared directory of multip
 ### Installation
 
 - You can use our official docker image to run GLM-5.2 directly.
-- KV Cache Pool（Ascend Store）Deployment Guide(https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/feature_guide/kv_pool.html)
+- [KV Cache Pool (Ascend Store) Deployment Guide](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/feature_guide/kv_pool.html)
 
 === "A3 series"
 
