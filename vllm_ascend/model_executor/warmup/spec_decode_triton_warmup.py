@@ -337,9 +337,9 @@ def _warm_greedy_rejection_kernels(
         torch.full((batch_size,), num_draft_per_req, dtype=torch.int32, device=device),
         dim=0,
     )
-    draft_token_ids = torch.zeros(num_tokens, dtype=torch.int64, device=device)
+    draft_token_ids = torch.zeros(num_tokens, dtype=torch.int32, device=device)
     target_argmax = torch.zeros(num_tokens, dtype=torch.int32, device=device)
-    bonus_token_ids = torch.zeros(batch_size, 1, dtype=torch.int64, device=device)
+    bonus_token_ids = torch.zeros(batch_size, 1, dtype=torch.int32, device=device)
 
     output_all_greedy = torch.full(
         (batch_size, max_spec_len + 1),
