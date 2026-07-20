@@ -515,7 +515,7 @@ class AscendSFACPImpl(AscendSFAImpl):
 
     def _execute_indexer_select(self, q, key, weights, actual_seq_lengths_query, actual_seq_lengths_key, block_table):
         if self.use_torch_npu_lightning_indexer:
-            topk_indices, _ = torch_npu.npu_lightning_indexer(
+            topk_indices, _ = torch.ops._C_ascend.npu_lightning_indexer(
                 query=q,
                 key=key,
                 weights=weights,

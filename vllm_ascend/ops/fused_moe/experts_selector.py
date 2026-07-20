@@ -271,9 +271,9 @@ def _select_experts_with_fusion_ops(
         else:
             input_ids = None
             tid2eid_ones = None
-        topk_weights, topk_ids, _ = torch.ops._C_ascend.moe_gating_top_k_hash(
-            x=router_logits,
-            k=top_k,
+        topk_weights, topk_ids, _ = torch.ops.custom.npu_moe_gating_top_k(
+            router_logits,
+            top_k,
             bias=e_score_correction_bias,
             input_ids=input_ids,
             tid2eid=tid2eid_ones,

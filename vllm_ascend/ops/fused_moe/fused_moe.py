@@ -715,7 +715,7 @@ else:
                     # Execute activation concurrently with gmm2.
 
                     maybe_wait_event(fused_moe_evts.before_gmm2)
-                    quantized_x, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
+                    quantized_x, swiglu_out_scale = torch.ops.custom.npu_dequant_swiglu_clamp_quant(
                         x=hidden_states,
                         weight_scale=self._shared_experts.gate_up_proj.weight_scale_fp32,
                         activation_scale=pertoken_scale,
@@ -727,6 +727,8 @@ else:
                         quant_mode=1,
                         swiglu_mode=1,
                         clamp_limit=fused_moe_evts.swiglu_limit,
+                        glu_alpha=1.0,
+                        glu_bias=0.0,
                     )
                     # Execute the down projection concurrently with the combine
                     # communication.
@@ -752,13 +754,14 @@ else:
                     hidden_states = self._shared_experts.gate_up_proj((quantized_x, pertoken_scale))[0]
                     # Execute activation concurrently with gmm2.
                     maybe_wait_event(fused_moe_evts.before_gmm2)
-                    quantized_x, swiglu_out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
+                    quantized_x, swiglu_out_scale, _ = torch.ops.custom.npu_swiglu_group_quant(
                         hidden_states,
-                        topk_weight=None,
+                        weight=None,
                         group_index=None,
                         dst_type=torch.float8_e4m3fn,
-                        quant_mode=2,
-                        clamp_value=fused_moe_evts.swiglu_limit,
+                        quant_mode=1,
+                        round_scale=True,
+                        clamp_limit=fused_moe_evts.swiglu_limit,
                     )
                     # Execute the down projection concurrently with the combine
                     # communication.

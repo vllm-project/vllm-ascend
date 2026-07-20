@@ -196,7 +196,7 @@ def quant_apply_mlp(
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
             # act_fn: swiglu
-            hidden_states, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
+            hidden_states, swiglu_out_scale = torch.ops.custom.npu_dequant_swiglu_clamp_quant(
                 x=hidden_states,
                 weight_scale=w1_scale[0],
                 activation_scale=pertoken_scale,
@@ -206,6 +206,10 @@ def quant_apply_mlp(
                 group_index=cumsum_group_list(group_list, group_list_type, 1),
                 activate_left=True,
                 quant_mode=1,
+                swiglu_mode=0,
+                clamp_limit=0.0,
+                glu_alpha=1.0,
+                glu_bias=0.0,
             )
         before_gmm2_evt = torch.npu.current_stream().record_event()
         # gmm2: down_proj
