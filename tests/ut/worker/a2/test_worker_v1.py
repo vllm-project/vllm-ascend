@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import torch
-from vllm.config import CacheConfig, CUDAGraphMode, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig
 
 from tests.ut.base import TestBase
 
@@ -216,6 +216,7 @@ class TestNPUWorker(TestBase):
     def test_wake_up_mode_enabled(self, mock_get_config, mock_allocator_class):
         mock_config = MagicMock()
         mock_config.weight_nz_mode = 0
+        mock_config.enable_sleep_mode_extra_cleanup = True
         mock_get_config.return_value = mock_config
         """Test wake_up method when sleep mode is enabled"""
         from vllm_ascend.worker.worker import NPUWorker
@@ -241,11 +242,14 @@ class TestNPUWorker(TestBase):
             worker.model_runner = mock_model_runner
             worker.vllm_config = mock_vllm_config
             worker._sleep_saved_buffers = {}
+            worker.sleep_wakeup_manager = MagicMock()
             # Test wake_up method
             worker.wake_up(tags=["test_tag"])
 
             mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
+            worker.sleep_wakeup_manager.wakeup.assert_called_once_with(["test_tag"])
 
+    @patch("vllm_ascend.worker.worker.current_platform")
     @patch("vllm_ascend.worker.worker.MemorySnapshot")
     @patch("vllm_ascend.worker.worker.NPUWorker._init_worker_distributed_environment")
     @patch("vllm_ascend.worker.worker.init_device_properties_triton")
@@ -262,6 +266,7 @@ class TestNPUWorker(TestBase):
         mock_init_triton,
         mock_init_dist_env,
         mock_snapshot_cls,
+        mock_current_platform,
     ):
         """Test _init_device method"""
         from vllm_ascend.worker.worker import AscendDeviceType, NPUWorker
@@ -276,15 +281,21 @@ class TestNPUWorker(TestBase):
         mock_snapshot.total_memory = 2000
         mock_snapshot_cls.return_value = mock_snapshot
 
+        # Mock current_platform for v0.24.0 init_device path
+        mock_current_platform.logical_device_id_to_visible_device_id.return_value = 0
+        mock_current_platform.device_type = "npu"
+
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
-            worker.local_rank = 1
+            worker.local_rank = 0
             worker.model_config = MagicMock()
             worker.model_config.seed = 42
             worker.parallel_config = MagicMock()
             worker.parallel_config.local_world_size = 0
             worker.parallel_config.data_parallel_size = 1
+            worker.parallel_config.assigned_physical_gpu_ids = None
+            worker.parallel_config.distributed_executor_backend = "ray"
             worker.vllm_config = MagicMock()
             worker.vllm_config.kv_transfer_config = None
             worker.cache_config = MagicMock()
@@ -294,7 +305,7 @@ class TestNPUWorker(TestBase):
             result = worker._init_device()
 
             mock_init_dist_env.assert_called_once()
-            self.assertEqual(str(result), "npu:1")
+            self.assertEqual(str(result), "npu:0")
             self.assertEqual(worker.init_snapshot, mock_snapshot)
             self.assertEqual(worker.requested_memory, 2000 * 0.5)
 
@@ -515,16 +526,14 @@ class TestNPUWorker(TestBase):
             worker.compilation_config = MagicMock()
             worker.compilation_config.cudagraph_mode = MagicMock()
             mock_model_runner = MagicMock()
-            mock_decode_token_per_req = mock_model_runner.decode_token_per_req
+            mock_uniform_decode_query_len = mock_model_runner.uniform_decode_query_len
             worker.model_runner = mock_model_runner
 
             # Test execute_dummy_batch
             worker.execute_dummy_batch()
 
             # Verify call
-            mock_model_runner._dummy_run.assert_called_once_with(
-                num_tokens=mock_decode_token_per_req, uniform_decode=True
-            )
+            mock_model_runner._dummy_run.assert_called_once_with(mock_uniform_decode_query_len, uniform_decode=True)
 
     @patch("vllm_ascend.worker.worker.memory_profiling")
     @patch("torch.npu.reset_peak_memory_stats")
@@ -571,8 +580,6 @@ class TestNPUWorker(TestBase):
             worker.requested_memory = 10000 * 0.8
             worker.model_runner = MagicMock()
             worker.model_runner.model_memory_usage = 500
-            worker.vllm_config = MagicMock()
-            worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.8
             worker.cache_config.kv_cache_memory_bytes = None
@@ -634,8 +641,6 @@ class TestNPUWorker(TestBase):
             worker.requested_memory = 10000 * 0.9
             worker.model_runner = MagicMock()
             worker.model_runner.model_memory_usage = 500
-            worker.vllm_config = MagicMock()
-            worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.9
             worker.cache_config.kv_cache_memory_bytes = None
@@ -654,14 +659,8 @@ class TestNPUWorker(TestBase):
     @patch("torch.npu.mem_get_info")
     @patch("torch.npu.reset_peak_memory_stats")
     @patch("torch.npu.empty_cache")
-    @patch("torch_npu.npu.memory_stats")
     def test_determine_available_memory_memory_profiling_error(
-        self,
-        mock_torch_memory_stats,
-        mock_torch_empty_cache,
-        mock_torch_reset_peak_memory_stats,
-        mock_torch_mem_get_info,
-        mock_memory_profiling,
+        self, mock_torch_empty_cache, mock_torch_reset_peak_memory_stats, mock_torch_mem_get_info, mock_memory_profiling
     ):
         """Test determine_available_memory throws exception on memory profiling error"""
         from vllm_ascend.worker.worker import NPUWorker
@@ -690,15 +689,10 @@ class TestNPUWorker(TestBase):
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.8
             worker.model_runner = MagicMock()
-            worker.model_runner.model_memory_usage = 0
-            worker.vllm_config = MagicMock()
-            worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.8
             worker.cache_config.kv_cache_memory_bytes = None
             worker.device = torch.device("npu:0")
-
-            mock_torch_memory_stats.return_value = {"allocated_bytes.all.peak": 0}
 
             # Test should throw assertion error
             with self.assertRaises(AssertionError) as cm:
@@ -749,8 +743,6 @@ class TestNPUWorker(TestBase):
             worker.requested_memory = 10000 * 0.8
             worker.model_runner = MagicMock()
             worker.model_runner.model_memory_usage = 500
-            worker.vllm_config = MagicMock()
-            worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.8
             worker.cache_config.kv_cache_memory_bytes = None
@@ -975,6 +967,7 @@ class TestNPUWorker(TestBase):
             worker.vllm_config.model_config = MagicMock()
             worker.vllm_config.model_config.enable_sleep_mode = True
             worker.vllm_config.weight_transfer_config = None
+            worker.vllm_config.kv_transfer_config = None
 
             # Setup allocator mock
             mock_allocator = MagicMock()
@@ -1161,13 +1154,17 @@ class TestNPUWorker(TestBase):
         from vllm_ascend.worker.worker import NPUWorker
 
         # Create worker mock
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+        with (
+            patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
+            patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized"),
+        ):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
             worker.vllm_config.speculative_config = None
             worker.vllm_config.model_config = MagicMock()
             worker.vllm_config.model_config.enable_sleep_mode = True
+            worker.vllm_config.kv_transfer_config = None
 
             # Setup allocator mock
             mock_allocator = MagicMock()
@@ -1186,19 +1183,75 @@ class TestNPUWorker(TestBase):
             mock_allocator.use_memory_pool.assert_called_once_with(tag="kv_cache")
             worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
 
+    def test_acl_graph_sleep_wakeup_manager_sleep_resets_acl_graph_state(self):
+        from vllm_ascend.device_allocator.sleep_mem_optimized import AclGraphSleepWakeupManager
+
+        model_runner = MagicMock()
+        model_runner.use_aclgraph = True
+        graph_manager = MagicMock()
+        graph_manager.graphs = MagicMock()
+        graph_manager.pool = None
+        model_runner.cudagraph_manager = graph_manager
+        saver = AclGraphSleepWakeupManager(MagicMock(), lambda: model_runner)
+        with (
+            patch(
+                "vllm_ascend.device_allocator.sleep_mem_optimized.AclGraphSleepWakeupManager"
+                ".clear_all_attention_workspaces"
+            ) as mock_clear,
+            patch(
+                "vllm_ascend.device_allocator.sleep_mem_optimized.AclGraphSleepWakeupManager.reset_all_graph_params"
+            ) as mock_reset,
+        ):
+            saver.sleep()
+        mock_clear.assert_called_once()
+        mock_reset.assert_called_once()
+        graph_manager.graphs.clear.assert_called_once()
+
+    def test_hccl_sleep_wakeup_manager_sleep_waits_and_destroys(self):
+        from vllm_ascend.device_allocator.sleep_mem_optimized import HcclSleepWakeupManager
+
+        worker = MagicMock()
+        handle = MagicMock()
+        worker._pp_send_work = [handle]
+        saver = HcclSleepWakeupManager(MagicMock(), worker)
+        saver._destroyed = False
+
+        with (
+            patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.distributed.is_available", return_value=True),
+            patch(
+                "vllm_ascend.device_allocator.sleep_mem_optimized.torch.distributed.is_initialized",
+                return_value=True,
+            ),
+            patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.synchronize") as mock_synchronize,
+            patch(
+                "vllm_ascend.device_allocator.sleep_mem_optimized.HcclSleepWakeupManager.destroy_hccl",
+                return_value=2,
+            ) as mock_destroy,
+        ):
+            saver.sleep()
+
+        handle.wait.assert_called_once()
+        self.assertEqual(worker._pp_send_work, [])
+        mock_synchronize.assert_called_once()
+        mock_destroy.assert_called_once()
+
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
     def test_initialize_from_config_without_sleep_mode(self, mock_ensure_kv_transfer):
         """Test initialize_from_config method - without sleep mode enabled"""
         from vllm_ascend.worker.worker import NPUWorker
 
         # Create worker mock
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+        with (
+            patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
+            patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized"),
+        ):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
             worker.vllm_config.speculative_config = None
             worker.vllm_config.model_config = MagicMock()
             worker.vllm_config.model_config.enable_sleep_mode = False
+            worker.vllm_config.kv_transfer_config = None
 
             # Create mock kv_cache_config
             mock_kv_cache_config = MagicMock()
@@ -1269,6 +1322,33 @@ class TestNPUWorker(TestBase):
 
             # When both flags are False, return EMPTY_MODEL_RUNNER_OUTPUT directly.
             self.assertEqual(result, mock_empty_output)
+
+    def test_update_config(self):
+        """Test update_config delegates to model_runner.update_config"""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+
+            overrides = {"load_config": {"load_format": "dummy"}}
+            worker.update_config(overrides)
+
+            worker.model_runner.update_config.assert_called_once_with(overrides)
+
+    def test_reload_weights(self):
+        """Test reload_weights delegates to model_runner.reload_weights"""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+
+            worker.reload_weights(weights_path="/tmp/weights", is_checkpoint_format=True)
+
+            worker.model_runner.reload_weights.assert_called_once_with(
+                weights_path="/tmp/weights", is_checkpoint_format=True
+            )
 
 
 class TestNPUWorkerWeightUpdate(TestBase):

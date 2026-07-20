@@ -16,6 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+
 from contextlib import contextmanager
 
 import numpy as np
@@ -45,11 +46,10 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_tokens_capacity,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.utils import set_weight_prefetch_method
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.spec_decode.eagle import init_speculator
+from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
@@ -118,10 +118,9 @@ class NPUModelRunner(GPUModelRunner):
             pin_memory=True,
         )
 
-        # set _WEIGHT_PREFETCH_METHOD, _mc2_tokens_capacity and _reserved_mc2_mask which
-        # is necessary for weight_prfetching function, and MoE communication optimization.
-        set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
+        # Set _mc2_tokens_capacity and _reserved_mc2_mask for MoE communication optimization.
         # TODO: remove set_cos_and_sin (together with update_cos_sin) when mla can properly handle cos/sin internally
+        self.decode_query_len = self.num_speculative_steps + 1
         set_cos_and_sin(vllm_config, self.max_num_reqs, self.decode_query_len, self.dtype, self.device)
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
         set_mc2_mask(vllm_config, self.device)
@@ -349,10 +348,13 @@ class NPUModelRunner(GPUModelRunner):
             max_seq_len_np=max_seq_len_np,
             input_ids=input_ids,
             positions=positions,
+            is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
             has_structured_output_reqs=scheduler_output.has_structured_output_requests,
+            # TODO: only populated for R-SWA (not supported yet).
+            prompt_lens=None,
             # extra attributes for ascend npus.
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
@@ -485,8 +487,21 @@ def graph_manager_wrapper(model_runner):
     """Context manager to override graph manager."""
     original_graph_manager = vllm_model_runner.ModelCudaGraphManager
 
-    def factory(vllm_config: VllmConfig, device: torch.device, cudagraph_mode: CUDAGraphMode, decode_query_len: int):
-        return ModelAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, model_runner)
+    def factory(
+        vllm_config: VllmConfig,
+        device: torch.device,
+        cudagraph_mode: CUDAGraphMode,
+        decode_query_len: int,
+        lora_capture_cases: list[int] | None = None,
+    ):
+        return ModelAclGraphManager(
+            vllm_config,
+            device,
+            cudagraph_mode,
+            decode_query_len,
+            model_runner,
+            lora_capture_cases=lora_capture_cases,
+        )
 
     try:
         vllm_model_runner.ModelCudaGraphManager = factory

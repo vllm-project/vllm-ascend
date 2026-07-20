@@ -21,12 +21,9 @@ CustomLinearOp
 ├── CustomColumnParallelOp
 │   ├── MLPColumnParallelOp
 │   ├── SequenceColumnParallelOp
-│   ├── Flashcomm2OshardQKVParallelOp
 └── CustomRowParallelOp
 │   ├── MLPRowParallelOp
 │   ├── OProjRowParallelOp
-|   ├── Flashcomm2OProjRowParallelOp
-│   ├── MatmulAllreduceRowParallelOp
 │   └── SequenceRowParallelOp
 └── CustomReplicatedOp
 How to extend a new linear op? Taking column parallel op as an example:
@@ -48,8 +45,6 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 import torch_npu
-from torch import nn
-from torch.distributed import ProcessGroup
 from torch.nn.parameter import Parameter
 from vllm.distributed import (
     split_tensor_along_last_dim,
@@ -57,26 +52,18 @@ from vllm.distributed import (
     tensor_model_parallel_reduce_scatter,
 )
 from vllm.distributed.parallel_state import get_tp_group
+from vllm.logger import logger
 from vllm.model_executor.models.utils import extract_layer_index
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.distributed.parallel_state import (
-    get_flashcomm2_odp_group,
-    get_flashcomm2_otp_group,
     get_mlp_tp_group,
     get_otp_group,
 )
-from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import (
     enable_dsa_cp,
-    enable_dsa_cp_with_layer_shard,
     enable_sp,
-    flashcomm2_enable,
-    get_flashcomm2_reorgnized_batch_ids,
-    get_weight_prefetch_method,
     is_vl_model,
-    matmul_allreduce_enable,
     mlp_tp_enable,
     oproj_tp_enable,
     shared_expert_dp_enabled,
@@ -150,10 +137,6 @@ class CustomRowParallelOp(CustomLinearOp):
 
     def apply(self, input_):
         output, output_bias = self.apply_impl(input_)
-        weight_prefetch_method = get_weight_prefetch_method()
-        weight_prefetch_method.maybe_prefetch_mlp_weight_preprocess(
-            weight_prefetch_method.MLP_GATE_UP, output, self.prefix
-        )
 
         if not self.return_bias:
             return output
@@ -220,6 +203,39 @@ class MLPRowParallelOp(CustomRowParallelOp):
         return output, output_bias
 
 
+class DSV4OProjColumnParallelOp(CustomColumnParallelOp):
+    @property
+    def comm_group(self):
+        return get_otp_group()
+
+    def apply_impl(
+        self,
+        input_: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        bias = self.bias if not self.skip_bias_add else None
+        assert self.quant_method is not None
+        output_parallel = self.quant_method.apply(self.layer, input_, bias)
+        output_bias = self.bias if self.skip_bias_add else None
+        return output_parallel, output_bias
+
+
+class DSV4OProjRowParallelOp(CustomRowParallelOp):
+    @property
+    def comm_group(self):
+        return get_otp_group()
+
+    def apply_impl(
+        self,
+        input_: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        input_parallel = self.get_input_parallel(input_)
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        assert self.quant_method is not None
+        output_parallel = self.quant_method.apply(self.layer, input_parallel, bias=bias_)
+        output_bias = self.bias if self.skip_bias_add else None
+        return output_parallel, output_bias
+
+
 class OProjRowParallelOp(CustomRowParallelOp):
     def __init__(self, layer):
         super().__init__(layer)
@@ -269,157 +285,6 @@ class OProjRowParallelOp(CustomRowParallelOp):
         self.input_size_per_partition = self.layer.input_size_per_partition
 
 
-class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
-    def __init__(self, layer):
-        super().__init__(layer)
-        self.odp_group = get_flashcomm2_odp_group()
-        self.odp_size = self.odp_group.world_size
-        self.otp_size = get_ascend_config().flashcomm2_oproj_tensor_parallel_size
-        self.reorgnized_batch_ids = get_flashcomm2_reorgnized_batch_ids(get_tp_group().world_size)
-        self.group_indices = torch.tensor(self.reorgnized_batch_ids).npu()
-        self.layer._quant_comm_config = {}
-
-    @property
-    def comm_group(self):
-        return get_flashcomm2_otp_group()
-
-    @property
-    def tp_rank(self):
-        if get_ascend_config().flashcomm2_oproj_tensor_parallel_size == 1:
-            return 0
-        return self.comm_group.rank_in_group
-
-    @property
-    def tp_size(self):
-        if get_ascend_config().flashcomm2_oproj_tensor_parallel_size == 1:
-            return 1
-        return self.comm_group.world_size
-
-    def apply_impl(
-        self,
-        input_: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        """Linear layer for Flashcomm2.
-        Input.ahspe = [batchsize*seqlength, headnum*headdim/TP]
-        Output.shape = [(batchsize*seqlength+padsize)/TP, hiddensize]
-        """
-        # Handle input parallelism - split or use as-is
-        input_parallel = self.get_input_parallel(input_)
-
-        # padding for all-to-all
-        num_padding_tokens = _EXTRA_CTX.pad_size
-        if num_padding_tokens > 0:
-            input_parallel = nn.functional.pad(input_parallel, (0, 0, 0, num_padding_tokens))
-
-        def otp_maybe_quant_comm(x):
-            # Reorganize the tensor so that the batch id and rank id correspond to each other.
-            chunk_num = len(self.reorgnized_batch_ids) * len(self.reorgnized_batch_ids[0])
-            batch_size = x.size(0)
-
-            assert batch_size % chunk_num == 0, f"Batch_size({batch_size}) must be divisible by chunk_num({chunk_num})"
-
-            batch_size_per_chunk = batch_size // chunk_num
-            # Indices of reorganized tensor
-            chunked = x.view(chunk_num, batch_size_per_chunk, x.shape[1])
-            if self.otp_size != 1:
-                chunked = chunked[self.group_indices]
-            send_buf = chunked.flatten(1, 2)
-
-            # all-to-all operation parameters
-            all2all_tp_size = self.odp_size
-            local_intermediate_size = x.size(1)
-            chunk_size = x.size(0) // all2all_tp_size
-            total_intermediate_size = local_intermediate_size * all2all_tp_size
-
-            # Create receive buffer
-            recv_buf = torch.empty(total_intermediate_size * chunk_size, dtype=x.dtype, device=x.device)
-
-            # Perform all-to-all communication
-            dist.all_to_all_single(recv_buf, send_buf, group=self.odp_group.device_group)
-
-            return recv_buf.view(all2all_tp_size, chunk_size, -1).transpose(0, 1).reshape(chunk_size, -1)
-
-        if not hasattr(self, "_quant_comm_config"):
-            self.layer._quant_comm_config = {}
-        self.layer._quant_comm_config["communication_fn"] = otp_maybe_quant_comm
-        actual_quant_method = getattr(self.quant_method, "quant_method", self.quant_method)
-        from vllm_ascend.quantization.methods.w8a8_static import AscendW8A8LinearMethod
-
-        if not isinstance(actual_quant_method, AscendW8A8LinearMethod):
-            # Check if w8a8 quantization is enabled. If not, communicate immediately.
-            input_parallel = otp_maybe_quant_comm(input_parallel)
-
-        # Matrix multiply.
-        assert self.quant_method is not None
-        # Only fuse bias add into GEMM for rank 0 (this ensures that
-        # bias will not get added more than once in TP>1 case)
-        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-
-        output_parallel = self.quant_method.apply(self.layer, input_parallel, bias=bias_)
-        # output_parallel shape: [bs/(TP/flashcomm2_otp_size), hiddenstate]
-        if self.tp_size > 1:
-            # flashcomm2 with reduce-scatter
-            output = self.comm_group.reduce_scatter(output_parallel, dim=0)
-        else:
-            output = output_parallel
-
-        if not _EXTRA_CTX.flash_comm_v1_enabled:
-            # flashcomm1 not enabled
-            output = get_tp_group().all_gather(output, 0)
-            if num_padding_tokens > 0:
-                output = output[:-num_padding_tokens]
-
-        # Handle bias return based on configuration
-        output_bias = self.bias if self.skip_bias_add else None
-
-        return output, output_bias
-
-    def update_attrs(self):
-        super().update_attrs()
-        self.input_is_parallel = self.layer.input_is_parallel
-        self.input_size_per_partition = self.layer.input_size_per_partition
-        if flashcomm2_oshard_manager.flashcomm2_oshard_enable():
-            flashcomm2_oshard_manager.register_layer(self.layer, prefetch_step=1)
-
-
-class MatmulAllreduceRowParallelOp(CustomRowParallelOp):
-    _HCOMM_INFO = None
-
-    def __init__(self, layer):
-        super().__init__(layer)
-        self.hcomm_info = self.get_hcomm_info(self.comm_group.device_group)
-
-    def apply_impl(self, input_: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        input_parallel = self.get_input_parallel(input_)
-        """Calculate the output tensor of forward by considering
-        fusing communication and computation."""
-        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        if self.reduce_results and self.tp_size > 1:
-            output = torch_npu.npu_mm_all_reduce_base(
-                input_parallel, self.layer.weight.t(), self.hcomm_info, bias=bias_
-            )
-        else:
-            assert self.quant_method is not None
-            output = self.quant_method.apply(self.layer, input_parallel, bias=bias_)
-
-        output_bias = self.bias if self.skip_bias_add else None
-        return output, output_bias
-
-    @classmethod
-    def get_hcomm_info(cls, group: ProcessGroup) -> str:
-        """Get the HCCL communication information for the given group."""
-        if cls._HCOMM_INFO is not None:
-            return cls._HCOMM_INFO
-
-        rank = torch.distributed.get_rank(group)
-        if torch.__version__ > "2.0":
-            global_rank = torch.distributed.get_global_rank(group, rank)
-            cls._HCOMM_INFO = group._get_backend(torch.device("npu")).get_hccl_comm_name(global_rank)
-        else:
-            cls._HCOMM_INFO = group.get_hccl_comm_name(rank)
-        return cls._HCOMM_INFO
-
-
 class SequenceColumnParallelOp(CustomColumnParallelOp):
     def apply_impl(self, input_: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         """Linear layer with column parallelism.
@@ -437,34 +302,6 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
         output_parallel = self.quant_method.apply(self.layer, input_, bias)
 
         if self.gather_output:
-            # All-gather across the partitions.
-            output = self.comm_group.all_gather(output_parallel)
-        else:
-            output = output_parallel
-        output_bias = self.bias if self.skip_bias_add else None
-        return output, output_bias
-
-
-class Flashcomm2OshardQKVParallelOp(CustomColumnParallelOp):
-    def __init__(self, layer):
-        super().__init__(layer)
-
-    def apply_impl(self, input_: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        """Column-parallel linear with FlashComm2 OShard optimization."""
-
-        bias = self.bias if not self.skip_bias_add else None
-
-        # Matrix multiply.
-        assert self.quant_method is not None
-
-        if enable_sp():
-            input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True)
-
-        # Trigger async broadcast before matmul to overlap communication.
-        flashcomm2_oshard_manager.trigger_broadcast_for_layer(self.layer.prefix)
-
-        output_parallel = self.quant_method.apply(self.layer, input_, bias)
-        if self.gather_output and self.tp_size > 1:
             # All-gather across the partitions.
             output = self.comm_group.all_gather(output_parallel)
         else:
@@ -505,6 +342,10 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         except AssertionError:
             flash_comm_v1_enabled = False
             mmrs_fusion = False
+            logger.debug(
+                "matmul_and_reduce: _EXTRA_CTX access failed (profile_run?), "
+                "using defaults: flash_comm_v1=False, mmrs_fusion=False",
+            )
 
         x = input_parallel
 
@@ -583,29 +424,6 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         self.unique_prefix = self.layer.unique_prefix
 
 
-class ShardedCPRowParallelOp(CustomRowParallelOp):
-    @property
-    def comm_group(self):
-        # fake comm group to bypass tp logic
-        return SimpleNamespace(world_size=1, rank_in_group=0, device_group=None)
-
-    def apply_impl(
-        self,
-        input_,
-    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        assert self.quant_method is not None
-        output = self.quant_method.apply(self.layer, input_, bias_)
-        output_bias = self.bias if self.skip_bias_add else None
-        if not self.return_bias:
-            return output
-        return output, output_bias
-
-    def update_attrs(self):
-        super().update_attrs()
-        self.layer.reduce_results = False
-
-
 class ShardedCPColumnParallelOp(CustomColumnParallelOp):
     @property
     def comm_group(self):
@@ -627,16 +445,16 @@ class ShardedCPColumnParallelOp(CustomColumnParallelOp):
 
 def _get_column_parallel_op(
     prefix, layer
-) -> MLPColumnParallelOp | SequenceColumnParallelOp | ShardedCPColumnParallelOp | Flashcomm2OshardQKVParallelOp | None:
+) -> MLPColumnParallelOp | DSV4OProjColumnParallelOp | SequenceColumnParallelOp | ShardedCPColumnParallelOp | None:
     if enable_dsa_cp() and ("q_b_proj" in prefix or "kv_b_proj" in prefix):
         return ShardedCPColumnParallelOp(layer)
+    if "wo_a" in prefix and oproj_tp_enable():
+        return DSV4OProjColumnParallelOp(layer)
     if "gate_up_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
         return MLPColumnParallelOp(layer)
-    if flashcomm2_oshard_manager.flashcomm2_oshard_enable():
-        if any(p in prefix for p in ("qkv_proj", "conv1d", "query_key_value")):
-            return Flashcomm2OshardQKVParallelOp(layer)
     if enable_sp():
-        if "shared_expert" in prefix:
+        # "share_expert" added for Step3p5
+        if "shared_expert" in prefix or "share_expert" in prefix:
             return None
         sp_column_prefix = [
             "gate_up_proj",  # first MLP of most LLMs
@@ -644,9 +462,10 @@ def _get_column_parallel_op(
             "qkv_proj",  # qkv linear of most LLMs
             "conv1d",  # gated deltanet of Qwen3 Next
             "query_key_value",  # qkv linear of Bailing
+            "g_proj",  # attention gate projection of Step3p5
         ]
         for a_prefix in sp_column_prefix:
-            if a_prefix in prefix:
+            if a_prefix in prefix and "vision_model" not in prefix:
                 return SequenceColumnParallelOp(layer)
 
     return None
@@ -654,28 +473,16 @@ def _get_column_parallel_op(
 
 def _get_row_parallel_op(
     prefix, layer
-) -> (
-    MLPRowParallelOp
-    | OProjRowParallelOp
-    | Flashcomm2OProjRowParallelOp
-    | MatmulAllreduceRowParallelOp
-    | SequenceRowParallelOp
-    | ShardedCPRowParallelOp
-    | None
-):
-    if enable_dsa_cp_with_layer_shard() and "o_proj" in prefix:
-        return ShardedCPRowParallelOp(layer)
+) -> MLPRowParallelOp | OProjRowParallelOp | DSV4OProjRowParallelOp | SequenceRowParallelOp | None:
+    if "wo_b" in prefix and oproj_tp_enable():
+        return DSV4OProjRowParallelOp(layer)
     if "down_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
         return MLPRowParallelOp(layer)
     if "o_proj" in prefix and oproj_tp_enable():
         return OProjRowParallelOp(layer)
-    if matmul_allreduce_enable():
-        return MatmulAllreduceRowParallelOp(layer)
-    if flashcomm2_enable():
-        if "o_proj" in prefix or "out_proj" in prefix:
-            return Flashcomm2OProjRowParallelOp(layer)
     if enable_sp():
-        if "shared_expert" in prefix:
+        # "share_expert" added for Step3p5
+        if "shared_expert" in prefix or "share_expert" in prefix:
             return None
         sp_row_prefixes = [
             "o_proj",  # attn output linear of most LLMs
@@ -685,7 +492,7 @@ def _get_row_parallel_op(
             "wo_b",  # attn output linear of v4
         ]
         for a_prefix in sp_row_prefixes:
-            if a_prefix in prefix:
+            if a_prefix in prefix and "vision_model" not in prefix:
                 return SequenceRowParallelOp(layer)
 
     return None
@@ -696,18 +503,17 @@ def get_parallel_op(disable_tp, prefix, layer, direct):
         disable_tp
         or ("shared_experts" in prefix and shared_expert_dp_enabled())
         or ("shared_expert" in prefix and shared_expert_dp_enabled())
+        or ("share_expert" in prefix and shared_expert_dp_enabled())  # "share_expert" added for Step3p5
     ):
         return None, 0, 1
     custom_op: (
         MLPColumnParallelOp
+        | DSV4OProjColumnParallelOp
         | SequenceColumnParallelOp
         | MLPRowParallelOp
         | OProjRowParallelOp
-        | Flashcomm2OProjRowParallelOp
-        | Flashcomm2OshardQKVParallelOp
-        | MatmulAllreduceRowParallelOp
+        | DSV4OProjRowParallelOp
         | SequenceRowParallelOp
-        | ShardedCPRowParallelOp
         | ShardedCPColumnParallelOp
         | None
     ) = None
@@ -718,6 +524,14 @@ def get_parallel_op(disable_tp, prefix, layer, direct):
         custom_op = _get_column_parallel_op(prefix, layer)
 
     if custom_op is not None:
+        logger.debug(
+            "get_parallel_op: prefix=%s, direct=%s -> %s (tp_rank=%d, tp_size=%d)",
+            prefix,
+            direct,
+            type(custom_op).__name__,
+            custom_op.tp_rank,
+            custom_op.tp_size,
+        )
         return custom_op, custom_op.tp_rank, custom_op.tp_size
 
     return None, get_tp_group().rank_in_group, get_tp_group().world_size

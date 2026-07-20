@@ -20,7 +20,7 @@ vLLM Ascend currently supports two types of connectors for handling KV cache man
 - **MooncakeLayerwiseConnector**: P nodes push KV cache to D nodes in a layered manner.  
 
 For step-by-step deployment and configuration, refer to the following guide:  
-[https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html)
+[PD disaggregation multi-node deployment guide](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html)
 
 ---
 
@@ -33,8 +33,8 @@ Under the disaggregated-prefill, a global proxy receives external requests, forw
 ### 2. Implementation Design
 
 Our design diagram is shown below, illustrating the pull and push schemes respectively.
-![alt text](../../assets/disaggregated_prefill_pull.png)
-![alt text](../../assets/disaggregated_prefill_push.png)
+![Disaggregated prefill pull](../../assets/disaggregated_prefill_pull.png)
+![Disaggregated prefill push](../../assets/disaggregated_prefill_push.png)
 
 #### Mooncake Connector
 
@@ -100,6 +100,6 @@ Under non-symmetric PD scenarios, validate the P-to-D tp ratio against expected 
 
 ## Limitations
 
-- Heterogeneous P and D nodes are not supported—for example, running P nodes on A2 and D nodes on A3.
+- Heterogeneous P and D nodes are not supported, for example, running P nodes on A2 and D nodes on A3.
 
 - In non-symmetric TP configurations, only cases where the P nodes have a higher TP degree than the D nodes and the P TP count is an integer multiple of the D TP count are supported (i.e., P_tp > D_tp and P_tp % D_tp = 0).

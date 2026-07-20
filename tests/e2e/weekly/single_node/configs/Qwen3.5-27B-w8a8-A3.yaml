@@ -10,7 +10,7 @@ _envs: &envs
   VLLM_USE_MODELSCOPE: "true"
   SERVER_PORT: "DEFAULT_PORT"
 test_cases:
-  - name: "Qwen3.5-27B-w8a8"
+  - name: "Qwen3.5-27B-w8a8-in3.5k-140-35"
     model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
     envs:
       <<: *envs
@@ -35,7 +35,7 @@ test_cases:
       - "--additional-config"
       - '{"enable_cpu_binding":true}'
       - "--speculative_config"
-      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3,"enforce_eager": true}'
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'
       - "--compilation-config"
       - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--mm-processor-cache-gb"
@@ -50,7 +50,7 @@ test_cases:
         max_out_len: 1500
         batch_size: 35
         request_rate: 0
-        baseline: 895
+        baseline: 610.22
         threshold: 0.97
   - name: "Qwen3.5-27B-w8a8-in16k-56-14"
     model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
@@ -95,7 +95,7 @@ test_cases:
         max_out_len: 1024
         batch_size: 14
         request_rate: 0
-        baseline: 1
+        baseline: 221.22
         threshold: 0.97
   - name: "Qwen3.5-27B-w8a8-in32k-56-14"
     model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
@@ -140,7 +140,7 @@ test_cases:
         max_out_len: 512
         batch_size: 14
         request_rate: 0
-        baseline: 1
+        baseline: 197.00
         threshold: 0.97
   - name: "Qwen3.5-27B-w8a8-in64k-16-4"
     model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
@@ -185,7 +185,7 @@ test_cases:
         max_out_len: 1024
         batch_size: 4
         request_rate: 0
-        baseline: 1
+        baseline: 56.17
         threshold: 0.97
   - name: "Qwen3.5-27B-w8a8-in64k-48-12"
     model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
@@ -230,7 +230,7 @@ test_cases:
         max_out_len: 1024
         batch_size: 12
         request_rate: 0
-        baseline: 1
+        baseline: 195.87
         threshold: 0.97
   - name: "Qwen3.5-27B-w8a8-in128k-28-7"
     model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
@@ -275,7 +275,7 @@ test_cases:
         max_out_len: 1024
         batch_size: 7
         request_rate: 0
-        baseline: 1
+        baseline: 101.12
         threshold: 0.97
   - name: "Qwen3.5-27B-w8a8-in16k-16-4"
     model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
@@ -320,7 +320,7 @@ test_cases:
         max_out_len: 1024
         batch_size: 4
         request_rate: 0
-        baseline: 1
+        baseline: 163.77
         threshold: 0.97
   - name: "Qwen3.5-27B-w8a8-in32k-8-2"
     model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
@@ -365,7 +365,7 @@ test_cases:
         max_out_len: 512
         batch_size: 2
         request_rate: 0
-        baseline: 1
+        baseline: 53.82
         threshold: 0.97
   - name: "Qwen3.5-27B-w8a8-in32k-16-4"
     model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
@@ -410,7 +410,7 @@ test_cases:
         max_out_len: 512
         batch_size: 4
         request_rate: 0
-        baseline: 1
+        baseline: 149.23
         threshold: 0.97
   - name: "Qwen3.5-27B-w8a8-in64k-8-2"
     model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
@@ -455,7 +455,7 @@ test_cases:
         max_out_len: 1024
         batch_size: 2
         request_rate: 0
-        baseline: 1
+        baseline: 48.52
         threshold: 0.97
   - name: "Qwen3.5-27B-w8a8-in64k-8-2-90"
     model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
@@ -500,7 +500,7 @@ test_cases:
         max_out_len: 1024
         batch_size: 2
         request_rate: 0
-        baseline: 1
+        baseline: 87.3
         threshold: 0.97
   - name: "Qwen3.5-27B-w8a8-in128k-4-1"
     model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
@@ -545,5 +545,5 @@ test_cases:
         max_out_len: 1024
         batch_size: 1
         request_rate: 0
-        baseline: 1
+        baseline: 36.44
         threshold: 0.97

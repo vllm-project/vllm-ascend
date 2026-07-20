@@ -27,6 +27,11 @@ on:
         required: false
         default: 'main'
         type: string
+      force:
+        description: 'Force full regeneration of ALL .po files (discard existing translations)'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: translation-${{ github.ref }}
@@ -38,15 +43,12 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     permissions:
       contents: read
-    env:
-      UPSTREAM_REPO: vllm-project/vllm-ascend
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
-          repository: vllm-ascend-ci/vllm-ascend
           token: ${{ secrets.PAT_TOKEN }}
-          ref: main
+          ref: ${{ inputs.target_branch || 'main' }}
 
       - name: Setup git and branch
         run: |
@@ -55,16 +57,10 @@ jobs:
           BRANCH_NAME="auto-pr/doc-translate-$(date +%Y%m%d%H%M%S)"
           echo "BRANCH_NAME=${BRANCH_NAME}" >> $GITHUB_ENV
 
-          git remote add upstream "https://github.com/${{ env.UPSTREAM_REPO }}.git"
-          git fetch upstream
           git config user.name "${{ github.actor }}"
           git config user.email "${{ github.actor }}@users.noreply.github.com"
-          git checkout -B "${BRANCH_NAME}" "upstream/${TARGET_BRANCH}"
-
-          # Use latest translation script from upstream/main
-          git checkout upstream/main -- .github/workflows/scripts/po_translate.py
-          git checkout upstream/main -- docs/requirements-docs.txt
-          git restore --staged .github/workflows/scripts/po_translate.py docs/requirements-docs.txt
+          git checkout -B "${BRANCH_NAME}"
+          git remote add fork "https://github.com/vllm-ascend-ci/vllm-ascend.git"
 
       - name: Setup Python
         uses: actions/setup-python@v6
@@ -74,40 +70,55 @@ jobs:
       - name: Build docs and generate PO files
         working-directory: ./docs
         run: |
-          sudo apt-get update && sudo apt-get install -y make
           pip install -r requirements-docs.txt
-          make clean && make html
-          sphinx-build -b gettext source _build/gettext
-          sphinx-intl update -p _build/gettext -l zh_CN
+          cd ..
+          FORCE_FLAG=""
+          if [ "${{ inputs.force }}" = "true" ]; then FORCE_FLAG="--force"; fi
+          python .github/workflows/scripts/detect_po_changes.py --output-json /tmp/po_changes.json $FORCE_FLAG
 
       - name: Detect PO files to translate
         id: detect
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          tracked=$(git diff --name-only --diff-filter=ACMUX || true)
-          untracked=$(git ls-files --others --exclude-standard || true)
-          po_files=$(printf "%s\n%s" "$tracked" "$untracked" | grep '\.po$' | tr '\n' ',' | sed 's/,$//' || true)
+          [ ! -f /tmp/po_changes.json ] && echo "No changes detected" && exit 0
 
-          if [ -z "$po_files" ]; then
-            echo "No PO files to translate"
-            echo "has_changes=false" >> $GITHUB_OUTPUT
+          has_changes=$(python3 -c "import json; print(json.load(open('/tmp/po_changes.json')).get('has_changes', False))")
+          echo "has_changes=$has_changes" >> $GITHUB_OUTPUT
+
+          if [ "$has_changes" = "True" ]; then
+            files=$(python3 -c "
+          import json
+          with open('/tmp/po_changes.json') as f:
+              data = json.load(f)
+          print(','.join(data.get('files', [])))
+          ")
+            echo "files=$files" >> $GITHUB_OUTPUT
+            echo "PO files: $files"
           else
-            echo "PO files: $po_files"
-            echo "has_changes=true" >> $GITHUB_OUTPUT
-            echo "files=$po_files" >> $GITHUB_OUTPUT
+            echo "No PO files to translate"
           fi
 
       - name: Translate PO files
         if: steps.detect.outputs.has_changes == 'true'
+        id: translate
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
           python .github/workflows/scripts/po_translate.py \
             --files "${{ steps.detect.outputs.files }}" \
-            --output-json /tmp/translation_results.json
+            --output-json /tmp/translation_results.json \
+            --ignore-validation-error
+
+      - name: Validate translation coverage
+        if: steps.translate.outcome == 'success'
+        id: validate
+        run: |
+          python .github/workflows/scripts/po_translate.py \
+            --files "${{ steps.detect.outputs.files }}" \
+            --validate-only \
+            --ignore-validation-error
 
       - name: Process translated files
-        if: steps.detect.outputs.has_changes == 'true'
+        if: steps.translate.outcome == 'success'
         id: results
         run: |
           [ ! -f /tmp/translation_results.json ] && echo "No results" && exit 1
@@ -141,17 +152,17 @@ jobs:
           } >> $GITHUB_OUTPUT
 
       - name: Commit and push
-        if: steps.detect.outputs.has_changes == 'true'
+        if: steps.translate.outcome == 'success'
         env:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           git diff --cached --quiet && echo "Nothing to commit" && exit 1
           count=$(git diff --cached --name-only | wc -l)
           git commit -s -m "[Doc] Auto-translate ${count} file(s)"
-          git push -f origin "${{ env.BRANCH_NAME }}"
+          git push -f fork "${{ env.BRANCH_NAME }}"
 
       - name: Create PR in upstream
-        if: steps.detect.outputs.has_changes == 'true'
+        if: steps.translate.outcome == 'success'
         uses: actions/github-script@v9
         env:
           FILE_LIST: ${{ steps.results.outputs.file_list }}

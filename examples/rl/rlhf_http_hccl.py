@@ -13,7 +13,7 @@ assumes you have already started a vLLM server using `vllm serve`. It uses:
 Prerequisites:
     Start a vLLM server with weight transfer enabled:
 
-    $ VLLM_SERVER_DEV_MODE=1 vllm serve qwen/qwen3-0.6b \
+    $ VLLM_SERVER_DEV_MODE=1 vllm serve Qwen/Qwen3-0.6b \
         --enforce-eager \
         --weight-transfer-config '{"backend": "nccl"}' \
         --load-format dummy
@@ -45,7 +45,7 @@ from vllm_ascend.distributed.weight_transfer.hccl_engine import (
 )
 
 BASE_URL = "http://localhost:8000"
-MODEL_NAME = "qwen/qwen3-0.6b"
+MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
 def generate_completions(client: OpenAI, model: str, prompts: list[str]) -> list[str]:

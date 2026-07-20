@@ -20,7 +20,7 @@ from vllm.assets.image import ImageAsset
 
 from tests.e2e.conftest import VllmRunner, qwen_prompt, wait_until_npu_memory_free
 
-MODEL = "Qwen/Qwen3.6-27B/"
+MODEL = "Qwen/Qwen3.6-27B"
 
 
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
@@ -89,7 +89,7 @@ def test_qwen3_6_27b_multimodel_fia_acl_graph():
             "fps": 1,
         },
         compilation_config={
-            "cudagraph_mm_encoder": False,
+            "cudagraph_mm_encoder": True,
             "cudagraph_capture_sizes": [1],
             "encoder_cudagraph_token_budgets": [128, 256, 512, 1024, 1536, 2048, 2560, 3072, 3584, 4096],
         },

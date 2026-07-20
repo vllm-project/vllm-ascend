@@ -3,10 +3,12 @@ import torch
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.block_table import _compute_slot_mapping_kernel
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
+
+from vllm_ascend.utils import vllm_version_is
 
 
 class BlockTable:
@@ -32,9 +34,11 @@ class BlockTable:
         if (
             kv_cache_group is not None
             and hasattr(kv_cache_group, "kv_cache_spec")
-            and hasattr(kv_cache_group.kv_cache_spec, "compress_ratio")
+            and isinstance(kv_cache_group.kv_cache_spec, UniformTypeKVCacheSpecs)
         ):
-            compress_ratio = kv_cache_group.kv_cache_spec.compress_ratio
+            kv_cache_spec = next(iter(kv_cache_group.kv_cache_spec.kv_cache_specs.values()), None)
+            if kv_cache_spec is not None and hasattr(kv_cache_spec, "compress_ratio"):
+                compress_ratio = kv_cache_spec.compress_ratio
         if (
             kv_cache_group is not None
             and hasattr(kv_cache_group, "kv_cache_spec")
@@ -152,9 +156,25 @@ class BlockTable:
             req_indices = torch.repeat_interleave(
                 torch.arange(num_reqs, dtype=torch.int32, device=query_start_loc.device),
                 query_start_loc[1:] - query_start_loc[:-1],
+                output_size=num_tokens,
             )
             self._compute_pcp_dcp_slot_mapping(req_indices, positions)
         else:
+            kernel_kwargs = {
+                "TOTAL_CP_WORLD_SIZE": total_cp_world_size,
+                "TOTAL_CP_RANK": total_cp_rank,
+                "CP_KV_CACHE_INTERLEAVE_SIZE": self.cp_kv_cache_interleave_size,
+                "PAD_ID": PAD_SLOT_ID,
+                "BLOCK_SIZE": 1024,
+            }
+            if not vllm_version_is("0.24.0"):
+                # vLLM #40996 split physical KV blocks into kernel blocks in
+                # the slot-mapping kernel. These are required constexprs on
+                # main; the v0.24.0 kernel does not accept them.
+                kernel_kwargs.update(
+                    KV_CACHE_BLOCK_SIZE=self.physical_block_size,
+                    BLOCKS_PER_KV_BLOCK=self.blocks_per_phys_block,
+                )
             _compute_slot_mapping_kernel[(num_reqs + 1,)](
                 num_tokens,
                 self.max_num_batched_tokens,
@@ -164,14 +184,14 @@ class BlockTable:
                 self.block_table.gpu.stride(0),
                 self.block_size,
                 self.slot_mapping.gpu,
-                TOTAL_CP_WORLD_SIZE=total_cp_world_size,
-                TOTAL_CP_RANK=total_cp_rank,
-                CP_KV_CACHE_INTERLEAVE_SIZE=self.cp_kv_cache_interleave_size,
-                PAD_ID=PAD_SLOT_ID,
-                BLOCK_SIZE=1024,
+                **kernel_kwargs,
             )
 
-    def compute_slot_mapping_draft(self, req_indices: np.ndarray, positions: np.ndarray) -> None:
+    def compute_slot_mapping_draft(
+        self,
+        req_indices: np.ndarray | torch.Tensor,
+        positions: np.ndarray | torch.Tensor,
+    ) -> None:
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
         # where K is the max_num_blocks_per_req and the block size is 2.
@@ -180,8 +200,20 @@ class BlockTable:
         # block_size.
 
         if self.dcp_world_size * self.pcp_world_size > 1:
-            self._compute_pcp_dcp_slot_mapping(torch.from_numpy(req_indices), torch.from_numpy(positions))
+            if not isinstance(req_indices, torch.Tensor):
+                req_indices = torch.from_numpy(req_indices)
+            if not isinstance(positions, torch.Tensor):
+                positions = torch.from_numpy(positions)
+            self._compute_pcp_dcp_slot_mapping(req_indices, positions)
         else:
+            if isinstance(req_indices, torch.Tensor):
+                if req_indices.device.type != "cpu":
+                    raise ValueError("Device tensor inputs are only supported for CP draft slot mapping.")
+                req_indices = req_indices.numpy()
+            if isinstance(positions, torch.Tensor):
+                if positions.device.type != "cpu":
+                    raise ValueError("Device tensor inputs are only supported for CP draft slot mapping.")
+                positions = positions.numpy()
             assert self.kernel_sizes is not None
             assert self.block_size == self.kernel_sizes[0]
             # IMPORTANT: In hybrid mode, positions are in logical block space,
@@ -196,9 +228,13 @@ class BlockTable:
                 req_indices * self.max_num_blocks_per_req * self.blocks_per_phys_block + logical_block_idx
             )
 
-            block_numbers = self.block_table.np.ravel()[block_table_indices]
             block_offsets = positions % self.block_size
-            np.add(block_numbers * self.block_size, block_offsets, out=self.slot_mapping.np[: req_indices.shape[0]])
+            block_numbers = self.block_table.np.ravel()[block_table_indices]
+            np.add(
+                block_numbers * self.block_size,
+                block_offsets,
+                out=self.slot_mapping.np[: req_indices.shape[0]],
+            )
             self.slot_mapping.copy_to_gpu(req_indices.shape[0])
 
     def _compute_pcp_dcp_slot_mapping(
@@ -272,8 +308,10 @@ class BlockTable:
 
         return np.array(logical_blocks, dtype=np.int32)
 
-    def get_device_tensor(self) -> torch.Tensor:
+    def get_device_tensor(self, num_reqs: int | None = None) -> torch.Tensor:
         """Returns the device tensor of the block table."""
+        if num_reqs is not None:
+            return self.block_table.gpu[:num_reqs]
         return self.block_table.gpu
 
     def get_cpu_tensor(self) -> torch.Tensor:
@@ -403,8 +441,8 @@ class MultiGroupBlockTable:
 
     def compute_slot_mapping_draft(
         self,
-        req_indices: np.ndarray,
-        positions: np.ndarray,
+        req_indices: np.ndarray | torch.Tensor,
+        positions: np.ndarray | torch.Tensor,
         positions_compressed_list: list[np.ndarray] | None = None,
         req_indices_compressed_list: list[np.ndarray] | None = None,
     ) -> None:

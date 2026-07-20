@@ -42,7 +42,7 @@ jobs:
     name: Build nightly-${{ inputs.target }} image
     runs-on: ubuntu-22.04-arm
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ inputs.vllm_ascend_branch }}
@@ -68,7 +68,7 @@ jobs:
             --network host \
             --platform linux/arm64 \
             -f .github/workflows/dockerfiles/Dockerfile.nightly.${{ inputs.target }} \
-            --build-arg CANN_VERSION="9.0.0" \
+            --build-arg CANN_VERSION="9.0.1" \
             --build-arg UBUNTU_VERSION="22.04" \
             --build-arg PYTHON_VERSION="3.12" \
             --build-arg VLLM_ASCEND_BRANCH="${BRANCH_TAG}" \

@@ -8,12 +8,11 @@ This document guides you to conduct accuracy testing using [AISBench](https://gi
 
 You can run docker container to start the vLLM server on a single NPU:
 
-```{code-block} bash
-   :substitutions:
+```bash
 # Update DEVICE according to your device (/dev/davinci[0-7])
 export DEVICE=/dev/davinci7
 # Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 docker run --rm \
 --name vllm-ascend \
 --shm-size=1g \
@@ -36,14 +35,13 @@ docker run --rm \
 
 Run the vLLM server in the docker.
 
-```{code-block} bash
-   :substitutions:
+```bash
 vllm serve Qwen/Qwen2.5-0.5B-Instruct --max-model-len 35000 &
 ```
 
-:::{note}
-`--max-model-len` should be greater than `35000`, this will be suitable for most datasets. Otherwise the accuracy evaluation may be affected.
-:::
+!!! note
+
+    `--max-model-len` should be greater than `35000`, this will be suitable for most datasets. Otherwise the accuracy evaluation may be affected.
 
 The vLLM server is started successfully, if you see logs as below:
 
@@ -152,7 +150,7 @@ You can choose one or multiple datasets to execute accuracy evaluation.
 
 #### Configuration
 
-Update the file `benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py`.
+Update the file `ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py`.
 There are several arguments that you should update according to your environment.
 
 - `attr`: Identifier for the inference backend type, fixed as `service` (serving-based inference) or `local` (local model).
@@ -219,6 +217,9 @@ ais_bench --models vllm_api_general_chat --datasets livecodebench_code_generate_
 # run AIME 2024 dataset
 ais_bench --models vllm_api_general_chat --datasets aime2024_gen_0_shot_chat_prompt.py --mode all --dump-eval-details --merge-ds
 
+# run GSM8K dataset
+ais_bench --models vllm_api_general_chat --datasets gsm8k_gen_0_shot_cot_chat_prompt.py --mode all --dump-eval-details --merge-ds
+
 ```
 
 After each dataset execution, you can get the result from saved files such as `outputs/default/20250628_151326`, there is an example as follows:
@@ -268,6 +269,9 @@ ais_bench --models vllm_api_general_chat --datasets livecodebench_code_generate_
 
 # run AIME 2024 dataset
 ais_bench --models vllm_api_general_chat --datasets aime2024_gen_0_shot_chat_prompt.py --summarizer default_perf --mode perf
+
+# run GSM8K dataset
+ais_bench --models vllm_api_general_chat --datasets gsm8k_gen_0_shot_cot_str_perf.py --summarizer default_perf --mode perf
 ```
 
 Multi-modal benchmarks (text + images):

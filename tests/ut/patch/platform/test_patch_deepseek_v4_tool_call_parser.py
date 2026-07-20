@@ -3,8 +3,18 @@
 import json
 from unittest.mock import MagicMock
 
+import pytest
+
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.24.0"):
+    pytest.skip(
+        "DeepSeekV4ToolParser compatibility patch only applies to vLLM 0.24.0",
+        allow_module_level=True,
+    )
+
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
+from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser  # type: ignore[import-not-found]
 
 from vllm_ascend.patch.platform import patch_deepseek_v4_tool_call_parser
 

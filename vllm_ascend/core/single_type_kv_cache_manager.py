@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -18,16 +19,18 @@ from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     KVCacheSpec,
-    MLAAttentionSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
 
 from vllm_ascend.utils import vllm_version_is
 
+if TYPE_CHECKING:
+    from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+
 
 class CompressAttentionManager(FullAttentionManager):
-    def __init__(self, kv_cache_spec: MLAAttentionSpec, block_pool: BlockPool, **kwargs) -> None:
+    def __init__(self, kv_cache_spec: "AscendMLAAttentionSpec", block_pool: BlockPool, **kwargs) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
         self.compress_ratio = kv_cache_spec.compress_ratio
         self._null_block = block_pool.null_block
@@ -201,11 +204,9 @@ class CompressAttentionManager(FullAttentionManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-        use_eagle: bool = False,
         drop_eagle_block: bool = False,
     ) -> tuple[list[KVCacheBlock], ...]:
-        # vLLM B renamed ``use_eagle`` to ``drop_eagle_block``; accept both.
-        eagle_drop = use_eagle if vllm_version_is("0.22.1") else drop_eagle_block
+        eagle_drop = drop_eagle_block
         # assert isinstance(
         #     kv_cache_spec, Compress4AttentionSpec | Compress128AttentionSpec | C4IndexerSpec
         # ), (
@@ -243,8 +244,9 @@ class CompressAttentionManager(FullAttentionManager):
 
 def get_manager_for_kv_cache_spec(
     kv_cache_spec: KVCacheSpec,
-    max_num_batched_tokens: int | None = None,
+    max_in_flight_tokens: int | None = None,
     max_model_len: int | None = None,
+    max_num_batched_tokens: int | None = None,
     **kwargs,
 ) -> SingleTypeKVCacheManager:
     """Build the per-spec KV cache manager.
@@ -264,16 +266,13 @@ def get_manager_for_kv_cache_spec(
     this value matches the pool sizer and makes admission consistent with the
     block budget actually held.
     """
-    if vllm_version_is("0.22.1"):
-        from vllm.v1.core.single_type_kv_cache_manager import spec_manager_map  # type: ignore[import-not-found]
+    from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry  # type: ignore[import-not-found]
 
-        manager_class = spec_manager_map[type(kv_cache_spec)]
-    else:
-        from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry  # type: ignore[import-not-found]
+    from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
-        manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec)
-        assert manager_class is not None, f"No KV cache manager registered for {type(kv_cache_spec).__name__}"
-    if isinstance(kv_cache_spec, MLAAttentionSpec) and kv_cache_spec.compress_ratio > 1:
+    manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec)
+    assert manager_class is not None, f"No KV cache manager registered for {type(kv_cache_spec).__name__}"
+    if isinstance(kv_cache_spec, AscendMLAAttentionSpec) and kv_cache_spec.compress_ratio > 1:
         manager_class = CompressAttentionManager
         if max_model_len is not None:
             # Compressed-MLA peak in blocks: ceil(max_model_len/compress/block).
@@ -289,10 +288,17 @@ def get_manager_for_kv_cache_spec(
         # and ``full_sequence_must_fit`` admission reserves the full
         # ``max_model_len`` worth of blocks per request, exhausting the pool
         # at cc>=2 on DSv4 (see vLLM issue #40863).
-        if max_num_batched_tokens is not None and max_model_len is not None:
-            kwargs["max_admission_blocks_per_request"] = kv_cache_spec.max_admission_blocks_per_request(
-                max_num_batched_tokens=max_num_batched_tokens,
-                max_model_len=max_model_len,
-            )
+        token_budget = max_num_batched_tokens if vllm_version_is("0.24.0") else max_in_flight_tokens
+        if token_budget is not None and max_model_len is not None:
+            if vllm_version_is("0.24.0"):
+                kwargs["max_admission_blocks_per_request"] = kv_cache_spec.max_admission_blocks_per_request(
+                    max_num_batched_tokens=token_budget,
+                    max_model_len=max_model_len,
+                )
+            else:
+                kwargs["max_admission_blocks_per_request"] = kv_cache_spec.max_admission_blocks_per_request(
+                    max_in_flight_tokens=token_budget,
+                    max_model_len=max_model_len,
+                )
     manager = manager_class(kv_cache_spec, **kwargs)
     return manager

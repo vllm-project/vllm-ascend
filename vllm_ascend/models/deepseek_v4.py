@@ -43,8 +43,8 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
-from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
+from vllm.model_executor.layers.fused_moe import FusedMoE, fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -70,9 +70,10 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache as VllmDeepseekV4SWACache
-from vllm.v1.kv_cache_interface import KVCacheSpec, SlidingWindowMLASpec
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
@@ -117,7 +118,7 @@ class AscendCompressorStateCache(CompressorStateCache):
         pads = _dsv4_block_sizes()[vllm_config.cache_config.block_size][1]
         page_size_padded = pads[0] if self.state_dim == 2 * 256 and self.compress_ratio == 4 else pads[1]
 
-        return SlidingWindowMLASpec(
+        return AscendSlidingWindowMLASpec(
             block_size=self.block_size,
             num_kv_heads=1,
             head_size=self.state_dim,
@@ -149,9 +150,9 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
             self.dtype = torch.float8_e4m3fn
             vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
 
-        from vllm.v1.kv_cache_interface import MLAAttentionSpec
+        from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
-        return MLAAttentionSpec(
+        return AscendMLAAttentionSpec(
             block_size=_dsv4_block_sizes()[vllm_config.cache_config.block_size][0][0],
             num_kv_heads=1,
             head_size=self.head_dim,
@@ -188,7 +189,7 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
             self.dtype = torch.float8_e4m3fn
             vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
         cached_head_size = self.head_dim + 128 if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_dim
-        return SlidingWindowMLASpec(
+        return AscendSlidingWindowMLASpec(
             block_size=self.block_size,
             num_kv_heads=1,
             head_size=cached_head_size,
@@ -332,7 +333,10 @@ class DeepseekV2MLP(nn.Module):
         )
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. Only silu is supported for now.")
-        self.act_fn = SiluAndMul()
+        if swiglu_limit is not None:
+            self.act_fn = SiluAndMulWithClamp(swiglu_limit)
+        else:
+            self.act_fn = SiluAndMul()
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
@@ -960,7 +964,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
 
     def hc_pre(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
-        y = torch.ops._C_ascend.npu_hc_pre(
+        y = torch.ops._C_ascend.npu_hc_pre_v2(
             x, hc_fn, hc_scale, hc_base, self.hc_mult, self.hc_sinkhorn_iters, self.norm_eps, self.hc_eps
         )
         return y
@@ -1272,7 +1276,7 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        return FusedMoE.make_expert_params_mapping(
+        return fused_moe_make_expert_params_mapping(
             self.model,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
@@ -1298,7 +1302,7 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
+        expert_params_mapping = fused_moe_make_expert_params_mapping(
             self.model,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",

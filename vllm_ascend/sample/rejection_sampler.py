@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 from dataclasses import replace
 
 import torch
@@ -7,7 +8,9 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.outputs import SamplerOutput
+from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.ops.bad_words import apply_bad_words_with_drafts
 from vllm.v1.sample.rejection_sampler import (
     GREEDY_TEMPERATURE,
     MAX_SPEC_LEN,
@@ -95,6 +98,52 @@ class AscendRejectionSampler(RejectionSampler):
             get_ascend_config().enable_reduce_sample,
         )
 
+    def apply_logits_processors(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        metadata: SpecDecodeMetadata,
+    ) -> torch.Tensor:
+        has_penalties = not sampling_metadata.no_penalties
+        any_penalties_or_bad_words = sampling_metadata.bad_words_token_ids or has_penalties
+
+        output_token_ids = sampling_metadata.output_token_ids
+        if any_penalties_or_bad_words:
+            output_token_ids = self._combine_outputs_with_spec_tokens(
+                output_token_ids,
+                sampling_metadata.spec_token_ids,
+            )
+
+        # Calculate indices of target logits.
+        if sampling_metadata.allowed_token_ids_mask is not None or has_penalties:
+            num_requests = len(metadata.num_draft_tokens)
+            # TODO: The apply_logits_processors function originally reused the base class from the
+            # upper-level vLLM module. However, the current vLLM implementation introduces synchronous
+            # host-to-device (H2D) copy operations. This function will be removed once PR
+            # https://github.com/vllm-project/vllm/pull/46323 is merged into the upstream vLLM repository.
+            original_indices = torch.arange(num_requests, device=logits.device, dtype=torch.long)
+            repeat_indices = expand_batch_to_tokens(
+                original_indices,
+                metadata.cu_num_draft_tokens,
+                logits.shape[0],
+            )
+            logits = self.apply_penalties(logits, sampling_metadata, metadata, repeat_indices, output_token_ids)
+
+            # Apply allowed token ids.
+            if sampling_metadata.allowed_token_ids_mask is not None:
+                token_mask = sampling_metadata.allowed_token_ids_mask[repeat_indices]
+                logits.masked_fill_(token_mask, float("-inf"))
+
+        # Apply bad words exclusion.
+        if bad_words_token_ids := sampling_metadata.bad_words_token_ids:
+            apply_bad_words_with_drafts(logits, bad_words_token_ids, output_token_ids, metadata.num_draft_tokens)
+
+        for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
+            if isinstance(processor, MinTokensLogitsProcessor):
+                logits = processor.apply_with_spec_decode(logits, metadata.num_draft_tokens)
+
+        return logits
+
     def forward(
         self,
         metadata: SpecDecodeMetadata,
@@ -126,7 +175,13 @@ class AscendRejectionSampler(RejectionSampler):
                 Contains the final output token IDs and their logprobs if
                 requested.
         """
-        assert metadata.max_spec_len <= MAX_SPEC_LEN
+        assert metadata.max_spec_len <= MAX_SPEC_LEN, (
+            f"rejection_sampler.forward: max_spec_len={metadata.max_spec_len} "
+            f"exceeds MAX_SPEC_LEN={MAX_SPEC_LEN}; rejection sampling cannot "
+            "proceed."
+        )
+
+        self._log_rejection_sampler_entry(logits, metadata)
         bonus_logits_indices = metadata.bonus_logits_indices
         target_logits_indices = metadata.target_logits_indices
 
@@ -181,6 +236,8 @@ class AscendRejectionSampler(RejectionSampler):
             ori_target_logits=raw_target_logits,
         )
 
+        self._log_rejection_sampler_exit(output_token_ids, metadata)
+
         logprobs_tensors = None
         if sampling_metadata.max_num_logprobs is not None:
             logprobs_tensors = self._get_logprobs_tensors(
@@ -195,6 +252,71 @@ class AscendRejectionSampler(RejectionSampler):
         return SamplerOutput(
             sampled_token_ids=output_token_ids,
             logprobs_tensors=logprobs_tensors,
+        )
+
+    def _log_rejection_sampler_entry(
+        self,
+        logits: torch.Tensor,
+        metadata: SpecDecodeMetadata,
+    ) -> None:
+        """DFX entry probe for rejection sampling.
+
+        Captures the shape/dtype baseline at the rejection-sampling boundary
+        so that mismatches between the target-model output and the spec decode
+        metadata can be diagnosed without re-running the workload. All payload
+        fields are host scalars / tuple shapes -- no device sync. Gated by
+        isEnabledFor(DEBUG) so production builds pay only one integer compare.
+        """
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        logger.debug(
+            "[spec/dfx] rejection_sampler entry: "
+            "logits.shape=%s, logits.dtype=%s, max_spec_len=%d, "
+            "num_total_drafts=%d, num_reqs=%d, "
+            "logprobs_mode=%s(processed=%s), top_k=%s",
+            tuple(logits.shape),
+            logits.dtype,
+            metadata.max_spec_len,
+            int(metadata.num_draft_tokens.sum().item())
+            if torch.is_tensor(metadata.num_draft_tokens)
+            else sum(metadata.num_draft_tokens),
+            metadata.cu_num_draft_tokens.shape[0],
+            self.sampler.logprobs_mode,
+            self.is_processed_logprobs_mode,
+            self.top_k,
+        )
+
+    def _log_rejection_sampler_exit(
+        self,
+        output_token_ids: torch.Tensor,
+        metadata: SpecDecodeMetadata,
+    ) -> None:
+        """DFX exit probe (acceptance signal) for rejection sampling.
+
+        Reports placeholder fill rate and an approximate acceptance ratio so
+        operators can tell at a glance whether the draft/target pairing is
+        healthy. The .ne()/.sum() calls force a host sync and only run when
+        DEBUG is on; production paths return early.
+        """
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        valid_mask = output_token_ids.ne(PLACEHOLDER_TOKEN_ID)
+        num_accepted = int(valid_mask.sum().item())
+        num_slots = int(output_token_ids.numel())
+        num_total_drafts = (
+            int(metadata.num_draft_tokens.sum().item())
+            if torch.is_tensor(metadata.num_draft_tokens)
+            else sum(metadata.num_draft_tokens)
+        )
+        logger.debug(
+            "[spec/dfx] rejection_sampler done: "
+            "accepted=%d/%d (slot_fill=%.1f%%), drafted=%d, "
+            "approx_accept_rate=%.1f%%",
+            num_accepted,
+            num_slots,
+            100.0 * num_accepted / max(num_slots, 1),
+            num_total_drafts,
+            100.0 * num_accepted / max(num_total_drafts + output_token_ids.shape[0], 1),
         )
 
 
@@ -346,7 +468,14 @@ def rejection_sample(
     assert draft_probs is None or draft_probs.is_contiguous()
     assert target_logits.is_contiguous()
     assert bonus_token_ids.is_contiguous()
-    assert target_logits.shape[0] == num_tokens
+    assert target_logits.shape[0] == num_tokens, (
+        "rejection_sample: target/draft row mismatch - "
+        f"target_logits.shape[0]={target_logits.shape[0]} != "
+        f"num_tokens(draft_token_ids)={num_tokens} "
+        f"(batch_size={batch_size}, max_spec_len={max_spec_len}). "
+        "Target output does not align with draft tokens; spec decode "
+        "results will be incorrect."
+    )
 
     # Block verify requires enable_block_verify config and max_spec_len >= 3.
     using_block_verify = max_spec_len >= 3 and bool(get_ascend_config().rejection_sampler_config.enable_block_verify)
@@ -445,6 +574,10 @@ def rejection_sample(
     # For random sampling with selected logits
     # target_logits is [num_tokens, top_k*tp_size] with indices [num_tokens, top_k*tp_size]
     if target_indices is not None:
+        if draft_probs is None:
+            logger.warning(
+                "[spec/dfx] rejection_sample: draft_probs is None in random sampling path; acceptance may be degraded.",
+            )
         # Enable reduce_sampling: logits are [num_tokens, top_k*tp_size]
         # We need to handle rejection sampling with selected vocab
         selected_vocab_size = target_logits.shape[-1]

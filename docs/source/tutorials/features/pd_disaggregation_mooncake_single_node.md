@@ -59,10 +59,9 @@ Using the Qwen2.5-VL-7B-Instruct model as an example, use vLLM-Ascend {{vllm_asc
 
 Start a Docker container.
 
-```{code-block} bash
-   :substitutions:
+```bash
 # Update the vllm-ascend image
-export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
@@ -145,91 +144,83 @@ export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LI
 
 We can run the following scripts to launch a server on the prefiller/decoder NPU, respectively.
 
-:::::{tab-set}
+=== "Prefiller"
 
-::::{tab-item} Prefiller
+    ```shell
+    export ASCEND_RT_VISIBLE_DEVICES=0
+    export HCCL_IF_IP=192.0.0.1  # node ip
+    export GLOO_SOCKET_IFNAME="eth0"  # network card name
+    export TP_SOCKET_IFNAME="eth0"
+    export HCCL_SOCKET_IFNAME="eth0"
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
 
-```shell
-export ASCEND_RT_VISIBLE_DEVICES=0
-export HCCL_IF_IP=192.0.0.1  # node ip
-export GLOO_SOCKET_IFNAME="eth0"  # network card name
-export TP_SOCKET_IFNAME="eth0"
-export HCCL_SOCKET_IFNAME="eth0"
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
+    vllm serve /model/Qwen2.5-VL-7B-Instruct  \
+      --host 0.0.0.0 \
+      --port 13700 \
+      --no-enable-prefix-caching \
+      --tensor-parallel-size 1 \
+      --seed 1024 \
+      --served-model-name qwen25vl \
+      --max-model-len 40000  \
+      --max-num-batched-tokens 40000  \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.9  \
+      --kv-transfer-config \
+      '{"kv_connector": "MooncakeConnectorV1",
+      "kv_role": "kv_producer",
+      "kv_port": "30000",
+      "kv_connector_extra_config": {
+                "prefill": {
+                        "dp_size": 1,
+                        "tp_size": 1
+                 },
+                 "decode": {
+                        "dp_size": 1,
+                        "tp_size": 1
+                 }
+          }
+      }'
+    ```
 
-vllm serve /model/Qwen2.5-VL-7B-Instruct  \
-  --host 0.0.0.0 \
-  --port 13700 \
-  --no-enable-prefix-caching \
-  --tensor-parallel-size 1 \
-  --seed 1024 \
-  --served-model-name qwen25vl \
-  --max-model-len 40000  \
-  --max-num-batched-tokens 40000  \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.9  \
-  --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnectorV1",
-  "kv_role": "kv_producer",
-  "kv_port": "30000",
-  "kv_connector_extra_config": {
-            "prefill": {
-                    "dp_size": 1,
-                    "tp_size": 1
-             },
-             "decode": {
-                    "dp_size": 1,
-                    "tp_size": 1
-             }
-      }
-  }'
-```
+=== "Decoder"
 
-::::
+    ```shell
+    export ASCEND_RT_VISIBLE_DEVICES=1
+    export HCCL_IF_IP=192.0.0.1  # node ip
+    export GLOO_SOCKET_IFNAME="eth0"  # network card name
+    export TP_SOCKET_IFNAME="eth0"
+    export HCCL_SOCKET_IFNAME="eth0"
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
 
-::::{tab-item} Decoder
-
-```shell
-export ASCEND_RT_VISIBLE_DEVICES=1
-export HCCL_IF_IP=192.0.0.1  # node ip
-export GLOO_SOCKET_IFNAME="eth0"  # network card name
-export TP_SOCKET_IFNAME="eth0"
-export HCCL_SOCKET_IFNAME="eth0"
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-
-vllm serve /model/Qwen2.5-VL-7B-Instruct  \
-  --host 0.0.0.0 \
-  --port 13701 \
-  --no-enable-prefix-caching \
-  --tensor-parallel-size 1 \
-  --seed 1024 \
-  --served-model-name qwen25vl \
-  --max-model-len 40000  \
-  --max-num-batched-tokens 40000  \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.9  \
-  --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnectorV1",
-  "kv_role": "kv_consumer",
-  "kv_port": "30100",
-  "kv_connector_extra_config": {
-            "prefill": {
-                    "dp_size": 1,
-                    "tp_size": 1
-             },
-             "decode": {
-                    "dp_size": 1,
-                    "tp_size": 1
-             }
-      }
-  }'
-```
-
-::::
-
-:::::
+    vllm serve /model/Qwen2.5-VL-7B-Instruct  \
+      --host 0.0.0.0 \
+      --port 13701 \
+      --no-enable-prefix-caching \
+      --tensor-parallel-size 1 \
+      --seed 1024 \
+      --served-model-name qwen25vl \
+      --max-model-len 40000  \
+      --max-num-batched-tokens 40000  \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.9  \
+      --kv-transfer-config \
+      '{"kv_connector": "MooncakeConnectorV1",
+      "kv_role": "kv_consumer",
+      "kv_port": "30100",
+      "kv_connector_extra_config": {
+                "prefill": {
+                        "dp_size": 1,
+                        "tp_size": 1
+                 },
+                 "decode": {
+                        "dp_size": 1,
+                        "tp_size": 1
+                 }
+          }
+      }'
+    ```
 
 If you want to run "2P1D", please set ASCEND_RT_VISIBLE_DEVICES and port to different values for each P process.
 

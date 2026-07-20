@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   cancel:
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-2-hk
     steps:
       - uses: actions/github-script@v9
         with:

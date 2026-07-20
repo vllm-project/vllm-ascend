@@ -10,9 +10,10 @@ from vllm.distributed import (
 )
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionCGSupport
-from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
@@ -39,7 +40,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     _npu_attention_update,
     _process_attn_out_lse,
 )
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, notify_kv_cache_written
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
     get_draft_graph_prefill_params,
@@ -61,7 +62,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
 
     def __init__(
         self,
-        kv_cache_spec: MLAAttentionSpec,
+        kv_cache_spec: AscendMLAAttentionSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
@@ -450,13 +451,10 @@ class AscendMlaCPImpl(AscendMLAImpl):
         kv_c_normed, k_pe = prefill_k_c_normed, prefill_k_pe
         prefill_k_c_normed = prefill_k_c_normed.squeeze(1)
         slot_mapping = attn_metadata.slot_mapping[self.pcp_size * num_decode_tokens :]
-        if self.is_kv_producer:
-            attn_metadata.reshape_cache_event = torch.npu.Event()
         DeviceOperator.reshape_and_cache(
             key=kv_c_normed, value=k_pe, key_cache=kv_cache[0], value_cache=kv_cache[1], slot_mapping=slot_mapping
         )
-        if self.is_kv_producer:
-            attn_metadata.reshape_cache_event.record()
+        notify_kv_cache_written(self.layer_name or "")
         pcp_metadata = attn_metadata.prefill.pcp_metadata
         assert pcp_metadata is not None
         tail_k_c_normed = torch.index_select(prefill_k_c_normed, 0, pcp_metadata.kv_tail_proj_idx)
@@ -590,10 +588,10 @@ class AscendMlaCPImpl(AscendMLAImpl):
 
         attn_out, attn_lse = torch.ops.npu.npu_fused_infer_attention_score(
             q_nope,
-            k_nope_attn,
-            value_attn,
+            k_nope_attn.contiguous(),
+            value_attn.contiguous(),
             query_rope=q_pe,
-            key_rope=k_pe_attn,
+            key_rope=k_pe_attn.contiguous(),
             num_heads=self.num_heads,
             num_key_value_heads=self.num_heads,
             input_layout="TND",

@@ -137,6 +137,25 @@ def test_collect_paths_and_basic_path_helpers():
 
 
 def test_route_helpers():
+    # Use a controlled runner_mapping that covers all convention directories
+    # documented in test_config.yaml (a2_2, a2, a3_4, a3_2, 310p). The real
+    # config only defines a subset because the corresponding test directories
+    # don't exist in the repo today, but the routing logic supports all of them.
+    select_tests._load_runner_mapping(
+        {
+            "runner_mapping": {
+                "tests/ut/.+/a2_2": {"default": "a2_x2"},
+                "tests/ut/.+/a2": {"default": "a2_x1"},
+                "tests/ut/.+/a3_4": {"default": "a3_x4"},
+                "tests/ut/.+/a3_2": {"default": "a3_x2"},
+                "tests/ut/.+/310p": {"default": "310p_x1"},
+                "tests/e2e/pull_request/one_card": {"default": "a2_x1", "310p": "310p_x1"},
+                "tests/e2e/pull_request/two_card": {"default": "a3_x2"},
+                "tests/e2e/pull_request/four_card": {"default": "a3_x4", "310p": "310p_x4"},
+            }
+        }
+    )
+
     assert select_tests._pytest_node_file_path("tests/e2e/test_x.py::TestCase::test_a") == "tests/e2e/test_x.py"
     assert select_tests._route_ut_dir("tests/ut/mod/a2_2/test_x.py") == (2, select_tests.NpuType.A2)
     assert select_tests._route_ut_dir("tests/ut/mod/a2_2/test_x.py::test_case") == (2, select_tests.NpuType.A2)
@@ -265,8 +284,16 @@ def test_dedup_runner_resolution_and_output(tmp_path, monkeypatch, capsys):
             "runner": "cpu-runner",
             "tests": "tests/ut/a.py tests/ut/b.py",
             "image_tag": "cpu-img",
+            "partition": "1-1",
         },
-        {"num_npus": 1, "npu_type": "a2", "runner": "a2-runner", "tests": "e2e.py", "image_tag": "a2-img"},
+        {
+            "num_npus": 1,
+            "npu_type": "a2",
+            "runner": "a2-runner",
+            "tests": "e2e.py",
+            "image_tag": "a2-img",
+            "partition": "1-1",
+        },
     ]
     with pytest.raises(SystemExit):
         select_tests._resolve_to_runners({(2, select_tests.NpuType.A2): ["x"]}, runners)
@@ -340,7 +367,12 @@ def test_main_end_to_end_changed_files_options_and_skip(tmp_path, monkeypatch, c
         },
     ]
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.safe_dump(config))
+    runner_mapping = {
+        "tests/ut/.+/a2": {"default": "a2_x1"},
+        "tests/e2e/pull_request/one_card": {"default": "a2_x1", "310p": "310p_x1"},
+        "tests/e2e/pull_request/two_card": {"default": "a3_x2"},
+    }
+    _write_two_doc_config(config_path, config, {"runner_mapping": runner_mapping})
     runner_file = tmp_path / "runner_label.json"
     runner_file.write_text(
         json.dumps(
@@ -436,6 +468,99 @@ def test_main_end_to_end_changed_files_options_and_skip(tmp_path, monkeypatch, c
     assert selected_tests == {"tests/e2e/pull_request/two_card/test_two_card.py::test_specific_case"}
 
 
+def test_bisect_tool_scoped_change_skips_global_modules(tmp_path, monkeypatch, capsys):
+    test_root = tmp_path / "tests"
+    default_cpu_dir = test_root / "ut" / "default"
+    bisect_dir = test_root / "ut" / "tools" / "bisect"
+    tools_dir = test_root / "ut" / "_tools"
+    e2e_dir = test_root / "e2e" / "pull_request" / "one_card"
+    for path in (default_cpu_dir, bisect_dir, tools_dir, e2e_dir):
+        path.mkdir(parents=True)
+
+    default_cpu_test = default_cpu_dir / "test_default.py"
+    bisect_test = bisect_dir / "test_auto_bisect.py"
+    tools_test = tools_dir / "test_base_tool.py"
+    e2e_test = e2e_dir / "test_model.py"
+    for path in (default_cpu_test, bisect_test, tools_test, e2e_test):
+        path.write_text("")
+
+    config = [
+        {
+            "name": "default_cpu_ut",
+            "optional": False,
+            "cpu_only": True,
+            "tests": ["tests/ut"],
+        },
+        {
+            "name": "always_e2e",
+            "optional": False,
+            "tests": ["tests/e2e/pull_request/one_card"],
+        },
+        {
+            "name": "nightly_bisect",
+            "optional": True,
+            "cpu_only": True,
+            "source_file_dependencies": ["tools/bisect", "tests/ut/tools/bisect"],
+            "tests": ["tests/ut/tools/bisect"],
+        },
+        {
+            "name": "_tools",
+            "optional": False,
+            "source_file_dependencies": ["tools/"],
+            "tests": ["tests/ut/_tools"],
+        },
+    ]
+    config_path = tmp_path / "config.yaml"
+    runner_mapping = {"tests/e2e/pull_request/one_card": {"default": "a2_x1"}}
+    _write_two_doc_config(config_path, config, {"runner_mapping": runner_mapping})
+    runner_file = tmp_path / "runner_label.json"
+    runner_file.write_text(
+        json.dumps(
+            {
+                "cpu-runner": {"chip": "cpu", "npu_num": 0},
+                "a2-runner": {"chip": "a2", "npu_num": 1},
+            }
+        )
+    )
+    monkeypatch.setattr(select_tests, "_RUNNER_LABEL_PATH", runner_file)
+    monkeypatch.chdir(tmp_path)
+
+    changed_files = [
+        "tools/bisect/auto_bisect.py",
+        "tests/ut/tools/bisect/test_auto_bisect.py",
+        ".github/workflows/scripts/select_tests.py",
+        ".github/workflows/scripts/test_config.yaml",
+        "csrc/build.sh",
+    ]
+    assert select_tests._is_bisect_tool_scoped_change(changed_files)
+    assert not select_tests._is_bisect_tool_scoped_change([*changed_files, "vllm_ascend/envs.py"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "select_tests.py",
+            "--config",
+            str(config_path),
+            "--changed-files",
+            *changed_files,
+        ],
+    )
+
+    select_tests.main()
+    captured = capsys.readouterr()
+    assert "Detected bisect tool-scoped change" in captured.err
+    assert "matched_modules=nightly_bisect,_tools" in captured.out
+    groups_line = next(line for line in captured.out.splitlines() if line.startswith("test_groups="))
+    test_groups = json.loads(groups_line.removeprefix("test_groups="))
+    selected_tests = {test for group in test_groups for test in group["tests"].split()}
+    assert selected_tests == {
+        "tests/ut/_tools/test_base_tool.py",
+        "tests/ut/tools/bisect/test_auto_bisect.py",
+    }
+    assert "tests/ut/default/test_default.py" not in selected_tests
+    assert "tests/e2e/pull_request/one_card/test_model.py" not in selected_tests
+
+
 def test_default_cpu_ut_always_runs(tmp_path, monkeypatch, capsys):
     test_root = tmp_path / "tests"
     cpu_dir = test_root / "ut" / "cpu"
@@ -462,7 +587,8 @@ def test_default_cpu_ut_always_runs(tmp_path, monkeypatch, capsys):
         },
     ]
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.safe_dump(config))
+    runner_mapping = {"tests/ut/.+/a2": {"default": "a2_x1"}}
+    _write_two_doc_config(config_path, config, {"runner_mapping": runner_mapping})
     runner_file = tmp_path / "runner_label.json"
     runner_file.write_text(
         json.dumps(

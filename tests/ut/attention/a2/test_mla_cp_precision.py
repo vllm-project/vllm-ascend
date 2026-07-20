@@ -424,7 +424,7 @@ def _make_fake_self(*, dtype: torch.dtype, **kwargs) -> MagicMock:
     _populate_impl_attrs(fake_self, **kwargs)
     fake_self.dtype = dtype
     fake_self._v_up_proj = lambda x: AscendMlaCPImpl._v_up_proj(fake_self, x)
-    fake_self._compute_prefill_context = lambda *a, **kw: (AscendMLAImpl._compute_prefill_context(fake_self, *a, **kw))
+    fake_self._compute_prefill_context = lambda *a, **kw: AscendMLAImpl._compute_prefill_context(fake_self, *a, **kw)
     return fake_self
 
 
