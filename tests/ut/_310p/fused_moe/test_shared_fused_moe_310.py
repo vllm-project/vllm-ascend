@@ -29,13 +29,19 @@ def _build_weight_layer():
     )
 
 
-def test_runner_310_installs_specialized_unquantized_method_and_comm():
+@pytest.mark.parametrize("multistream_overlap_shared_expert", [False, True])
+def test_runner_310_installs_specialized_unquantized_method_and_comm(
+    multistream_overlap_shared_expert,
+):
     runner = _build_runner()
     moe_config = MagicMock()
     runner.moe_config = moe_config
     runner._get_quant_type = MagicMock(return_value=QuantType.NONE)
+    runner.multistream_overlap_shared_expert = multistream_overlap_shared_expert
+    runner._validate_shared_expert_consistency = MagicMock()
     routed_experts = SimpleNamespace(quant_config=None, quant_method=None)
-    quant_method = object()
+    quant_method = MagicMock()
+    original_process_weights = quant_method.process_weights_after_loading
     comm_method = object()
 
     with (
@@ -54,9 +60,16 @@ def test_runner_310_installs_specialized_unquantized_method_and_comm():
 
         assert routed_experts.quant_method is quant_method
         assert runner.quant_type == QuantType.NONE
-        assert runner.multistream_overlap_shared_expert is False
+        assert runner.multistream_overlap_shared_expert is multistream_overlap_shared_expert
         assert fused_moe_310_module._MoECommMethods[MoECommType.ALLGATHER] is comm_method
         parent_init.assert_called_once()
+
+        routed_experts.quant_method.process_weights_after_loading("layer")
+        original_process_weights.assert_called_once_with("layer")
+        if multistream_overlap_shared_expert:
+            runner._validate_shared_expert_consistency.assert_called_once_with()
+        else:
+            runner._validate_shared_expert_consistency.assert_not_called()
 
 
 @pytest.mark.parametrize(

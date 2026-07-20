@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 from collections.abc import Callable
+from functools import wraps
 
 import torch
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
@@ -169,5 +170,22 @@ class AscendMoERunner310(AscendMoERunner):
             routed_experts.quant_method = AscendUnquantizedFusedMoEMethod310(self.moe_config)
             self.quant_type = self._get_quant_type()
 
-        self.multistream_overlap_shared_expert = False
+            # AscendMoERunner installs this validation hook before the 310P
+            # unquantized method replaces its generic method. Reinstall it on
+            # the method that will actually process the routed-expert weights.
+            if self.multistream_overlap_shared_expert:
+                original_process_weights = routed_experts.quant_method.process_weights_after_loading
+
+                @wraps(original_process_weights)
+                def wrapped_process_weights(*args, **kwargs):
+                    result = original_process_weights(*args, **kwargs)
+                    self._validate_shared_expert_consistency()
+                    return result
+
+                routed_experts.quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
+
+        # Keep the FlashCommV3 switch initialized by AscendMoERunner. Its
+        # event-driven shared-expert path overlaps gate/up with dispatch and
+        # down projection with combine instead of running the whole shared
+        # expert independently from the routed experts.
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl310(self.moe_config)
