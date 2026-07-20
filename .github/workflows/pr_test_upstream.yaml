@@ -160,16 +160,14 @@ jobs:
                 echo "CSRC cache miss: no .so files found, compile kernels"
                 uv pip install -e . --no-build-isolation
               fi
-              uv pip install tblib 
-              uv pip install pqdm timm schemathesis==3.39.15 "vllm[helion]" "runai-model-streamer[s3,gcs]"
-              uv pip install "mteb[bm25s]" open_clip_torch terratorch==1.2.2 imagehash
-              uv pip install "lm-eval[api]" num2words "vllm[grpc]" "vllm[audio]"
+              uv pip install tblib
 
           - name: Run vllm-project/vllm test
             working-directory: ./vllm-empty
             env:
               PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
               VLLM_WORKER_MULTIPROC_METHOD: spawn
+              TORCH_DEVICE_BACKEND_AUTOLOAD: 0
             run: |
               mkdir -p tiktoken_encodings
               curl -L -o tiktoken_encodings/o200k_base.tiktoken "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken"
