@@ -167,10 +167,10 @@ class BlockTable:
                 "PAD_ID": PAD_SLOT_ID,
                 "BLOCK_SIZE": 1024,
             }
-            if not vllm_version_is("0.25.0"):
+            if not vllm_version_is("0.25.1"):
                 # vLLM #40996 split physical KV blocks into kernel blocks in
                 # the slot-mapping kernel. These are required constexprs on
-                # main; the v0.25.0 kernel does not accept them.
+                # main; the v0.25.1 kernel does not accept them.
                 kernel_kwargs.update(
                     KV_CACHE_BLOCK_SIZE=self.physical_block_size,
                     BLOCKS_PER_KV_BLOCK=self.blocks_per_phys_block,
