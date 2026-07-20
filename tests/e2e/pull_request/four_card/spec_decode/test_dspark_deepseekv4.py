@@ -22,9 +22,9 @@ Run `pytest tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.
 """
 
 import os
+from unittest.mock import patch
 
 import pytest
-from unittest.mock import patch
 from vllm.config import CompilationConfig
 from vllm.v1.metrics.reader import Counter, Vector
 
@@ -32,6 +32,7 @@ from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
 
 MODELS = ["UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test"]
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
 
 @pytest.mark.parametrize("model_name", MODELS)
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
