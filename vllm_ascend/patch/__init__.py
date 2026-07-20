@@ -723,6 +723,20 @@
 #    Future Plan:
 #       Remove this patch when all ops in _forward_core support both Qwen3_5 and Qwen3Next.
 #
+#   2. `vllm.model_executor.models.qwen3_5.Qwen3_5ForConditionalGeneration`
+#      `vllm.model_executor.models.qwen3_5.Qwen3_5ForConditionalGeneration.__init__`
+#      `vllm.model_executor.models.qwen3_5.Qwen3_5ForConditionalGeneration.recompute_mrope_positions`
+#      `vllm.model_executor.models.qwen3_5.Qwen3_5MoeForConditionalGeneration.__init__`
+#    Why:
+#       Enables EVS (Efficient Video Sampling) feature for Qwen3.5 models
+#    How：
+#       Set the class attribute supports_multimodal_pruning to True for Qwen3.5 models.
+#       Patch the __init__ of Qwen3.5 dense and MoE models to allow using EVS.
+#       Remove the recompute_mrope_positions function defined in Qwen3.5 such that it
+#       correctly inherits the EVS implementation from Qwen3.
+#    Future Plan:
+#       Remove this patch when upstream vLLM supports EVS for Qwen3.5 models.
+#
 # ** 17a. File: worker/patch_idex_310.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.fla.ops.index.prepare_chunk_indices`
