@@ -3880,16 +3880,11 @@ class NPUModelRunner(GPUModelRunner):
         )
 
     def _get_eagle3_aux_layers_from_config(self) -> tuple[int, ...] | None:
-        # add additional logic for dspark-config
+        # Keep Eagle3 aux layer selection aligned with the upstream drafter
+        # config. `target_layer_ids` has different semantics and can shrink
+        # the aux hidden states below what Eagle3's combine fc expects.
         if not (self.speculative_config and self.speculative_config.draft_model_config):
             return None
-        hf_config = self.speculative_config.draft_model_config.hf_config
-        if hasattr(hf_config, 'target_layer_ids'):
-            layer_ids = [
-                i for i in (hf_config.target_layer_ids or [])
-            ]
-            if layer_ids and isinstance(layer_ids, (list, tuple)):
-                return tuple(layer_ids)
         return super()._get_eagle3_aux_layers_from_config()
 
     def _start_dump_data(self) -> None:
