@@ -30,7 +30,6 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 @triton.jit(
     do_not_specialize=[
         "num_seqs",
-        "vocab_size",
         "stride_logits_seq",
         "stride_logits_vocab",
         "stride_prompt_mask_seq",
@@ -69,14 +68,12 @@ def apply_all_penalties_kernel(
     start_seq = pid * seqs_per_program
     end_seq = tl.minimum(start_seq + seqs_per_program, num_seqs)
 
-    num_vocab_tiles = tl.cdiv(vocab_size, BLOCK_SIZE)
-    for seq_idx in tl.range(start_seq, end_seq):
+    for seq_idx in range(start_seq, end_seq):
         repetition_penalty = tl.load(repetition_penalties_ptr + seq_idx)
         frequency_penalty = tl.load(frequency_penalties_ptr + seq_idx)
         presence_penalty = tl.load(presence_penalties_ptr + seq_idx)
 
-        for tile_idx in tl.range(0, num_vocab_tiles):
-            vocab_start = tile_idx * BLOCK_SIZE
+        for vocab_start in range(0, vocab_size, BLOCK_SIZE):
             vocab_offsets = vocab_start + tl.arange(0, BLOCK_SIZE)
             mask = vocab_offsets < vocab_size
 
@@ -149,7 +146,7 @@ def _apply_all_penalties_triton(
 ) -> None:
     """Apply all penalties given precomputed bin counts and masks."""
     num_seqs, vocab_size = logits.shape
-    grid = (get_vectorcore_num(), 1, 1)
+    grid = (min(num_seqs, get_vectorcore_num()), 1, 1)
 
     apply_all_penalties_kernel[grid](
         logits,
