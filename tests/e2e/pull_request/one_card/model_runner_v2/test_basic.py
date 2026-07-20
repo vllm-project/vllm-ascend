@@ -24,7 +24,6 @@ from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
-from vllm_ascend.utils import vllm_version_is
 
 MODELS = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
 
@@ -34,11 +33,6 @@ DFLASH_MAIN_MODEL = ["Qwen/Qwen3-8B"]
 DFLASH_MODELS = ["z-lab/Qwen3-8B-DFlash-b16"]
 DSPARK_MAIN_MODEL = ["Qwen/Qwen3-8B"]
 DSPARK_MODELS = ["deepseek-ai/dspark_qwen3_8b_block7"]
-
-pytestmark = pytest.mark.skipif(
-    vllm_version_is("0.24.0"),
-    reason="v2 model runner patches are only supported on the verified vLLM main commit",
-)
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -132,10 +126,7 @@ def test_egale_spec_decoding(
     )
     golden = [0.43, 0.13, 0.05]
     match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
-    if not match:
-        print(f"acceptance_per_pos: {acceptance_per_pos}")
-        print(f"golden: {golden}")
-    assert match
+    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
 @pytest.mark.parametrize("model", DFLASH_MAIN_MODEL)
@@ -194,22 +185,30 @@ def test_dflash_spec_decoding(
 
     golden = [0.51, 0.16, 0.07, 0.07, 0.01, 0.01, 0.0]
     match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
-    if not match:
-        print(f"acceptance_per_pos: {acceptance_per_pos}")
-        print(f"golden: {golden}")
-    assert match
+    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
 @pytest.mark.parametrize("model", DSPARK_MAIN_MODEL)
 @pytest.mark.parametrize("dspark_model", DSPARK_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("enforce_eager", [True])
+@pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize(
+    "compilation_config",
+    [
+        pytest.param(
+            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8]},
+            id="full_decode_only",
+        ),
+        pytest.param({}, id="default_full_and_piecewise"),
+    ],
+)
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 def test_dspark_spec_decoding(
     model: str,
     dspark_model: str,
     max_tokens: int,
     enforce_eager: bool,
+    compilation_config: dict,
 ) -> None:
     prompts = [
         "Hello, my name is",
@@ -231,6 +230,7 @@ def test_dspark_spec_decoding(
             "method": "dspark",
             "num_speculative_tokens": num_speculative_tokens,
         },
+        compilation_config=compilation_config,
     ) as runner:
         runner.model.generate(prompts, sampling_params)
         metrics = runner.model.get_metrics()
@@ -243,10 +243,7 @@ def test_dspark_spec_decoding(
     )
     golden = [0.84, 0.48, 0.32, 0.20, 0.09, 0.09, 0.02]
     match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
-    if not match:
-        print(f"acceptance_per_pos: {acceptance_per_pos}")
-        print(f"golden: {golden}")
-    assert match
+    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
 @pytest.mark.parametrize("model", MODELS)

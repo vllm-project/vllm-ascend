@@ -268,6 +268,7 @@
     - vllm_ascend/worker/model_runner_v1.py
     - vllm_ascend/compilation/acl_graph.py
   tests:
+    - tests/ut/model_executor
     - tests/e2e/pull_request/one_card/test_cpu_weight_offload.py
 
 # Model Loader
@@ -717,7 +718,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_camem.py: 140
   tests/e2e/pull_request/one_card/test_completion_with_prompt_embeds.py: 200
   tests/e2e/pull_request/one_card/test_cpu_offloading.py: 30
-  tests/e2e/pull_request/one_card/test_cpu_weight_offload.py: 830
+  tests/e2e/pull_request/one_card/test_cpu_weight_offload.py: 1400
   tests/e2e/pull_request/one_card/test_guided_decoding.py: 610
   tests/e2e/pull_request/one_card/test_minicpm.py: 330
   tests/e2e/pull_request/one_card/test_multi_instance.py: 140

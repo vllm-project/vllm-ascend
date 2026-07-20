@@ -43,7 +43,7 @@ def _select_kv_token_budget(
     max_in_flight_tokens: int | None,
     max_num_batched_tokens: int | None,
 ) -> int:
-    token_budget = max_num_batched_tokens if vllm_version_is("0.24.0") else max_in_flight_tokens
+    token_budget = max_num_batched_tokens if vllm_version_is("0.25.0") else max_in_flight_tokens
     return token_budget if token_budget is not None else max_model_len
 
 
@@ -131,7 +131,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
 
         extra_mgr_kwargs: dict = {"scheduler_block_size": scheduler_block_size}
-        if not vllm_version_is("0.24.0"):
+        if not vllm_version_is("0.25.0"):
             extra_mgr_kwargs["needs_kv_cache_zeroing"] = kv_cache_config.needs_kv_cache_zeroing
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
@@ -510,7 +510,7 @@ def get_kv_cache_coordinator(
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
         )
-        if vllm_version_is("0.24.0"):
+        if vllm_version_is("0.25.0"):
             orig_kwargs["max_num_batched_tokens"] = token_budget
         else:
             orig_kwargs["max_in_flight_tokens"] = token_budget
