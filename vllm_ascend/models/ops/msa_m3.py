@@ -35,9 +35,9 @@ from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheSpec,
-    MLAAttentionSpec,
 )
 
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.models.ops.msa_m3_npu import minimax_m3_sparse_attn
 from vllm_ascend.models.ops.msa_m3_triton import (
     minimax_m3_index_decode,
@@ -47,8 +47,6 @@ from vllm_ascend.models.ops.msa_m3_triton import (
 )
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
-
-_SPARSE_ATTN_LOGGED = False
 
 
 def _active_decode_num_reqs(
@@ -161,8 +159,7 @@ class AscendMiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        # Key-only: MLAAttentionSpec budgets one vector/token, not K+V.
-        return MLAAttentionSpec(
+        return AscendSFAIndexerCacheSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
