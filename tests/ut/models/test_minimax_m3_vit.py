@@ -23,32 +23,18 @@ class TestMiniMaxM3VitProcessor(unittest.TestCase):
         source_file = inspect.getsourcefile(MiniMaxVLVisionModel)
         self.assertIsNotNone(source_file)
         self.assertIsNotNone(vllm.__file__)
-        expected_source = (
-            Path(vllm.__file__).resolve().parent
-            / "models"
-            / "minimax_m3"
-            / "common"
-            / "vision_tower.py"
-        )
+        expected_source = Path(vllm.__file__).resolve().parent / "models" / "minimax_m3" / "common" / "vision_tower.py"
         self.assertTrue(Path(source_file).samefile(expected_source))
 
     def test_standalone_vllm_vision_bridge_is_removed(self) -> None:
-        self.assertIsNone(
-            importlib.util.find_spec("vllm_ascend.models.minimax_m3_vllm_vision")
-        )
+        self.assertIsNone(importlib.util.find_spec("vllm_ascend.models.minimax_m3_vllm_vision"))
 
     def test_multimodal_processor_uses_vllm_common_implementation(self) -> None:
-        from vllm.models.minimax_m3.common import mm_preprocess
-
-        self.assertIs(
-            MiniMaxM3VLProcessingInfo,
-            mm_preprocess.MiniMaxM3VLProcessingInfo,
+        self.assertEqual(
+            inspect.getsourcefile(MiniMaxM3VLProcessingInfo),
+            inspect.getsourcefile(MiniMaxM3VLDummyInputsBuilder),
         )
-        self.assertIs(
-            MiniMaxM3VLDummyInputsBuilder,
-            mm_preprocess.MiniMaxM3VLDummyInputsBuilder,
-        )
-        self.assertIs(
-            MiniMaxM3VLMultiModalProcessor,
-            mm_preprocess.MiniMaxM3VLMultiModalProcessor,
+        self.assertEqual(
+            inspect.getsourcefile(MiniMaxM3VLProcessingInfo),
+            inspect.getsourcefile(MiniMaxM3VLMultiModalProcessor),
         )

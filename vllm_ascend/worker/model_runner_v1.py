@@ -28,7 +28,7 @@ from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
 from multiprocessing import Manager
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -69,6 +69,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
+    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import (
@@ -125,6 +126,8 @@ from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
+from vllm_ascend.models.minimax_m3 import MiniMaxM3SparseAttention
+from vllm_ascend.models.ops.msa_m3 import AscendMiniMaxM3IndexerCache
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -440,7 +443,12 @@ class NPUModelRunner(GPUModelRunner):
         self.sfa_dcp_replicated_indexer_size = 1
         if enable_sfa_dcp_replicated_indexer():
             self.sfa_dcp_replicated_indexer_size = self.dcp_size
-            
+            sparse_head_dim: tuple[int, ...] = cast(Any, self).sparse_head_dim
+            self.sparse_head_dim = (
+                *sparse_head_dim[:-1],
+                sparse_head_dim[-1] * self.dcp_size,
+            )
+
         # Create a CPU numpy buffer for positions computation when
         # self.positions is a plain tensor (non-CpuGpuBuffer case).
         self._positions_cpu_buf = torch.zeros(
@@ -592,7 +600,6 @@ class NPUModelRunner(GPUModelRunner):
             self.kvcomp_meta_data = initialize_kvcomp_metadata(max_num_reqs=self.max_num_reqs,
                 block_size=self.block_size, device=self.device, vllm_config=self.vllm_config,
                 parallel_config=self.parallel_config, dtype=self.dtype)
-
     @property
     def use_cp(self) -> bool:
         return self.pcp_size * self.dcp_size > 1
@@ -1996,13 +2003,14 @@ class NPUModelRunner(GPUModelRunner):
             if self.routed_experts_initialized:
                 self.routed_experts_capturer.clear_buffer()
 
-        if self.ascend_config.profiling_chunk_config.need_timing:
+        profiling_chunk_config = self.ascend_config.profiling_chunk_config
+        if profiling_chunk_config.need_timing:
             # Check if the scheduler signaled that calibration is complete.
             # This flag is set cross-process via scheduler_output because
             # modifying the config singleton in the scheduler process does
             # not affect this worker process.
             if getattr(scheduler_output, "disable_profiling_timing", False):
-                self.ascend_config.profiling_chunk_config.need_timing = False
+                profiling_chunk_config.need_timing = False
             else:
                 self._sync_device()
                 self._execution_start_time = time.perf_counter()
@@ -2318,13 +2326,6 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_mode = CUDAGraphMode.NONE
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False  # type: ignore[has-type]
-        if self.ascend_config.enable_async_exponential:
-            self.sampler.do_async_exponential(
-                b_s=logits_indices.shape[0],
-                head_dim=self.model_config.get_vocab_size(),
-                generators=self.input_batch.sampling_metadata.generators,
-            )
-
         # Encoder-decoder models can only compile the pure decode steps where no
         # encoder inputs are present. Use eager for the first pass.
         num_encoder_reqs = len(scheduler_output.scheduled_encoder_inputs)
@@ -2605,7 +2606,8 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_stats=cudagraph_stats,
             routed_experts=None,
         )
-        if self.ascend_config.profiling_chunk_config.need_timing and hasattr(self, '_execution_start_time'):
+        profiling_chunk_config = self.ascend_config.profiling_chunk_config
+        if profiling_chunk_config.need_timing and hasattr(self, "_execution_start_time"):
             self._sync_device()
             model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
 
@@ -3365,7 +3367,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.drafter.set_per_group_attn_metadata(
                     kv_cache_gid, cm.block_table_tensor, cm.slot_mapping)
             if self.speculative_config and spec_decode_common_attn_metadata is None:
-                if isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer | AscendDflashProposer 
+                if isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer | AscendDflashProposer
                     | AscendDsparkProposer):
                     if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
                         spec_decode_common_attn_metadata = cm
@@ -4171,12 +4173,17 @@ class NPUModelRunner(GPUModelRunner):
             self.hybrid_with_attn_and_mamba = self.hybrid_with_attn_and_mamba or (use_mamba and use_attn)
             for idx in range(len(kv_cache_tensor.shared_by)):
                 layer_name = kv_cache_tensor.shared_by[idx]
-                # Single tensor path for: mamba, hybrid attn-mamba, or cache_only_layers
+                # Single tensor path for: mamba, hybrid attn-mamba, cache_only_layers,
+                # or MiniMax M3 key-only indexer side cache.
                 if (
                     "linear_attn" in layer_name
                     or self.hybrid_with_attn_and_mamba
                     or "cache_only_layers" in layer_name
                     or is_hidden_state_cache_spec(layer_kv_cache_spec.get(layer_name))
+                    or (
+                        layer_name.endswith(".index_cache")
+                        and isinstance(layer_kv_cache_spec.get(layer_name), MLAAttentionSpec)
+                    )
                 ) and layer_name not in kv_cache_raw_tensors:
                     # for mamba linear attention, attn-linear hybrid, or cache_only_layers (extract_hidden_states)
                     if self.vllm_config.kv_transfer_config is None:
@@ -4488,6 +4495,10 @@ class NPUModelRunner(GPUModelRunner):
                     elif (
                         "cache_only_layers" in layer_name
                         or is_hidden_state_cache_spec(current_kv_cache_spec)
+                        or (
+                            layer_name.endswith(".index_cache")
+                            and isinstance(current_kv_cache_spec, MLAAttentionSpec)
+                        )
                     ):
                         # Single tensor for extract_hidden_states (no K/V split)
                         raw_tensor = kv_cache_raw_tensors[layer_name]
@@ -4900,7 +4911,10 @@ class NPUModelRunner(GPUModelRunner):
                 # Skip modules that don't need KV cache (eg encoder-only attention)
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
-            elif isinstance(attn_module, Attention):
+            elif isinstance(
+                attn_module,
+                (Attention, MiniMaxM3SparseAttention, AscendMiniMaxM3IndexerCache),
+            ):
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
                     attn_layer_names.add(layer_name)

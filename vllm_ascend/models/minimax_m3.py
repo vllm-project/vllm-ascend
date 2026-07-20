@@ -31,12 +31,15 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_pp_group,
+    get_tensor_model_parallel_world_size,
 )
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     GateLinear,
@@ -75,8 +78,334 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheSpec,
+    get_kv_quant_mode,
+)
 
-from vllm_ascend.attention.msa_m3 import MiniMaxM3SparseAttention
+from vllm_ascend.models.ops.msa_m3 import (
+    AscendMiniMaxM3Indexer,
+    AscendMiniMaxM3IndexerLinear,
+    AscendMiniMaxM3IndexerMetadata,
+    AscendMiniMaxM3QKVParallelLinearWithIndexer,
+    AscendMiniMaxM3SparseBackend,
+    AscendMiniMaxM3SparseImpl,
+    AscendMiniMaxM3SparseMetadata,
+    _register_m3_sparse_packed_modules,
+    _use_fused_qkv_indexer,
+)
+
+_SPARSE_ATTN_LOGGED = False
+
+
+class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
+    """Block-sparse attention with lightning indexer on Ascend."""
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        rotary_dim: int,
+        rope_parameters: dict[str, Any] | None = None,
+        attn_window_size: int | None = None,
+        max_position_embeddings: int = 8192,
+        head_dim: int | None = None,
+        rms_norm_eps: float = 1e-06,
+        qkv_bias: bool = False,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+        sparse_cfg: dict[str, Any] | None = None,
+        disable_index_value: bool = False,
+        reduce_results: bool = True,
+    ) -> None:
+        super().__init__()
+        assert sparse_cfg is not None
+        self.hidden_size = hidden_size
+        self.disable_index_value = disable_index_value
+
+        tp_size = get_tensor_model_parallel_world_size()
+        self.total_num_heads = num_heads
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
+        self.total_num_kv_heads = num_kv_heads
+        if self.total_num_kv_heads >= tp_size:
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            assert tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        self.head_dim = head_dim or (hidden_size // self.total_num_heads)
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        self.scaling = self.head_dim**-0.5
+        self.max_position_embeddings = max_position_embeddings
+
+        self.total_idx_heads = sparse_cfg["sparse_num_index_heads"]
+        self.idx_head_dim = sparse_cfg["sparse_index_dim"]
+        assert self.total_idx_heads == self.total_num_kv_heads, (
+            "MiniMax M3 sparse attention requires sparse_num_index_heads == num_key_value_heads"
+        )
+        self.num_idx_heads = self.num_kv_heads
+        self.index_q_size = self.num_idx_heads * self.idx_head_dim
+        self._use_fused_qkv_indexer = _use_fused_qkv_indexer(quant_config, prefix)
+        _register_m3_sparse_packed_modules(quant_config, self._use_fused_qkv_indexer)
+
+        if self._use_fused_qkv_indexer:
+            self.qkv_proj = AscendMiniMaxM3QKVParallelLinearWithIndexer(
+                hidden_size,
+                self.head_dim,
+                self.total_num_heads,
+                self.total_num_kv_heads,
+                self.total_idx_heads,
+                self.idx_head_dim,
+                bias=qkv_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
+            self.indexer_proj = None
+        else:
+            self.qkv_proj = QKVParallelLinear(
+                hidden_size,
+                self.head_dim,
+                self.total_num_heads,
+                self.total_num_kv_heads,
+                bias=qkv_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
+            self.indexer_proj = AscendMiniMaxM3IndexerLinear(
+                hidden_size,
+                self.total_idx_heads,
+                self.idx_head_dim,
+                bias=qkv_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.indexer_proj",
+            )
+        self.o_proj = RowParallelLinear(
+            self.total_num_heads * self.head_dim,
+            hidden_size,
+            bias=False,
+            reduce_results=reduce_results,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+        )
+
+        if rope_parameters is not None and "partial_rotary_factor" not in rope_parameters:
+            rope_parameters["partial_rotary_factor"] = rotary_dim / self.head_dim
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            max_position=max_position_embeddings,
+            rope_parameters=rope_parameters,
+        )
+
+        self.index_q_norm = GemmaRMSNorm(self.idx_head_dim, eps=rms_norm_eps)
+        self.index_k_norm = GemmaRMSNorm(self.idx_head_dim, eps=rms_norm_eps)
+
+        self.q_norm = GemmaRMSNorm(self.head_dim, eps=rms_norm_eps)
+        self.k_norm = GemmaRMSNorm(self.head_dim, eps=rms_norm_eps)
+
+        vllm_config = get_current_vllm_config()
+        self.layer_name = f"{prefix}.attn"
+        self.kv_cache_dtype = cache_config.cache_dtype if cache_config is not None else "auto"
+        self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)
+        self.attn_backend = AscendMiniMaxM3SparseBackend
+        self.impl = AscendMiniMaxM3SparseImpl(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            self.num_kv_heads,
+            kv_cache_dtype=self.kv_cache_dtype,
+            topk_blocks=sparse_cfg["sparse_topk_blocks"],
+            sparse_block_size=sparse_cfg["sparse_block_size"],
+        )
+        self.topk_blocks = sparse_cfg["sparse_topk_blocks"]
+        self.sparse_block_size = sparse_cfg["sparse_block_size"]
+        self.indexer = AscendMiniMaxM3Indexer(
+            num_kv_heads=self.num_kv_heads,
+            scale=self.scaling,
+            topk_blocks=self.topk_blocks,
+            sparse_block_size=self.sparse_block_size,
+            num_index_heads=self.num_idx_heads,
+            index_head_dim=self.idx_head_dim,
+            prefix=self.layer_name,
+            init_blocks=sparse_cfg.get("sparse_init_block", 0),
+            local_blocks=sparse_cfg.get("sparse_local_block", 0),
+            cache_config=cache_config,
+        )
+
+        compilation_config = vllm_config.compilation_config
+        if self.layer_name in compilation_config.static_forward_context:
+            raise ValueError(f"Duplicate layer name: {self.layer_name}")
+        compilation_config.static_forward_context[self.layer_name] = self
+        self.kv_cache = torch.tensor([])
+        global _SPARSE_ATTN_LOGGED
+        if not _SPARSE_ATTN_LOGGED:
+            logger.warning(
+                "MiniMax M3 sparse attention enabled via npu_sparse_attention_score (topk_blocks=%d, block_size=%d)",
+                sparse_cfg["sparse_topk_blocks"],
+                sparse_cfg["sparse_block_size"],
+            )
+            _SPARSE_ATTN_LOGGED = True
+
+    def get_attn_backend(self) -> type[AscendMiniMaxM3SparseBackend]:
+        return self.attn_backend
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+        return FullAttentionSpec(
+            block_size=vllm_config.cache_config.block_size,
+            num_kv_heads=self.num_kv_heads,
+            head_size=self.head_dim,
+            head_size_v=self.head_dim,
+            dtype=self.kv_cache_torch_dtype,
+            kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
+        )
+
+    def _insert_kv(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        index_key: torch.Tensor,
+    ) -> None:
+        attn_metadata = get_forward_context().attn_metadata
+        if not isinstance(attn_metadata, dict):
+            return
+        main_meta = attn_metadata[self.layer_name]
+        index_meta = attn_metadata[self.indexer.index_cache.prefix]
+        assert isinstance(main_meta, AscendMiniMaxM3SparseMetadata)
+        assert isinstance(index_meta, AscendMiniMaxM3IndexerMetadata)
+
+        from vllm_ascend.device.device_op import DeviceOperator
+
+        key_cache, value_cache = self.kv_cache
+        num_tokens = main_meta.num_actual_tokens
+        k_insert = key[:num_tokens].view(-1, self.num_kv_heads, self.head_dim)
+        v_insert = value[:num_tokens].view(-1, self.num_kv_heads, self.head_dim)
+        DeviceOperator.reshape_and_cache(
+            k_insert,
+            v_insert,
+            key_cache,
+            value_cache,
+            main_meta.slot_mapping[:num_tokens],
+        )
+
+        idx_cache = self.indexer.index_cache.kv_cache
+        if isinstance(idx_cache, (tuple, list)):
+            idx_cache = idx_cache[0]
+        flat = idx_cache.view(-1, self.idx_head_dim)
+        # Scatter ND update ignores indices outside the cache bounds, so graph
+        # padding slots set to -1 do not write into the last cache row.
+        torch.ops._C_ascend.npu_scatter_nd_update_v2(
+            flat,
+            index_meta.slot_mapping[:num_tokens].view(-1, 1),
+            index_key[:num_tokens].to(flat.dtype),
+        )
+
+    def _sparse_prepare(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        qkv, _ = self.qkv_proj(hidden_states)
+        main_qkv_size = self.q_size + 2 * self.kv_size
+        if self.indexer_proj is None:
+            main_qkv = qkv.narrow(-1, 0, main_qkv_size)
+            index_q = qkv.narrow(-1, main_qkv_size, self.index_q_size)
+            index_k = qkv.narrow(
+                -1,
+                main_qkv_size + self.index_q_size,
+                self.idx_head_dim,
+            )
+        else:
+            main_qkv = qkv
+            index_qk, _ = self.indexer_proj(hidden_states)
+            index_q, index_k = index_qk.split(
+                [self.index_q_size, self.idx_head_dim],
+                dim=-1,
+            )
+
+        if (
+            main_qkv.device.type != "npu"
+            or main_qkv.dtype != torch.bfloat16
+            or positions.ndim != 1
+            or not getattr(self.rotary_emb, "is_neox_style", True)
+        ):
+            q, k, v = main_qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            v = v.contiguous()
+            q, k = self._qk_norm(q, k)
+            q, k = self.rotary_emb(positions, q, k)
+        else:
+            q, k, v = torch.ops.vllm.qkv_rmsnorm_rope(
+                input=main_qkv.contiguous(),
+                q_weight=self.q_norm.weight_plus_one,
+                k_weight=self.k_norm.weight_plus_one,
+                q_hidden_size=self.q_size,
+                kv_hidden_size=self.kv_size,
+                head_dim=self.head_dim,
+                eps=self.q_norm.variance_epsilon,
+                q_bias=None,
+                k_bias=None,
+                cos_sin_cache=self.rotary_emb.cos_sin_cache,
+                positions=positions,
+            )
+
+        index_q, index_k = self._index_qk_norm(index_q, index_k)
+        index_q, index_k = self.rotary_emb(positions, index_q, index_k)
+
+        return q, k, v, index_q, index_k
+
+    def _run_sparse_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        index_query: torch.Tensor,
+        index_key: torch.Tensor,
+        attn_output: torch.Tensor,
+    ) -> None:
+        """Insert KV, build sparse top-k indices, then run sparse attention."""
+        self._insert_kv(key, value, index_key)
+        topk_idx = self.indexer(index_query)
+        self.impl.forward(self, query, self.kv_cache, topk_idx, attn_output)
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        q, k, v, index_q, index_k = self._sparse_prepare(positions, hidden_states)
+        attn_out = torch.empty_like(q)
+        torch.ops.vllm.minimax_m3_sparse_forward(
+            q,
+            k,
+            v,
+            index_q,
+            index_k,
+            attn_out,
+            self.layer_name,
+        )
+        projected, _ = self.o_proj(attn_out)
+        return projected
+
+    def _qk_norm(self, q: torch.Tensor, k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        q_shape = q.shape
+        k_shape = k.shape
+        q = q.reshape(-1, self.head_dim).contiguous()
+        k = k.reshape(-1, self.head_dim).contiguous()
+        q = self.q_norm(q).reshape(q_shape)
+        k = self.k_norm(k).reshape(k_shape)
+        return q, k
+
+    def _index_qk_norm(self, idx_q: torch.Tensor, idx_k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        idx_q_shape = idx_q.shape
+        idx_k_shape = idx_k.shape
+        idx_q = idx_q.reshape(-1, self.index_q_size)
+        idx_k = idx_k.reshape(-1, self.idx_head_dim)
+        idx_q = self.index_q_norm(idx_q).reshape(idx_q_shape)
+        idx_k = self.index_k_norm(idx_k).reshape(idx_k_shape)
+        return idx_q, idx_k
 
 
 def _sparse_attention_layer_ids(config: PretrainedConfig) -> set[int]:
@@ -195,8 +524,7 @@ class MiniMaxM3MoE(nn.Module):
 
         if self.tp_size > config.num_local_experts:
             raise ValueError(
-                f"Tensor parallel size {self.tp_size} is greater than the "
-                f"number of experts {config.num_local_experts}."
+                f"Tensor parallel size {self.tp_size} is greater than the number of experts {config.num_local_experts}."
             )
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
         self.use_routing_bias = getattr(config, "use_routing_bias", False)

@@ -14,10 +14,12 @@ while the language model path remains the Ascend-native implementation in
 
 import sys
 from collections.abc import Iterable
+from pathlib import Path
 from types import ModuleType
 from typing import Any, cast
 
 import torch
+import vllm
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
@@ -33,15 +35,34 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
-from vllm.models.minimax_m3.common.mm_preprocess import (
-    MiniMaxM3VLDummyInputsBuilder,
-    MiniMaxM3VLMultiModalProcessor,
-    MiniMaxM3VLProcessingInfo,
-)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
+from vllm.utils.import_utils import import_from_path
 
 from vllm_ascend.models.minimax_m3 import MiniMaxM3SparseForCausalLM
+
+
+def _load_vllm_minimax_m3_common_module(module_name: str):
+    if vllm.__file__ is None:
+        raise ImportError("Unable to locate the installed vLLM package.")
+
+    module_path = Path(vllm.__file__).resolve().parent / "models" / "minimax_m3" / "common" / f"{module_name}.py"
+    if not module_path.is_file():
+        raise ImportError(
+            "The vLLM MiniMax M3 common source was not found at "
+            f"{module_path}. This vllm-ascend adapter requires vLLM 0.24."
+        )
+
+    return import_from_path(
+        f"vllm_ascend.models._vllm_024_minimax_m3_{module_name}",
+        module_path,
+    )
+
+
+_mm_preprocess = _load_vllm_minimax_m3_common_module("mm_preprocess")
+MiniMaxM3VLDummyInputsBuilder = _mm_preprocess.MiniMaxM3VLDummyInputsBuilder
+MiniMaxM3VLMultiModalProcessor = _mm_preprocess.MiniMaxM3VLMultiModalProcessor
+MiniMaxM3VLProcessingInfo = _mm_preprocess.MiniMaxM3VLProcessingInfo
 
 
 def _install_fused_allreduce_norm_fallback() -> None:
@@ -67,7 +88,7 @@ def _install_fused_allreduce_norm_fallback() -> None:
 
 _install_fused_allreduce_norm_fallback()
 
-from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel  # noqa: E402
+MiniMaxVLVisionModel = _load_vllm_minimax_m3_common_module("vision_tower").MiniMaxVLVisionModel
 
 
 class MiniMaxM3VLModel(nn.Module):
