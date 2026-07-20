@@ -110,10 +110,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
-    # Print total draft runnable wall-clock per spec step ([STEP_DBG] draft_runnable
-    # total=...ms graph=... enpu=...). Covers eager forward (graph=0) and graph
-    # replay (graph=1) for direct comparison. "1" enable, "0" (default) silent.
-    "VLLM_STEP_DBG": lambda: bool(int(os.getenv("VLLM_STEP_DBG", "0"))),
 }
 
 # end-env-vars-definition

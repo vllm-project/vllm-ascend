@@ -43,7 +43,6 @@ from vllm.v1.spec_decode.utils import (
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend import envs
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -1111,30 +1110,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if self._is_gemma4_mtp:
                 self._sync_wait_target_events()
 
-            # [STEP_DBG] total draft runnable wall-clock (eager forward or graph
-            # replay). Outside the compiled fn so the timer is not stripped.
-            # Rate-limited to _STEP_DBG_COUNT prints to avoid log flooding.
-            if not hasattr(self, "_step_dbg_count"):
-                self._step_dbg_count = 0
-            _step_dbg = envs.VLLM_STEP_DBG and self._step_dbg_count < 30
-            if envs.VLLM_STEP_DBG:
-                self._step_dbg_count += 1
-            if _step_dbg:
-                import time as _time
-                torch.npu.current_stream().synchronize()
-                _sd_t0 = _time.perf_counter()
             if self.enable_enpu:
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
                 draft_token_ids = run_draft()
             else:
                 draft_token_ids = run_draft()
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
-            if _step_dbg:
-                torch.npu.current_stream().synchronize()
-                _sd_ms = (_time.perf_counter() - _sd_t0) * 1000.0
-                print(f"[STEP_DBG] draft_runnable total={_sd_ms:.2f}ms "
-                      f"graph={int(isinstance(self._runnable, ACLGraphWrapper))} "
-                      f"enpu={int(self.enable_enpu)}", flush=True)
         return draft_token_ids
 
     def compute_draft_token_ids(self, hidden_states: torch.Tensor):
