@@ -1045,7 +1045,7 @@ vllm serve /mnt/share/weight/GLM-5.2-W4A8C8-0713-MTP \
                 "kv_role": "kv_consumer",
                 "kv_connector_extra_config": {
                     "lookup_rpc_port":"0",
-		    "load_async": true,
+		            "load_async": true,
                     "backend": "mooncake"
                 }
             }
