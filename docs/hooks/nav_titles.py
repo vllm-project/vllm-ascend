@@ -223,7 +223,7 @@ SECTION_TITLES = {
     "Model Tutorials": {"en": "Model Tutorials", "zh": "模型教程"},
     "Feature Tutorials": {"en": "Feature Tutorials", "zh": "功能教程"},
     "User Guide": {"en": "User Guide", "zh": "用户指南"},
-    "Support Matrix": {"en": "Support Matrix", "zh": "支持矩阵"},
+    "Features and Models": {"en": "Features and Models", "zh": "特性与模型"},
     "Configuration": {"en": "Configuration", "zh": "配置"},
     "Feature Guide": {"en": "Feature Guide", "zh": "特性指南"},
     "Deployment Guide": {"en": "Deployment Guide", "zh": "部署指南"},
