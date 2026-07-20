@@ -41,6 +41,19 @@ def init_speculator(
         )
 
         return AscendDFlashSpeculator(vllm_config, device)
+    # DeepSeek-style MTP reuses the eagle path on Ascend. Guard out
+    # gemma4_mtp / step3p5_mtp (method == "mtp" but distinct draft model_type),
+    # which need their own speculators and are out of scope here.
+    if (
+        speculative_config.method == "mtp"
+        and not speculative_config.use_gemma4_mtp()
+        and not speculative_config.use_step3p5_mtp()
+    ):
+        from vllm_ascend.worker.v2.spec_decode.mtp.speculator import (
+            AscendMTPSpeculator,
+        )
+
+        return AscendMTPSpeculator(vllm_config, device)
     if speculative_config.use_eagle():
         from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 

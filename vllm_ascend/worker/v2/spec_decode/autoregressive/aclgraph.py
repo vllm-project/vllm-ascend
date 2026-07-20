@@ -1,5 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+# Shared Ascend aclgraph managers for speculative decoding. Used by both
+# AscendEagleSpeculator (via the global patch_eagle_speculator) and
+# AscendMTPSpeculator (direct instantiation).
 from collections.abc import Callable
 from typing import Any
 
@@ -29,8 +46,8 @@ from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_s
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
-class PrefillEagleAclGraphManager(PrefillSpeculatorCudaGraphManager):
-    """AclGraphManager for Eagle speculative decoding."""
+class AscendPrefillAclGraphManager(PrefillSpeculatorCudaGraphManager):
+    """Shared aclgraph manager for speculator prefill on Ascend NPUs."""
 
     def __init__(
         self,
@@ -43,13 +60,9 @@ class PrefillEagleAclGraphManager(PrefillSpeculatorCudaGraphManager):
         super().__init__(vllm_config, device, cudagraph_mode, decode_query_len)
 
         # set speculator attribute, so we can access attributes speculator
-        # when call `run_fullgraph` method in CudaGraphManager,
-        # then we don't need to # copy `propose` method in `AscendEagleSpeculator` class.
+        # when call `run_fullgraph` method in CudaGraphManager.
         self.speculator = speculator
-        # The attention backend keys its per-size graph params by the actual
-        # captured token counts (rounded up to decode_query_len when using
-        # speculative decoding), so derive them from the capture descriptors
-        # instead of the raw config sizes.
+        # capture_sizes sorts in ascending order.
         self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
         # vllm-ascend need to update draft graph params of attention backend.
         # so we need to set draft graph params before capture full graph.
@@ -67,7 +80,7 @@ class PrefillEagleAclGraphManager(PrefillSpeculatorCudaGraphManager):
         attn_states: dict[BatchExecutionDescriptor, AttentionStatePair],
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
-        """Capture ACL graphs for Eagle."""
+        """Capture ACL graphs for speculator prefill."""
         with communicator_switch(), model_capture_wrapper(self.speculator, self.is_draft_model_prefill):
             super().capture(
                 forward_fn,
@@ -79,9 +92,9 @@ class PrefillEagleAclGraphManager(PrefillSpeculatorCudaGraphManager):
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
         if self.is_draft_model_prefill:
-            logger.info_once("PrefillEagleAclGraphManager: draft prefill run_fullgraph with num_tokens=%s", num_tokens)
+            logger.info_once("AscendPrefillAclGraphManager: draft prefill run_fullgraph with num_tokens=%s", num_tokens)
         else:
-            logger.info_once("DecodeEagleAclGraphManager: draft run_fullgraph with num_tokens=%s", num_tokens)
+            logger.info_once("AscendDecodeAclGraphManager: draft run_fullgraph with num_tokens=%s", num_tokens)
 
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs, self.is_draft_model_prefill)
 
@@ -121,8 +134,8 @@ class PrefillEagleAclGraphManager(PrefillSpeculatorCudaGraphManager):
         return ret
 
 
-class DecodeEagleAclGraphManager(DecodeSpeculatorCudaGraphManager):
-    """AclGraphManager for Eagle speculative decoding."""
+class AscendDecodeAclGraphManager(DecodeSpeculatorCudaGraphManager):
+    """Shared aclgraph manager for speculator decode on Ascend NPUs."""
 
     def __init__(
         self,
@@ -135,13 +148,9 @@ class DecodeEagleAclGraphManager(DecodeSpeculatorCudaGraphManager):
         super().__init__(vllm_config, device, cudagraph_mode, decode_query_len)
 
         # set speculator attribute, so we can access attributes speculator
-        # when call `run_fullgraph` method in CudaGraphManager,
-        # then we don't need to # copy `propose` method in `AscendEagleSpeculator` class.
+        # when call `run_fullgraph` method in CudaGraphManager.
         self.speculator = speculator
-        # The attention backend keys its per-size graph params by the actual
-        # captured token counts (rounded up to decode_query_len when using
-        # speculative decoding), so derive them from the capture descriptors
-        # instead of the raw config sizes.
+        # capture_sizes sorts in ascending order.
         self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
         # vllm-ascend need to update draft graph params of attention backend.
         # so we need to set draft graph params before capture full graph.
@@ -163,7 +172,7 @@ class DecodeEagleAclGraphManager(DecodeSpeculatorCudaGraphManager):
         kv_cache_config: KVCacheConfig,
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
-        """Capture ACL graphs for Eagle."""
+        """Capture ACL graphs for speculator decode."""
 
         def create_forward_fn(desc: BatchExecutionDescriptor, warmup: bool):
             num_tokens = desc.num_tokens
@@ -198,11 +207,13 @@ class DecodeEagleAclGraphManager(DecodeSpeculatorCudaGraphManager):
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
         if self.is_draft_model_prefill:
-            logger.info_once("PrefillEagleAclGraphManager: draft prefill run_fullgraph with num_tokens=%s", num_tokens)
+            logger.info_once("AscendPrefillAclGraphManager: draft prefill run_fullgraph with num_tokens=%s", num_tokens)
         else:
-            logger.info_once("DecodeEagleAclGraphManager: draft run_fullgraph with num_tokens=%s", num_tokens)
+            logger.info_once("AscendDecodeAclGraphManager: draft run_fullgraph with num_tokens=%s", num_tokens)
 
-        draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs, self.is_draft_model_prefill)
+        draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
+            self.speculator.get_draft_decode_num_reqs_padded(desc), self.is_draft_model_prefill
+        )
 
         ret = super().run_fullgraph(desc)
 

@@ -18,7 +18,10 @@
 
 from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as vllm_speculator_module
 
-from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import DecodeEagleAclGraphManager, PrefillEagleAclGraphManager
+from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import (
+    AscendDecodeAclGraphManager,
+    AscendPrefillAclGraphManager,
+)
 
-vllm_speculator_module.PrefillSpeculatorCudaGraphManager = PrefillEagleAclGraphManager
-vllm_speculator_module.DecodeSpeculatorCudaGraphManager = DecodeEagleAclGraphManager
+vllm_speculator_module.PrefillSpeculatorCudaGraphManager = AscendPrefillAclGraphManager
+vllm_speculator_module.DecodeSpeculatorCudaGraphManager = AscendDecodeAclGraphManager
