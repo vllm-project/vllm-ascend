@@ -50,14 +50,8 @@ def test_ascend_unquantized_skips_upstream_modular_kernel_init():
     assert method.maybe_make_prepare_finalize() is None
 
 
-@pytest.mark.parametrize(
-    "is_v024, expected_contiguous",
-    [(True, True), (False, False)],
-)
 def test_process_weights_after_loading_uses_version_specific_layout(
     monkeypatch,
-    is_v024,
-    expected_contiguous,
 ):
     method = _build_unquantized_method()
     layer = _build_weight_layer()
@@ -65,7 +59,6 @@ def test_process_weights_after_loading_uses_version_specific_layout(
     original_w2 = layer.w2_weight.detach().clone()
     ascend_config = SimpleNamespace(enable_fused_mc2=False)
 
-    monkeypatch.setattr(fused_moe_module, "vllm_version_is", lambda version: is_v024 and version == "0.24.0")
     monkeypatch.setattr(fused_moe_module, "get_ascend_config", lambda: ascend_config)
     monkeypatch.setattr(fused_moe_module, "maybe_trans_nz", lambda weight: weight)
     upstream_method_base = AscendUnquantizedFusedMoEMethod.__mro__[2]
@@ -80,8 +73,8 @@ def test_process_weights_after_loading_uses_version_specific_layout(
 
     torch.testing.assert_close(layer.w13_weight, original_w13.transpose(1, 2))
     torch.testing.assert_close(layer.w2_weight, original_w2.transpose(1, 2))
-    assert layer.w13_weight.is_contiguous() is expected_contiguous
-    assert layer.w2_weight.is_contiguous() is expected_contiguous
+    assert layer.w13_weight.is_contiguous() is False
+    assert layer.w2_weight.is_contiguous() is False
 
 
 @pytest.mark.parametrize("moe_comm_type", [MoECommType.ALLGATHER, MoECommType.FUSED_MC2])

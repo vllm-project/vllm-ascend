@@ -32,8 +32,6 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.sequence import IntermediateTensors
 
-from vllm_ascend.utils import vllm_version_is
-
 
 def _should_skip_indexer_init(
     config: DeepseekV2Config | DeepseekV3Config,
@@ -343,7 +341,7 @@ def _patched_forward(
         combined_states = torch.cat([hidden_states, residual], dim=-1)
         combined_states = tensor_model_parallel_all_gather(combined_states, 0)
         combined_states = combined_states[: positions.shape[0]]
-        hidden_size = self.config.hidden_size if vllm_version_is("0.24.0") else self.hidden_size
+        hidden_size = self.hidden_size
         hidden_states, residual = combined_states.split([hidden_size, hidden_size], dim=-1)
         residual = residual.contiguous()
 

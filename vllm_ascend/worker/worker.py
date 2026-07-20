@@ -71,7 +71,6 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     register_ascend_customop,
     setup_ascend_local_comm_res,
-    vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -159,12 +158,6 @@ class NPUWorker(WorkerBase):
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
         self.use_v2_model_runner = self.vllm_config.use_v2_model_runner
-        if self.use_v2_model_runner and vllm_version_is("0.24.0"):
-            logger.warning(
-                "VLLM_USE_V2_MODEL_RUNNER is supported only on the verified vLLM main commit; "
-                "falling back to the v1 model runner."
-            )
-            self.use_v2_model_runner = False
         self._pp_send_work: list[Handle] = []
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
@@ -681,19 +674,12 @@ class NPUWorker(WorkerBase):
                 WeightTransferEngineFactory,
             )
 
-            if vllm_version_is("0.24.0"):
-                self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
-                    self.vllm_config.weight_transfer_config,
-                    self.vllm_config.parallel_config,
-                    self.model_runner.get_model(),
-                )
-            else:
-                self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
-                    self.vllm_config.weight_transfer_config,
-                    self.vllm_config,
-                    self.device,
-                    self.model_runner.get_model(),
-                )
+            self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
+                self.vllm_config.weight_transfer_config,
+                self.vllm_config,
+                self.device,
+                self.model_runner.get_model(),
+            )
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # Note: need to adapt for graph mode.

@@ -17,18 +17,11 @@
 
 from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend.utils import is_310p, vllm_version_is
-
-# The v2 model runner tracks only the verified vLLM main commit. The v0.24.0
-# release has diverged APIs and is intentionally kept on the v1 runner instead
-# of maintaining a separate v2 compatibility path.
-_V2_MODEL_RUNNER_SUPPORTED = not vllm_version_is("0.24.0")
+from vllm_ascend.utils import is_310p
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
-
-    if _V2_MODEL_RUNNER_SUPPORTED:
-        import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
+    import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
 
 
 import vllm_ascend.patch.worker.patch_process_weights_after_loading  # noqa
@@ -72,15 +65,13 @@ import vllm_ascend.patch.worker.patch_v2.patch_use_v2_model_runner  # noqa
 
 import vllm_ascend.patch.worker.patch_fused_moe  # noqa
 
-if _V2_MODEL_RUNNER_SUPPORTED:
-    import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
-    import vllm_ascend.patch.worker.patch_v2.patch_input_batch  # noqa
-    import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
-    import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
-    import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
-    import vllm_ascend.patch.worker.patch_v2.patch_eagle_speculator  # noqa
-    import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa
+import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
+import vllm_ascend.patch.worker.patch_v2.patch_input_batch  # noqa
+import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
+import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
+import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
+import vllm_ascend.patch.worker.patch_v2.patch_eagle_speculator  # noqa
+import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa
 
 # only patch routed experts capture in main2main.
-if _V2_MODEL_RUNNER_SUPPORTED:
-    import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
+import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa

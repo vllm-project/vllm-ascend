@@ -24,7 +24,7 @@ from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer, wait_until_npu_memory_free
 
-pytestmark = pytest.mark.skip(reason="broken on vLLM v0.24.0 and the verified main commit, fix me.")
+pytestmark = pytest.mark.skip(reason="broken on vLLM v0.25.0 and the verified main commit, fix me.")
 
 
 @pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B")
