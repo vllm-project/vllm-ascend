@@ -556,7 +556,14 @@ class BaseDeviceAdaptor:
                 attention_mode=2,
                 return_softmax_lse=return_lse,
             )
-        return BaseDeviceAdaptor._format_sparse_flash_attention_output(result, return_lse)
+        if not isinstance(result, tuple):
+            if return_lse:
+                raise RuntimeError("Sparse flash attention did not return softmax max/sum for DCP LSE merge.")
+            return result
+        if return_lse:
+            return result
+        else:
+            return result[0]
 
     @staticmethod
     def _execute_kv_quant_sparse_flash_attention(
@@ -594,20 +601,6 @@ class BaseDeviceAdaptor:
             rope_head_dim=getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]),
             return_softmax_lse=return_lse,
         )
-
-    @staticmethod
-    def _format_sparse_flash_attention_output(
-        result: torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-        return_lse: bool,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if not isinstance(result, tuple):
-            if return_lse:
-                raise RuntimeError("Sparse flash attention did not return softmax max/sum for DCP LSE merge.")
-            return result
-        if return_lse:
-            return result
-        else:
-            return result[0]
 
     @staticmethod
     def npu_flash_attention(query, key, value, seq_lens_cpu, head_num, scale_value, num_kv_heads):
