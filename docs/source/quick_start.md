@@ -34,7 +34,7 @@ This section guides you through container-based environment setup and large mode
 
 !!! note "Atlas inference products"
 
-    Atlas inference products use CANN 9.1.0 beta and `float16`. Use the `-310p` image suffix for Ubuntu or `-310p-openeuler` for openEuler. Atlas 300I DUO does not support `triton` or `triton-ascend`.
+    Atlas inference products use CANN 9.1.0 beta and `float16`. Use the `-310p` image suffix for Ubuntu or `-310p-openeuler` for openEuler. Atlas inference products do not support `triton` or `triton-ascend`.
 
     Always set an explicit, conservative `max_model_len`/`--max-model-len` value on Atlas inference products, for example, `--max-model-len 16384`. The current attention path creates a causal mask whose memory usage grows quadratically with the configured context length, so automatic model-length detection can cause out-of-memory errors.
 

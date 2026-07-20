@@ -208,9 +208,9 @@ Then you can install `vllm` and `vllm-ascend` from a **pre-built wheel** using o
 
     If you are building custom operators for Atlas A3, you should run `git submodule update --init --recursive` manually, or ensure your environment has internet access.
 
-    !!! note "Atlas 300I DUO"
+    !!! note "Atlas inference products"
 
-        Atlas 300I DUO does not support `triton` or `triton-ascend`. Source installations can pull these packages as dependencies; remove them before running on Atlas 300I DUO:
+        Atlas inference products do not support `triton` or `triton-ascend`. Source installations can pull these packages as dependencies; remove them before running on Atlas inference products:
 
         ```bash
         pip uninstall -y triton-ascend triton
