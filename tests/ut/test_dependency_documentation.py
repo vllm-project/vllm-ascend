@@ -107,7 +107,9 @@ class DependencyDocumentationTest(unittest.TestCase):
         manual_install_end = installation.index('=== "Before using docker"', manual_install_start)
         manual_install = installation[manual_install_start:manual_install_end]
         export_position = manual_install.index("export ASCEND_TOOLKIT_HOME=")
-        nnal_install_position = manual_install.index('./Ascend-cann-nnal_9.0.0_linux-"$(uname -i)".run --install')
+        nnal_install = re.search(r'^\s*\./Ascend-cann-nnal_[^\n]+\.run --install$', manual_install, flags=re.MULTILINE)
+        self.assertIsNotNone(nnal_install)
+        nnal_install_position = nnal_install.start()
         self.assertLess(export_position, nnal_install_position)
 
 
