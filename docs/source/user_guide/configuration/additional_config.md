@@ -73,6 +73,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
 | `dump_config`                       | dict | `None`  | Inline msprobe dump configuration. vLLM-Ascend will materialize it to a temporary JSON file and pass that file to the debugger. |
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump (compatible legacy option).                                      |
+| `dynamic_dump_config`               | dict | `{}`    | Configuration options for anomaly-triggered dynamic msprobe dump thresholds and rate limits. |
 | `enable_async_exponential`          | bool | `False` | Whether to enable asynchronous exponential overlap. To enable asynchronous exponential, set this config to True.        |
 | `enable_shared_expert_dp`           | bool | `False` | When the expert is shared in DP, it delivers better performance but consumes more memory. Currently only DeepSeek series models are supported. |
 | `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multi-stream shared expert. This option only takes effect on MoE models with shared experts. |
@@ -165,6 +166,18 @@ The details of each configuration option are as follows:
 | `enable_entropy_verify` | bool  | `False` | Whether to enable entropy verify mode. Entropy verify adjusts the acceptance threshold based on the entropy of the target distribution — higher entropy (uncertain) tokens get a lower threshold (easier to accept), while lower entropy (confident) tokens get a stricter threshold. |
 | `posterior_threshold`   | float | `0.95`  | Upper bound for the entropy-adjusted acceptance threshold. Must be in (0, 1]. The effective threshold is `min(exp(-entropy * posterior_alpha), posterior_threshold)`. |
 | `posterior_alpha`       | float | `0.4`   | Scaling factor for entropy in the threshold computation. Must be >= 0. Higher values make the threshold more sensitive to entropy — high-entropy tokens become much easier to accept, improving performance but reducing precision. |
+
+**dynamic_dump_config**
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `mtp_acceptance_window` | int | `10` | Sliding window size used to aggregate MTP acceptance behavior. |
+| `mtp_acceptance_low_threshold` | float | `0.3` | Low acceptance-rate threshold for triggering detailed anomaly logging and dump. |
+| `mtp_acceptance_len_low_threshold` | float | `1.4` | Low accepted-length threshold paired with `mtp_acceptance_low_threshold`. |
+| `mtp_acceptance_high_threshold` | float | `0.96` | High acceptance-rate threshold for triggering detailed anomaly logging and dump. |
+| `mtp_acceptance_len_high_threshold` | float | `2.8` | High accepted-length threshold paired with `mtp_acceptance_high_threshold`. |
+| `msprobe_dump_cooldown_seconds` | int | `300` | Minimum cooldown between two auto-triggered dumps. |
+| `msprobe_dump_max_times` | int | `10` | Maximum number of auto-triggered dumps in one worker lifecycle. |
 
 **short_request_first_config**
 

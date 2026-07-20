@@ -29,7 +29,7 @@ from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
 from multiprocessing import Manager
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -364,21 +364,37 @@ class NPUModelRunner(GPUModelRunner):
         # use_hybrid_blocks: if hybrid blocks is used.
         self.use_hybrid_blocks: bool = False
         self.need_accepted_tokens: bool = False
+        dynamic_dump_config = self.ascend_config.dynamic_dump_config
         self._mtp_acceptance_history: dict[str, deque[tuple[int, int]]] = defaultdict(deque)
-        self._mtp_acceptance_window = 10
+        self._mtp_acceptance_window = dynamic_dump_config.mtp_acceptance_window
         self._current_step_debug_log_full_requests: dict[str, bool] = {}
-        self._mtp_acceptance_low_threshold = 0.3
-        self._mtp_acceptance_len_low_threshold = 1.4
-        self._mtp_acceptance_high_threshold = 0.96
-        self._mtp_acceptance_len_high_threshold = 2.8
-        self._msprobe_dump_cooldown_seconds = 5 * 60
-        self._msprobe_dump_max_times = 10
+        self._mtp_acceptance_low_threshold = dynamic_dump_config.mtp_acceptance_low_threshold
+        self._mtp_acceptance_len_low_threshold = dynamic_dump_config.mtp_acceptance_len_low_threshold
+        self._mtp_acceptance_high_threshold = dynamic_dump_config.mtp_acceptance_high_threshold
+        self._mtp_acceptance_len_high_threshold = dynamic_dump_config.mtp_acceptance_len_high_threshold
+        self._msprobe_dump_cooldown_seconds = dynamic_dump_config.msprobe_dump_cooldown_seconds
+        self._msprobe_dump_max_times = dynamic_dump_config.msprobe_dump_max_times
         self._msprobe_dump_total_count = 0
         self._msprobe_dumped_req_ids: set[str] = set()
         self._msprobe_last_dump_ts: float | None = None
         self._msprobe_dump_changed_by_runner = False
         self._msprobe_dump_restore_value: Any = None
         self._msprobe_dump_disable_delay_rounds = 0
+        logger.info_once(
+            "Dynamic dump config applied: mtp_acceptance_window=%d "
+            "mtp_acceptance_low_threshold=%.4f "
+            "mtp_acceptance_len_low_threshold=%.4f "
+            "mtp_acceptance_high_threshold=%.4f "
+            "mtp_acceptance_len_high_threshold=%.4f "
+            "msprobe_dump_cooldown_seconds=%d msprobe_dump_max_times=%d",
+            self._mtp_acceptance_window,
+            self._mtp_acceptance_low_threshold,
+            self._mtp_acceptance_len_low_threshold,
+            self._mtp_acceptance_high_threshold,
+            self._mtp_acceptance_len_high_threshold,
+            self._msprobe_dump_cooldown_seconds,
+            self._msprobe_dump_max_times,
+        )
 
         self.is_multimodal_model = self.model_config.is_multimodal_model
         self.block_size = vllm_config.cache_config.block_size
@@ -2625,8 +2641,8 @@ class NPUModelRunner(GPUModelRunner):
                 req_idx,
                 req_id,
                 req_state,
+                sampling_metadata=self.input_batch.sampling_metadata,
                 sampled_ids=sampled_ids,
-                draft_token_ids=draft_token_ids,
                 debug_log_full_by_req_id=self._current_step_debug_log_full_requests,
             )
 
@@ -2719,9 +2735,8 @@ class NPUModelRunner(GPUModelRunner):
         req_idx: int,
         req_id: str,
         req_state: Any,
+        sampling_metadata: Any = None,
         sampled_ids: list[int] | torch.Tensor | None = None,
-        draft_token_ids: list[int] | torch.Tensor | None = None,
-        num_invalid_spec_tokens_by_req_id: dict[str, int] | None = None,
         debug_log_full_by_req_id: dict[str, bool] | None = None,
     ) -> None:
         if debug_log_full_by_req_id is not None:
@@ -2737,13 +2752,11 @@ class NPUModelRunner(GPUModelRunner):
             return list(token_ids)
 
         draft_len = getattr(req_state, "prev_num_draft_len", 0) or 0
-        draft_token_ids_len = len(draft_token_ids) if draft_token_ids is not None else 0
-        if draft_len <= 0 or draft_token_ids is None or draft_len != draft_token_ids_len:
+        if draft_len <= 0:
             logger.warning(
-                "[Anomaly MTP] req_id=%s draft_len=%d len(draft_token_ids)=%d",
+                "[Anomaly MTP] req_id=%s draft_len=%d",
                 req_id,
                 draft_len,
-                draft_token_ids_len,
             )
             return
         accepted_tokens = (
@@ -2753,15 +2766,13 @@ class NPUModelRunner(GPUModelRunner):
         )
         accepted_draft_tokens = max(0, accepted_tokens - 1)
         invalid_spec_tokens = 0
-        if num_invalid_spec_tokens_by_req_id is not None:
-            invalid_spec_tokens = int(num_invalid_spec_tokens_by_req_id.get(req_id, 0) or 0)
         effective_draft_len = max(0, draft_len - invalid_spec_tokens)
         history = self._mtp_acceptance_history[req_id]
         history.append((accepted_draft_tokens, effective_draft_len))
         if len(history) > self._mtp_acceptance_window:
             history.popleft()
         prompt_token_ids_raw = getattr(req_state, "prompt_token_ids", None)
-        output_token_ids_raw = getattr(req_state, "output_token_ids", None)
+        output_token_ids_raw = cast(list[list[int]], self.input_batch.req_output_token_ids)
         prompt_token_count = len(prompt_token_ids_raw) if prompt_token_ids_raw is not None else 0
         output_token_count = len(output_token_ids_raw) if output_token_ids_raw is not None else 0
         accepted_sum = sum(accepted for accepted, _ in history)
@@ -2799,7 +2810,6 @@ class NPUModelRunner(GPUModelRunner):
         self._log_mtp_token_details(
             req_id=req_id,
             sampled_ids=_normalize_token_ids(sampled_ids),
-            draft_token_ids=_normalize_token_ids(draft_token_ids),
             accepted_tokens=accepted_tokens,
             prompt_token_ids_raw=prompt_token_ids_raw,
             output_token_ids_raw=output_token_ids_raw,
@@ -2809,7 +2819,6 @@ class NPUModelRunner(GPUModelRunner):
         self,
         req_id: str,
         sampled_ids: list[int],
-        draft_token_ids: list[int],
         accepted_tokens: int,
         prompt_token_ids_raw: Any,
         output_token_ids_raw: Any,
@@ -2821,11 +2830,6 @@ class NPUModelRunner(GPUModelRunner):
             output_token_id.item() if isinstance(output_token_id, torch.Tensor) else output_token_id
             for output_token_id in output_token_ids
         ]
-        logger.info(
-            "[Anomaly MTP] req_id=%s draft_token_ids=%s",
-            req_id,
-            draft_token_ids,
-        )
         logger.info(
             "[Anomaly MTP] req_id=%s sampled_token_ids=%s",
             req_id,
@@ -3047,7 +3051,7 @@ class NPUModelRunner(GPUModelRunner):
                 req_logprob_tokens = None
 
             logger.info(
-                "[Garbled-Per Request SamplingMeta] req_id=%s req_idx=%d "
+                "[SamplingMeta] req_id=%s req_idx=%d "
                 "temperature=%.4f top_k=%s top_p=%.4f "
                 "freq_pen=%.4f pres_pen=%.4f rep_pen=%.4f "
                 "bad_words_group_num=%d output_tokens_len=%d spec_tokens_len=%s logprob_target_tokens_len=%s "

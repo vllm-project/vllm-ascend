@@ -92,6 +92,7 @@ class AscendConfig:
 
         # Dump / PrecisionDebugger configuration
         self.dump_config_path = self._resolve_dump_config_path(additional_config)
+        self.dynamic_dump_config = DynamicDumpConfig(additional_config.get("dynamic_dump_config"))
 
         # Log configuration
         self.ascend_log_path = additional_config.get(
@@ -751,6 +752,109 @@ class RejectionSamplerConfig:
             )
         if self.posterior_alpha < 0:
             raise ValueError(f"rejection_sampler_config.posterior_alpha must be >= 0, got {self.posterior_alpha}")
+
+
+class DynamicDumpConfig:
+    """Configuration for anomaly-triggered msprobe dump behavior.
+
+    Usage (online)::
+
+        vllm serve <model> --additional-config \
+            '{"dynamic_dump_config": {"mtp_acceptance_window": 20}}'
+
+    Usage (offline)::
+
+        llm = LLM(
+            model,
+            additional_config={
+                "dynamic_dump_config": {
+                    "mtp_acceptance_window": 20,
+                }
+            },
+        )
+    """
+
+    _defaults = {
+        "mtp_acceptance_window": 10,
+        "mtp_acceptance_low_threshold": 0.3,
+        "mtp_acceptance_len_low_threshold": 1.4,
+        "mtp_acceptance_high_threshold": 0.96,
+        "mtp_acceptance_len_high_threshold": 2.8,
+        "msprobe_dump_cooldown_seconds": 5 * 60,
+        "msprobe_dump_max_times": 0,
+    }
+
+    def __init__(self, config: dict | None = None):
+        if config is None:
+            config = {}
+        if not isinstance(config, dict):
+            raise ValueError(f"dynamic_dump_config must be a dict, got {type(config).__name__}.")
+
+        self.config = self._defaults.copy()
+        for key, value in config.items():
+            if key not in self.config:
+                raise ValueError(f"dynamic_dump_config has no attribute '{key}'")
+            self.config[key] = value
+
+        self._validate()
+
+    def __getattr__(self, key: str) -> Any:
+        if key in self.config:
+            return self.config[key]
+        raise AttributeError(f"dynamic_dump_config has no attribute '{key}'")
+
+    def _validate(self) -> None:
+        int_fields = (
+            "mtp_acceptance_window",
+            "msprobe_dump_cooldown_seconds",
+            "msprobe_dump_max_times",
+        )
+        positive_int_fields = (
+            "mtp_acceptance_window",
+            "msprobe_dump_cooldown_seconds",
+        )
+        float_fields = (
+            "mtp_acceptance_low_threshold",
+            "mtp_acceptance_len_low_threshold",
+            "mtp_acceptance_high_threshold",
+            "mtp_acceptance_len_high_threshold",
+        )
+
+        for field in int_fields:
+            value = self.config[field]
+            if not isinstance(value, int):
+                raise ValueError(f"dynamic_dump_config.{field} must be an int, got {type(value).__name__}")
+            if field in positive_int_fields and value <= 0:
+                raise ValueError(f"dynamic_dump_config.{field} must be positive, got {value}")
+            else:
+                if value < 0:
+                    raise ValueError(f"dynamic_dump_config.{field} must be non-negative, got {value}")
+
+        for field in float_fields:
+            value = self.config[field]
+            if not isinstance(value, (int, float)):
+                raise ValueError(f"dynamic_dump_config.{field} must be a float, got {type(value).__name__}")
+            self.config[field] = float(value)
+
+        low_rate = self.config["mtp_acceptance_low_threshold"]
+        high_rate = self.config["mtp_acceptance_high_threshold"]
+        low_len = self.config["mtp_acceptance_len_low_threshold"]
+        high_len = self.config["mtp_acceptance_len_high_threshold"]
+
+        if not 0 <= low_rate <= 1:
+            raise ValueError(f"dynamic_dump_config.mtp_acceptance_low_threshold must be in [0, 1], got {low_rate}")
+        if not 0 <= high_rate <= 1:
+            raise ValueError(f"dynamic_dump_config.mtp_acceptance_high_threshold must be in [0, 1], got {high_rate}")
+        if low_rate > high_rate:
+            raise ValueError(
+                "dynamic_dump_config.mtp_acceptance_low_threshold must be <= "
+                "dynamic_dump_config.mtp_acceptance_high_threshold"
+            )
+        if low_len > high_len:
+            raise ValueError(
+                "dynamic_dump_config.mtp_acceptance_len_low_threshold must be <= "
+                "dynamic_dump_config.mtp_acceptance_len_high_threshold"
+            )
 
 
 class EplbConfig:
