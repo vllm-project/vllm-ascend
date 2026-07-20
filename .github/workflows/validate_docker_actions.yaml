@@ -160,23 +160,37 @@ jobs:
           echo "JSON: ${{ steps.meta.outputs.json }}"
           test -n "${{ steps.meta.outputs.tags }}" && echo "metadata OK" || echo "metadata FAILED"
 
-      - name: Set up QEMU (cross-arch, amd64 only)
+      - name: Check Docker daemon (same job)
+        id: check-docker
+        run: |
+          if docker info &> /dev/null; then
+            echo "docker-ready=true" >> $GITHUB_OUTPUT
+            docker info --format 'Server: {{.ServerVersion}}' 2>/dev/null
+          else
+            echo "docker-ready=false" >> $GITHUB_OUTPUT
+            echo "::warning::Docker daemon not available on this runner instance"
+          fi
+
+      - name: Set up QEMU (cross-arch, only if Docker daemon available)
         uses: docker/setup-qemu-action@v4
-        if: ${{ runner.arch == 'X64' || contains(matrix.runner, 'amd64') }}
+        if: ${{ steps.check-docker.outputs.docker-ready == 'true' && (runner.arch == 'X64' || contains(matrix.runner, 'amd64')) }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
+        if: steps.check-docker.outputs.docker-ready == 'true'
         with:
           driver-opts: |
             network=host
 
       - name: Verify Buildx
+        if: steps.check-docker.outputs.docker-ready == 'true'
         run: |
           docker buildx inspect --bootstrap
           docker buildx ls
           echo "buildx setup OK"
 
       - name: Login to GitHub Container Registry
+        if: steps.check-docker.outputs.docker-ready == 'true'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
