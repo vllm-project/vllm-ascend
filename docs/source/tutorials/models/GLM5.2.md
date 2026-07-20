@@ -121,7 +121,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-vllm serve /mnt/weight/GLM-5.2-W4A8C8-0713-MTP \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --host 0.0.0.0 \
 --port 8077 \
 --api-server-count 1 \
@@ -129,7 +129,7 @@ vllm serve /mnt/weight/GLM-5.2-W4A8C8-0713-MTP \
 --enable-expert-parallel \
 --tensor-parallel-size 8 \
 --seed 1024 \
---served-model-name glm-5 \
+--served-model-name glm-52 \
 --tool-call-parser glm47 \
 --reasoning-parser glm45 \
 --enable-auto-tool-choice \
@@ -188,7 +188,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-    vllm serve /mnt/weight/GLM-5.2-W4A8C8-0713-MTP \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
     --host 0.0.0.0 \
     --port 8077 \
     --api-server-count 1 \
@@ -199,7 +199,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --data-parallel-rpc-port 12980 \
     --tensor-parallel-size 4 \
     --seed 1024 \
-    --served-model-name glm-5 \
+    --served-model-name glm-52 \
     --tool-call-parser glm47 \
     --reasoning-parser glm45 \
     --enable-auto-tool-choice \
@@ -210,7 +210,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --gpu-memory-utilization 0.92 \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_dsa_cp": true,"enable_sparse_c8": true,"enable_balance_scheduling": true,"fuse_muls_add":true}' \
+    --additional-config '{"enable_dsa_cp": true,"enable_sparse_c8": true,"enable_balance_scheduling": true}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
 
@@ -237,7 +237,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-    vllm serve /mnt/weight/GLM-5.2-W4A8C8-0713-MTP \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
     --host 0.0.0.0 \
     --port 8077 \
     --api-server-count 1 \
@@ -248,7 +248,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --data-parallel-rpc-port 12980 \
     --tensor-parallel-size 4 \
     --seed 1024 \
-    --served-model-name glm-5 \
+    --served-model-name glm-52 \
     --tool-call-parser glm47 \
     --reasoning-parser glm45 \
     --enable-auto-tool-choice \
@@ -259,7 +259,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --gpu-memory-utilization 0.92 \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_dsa_cp": true,"enable_sparse_c8": true,"enable_balance_scheduling": true,"fuse_muls_add":true}' \
+    --additional-config '{"enable_dsa_cp": true,"enable_sparse_c8": true,"enable_balance_scheduling": true}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
 
@@ -644,7 +644,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 
-        vllm serve /mnt/weight/GLM-5.2-W4A8C8-0713-MTP \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -655,7 +655,7 @@ Before you start, please
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens":1, "method":"deepseek_mtp","enforce_eager":true}' \
             --seed 1024 \
-            --served-model-name glm-5 \
+            --served-model-name glm-52 \
             --max-model-len 133120 \
             --additional-config '{"recompute_scheduler_enable" : false, "enable_dsa_cp":true,"enable_sparse_c8": true,"c8_enable_reshape_optim":True}' \
             --max-num-batched-tokens 8192 \
@@ -714,7 +714,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 
-        vllm serve /mnt/weight/GLM-5.2-W4A8C8-0713-MTP \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -725,7 +725,7 @@ Before you start, please
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens":1, "method":"deepseek_mtp","enforce_eager":true}' \
             --seed 1024 \
-            --served-model-name glm-5 \
+            --served-model-name glm-52 \
             --max-model-len 133120 \
             --additional-config '{"recompute_scheduler_enable" : false,"enable_dsa_cp":true,"enable_sparse_c8": true,"c8_enable_reshape_optim":True}' \
             --max-num-batched-tokens 8192 \
@@ -781,7 +781,7 @@ Before you start, please
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-        vllm serve /mnt/weight/GLM-5.2-W4A8C8-0713-MTP \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -791,7 +791,7 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --seed 1024 \
-            --served-model-name glm-5 \
+            --served-model-name glm-52 \
             --max-model-len 133120 \
             --max-num-batched-tokens 164 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
@@ -849,7 +849,7 @@ Before you start, please
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-        vllm serve /mnt/weight/GLM-5.2-W4A8C8-0713-MTP \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -859,7 +859,7 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --seed 1024 \
-            --served-model-name glm-5 \
+            --served-model-name glm-52 \
             --max-model-len 133120 \
             --max-num-batched-tokens 164 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
@@ -903,7 +903,7 @@ Before you start, please
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 8 --tp-size 4  --dp-size-local 4 --dp-rank-start 1 --dp-address $node_p0_ip --dp-rpc-port 16591 --vllm-start-port 9081
+    python launch_online_dp.py --dp-size 8 --tp-size 4  --dp-size-local 4 --dp-rank-start 4 --dp-address $node_p0_ip --dp-rpc-port 16591 --vllm-start-port 9081
     ```
 
 3. Decode node 0
@@ -917,7 +917,7 @@ Before you start, please
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 4 --dp-address $node_d0_ip --dp-rpc-port 16600 --vllm-start-port 9900
+    python launch_online_dp.py --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 8 --dp-address $node_d0_ip --dp-rpc-port 16600 --vllm-start-port 9900
     ```
 
         
