@@ -942,15 +942,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
         attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args)
 
-        # MTP draft always runs in decode-like mode (1 token per request)
-        # regardless of the target model's attention state. During chunked
-        # prefill the common_attn_metadata inherits ChunkedPrefill from the
-        # target, which makes the PA gate in forward_impl fail for 512-dim
-        # global attention heads (Gemma4), routing them through the dense-KV-
-        # gather prefill fallback (_gather_paged_kv_to_dense) that OOMs on
-        # long sequences. Override to SpecDecoding so all draft attention
-        # heads route through PA/FIA correctly. Subsequent draft steps are
-        # already handled by attn_update_stack_num_spec_norm (line 1724).
+        # MTP draft runs in decode-like mode (1 token per request per step)
+        # regardless of the target's attention state. Without this override
+        # the draft inherits ChunkedPrefill from the target during chunked
+        # prefill, causing incorrect attention routing.
         if self.method == "mtp":
             attn_metadata.attn_state = AscendAttentionState.SpecDecoding
 
