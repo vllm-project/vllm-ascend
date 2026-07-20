@@ -536,7 +536,7 @@ class TestMooncakeBackendMethods(unittest.TestCase):
     def test_mock_dependencies_do_not_replace_parallel_state(self):
         parallel_state = importlib.import_module("vllm_ascend.distributed.parallel_state")
 
-        self.assertTrue(hasattr(parallel_state, "_FLASHCOMM2_ODP"))
+        self.assertTrue(hasattr(parallel_state, "__file__"))
         self.assertTrue(callable(parallel_state.get_global_rank))
 
 

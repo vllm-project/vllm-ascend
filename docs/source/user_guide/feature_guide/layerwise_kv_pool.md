@@ -31,6 +31,20 @@ Layerwise mode splits the save/load at the layer granularity:
 The net effect: save/load latency is amortized across the forward pass rather
 than concentrated as a single blocking step.
 
+### Chunked Prefill
+
+Mooncake layerwise mode keeps its read-session state across chunked-prefill
+scheduler steps. Before each chunk, the Worker calls `batch_get_start` with the
+request's accumulated load keys. This renews existing leases and opens sessions
+for keys that became COMPLETE after the previous chunk. The current chunk opens
+put sessions only for its new save keys and publishes successful keys with
+`batch_put_end` after the final layer write.
+
+Intermediate chunks do not call `batch_get_end`. On the last chunk, the Worker
+releases the request after its final ranged read. When concurrently scheduled
+requests share a prefix key, the Worker tracks every active request owner and
+calls `batch_get_end` only after the last owner releases that key.
+
 ## Prerequisites
 
 Layerwise mode supports the **memcache** and **Mooncake** backends. The
@@ -246,7 +260,8 @@ Mooncake layerwise uses Client-owned put/get sessions and ranged copies. The
 remote object offset for cache segment `j` is
 `layer_id * page_size_bytes + layer_inner_offset[j]`; the local pointer is
 `layer_base_addr[j] + block_id * block_stride[j]`. The Client/Master default
-lease TTL owns the read-session lifetime. Mooncake transfer splitting is not
+lease TTL must cover one chunk's ranged reads; each later chunk renews the
+accumulated keys with `batch_get_start`. Mooncake transfer splitting is not
 supported in this initial implementation.
 
 SSD selection remains controlled by the existing Mooncake configuration.

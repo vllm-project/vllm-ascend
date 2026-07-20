@@ -1161,11 +1161,11 @@ class LayerTransferTask:
     layer_id: int
     block_ranges: list[LayerBlockRange]
     shared_block_data: SharedBlockData | None = None
-    group_id: int = 0
-    layer_idx_in_group: int = 0
     # Cache for KVCacheStoreKeyLayerSendingThread:
     # maps block_range index -> list of (start, end, key_all_layers)
     cached_process_tokens: dict[int, list[tuple[int, int, list]]] | None = None
+    group_id: int = 0
+    layer_idx_in_group: int = 0
     # Batch kind is independent of whether session setup filtered every key.
     use_key_major_ranges: bool = False
 

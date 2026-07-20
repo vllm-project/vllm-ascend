@@ -47,6 +47,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVTransferThread,
     LayerBatchBuilder,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mooncake_session_tracker import (
+    MooncakeSessionTracker,
+)
 
 
 class FakeStore:
@@ -1039,6 +1042,21 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
         self.assertEqual(store.commit_calls, [["key-1", "key-2"]])
         self.assertEqual(store.revoke_calls, [["key-2"]])
         self.assertEqual(started_keys, set())
+
+    def test_commit_promotes_only_successful_keys_to_future_loads(self):
+        thread, store, _ = self._make_thread(num_layers=1)
+        tracker = MooncakeSessionTracker()
+        tracker.register_put_keys("r1", [("key-1", 0), ("key-2", 1)])
+        thread._session_tracker = tracker
+        store.commit_results = [[0, -1]]
+        store.revoke_results = [[0]]
+
+        self._run_task(thread, self._make_task(thread, 0))
+
+        self.assertEqual(
+            tracker.prepare_load_entries("r1", []),
+            [("key-1", 0)],
+        )
 
     def test_commit_error_results_revoke_all_active_keys_and_clear_tracker(self):
         cases = (
