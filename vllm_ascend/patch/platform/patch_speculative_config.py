@@ -3,8 +3,6 @@ from typing import TYPE_CHECKING, Any
 from vllm.config.speculative import SpeculativeConfig
 from vllm.utils.import_utils import LazyLoader
 
-from vllm_ascend.utils import vllm_version_is
-
 _orig_post_init = SpeculativeConfig.__post_init__
 
 if TYPE_CHECKING:
@@ -140,7 +138,7 @@ def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
 
 def _dspark_post_init(self):
     _orig_post_init(self)
-    if not vllm_version_is("0.24.0") and self.use_dspark():
+    if self.use_dspark():
         draft_model_config = getattr(self, "draft_model_config", None)
         draft_hf_config = getattr(draft_model_config, "hf_config", None)
         # deepseek v4 dspark
