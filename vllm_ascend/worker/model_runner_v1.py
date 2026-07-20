@@ -2429,18 +2429,9 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
-        # MTP: Record NPU event after target forward completes, so the draft
-        # model can wait on it before reading the KV cache. Required when
-        # the target model runs in FDO graph mode because reshape_and_cache
-        # KV writes are async on the NPU stream.
-        _target_is_fdo = self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        # Only Gemma4 MTP reads the target's KV cache and needs event sync;
-        # Eagle/DFlash/etc. own their KV cache and are skipped by the gate.
-        if (
-            _target_is_fdo
-            and getattr(self, "drafter", None) is not None
-            and isinstance(self.drafter, AscendGemma4Proposer)
-        ):
+        # Gemma4 MTP reads the target's KV cache; record an NPU event so the
+        # draft can wait on the target's async KV writes before reading.
+        if getattr(self, "drafter", None) is not None and isinstance(self.drafter, AscendGemma4Proposer):
             self.drafter.notify_target_forward_done()
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
