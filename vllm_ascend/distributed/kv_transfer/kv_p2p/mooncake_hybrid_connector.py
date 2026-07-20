@@ -88,6 +88,7 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     block_lens: list[int]
     ssm_sizes: tuple[int, int]
     local_ip: str = ""
+    side_channel_port: int = 0
 
 
 @dataclass
@@ -1476,6 +1477,7 @@ class MooncakeConnectorScheduler:
             self.multi_nodes_meta_mapping[str(local_rank)] = {
                 "host": rank_metadata.local_ip,
                 "engine_id": rank_metadata.engine_id,
+                "side_channel_port": getattr(rank_metadata, "side_channel_port", 0),
             }
 
 
@@ -1696,6 +1698,7 @@ class MooncakeConnectorWorker:
             block_lens=self.block_len_per_addr,
             ssm_sizes=self._mamba_ssm_size,
             local_ip=get_ip(),
+            side_channel_port=self.side_channel_port,
         )
         self.xfer_handshake_metadata = metadata
 
@@ -1788,10 +1791,11 @@ class MooncakeConnectorWorker:
             if self.use_mamba:
                 assert self.kv_recv_thread is not None
                 chosen_rank_list = self._get_remote_rank(remote_req_id, prefill_tp_size)
-                remote_handshake_port_list = [[x + meta.remote_port] for x in chosen_rank_list]
-                remote_host, remote_engine_id = self._get_remote_host_info_by_port(
-                    meta.remote_port,
-                    remote_handshake_port_list[0][0],
+                remote_handshake_port_list = [[self._compute_remote_handshake_port(x, meta)] for x in chosen_rank_list]
+                # Use rank from chosen_rank_list directly for host lookup
+                rank = chosen_rank_list[0]
+                remote_host, remote_engine_id = self._get_remote_host_info_by_rank(
+                    rank,
                     meta.remote_host,
                     meta.remote_engine_id,
                     meta.remote_multi_nodes_meta_mapping,
@@ -1810,12 +1814,12 @@ class MooncakeConnectorWorker:
                 )
             else:  # TODO: support prefill context parallel and pipeline parallel open at the same time
                 chosen_rank_list = self._get_remote_rank(remote_req_id, prefill_tp_size)
-                remote_handshake_port_list = [[x + meta.remote_port] for x in chosen_rank_list]
+                remote_handshake_port_list = [[self._compute_remote_handshake_port(x, meta)] for x in chosen_rank_list]
                 for i in range(tp_num_need_pulls * self._prefill_pp_size):
                     assert self.kv_recv_thread is not None
-                    remote_host, remote_engine_id = self._get_remote_host_info_by_port(
-                        meta.remote_port,
-                        remote_handshake_port_list[i][0],
+                    rank = chosen_rank_list[i]
+                    remote_host, remote_engine_id = self._get_remote_host_info_by_rank(
+                        rank,
                         meta.remote_host,
                         meta.remote_engine_id,
                         meta.remote_multi_nodes_meta_mapping,
@@ -1864,18 +1868,34 @@ class MooncakeConnectorWorker:
             tp_num_need_pulls = num_d_block_heads // num_p_block_heads
         return tp_num_need_pulls
 
-    def _get_remote_host_info_by_port(
+    def _compute_remote_handshake_port(self, rank: int, meta) -> int:
+        """Compute the correct handshake port for a given rank.
+
+        In multi-node PP, different nodes have different base ports (side_channel_port).
+        This method uses the per-rank side_channel_port from multi_nodes_meta_mapping
+        instead of assuming all ranks share the same base port (meta.remote_port).
+        """
+        mapping = getattr(meta, "remote_multi_nodes_meta_mapping", None)
+        if mapping is not None:
+            rank_info = mapping.get(str(rank))
+            if rank_info is not None:
+                node_base_port = rank_info.get("side_channel_port", 0)
+                if node_base_port > 0:
+                    return node_base_port + rank
+        return meta.remote_port + rank
+
+    def _get_remote_host_info_by_rank(
         self,
-        base_port: int,
-        remote_handshake_port: int,
+        rank: int,
         remote_host: str,
         remote_engine_id: str,
         remote_multi_nodes_meta_mapping: dict,
     ):
-        rank = str(remote_handshake_port - base_port)
-        if remote_multi_nodes_meta_mapping is None or remote_multi_nodes_meta_mapping.get(rank) is None:
+        """Look up host and engine_id for a given rank from the multi_nodes_meta_mapping."""
+        rank_str = str(rank)
+        if remote_multi_nodes_meta_mapping is None or remote_multi_nodes_meta_mapping.get(rank_str) is None:
             return remote_host, remote_engine_id
-        info = remote_multi_nodes_meta_mapping[rank]
+        info = remote_multi_nodes_meta_mapping[rank_str]
         return info.get("host", remote_host), info.get("engine_id", remote_engine_id)
 
     def _prefill_get_remote_rank(self, req_id: str) -> list[int]:

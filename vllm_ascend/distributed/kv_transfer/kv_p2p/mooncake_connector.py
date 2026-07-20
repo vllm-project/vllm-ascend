@@ -104,6 +104,7 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     block_lens: list[list[int]]
     block_strides: list[list[int]]
     local_ip: str = ""
+    side_channel_port: int = 0
     handshake_port: int = 0
 
 
@@ -1855,6 +1856,7 @@ class MooncakeConnectorScheduler:
             updated_mapping[str(port_offset)] = {
                 "host": rank_metadata.local_ip,
                 "engine_id": rank_metadata.engine_id,
+                "side_channel_port": getattr(rank_metadata, "side_channel_port", 0),
             }
 
         self.multi_nodes_meta_mapping.update(updated_mapping)
@@ -2319,6 +2321,7 @@ class MooncakeConnectorWorker:
             block_lens=self.block_len_per_addr,
             block_strides=self.block_stride_per_addr,
             local_ip=get_ip(),
+            side_channel_port=self.side_channel_port,
             handshake_port=self.handshake_port,
         )
         self.xfer_handshake_metadata = metadata
@@ -2597,7 +2600,7 @@ class MooncakeConnectorWorker:
             else:
                 chosen_rank_list = self._get_remote_rank(req_id, prefill_tp_size)
 
-            remote_handshake_port_list = [[x + meta.remote_port for x in chosen_rank_list]]
+            remote_handshake_port_list = [[self._compute_remote_handshake_port(x, meta) for x in chosen_rank_list]]
             # No CP: expand logical blocks into kernel blocks here so the transfer
             # stage consumes kernel-level ids directly (chunk_starts no longer needed).
             local_block_ids: list[list[int]] = [[] for _ in meta.local_block_ids]
@@ -2730,7 +2733,10 @@ class MooncakeConnectorWorker:
                     remote_host = meta.remote_host
                 else:
                     remote_host = remote_host_info["host"]
-                remote_port_send_num[meta.remote_port + port_offset] = {"num": 0, "host": remote_host}
+                remote_port_send_num[self._compute_remote_handshake_port(port_offset, meta)] = {
+                    "num": 0,
+                    "host": remote_host,
+                }
 
             for remote_port_head_list in local_remote_block_port_mappings.values():
                 for remote_port_list in remote_port_head_list:
@@ -3232,9 +3238,9 @@ class MooncakeConnectorWorker:
             for pcp_dcp_rank, remote_ports in enumerate(remote_handshake_port_list):
                 for remote_tp_offset, remote_handshake_port in enumerate(remote_ports):
                     assert self.kv_recv_thread is not None
-                    remote_host, remote_engine_id = self._get_remote_host_info_by_port(
-                        meta.remote_port,
-                        remote_handshake_port,
+                    rank = self._get_rank_from_port(remote_handshake_port, meta)
+                    remote_host, remote_engine_id = self._get_remote_host_info_by_rank(
+                        rank,
                         meta.remote_host,
                         meta.remote_engine_id,
                         meta.remote_multi_nodes_meta_mapping,
@@ -3288,19 +3294,98 @@ class MooncakeConnectorWorker:
             tp_num_need_pulls = num_d_block_heads // num_p_block_heads
         return tp_num_need_pulls
 
-    def _get_remote_host_info_by_port(
+    def _compute_remote_handshake_port(self, rank_or_port_offset: int, meta) -> int:
+        """Compute the correct handshake port for a given rank or port offset.
+
+        In multi-node PP, different nodes have different base ports (side_channel_port).
+        This method uses the per-node side_channel_port from multi_nodes_meta_mapping
+        instead of assuming all ranks share the same base port (meta.remote_port).
+
+        The mapping is keyed by port_offset (= handshake_port - kv_port), so:
+        handshake_port = port_offset + kv_port.
+
+        Args:
+            rank_or_port_offset: The rank (device index) or port offset
+            meta: The ReqMeta object containing remote_port and remote_multi_nodes_meta_mapping
+
+        Returns:
+            The correct handshake port.
+        """
+        mapping = getattr(meta, "remote_multi_nodes_meta_mapping", None)
+        kv_port = self.vllm_config.kv_transfer_config.kv_port
+        if mapping is not None:
+            # Direct lookup by port_offset (mapping key in main branch)
+            rank_info = mapping.get(str(rank_or_port_offset))
+            if rank_info is not None:
+                node_base_port = rank_info.get("side_channel_port", 0)
+                if node_base_port > 0:
+                    # port_offset = handshake_port - kv_port => handshake_port = port_offset + kv_port
+                    return rank_or_port_offset + kv_port
+            # Iterative lookup by device_index (for rank-based calls)
+            for key, info in mapping.items():
+                try:
+                    port_offset = int(key)
+                except (ValueError, TypeError):
+                    continue
+                node_base_port = info.get("side_channel_port", 0)
+                if node_base_port > 0:
+                    handshake_port = port_offset + kv_port
+                    device_index = handshake_port - node_base_port
+                    if device_index == rank_or_port_offset:
+                        return handshake_port
+        # Fallback: use the original base port (P0's side_channel_port)
+        return meta.remote_port + rank_or_port_offset
+
+    def _get_remote_host_info_by_rank(
         self,
-        base_port: int,
-        remote_handshake_port: int,
+        rank: int,
         remote_host: str,
         remote_engine_id: str,
         remote_multi_nodes_meta_mapping: dict,
     ):
-        rank = str(remote_handshake_port - base_port)
-        if remote_multi_nodes_meta_mapping is None or remote_multi_nodes_meta_mapping.get(rank) is None:
+        """Look up host and engine_id for a given rank from the multi_nodes_meta_mapping.
+
+        The mapping is keyed by port_offset (= handshake_port - kv_port), so we
+        compute device_index = (port_offset + kv_port) - side_channel_port to match
+        the given rank.
+        """
+        kv_port = self.vllm_config.kv_transfer_config.kv_port
+        if remote_multi_nodes_meta_mapping is None:
             return remote_host, remote_engine_id
-        info = remote_multi_nodes_meta_mapping[rank]
-        return info.get("host", remote_host), info.get("engine_id", remote_engine_id)
+        for key, info in remote_multi_nodes_meta_mapping.items():
+            node_base_port = info.get("side_channel_port", 0)
+            if node_base_port > 0:
+                try:
+                    port_offset = int(key)
+                except (ValueError, TypeError):
+                    continue
+                handshake_port = port_offset + kv_port
+                device_index = handshake_port - node_base_port
+                if device_index == rank:
+                    return info.get("host", remote_host), info.get("engine_id", remote_engine_id)
+        return remote_host, remote_engine_id
+
+    def _get_rank_from_port(self, port: int, meta) -> int:
+        """Derive the rank (device_index) from a handshake port number.
+
+        Tries to find the rank whose side_channel_port produces the given port.
+        Falls back to (port - meta.remote_port) if no match found.
+        """
+        mapping = getattr(meta, "remote_multi_nodes_meta_mapping", None)
+        kv_port = self.vllm_config.kv_transfer_config.kv_port
+        if mapping is not None:
+            for key, rank_info in mapping.items():
+                node_base_port = rank_info.get("side_channel_port", 0)
+                if node_base_port > 0:
+                    try:
+                        port_offset = int(key)
+                    except (ValueError, TypeError):
+                        continue
+                    handshake_port = port_offset + kv_port
+                    if handshake_port == port:
+                        return handshake_port - node_base_port
+        # Fallback: derive rank assuming P0's base port
+        return port - meta.remote_port
 
     def _prefill_get_remote_rank(self, req_id: str) -> list[int]:
         if self._is_hma_required:
