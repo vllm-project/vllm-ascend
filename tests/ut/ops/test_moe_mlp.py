@@ -21,6 +21,8 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEMlpComputeInput,
     MoEQuantParams,
     MoEWeights,
+    build_fused_experts_input,
+    build_mlp_compute_input,
 )
 from vllm_ascend.ops.fused_moe.moe_stage_params import MoEMxfpParams
 from vllm_ascend.quantization.quant_type import QuantType
@@ -76,6 +78,41 @@ class TestW4A8RuntimeFlags(unittest.TestCase):
 
 
 class TestUnifiedApplyMlpRequest(unittest.TestCase):
+    def test_build_mlp_input_propagates_swigluoai_params(self):
+        hidden_states = torch.randn(2, 8)
+        fused_input = build_fused_experts_input(
+            hidden_states=hidden_states,
+            topk_weights=torch.ones(2, 1),
+            topk_ids=torch.zeros(2, 1, dtype=torch.int64),
+            w1=torch.randn(1, 16, 8),
+            w2=torch.randn(1, 8, 8),
+            quant_type=QuantType.NONE,
+            dynamic_eplb=False,
+            activation="swigluoai_uninterleave",
+            swiglu_limit=7.0,
+            swiglu_alpha=1.702,
+            swiglu_beta=0.5,
+        )
+        token_output = SimpleNamespace(
+            hidden_states=hidden_states,
+            group_list=torch.tensor([2], dtype=torch.int64),
+            group_list_type=1,
+            dynamic_scale=None,
+            topk_scales=None,
+            combine_metadata=SimpleNamespace(expanded_row_idx=None),
+        )
+
+        mlp_input = build_mlp_compute_input(
+            fused_experts_input=fused_input,
+            token_dispatch_output=token_output,
+            use_fusion_ops=True,
+        )
+
+        self.assertEqual(mlp_input.activation, "swigluoai_uninterleave")
+        self.assertEqual(mlp_input.swiglu_limit, 7.0)
+        self.assertEqual(mlp_input.swiglu_alpha, 1.702)
+        self.assertEqual(mlp_input.swiglu_beta, 0.5)
+
     def test_unquant_apply_mlp_wraps_tensor_weights_for_grouped_matmul(self):
         hidden_states = torch.randn(2, 8)
         gate_up_out = torch.randn(2, 16)
@@ -109,6 +146,51 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
         self.assertEqual(len(second_call.kwargs["weight"]), 1)
         self.assertEqual(first_call.kwargs["weight"][0].shape, torch.Size([2, 16, 8]))
         self.assertEqual(second_call.kwargs["weight"][0].shape, torch.Size([2, 8, 8]))
+
+    def test_unquant_swigluoai_uninterleave_uses_clipped_swiglu(self):
+        hidden_states = torch.randn(2, 8)
+        gate_up_out = torch.randn(2, 16)
+        clipped_out = torch.randn(2, 8)
+        expected = torch.randn(2, 8)
+
+        with (
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.torch_npu.npu_grouped_matmul",
+                side_effect=[[gate_up_out], [expected]],
+                create=True,
+            ) as mock_grouped_matmul,
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.torch_npu.npu_clipped_swiglu",
+                return_value=clipped_out,
+                create=True,
+            ) as mock_clipped_swiglu,
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.torch_npu.npu_swiglu",
+                create=True,
+            ) as mock_swiglu,
+        ):
+            output, _ = unquant_apply_mlp(
+                hidden_states=hidden_states,
+                w1=torch.randn(1, 16, 8),
+                w2=torch.randn(1, 8, 8),
+                group_list=torch.tensor([2], dtype=torch.int64),
+                activation="swigluoai_uninterleave",
+                need_trans=False,
+                swiglu_limit=6.0,
+                swiglu_alpha=1.25,
+                swiglu_beta=0.125,
+            )
+
+        self.assertTrue(output is expected)
+        mock_clipped_swiglu.assert_called_once_with(
+            gate_up_out,
+            interleaved=False,
+            alpha=1.25,
+            limit=6.0,
+            bias=0.125,
+        )
+        mock_swiglu.assert_not_called()
+        self.assertIs(mock_grouped_matmul.call_args_list[1].kwargs["x"][0], clipped_out)
 
     def test_request_unquant_path(self):
         hidden_states = torch.randn(2, 8)
@@ -226,6 +308,42 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
         self.assertTrue(output is expected)
         quant_kwargs = mock_quant.call_args.kwargs
         self.assertTrue(quant_kwargs["use_w4a8_per_channel_gmm_swiglu"])
+        mock_unquant.assert_not_called()
+
+    def test_request_quant_path_passes_swigluoai_uninterleave_params(self):
+        expected = torch.randn(1, 2)
+        mlp_compute_input = MoEMlpComputeInput(
+            hidden_states=torch.ones((1, 2), dtype=torch.float32),
+            group_list=torch.tensor([1], dtype=torch.int64),
+            group_list_type=1,
+            dynamic_scale=None,
+            topk_scales=None,
+            weights=MoEWeights(
+                w1=[torch.ones((1, 2, 4), dtype=torch.float32)],
+                w2=[torch.ones((1, 2, 2), dtype=torch.float32)],
+                w1_scale=[torch.ones((1,), dtype=torch.float32)],
+                w2_scale=[torch.ones((1,), dtype=torch.float32)],
+            ),
+            quant=MoEQuantParams(quant_type=QuantType.W8A8),
+            fusion=True,
+            activation="swigluoai_uninterleave",
+            swiglu_limit=6.0,
+            swiglu_alpha=1.25,
+            swiglu_beta=0.125,
+        )
+
+        with (
+            patch("vllm_ascend.ops.fused_moe.moe_mlp.quant_apply_mlp", return_value=expected) as mock_quant,
+            patch("vllm_ascend.ops.fused_moe.moe_mlp.unquant_apply_mlp") as mock_unquant,
+        ):
+            output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+
+        self.assertTrue(output is expected)
+        quant_kwargs = mock_quant.call_args.kwargs
+        self.assertEqual(quant_kwargs["activation"], "swigluoai_uninterleave")
+        self.assertEqual(quant_kwargs["swiglu_limit"], 6.0)
+        self.assertEqual(quant_kwargs["swiglu_alpha"], 1.25)
+        self.assertEqual(quant_kwargs["swiglu_beta"], 0.125)
         mock_unquant.assert_not_called()
 
     def test_request_quant_path_passes_swiglustep_activation(self):

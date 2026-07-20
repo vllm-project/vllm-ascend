@@ -31,6 +31,7 @@ Conventions for UT directories:
 """
 
 import importlib.util
+import os
 import subprocess
 import sys
 import types
@@ -81,6 +82,7 @@ if not _npu_available:
     except RuntimeError:
         pass
     torch.npu = MagicMock()
+    torch.npu.is_available = MagicMock(return_value=False)
     torch.npu.Stream = MagicMock
     torch.version.cann = None
     torch.distributed.is_hccl_available = MagicMock(return_value=True)
@@ -105,6 +107,10 @@ if not _npu_available:
     sys.modules["torch_npu"]._npu_flash_attention = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"]._npu_paged_attention_splitfuse = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"]._npu_reshape_and_cache = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"].npu_scatter_pa_kv_cache = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"].npu_gather_pa_kv_cache = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"].npu_fused_infer_attention_score = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"]._npu_fused_infer_attention_score_get_max_workspace = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_moe_gating_top_k_softmax = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_quant_matmul = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_rms_norm = MagicMock()  # type: ignore[attr-defined]
@@ -127,6 +133,19 @@ _stale_modules = [
 ]
 for _m in _stale_modules:
     del sys.modules[_m]
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--msa-m3-sparse-backend",
+        action="store",
+        default=os.environ.get("MINIMAX_M3_SPARSE_BACKEND", "triton"),
+        choices=("triton", "torch_npu"),
+        help=(
+            "MiniMax M3 sparse-attention kernel backend for "
+            "test_minimax_m3_sparse_attn.py: triton reference or msa_m3_npu (torch_npu)."
+        ),
+    )
 
 
 @pytest.fixture(autouse=True)

@@ -23,20 +23,27 @@
 # limitations under the License.
 """Inference-only MiniMaxM3 model."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from itertools import islice
+from pathlib import Path
 from typing import Any
 
 import torch
+import vllm
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import BatchFeature, PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import (
     get_pp_group,
+    get_tensor_model_parallel_world_size,
 )
+from vllm.forward_context import get_forward_context
+from vllm.inputs import MultiModalDataDict
 from vllm.logger import logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     GateLinear,
@@ -61,8 +68,10 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
+    MultiModalEmbeddings,
     SupportsEagle3,
     SupportsLoRA,
+    SupportsMultiModal,
     SupportsPP,
 )
 from vllm.model_executor.models.utils import (
@@ -74,9 +83,379 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import (
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
+from vllm.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    BaseMultiModalProcessor,
+    BaseProcessingInfo,
+    PromptReplacement,
+    PromptUpdate,
+    PromptUpdateDetails,
+)
 from vllm.sequence import IntermediateTensors
+from vllm.utils.import_utils import import_from_path
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheSpec,
+    get_kv_quant_mode,
+)
 
-from vllm_ascend.attention.msa_m3 import MiniMaxM3SparseAttention
+from vllm_ascend.models.ops.msa_m3 import (
+    AscendMiniMaxM3Indexer,
+    AscendMiniMaxM3IndexerLinear,
+    AscendMiniMaxM3IndexerMetadata,
+    AscendMiniMaxM3QKVParallelLinearWithIndexer,
+    AscendMiniMaxM3SparseBackend,
+    AscendMiniMaxM3SparseImpl,
+    AscendMiniMaxM3SparseMetadata,
+    _register_m3_sparse_packed_modules,
+    _use_fused_qkv_indexer,
+)
+
+_SPARSE_ATTN_LOGGED = False
+
+class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
+    """Block-sparse attention with lightning indexer on Ascend."""
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        rotary_dim: int,
+        rope_parameters: dict[str, Any] | None = None,
+        attn_window_size: int | None = None,
+        max_position_embeddings: int = 8192,
+        head_dim: int | None = None,
+        rms_norm_eps: float = 1e-06,
+        qkv_bias: bool = False,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+        sparse_cfg: dict[str, Any] | None = None,
+        disable_index_value: bool = False,
+        reduce_results: bool = True,
+    ) -> None:
+        super().__init__()
+        assert sparse_cfg is not None
+        self.hidden_size = hidden_size
+        self.disable_index_value = disable_index_value
+
+        tp_size = get_tensor_model_parallel_world_size()
+        self.total_num_heads = num_heads
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
+        self.total_num_kv_heads = num_kv_heads
+        if self.total_num_kv_heads >= tp_size:
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            assert tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        self.head_dim = head_dim or (hidden_size // self.total_num_heads)
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        self.scaling = self.head_dim**-0.5
+        self.max_position_embeddings = max_position_embeddings
+
+        self.total_idx_heads = sparse_cfg["sparse_num_index_heads"]
+        self.idx_head_dim = sparse_cfg["sparse_index_dim"]
+        assert self.total_idx_heads == self.total_num_kv_heads, (
+            "MiniMax M3 sparse attention requires sparse_num_index_heads == num_key_value_heads"
+        )
+        self.num_idx_heads = self.num_kv_heads
+        self.index_q_size = self.num_idx_heads * self.idx_head_dim
+        self._use_fused_qkv_indexer = _use_fused_qkv_indexer(quant_config, prefix)
+        _register_m3_sparse_packed_modules(quant_config, self._use_fused_qkv_indexer)
+
+        if self._use_fused_qkv_indexer:
+            self.qkv_proj = AscendMiniMaxM3QKVParallelLinearWithIndexer(
+                hidden_size,
+                self.head_dim,
+                self.total_num_heads,
+                self.total_num_kv_heads,
+                self.total_idx_heads,
+                self.idx_head_dim,
+                bias=qkv_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
+            self.indexer_proj = None
+        else:
+            self.qkv_proj = QKVParallelLinear(
+                hidden_size,
+                self.head_dim,
+                self.total_num_heads,
+                self.total_num_kv_heads,
+                bias=qkv_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
+            self.indexer_proj = AscendMiniMaxM3IndexerLinear(
+                hidden_size,
+                self.total_idx_heads,
+                self.idx_head_dim,
+                bias=qkv_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.indexer_proj",
+            )
+        self.o_proj = RowParallelLinear(
+            self.total_num_heads * self.head_dim,
+            hidden_size,
+            bias=False,
+            reduce_results=reduce_results,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+        )
+
+        if rope_parameters is not None and "partial_rotary_factor" not in rope_parameters:
+            rope_parameters["partial_rotary_factor"] = rotary_dim / self.head_dim
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            max_position=max_position_embeddings,
+            rope_parameters=rope_parameters,
+        )
+
+        self.index_q_norm = GemmaRMSNorm(self.idx_head_dim, eps=rms_norm_eps)
+        self.index_k_norm = GemmaRMSNorm(self.idx_head_dim, eps=rms_norm_eps)
+
+        self.q_norm = GemmaRMSNorm(self.head_dim, eps=rms_norm_eps)
+        self.k_norm = GemmaRMSNorm(self.head_dim, eps=rms_norm_eps)
+
+        vllm_config = get_current_vllm_config()
+        self.layer_name = f"{prefix}.attn"
+        self.kv_cache_dtype = cache_config.cache_dtype if cache_config is not None else "auto"
+        self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)
+        self.attn_backend = AscendMiniMaxM3SparseBackend
+        self.impl = AscendMiniMaxM3SparseImpl(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            self.num_kv_heads,
+            kv_cache_dtype=self.kv_cache_dtype,
+            topk_blocks=sparse_cfg["sparse_topk_blocks"],
+            sparse_block_size=sparse_cfg["sparse_block_size"],
+        )
+        self.topk_blocks = sparse_cfg["sparse_topk_blocks"]
+        self.sparse_block_size = sparse_cfg["sparse_block_size"]
+        self.indexer = AscendMiniMaxM3Indexer(
+            num_kv_heads=self.num_kv_heads,
+            scale=self.scaling,
+            topk_blocks=self.topk_blocks,
+            sparse_block_size=self.sparse_block_size,
+            num_index_heads=self.num_idx_heads,
+            index_head_dim=self.idx_head_dim,
+            prefix=self.layer_name,
+            init_blocks=sparse_cfg.get("sparse_init_block", 0),
+            local_blocks=sparse_cfg.get("sparse_local_block", 0),
+            cache_config=cache_config,
+        )
+
+        compilation_config = vllm_config.compilation_config
+        if self.layer_name in compilation_config.static_forward_context:
+            raise ValueError(f"Duplicate layer name: {self.layer_name}")
+        compilation_config.static_forward_context[self.layer_name] = self
+        self.kv_cache = torch.tensor([])
+        global _SPARSE_ATTN_LOGGED
+        if not _SPARSE_ATTN_LOGGED:
+            logger.warning(
+                "MiniMax M3 sparse attention enabled via npu_sparse_attention_score (topk_blocks=%d, block_size=%d)",
+                sparse_cfg["sparse_topk_blocks"],
+                sparse_cfg["sparse_block_size"],
+            )
+            _SPARSE_ATTN_LOGGED = True
+
+    def get_attn_backend(self) -> type[AscendMiniMaxM3SparseBackend]:
+        return self.attn_backend
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+        return FullAttentionSpec(
+            block_size=vllm_config.cache_config.block_size,
+            num_kv_heads=self.num_kv_heads,
+            head_size=self.head_dim,
+            head_size_v=self.head_dim,
+            dtype=self.kv_cache_torch_dtype,
+            kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
+        )
+
+    def _insert_kv(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        index_key: torch.Tensor,
+    ) -> None:
+        attn_metadata = get_forward_context().attn_metadata
+        if not isinstance(attn_metadata, dict):
+            return
+        main_meta = attn_metadata[self.layer_name]
+        index_meta = attn_metadata[self.indexer.index_cache.prefix]
+        assert isinstance(main_meta, AscendMiniMaxM3SparseMetadata)
+        assert isinstance(index_meta, AscendMiniMaxM3IndexerMetadata)
+
+        from vllm_ascend.device.device_op import DeviceOperator
+
+        key_cache, value_cache = self.kv_cache
+        num_tokens = main_meta.num_actual_tokens
+        k_insert = key[:num_tokens].view(-1, self.num_kv_heads, self.head_dim)
+        v_insert = value[:num_tokens].view(-1, self.num_kv_heads, self.head_dim)
+        DeviceOperator.reshape_and_cache(
+            k_insert,
+            v_insert,
+            key_cache,
+            value_cache,
+            main_meta.slot_mapping[:num_tokens],
+        )
+
+        idx_cache = self.indexer.index_cache.kv_cache
+        if isinstance(idx_cache, (tuple, list)):
+            idx_cache = idx_cache[0]
+        flat = idx_cache.view(-1, self.idx_head_dim)
+        # Scatter ND update ignores indices outside the cache bounds, so graph
+        # padding slots set to -1 do not write into the last cache row.
+        torch.ops._C_ascend.npu_scatter_nd_update_v2(
+            flat,
+            index_meta.slot_mapping[:num_tokens].view(-1, 1),
+            index_key[:num_tokens].to(flat.dtype),
+        )
+
+    def _sparse_prepare(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        qkv, _ = self.qkv_proj(hidden_states)
+        main_qkv_size = self.q_size + 2 * self.kv_size
+        if self.indexer_proj is None:
+            main_qkv = qkv.narrow(-1, 0, main_qkv_size)
+            index_q = qkv.narrow(-1, main_qkv_size, self.index_q_size)
+            index_k = qkv.narrow(
+                -1,
+                main_qkv_size + self.index_q_size,
+                self.idx_head_dim,
+            )
+        else:
+            main_qkv = qkv
+            index_qk, _ = self.indexer_proj(hidden_states)
+            index_q, index_k = index_qk.split(
+                [self.index_q_size, self.idx_head_dim],
+                dim=-1,
+            )
+
+        if (
+            main_qkv.device.type != "npu"
+            or main_qkv.dtype != torch.bfloat16
+            or positions.ndim != 1
+            or not getattr(self.rotary_emb, "is_neox_style", True)
+        ):
+            q, k, v = main_qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            v = v.contiguous()
+            q, k = self._qk_norm(q, k)
+            q, k = self.rotary_emb(positions, q, k)
+        else:
+            q, k, v = torch.ops.vllm.qkv_rmsnorm_rope(
+                input=main_qkv.contiguous(),
+                q_weight=self.q_norm.weight_plus_one,
+                k_weight=self.k_norm.weight_plus_one,
+                q_hidden_size=self.q_size,
+                kv_hidden_size=self.kv_size,
+                head_dim=self.head_dim,
+                eps=self.q_norm.variance_epsilon,
+                q_bias=None,
+                k_bias=None,
+                cos_sin_cache=self.rotary_emb.cos_sin_cache,
+                positions=positions,
+            )
+
+        index_q, index_k = self._index_qk_norm(index_q, index_k)
+        index_q, index_k = self.rotary_emb(positions, index_q, index_k)
+
+        return q, k, v, index_q, index_k
+
+    def _run_sparse_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        index_query: torch.Tensor,
+        index_key: torch.Tensor,
+        attn_output: torch.Tensor,
+    ) -> None:
+        """Insert KV, build sparse top-k indices, then run sparse attention."""
+        self._insert_kv(key, value, index_key)
+        topk_idx = self.indexer(index_query)
+        self.impl.forward(self, query, self.kv_cache, topk_idx, attn_output)
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        q, k, v, index_q, index_k = self._sparse_prepare(positions, hidden_states)
+        attn_out = torch.empty_like(q)
+        torch.ops.vllm.minimax_m3_sparse_forward(
+            q,
+            k,
+            v,
+            index_q,
+            index_k,
+            attn_out,
+            self.layer_name,
+        )
+        projected, _ = self.o_proj(attn_out)
+        return projected
+
+    def _qk_norm(self, q: torch.Tensor, k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        q_shape = q.shape
+        k_shape = k.shape
+        q = q.reshape(-1, self.head_dim).contiguous()
+        k = k.reshape(-1, self.head_dim).contiguous()
+        q = self.q_norm(q).reshape(q_shape)
+        k = self.k_norm(k).reshape(k_shape)
+        return q, k
+
+    def _index_qk_norm(self, idx_q: torch.Tensor, idx_k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        idx_q_shape = idx_q.shape
+        idx_k_shape = idx_k.shape
+        idx_q = idx_q.reshape(-1, self.index_q_size)
+        idx_k = idx_k.reshape(-1, self.idx_head_dim)
+        idx_q = self.index_q_norm(idx_q).reshape(idx_q_shape)
+        idx_k = self.index_k_norm(idx_k).reshape(idx_k_shape)
+        return idx_q, idx_k
+
+
+
+def _load_vllm_minimax_m3_vision_model() -> type[nn.Module]:
+    """Load vLLM's MiniMax-M3 vision tower without importing its platform entry."""
+    if vllm.__file__ is None:
+        raise ImportError("Unable to locate the installed vLLM package.")
+
+    vision_tower_path = (
+        Path(vllm.__file__).resolve().parent
+        / "models"
+        / "minimax_m3"
+        / "common"
+        / "vision_tower.py"
+    )
+    if not vision_tower_path.is_file():
+        raise ImportError(
+            "The vLLM MiniMax M3 vision tower source was not found at "
+            f"{vision_tower_path}. This vllm-ascend adapter requires vLLM 0.24."
+        )
+
+    vision_tower_module = import_from_path(
+        "vllm_ascend.models._vllm_024_minimax_m3_vision_tower",
+        vision_tower_path,
+    )
+    return vision_tower_module.MiniMaxVLVisionModel
+
+
+MiniMaxVLVisionModel = _load_vllm_minimax_m3_vision_model()
 
 
 def _sparse_attention_layer_ids(config: PretrainedConfig) -> set[int]:
@@ -195,8 +574,7 @@ class MiniMaxM3MoE(nn.Module):
 
         if self.tp_size > config.num_local_experts:
             raise ValueError(
-                f"Tensor parallel size {self.tp_size} is greater than the "
-                f"number of experts {config.num_local_experts}."
+                f"Tensor parallel size {self.tp_size} is greater than the number of experts {config.num_local_experts}."
             )
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
         self.use_routing_bias = getattr(config, "use_routing_bias", False)
@@ -847,6 +1225,595 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEa
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
+
+
+def _get_minimax_m3_image_size(image_processor: object) -> ImageSize:
+    patch_size = int(getattr(image_processor, "patch_size", 14))
+    merge_size = int(getattr(image_processor, "merge_size", 2))
+    factor = patch_size * merge_size
+
+    max_pixels = getattr(image_processor, "max_pixels", None)
+    if not isinstance(max_pixels, int):
+        size = getattr(image_processor, "size", None)
+        if isinstance(size, Mapping):
+            height = int(size.get("height") or size.get("shortest_edge") or 672)
+            width = int(size.get("width") or size.get("longest_edge") or height)
+            max_pixels = height * width
+        elif isinstance(size, Sequence) and len(size) >= 2:
+            max_pixels = int(size[0]) * int(size[1])
+        else:
+            max_pixels = 672 * 672
+
+    side = max(factor, int(max_pixels**0.5) // factor * factor)
+    return ImageSize(width=side, height=side)
+
+
+def _get_minimax_m3_num_image_tokens(
+    image_processor: object,
+    *,
+    image_width: int,
+    image_height: int,
+) -> int:
+    merge_size = int(getattr(image_processor, "merge_size", 2))
+    if hasattr(image_processor, "get_number_of_image_patches"):
+        num_patches = image_processor.get_number_of_image_patches(image_height, image_width)
+    else:
+        patch_size = int(getattr(image_processor, "patch_size", 14))
+        grid_h = image_height // patch_size
+        grid_w = image_width // patch_size
+        num_patches = grid_h * grid_w
+    return int(num_patches) // (merge_size**2)
+
+
+def _get_minimax_m3_num_video_tokens(
+    video_processor: object,
+    *,
+    video_width: int,
+    video_height: int,
+    num_frames: int,
+) -> int:
+    patch_size = int(getattr(video_processor, "patch_size", 14))
+    merge_size = int(getattr(video_processor, "merge_size", 2))
+    temporal_patch_size = int(getattr(video_processor, "temporal_patch_size", 2))
+    padded_frames = num_frames
+    pad = -padded_frames % temporal_patch_size
+    if pad:
+        padded_frames += pad
+    grid_t = max(padded_frames // temporal_patch_size, 1)
+    grid_h = video_height // patch_size
+    grid_w = video_width // patch_size
+    return int(grid_t * grid_h * grid_w) // (merge_size**2)
+
+
+class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
+    IMAGE_TOKEN = "]<]image[>["
+    VIDEO_TOKEN = "]<]video[>["
+    VISION_START_TOKEN = "]<]start of image[>["
+    VISION_END_TOKEN = "]<]end of image[>["
+
+    def get_hf_processor(self, **kwargs: object):
+        # Do not type-check the processor class here: released MiniMax-M3
+        # checkpoints may expose remote-code MiniMaxVLProcessor, while
+        # transformers main uses MiniMaxM3VLProcessor.
+        return self.ctx.get_hf_processor(**kwargs)
+
+    def get_image_processor(self, **kwargs: object):
+        return self.get_hf_processor(**kwargs).image_processor
+
+    def get_video_processor(self, **kwargs: object):
+        return self.get_hf_processor(**kwargs).video_processor
+
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        limits: dict[str, int | None] = {"image": None}
+        mm_config = self.ctx.get_mm_config()
+        if "video" in mm_config.limit_per_prompt:
+            limits["video"] = None
+        return limits
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        max_tokens = {"image": self.get_max_image_tokens()}
+        if mm_counts.get("video", 0) > 0:
+            max_tokens["video"] = self.get_max_video_tokens(seq_len, mm_counts)
+        return max_tokens
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        return _get_minimax_m3_image_size(self.get_image_processor())
+
+    def get_max_image_tokens(self) -> int:
+        image_processor = self.get_image_processor()
+        size = self.get_image_size_with_most_features()
+        return _get_minimax_m3_num_image_tokens(
+            image_processor,
+            image_width=size.width,
+            image_height=size.height,
+        )
+
+    def get_num_frames_with_most_features(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        video_processor = self.get_video_processor()
+        size = self.get_image_size_with_most_features()
+        patch_size = int(getattr(video_processor, "patch_size", 14))
+        merge_size = int(getattr(video_processor, "merge_size", 2))
+        temporal_patch_size = int(getattr(video_processor, "temporal_patch_size", 2))
+        max_frames = int(getattr(video_processor, "max_frames", 768))
+
+        grid_h = max(size.height // patch_size, 1)
+        grid_w = max(size.width // patch_size, 1)
+        tokens_per_temporal_grid = max(grid_h * grid_w // (merge_size**2), 1)
+
+        num_images = mm_counts.get("image", 0)
+        num_videos = max(mm_counts.get("video", 0), 1)
+        remaining = max(seq_len - num_images * self.get_max_image_tokens(), 1)
+        max_grid_t = max(remaining // tokens_per_temporal_grid // num_videos, 1)
+        num_frames = max_grid_t * temporal_patch_size
+        return max(min(num_frames, max_frames), temporal_patch_size)
+
+    def get_max_video_tokens(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        video_processor = self.get_video_processor()
+        size = self.get_image_size_with_most_features()
+        return _get_minimax_m3_num_video_tokens(
+            video_processor,
+            video_width=size.width,
+            video_height=size.height,
+            num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
+        )
+
+
+class MiniMaxM3VLDummyInputsBuilder(BaseDummyInputsBuilder[MiniMaxM3VLProcessingInfo]):
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.info.IMAGE_TOKEN * mm_counts.get("image", 0) + self.info.VIDEO_TOKEN * mm_counts.get("video", 0)
+
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: Mapping[str, BaseDummyOptions],
+    ) -> MultiModalDataDict:
+        size = self.info.get_image_size_with_most_features()
+        num_frames = self.info.get_num_frames_with_most_features(seq_len, mm_counts)
+        return {
+            "image": self._get_dummy_images(
+                width=size.width,
+                height=size.height,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
+            ),
+            "video": self._get_dummy_videos(
+                width=size.width,
+                height=size.height,
+                num_frames=num_frames,
+                num_videos=mm_counts.get("video", 0),
+                overrides=mm_options.get("video"),
+            ),
+        }
+
+
+class MiniMaxM3VLMultiModalProcessor(BaseMultiModalProcessor[MiniMaxM3VLProcessingInfo]):
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        # MiniMax-M3's processor default sets videos_kwargs.do_resize=False,
+        # which assumes pre-resized frames. vLLM passes raw video frames, so
+        # resize by default unless the user explicitly overrides it.
+        merged_kwargs = {"do_resize": True}
+        merged_kwargs.update(mm_kwargs)
+        merged_kwargs.update(tok_kwargs)
+        return self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**mm_kwargs),
+            dict(text=prompt, **mm_data),
+            merged_kwargs,
+        )
+
+    def _get_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, Any],
+        out_mm_kwargs: MultiModalKwargsItems,
+    ) -> Sequence[PromptUpdate]:
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
+        video_processor = self.info.get_video_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
+
+        image_token = getattr(hf_processor, "image_token", MiniMaxM3VLProcessingInfo.IMAGE_TOKEN)
+        video_token = getattr(hf_processor, "video_token", MiniMaxM3VLProcessingInfo.VIDEO_TOKEN)
+        start_token = getattr(
+            hf_processor,
+            "VISION_START_TOKEN",
+            MiniMaxM3VLProcessingInfo.VISION_START_TOKEN,
+        )
+        end_token = getattr(
+            hf_processor,
+            "VISION_END_TOKEN",
+            MiniMaxM3VLProcessingInfo.VISION_END_TOKEN,
+        )
+
+        image_token_id = vocab[image_token]
+        video_token_id = vocab[video_token]
+        start_token_id = vocab[start_token]
+        end_token_id = vocab[end_token]
+        image_merge_length = int(getattr(image_processor, "merge_size", 2)) ** 2
+        video_merge_length = int(getattr(video_processor, "merge_size", 2)) ** 2
+        temporal_patch_size = int(getattr(video_processor, "temporal_patch_size", 2))
+        fps = float(getattr(video_processor, "fps", 1.0) or 1.0)
+
+        def get_image_replacement(item_idx: int):
+            grid_thw = out_mm_kwargs["image"][item_idx]["image_grid_thw"].data
+            assert isinstance(grid_thw, torch.Tensor)
+            num_tokens = int(grid_thw.prod().item()) // image_merge_length
+            full = [start_token_id] + [image_token_id] * num_tokens + [end_token_id]
+            return PromptUpdateDetails.select_token_id(full, image_token_id)
+
+        def get_video_replacement(item_idx: int):
+            grid_thw = out_mm_kwargs["video"][item_idx]["video_grid_thw"].data
+            assert isinstance(grid_thw, torch.Tensor)
+            grid_t, grid_h, grid_w = [int(x) for x in grid_thw.tolist()]
+            frame_seqlen = grid_h * grid_w // video_merge_length
+
+            full: list[int] = []
+            for frame_idx in range(grid_t):
+                timestamp = frame_idx * temporal_patch_size / fps
+                full.extend(
+                    tokenizer.encode(
+                        f"]<]{timestamp:.1f} seconds[>[",
+                        add_special_tokens=False,
+                    )
+                )
+                full.append(start_token_id)
+                full.extend([video_token_id] * frame_seqlen)
+                full.append(end_token_id)
+            return PromptUpdateDetails.select_token_id(full, video_token_id)
+
+        return [
+            PromptReplacement(
+                modality="image",
+                target=[image_token_id],
+                replacement=get_image_replacement,
+            ),
+            PromptReplacement(
+                modality="video",
+                target=[video_token_id],
+                replacement=get_video_replacement,
+            ),
+        ]
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        image_grid_thw = hf_inputs.get("image_grid_thw")
+        if image_grid_thw is None:
+            image_grid_sizes = torch.empty(0, dtype=torch.long)
+        else:
+            image_grid_sizes = image_grid_thw.prod(-1)
+
+        video_grid_thw = hf_inputs.get("video_grid_thw")
+        if video_grid_thw is None:
+            video_grid_sizes = torch.empty(0, dtype=torch.long)
+        else:
+            video_grid_sizes = video_grid_thw.prod(-1)
+
+        return {
+            "pixel_values": MultiModalFieldConfig.flat_from_sizes("image", image_grid_sizes),
+            "image_grid_thw": MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            "pixel_values_videos": MultiModalFieldConfig.flat_from_sizes("video", video_grid_sizes),
+            "video_grid_thw": MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+        }
+
+
+class MiniMaxM3VLModel(nn.Module):
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        text_config = vllm_config.model_config.hf_text_config
+        vision_config = getattr(config, "vision_config", None)
+        if vision_config is None:
+            raise ValueError("MiniMax-M3 VL requires config.vision_config.")
+
+        if isinstance(vision_config, dict):
+            vision_config = PretrainedConfig.from_dict(vision_config)
+
+        projector_hidden_size = getattr(config, "projector_hidden_size", None)
+        self.vision_tower = MiniMaxVLVisionModel(
+            config=vision_config,
+            text_hidden_size=text_config.hidden_size,
+            projector_hidden_size=projector_hidden_size,
+            quant_config=vllm_config.quant_config,
+            prefix=maybe_prefix(prefix, "vision_tower"),
+        )
+        self.language_model = MiniMaxM3SparseForCausalLM(
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "language_model"),
+        )
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
+        return self.language_model(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+        )
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    MiniMaxM3VLMultiModalProcessor,
+    info=MiniMaxM3VLProcessingInfo,
+    dummy_inputs=MiniMaxM3VLDummyInputsBuilder,
+)
+class MiniMaxM3SparseForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsEagle3):
+    supports_encoder_tp_data = True
+
+    packed_modules_mapping = {
+        **MiniMaxM3SparseForCausalLM.packed_modules_mapping,
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    }
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "model.language_model.": "model.language_model.model.",
+            "language_model.model.": "model.language_model.model.",
+            "language_model.lm_head.": "model.language_model.lm_head.",
+            "model.vision_tower.": "model.vision_tower.",
+            "vision_tower.": "model.vision_tower.",
+            "multi_modal_projector.": ("model.vision_tower.multi_modal_projector."),
+            "patch_merge_mlp.": "model.vision_tower.patch_merge_mlp.",
+            "lm_head.": "model.language_model.lm_head.",
+        },
+        orig_to_new_substr={
+            ".mlp.fc1.": ".fc1.",
+            ".mlp.fc2.": ".fc2.",
+        },
+    )
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
+        if modality == "image":
+            return "]<]image[>["
+        if modality == "video":
+            return "]<]video[>["
+        raise ValueError(f"Unsupported modality: {modality!r}")
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        self.config = config
+        self.quant_config = vllm_config.quant_config
+        self.model_config = vllm_config.model_config
+        self.multimodal_config = vllm_config.model_config.multimodal_config
+        self.use_data_parallel = (
+            self.multimodal_config is not None and self.multimodal_config.mm_encoder_tp_mode == "data"
+        )
+
+        with self._mark_composite_model(
+            vllm_config,
+            language_targets=MiniMaxM3SparseForCausalLM,
+            tower_targets={"image": MiniMaxVLVisionModel, "video": MiniMaxVLVisionModel},
+        ):
+            self.model = MiniMaxM3VLModel(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "model"),
+            )
+
+        self.vision_tower = self.model.vision_tower
+        self.language_model = self.model.language_model
+        self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
+
+    @property
+    def lm_head(self) -> nn.Module:
+        return self.language_model.lm_head
+
+    def _parse_and_validate_image_input(self, **kwargs: object) -> dict | None:
+        pixel_values = kwargs.pop("pixel_values", None)
+        image_grid_thw = kwargs.pop("image_grid_thw", None)
+        image_embeds = kwargs.pop("image_embeds", None)
+        if pixel_values is None and image_embeds is None:
+            return None
+        if pixel_values is not None:
+            return {
+                "type": "pixel_values",
+                "pixel_values": pixel_values,
+                "image_grid_thw": image_grid_thw,
+            }
+        return {
+            "type": "image_embeds",
+            "image_embeds": image_embeds,
+            "image_grid_thw": image_grid_thw,
+        }
+
+    def _parse_and_validate_video_input(self, **kwargs: object) -> dict | None:
+        pixel_values_videos = kwargs.pop("pixel_values_videos", None)
+        video_grid_thw = kwargs.pop("video_grid_thw", None)
+        video_embeds = kwargs.pop("video_embeds", None)
+        if pixel_values_videos is None and video_embeds is None:
+            return None
+        if pixel_values_videos is not None:
+            return {
+                "type": "pixel_values_videos",
+                "pixel_values_videos": pixel_values_videos,
+                "video_grid_thw": video_grid_thw,
+            }
+        return {
+            "type": "video_embeds",
+            "video_embeds": video_embeds,
+            "video_grid_thw": video_grid_thw,
+        }
+
+    def _process_image_input(self, image_input: dict) -> tuple[torch.Tensor, ...]:
+        grid_thw = image_input["image_grid_thw"]
+        assert grid_thw is not None and grid_thw.ndim == 2
+        grid_thw_list = grid_thw.tolist()
+
+        if image_input["type"] == "image_embeds":
+            image_embeds = image_input["image_embeds"].type(self.vision_tower.dtype)
+        else:
+            pixel_values = image_input["pixel_values"].type(self.vision_tower.dtype)
+            if self.use_data_parallel:
+                return run_dp_sharded_mrope_vision_model(
+                    self.vision_tower,
+                    pixel_values,
+                    grid_thw_list,
+                    rope_type="rope_3d",
+                )
+            image_embeds = self.vision_tower(
+                pixel_values=pixel_values,
+                grid_thw=grid_thw_list,
+            )
+
+        merge_size = self.vision_tower.spatial_merge_size
+        sizes = (grid_thw.prod(-1) // (merge_size * merge_size)).tolist()
+        return image_embeds.split(sizes)
+
+    def _process_video_input(self, video_input: dict) -> tuple[torch.Tensor, ...]:
+        grid_thw = video_input["video_grid_thw"]
+        assert grid_thw is not None and grid_thw.ndim == 2
+        grid_thw_list = grid_thw.tolist()
+
+        if video_input["type"] == "video_embeds":
+            video_embeds = video_input["video_embeds"].type(self.vision_tower.dtype)
+        else:
+            pixel_values = video_input["pixel_values_videos"].type(self.vision_tower.dtype)
+            if self.use_data_parallel:
+                return run_dp_sharded_mrope_vision_model(
+                    self.vision_tower,
+                    pixel_values,
+                    grid_thw_list,
+                    rope_type="rope_3d",
+                )
+            video_embeds = self.vision_tower(
+                pixel_values=pixel_values,
+                grid_thw=grid_thw_list,
+            )
+
+        merge_size = self.vision_tower.spatial_merge_size
+        sizes = (grid_thw.prod(-1) // (merge_size * merge_size)).tolist()
+        return video_embeds.split(sizes)
+
+    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict[str, dict]:
+        mm_input_by_modality: dict[str, dict] = {}
+        for input_key in kwargs:
+            if input_key in ("pixel_values", "image_embeds") and "image" not in mm_input_by_modality:
+                image_input = self._parse_and_validate_image_input(**kwargs)
+                if image_input is not None:
+                    mm_input_by_modality["image"] = image_input
+            if input_key in ("pixel_values_videos", "video_embeds") and "video" not in mm_input_by_modality:
+                video_input = self._parse_and_validate_video_input(**kwargs)
+                if video_input is not None:
+                    mm_input_by_modality["video"] = video_input
+        return mm_input_by_modality
+
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+        mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
+        if not mm_input_by_modality:
+            return []
+
+        multimodal_embeddings: list[torch.Tensor] = []
+        for modality, multimodal_input in mm_input_by_modality.items():
+            if modality == "image":
+                multimodal_embeddings.extend(self._process_image_input(multimodal_input))
+            elif modality == "video":
+                multimodal_embeddings.extend(self._process_video_input(multimodal_input))
+        return tuple(multimodal_embeddings)
+
+    def embed_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        *,
+        is_multimodal: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return SupportsMultiModal.embed_input_ids(
+            self,
+            input_ids,
+            multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor | IntermediateTensors:
+        return self.language_model(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+        )
+
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
+        return self.language_model.compute_logits(hidden_states)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.language_model.set_aux_hidden_state_layers(layers)
+
+    def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        return self.language_model.get_eagle3_default_aux_hidden_state_layers()
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        return self.language_model.get_expert_mapping()
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        raw_tensors = 0
+        prefix_counts: dict[str, int] = {}
+
+        def counted_weights() -> Iterable[tuple[str, torch.Tensor]]:
+            nonlocal raw_tensors
+            for name, weight in weights:
+                raw_tensors += 1
+                if name.startswith("language_model."):
+                    bucket = "language_model"
+                elif name.startswith("vision_tower."):
+                    bucket = "vision_tower"
+                elif name.startswith("multi_modal_projector."):
+                    bucket = "multi_modal_projector"
+                elif name.startswith("patch_merge_mlp."):
+                    bucket = "patch_merge_mlp"
+                else:
+                    bucket = name.split(".", 1)[0]
+                prefix_counts[bucket] = prefix_counts.get(bucket, 0) + 1
+                yield name, weight
+
+        logger.warning("MiniMax M3 VL load_weights entered")
+        loaded_params = loader.load_weights(counted_weights(), mapper=self.hf_to_vllm_mapper)
+        logger.warning(
+            "MiniMax M3 VL load_weights saw %d checkpoint tensors by prefix %s; returned %d loaded parameter names",
+            raw_tensors,
+            prefix_counts,
+            len(loaded_params),
+        )
+        return loaded_params
 
 
 def get_spec_layer_idx_from_weight_name(config: PretrainedConfig, weight_name: str) -> int | None:
