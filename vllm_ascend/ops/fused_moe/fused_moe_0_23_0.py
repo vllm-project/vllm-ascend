@@ -211,9 +211,10 @@ class AscendFusedMoE(FusedMoE):
             and self.e_score_correction_bias is not None
             and not vllm_config.model_config.is_deepseek_mla
         ):
-            self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
-                dtype=vllm_config.model_config.dtype
-            )
+            # self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
+            #     dtype=vllm_config.model_config.dtype
+            # )
+            pass
         self._gate = kwargs.get("gate")
 
         # init moe
