@@ -24,7 +24,7 @@ There are two installation methods:
 
 ## Configure Ascend CANN environment
 
-Before installation, you need to make sure firmware/driver, and CANN are installed correctly, refer to [Ascend Environment Setup Guide](https://www.hiascend.com/cann/download?versionId=735&ids=d806%2Ch0501%2Ch0601%2Ch0702) for more details.
+Before installation, you need to make sure firmware/driver, and CANN are installed correctly, refer to [CANN Installation](https://www.hiascend.com/cann/download?versionId=735&ids=d806%2Ch0501%2Ch0601%2Ch0702) for more details.
 
 ### Configure hardware environment
 
@@ -34,7 +34,7 @@ To verify that the Ascend NPU firmware and driver were correctly installed, run:
 npu-smi info
 ```
 
-Refer to [Ascend Environment Setup Guide](https://ascend.github.io/docs/sources/ascend/quick_install.html) for more details.
+Refer to [CANN Installation](https://www.hiascend.com/cann/download?versionId=735&ids=d806%2Ch0501%2Ch0601%2Ch0702) for more details.
 
 ### Configure software environment
 
@@ -220,7 +220,7 @@ Then you can install `vllm` and `vllm-ascend` from a **pre-built wheel** using o
     To enable the batch invariance feature, set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend to install the batch invariance custom operator library during the installation process.
     For usage guidance on the batch invariance feature, see <https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/feature_guide/batch_invariance.md>
 
-## Set up using Docker
+## Set up using Docker {: #set-up-using-docker }
 
 `vllm-ascend` offers Docker images for deployment. You can just pull the **prebuilt image** from the image repository [ascend/vllm-ascend](https://quay.io/repository/ascend/vllm-ascend?tab=tags) and run it with bash.
 
@@ -350,7 +350,7 @@ sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
 
 ## Multi-node Deployment
 
-### Verify Multi-Node Communication
+### Verify Multi-Node Communication {: #verify-multi-node-communication }
 
 First, check physical layer connectivity, then verify each node, and finally verify the inter-node connectivity.
 

@@ -165,44 +165,6 @@
 #       is merged and the supported vLLM revision used by vLLM Ascend includes
 #       it through the regular main-to-main sync.
 #
-# ** 7a. File: platform/patch_glm_tool_call_streaming.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
-#    Why:
-#       GLM tool-call streaming can emit final remaining-argument chunks with
-#       repeated tool-call metadata, and can combine terminal argument bytes with
-#       `finish_reason="tool_calls"` in the same SSE chunk.
-#    How：
-#       Monkey-patch remaining-argument delta construction to emit only argument
-#       fragments by default, and split terminal argument chunks into an argument
-#       chunk followed by an empty finish chunk.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/issues/44098
-#       https://github.com/vllm-project/vllm/pull/44099
-#       https://github.com/vllm-project/vllm-ascend/issues/8327
-#       https://github.com/vllm-project/vllm-ascend/pull/8178
-#    Future Plan:
-#       Remove this patch once the supported vLLM version contains the upstream
-#       GLM tool-call final chunk fixes.
-#
-# ** 7b. File: platform/patch_glm47_tool_call_parser.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.tool_parsers.glm47_moe_tool_parser.Glm47MoeModelToolParser`
-#    Why:
-#       vLLM's GLM47 streaming parser can drop complete inline zero-argument
-#       tool calls such as `<tool_call>get_current_time</tool_call>`, while
-#       non-streaming parses the same output correctly.
-#    How：
-#       Monkey-patch GLM47 tool-call region extraction so complete inline
-#       zero-argument regions are normalized for the existing streaming name
-#       extractor without emitting partial names for incomplete regions.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/issues/44326
-#       https://github.com/vllm-project/vllm/pull/44327
-#    Future Plan:
-#       Remove this patch once the supported vLLM version contains the upstream
-#       GLM47 inline zero-argument streaming parser fix.
-#
 # ** 10a. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
@@ -358,22 +320,6 @@
 #       Remove this patch once upstream vLLM's `ModelConfig.verify_with_parallel_config`
 #       supports local drafter models with PP > 1, or moves the PP validation to a
 #       separate hook that can be overridden per-model-type.
-#
-# ** 11. File: platform/patch_tool_choice_none_content.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionResponse`
-#      `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionStreamResponse`
-#    Why:
-#       vLLM v0.23.0 can serialize empty `tool_calls: []` fields for content-only
-#       OpenAI chat responses / streaming deltas, while OpenAI-compatible SDKs
-#       expect those empty fields to be omitted so clients see `tool_calls=None`.
-#    How：
-#       Wrap `model_dump` / `model_dump_json` for chat response payloads and drop
-#       empty `tool_calls` lists from `message` / `delta` objects.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/44105
-#    Future Plan:
-#       Remove this patch once the supported vLLM version contains PR #44105.
 #
 # ** 12. File: platform/patch_deepseek_v4_tool_call_parser.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

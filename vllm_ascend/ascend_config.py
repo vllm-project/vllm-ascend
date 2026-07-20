@@ -149,12 +149,6 @@ class AscendConfig:
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
         self.enable_prefill_mc2 = bool(additional_config.get("enable_prefill_mc2", False))
 
-        self.enable_matmul_allreduce = self._get_config_value(
-            additional_config,
-            "enable_matmul_allreduce",
-            "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE",
-            ascend_envs.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE,
-        )
         self.enable_fused_mc2 = self._get_config_value(
             additional_config,
             "enable_fused_mc2",
@@ -173,12 +167,6 @@ class AscendConfig:
             "enable_mlapo",
             "VLLM_ASCEND_ENABLE_MLAPO",
             ascend_envs.VLLM_ASCEND_ENABLE_MLAPO,
-        )
-        self.enable_flashcomm2_parallel_size = self._get_config_value(
-            additional_config,
-            "enable_flashcomm2_parallel_size",
-            "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE",
-            ascend_envs.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE,
         )
         self.msmonitor_use_daemon = self._get_config_value(
             additional_config,
@@ -221,9 +209,6 @@ class AscendConfig:
 
             if self.pd_tp_ratio == 0:
                 raise AssertionError("Only support P node tp size lagger then D node tp size")
-        from vllm_ascend.utils import get_flashcomm2_config_and_validate
-
-        self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_config_and_validate(self, vllm_config)
         # Weight NZ mode configuration.
         # 0: disabled, 1: only quant case enable nz (default), 2: BF16/FP16 also enable nz
         self.weight_nz_mode = self._get_config_value(
@@ -231,15 +216,6 @@ class AscendConfig:
             "weight_nz_mode",
             "VLLM_ASCEND_ENABLE_NZ",
             ascend_envs.VLLM_ASCEND_ENABLE_NZ,
-        )
-
-        # when enable_async_exponential is True, AscendSampler will be different from vllm Sampler,
-        # which make batch_invariant mode not working.
-        # so we disable async exponential when batch_invariant mode is enabled.
-        import vllm.envs as envs
-
-        self.enable_async_exponential = (
-            bool(additional_config.get("enable_async_exponential", False)) and not envs.VLLM_BATCH_INVARIANT
         )
 
         from vllm_ascend.utils import model_uses_sfa_sparse
@@ -298,11 +274,6 @@ class AscendConfig:
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()
 
-        self.hamming_sparse = additional_config.get("hamming_sparse", {"enabled": False, "sparse_json_location": ""})
-        self.enable_hamming_sparse = self.hamming_sparse["enabled"]
-        self.sparse_json = self.hamming_sparse["sparse_json_location"]
-        self._check_enable_hamming_sparse()
-
         # Enable Block Verify and Entropy Verify in Rejection Sampler
         rejection_sampler_config = additional_config.get("rejection_sampler_config", {})
         self.rejection_sampler_config = RejectionSamplerConfig(rejection_sampler_config)
@@ -351,11 +322,6 @@ class AscendConfig:
         if self.mix_placement:
             if self.enable_shared_expert_dp or self.multistream_overlap_shared_expert:
                 raise ValueError("Mix placement is not supported with shared expert DP or multistream overlap.")
-
-    def _check_enable_hamming_sparse(self):
-        if self.enable_hamming_sparse:
-            if isinstance(self.sparse_json, str) and not os.path.isfile(self.sparse_json):
-                raise ValueError("Hamming sparse config json file doesn't exist.")
 
     @staticmethod
     def _materialize_dump_config_to_file(dump_config: dict[str, Any]) -> str:
@@ -446,36 +412,7 @@ class AscendConfig:
         compilation_config.compile_ranges_endpoints = value
 
     def update_compile_ranges_split_points(self):
-        vllm_config = self.vllm_config
-        if self.ascend_compilation_config.enable_npugraph_ex:
-            if self.ascend_compilation_config.fuse_allreduce_rms:
-                from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THRESHOLD
-
-                new_compile_ranges_split_points = self._get_compile_ranges(vllm_config.compilation_config)
-                new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THRESHOLD)
-                new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
-                self._set_compile_ranges(vllm_config.compilation_config, new_compile_ranges_split_points)
-                logger.debug(
-                    "Set compile_ranges_split_points to %s for matmul and allreduce fusion",
-                    new_compile_ranges_split_points,
-                )
-
-        else:
-            new_compile_ranges_split_points = self._get_compile_ranges(vllm_config.compilation_config)
-            if vllm_config.additional_config.get("ascend_compilation_config", {}).get("fuse_allreduce_rms", True):
-                from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THRESHOLD
-
-                new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THRESHOLD)
-                new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
-                self._set_compile_ranges(vllm_config.compilation_config, new_compile_ranges_split_points)
-                logger.debug(
-                    "Set compile_ranges_split_points to %s for matmul and allreduce fusion",
-                    new_compile_ranges_split_points,
-                )
-
-            if len(new_compile_ranges_split_points) > len(self._get_compile_ranges(vllm_config.compilation_config)):
-                new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
-                self._set_compile_ranges(vllm_config.compilation_config, new_compile_ranges_split_points)
+        return
 
 
 class FinegrainedTPConfig:
@@ -567,7 +504,6 @@ class AscendCompilationConfig:
         enable_static_kernel: bool = False,
         fuse_norm_quant: bool = True,
         fuse_qknorm_rope: bool = True,
-        fuse_allreduce_rms: bool = False,
         **kwargs,
     ):
         """
@@ -590,13 +526,10 @@ class AscendCompilationConfig:
                 Default: True
             fuse_qknorm_rope (bool): Whether to enable qknorm and rope fusion optimization.
                 Default: True
-            fuse_allreduce_rms (bool): Whether to enable allreduce and addrmsnorm fusion optimization.
-                Default: False
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         self.fuse_norm_quant = fuse_norm_quant
         self.fuse_qknorm_rope = fuse_qknorm_rope
-        self.fuse_allreduce_rms = fuse_allreduce_rms
         self.enable_npugraph_ex = enable_npugraph_ex
         self.enable_static_kernel = enable_static_kernel
         self.fuse_muls_add = kwargs.get("fuse_muls_add", True)
