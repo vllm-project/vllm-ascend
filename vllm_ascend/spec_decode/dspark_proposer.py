@@ -7,7 +7,6 @@ from typing import Any
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, get_forward_context
-from vllm.logger import logger
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
@@ -95,9 +94,8 @@ class AscendDSparkProposer(AscendDflashProposer):
         )
         self._dspark_pd_handoff_warmup_steps = max(0, int(handoff_warmup_steps or 0))
         self._dspark_pd_handoff_warmup_remaining: dict[str, int] = {}
-        self._dspark_context_seq_lens: torch.Tensor | None = None
-        self._dspark_cache_diagnostics_logged = False
-        self._dspark_position_diagnostics_logged = False
+        self._dspark_context_lens: torch.Tensor | None = None
+        self._dspark_context_request_slots: torch.Tensor | None = None
         self._runnable = self._run_dspark_draft
 
     def _get_graph_runnable(self):
@@ -464,11 +462,12 @@ class AscendDSparkProposer(AscendDflashProposer):
             getattr(cad, "block_table_tensor", None),
             getattr(cad, "seq_lens", None),
         )
-        self._dspark_context_seq_lens = cad.seq_lens[:batch_size].clone()
+        self._dspark_context_lens = cad.seq_lens[:batch_size].clone()
         block_size = self.num_speculative_tokens
         num_query_total = batch_size * block_size
         request_slots = self._assign_request_slots(batch_size)
         request_slots_tensor = torch.tensor(request_slots, dtype=torch.int32, device=self.device)
+        self._dspark_context_request_slots = request_slots_tensor
         has_num_rejected = num_rejected_tokens_gpu is not None
         query_start_loc = cad.query_start_loc[: batch_size + 1]
         query_start = query_start_loc[:-1]
@@ -511,6 +510,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         max_model_len = int(getattr(model_config, "max_model_len", 0) or 0)
         last_token_indices = torch.clamp(valid_query_end - 1, min=0, max=target_positions.shape[0] - 1).to(torch.long)
         last_positions = target_positions.index_select(0, last_token_indices).to(self.positions.dtype)
+        self._dspark_context_lens = last_positions + 1
         draft_offsets = self.arange_dflash[:block_size].view(1, block_size)
         draft_positions = last_positions.view(batch_size, 1) + 1 + draft_offsets
         if max_model_len > 0:
@@ -538,63 +538,6 @@ class AscendDSparkProposer(AscendDflashProposer):
             slot_mapping,
         )
         self._slot_mapping_buffer[:num_query_total] = slot_mapping.flatten()
-        if num_context > 0 and not self._dspark_position_diagnostics_logged and self._current_req_ids(1):
-            # One-time diagnostics intentionally synchronize device values to
-            # isolate position and block-table mismatches during PD handoff.
-            first_query_start = int(query_start[0].item())
-            first_query_end = min(int(query_end[0].item()), num_context)
-            first_valid_query_end = min(int(valid_query_end[0].item()), num_context)
-            first_context_positions = self._context_positions_buffer[first_query_start:first_query_end]
-            first_valid_context = first_context_positions[: max(0, first_valid_query_end - first_query_start)]
-            draft_block_numbers = (draft_positions[0] // self.kernel_block_size).to(torch.long)
-            draft_block_offsets = (draft_positions[0] % self.kernel_block_size).to(torch.long)
-            draft_block_ids = torch.full_like(draft_block_numbers, -1)
-
-            context_start = max(0, int(draft_positions[0, 0].item()) - int(self.model.model.layers[next(
-                iter(self.model.model.layers)
-            )].self_attn.window_size))
-            context_end = int(draft_positions[0, 0].item())
-            context_logical_blocks = torch.arange(
-                context_start // self.kernel_block_size,
-                (context_end + self.kernel_block_size - 1) // self.kernel_block_size,
-                dtype=torch.long,
-                device=self.device,
-            )
-            context_physical_blocks = torch.full_like(context_logical_blocks, -1)
-            if getattr(cad, "block_table_tensor", None) is not None:
-                table = cad.block_table_tensor[0]
-                valid_draft_blocks = draft_block_numbers < table.shape[0]
-                draft_block_ids[valid_draft_blocks] = table.gather(
-                    0, draft_block_numbers[valid_draft_blocks]
-                ).to(torch.long)
-                valid_context_blocks = context_logical_blocks < table.shape[0]
-                context_physical_blocks[valid_context_blocks] = table.gather(
-                    0, context_logical_blocks[valid_context_blocks]
-                ).to(torch.long)
-
-            logger.warning(
-                "DSpark position diagnostic request=%s seq_len=%d query_start=%d query_end=%d "
-                "valid_query_end=%d target_positions=%s context_positions=%s valid_context_positions=%s "
-                "draft_positions=%s draft_block_numbers=%s draft_block_ids=%s draft_block_offsets=%s "
-                "attention_context_range=[%d,%d) context_logical_blocks=%s context_physical_blocks=%s",
-                self._current_req_ids(1)[0],
-                int(cad.seq_lens[0].item()),
-                first_query_start,
-                first_query_end,
-                first_valid_query_end,
-                target_positions[first_query_start:first_query_end].detach().cpu().tolist(),
-                first_context_positions.detach().cpu().tolist(),
-                first_valid_context.detach().cpu().tolist(),
-                draft_positions[0].detach().cpu().tolist(),
-                draft_block_numbers.detach().cpu().tolist(),
-                draft_block_ids.detach().cpu().tolist(),
-                draft_block_offsets.detach().cpu().tolist(),
-                context_start,
-                context_end,
-                context_logical_blocks.detach().cpu().tolist(),
-                context_physical_blocks.detach().cpu().tolist(),
-            )
-            self._dspark_position_diagnostics_logged = True
         effective_seq_lens = cad.seq_lens - num_rejected_tokens_gpu if has_num_rejected else cad.seq_lens
         cad.query_start_loc = self.arange_dflash[: batch_size + 1] * block_size
         cad.seq_lens = effective_seq_lens + block_size
@@ -645,73 +588,11 @@ class AscendDSparkProposer(AscendDflashProposer):
             self._context_slot_mapping_buffer[:num_context],
             self._context_request_slots_buffer[:num_context],
         )
-
-    def _log_dspark_cache_diagnostics(self, stage: str) -> bool:
-        block_table = self._dspark_block_table_tensor
-        seq_lens = self._dspark_context_seq_lens
-        req_ids = self._current_req_ids(1)
-        if block_table is None or seq_lens is None or seq_lens.numel() == 0 or not req_ids:
-            return False
-
-        # One-time diagnostics intentionally synchronize device values to
-        # identify PD cache transfer corruption. This is not a steady-state path.
-        seq_len = int(seq_lens[0].item())
-        if seq_len <= 0:
-            return False
-        first_layer = next(iter(self.model.model.layers.values()))
-        window_size = int(first_layer.self_attn.window_size)
-        first_logical_block = max(0, seq_len - window_size) // self.kernel_block_size
-        end_logical_block = (seq_len + self.kernel_block_size - 1) // self.kernel_block_size
-        block_ids_tensor = block_table[0, first_logical_block:end_logical_block].to(torch.long)
-        block_ids_tensor = block_ids_tensor[block_ids_tensor >= 0]
-        if block_ids_tensor.numel() == 0:
-            return False
-
-        block_ids = block_ids_tensor.detach().cpu().tolist()
-        layer_stats = []
-        for layer_name, layer in self.model.model.layers.items():
-            kv_cache = layer.self_attn._get_dspark_kv_cache()
-            if kv_cache is None:
-                layer_stats.append({"layer": layer_name, "cache": "unbound"})
-                continue
-            valid_block_ids = block_ids_tensor[block_ids_tensor < kv_cache.shape[0]]
-            if valid_block_ids.numel() == 0:
-                layer_stats.append(
-                    {
-                        "layer": layer_name,
-                        "shape": tuple(kv_cache.shape),
-                        "block_ids": "out_of_range",
-                    }
-                )
-                continue
-            selected_cache = kv_cache.index_select(0, valid_block_ids)
-            selected_float = selected_cache.float()
-            layer_stats.append(
-                {
-                    "layer": layer_name,
-                    "shape": tuple(kv_cache.shape),
-                    "stride": tuple(kv_cache.stride()),
-                    "ptr": kv_cache.data_ptr(),
-                    "sum": float(selected_float.sum().item()),
-                    "abs_sum": float(selected_float.abs().sum().item()),
-                    "max_abs": float(selected_float.abs().amax().item()),
-                }
-            )
-
-        kv_transfer_config = getattr(self.vllm_config, "kv_transfer_config", None)
-        role = getattr(kv_transfer_config, "kv_role", None) or (
-            "consumer" if self._is_kv_consumer() else "standalone"
+        self.model.model.sync_context_cache_from_paged(
+            self._dspark_block_table_tensor,
+            self._dspark_context_lens,
+            self._dspark_context_request_slots,
         )
-        logger.warning(
-            "DSpark cache diagnostic role=%s stage=%s request=%s seq_len=%d block_ids=%s layers=%s",
-            role,
-            stage,
-            req_ids[0],
-            seq_len,
-            block_ids,
-            layer_stats,
-        )
-        return True
 
     def _pad_dspark_decode_inputs(self, num_tokens: int, num_input_tokens: int) -> None:
         if num_input_tokens <= num_tokens:
@@ -989,12 +870,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             forward_context = get_forward_context()
             if forward_context is not None:
                 forward_context.moe_layer_index = 0
-            log_cache_diagnostics = not self._dspark_cache_diagnostics_logged
-            if log_cache_diagnostics:
-                self._log_dspark_cache_diagnostics("before_context_write")
             self._prepare_dspark_context_cache()
-            if log_cache_diagnostics and self._log_dspark_cache_diagnostics("after_context_write"):
-                self._dspark_cache_diagnostics_logged = True
             self._register_pd_handoff_warmup(scheduler_output, actual_num_reqs)
             if is_prefill:
                 return common_attn_metadata.num_reqs.new_zeros(common_attn_metadata.num_reqs, 0, dtype=torch.long)
