@@ -64,8 +64,10 @@ class _GDNForwardWrapper(nn.Module):
         self.norm = _Norm()
         self.out_proj = _OutputProjection()
         self.conv1d = nn.Conv1d(1, 2, kernel_size=2)
+        self.num_k_heads = 1
         self.num_v_heads = 1
         self.tp_size = 1
+        self.head_k_dim = 2
         self.head_v_dim = 2
         self.activation = None
         self.register_buffer("A_log", torch.zeros(1))
