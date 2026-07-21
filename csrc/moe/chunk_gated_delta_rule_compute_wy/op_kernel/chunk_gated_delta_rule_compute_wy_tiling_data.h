@@ -20,6 +20,13 @@ struct alignas(8) ChunkGatedDeltaRuleComputeWyTilingData {
     int64_t numChunks;
     int64_t groupSize;
     int64_t totalTasks;
+    uint32_t localWorkspaceSize;
+    uint32_t perCoreWorkspaceBytes;
+    uint32_t usedCoreNum;
+    uint32_t reserved0;
+    TCubeTiling mmAttn;
+    TCubeTiling mmU;
+    TCubeTiling mmW;
 };
 #pragma pack(pop)
 
