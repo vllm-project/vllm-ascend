@@ -155,12 +155,7 @@ def _make_eagle_mixin_forward():
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = self._maybe_add_hidden_state(
-            list(prev_aux_list),
-            self.start_layer,
-            hidden_states,
-            residual,
-        )
+        aux_hidden_states = self._maybe_add_hidden_state(list(prev_aux_list), 0, hidden_states, residual)
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
@@ -187,7 +182,10 @@ def _make_eagle_mixin_forward():
     return pp_eagle3_forward
 
 
-def _patch_make_empty_intermediate_tensors(inner_model: nn.Module) -> None:
+def _patch_make_empty_intermediate_tensors(
+    inner_model: nn.Module,
+    include_boundary_aux: bool,
+) -> None:
     if getattr(inner_model, "_eagle3_pp_aux_make_empty_patched", False):
         return
 
@@ -198,7 +196,15 @@ def _patch_make_empty_intermediate_tensors(inner_model: nn.Module) -> None:
         aux_layers = getattr(inner_model, "aux_hidden_state_layers", ())
         # A non-first PP rank only receives aux hidden states produced by
         # earlier pipeline stages. Local aux states are appended during forward.
-        num_incoming_aux_layers = sum(layer_idx < inner_model.start_layer for layer_idx in aux_layers)
+        if include_boundary_aux:
+            # EagleModelMixin records aux hidden states after each layer with
+            # layer_idx + 1, so an aux layer exactly at this PP stage boundary
+            # is produced by the previous stage and must be received here.
+            num_incoming_aux_layers = sum(layer_idx <= inner_model.start_layer for layer_idx in aux_layers)
+        else:
+            # DeepseekV2 records aux hidden states before executing the layer,
+            # so the boundary layer belongs to the local PP stage.
+            num_incoming_aux_layers = sum(layer_idx < inner_model.start_layer for layer_idx in aux_layers)
         hidden_size = inner_model.config.hidden_size
         for i in range(num_incoming_aux_layers):
             result.tensors[f"{_AUX_KEY_PREFIX}{i}"] = torch.zeros(
@@ -218,8 +224,10 @@ def patch_eagle3_pp_aux_propagation(inner_model: nn.Module) -> bool:
 
     if isinstance(inner_model, DeepseekV2Model):
         make_forward = _make_deepseek_v2_forward
+        include_boundary_aux = False
     elif isinstance(inner_model, EagleModelMixin):
         make_forward = _make_eagle_mixin_forward
+        include_boundary_aux = True
     else:
         logger.warning(
             "Eagle3 PP aux propagation is only supported for DeepseekV2Model "
@@ -231,7 +239,7 @@ def patch_eagle3_pp_aux_propagation(inner_model: nn.Module) -> bool:
     if not getattr(inner_model, "_eagle3_pp_aux_forward_patched", False):
         inner_model.forward = make_forward().__get__(inner_model, type(inner_model))
         inner_model._eagle3_pp_aux_forward_patched = True
-    _patch_make_empty_intermediate_tensors(inner_model)
+    _patch_make_empty_intermediate_tensors(inner_model, include_boundary_aux)
 
     logger.info(
         "Applied Eagle3 PP aux propagation patch to %s (aux_layers=%s, start_layer=%d, end_layer=%d).",
