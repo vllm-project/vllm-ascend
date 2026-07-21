@@ -50,7 +50,7 @@ We need to add environment variable `export DYNAMIC_EPLB="true"` to enable vLLM-
 | eplb_policy_type | EPLB policy type. | 2 |
 | num_redundant_experts | Number of redundant experts. | 0 |
 
-```shell
+```mermaid
 graph TB
    A[start] --> B(collect_heat)
    B --> C(execute_algorithm)
