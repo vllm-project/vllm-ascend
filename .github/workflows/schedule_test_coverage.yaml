@@ -64,7 +64,7 @@ jobs:
       release_tag: ${{ steps.resolve-refs.outputs.release_tag }}
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.vllm_ascend_ref || 'main' }}
           fetch-depth: 0

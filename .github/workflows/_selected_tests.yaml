@@ -317,7 +317,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
-          name: selected-test-logs-vllm-${{ inputs.vllm }}-${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card
+          name: selected-test-logs-vllm-${{ inputs.vllm }}-${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card-${{ matrix.group.partition }}
           path: ${{ runner.temp }}/selected-tests-*
           if-no-files-found: ignore
           retention-days: 14
@@ -333,7 +333,7 @@ jobs:
         OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
       steps:
         - name: Checkout vllm-ascend source code
-          uses: actions/checkout@v6
+          uses: actions/checkout@v7
           with:
             ref: ${{ inputs.ref || github.ref }}
 
