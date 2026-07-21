@@ -642,6 +642,9 @@ class NPUModelRunner(GPUModelRunner):
             return layer_ids
         if self.speculative_config.use_dspark():
             hf_config = self.speculative_config.draft_model_config.hf_config
+            layer_ids = getattr(hf_config, "aux_hidden_state_layer_ids", None)
+            if layer_ids:
+                return tuple(int(i) for i in layer_ids)
             # deepseek v4 dspark
             dspark_layer_ids = getattr(hf_config, "dspark_target_layer_ids", None)
             if dspark_layer_ids:
