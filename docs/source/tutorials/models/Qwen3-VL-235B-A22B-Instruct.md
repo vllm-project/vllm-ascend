@@ -2,7 +2,7 @@
 
 ## 1 Introduction
 
-Qwen3-VL-235B-A22B-Instruct is a large-scale sparse MoE vision-language model in the Qwen3-VL family. It is designed for multimodal chat, image understanding, multi-image reasoning, OCR-like visual question answering, and long-context generation.
+The Qwen-VL (Vision-Language) series from Alibaba Cloud comprises a family of powerful Large Vision-Language Models (LVLMs) designed for comprehensive multimodal understanding. They accept images, text, and bounding boxes as input, and output text and detection boxes, enabling advanced functions like image detection, multi-modal dialogue, and multi-image reasoning.
 
 This document describes the main validation steps for the model, including supported features, prerequisites, installation, single-node online deployment, multi-node deployment, Prefill-Decode (PD) disaggregation, functional verification, accuracy and performance evaluation, performance tuning, and FAQs.
 
