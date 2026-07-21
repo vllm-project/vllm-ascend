@@ -427,6 +427,8 @@ class AscendDSparkProposer(AscendDflashProposer):
         block_table_buffer.fill_(-1)
         if block_table is not None:
             num_rows = min(block_table.shape[0], block_table_buffer.shape[0])
+            if seq_lens is not None:
+                num_rows = min(num_rows, seq_lens.shape[0])
             num_cols = min(block_table.shape[1], block_table_buffer.shape[1])
             block_table_buffer[:num_rows, :num_cols].copy_(block_table[:num_rows, :num_cols])
             if seq_lens is not None and num_rows > 0:
@@ -458,10 +460,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         del req_scheduled_tokens, long_seq_metadata
         is_prefill = num_decode_reqs == 0 and num_prefill_reqs > 0
         batch_size = cad.num_reqs
-        self._copy_dspark_block_table(
-            getattr(cad, "block_table_tensor", None),
-            getattr(cad, "seq_lens", None),
-        )
         self._dspark_context_lens = cad.seq_lens[:batch_size].clone()
         block_size = self.num_speculative_tokens
         num_query_total = batch_size * block_size
@@ -505,12 +503,23 @@ class AscendDSparkProposer(AscendDflashProposer):
             else:
                 self._context_slot_mapping_buffer[:num_context].fill_(-1)
         if is_prefill:
+            self._copy_dspark_block_table(
+                getattr(cad, "block_table_tensor", None),
+                self._dspark_context_lens,
+            )
             return num_query_total, None, cad, None
         model_config = getattr(getattr(self, "vllm_config", None), "model_config", None)
         max_model_len = int(getattr(model_config, "max_model_len", 0) or 0)
         last_token_indices = torch.clamp(valid_query_end - 1, min=0, max=target_positions.shape[0] - 1).to(torch.long)
         last_positions = target_positions.index_select(0, last_token_indices).to(self.positions.dtype)
+        # The target metadata is optimistic and can still include rejected
+        # draft tokens. Use the last valid target position for paged-cache
+        # bounds and for the DSpark attention sequence lengths.
         self._dspark_context_lens = last_positions + 1
+        self._copy_dspark_block_table(
+            getattr(cad, "block_table_tensor", None),
+            self._dspark_context_lens,
+        )
         draft_offsets = self.arange_dflash[:block_size].view(1, block_size)
         draft_positions = last_positions.view(batch_size, 1) + 1 + draft_offsets
         if max_model_len > 0:
@@ -538,9 +547,8 @@ class AscendDSparkProposer(AscendDflashProposer):
             slot_mapping,
         )
         self._slot_mapping_buffer[:num_query_total] = slot_mapping.flatten()
-        effective_seq_lens = cad.seq_lens - num_rejected_tokens_gpu if has_num_rejected else cad.seq_lens
         cad.query_start_loc = self.arange_dflash[: batch_size + 1] * block_size
-        cad.seq_lens = effective_seq_lens + block_size
+        cad.seq_lens = self._dspark_context_lens + block_size
         if max_model_len > 0:
             cad.seq_lens = cad.seq_lens.clamp(max=max_model_len)
         cad.query_start_loc_cpu = (torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone() * block_size).to(
