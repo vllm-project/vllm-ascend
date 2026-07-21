@@ -113,7 +113,17 @@ jobs:
         NAMESPACE: vllm-project
     steps:
       - name: Decode kubeconfig
-        run: echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$KUBECONFIG"
+        run: |
+          if [ -n "${{ inputs.request_id }}" ]; then
+            if [ "${{ inputs.soc_version }}" = "a3" ]; then
+              # NOTE: This is too hack, we should find a better way to manage kubeconfig for pr tests.
+              cp /root/.cache/.kube/kubeconfig.yaml "$KUBECONFIG"
+            else
+              cp /root/.cache/.kube/hk_001_kb.yaml "$KUBECONFIG"
+            fi
+          else
+            echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$KUBECONFIG"
+          fi
 
       - name: Checkout code
         uses: actions/checkout@v7
@@ -153,10 +163,6 @@ jobs:
             echo "artifact_name=${ARTIFACT_NAME}"
             echo "benchmark_job_name=${BENCHMARK_JOB_NAME}"
           } >> $GITHUB_OUTPUT
-
-      - name: Prepare scripts
-        run: |
-          install -D tests/e2e/nightly/multi_node/scripts/run.sh /root/.cache/tests/run.sh
 
       - name: Clear resources
         run: |

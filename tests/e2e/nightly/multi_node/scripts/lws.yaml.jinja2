@@ -50,10 +50,10 @@ spec:
               - name: GOOD_TABLE
                 value: "{{ good_table | default("/root/.cache/vllm-ascend/nightly/good_table.csv") }}"
             command:
-              - sh
+              - bash
               - -c
               - |
-                bash /root/.cache/tests/run.sh
+{% include 'run.sh' %}
             resources:
               limits:
                 huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
@@ -125,10 +125,10 @@ spec:
               - name: GOOD_TABLE
                 value: "{{ good_table | default("/root/.cache/vllm-ascend/nightly/good_table.csv") }}"
             command:
-              - sh
+              - bash
               - -c
               - |
-                bash /root/.cache/tests/run.sh
+{% include 'run.sh' %}
             resources:
               limits:
                 huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
