@@ -305,7 +305,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --max-num-seqs 32 \
         --served-model-name qwen3 \
         --dtype float16 \
-        --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+        --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32]}' \
         --quantization ascend \
         --max-model-len 16384 \
@@ -327,7 +327,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --max-num-seqs 16 \
         --served-model-name qwen3 \
         --dtype float16 \
-        --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+        --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}' \
         --quantization ascend \
         --max-model-len 16384 \
@@ -349,7 +349,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --max-num-seqs 32 \
         --served-model-name qwen3 \
         --dtype float16 \
-        --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+        --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [16,32]}' \
         --quantization ascend \
         --max-model-len 20480 \
