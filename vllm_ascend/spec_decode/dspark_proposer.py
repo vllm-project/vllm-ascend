@@ -53,11 +53,19 @@ class AscendDSparkProposer(AscendDflashProposer):
         block_size = self.num_speculative_tokens
         self.max_graph_batch_size = self.max_batch_size
         self.max_query_tokens = self.max_graph_batch_size * block_size
+        self._dspark_window_size = int(draft_hf_config.sliding_window)
         self.input_ids = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
         self.positions = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
         self._slot_mapping_buffer = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
         self._request_slots_buffer = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
         self._context_request_slots_buffer = torch.zeros(self.max_num_tokens, dtype=torch.int32, device=self.device)
+        self._dspark_window_offsets = torch.arange(self._dspark_window_size, dtype=torch.long, device=self.device).view(
+            1, -1
+        )
+        window_shape = (self.max_graph_batch_size, self._dspark_window_size)
+        self._dspark_context_cache_indices_buffer = torch.zeros(window_shape, dtype=torch.long, device=self.device)
+        self._dspark_context_cache_valid_buffer = torch.zeros(window_shape, dtype=torch.bool, device=self.device)
+        self._dspark_context_request_slots_buffer = torch.zeros(window_shape, dtype=torch.long, device=self.device)
         self._dspark_sampling_seed_buffer = torch.zeros(
             self.max_graph_batch_size, dtype=torch.int64, device=self.device
         )
@@ -326,6 +334,9 @@ class AscendDSparkProposer(AscendDflashProposer):
             )
         graph_batch_size = num_input_tokens // block_size
         fused_attn_metadata = self._prepare_dspark_fused_attention_metadata(graph_batch_size)
+        context_cache_indices, context_cache_valid, context_request_slots = self._prepare_dspark_window_inputs(
+            num_input_tokens
+        )
 
         with set_ascend_forward_context(
             None,
@@ -351,6 +362,9 @@ class AscendDSparkProposer(AscendDflashProposer):
                     inputs_embeds=None,
                     request_slots=self._request_slots_buffer[:num_input_tokens],
                     slot_mapping=self._slot_mapping_buffer[:num_input_tokens],
+                    context_cache_indices=context_cache_indices,
+                    context_cache_valid=context_cache_valid,
+                    context_request_slots=context_request_slots,
                 )
             else:
                 if forward_context is not None:
@@ -570,7 +584,43 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.attn_mask = None
         return num_query_total, None, cad, None
 
+    def _prepare_dspark_window_inputs(
+        self,
+        num_input_tokens: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        block_size = self.num_speculative_tokens
+        if num_input_tokens % block_size != 0:
+            raise ValueError(
+                f"DSpark decode requires a multiple of block_size tokens, got "
+                f"{num_input_tokens} tokens for block_size={block_size}"
+            )
+        batch_size = num_input_tokens // block_size
+        draft_positions = self.positions[:num_input_tokens].view(batch_size, block_size)
+        context_end = draft_positions[:, :1].to(torch.long) - 1
+        context_start = torch.clamp(context_end + 1 - self._dspark_window_size, min=0)
+        context_positions = context_start + self._dspark_window_offsets
+        cache_indices = context_positions.remainder(self._dspark_window_size)
+        cache_valid = context_positions <= context_end
+        request_slots = (
+            self._request_slots_buffer[:num_input_tokens]
+            .view(batch_size, block_size)[:, :1]
+            .to(torch.long)
+            .expand(-1, self._dspark_window_size)
+        )
+
+        self._dspark_context_cache_indices_buffer[:batch_size].copy_(cache_indices)
+        self._dspark_context_cache_valid_buffer[:batch_size].copy_(cache_valid)
+        self._dspark_context_request_slots_buffer[:batch_size].copy_(request_slots)
+        return (
+            self._dspark_context_cache_indices_buffer[:batch_size],
+            self._dspark_context_cache_valid_buffer[:batch_size],
+            self._dspark_context_request_slots_buffer[:batch_size],
+        )
+
     def build_model_inputs_first_pass(self, num_input_tokens: int) -> dict[str, Any]:
+        context_cache_indices, context_cache_valid, context_request_slots = self._prepare_dspark_window_inputs(
+            num_input_tokens
+        )
         return {
             "input_ids": self.input_ids[:num_input_tokens],
             "positions": self.positions[:num_input_tokens],
@@ -578,6 +628,9 @@ class AscendDSparkProposer(AscendDflashProposer):
             "request_slots": self._request_slots_buffer[:num_input_tokens],
             "slot_mapping": self._slot_mapping_buffer[:num_input_tokens],
             "block_table": self._dspark_block_table_tensor,
+            "context_cache_indices": context_cache_indices,
+            "context_cache_valid": context_cache_valid,
+            "context_request_slots": context_request_slots,
         }
 
     def _prepare_dspark_fused_attention_metadata(self, batch_size: int):

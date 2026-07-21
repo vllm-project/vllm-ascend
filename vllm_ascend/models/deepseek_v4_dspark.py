@@ -4,6 +4,7 @@
 import importlib
 import typing
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -26,7 +27,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
+from vllm_ascend.ops.rope_dsv4 import RopeDataProxy, get_cos_and_sin_dsa
 from vllm_ascend.utils import enable_dsa_cp
 
 from .deepseek_v4 import (
@@ -43,6 +44,15 @@ DSPARK_DEFAULT_BLOCK_SIZE = 5
 DSPARK_DEFAULT_NUM_LAYERS = 3
 DSPARK_SAS_OP_NAMESPACES = ("_ascend_dsv4", "_ascend_v4", "custom")
 DSparkFusedAttentionMetadata = tuple[int, torch.Tensor, torch.Tensor, torch.Tensor]
+
+
+@dataclass
+class DSparkDecodeMetadata:
+    cos: RopeDataProxy
+    sin: RopeDataProxy
+    context_cache_indices: torch.Tensor | None
+    context_cache_valid: torch.Tensor | None
+    context_request_slots: torch.Tensor | None
 
 
 def _get_dspark_sas_op(name: str):
@@ -100,10 +110,14 @@ def _apply_dsv4_rope(
     x: torch.Tensor,
     *,
     inverse: bool = False,
+    cos_sin: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> torch.Tensor:
-    cos, sin = get_cos_and_sin_dsa(positions)
-    cos_t = cos[rotary_emb.layername]
-    sin_t = sin[rotary_emb.layername]
+    if cos_sin is None:
+        cos, sin = get_cos_and_sin_dsa(positions)
+        cos_t = cos[rotary_emb.layername]
+        sin_t = sin[rotary_emb.layername]
+    else:
+        cos_t, sin_t = cos_sin
     if inverse:
         sin_t = -sin_t
     return rotary_emb(x, cos_t, sin_t)
@@ -115,13 +129,25 @@ def _apply_dsv4_rope_tail(
     x: torch.Tensor,
     *,
     inverse: bool = False,
+    cos_sin: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     rotary_dim = rotary_emb.rotary_dim
-    if x.shape[-1] == rotary_dim:
-        return _apply_dsv4_rope(rotary_emb, positions, x, inverse=inverse)
-    x_pass, x_rot = x[..., :-rotary_dim], x[..., -rotary_dim:]
-    x_rot = _apply_dsv4_rope(rotary_emb, positions, x_rot, inverse=inverse)
-    return torch.cat([x_pass, x_rot], dim=-1)
+    if cos_sin is None:
+        cos, sin = get_cos_and_sin_dsa(positions)
+        cos_t = cos[rotary_emb.layername]
+        sin_t = sin[rotary_emb.layername]
+    else:
+        cos_t, sin_t = cos_sin
+    if inverse:
+        sin_t = -sin_t
+    torch.ops._C_ascend.inplace_partial_rotary_mul(
+        x.unsqueeze(1),
+        cos_t,
+        sin_t,
+        rotary_mode="interleave",
+        partial_slice=[x.shape[-1] - rotary_dim, x.shape[-1]],
+    )
+    return x
 
 
 def _wo_a_weight_for_eager_projection(
@@ -275,10 +301,20 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             return None
         return kv_cache
 
-    def _project_shared_kv(self, hidden_states: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+    def _project_shared_kv(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        rope_cos_sin: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
         kv = self.kv_norm(_linear_output(self.wkv, hidden_states))
         k_nope, k_pe = kv.split([self.nope_head_dim, self.rope_head_dim], dim=-1)
-        k_pe = _apply_dsv4_rope(self.rotary_emb, positions, k_pe.unsqueeze(1)).squeeze(1)
+        k_pe = _apply_dsv4_rope(
+            self.rotary_emb,
+            positions,
+            k_pe.unsqueeze(1),
+            cos_sin=rope_cos_sin,
+        ).squeeze(1)
         return torch.cat([k_nope, k_pe], dim=-1).contiguous()
 
     def precompute_context_kv(
@@ -286,6 +322,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         main_x: torch.Tensor,
         positions: torch.Tensor,
         slot_mapping: torch.Tensor | None,
+        rope_cos_sin: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> None:
         if positions.numel() == 0:
             return
@@ -293,7 +330,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             return
         valid = (positions >= 0) & (slot_mapping >= 0)
         safe_positions = torch.where(valid, positions, torch.zeros_like(positions))
-        shared_kv = self._project_shared_kv(main_x, safe_positions)
+        shared_kv = self._project_shared_kv(main_x, safe_positions, rope_cos_sin)
         kv_cache = self._get_dspark_kv_cache()
         if kv_cache is None:
             # KV caches are not bound during the memory profiling dummy run.
@@ -417,18 +454,24 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         draft_kv: torch.Tensor,
         draft_positions: torch.Tensor,
         request_slots: torch.Tensor,
+        context_cache_indices: torch.Tensor | None = None,
+        context_cache_valid: torch.Tensor | None = None,
+        context_request_slots: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size, draft_len = q.shape[:2]
 
-        block_start = draft_positions[:, :1].to(torch.long)
-        context_end = block_start - 1
-        context_start = torch.clamp(context_end + 1 - self.window_size, min=0)
-        ctx_positions = context_start + self._dspark_window_offsets
-        within_ctx = ctx_positions <= context_end
-        cache_indices = ctx_positions.remainder(self.window_size)
-        slot_indices = request_slots[:, :1].to(device=draft_kv.device, dtype=torch.long).expand(-1, self.window_size)
-        ctx_kv = self._dspark_kv_cache[slot_indices, cache_indices]
-        ctx_kv = torch.where(within_ctx.unsqueeze(-1), ctx_kv, torch.zeros_like(ctx_kv))
+        if context_cache_indices is None or context_cache_valid is None or context_request_slots is None:
+            block_start = draft_positions[:, :1].to(torch.long)
+            context_end = block_start - 1
+            context_start = torch.clamp(context_end + 1 - self.window_size, min=0)
+            ctx_positions = context_start + self._dspark_window_offsets
+            context_cache_valid = ctx_positions <= context_end
+            context_cache_indices = ctx_positions.remainder(self.window_size)
+            context_request_slots = (
+                request_slots[:, :1].to(device=draft_kv.device, dtype=torch.long).expand(-1, self.window_size)
+            )
+        ctx_kv = self._dspark_kv_cache[context_request_slots, context_cache_indices]
+        ctx_kv = torch.where(context_cache_valid.unsqueeze(-1), ctx_kv, torch.zeros_like(ctx_kv))
 
         total_tokens = self.window_size + draft_len
         blocks_per_request = (total_tokens + self.pa_block_size - 1) // self.pa_block_size
@@ -459,14 +502,26 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         request_slots: torch.Tensor | None = None,
         slot_mapping: torch.Tensor | None = None,
         block_table: torch.Tensor | None = None,
+        dspark_metadata: DSparkDecodeMetadata | None = None,
     ) -> torch.Tensor:
         del llama_4_scaling, slot_mapping, block_table
+        if dspark_metadata is None:
+            rope_cos_sin = None
+            context_cache_indices = None
+            context_cache_valid = None
+            context_request_slots = None
+        else:
+            layer_name = self.rotary_emb.layername
+            rope_cos_sin = (dspark_metadata.cos[layer_name], dspark_metadata.sin[layer_name])
+            context_cache_indices = dspark_metadata.context_cache_indices
+            context_cache_valid = dspark_metadata.context_cache_valid
+            context_request_slots = dspark_metadata.context_request_slots
         qr = self.q_norm(_linear_output(self.wq_a, hidden_states))
         q = _linear_output(self.wq_b, qr).view(-1, self.n_local_heads, self.head_dim)
         q = self.q_norm_without_weight(q)
         q_nope, q_pe = q.split([self.nope_head_dim, self.rope_head_dim], dim=-1)
-        q_pe = _apply_dsv4_rope(self.rotary_emb, positions, q_pe)
-        shared_kv = self._project_shared_kv(hidden_states, positions)
+        q_pe = _apply_dsv4_rope(self.rotary_emb, positions, q_pe, cos_sin=rope_cos_sin)
+        shared_kv = self._project_shared_kv(hidden_states, positions, rope_cos_sin)
         q = torch.cat([q_nope, q_pe], dim=-1)
         if positions.numel() % self.block_size != 0:
             raise ValueError(
@@ -480,9 +535,23 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         if request_slots is None:
             request_slots = torch.zeros_like(positions, dtype=torch.int32)
         request_slots = request_slots.view(batch_size, self.block_size)
-        out = self._dspark_attention_from_cache(q, draft_kv, draft_positions, request_slots).flatten(0, 1)
+        out = self._dspark_attention_from_cache(
+            q,
+            draft_kv,
+            draft_positions,
+            request_slots,
+            context_cache_indices,
+            context_cache_valid,
+            context_request_slots,
+        ).flatten(0, 1)
 
-        out = _apply_dsv4_rope_tail(self.rotary_emb, positions, out, inverse=True)
+        out = _apply_dsv4_rope_tail(
+            self.rotary_emb,
+            positions,
+            out,
+            inverse=True,
+            cos_sin=rope_cos_sin,
+        )
         group_dim = self.n_local_heads * self.head_dim // self.n_local_groups
         out = out.reshape(-1, self.n_local_groups, group_dim)
         if hasattr(self.wo_a, "weight_scale") and self.wo_a.weight.dtype == torch.float8_e4m3fn:
@@ -531,6 +600,7 @@ class DeepseekV4DSparkDecoderLayer(DeepseekV2DecoderLayer):
         request_slots: torch.Tensor | None = None,
         slot_mapping: torch.Tensor | None = None,
         block_table: torch.Tensor | None = None,
+        dspark_metadata: DSparkDecodeMetadata | None = None,
     ) -> torch.Tensor:
         del residual, llama_4_scaling
         hidden_states, _ = self._forward_hc_blocks(
@@ -541,6 +611,7 @@ class DeepseekV4DSparkDecoderLayer(DeepseekV2DecoderLayer):
                 "request_slots": request_slots,
                 "slot_mapping": slot_mapping,
                 "block_table": block_table,
+                "dspark_metadata": dspark_metadata,
             },
         )
         return hidden_states
@@ -649,8 +720,21 @@ class DeepseekV4DSparkModel(nn.Module):
         if context_states.numel() == 0:
             return
         main_x = self.main_norm(_linear_output(self.main_proj, context_states))
+        safe_context_positions = torch.where(
+            context_positions >= 0,
+            context_positions,
+            torch.zeros_like(context_positions),
+        )
+        rope_cos, rope_sin = get_cos_and_sin_dsa(safe_context_positions)
         for layer in self.layers.values():
-            layer.self_attn.precompute_context_kv(main_x, context_positions, context_slot_mapping)
+            rotary_emb = layer.self_attn.rotary_emb
+            rope_cos_sin = (rope_cos[rotary_emb.layername], rope_sin[rotary_emb.layername])
+            layer.self_attn.precompute_context_kv(
+                main_x,
+                context_positions,
+                context_slot_mapping,
+                rope_cos_sin,
+            )
 
     def reset_request_slots(self, request_slots: torch.Tensor | None) -> None:
         for layer in self.layers.values():
@@ -687,11 +771,22 @@ class DeepseekV4DSparkModel(nn.Module):
         request_slots: torch.Tensor | None = None,
         slot_mapping: torch.Tensor | None = None,
         block_table: torch.Tensor | None = None,
+        context_cache_indices: torch.Tensor | None = None,
+        context_cache_valid: torch.Tensor | None = None,
+        context_request_slots: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del hidden_states
         if inputs_embeds is None:
             inputs_embeds = self.embed_input_ids(input_ids)
         hidden_states = inputs_embeds.unsqueeze(-2).repeat(1, self.hc_mult, 1)
+        rope_cos, rope_sin = get_cos_and_sin_dsa(positions)
+        dspark_metadata = DSparkDecodeMetadata(
+            cos=rope_cos,
+            sin=rope_sin,
+            context_cache_indices=context_cache_indices,
+            context_cache_valid=context_cache_valid,
+            context_request_slots=context_request_slots,
+        )
         for layer in self.layers.values():
             hidden_states = layer(
                 positions=positions,
@@ -700,6 +795,7 @@ class DeepseekV4DSparkModel(nn.Module):
                 request_slots=request_slots,
                 slot_mapping=slot_mapping,
                 block_table=block_table,
+                dspark_metadata=dspark_metadata,
             )
         return hidden_states
 
@@ -768,6 +864,9 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
         request_slots: torch.Tensor | None = None,
         slot_mapping: torch.Tensor | None = None,
         block_table: torch.Tensor | None = None,
+        context_cache_indices: torch.Tensor | None = None,
+        context_cache_valid: torch.Tensor | None = None,
+        context_request_slots: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del intermediate_tensors, spec_step_idx
         assert input_ids is not None
@@ -779,6 +878,9 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
             request_slots=request_slots,
             slot_mapping=slot_mapping,
             block_table=block_table,
+            context_cache_indices=context_cache_indices,
+            context_cache_valid=context_cache_valid,
+            context_request_slots=context_request_slots,
         )
 
     def prepare_fused_attention_metadata(
