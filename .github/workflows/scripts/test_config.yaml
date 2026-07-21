@@ -76,6 +76,7 @@
   source_file_dependencies:
     - vllm_ascend/attention/attention_v1.py
   tests:
+    - tests/e2e/pull_request/four_card/test_gemma4.py
     - tests/e2e/pull_request/two_card/test_gemma4.py
 
 - name: attention_fa3
@@ -785,6 +786,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_qwen3_5.py: 610
   tests/e2e/pull_request/four_card/test_qwen3_next.py: 1180
   tests/e2e/pull_request/four_card/test_graph_mode.py: 480
+  tests/e2e/pull_request/four_card/test_gemma4.py: 1200
   tests/e2e/pull_request/two_card/test_gemma4.py: 1200
   tests/ut/attention/a2/test_attention_cp.py: 40
   tests/ut/attention/a2/test_attention_cp_precision.py: 30
