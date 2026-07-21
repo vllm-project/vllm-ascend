@@ -92,14 +92,14 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
 === "Atlas inference products"
 
-    | Model | Support | Note | Supported Hardware | Doc |
-    |-------|---------|------|--------------------|-----|
-    | Qwen3-Embedding | 🔵 | FP16 | Atlas inference products | [Qwen3_Embedding](../../tutorials/models/Qwen3-Embedding.md) |
-    | Qwen3-VL-Embedding | 🔵 | FP16 | Atlas inference products | [Qwen3_VL_Embedding](../../tutorials/models/Qwen3-VL-Embedding.md) |
-    | Qwen3-Reranker  | 🔵 | FP16 | Atlas inference products | [Qwen3_Reranekr](../../tutorials/models/Qwen3-Reranker.md) |
-    | Qwen3-VL-Reranker | 🔵 | FP16 | Atlas inference products | [Qwen3_VL_Reranker](../../tutorials/models/Qwen3-VL-Reranker.md) |
-    | XLM-RoBERTa-based | 🔵 | FP16; embedding and scoring | Atlas inference products | |
-    | Qwen2.5-based | 🔵 | FP16 classification | Atlas inference products | |
+    | Model | Support | Note | Supported Hardware | W8A8|Doc |
+    |-------|---------|------|--------------------|-----|------|
+    | Qwen3-Embedding | 🔵 | FP16 | Atlas inference products |❌| [Qwen3_Embedding](../../tutorials/models/Qwen3-Embedding.md) |
+    | Qwen3-VL-Embedding | 🔵 | FP16 | Atlas inference products |🔵| [Qwen3_VL_Embedding](../../tutorials/models/Qwen3-VL-Embedding.md) |
+    | Qwen3-Reranker  | 🔵 | FP16 | Atlas inference products |❌| [Qwen3_Reranker](../../tutorials/models/Qwen3-Reranker.md) |
+    | Qwen3-VL-Reranker | 🔵 | FP16 | Atlas inference products |🔵| [Qwen3_VL_Reranker](../../tutorials/models/Qwen3-VL-Reranker.md) |
+    | XLM-RoBERTa-based | 🔵 | FP16; embedding and scoring | Atlas inference products |❌| |
+    | Qwen2.5-based | 🔵 | FP16 classification | Atlas inference products |❌| |
 
 ## Multimodal Language Models
 
