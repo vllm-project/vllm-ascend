@@ -80,20 +80,28 @@ def _scatter_index_cache(
 
     updates = updates.reshape(slots.shape[0], cache.shape[-1])
     valid = slots >= 0
-    first_valid_idx = torch.argmax(valid.to(torch.int32))
+    first_valid_idx = torch.argmax(valid.to(torch.int32)).reshape(1)
     has_valid = valid.any()
+
+    # Keep the index on device. Tensor scalar indexing would invoke
+    # _local_scalar_dense and synchronize a copy stream, which is unsupported
+    # while an ACL graph is being captured.
+    first_valid_slot = torch.index_select(slots, 0, first_valid_idx).squeeze(0)
+    first_valid_update = torch.index_select(
+        updates, 0, first_valid_idx
+    ).squeeze(0)
 
     # A5 ScatterNdUpdate requires in-range indices. Redirect padding to the
     # first valid slot with that slot's same update, making duplicates harmless.
     # If the whole batch is padding, write cache[0] back to itself.
     fallback_slot = torch.where(
         has_valid,
-        slots[first_valid_idx],
+        first_valid_slot,
         slots.new_zeros(()),
     )
     fallback_update = torch.where(
         has_valid,
-        updates[first_valid_idx],
+        first_valid_update,
         cache[0],
     )
     safe_slots = torch.where(valid, slots, fallback_slot).view(-1, 1)
