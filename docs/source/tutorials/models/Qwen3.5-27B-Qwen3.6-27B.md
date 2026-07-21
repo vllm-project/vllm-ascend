@@ -22,13 +22,13 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 - `Qwen3.5-27B` (BF16 version): requires 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node or Atlas inference products. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3.5-27B)
 - `Qwen3.5-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node or Atlas inference products. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-27B-w8a8-mtp)
-- `Qwen3.5-27B-w8a8-MXFP8` (Quantized version): requires 1 Ascend950DT series (96G × 8) node. [Download model weight]() #TODO
+- `Qwen3.5-27B-w8a8-MXFP8` (Quantized version): requires 1 Ascend950DT series (96G × 8) node. [Download model weight] #TODO
 
 **Qwen3.6-27B**
 
 - `Qwen3.6-27B` (BF16 version): requires 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node or Atlas inference products. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3.6-27B)
 - `Qwen3.6-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node or Atlas inference products. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8)
-- `Qwen3.6-27B-w8a8-MXFP8` (Quantized version): requires 1 Ascend950DT series (96G × 8) node. [Download model weight]() #TODO
+- `Qwen3.6-27B-w8a8-MXFP8` (Quantized version): requires 1 Ascend950DT series (96G × 8) node. [Download model weight] #TODO
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
