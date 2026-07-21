@@ -162,6 +162,11 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
 The parameters are explained as follows:
 
 - For single-node deployment, we recommend using `dp1tp16` and turn off expert parallel in low-latency scenarios.
+- If the video memory is sufficient, there is no need to enable sfac8.
+- For short sequences, DCP does not need to be enabled;For long sequences, DCP needs to be enabled.
+- There are two cases:
+    1. If the GPU memory is insufficient for the sequence length, enable the DCP configuration. However, enabling the DCP configuration will affect the TPOT performance.
+    2. If the GPU memory is sufficient, you are advised not to enable the DCP configuration.
 
 ### Multi-node Deployment
 
@@ -819,6 +824,15 @@ Once the preparation is done, you can start the server with the following comman
     # change ip to your own
     python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address $node_d0_ip --dp-rpc-port 16600 --vllm-start-port 9900
     ```
+
+**Notice:**
+The parameters are explained as follows:
+
+- Like a single node,For short sequences, DCP does not need to be enabled; For long sequences, DCP needs to be enabled.
+- If the video memory is sufficient, there is no need to enable sfac8.
+- There are two cases:
+    1. If the GPU memory is insufficient for the sequence length, enable the DCP configuration. However, enabling the DCP configuration will affect the TPOT performance.
+    2. If the GPU memory is sufficient, you are advised not to enable the DCP configuration.
 
 To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
