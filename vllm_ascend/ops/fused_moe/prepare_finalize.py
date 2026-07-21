@@ -176,7 +176,8 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
                         self.tp_rank
                     ]
             else:
-                lora_context.split_lora_indices = token_lora_indices
+                if lora_context is not None:
+                    lora_context.split_lora_indices = token_lora_indices
 
         return MoEPrepareOutput(
             hidden_states=hidden_states,
