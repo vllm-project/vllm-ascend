@@ -89,6 +89,19 @@ env_variables: dict[str, Callable[[], Any]] = {
     # 1: ALLTOALL and MC2 might be replaced by `dispatch_ffn_combine` operator.
     # `dispatch_ffn_combine` can be used only for moe layer with W8A8, EP<=32, non-mtp, non-dynamic-eplb.
     "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
+    # Allow MoE LoRA on models with shared experts (e.g. Qwen3.5-MoE,
+    # DeepSeek-V3). The shared-experts LoRA runs through vLLM's dense
+    # wrappers, whose expand-slice path does not match the
+    # _C_ascend.sgmv_expand stacked lora_b layout (and vLLM's torch_ops
+    # einsum fallback fails on the same layout). When set to 1,
+    # PunicaWrapperNPU._expand_slice_prefill / _expand_slice_decode bypass
+    # sgmv/bgmv_expand_slice and compute the LoRA expand via a per-token
+    # gather + torch.bmm instead. Experimental; expect a throughput drop.
+    # Leave off for models without shared experts (e.g. Qwen3-30B-A3B),
+    # whose expand-slice path stays on _C_ascend and is unaffected.
+    "VLLM_ASCEND_MOE_LORA_ALLOW_SHARED_EXPERTS": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_MOE_LORA_ALLOW_SHARED_EXPERTS", "0"))
+    ),
     # DEPRECATED: VLLM_ASCEND_BALANCE_SCHEDULING env var will be removed in a future release.
     # Use --additional-config '{"enable_balance_scheduling": true}' instead.
     "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))),
