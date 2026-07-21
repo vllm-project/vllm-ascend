@@ -376,9 +376,8 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
     """GELU path: dispatch, math, and layout coverage.
 
     In the in-branch/guard variant the GELU path runs through the existing
-    branch preamble (``get_weight_prefetch_method`` and ``_EXTRA_CTX``), which
-    the early-return variant skipped. Stub them in setUp so each test can focus
-    on the GELU dispatch/math.
+    branch preamble. Stub `_EXTRA_CTX` in setUp so each test can focus on the
+    GELU dispatch/math.
     """
 
     def setUp(self):
@@ -386,7 +385,6 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
         self._ctx_mock = MagicMock()
         self._ctx_mock.moe_comm_type = -1
         self._patches = [
-            patch(f"{MOE_MLP}.get_weight_prefetch_method", return_value=None),
             patch(f"{MOE_MLP}._EXTRA_CTX", self._ctx_mock),
         ]
         for p in self._patches:

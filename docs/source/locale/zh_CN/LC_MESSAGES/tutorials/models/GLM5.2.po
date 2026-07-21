@@ -201,9 +201,6 @@ msgstr "1. 在每个节点上准备脚本 `launch_online_dp.py`："
 msgid "2. prepare the script `run_dp_template.sh` on each node."
 msgstr "2. 在每个节点上准备脚本 `run_dp_template.sh`。"
 
-msgid "1. Prefill node 0"
-msgstr "1. Prefill节点0"
-
 msgid ""
 "Once the preparation is done, you can start the server with the following "
 "command on each node:"
@@ -277,11 +274,11 @@ msgid "Some configurations for optimization are shown below:"
 msgstr "以下是一些用于优化的配置："
 
 msgid ""
-"- `VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node.\n"
-"- `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable following fused operators: dispatch_gmm_combine_decode and dispatch_ffn_combine operator."
+"- `VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node. With FlashComm enabled, layer_sharding list cannot include o_proj as an element.\n"
+"- `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable the dispatch_ffn_combine fused operator."
 msgstr ""
-"- `VLLM_ASCEND_ENABLE_FLASHCOMM1`：启用 FlashComm 优化，以减少预填充节点上的通信和计算开销。\n"
-"- `VLLM_ASCEND_ENABLE_FUSED_MC2`：启用以下融合算子：dispatch_gmm_combine_decode 和 dispatch_ffn_combine 算子。"
+"- `VLLM_ASCEND_ENABLE_FLASHCOMM1`：启用 FlashComm 优化，以减少预填充节点上的通信和计算开销。启用 FlashComm 后，layer_sharding 列表不能包含 o_proj 作为元素。\n"
+"- `VLLM_ASCEND_ENABLE_FUSED_MC2`：启用 dispatch_ffn_combine 融合算子。"
 
 msgid ""
 "Please refer to the following python file for further explanation and "
@@ -370,3 +367,62 @@ msgstr ""
 
 msgid "### Using AISBench"
 msgstr "### 使用 AISBench"
+
+msgid "### 1M Context Configuration"
+msgstr "### 1M 上下文配置"
+
+msgid ""
+"Recommended configurations for serving `GLM-5.2` with a 1M context window on"
+" Atlas 800 A3 (64G x 16) and quantized GLM-5.2(W4A8C8) weights:"
+msgstr ""
+"在 Atlas 800 A3（64G x 16）上使用量化后的 GLM-5.2（W4A8C8）权重，为 `GLM-5.2` 提供 1M "
+"上下文窗口服务的推荐配置："
+
+msgid "| Mode | Hardware | Parallelism | Context |"
+msgstr "| 模式 | 硬件 | 并行配置 | 上下文长度 |"
+
+msgid ""
+"| Single-node co-located | 1 Atlas 800 A3 (64G x 16) | `DP1 PP1 TP16 PCP1 "
+"DCP16` | `1024000` |"
+msgstr ""
+"| 单节点共部署 | 1 台 Atlas 800 A3（64G x 16） | `DP1 PP1 TP16 PCP1 DCP16` | "
+"`1024000` |"
+
+msgid ""
+"| Dual-node co-located | 2 Atlas 800 A3 (64G x 16) | `DP4 PP1 TP8 PCP1 DCP8`"
+" | `1024000` |"
+msgstr ""
+"| 双节点共部署 | 2 台 Atlas 800 A3（64G x 16） | `DP4 PP1 TP8 PCP1 DCP8` | `1024000` "
+"|"
+
+msgid ""
+"| 1P1D PD disaggregation | 1 prefiller with 2 A3 nodes + 1 decoder with 2 A3"
+" nodes | Prefill `DP4 PP1 TP8 PCP1 DCP8`, Decode `DP4 PP1 TP8 PCP1 DCP8` | "
+"`1024000` |"
+msgstr ""
+"| 1P1D PD 分离部署 | 1 个预填充节点（2 台 A3）+ 1 个解码节点（2 台 A3） | 预填充 `DP4 PP1 TP8 PCP1 "
+"DCP8`，解码 `DP4 PP1 TP8 PCP1 DCP8` | `1024000` |"
+
+msgid "#### Single-Node 1M Deployment"
+msgstr "#### 单节点 1M 部署"
+
+msgid "Recommended command:"
+msgstr "推荐命令："
+
+msgid "#### Dual-Node Co-Located 1M Deployment"
+msgstr "#### 双节点共部署 1M 部署"
+
+msgid "Recommended command for both co-located nodes:"
+msgstr "两个共部署节点的推荐命令："
+
+msgid "#### PD Disaggregation 1M Deployment"
+msgstr "#### PD 分离部署 1M 部署"
+
+msgid "Recommended command for both prefiller nodes:"
+msgstr "两个预填充节点的推荐命令："
+
+msgid "Recommended command for both decoder nodes:"
+msgstr "两个解码节点的推荐命令："
+
+msgid "Recommended proxy command:"
+msgstr "推荐代理命令："

@@ -120,14 +120,8 @@ msgstr "### 4.1 Docker 镜像安装"
 msgid "You can use the official all-in-one Docker image for Qwen3 MoE models."
 msgstr "您可以使用官方为 Qwen3 MoE 模型提供的集成 Docker 镜像。"
 
-msgid "**Docker Pull:**"
-msgstr "**Docker 拉取：**"
-
 msgid "**Docker Run:**"
 msgstr "**Docker 运行：**"
-
-msgid "=== \"Atlas 800I A3\""
-msgstr "=== \"Atlas 800I A3\""
 
 msgid ""
 "A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).\n"
@@ -135,9 +129,6 @@ msgid ""
 msgstr ""
 "A3 有 8 个 NPU，采用双芯设计（共 16 个芯片：`/dev/davinci[0-15]`）。\n"
 "        如果您在共享机器上，只需映射您需要的芯片（例如，NPU 0-3 映射 `/dev/davinci[0-7]`）。"
-
-msgid "=== \"Atlas 800I A2\""
-msgstr "=== \"Atlas 800I A2\""
 
 msgid ""
 "The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed as "
@@ -442,8 +433,8 @@ msgid ""
 "Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.\n"
 "Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions."
 msgstr ""
-"调优方法请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。\n"
-"详细功能说明请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)。"
+"调优方法请参考[优化与调优](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。\n"
+"详细功能说明请参考[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
 
 msgid "## 10 FAQ"
 msgstr "## 10 常见问题"
@@ -568,3 +559,16 @@ msgstr ""
 "| Eagle3 草稿模型   | 不适用"
 "                                                                                               "
 "| [下载](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3)            |"
+
+msgid "=== \"A3 series\""
+msgstr "=== \"A3系列\""
+
+msgid "=== \"A2 series\""
+msgstr "=== \"A2系列\""
+
+msgid ""
+"!!! tip\n"
+"    The mounts above are the minimum required for NPU driver access. Add additional `-v` mounts (e.g., model weight paths, datasets) as needed for your environment."
+msgstr ""
+"!!! tip\n"
+"    上述挂载是访问NPU驱动所需的最小配置。根据您的环境需要，可添加额外的`-v`挂载（例如模型权重路径、数据集等）。"

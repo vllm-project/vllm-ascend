@@ -4,7 +4,11 @@
 
 This is an optimization based on FX graphs, which can be considered an acceleration solution for the aclgraph mode.
 
-You can get its code [code](https://gitcode.com/Ascend/torchair)
+You can get its code [torchair source code repository](https://gitcode.com/Ascend/torchair)
+
+!!! note "Atlas inference products"
+
+    Atlas inference products and Atlas 200I Pro do not support `enable_npugraph_ex`. Set --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}'.
 
 ## Default FX Graph Optimization
 
@@ -19,7 +23,7 @@ npugraph_ex now provides some operator fusion passes, and more will be added in 
 
 Operator combinations that meet the replacement rules can be replaced with the corresponding fused operators.
 
-You can get the default [fusion pass list](https://www.hiascend.com/document/detail/zh/Pytorch/2600/modthirdparty/torchairuseguide/docs/zh/npugraph_ex/basic/pattern_fusion_pass.md#功能简介)
+You can get the default [fusion pass list](https://www.hiascend.com/document/detail/zh/Pytorch/latest/modthirdparty/torchairuseguide/docs/zh/npugraph_ex/basic/pattern_fusion_pass.md#功能简介)
 
 ## Custom fusion pass
 

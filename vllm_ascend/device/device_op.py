@@ -117,7 +117,7 @@ class BaseDeviceAdaptor:
         quant_mode: int = -1,
         act_quant_type: torch.dtype | None = None,
     ):
-        return torch.ops._C_ascend.npu_moe_init_routing_custom(
+        return torch_npu.npu_moe_init_routing_v2(
             hidden_states,
             topk_ids,
             scale=scale,
@@ -993,7 +993,7 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def fused_gdn_gating(A_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor):
-        return torch.ops._C_ascend.npu_fused_gdn_gating(A_log, a, b, dt_bias.to(A_log.dtype))
+        return fused_gdn_gating_patch(A_log, a, b, dt_bias)
 
     @staticmethod
     def split_qkv_rmsnorm_rope(
