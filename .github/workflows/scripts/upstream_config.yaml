@@ -1,3 +1,8 @@
+e2e-upstream_pr:
+  - name: tests/v1/worker/test_mamba_utils.py
+    estimated_time: 20
+  - name: tests/lora/test_lora_manager.py
+    estimated_time: 20
 e2e-upstream_singlecard:
   - name: tests/benchmarks/test_plot_filters.py
     estimated_time: 20
@@ -62,8 +67,6 @@ e2e-upstream_singlecard:
   - name: tests/lora/test_lora_functions.py
     estimated_time: 20
   - name: tests/lora/test_lora_huggingface.py
-    estimated_time: 20
-  - name: tests/lora/test_lora_manager.py
     estimated_time: 20
   - name: tests/lora/test_peft_helper.py
     estimated_time: 20
@@ -384,8 +387,6 @@ e2e-upstream_singlecard:
   - name: tests/v1/core/test_repetition_detection.py
     estimated_time: 20
   - name: tests/v1/spec_decode/test_extract_hidden_states.py
-    estimated_time: 20
-  - name: tests/v1/worker/test_mamba_utils.py
     estimated_time: 20
   - name: tests/entrypoints/anthropic/test_anthropic_messages_conversion.py
     estimated_time: 20
