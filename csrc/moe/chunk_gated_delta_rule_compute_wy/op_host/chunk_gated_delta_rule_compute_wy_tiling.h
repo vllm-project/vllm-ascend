@@ -17,6 +17,13 @@ TILING_DATA_FIELD_DEF(int64_t, chunkSize);
 TILING_DATA_FIELD_DEF(int64_t, numChunks);
 TILING_DATA_FIELD_DEF(int64_t, groupSize);
 TILING_DATA_FIELD_DEF(int64_t, totalTasks);
+TILING_DATA_FIELD_DEF(uint32_t, localWorkspaceSize);
+TILING_DATA_FIELD_DEF(uint32_t, perCoreWorkspaceBytes);
+TILING_DATA_FIELD_DEF(uint32_t, usedCoreNum);
+TILING_DATA_FIELD_DEF(uint32_t, reserved0);
+TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, mmAttn);
+TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, mmU);
+TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, mmW);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(ChunkGatedDeltaRuleComputeWy, ChunkGatedDeltaRuleComputeWyTilingData)
