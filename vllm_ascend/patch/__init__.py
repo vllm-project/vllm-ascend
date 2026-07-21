@@ -716,6 +716,28 @@
 #    Future Plan:
 #       Remove this patch when vLLM merges the PR.
 #
+# ** 14a. File: worker/patch_eagle3_pp_aux.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.interfaces.EagleModelMixin`
+#      `inner_model.forward`
+#      `inner_model.make_empty_intermediate_tensors`
+#    Why:
+#       In EAGLE3 speculative decoding with PP, aux hidden states can be
+#       produced on earlier PP stages while the drafter runs on the last stage.
+#       Without propagating those aux tensors through IntermediateTensors, the
+#       drafter only sees local-stage aux states and may fail or use incomplete
+#       hidden states.
+#    How:
+#       Install PP aux helper methods on EagleModelMixin, patch supported inner
+#       model forward functions to use global layer indices, and extend
+#       make_empty_intermediate_tensors so upstream PP handoff carries aux
+#       tensors between stages.
+#    Related PR (if no, explain why):
+#       No, Ascend PP + EAGLE3 timing/path behavior is still being stabilized.
+#    Future Plan:
+#       Remove this patch once vLLM provides native PP aux propagation for
+#       EAGLE3 target models.
+#
 # ** 15. File: worker/patch_minimax_m2.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.minimax_m2.MiniMaxM2MoE.forward`
