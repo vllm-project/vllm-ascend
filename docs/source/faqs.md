@@ -198,7 +198,7 @@ There are several factors that affect output determinism:
    export ATB_LLM_LCOC_ENABLE=0
    ```
 
-### 16. How to fix the error "ImportError: Please install vllm[audio] for audio support" for the multi-modal models？
+### 16. How to fix the error "ImportError: Please install vllm[audio] for audio support" for the multi-modal models?
 
 Some multi-modal models requires the `librosa` package to be installed, you need to install the `qwen-omni-utils` package to ensure all dependencies are met, for Qwen-omni, run `pip install qwen-omni-utils`.
 This package will install `librosa` and its related dependencies, resolving the `ImportError: No module named 'librosa'` issue and ensuring that the audio processing functionality works correctly.
@@ -226,7 +226,7 @@ ACL graph capture can still fail when the runtime resources required by the sele
 
 ### 18. How to install custom version of torch_npu?
 
-torch-npu will be overridden  when installing vllm-ascend. If you need to install a specific version of torch-npu, you can manually install the specified version of torch-npu after vllm-ascend is installed.
+torch-npu will be overridden when installing vllm-ascend. If you need to install a specific version of torch-npu, you can manually install the specified version of torch-npu after vllm-ascend is installed.
 
 ### 19. On certain systems (e.g., Kylin OS), `docker pull` may fail with an `invalid tar header` error
 
@@ -291,7 +291,7 @@ Preemption cannot be avoided completely since KV cache usage always has a limit.
 
 ### 23. How do I choose between single-node and multi-node deployment?
 
-Single-node deployment is recommended when the model fits within the memory of a single node's NPUs. For models like Qwen3-32B (BF16), which requires 4 × 64G cards, multi-NPU within a single node (TP) is sufficient. Multi-node deployment is only needed when the total NPU count exceeds a single node's capacity.
+Single-node deployment is recommended when the model fits within the memory of a single node's NPUs. For models like Qwen3-32B (BF16), which requires 4 × 64GB cards, multi-NPU within a single node (TP) is sufficient. Multi-node deployment is only needed when the total NPU count exceeds a single node's capacity.
 
 ### 24. What quantization method should I use?
 
