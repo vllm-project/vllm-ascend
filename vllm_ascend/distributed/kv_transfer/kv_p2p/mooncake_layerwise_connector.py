@@ -56,6 +56,7 @@ from vllm.v1.worker.utils import extract_layer_index
 from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import GET_META_MSG
+from vllm_ascend.distributed.kv_transfer.utils.async_transfer_poller import AsyncTransferPoller
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     RegisterRegions,
@@ -270,8 +271,19 @@ class KVCacheSendingLayerThread(threading.Thread):
         logger.info("KVCacheSendingLayerThread: async transfer=%s, poll_interval=%.4fs (set via VLLM_MOONCAKE_ASYNC_TRANSFER)",
                      self._use_async_transfer, self._async_poll_interval)
         if self._use_async_transfer:
-            self._pending_async_transfers: dict[int, tuple[str, str, str, float]] = {}
+            self._pending_async_transfers: dict[int, dict[str, Any]] = {}
             self._pending_async_lock = threading.Lock()
+
+            self._async_poller = AsyncTransferPoller(
+                engine=self.engine,
+                pending_async_transfers=self._pending_async_transfers,
+                pending_async_lock=self._pending_async_lock,
+                callback_map={
+                    "on_completed": self._on_async_write_completed,
+                    "on_failed": self._on_async_write_failed,
+                    "on_poll_error": self._on_async_write_failed,
+                },
+            )
 
     def run(self):
         local_rank = get_world_group().local_rank
@@ -638,67 +650,29 @@ class KVCacheSendingLayerThread(threading.Thread):
 
     def _poll_and_complete_async(self):
         """Poll pending async writes and fire callbacks for completed ones."""
-        with self._pending_async_lock:
-            batch_ids = list(self._pending_async_transfers.keys())
-            if not batch_ids:
-                return
+        self._async_poller.poll_and_complete_async()
 
-        completed = []
-        failed = []
-        for batch_id in batch_ids:
-            try:
-                result = self.engine.get_batch_transfer_status([batch_id])
-                if result == 0:
-                    completed.append(batch_id)
-                elif result < 0:
-                    # Transfer failed (negative result)
-                    failed.append(batch_id)
-                    logger.error("Async write transfer failed for batch %s, result=%d", batch_id, result)
-            except Exception as e:
-                logger.error("Error polling async write transfer status for batch %s: %s", batch_id, e)
-                failed.append(batch_id)
+    def _on_async_write_completed(self, batch_id: int, info: dict[str, Any]) -> None:
+        """Handle a completed async write transfer."""
+        if info["layer_idx"] == (self.total_layers - 1):
+            for req_id in info["req_ids"]:
+                req_meta = info["send_request"][req_id]
+                if req_meta.chunk_finish:
+                    if req_id in self.failed_reqs:
+                        self.callback_func(req_id, req_meta, info["layer_group_idx"], trans_flag=False)
+                        self.failed_reqs.discard(req_id)
+                    else:
+                        self.callback_func(req_id, req_meta, info["layer_group_idx"], trans_flag=True)
 
-        # Handle failed transfers
-        for batch_id in failed:
-            with self._pending_async_lock:
-                if batch_id in self._pending_async_transfers:
-                    info = self._pending_async_transfers.pop(batch_id)
-                    logger.warning("Marked async write batch_id %s as failed", batch_id)
-                    # Add failed req_ids to self.failed_reqs
-                    for req_id in info["req_ids"]:
-                        self.failed_reqs.add(req_id)
-                    if info["layer_idx"] == (self.total_layers - 1):
-                        for req_id in info["req_ids"]:
-                            req_meta = info["send_request"][req_id]
-                            if req_meta.chunk_finish:
-                                self.callback_func(req_id, req_meta, info["layer_group_idx"], trans_flag=False)
-
-        if not completed:
-            return
-
-        completed_transfers = []
-        with self._pending_async_lock:
-            for batch_id in completed:
-                if batch_id in self._pending_async_transfers:
-                    info = self._pending_async_transfers.pop(batch_id)
-                    req_end_time = time.perf_counter()
-                    req_transfer_elapsed = (req_end_time - info["req_start_time"]) * 1000
-                    completed_transfers.append((batch_id, info, req_transfer_elapsed))
-
-        for batch_id, info, req_transfer_elapsed in completed_transfers:
-            logger.debug(
-                "Async write batch_id=%s (layer%d) completed, took %.2f ms",
-                batch_id, info["layer_idx"], req_transfer_elapsed,
-            )
-            if info["layer_idx"] == (self.total_layers - 1):
-                for req_id in info["req_ids"]:
-                    req_meta = info["send_request"][req_id]
-                    if req_meta.chunk_finish:
-                        if req_id in self.failed_reqs:
-                            self.callback_func(req_id, req_meta, info["layer_group_idx"], trans_flag=False)
-                            self.failed_reqs.discard(req_id)
-                        else:
-                            self.callback_func(req_id, req_meta, info["layer_group_idx"], trans_flag=True)
+    def _on_async_write_failed(self, batch_id: int, info: dict[str, Any]) -> None:
+        """Handle a failed async write transfer."""
+        for req_id in info["req_ids"]:
+            self.failed_reqs.add(req_id)
+        if info["layer_idx"] == (self.total_layers - 1):
+            for req_id in info["req_ids"]:
+                req_meta = info["send_request"][req_id]
+                if req_meta.chunk_finish:
+                    self.callback_func(req_id, req_meta, info["layer_group_idx"], trans_flag=False)
 
 
 class KVCacheRecvingLayerThread(threading.Thread):

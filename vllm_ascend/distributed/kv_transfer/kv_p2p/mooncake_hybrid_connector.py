@@ -52,6 +52,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.distributed.kv_transfer.utils.async_transfer_poller import AsyncTransferPoller
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
 from vllm_ascend.utils import enable_custom_op, is_vl_model
@@ -476,6 +477,17 @@ class KVCacheRecvingThread(threading.Thread):
             # Stores req_meta for post-transfer reformat/cleanup
             self._pending_async_req_meta: dict[int, dict[str, Any]] = {}
             self._pending_batch_to_signal: dict[int, dict[str, Any]] = {}
+
+            self._async_poller = AsyncTransferPoller(
+                engine=self.engine,
+                pending_async_transfers=self._pending_async_transfers,
+                pending_async_lock=self._pending_async_lock,
+                callback_map={
+                    "on_completed": lambda batch_id, info: self._complete_async_transfer(batch_id, failed=False),
+                    "on_failed": lambda batch_id, info: self._complete_async_transfer(batch_id, failed=True),
+                    "on_poll_error": lambda batch_id, info: self._complete_async_transfer(batch_id, failed=True),
+                },
+            )
 
     def add_request(
         self,
@@ -934,10 +946,7 @@ class KVCacheRecvingThread(threading.Thread):
 
     def _poll_and_complete_async(self) -> None:
         """Poll all pending async transfers and complete any that are done."""
-        finished_batch_ids = self._poll_async_transfers()
-
-        for batch_id in finished_batch_ids:
-            self._complete_async_transfer(batch_id)
+        self._async_poller.poll_and_complete_async()
 
     def _poll_async_transfers(self) -> list[int]:
         """Poll all pending async transfers for completion.
@@ -945,55 +954,7 @@ class KVCacheRecvingThread(threading.Thread):
         Returns:
             List of batch_ids that have completed.
         """
-        with self._pending_async_lock:
-            batch_ids = list(self._pending_async_transfers.keys())
-            if not batch_ids:
-                return []
-
-        completed = []
-        failed = []
-        for batch_id in batch_ids:
-            try:
-                result = self.engine.get_batch_transfer_status([batch_id])
-                if result == 0:
-                    completed.append(batch_id)
-                elif result < 0:
-                    # Transfer failed (negative result)
-                    failed.append(batch_id)
-                    logger.error("Async transfer failed for batch %s, result=%d", batch_id, result)
-            except Exception as e:
-                logger.error("Error polling async transfer status for batch %s: %s", batch_id, e)
-                failed.append(batch_id)
-
-        # Handle failed transfers: pop from pending and call _complete_async_transfer with failed=True
-        for batch_id in failed:
-            with self._pending_async_lock:
-                if batch_id in self._pending_async_transfers:
-                    req_id, remote_req_id, group_name, req_start_time = self._pending_async_transfers.pop(
-                        batch_id
-                    )
-                    logger.warning("Marked async transfer request %s as failed due to poll error", remote_req_id)
-            self._complete_async_transfer(batch_id, failed=True)
-
-        if not completed:
-            return []
-
-        completed_transfers = []
-        with self._pending_async_lock:
-            for batch_id in completed:
-                if batch_id in self._pending_async_transfers:
-                    req_id, remote_req_id, group_name, req_start_time = self._pending_async_transfers.pop(batch_id)
-                    req_end_time = time.perf_counter()
-                    req_transfer_elapsed = (req_end_time - req_start_time) * 1000
-                    completed_transfers.append((remote_req_id, batch_id, req_transfer_elapsed))
-
-        for remote_req_id, batch_id, req_transfer_elapsed in completed_transfers:
-            logger.debug(
-                "Async KV cache transfer completed for request %s, batch_id=%s, took %.2f ms",
-                remote_req_id, batch_id, req_transfer_elapsed,
-            )
-
-        return completed
+        return self._async_poller.poll_async_transfers()
 
     def _complete_async_transfer(self, batch_id: int, failed: bool = False):
         """Process a completed async transfer: reformat KV cache and cleanup.
