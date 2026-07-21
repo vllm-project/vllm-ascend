@@ -12,6 +12,7 @@ from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -23,6 +24,7 @@ from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.utils import enable_dsa_cp
@@ -190,6 +192,74 @@ def _dspark_qdq_nope_dims(kv: torch.Tensor, nope_head_dim: int) -> torch.Tensor:
         return kv
     kv_nope = _fp8_e4m3fn_qdq(kv[..., :nope_head_dim], DSPARK_NOPE_QDQ_BLOCK_SIZE)
     return torch.cat([kv_nope, kv[..., nope_head_dim:]], dim=-1)
+
+
+def dspark_sparse_attn_sharedkv(
+    q: torch.Tensor,
+    ori_kv: torch.Tensor,
+    sinks: torch.Tensor,
+    output: torch.Tensor,
+    softmax_scale: float,
+    ori_win_left: int,
+) -> None:
+    forward_context = get_forward_context()
+    fused_attn_metadata = getattr(forward_context, "dspark_fused_attn_metadata", None)
+    if fused_attn_metadata is None:
+        raise RuntimeError("DSpark fused attention metadata was not prepared before model forward.")
+
+    _, block_table, seqused_kv, metadata = fused_attn_metadata
+    batch_size = q.shape[0]
+    if block_table.shape[0] != batch_size:
+        raise ValueError(f"DSpark block table batch mismatch: q={batch_size}, block_table={block_table.shape[0]}")
+    if seqused_kv.shape[0] != batch_size:
+        raise ValueError(f"DSpark seqused_kv batch mismatch: q={batch_size}, seqused_kv={seqused_kv.shape[0]}")
+
+    result = _get_dspark_sas_op("npu_sparse_attn_sharedkv")(
+        q=q,
+        ori_kv=ori_kv,
+        cmp_kv=None,
+        ori_sparse_indices=None,
+        cmp_sparse_indices=None,
+        ori_block_table=block_table,
+        cmp_block_table=None,
+        cu_seqlens_q=None,
+        cu_seqlens_ori_kv=None,
+        cu_seqlens_cmp_kv=None,
+        seqused_q=None,
+        seqused_kv=seqused_kv,
+        sinks=sinks,
+        metadata=metadata,
+        softmax_scale=softmax_scale,
+        cmp_ratio=1,
+        ori_mask_mode=0,
+        cmp_mask_mode=3,
+        ori_win_left=ori_win_left,
+        ori_win_right=0,
+        layout_q="BSND",
+        layout_kv="PA_BNBD",
+        return_softmax_lse=False,
+    )[0]
+    output.copy_(result.to(output.dtype))
+
+
+def dspark_sparse_attn_sharedkv_fake(
+    q: torch.Tensor,
+    ori_kv: torch.Tensor,
+    sinks: torch.Tensor,
+    output: torch.Tensor,
+    softmax_scale: float,
+    ori_win_left: int,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="dspark_sparse_attn_sharedkv",
+    op_func=dspark_sparse_attn_sharedkv,
+    mutates_args=["output"],
+    fake_impl=dspark_sparse_attn_sharedkv_fake,
+    dispatch_key="PrivateUse1",
+)
 
 
 class DeepseekV4DSparkAttention(DeepseekV4Attention):
@@ -415,12 +485,8 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         ctx_kv = self._dspark_kv_cache[slot_indices, cache_indices]
         ctx_kv = torch.where(within_ctx.unsqueeze(-1), ctx_kv, torch.zeros_like(ctx_kv))
 
-        blocks_per_request, block_table, seqused_kv, metadata = self._get_dspark_fused_attention_metadata(
-            draft_kv.device,
-            batch_size,
-            draft_len,
-        )
         total_tokens = self.window_size + draft_len
+        blocks_per_request = (total_tokens + self.pa_block_size - 1) // self.pa_block_size
         padded_tokens = blocks_per_request * self.pa_block_size
         if padded_tokens > total_tokens:
             pad = draft_kv.new_zeros((batch_size, padded_tokens - total_tokens, self.head_dim))
@@ -429,31 +495,16 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             kv = torch.cat([ctx_kv, draft_kv], dim=1)
         kv = kv.view(batch_size * blocks_per_request, self.pa_block_size, 1, self.head_dim).contiguous()
 
-        return self.dspark_sparse_attn_op(
-            q=q,
-            ori_kv=kv,
-            cmp_kv=None,
-            ori_sparse_indices=None,
-            cmp_sparse_indices=None,
-            ori_block_table=block_table,
-            cmp_block_table=None,
-            cu_seqlens_q=None,
-            cu_seqlens_ori_kv=None,
-            cu_seqlens_cmp_kv=None,
-            seqused_q=None,
-            seqused_kv=seqused_kv,
-            sinks=self.attn_sink,
-            metadata=metadata,
-            softmax_scale=float(self.scale),
-            cmp_ratio=1,
-            ori_mask_mode=0,
-            cmp_mask_mode=3,
-            ori_win_left=self.window_size - 1,
-            ori_win_right=0,
-            layout_q="BSND",
-            layout_kv="PA_BNBD",
-            return_softmax_lse=False,
-        )[0].to(q.dtype)
+        output = torch.empty_like(q)
+        torch.ops.vllm.dspark_sparse_attn_sharedkv(
+            q,
+            kv,
+            self.attn_sink,
+            output,
+            float(self.scale),
+            self.window_size - 1,
+        )
+        return output
 
     def forward(
         self,

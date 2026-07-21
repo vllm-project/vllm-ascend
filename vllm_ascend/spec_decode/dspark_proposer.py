@@ -325,7 +325,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                 f"{num_input_tokens} tokens for block_size={block_size}"
             )
         graph_batch_size = num_input_tokens // block_size
-        self._prepare_dspark_fused_attention_metadata(graph_batch_size)
+        fused_attn_metadata = self._prepare_dspark_fused_attention_metadata(graph_batch_size)
 
         with set_ascend_forward_context(
             None,
@@ -339,9 +339,10 @@ class AscendDSparkProposer(AscendDflashProposer):
             is_draft_model=True,
             draft_attn_metadatas=[],
         ):
+            forward_context = get_forward_context()
+            forward_context.dspark_fused_attn_metadata = fused_attn_metadata
             self._prepare_dspark_context_cache()
             if is_profile:
-                forward_context = get_forward_context()
                 if forward_context is not None:
                     forward_context.moe_layer_index = 0
                 self.model(
@@ -352,7 +353,6 @@ class AscendDSparkProposer(AscendDflashProposer):
                     slot_mapping=self._slot_mapping_buffer[:num_input_tokens],
                 )
             else:
-                forward_context = get_forward_context()
                 if forward_context is not None:
                     forward_context.moe_layer_index = 0
                 self._runnable(
@@ -363,7 +363,6 @@ class AscendDSparkProposer(AscendDflashProposer):
                     multi_steps_attn_metadata=[],
                     num_tokens=num_input_tokens,
                 )
-            forward_context = get_forward_context()
             if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
                 self._update_full_graph_params(forward_context, num_input_tokens, [])
 
@@ -863,9 +862,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             num_tokens_across_dp = num_tokens_across_dp.clone()
             num_tokens_across_dp[:] = num_input_tokens
         graph_batch_size = num_input_tokens // block_size
-        model_num_actual_tokens = (
-            num_input_tokens if aclgraph_runtime_mode != CUDAGraphMode.NONE else num_tokens
-        )
+        model_num_actual_tokens = num_input_tokens if aclgraph_runtime_mode != CUDAGraphMode.NONE else num_tokens
 
         with set_ascend_forward_context(
             None,
@@ -894,7 +891,8 @@ class AscendDSparkProposer(AscendDflashProposer):
                     device=self.device,
                 )
             else:
-                self._prepare_dspark_fused_attention_metadata(graph_batch_size)
+                fused_attn_metadata = self._prepare_dspark_fused_attention_metadata(graph_batch_size)
+                forward_context.dspark_fused_attn_metadata = fused_attn_metadata
                 run_kwargs = dict(
                     num_input_tokens=num_input_tokens,
                     batch_size=graph_batch_size,
