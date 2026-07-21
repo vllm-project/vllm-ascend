@@ -44,6 +44,17 @@ else:
 
 
 class BaseDeviceAdaptor:
+
+    @staticmethod
+    def compute_gate_logits(
+        hidden_states: torch.Tensor,
+        weight: torch.Tensor,
+        weight_fp32: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if weight_fp32 is not None:
+            return F.linear(hidden_states.float(), weight_fp32)
+        return F.linear(hidden_states.float(), weight)
+
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
         torch_npu._npu_reshape_and_cache(
@@ -857,6 +868,17 @@ class BaseDeviceAdaptor:
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
+
+    @staticmethod
+    def compute_gate_logits(
+        hidden_states: torch.Tensor,
+        weight: torch.Tensor,
+        weight_fp32: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return torch_npu.npu_fused_matmul(
+            hidden_states, weight.t(), fused_op_type="16cast32"
+        )
+
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
         torch_npu.npu_scatter_pa_kv_cache(
