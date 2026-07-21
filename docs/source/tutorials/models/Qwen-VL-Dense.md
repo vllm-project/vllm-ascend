@@ -194,7 +194,8 @@ vllm serve Qwen/Qwen3-VL-8B-Instruct \
 vllm serve Qwen/Qwen3-VL-8B-Instruct \
 --dtype float16 \
 --max_model_len 16384 \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32]}'
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32]}' \
+--additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}'
 ```
 
 :::{note}
@@ -202,6 +203,7 @@ On Atlas inference products:
 
 - Only `float16` dtype is supported.
 - Graph compilation (`--compilation-config`) requires **CANN version >= 9.0.0**. If your CANN version is lower, replace `--compilation-config` with `--enforce-eager`.
+- `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required because `enable_npugraph_ex` is not supported on Atlas inference products.
 :::
 
 ::::
