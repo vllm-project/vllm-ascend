@@ -2768,11 +2768,16 @@ class NPUModelRunner(GPUModelRunner):
                 return token_ids.tolist()
             return list(token_ids)
 
-        accepted_tokens = (
-            int(self.input_batch.num_accepted_tokens_cpu[req_idx])
-            if req_idx < len(self.input_batch.num_accepted_tokens_cpu)
-            else 0
-        )
+        # Count the accepted prefix from this step's sampled ids.
+        # RejectionSampler emits valid tokens first and PLACEHOLDER_TOKEN_ID
+        # for rejected slots, so the accepted span is the contiguous prefix
+        # before the first placeholder.
+        sampled_token_ids = _normalize_token_ids(sampled_ids)
+        accepted_tokens = 0
+        for token_id in sampled_token_ids:
+            if token_id == PLACEHOLDER_TOKEN_ID:
+                break
+            accepted_tokens += 1
         accepted_draft_tokens = max(0, accepted_tokens - 1)
         invalid_spec_tokens = 0
         effective_draft_len = max(0, draft_len - invalid_spec_tokens)
@@ -2825,7 +2830,7 @@ class NPUModelRunner(GPUModelRunner):
         if log_leader:
             self._log_mtp_token_details(
                 req_id=req_id,
-                sampled_ids=_normalize_token_ids(sampled_ids),
+                sampled_ids=sampled_token_ids,
                 accepted_tokens=accepted_tokens,
                 prompt_token_ids_raw=prompt_token_ids_raw,
                 output_token_ids_raw=output_token_ids_raw,
