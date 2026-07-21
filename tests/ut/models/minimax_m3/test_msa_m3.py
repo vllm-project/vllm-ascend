@@ -15,7 +15,7 @@ from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
 
 from vllm_ascend.models.minimax_m3 import MiniMaxM3SparseAttention
-from vllm_ascend.models.ops.msa_m3 import (
+from vllm_ascend.models.minimax_m3.msa_m3 import (
     AscendMiniMaxM3IndexerBackend,
     AscendMiniMaxM3IndexerCache,
     AscendMiniMaxM3IndexerLinear,
@@ -150,7 +150,7 @@ def test_sparse_backend_get_name() -> None:
     assert AscendMiniMaxM3SparseBackend.is_sparse() is True
 
 
-@patch("vllm_ascend.models.ops.msa_m3.get_current_vllm_config")
+@patch("vllm_ascend.models.minimax_m3.msa_m3.get_current_vllm_config")
 def test_indexer_cache_uses_key_only_mla_spec(mock_get_vllm_config: MagicMock) -> None:
     mock_get_vllm_config.return_value = SimpleNamespace(
         compilation_config=SimpleNamespace(static_forward_context={}),
@@ -180,7 +180,7 @@ def test_indexer_cache_uses_key_only_mla_spec(mock_get_vllm_config: MagicMock) -
     ) == (4, 128, 128)
 
 
-@patch("vllm_ascend.models.ops.msa_m3.get_forward_context")
+@patch("vllm_ascend.models.minimax_m3.msa_m3.get_forward_context")
 def test_minimax_m3_sparse_forward_dispatches_to_layer(
     mock_get_forward_context: MagicMock,
 ) -> None:
@@ -203,7 +203,7 @@ def test_minimax_m3_sparse_forward_dispatches_to_layer(
     layer._run_sparse_attention.assert_called_once_with(q, k, v, index_q, index_k, out)
 
 
-@patch("vllm_ascend.models.ops.msa_m3.get_forward_context")
+@patch("vllm_ascend.models.minimax_m3.msa_m3.get_forward_context")
 def test_minimax_m3_sparse_forward_zeros_output_without_dict_metadata(
     mock_get_forward_context: MagicMock,
 ) -> None:
@@ -376,18 +376,18 @@ def test_sparse_prepare_keeps_npu_fused_qkv_norm_rope_path() -> None:
     assert "self.q_norm.weight_plus_one" in source
 
 
-@patch("vllm_ascend.models.minimax_m3.logger.warning")
-@patch("vllm_ascend.models.minimax_m3.AscendMiniMaxM3Indexer")
-@patch("vllm_ascend.models.minimax_m3.AscendMiniMaxM3IndexerLinear")
-@patch("vllm_ascend.models.minimax_m3.AscendMiniMaxM3SparseImpl")
-@patch("vllm_ascend.models.minimax_m3.kv_cache_dtype_str_to_dtype")
-@patch("vllm_ascend.models.minimax_m3.get_current_vllm_config")
-@patch("vllm_ascend.models.minimax_m3.GemmaRMSNorm")
-@patch("vllm_ascend.models.minimax_m3.get_rope")
-@patch("vllm_ascend.models.minimax_m3.RowParallelLinear")
-@patch("vllm_ascend.models.minimax_m3.QKVParallelLinear")
-@patch("vllm_ascend.models.minimax_m3.AscendMiniMaxM3QKVParallelLinearWithIndexer")
-@patch("vllm_ascend.models.minimax_m3.get_tensor_model_parallel_world_size", return_value=1)
+@patch("vllm_ascend.models.minimax_m3.minimax_m3.logger.warning")
+@patch("vllm_ascend.models.minimax_m3.minimax_m3.AscendMiniMaxM3Indexer")
+@patch("vllm_ascend.models.minimax_m3.minimax_m3.AscendMiniMaxM3IndexerLinear")
+@patch("vllm_ascend.models.minimax_m3.minimax_m3.AscendMiniMaxM3SparseImpl")
+@patch("vllm_ascend.models.minimax_m3.minimax_m3.kv_cache_dtype_str_to_dtype")
+@patch("vllm_ascend.models.minimax_m3.minimax_m3.get_current_vllm_config")
+@patch("vllm_ascend.models.minimax_m3.minimax_m3.GemmaRMSNorm")
+@patch("vllm_ascend.models.minimax_m3.minimax_m3.get_rope")
+@patch("vllm_ascend.models.minimax_m3.minimax_m3.RowParallelLinear")
+@patch("vllm_ascend.models.minimax_m3.minimax_m3.QKVParallelLinear")
+@patch("vllm_ascend.models.minimax_m3.minimax_m3.AscendMiniMaxM3QKVParallelLinearWithIndexer")
+@patch("vllm_ascend.models.minimax_m3.minimax_m3.get_tensor_model_parallel_world_size", return_value=1)
 def test_sparse_attention_uses_split_indexer_projection_when_quant_types_differ(
     _mock_tp_size: MagicMock,
     mock_fused_qkv_linear: MagicMock,
@@ -480,9 +480,9 @@ def test_indexer_linear_weight_loader_uses_first_index_k_shard_for_all_ranks() -
     assert torch.equal(param.data[2:3], loaded_weight[:1])
 
 
-@patch("vllm_ascend.models.ops.msa_m3.minimax_m3_sparse_attn")
-@patch("vllm_ascend.models.ops.msa_m3.minimax_m3_sparse_attn_decode")
-@patch("vllm_ascend.models.ops.msa_m3.get_forward_context")
+@patch("vllm_ascend.models.minimax_m3.msa_m3.minimax_m3_sparse_attn")
+@patch("vllm_ascend.models.minimax_m3.msa_m3.minimax_m3_sparse_attn_decode")
+@patch("vllm_ascend.models.minimax_m3.msa_m3.get_forward_context")
 def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
     mock_get_forward_context: MagicMock,
     mock_sparse_attn_decode: MagicMock,

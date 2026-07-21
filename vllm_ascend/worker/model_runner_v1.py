@@ -197,7 +197,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
 )
 from vllm_ascend.models.minimax_m3 import MiniMaxM3SparseAttention
-from vllm_ascend.models.ops.msa_m3 import AscendMiniMaxM3IndexerCache
+from vllm_ascend.models.minimax_m3.msa_m3 import AscendMiniMaxM3IndexerCache
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True

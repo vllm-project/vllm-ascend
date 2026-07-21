@@ -38,8 +38,8 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
-from vllm_ascend.models.ops.msa_m3_npu import minimax_m3_sparse_attn
-from vllm_ascend.models.ops.msa_m3_triton import (
+from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import minimax_m3_sparse_attn
+from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
     minimax_m3_index_decode,
     minimax_m3_index_score,
     minimax_m3_index_topk,
