@@ -1,6 +1,9 @@
 #include "chunk_gated_delta_rule_compute_wy_tiling.h"
 
+#include <algorithm>
+
 #include <register/op_impl_registry.h>
+#include <tiling/tiling_api.h>
 
 namespace optiling {
 static constexpr size_t INPUT_Q_IDX = 0;
@@ -11,6 +14,36 @@ static constexpr size_t DIM_B = 0;
 static constexpr size_t DIM_T = 1;
 static constexpr size_t DIM_H = 2;
 static constexpr size_t DIM_D = 3;
+
+static constexpr int64_t FIXED_CHUNK = 64;
+static constexpr uint32_t SYS_WORKSPACE_SIZE = 16 * 1024 * 1024;
+// Atlas inference Matmul needs a UB scratch region for internal temps.
+static constexpr uint32_t LOCAL_WORKSPACE_BYTES = 32 * 1024;
+// Per-core GM staging: A_half(64*128) + B_half(64*128) + C_float(64*128)
+static constexpr uint32_t STAGING_A_BYTES = FIXED_CHUNK * 128 * sizeof(uint16_t);
+static constexpr uint32_t STAGING_B_BYTES = FIXED_CHUNK * 128 * sizeof(uint16_t);
+static constexpr uint32_t STAGING_C_BYTES = FIXED_CHUNK * 128 * sizeof(float);
+static constexpr uint32_t PER_CORE_STAGING_BYTES = STAGING_A_BYTES + STAGING_B_BYTES + STAGING_C_BYTES;
+
+static ge::graphStatus FillCubeTiling(gert::TilingContext *context, int64_t m, int64_t n, int64_t k, bool bTranspose,
+                                      TCubeTiling &out)
+{
+    auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
+    matmul_tiling::MatmulApiTiling mm(ascendcPlatform);
+    mm.SetAType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND, matmul_tiling::DataType::DT_FLOAT16,
+                false);
+    mm.SetBType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND, matmul_tiling::DataType::DT_FLOAT16,
+                bTranspose);
+    mm.SetCType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND, matmul_tiling::DataType::DT_FLOAT);
+    mm.SetBias(false);
+    mm.SetOrgShape(m, n, k);
+    mm.SetShape(m, n, k);
+    mm.SetBufferSpace(-1, -1, -1);
+    if (mm.GetTiling(out) == -1) {
+        return ge::GRAPH_FAILED;
+    }
+    return ge::GRAPH_SUCCESS;
+}
 
 ge::graphStatus Tiling4ChunkGatedDeltaRuleComputeWy(gert::TilingContext *context)
 {
@@ -35,7 +68,7 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleComputeWy(gert::TilingContext *context
     if (chunkSize <= 0 || t <= 0 || hk <= 0 || hv <= 0 || kdim <= 0 || vdim <= 0) {
         return ge::GRAPH_FAILED;
     }
-    if (chunkSize != 64) {
+    if (chunkSize != FIXED_CHUNK) {
         return ge::GRAPH_FAILED;
     }
     if ((t % chunkSize) != 0 || (hv % hk) != 0) {
@@ -44,13 +77,9 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleComputeWy(gert::TilingContext *context
     if ((kdim % 16) != 0 || (vdim % 16) != 0) {
         return ge::GRAPH_FAILED;
     }
-    // Current vector-only 310P kernel uses fixed local-memory budget for head dims
-    // (per-task UB holds 64xK / 64xV float+half buffers plus attn 64x64).
     if (kdim > 128 || vdim > 128) {
         return ge::GRAPH_FAILED;
     }
-    // B/Hv only affect task count and short staging for g/beta (64*Hv). Attn scratch
-    // has 4096 floats, so Hv<=64 is safe; B is an independent outer index.
     if (b > 32 || hv > 64) {
         return ge::GRAPH_FAILED;
     }
@@ -60,7 +89,29 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleComputeWy(gert::TilingContext *context
     const int64_t totalTasks = b * hv * numChunks;
 
     const auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
-    context->SetBlockDim(ascendcPlatform.GetCoreNumAiv());
+    uint32_t aicNum = ascendcPlatform.GetCoreNumAic();
+    uint32_t aivNum = ascendcPlatform.GetCoreNumAiv();
+    uint32_t usedCoreNum = std::max(aicNum, aivNum);
+    if (usedCoreNum == 0) {
+        usedCoreNum = 1;
+    }
+    context->SetBlockDim(usedCoreNum);
+
+    // mmAttn: kBeta[64,K] @ K[64,K]^T -> [64,64]
+    if (FillCubeTiling(context, FIXED_CHUNK, FIXED_CHUNK, kdim, /*bTranspose=*/true, tiling.mmAttn) !=
+        ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+    // mmU: attn[64,64] @ V[64,V] -> [64,V]
+    if (FillCubeTiling(context, FIXED_CHUNK, vdim, FIXED_CHUNK, /*bTranspose=*/false, tiling.mmU) !=
+        ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+    // mmW: attn[64,64] @ kBetaExp[64,K] -> [64,K]
+    if (FillCubeTiling(context, FIXED_CHUNK, kdim, FIXED_CHUNK, /*bTranspose=*/false, tiling.mmW) !=
+        ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
 
     tiling.set_batch(b);
     tiling.set_seqlen(t);
@@ -72,12 +123,17 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleComputeWy(gert::TilingContext *context
     tiling.set_numChunks(numChunks);
     tiling.set_groupSize(groupSize);
     tiling.set_totalTasks(totalTasks);
+    tiling.set_localWorkspaceSize(LOCAL_WORKSPACE_BYTES);
+    tiling.set_perCoreWorkspaceBytes(PER_CORE_STAGING_BYTES);
+    tiling.set_usedCoreNum(usedCoreNum);
+    tiling.set_reserved0(0);
 
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
 
     size_t *workspace = context->GetWorkspaceSizes(1);
-    workspace[0] = 0;
+    workspace[0] = static_cast<size_t>(SYS_WORKSPACE_SIZE) +
+                   static_cast<size_t>(usedCoreNum) * static_cast<size_t>(PER_CORE_STAGING_BYTES);
     return ge::GRAPH_SUCCESS;
 }
 
