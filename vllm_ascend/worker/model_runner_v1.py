@@ -17,14 +17,11 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
-import fcntl
-import json
 import logging
 import math
-import os
 import sys
 import time
-from collections import defaultdict, deque
+from collections import defaultdict
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
@@ -124,13 +121,14 @@ from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_full_graph_params,
 )
+from vllm_ascend.dumper import Dumper
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
-from vllm_ascend.quantization.utils import Path, enable_fa_quant
+from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
@@ -343,58 +341,16 @@ class NPUModelRunner(GPUModelRunner):
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
-
-        # Dump / PrecisionDebugger configuration now comes from AscendConfig
-        dump_cfg = self.ascend_config.dump_config_path
-        self.debugger = None
-        if dump_cfg is not None:
-            self._debugger_started = False
-            if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
-                from msprobe.pytorch import PrecisionDebugger
-
-                self.debugger = PrecisionDebugger(dump_cfg)
-            else:
-                try:
-                    from msprobe.pytorch import AclGraphDumper
-                except Exception as exc:
-                    raise RuntimeError(
-                        "Failed to import AclGraphDumper from msprobe. "
-                        "Please install/rebuild msprobe with aclgraph_dump enabled."
-                    ) from exc
-
-                self.debugger = AclGraphDumper(dump_cfg)
         # use_hybrid_blocks: if hybrid blocks is used.
         self.use_hybrid_blocks: bool = False
         self.need_accepted_tokens: bool = False
         dynamic_dump_config = self.ascend_config.dynamic_dump_config
-        self._mtp_acceptance_history: dict[str, deque[tuple[int, int]]] = defaultdict(deque)
-        self._mtp_acceptance_window = dynamic_dump_config.mtp_acceptance_window
-        self._current_step_debug_log_full_requests: dict[str, bool] = {}
-        self._mtp_acceptance_low_threshold = dynamic_dump_config.mtp_acceptance_low_threshold
-        self._mtp_acceptance_len_low_threshold = dynamic_dump_config.mtp_acceptance_len_low_threshold
-        self._mtp_acceptance_high_threshold = dynamic_dump_config.mtp_acceptance_high_threshold
-        self._mtp_acceptance_len_high_threshold = dynamic_dump_config.mtp_acceptance_len_high_threshold
-        self._msprobe_dump_cooldown_seconds = dynamic_dump_config.msprobe_dump_cooldown_seconds
-        self._msprobe_dump_max_times = dynamic_dump_config.msprobe_dump_max_times
-        self._msprobe_dump_total_count = 0
-        self._msprobe_dumped_req_ids: set[str] = set()
-        self._msprobe_last_dump_ts: float | None = None
-        self._msprobe_dump_disable_delay_rounds = 0
-        self._msprobe_dump_active = False
-        logger.info_once(
-            "Dynamic dump config applied: mtp_acceptance_window=%d "
-            "mtp_acceptance_low_threshold=%.4f "
-            "mtp_acceptance_len_low_threshold=%.4f "
-            "mtp_acceptance_high_threshold=%.4f "
-            "mtp_acceptance_len_high_threshold=%.4f "
-            "msprobe_dump_cooldown_seconds=%d msprobe_dump_max_times=%d",
-            self._mtp_acceptance_window,
-            self._mtp_acceptance_low_threshold,
-            self._mtp_acceptance_len_low_threshold,
-            self._mtp_acceptance_high_threshold,
-            self._mtp_acceptance_len_high_threshold,
-            self._msprobe_dump_cooldown_seconds,
-            self._msprobe_dump_max_times,
+        self.dumper = Dumper(self, dynamic_dump_config)
+        self.debugger = self.dumper.init_debugger(
+            self.compilation_config.cudagraph_mode
+        )
+        self._current_step_debug_log_full_requests = (
+            self.dumper.current_step_debug_log_full_requests
         )
 
         self.is_multimodal_model = self.model_config.is_multimodal_model
@@ -2125,13 +2081,13 @@ class NPUModelRunner(GPUModelRunner):
                 )
 
                 if has_ec_transfer() and get_ec_transfer().is_producer:
-                    self._start_dump_data()
+                    self.dumper.start_dump_data()
                     with self.maybe_get_ec_connector_output(
                         scheduler_output,
                         encoder_cache=self.encoder_cache,
                     ) as ec_connector_output:
                         self._execute_mm_encoder(scheduler_output)
-                        self._finalize_dump_data()
+                        self.dumper.finalize_dump_data()
                         return make_empty_encoder_model_runner_output(scheduler_output)
 
                 if not num_scheduled_tokens:
@@ -2165,7 +2121,7 @@ class NPUModelRunner(GPUModelRunner):
                     if not has_kv_transfer_group():
                         return EMPTY_MODEL_RUNNER_OUTPUT
                     return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
-                self._start_dump_data()
+                self.dumper.start_dump_data()
                 num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
                 max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
                 (
@@ -2419,7 +2375,7 @@ class NPUModelRunner(GPUModelRunner):
                     assert isinstance(hidden_states, IntermediateTensors)
                     hidden_states.kv_connector_output = kv_connector_output
                     self.kv_connector_output = kv_connector_output
-                    self._finalize_dump_data()
+                    self.dumper.finalize_dump_data()
                     if self.dynamic_eplb:
                         self.eplb_updator.forward_end(self.eplb_heat_collection_status)
                     return hidden_states
@@ -2429,7 +2385,7 @@ class NPUModelRunner(GPUModelRunner):
                         hidden_states, num_scheduled_tokens, num_scheduled_tokens_np, kv_connector_output
                     )
                     output.kv_connector_output = kv_connector_output
-                    self._finalize_dump_data()
+                    self.dumper.finalize_dump_data()
                     return output
 
                 sample_hidden_states = hidden_states[logits_indices]
@@ -2638,10 +2594,10 @@ class NPUModelRunner(GPUModelRunner):
             draft_token_ids = None
             if self.input_batch.sampling_metadata.spec_token_ids:
                 draft_token_ids = self.input_batch.sampling_metadata.spec_token_ids[req_idx]
-            self._record_mtp_acceptance_rate(
-                req_idx,
-                req_id,
-                req_state,
+            self.dumper.record_mtp_acceptance_rate(
+                req_idx=req_idx,
+                req_id=req_id,
+                req_state=req_state,
                 sampled_ids=sampled_ids,
                 debug_log_full_by_req_id=self._current_step_debug_log_full_requests,
             )
@@ -2670,7 +2626,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.dynamic_eplb:
             self.eplb_updator.forward_end(self.eplb_heat_collection_status)
 
-        self._finalize_dump_data()
+        self.dumper.finalize_dump_data()
 
         if self.need_accepted_tokens:
             assert self.sampling_done_event is not None
@@ -2729,322 +2685,6 @@ class NPUModelRunner(GPUModelRunner):
             async_output.async_copy_ready_event,
         )
         return async_output
-
-    def _record_mtp_acceptance_rate(
-        self,
-        req_idx: int,
-        req_id: str,
-        req_state: Any,
-        sampled_ids: list[int] | torch.Tensor | None = None,
-        debug_log_full_by_req_id: dict[str, bool] | None = None,
-    ) -> None:
-        if self._msprobe_dump_max_times == 0:
-            return
-        if not req_id or not self.need_accepted_tokens:
-            return
-        if not get_pp_group().is_last_rank:
-            logger.warning(
-                "[Anomaly MTP] req_id=%s not last pp rank",
-                req_id,
-            )
-            return
-        log_leader = self.tp_rank == 0
-        draft_len = getattr(req_state, "prev_num_draft_len", 0) or 0
-        if draft_len <= 0:
-            if log_leader:
-                logger.warning(
-                    "[Anomaly MTP] req_id=%s draft_len=%d",
-                    req_id,
-                    draft_len,
-                )
-            return
-        if debug_log_full_by_req_id is not None:
-            debug_log_full_by_req_id.pop(req_id, None)
-
-        def _normalize_token_ids(token_ids: Any) -> list[int]:
-            if token_ids is None:
-                return []
-            if torch.is_tensor(token_ids):
-                return token_ids.tolist()
-            return list(token_ids)
-
-        # Count the accepted prefix from this step's sampled ids.
-        # RejectionSampler emits valid tokens first and PLACEHOLDER_TOKEN_ID
-        # for rejected slots, so the accepted span is the contiguous prefix
-        # before the first placeholder.
-        sampled_token_ids = _normalize_token_ids(sampled_ids)
-        accepted_tokens = 0
-        for token_id in sampled_token_ids:
-            if token_id == PLACEHOLDER_TOKEN_ID:
-                break
-            accepted_tokens += 1
-        accepted_draft_tokens = max(0, accepted_tokens - 1)
-        invalid_spec_tokens = 0
-        effective_draft_len = max(0, draft_len - invalid_spec_tokens)
-        history = self._mtp_acceptance_history[req_id]
-        history.append((accepted_draft_tokens, effective_draft_len))
-        if len(history) > self._mtp_acceptance_window:
-            history.popleft()
-        prompt_token_ids_raw = getattr(req_state, "prompt_token_ids", None)
-        req_output_token_ids = self.input_batch.req_output_token_ids
-        output_token_ids_raw = (
-            req_output_token_ids[req_idx]
-            if 0 <= req_idx < len(req_output_token_ids)
-            else None
-        )
-        prompt_token_count = len(prompt_token_ids_raw) if prompt_token_ids_raw is not None else 0
-        output_token_count = len(output_token_ids_raw) if output_token_ids_raw is not None else 0
-        accepted_sum = sum(accepted for accepted, _ in history)
-        draft_sum = sum(draft for _, draft in history)
-        acceptance_rate = accepted_sum / draft_sum if draft_sum > 0 else 0.0
-        acceptance_len = accepted_sum / len(history) if history else 0.0
-        if log_leader:
-            logger.info(
-                "[Anomaly MTP short] req_id=%s draft_len=%d effective_draft_len=%d "
-                "invalid_spec_tokens=%d accepted_count=%d accepted_draft_count=%d "
-                "accept_rate=%.4f accept_len=%.4f window=%d accepted=%d drafted=%d "
-                "prompt_tokens=%d output_tokens=%d",
-                req_id, draft_len, effective_draft_len,
-                invalid_spec_tokens, accepted_tokens, accepted_draft_tokens,
-                acceptance_rate, acceptance_len, len(history), accepted_sum, draft_sum,
-                prompt_token_count, output_token_count,
-            )
-        if len(history) < self._mtp_acceptance_window:
-            return
-        should_log_full = bool(
-            (
-                acceptance_rate < self._mtp_acceptance_low_threshold
-                and acceptance_len < self._mtp_acceptance_len_low_threshold
-            )
-            or (
-                acceptance_rate > self._mtp_acceptance_high_threshold
-                and acceptance_len > self._mtp_acceptance_len_high_threshold
-            )
-        )
-        if not should_log_full:
-            return
-        if not self._enable_msprobe_dump_if_needed(req_id):
-            return
-        if log_leader and debug_log_full_by_req_id is not None:
-            debug_log_full_by_req_id[req_id] = True
-        if log_leader:
-            self._log_mtp_token_details(
-                req_id=req_id,
-                sampled_ids=sampled_token_ids,
-                accepted_tokens=accepted_tokens,
-                prompt_token_ids_raw=prompt_token_ids_raw,
-                output_token_ids_raw=output_token_ids_raw,
-            )
-
-    def _log_mtp_token_details(
-        self,
-        req_id: str,
-        sampled_ids: list[int],
-        accepted_tokens: int,
-        prompt_token_ids_raw: Any,
-        output_token_ids_raw: Any,
-    ) -> None:
-        accepted_token_ids = sampled_ids[:accepted_tokens] if accepted_tokens > 0 else []
-        prompt_token_ids = list(prompt_token_ids_raw) if prompt_token_ids_raw is not None else []
-        output_token_ids = list(output_token_ids_raw) if output_token_ids_raw is not None else []
-        output_token_ids = [
-            output_token_id.item() if isinstance(output_token_id, torch.Tensor) else output_token_id
-            for output_token_id in output_token_ids
-        ]
-        logger.info(
-            "[Anomaly MTP] req_id=%s sampled_token_ids=%s",
-            req_id,
-            sampled_ids,
-        )
-        logger.info(
-            "[Anomaly MTP] req_id=%s accepted_token_ids=%s",
-            req_id,
-            accepted_token_ids,
-        )
-        logger.info(
-            "[Anomaly MTP] req_id=%s prompt_token_count=%d prompt_token_ids=%s",
-            req_id,
-            len(prompt_token_ids),
-            prompt_token_ids,
-        )
-        logger.info(
-            "[Anomaly MTP] req_id=%s output_token_count=%d output_token_ids=%s",
-            req_id,
-            len(output_token_ids),
-            output_token_ids,
-        )
-
-    @contextmanager
-    def _lock_msprobe_config(self, config_path: Path):
-        lock_path = Path(f"{config_path}.lock")
-        os.makedirs(lock_path.parent, exist_ok=True)
-        with lock_path.open("w", encoding="utf-8") as lock_fd:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-
-    def _disable_msprobe_dump_if_needed(self) -> None:
-        if not self._msprobe_dump_active:
-            return
-        if self.debugger is None:
-            return
-        if self._msprobe_dump_disable_delay_rounds > 0:
-            self._msprobe_dump_disable_delay_rounds -= 1
-            logger.info(
-                "[Anomaly msprobe] defer rollback dump_enable for one round. remaining_delay_rounds=%d",
-                self._msprobe_dump_disable_delay_rounds,
-            )
-            return
-
-        if not self._set_msprobe_dump_state(False):
-            return
-        self._msprobe_dump_active = False
-        self._msprobe_dump_disable_delay_rounds = 0
-        logger.info("[Anomaly msprobe] disable msprobe dump succeeded.")
-        self.debugger._maybe_reload_config(force=True)
-
-    def _set_msprobe_dump_state(self, dump_state: bool) -> bool:
-        dump_cfg = self.ascend_config.dump_config_path
-        if not dump_cfg:
-            logger.error("[Anomaly msprobe] set msprobe dump state failed, because dump_config_path is empty")
-            return False
-        config_path = Path(dump_cfg)
-        if not config_path.exists():
-            logger.error(
-                "[Anomaly msprobe] set msprobe dump state failed, because config file not found. path=%s",
-                str(config_path),
-            )
-            return False
-        try:
-            with self._lock_msprobe_config(config_path):
-                with config_path.open("r", encoding="utf-8") as f:
-                    config_obj = json.load(f)
-
-                if not isinstance(config_obj, dict):
-                    logger.error(
-                        "[Anomaly msprobe] set msprobe dump state failed, because json root is not object. type=%s",
-                        str(config_path),
-                        type(config_obj).__name__,
-                    )
-                    return False
-
-                ori_value = config_obj.get("dump_enable")
-                if ori_value != dump_state:
-                    config_obj["dump_enable"] = dump_state
-                    with config_path.open("w", encoding="utf-8") as f:
-                        json.dump(config_obj, f, ensure_ascii=False, indent=2)
-                        f.write("\n")
-            return True
-        except Exception as e:
-            logger.error(
-                "[Anomaly msprobe] set msprobe dump state failed, path=%s error=%s",
-                str(config_path),
-                e,
-            )
-            return False
-
-    def _enable_msprobe_dump_if_needed(self, req_id: str) -> bool:
-        if self.debugger is None:
-            return False
-        if not get_pp_group().is_last_rank:
-            return False
-        if req_id in self._msprobe_dumped_req_ids:
-            logger.info_once("[Anomaly msprobe] req_id=%s skip dump: request already dumped once", req_id)
-            return False
-        if self._msprobe_dump_total_count >= self._msprobe_dump_max_times:
-            logger.info_once("[Anomaly msprobe] req_id=%s skip dump: reached max dump times=%d",
-                             req_id, self._msprobe_dump_max_times)
-            return False
-        now_ts = time.time()
-        elapsed = None if self._msprobe_last_dump_ts is None else now_ts - self._msprobe_last_dump_ts
-        if elapsed is not None and elapsed < self._msprobe_dump_cooldown_seconds:
-            logger.info_once(
-                "[Anomaly msprobe] req_id=%s skip dump: cooldown active elapsed=%.2fs remaining=%.2fs",
-                req_id,
-                elapsed,
-                self._msprobe_dump_cooldown_seconds - elapsed,
-            )
-            return False
-        
-        if not self._set_msprobe_dump_state(True):
-            return False
-        self._msprobe_dump_active = True
-        self._msprobe_dumped_req_ids.add(req_id)
-        self._msprobe_dump_total_count += 1
-        self._msprobe_last_dump_ts = now_ts
-        self._msprobe_dump_disable_delay_rounds = 1
-        if self.tp_rank == 0 and get_pp_group().is_last_rank:
-            self._save_sample_param(target_req_id=req_id)
-        logger.info(
-            "[Anomaly msprobe] req_id=%s set msprobe dump state succeeded. dump_count=%d/%d",
-            req_id,
-            self._msprobe_dump_total_count,
-            self._msprobe_dump_max_times,
-        )
-        self.debugger._maybe_reload_config(force=True)
-        return True
-
-    def _save_sample_param(self, target_req_id: str) -> None:
-        sampling_metadata = self.input_batch.sampling_metadata
-        req_ids = self.input_batch.req_ids
-        for req_idx, req_id in enumerate(req_ids):
-            if target_req_id and req_id != target_req_id:
-                continue
-
-            # 单请求采样参数
-            temp = sampling_metadata.temperature[req_idx].item() if sampling_metadata.temperature is not None else None
-            topk = sampling_metadata.top_k[req_idx].item() if sampling_metadata.top_k is not None else None
-            topp = sampling_metadata.top_p[req_idx].item() if sampling_metadata.top_p is not None else None
-
-            freq_pen = sampling_metadata.frequency_penalties[req_idx].item()
-            pres_pen = sampling_metadata.presence_penalties[req_idx].item()
-            rep_pen = sampling_metadata.repetition_penalties[req_idx].item()
-
-            req_bad_words = sampling_metadata.bad_words_token_ids.get(req_idx, [])
-            req_output_tokens = (
-                sampling_metadata.output_token_ids[req_idx]
-                if sampling_metadata.output_token_ids
-                and req_idx < len(sampling_metadata.output_token_ids)
-                else []
-            )
-            req_spec_tokens = (
-                sampling_metadata.spec_token_ids[req_idx]
-                if sampling_metadata.spec_token_ids
-                and req_idx < len(sampling_metadata.spec_token_ids)
-                else None
-            )
-            if sampling_metadata.logprob_token_ids:
-                req_logprob_tokens = sampling_metadata.logprob_token_ids.get(req_idx, [])
-            else:
-                req_logprob_tokens = None
-
-            logger.info(
-                "[SamplingMeta] req_id=%s req_idx=%d "
-                "dp_rank=%d tp_rank=%d "
-                "temperature=%.4f top_k=%s top_p=%.4f "
-                "freq_pen=%.4f pres_pen=%.4f rep_pen=%.4f "
-                "bad_words_group_num=%d output_tokens_len=%d spec_tokens_len=%s logprob_target_tokens_len=%s "
-                "all_greedy=%s all_random=%s max_num_logprobs=%s",
-                req_id,
-                req_idx,
-                self.dp_rank,
-                self.tp_rank,
-                temp if temp is not None else -1,
-                topk,
-                topp if topp is not None else 1.0,
-                freq_pen,
-                pres_pen,
-                rep_pen,
-                len(req_bad_words),
-                len(req_output_tokens),
-                len(req_spec_tokens) if req_spec_tokens else None,
-                len(req_logprob_tokens) if req_logprob_tokens else None,
-                sampling_metadata.all_greedy,
-                sampling_metadata.all_random,
-                sampling_metadata.max_num_logprobs
-            )
 
     # overwrite _sample for lmhead_tp_enable and need_accepted_tokens
     def _sample(self, logits, spec_decode_metadata):
@@ -3166,7 +2806,7 @@ class NPUModelRunner(GPUModelRunner):
                 req_id: i for i, req_id in enumerate(self.input_batch.req_ids) if i not in invalid_req_indices_set
             }
 
-        self._current_step_debug_log_full_requests = {}
+        self.dumper.reset_current_step_debug_log_full_requests()
 
         # Cache the sampled tokens in the model runner, so that the scheduler
         # doesn't need to send them back.
@@ -4084,7 +3724,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.eplb_updator.adaptor.clear_all_moe_loads()
             if not is_profile and self.dynamic_eplb:
                 self.eplb_updator.forward_end(self.eplb_heat_collection_status)
-            self._finalize_dump_data(dump=False)
+            self.dumper.finalize_dump_data(dump=False)
             if self.use_compress and force_attention:
                 self.positions.fill_(0)
                 self._dsa_positions_cpu_buf.fill_(0)
@@ -4245,7 +3885,7 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-            self._start_dump_data()
+            self.dumper.start_dump_data()
 
         load_model_total_time = time.perf_counter() - load_model_start_time
         logger.info(
@@ -4265,22 +3905,6 @@ class NPUModelRunner(GPUModelRunner):
             if layer_ids and isinstance(layer_ids, (list, tuple)):
                 return tuple(layer_ids)
         return super()._get_eagle3_aux_layers_from_config()
-
-    def _start_dump_data(self) -> None:
-        if self.debugger is None or self._debugger_started:
-            return
-        self.debugger.start(self.model)
-        self._debugger_started = True
-
-    def _finalize_dump_data(self, **kwargs) -> None:
-        if self.debugger is None or not self._debugger_started:
-            return
-        if hasattr(self.debugger, "stop"):
-            self.debugger.stop()
-            self._debugger_started = False
-
-        self.debugger.step(**kwargs)
-        self._disable_msprobe_dump_if_needed()
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
