@@ -970,16 +970,20 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         common_attn_metadata.num_input_tokens = num_input_tokens
 
+        # MTP draft always runs in decode-like mode (1 token / request / step),
+        # but common_attn_metadata is the *target's* metadata whose attn_state
+        # is ChunkedPrefill during chunked-prefill steps.  build_draft_attn_metadata
+        # below inherits attn_state from common_attn_metadata, so force it to
+        # SpecDecoding *before* the build call — this way every draft attn group
+        # picks up the correct state (patching only attn_metadata_i afterwards
+        # would miss non-first groups in multi-KV-cache-group models).
+        if self.method == "mtp":
+            common_attn_metadata.attn_state = AscendAttentionState.SpecDecoding
+
         multi_steps_attn_metadata, attn_metadata_i = self.build_draft_attn_metadata(
             common_attn_metadata, num_input_tokens, num_tokens
         )
         self._pad_draft_buffers(num_tokens, num_input_tokens)
-        # MTP draft runs in decode-like mode (1 token per request per step)
-        # regardless of the target's attention state. Without this override
-        # the draft inherits ChunkedPrefill from the target during chunked
-        # prefill, causing incorrect attention routing.
-        if self.method == "mtp":
-            attn_metadata_i.attn_state = AscendAttentionState.SpecDecoding
 
         if hasattr(attn_metadata_i, "causal") and not attn_metadata_i.causal:
             attn_metadata_i.attn_mask = None

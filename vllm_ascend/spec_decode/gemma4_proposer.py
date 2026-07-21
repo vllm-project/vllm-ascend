@@ -65,10 +65,10 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
         #    causing a double-init of the Ascend base.
         self.constant_draft_positions = True
         self._per_group_block_tables: dict[int, torch.Tensor] = {}
+        # Kept empty: upstream _greedy_sample reads this; on NPU we never
+        # populate it (CUDA-graph centroids are GPU-only), so the upstream
+        # fast-path is skipped and our override below handles masked vocab.
         self._centroids_sizes: list[int] = []
-        self._centroids_graphs: dict[int, torch.cuda.CUDAGraph] = {}
-        self._centroids_inputs: dict[int, torch.Tensor] = {}
-        self._centroids_outputs: dict[int, torch.Tensor] = {}
 
     # ---- _create_draft_vllm_config -------------------------------------------
     # Override to also replace model_config with the draft model's config.
@@ -96,54 +96,6 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
         if getattr(model, "masked_embedding", None) is not None:
             return model.get_top_tokens(hidden_states)
         return super()._greedy_sample(hidden_states)
-
-    # ---- model_returns_tuple -----------------------------------------------
-    # Ascend base returns False for "mtp", but Gemma4 MTP forward()
-    # returns (draft_hidden_states, backbone_hidden_states).
-    # Gemma4Proposer already overrides this to return True; the MRO
-    # picks that up.  Explicit override here for clarity.
-
-    def model_returns_tuple(self) -> bool:
-        return True
-
-    # ---- build_per_group_and_layer_attn_metadata ----------------------------
-    # Override to add diagnostics for multi-group block table assignment.
-
-    def build_per_group_and_layer_attn_metadata(
-        self,
-        common_attn_metadata,
-        draft_index: int = 0,
-    ):
-        from copy import copy
-
-        per_group_attn_metadata: list[object] = []
-        per_layer_attn_metadata: dict[str, object] = {}
-        # Slice to the actual batch size to match the upstream Gemma4Proposer
-        # behavior: stored block tables may be padded (num_reqs_padded) from
-        # the target forward pass, while the drafter runs on the unpadded
-        # batch. Without this slice, padded rows leak into draft metadata.
-        batch_size = common_attn_metadata.batch_size()
-        for attn_group in self.draft_attn_groups:
-            gid = attn_group.kv_cache_group_id
-            if gid in self._per_group_block_tables:
-                cm = copy(common_attn_metadata)
-                cm.block_table_tensor = self._per_group_block_tables[gid][:batch_size]
-            else:
-                cm = common_attn_metadata
-            attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
-                common_attn_metadata=cm, draft_index=draft_index
-            )
-            per_group_attn_metadata.append(attn_metadata)
-            for layer_name in attn_group.layer_names:
-                per_layer_attn_metadata[layer_name] = attn_metadata
-        return per_group_attn_metadata, per_layer_attn_metadata
-
-    # ---- set_per_group_block_table -------------------------------------------
-    # Override to log block table updates — tracks when new blocks are assigned
-    # to each KV cache group. Critical for the "append" degradation theory.
-
-    def set_per_group_block_table(self, gid: int, block_table: torch.Tensor) -> None:
-        self._per_group_block_tables[gid] = block_table
 
     # ---- _maybe_share_lm_head ----------------------------------------------
     # Gemma4 MTP's lm_head operates in draft hidden_size (e.g. 1024),
