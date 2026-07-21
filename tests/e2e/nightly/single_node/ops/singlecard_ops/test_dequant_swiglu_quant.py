@@ -180,4 +180,3 @@ def test_npu_dequant_swiglu_quant_with_limit(x_shape, clamp_limit, desc):
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
-
