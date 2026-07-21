@@ -76,7 +76,7 @@ Start the docker image on your each node.
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/.cache:/root/.cache \
     -it $IMAGE bash
-    ```
+```
 
 ::::
 ::::{tab-item} A2 series
@@ -111,7 +111,8 @@ Start the docker image on each of your nodes.
         -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
-    ```
+```
+
 ::::
 :::::
 
