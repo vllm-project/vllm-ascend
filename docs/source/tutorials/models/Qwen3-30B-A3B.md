@@ -225,36 +225,36 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 
 === "Atlas 800I A2/A3"
 
-```bash
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export HCCL_OP_EXPANSION_MODE="AIV"  # not needed on A2
-export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    ```bash
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+    export HCCL_OP_EXPANSION_MODE="AIV"  # not needed on A2
+    export HCCL_BUFFSIZE=1024
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-vllm serve your_model_path \
-    --served-model-name qwen3 \
-    --trust-remote-code \
-    --max-num-seqs 100 \
-    --max-model-len 40960 \
-    --max-num-batched-tokens 16384 \
-    --tensor-parallel-size 4 \
-    --enable-expert-parallel \
-    --quantization ascend \
-    --distributed_executor_backend "mp" \
-    --no-enable-prefix-caching \
-    --async-scheduling \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
-    --gpu-memory-utilization 0.95 \
-    --port 8000 \
-    --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "draft_tensor_parallel_size": 1, "num_speculative_tokens": 3}'
-```
+    vllm serve your_model_path \
+        --served-model-name qwen3 \
+        --trust-remote-code \
+        --max-num-seqs 100 \
+        --max-model-len 40960 \
+        --max-num-batched-tokens 16384 \
+        --tensor-parallel-size 4 \
+        --enable-expert-parallel \
+        --quantization ascend \
+        --distributed_executor_backend "mp" \
+        --no-enable-prefix-caching \
+        --async-scheduling \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+        --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
+        --gpu-memory-utilization 0.95 \
+        --port 8000 \
+        --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "draft_tensor_parallel_size": 1, "num_speculative_tokens": 3}'
+    ```
 
 === "Atlas inference products"
 
-    ```shell
+    ```bash
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0,1
 
