@@ -6,9 +6,10 @@ Covers ``msa_m3_triton`` index top-k operators, ``msa_m3_npu`` block-sparse
 attention (``npu_sparse_attention_score``), and optionally compares against the
 Triton sparse-attention reference.
 
-Default sparse-attention backend is Triton. Select the NPU op with::
+Default sparse-attention backend selection runs both Triton and torch_npu.
+Select one backend with::
 
-    pytest tests/ut/models/test_minimax_m3_sparse_attn.py --msa-m3-sparse-backend=torch_npu
+    pytest tests/e2e/pull_request/one_card/test_minimax_m3_sparse_attn.py --msa-m3-sparse-backend=torch_npu
 
 Test cases are adapted from
 ``reference/vllm_cp/tests/kernels/attention/test_minimax_m3.py`` and
@@ -26,19 +27,19 @@ from typing import Literal
 import pytest
 import torch
 
-from vllm_ascend.models.ops.msa_m3_npu import (
+from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_sparse_attn,
 )
-from vllm_ascend.models.ops.msa_m3_triton import (
+from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
     SPARSE_BLOCK_SIZE,
     minimax_m3_index_decode,
     minimax_m3_index_score,
     minimax_m3_index_topk,
 )
-from vllm_ascend.models.ops.msa_m3_triton import (
+from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
     minimax_m3_sparse_attn as minimax_m3_sparse_attn_triton,
 )
-from vllm_ascend.models.ops.msa_m3_triton import (
+from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
     minimax_m3_sparse_attn_decode as minimax_m3_sparse_attn_decode_triton,
 )
 
@@ -102,9 +103,18 @@ def _topk_select_width(topk: int) -> int:
     return max(TOPK_SELECTION_TILE, _topk_compute_width(topk))
 
 
+def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
+    if "msa_m3_sparse_backend" not in metafunc.fixturenames:
+        return
+
+    selected_backend = metafunc.config.getoption("--msa-m3-sparse-backend")
+    backends = ("triton", "torch_npu") if selected_backend == "all" else (selected_backend,)
+    metafunc.parametrize("msa_m3_sparse_backend", backends, indirect=True, scope="session")
+
+
 @pytest.fixture(scope="session")
 def msa_m3_sparse_backend(request: pytest.FixtureRequest) -> SparseAttnBackend:
-    backend: SparseAttnBackend = request.config.getoption("--msa-m3-sparse-backend")
+    backend: SparseAttnBackend = request.param
     if backend == "torch_npu":
         if not NPU_AVAILABLE:
             pytest.skip("torch_npu sparse backend requires NPU.")

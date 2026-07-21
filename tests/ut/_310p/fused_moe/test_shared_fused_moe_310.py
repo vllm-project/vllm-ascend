@@ -137,6 +137,8 @@ def test_shared_forward_impl_310_returns_current_runner_contract(monkeypatch, ha
         before_gmm2_evt=None,
         before_combine_evt=None,
         swiglu_limit=0.0,
+        swiglu_alpha=1.0,
+        swiglu_beta=0.0,
     )
     runner.no_shared_forward_impl = MagicMock(return_value=routed_result)
     runner._forward_shared_experts = MagicMock(return_value=shared_out)

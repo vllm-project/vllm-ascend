@@ -10,7 +10,7 @@ from pathlib import Path
 
 import vllm
 
-from vllm_ascend.models.minimax_m3_vl import (
+from vllm_ascend.models.minimax_m3.minimax_m3_vl import (
     MiniMaxM3VLDummyInputsBuilder,
     MiniMaxM3VLMultiModalProcessor,
     MiniMaxM3VLProcessingInfo,
@@ -28,7 +28,7 @@ class TestMiniMaxM3VitProcessor(unittest.TestCase):
         self.assertTrue(Path(source_file).samefile(expected_source))
 
     def test_standalone_vllm_vision_bridge_is_removed(self) -> None:
-        self.assertIsNone(importlib.util.find_spec("vllm_ascend.models.minimax_m3_vllm_vision"))
+        self.assertIsNone(importlib.util.find_spec("vllm_ascend.models.minimax_m3.minimax_m3_vllm_vision"))
 
     def test_multimodal_processor_uses_vllm_common_implementation(self) -> None:
         self.assertEqual(

@@ -96,19 +96,19 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
 
         with (
             patch(
-                "vllm_ascend.models.minimax_m3.get_tensor_model_parallel_world_size",
+                "vllm_ascend.models.minimax_m3.minimax_m3.get_tensor_model_parallel_world_size",
                 return_value=1,
             ),
             patch(
-                "vllm_ascend.models.minimax_m3.MiniMaxM3MLP",
+                "vllm_ascend.models.minimax_m3.minimax_m3.MiniMaxM3MLP",
                 return_value=nn.Identity(),
             ),
             patch(
-                "vllm_ascend.models.minimax_m3.GateLinear",
+                "vllm_ascend.models.minimax_m3.minimax_m3.GateLinear",
                 return_value=gate,
             ),
             patch(
-                "vllm_ascend.models.minimax_m3.FusedMoE",
+                "vllm_ascend.models.minimax_m3.minimax_m3.FusedMoE",
                 return_value=nn.Identity(),
             ) as fused_moe,
         ):

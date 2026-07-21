@@ -12,7 +12,7 @@ def register_model():
     )
     ModelRegistry.register_model(
         "MiniMaxM3SparseForConditionalGeneration",
-        "vllm_ascend.models.minimax_m3_vl:MiniMaxM3SparseForConditionalGeneration",
+        "vllm_ascend.models.minimax_m3.minimax_m3_vl:MiniMaxM3SparseForConditionalGeneration",
     )
     ModelRegistry.register_model(
         "DeepSeekV4MTPModel",
