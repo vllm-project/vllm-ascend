@@ -35,6 +35,7 @@ It is recommended to download the model weight to the shared directory of multip
     ```shell
 
     export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+    
     export NAME=vllm-ascend
 
     # Run the container using the defined variables
