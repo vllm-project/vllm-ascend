@@ -4,15 +4,16 @@
   <a href="Model-Deployment-Tutorial-Template.md"><b>English</b></a> | <a href="Model-Deployment-Tutorial-Template.zh.md"><b>中文</b></a>
 </p>
 
-!!! note "Version Compatibility Notes"
-
-    - **v0.24.0rc and later (MkDocs framework)**:
-      - Variable format: `{{ vllm_ascend_version }}`; Tab syntax: `=== "tab name"` (content must be indented with 4 spaces)
-      - Please refer to the [MkDocs official documentation](https://www.mkdocs.org/) for more syntax details.
-
-    - **v0.23.0 and earlier (Sphinx framework)**:
-      - Variable format: `|vllm_ascend_version|`; Tab syntax: `:::{tab-item}`
-      - Please refer to the [Sphinx official documentation](https://www.sphinx-doc.org/) for more syntax details.
+> [!NOTE]
+> **Version Compatibility Notes**
+>
+> - **v0.24.0rc and later (MkDocs framework)**:
+>   - Variable format: `{{ vllm_ascend_version }}`; Tab syntax: `=== "tab name"` (content must be indented with 4 spaces)
+>   - Please refer to the [MkDocs official documentation](https://www.mkdocs.org/) for more syntax details.
+>
+> - **v0.23.0 and earlier (Sphinx framework)**:
+>   - Variable format: `|vllm_ascend_version|`; Tab syntax: `:::{tab-item}`
+>   - Please refer to the [Sphinx official documentation](https://www.sphinx-doc.org/) for more syntax details.
 
 This template is based on deployment tutorials for models such as DeepSeek-V3.2 and Qwen-VL-Dense, and is intended to serve as a reference for technical documentation writing. Users can systematically construct relevant technical documentation by following the guidelines provided in this template.
 
