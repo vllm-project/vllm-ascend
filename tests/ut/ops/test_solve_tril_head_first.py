@@ -46,7 +46,8 @@ def _golden(matrix: torch.Tensor, seqlens: list[int]) -> torch.Tensor:
             for head in range(heads):
                 block = torch.zeros((block_size, block_size), dtype=torch.float32)
                 block[:valid] = source[0, head, start + block_start : start + block_start + valid]
-                expected[0, head, start + block_start : start + block_start + valid] = torch.linalg.inv(eye + block)[:valid]
+                inverse = torch.linalg.inv(eye + block)
+                expected[0, head, start + block_start : start + block_start + valid] = inverse[:valid]
         start += length
     return expected
 
@@ -60,10 +61,7 @@ def test_solve_tril_head_first_matches_golden(seqlens: list[int]):
     chunk_indices = None
     if len(seqlens) > 1:
         cu_seqlens = torch.tensor([0, *torch.tensor(seqlens).cumsum(0).tolist()], dtype=torch.int64, device="npu")
-        chunk_indices = {
-            str(size): prepare_chunk_indices(cu_seqlens, size)
-            for size in (32, 64, 1216)
-        }
+        chunk_indices = {str(size): prepare_chunk_indices(cu_seqlens, size) for size in (32, 64, 1216)}
 
     actual = solve_tril(
         matrix,

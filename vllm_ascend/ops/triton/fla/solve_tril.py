@@ -8,7 +8,6 @@
 # ruff: noqa: E501
 # mypy: ignore-errors
 
-from typing import Optional
 
 import torch
 from vllm.triton_utils import tl, triton
@@ -16,6 +15,7 @@ from vllm.triton_utils import tl, triton
 from vllm_ascend.ops.triton.triton_utils import extract_slice, insert_slice
 
 from .utils import prepare_chunk_indices
+
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
 @triton.jit(do_not_specialize=["T"])
@@ -34,12 +34,8 @@ def solve_tril_16x16_kernel_paral(
     i_b, i_h = i_bh // H, i_bh % H
     T_max = T
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
-            chunk_indices + i_t * 2 + 1
-        ).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
-            cu_seqlens + i_n + 1
-        ).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -58,12 +54,8 @@ def solve_tril_16x16_kernel_paral(
     for blkid in range(0, N_BLOCKS):
         row_start_o = base_t + blkid * 16
         col_start_o = row_start_o % BT
-        p_A_subrec16 = tl.make_block_ptr(
-            A, (T, BT), (BT, 1), (row_start_o, col_start_o), (16, 16), (1, 0)
-        )
-        b_A_subrec16 = tl.load(p_A_subrec16, boundary_check=(0, 1)).to(
-            tl.float32
-        )  # (16, 16)
+        p_A_subrec16 = tl.make_block_ptr(A, (T, BT), (BT, 1), (row_start_o, col_start_o), (16, 16), (1, 0))
+        b_A_subrec16 = tl.load(p_A_subrec16, boundary_check=(0, 1)).to(tl.float32)  # (16, 16)
         b_A = insert_slice(
             ful=b_A,
             sub=b_A_subrec16[None, :, :],  # (1, 16, 16)
@@ -84,10 +76,7 @@ def solve_tril_16x16_kernel_paral(
 
     o_i = tl.arange(0, 16)
     for i in range(1, 16):
-
-        nblks_vec16 = -extract_slice(
-            local_ori_A, (i, 0), (1, 16 * N_BLOCKS), (16 * N_BLOCKS, 1)
-        )
+        nblks_vec16 = -extract_slice(local_ori_A, (i, 0), (1, 16 * N_BLOCKS), (16 * N_BLOCKS, 1))
         b_a = tl.reshape(nblks_vec16, (N_BLOCKS, 16))
 
         dot_tmp = tl.trans(b_a[:, :, None] * b_A, (1, 0, 2))
@@ -103,9 +92,7 @@ def solve_tril_16x16_kernel_paral(
     b_A = tl.where(on_diagonal, b_A + 1.0, b_A)
 
     b_A = tl.reshape(b_A, (N_BLOCKS * 16, 16))
-    p_Ai = tl.make_block_ptr(
-        Ad, (T, 16), (16, 1), (base_t, 0), (N_BLOCKS * 16, 16), (1, 0)
-    )
+    p_Ai = tl.make_block_ptr(Ad, (T, 16), (16, 1), (base_t, 0), (N_BLOCKS * 16, 16), (1, 0))
     tl.store(
         p_Ai,
         b_A.to(p_Ai.dtype.element_ty, fp_downcast_rounding="rtne"),
@@ -130,12 +117,8 @@ def solve_tril_16x16_kernel_paral_v3(
     i_b, i_h = i_bh // H, i_bh % H
     T_max = T
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
-            chunk_indices + i_t * 2 + 1
-        ).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
-            cu_seqlens + i_n + 1
-        ).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -164,18 +147,12 @@ def solve_tril_16x16_kernel_paral_v3(
             offs_cols_in_block = tl.arange(0, 16)
             # BHTC: the token dimension is contiguous inside one head.
             ptr_A_subrec16 = (
-                A
-                + row_start_o * BT
-                + col_start_o
-                + offs_rows_in_block[:, None] * BT
-                + offs_cols_in_block[None, :]
+                A + row_start_o * BT + col_start_o + offs_rows_in_block[:, None] * BT + offs_cols_in_block[None, :]
             )
             global_rows = row_start_o + offs_rows_in_block[:, None]
             global_cols = col_start_o + offs_cols_in_block[None, :]
             load_mask = (global_rows < T) & (global_cols < BT)
-            b_A_subrec16 = tl.load(ptr_A_subrec16, mask=load_mask, other=0.0).to(
-                tl.float32
-            )
+            b_A_subrec16 = tl.load(ptr_A_subrec16, mask=load_mask, other=0.0).to(tl.float32)
             b_A = insert_slice(
                 ful=b_A,
                 sub=b_A_subrec16[None, :, :],  # (1, 16, 16)
@@ -196,10 +173,7 @@ def solve_tril_16x16_kernel_paral_v3(
         b_A = -b_A * is_lower
 
         for i in range(1, 16):
-
-            nblks_vec16 = -extract_slice(
-                local_ori_A, (i, 0), (1, 16 * N_BLOCKS), (16 * N_BLOCKS, 1)
-            )
+            nblks_vec16 = -extract_slice(local_ori_A, (i, 0), (1, 16 * N_BLOCKS), (16 * N_BLOCKS, 1))
             b_a = tl.reshape(nblks_vec16, (N_BLOCKS, 16))
 
             dot_tmp = tl.trans(b_a[:, :, None] * b_A, (1, 0, 2))
@@ -219,20 +193,12 @@ def solve_tril_16x16_kernel_paral_v3(
         b_A = tl.where(on_diagonal, b_A + 1.0, b_A)
 
         b_A = tl.reshape(b_A, (N_BLOCKS * 16, 16))
-        p_Ai = tl.make_block_ptr(
-            Ad, (T, 16), (16, 1), (base_t, 0), (N_BLOCKS * 16, 16), (1, 0)
-        )
+        p_Ai = tl.make_block_ptr(Ad, (T, 16), (16, 1), (base_t, 0), (N_BLOCKS * 16, 16), (1, 0))
         # using ptr with mask instead of tl.load(block_ptr)
         offs_rows_to_store = tl.arange(0, N_BLOCKS * 16)
         offs_cols_to_store = tl.arange(0, 16)
         # BHTC: the token dimension is contiguous inside one head.
-        p_Ai = (
-            Ad
-            + base_t * 16
-            + 0
-            + offs_rows_to_store[:, None] * 16
-            + offs_cols_to_store[None, :]
-        )
+        p_Ai = Ad + base_t * 16 + 0 + offs_rows_to_store[:, None] * 16 + offs_cols_to_store[None, :]
         global_store_rows = base_t + offs_rows_to_store[:, None]
         store_mask = global_store_rows < T
         tl.store(
@@ -260,12 +226,8 @@ def merge_16x16_to_32x32_inverse_kernel(
     i_b, i_h = i_bh // H, i_bh % H
     T_max = T
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_tt * 2).to(tl.int32), tl.load(
-            chunk_indices + i_tt * 2 + 1
-        ).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
-            cu_seqlens + i_n + 1
-        ).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_tt * 2).to(tl.int32), tl.load(chunk_indices + i_tt * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -279,31 +241,17 @@ def merge_16x16_to_32x32_inverse_kernel(
         Ad += (i_b * H + i_h) * T_max * 16
         Ai += (i_b * H + i_h) * T_max * 32
 
-    p_A_21 = tl.make_block_ptr(
-        A, (T, BT), (BT, 1), (i_t * 32 + 16, 0 + i_t % (BT // 32) * 32), (16, 16), (1, 0)
-    )
-    p_Ad_11 = tl.make_block_ptr(
-        Ad, (T, 16), (16, 1), (i_t * 32, 0), (16, 16), (1, 0)
-    )
-    p_Ad_22 = tl.make_block_ptr(
-        Ad, (T, 16), (16, 1), (i_t * 32 + 16, 0), (16, 16), (1, 0)
-    )
-    p_Ai_11 = tl.make_block_ptr(
-        Ai, (T, 32), (32, 1), (i_t * 32, 0), (16, 16), (1, 0)
-    )
-    p_Ai_22 = tl.make_block_ptr(
-        Ai, (T, 32), (32, 1), (i_t * 32 + 16, 16), (16, 16), (1, 0)
-    )
-    p_Ai_21 = tl.make_block_ptr(
-        Ai, (T, 32), (32, 1), (i_t * 32 + 16, 0), (16, 16), (1, 0)
-    )
+    p_A_21 = tl.make_block_ptr(A, (T, BT), (BT, 1), (i_t * 32 + 16, 0 + i_t % (BT // 32) * 32), (16, 16), (1, 0))
+    p_Ad_11 = tl.make_block_ptr(Ad, (T, 16), (16, 1), (i_t * 32, 0), (16, 16), (1, 0))
+    p_Ad_22 = tl.make_block_ptr(Ad, (T, 16), (16, 1), (i_t * 32 + 16, 0), (16, 16), (1, 0))
+    p_Ai_11 = tl.make_block_ptr(Ai, (T, 32), (32, 1), (i_t * 32, 0), (16, 16), (1, 0))
+    p_Ai_22 = tl.make_block_ptr(Ai, (T, 32), (32, 1), (i_t * 32 + 16, 16), (16, 16), (1, 0))
+    p_Ai_21 = tl.make_block_ptr(Ai, (T, 32), (32, 1), (i_t * 32 + 16, 0), (16, 16), (1, 0))
 
     A_21 = tl.load(p_A_21, boundary_check=(0, 1)).to(tl.float32)
     Ai_11 = tl.load(p_Ad_11, boundary_check=(0, 1)).to(tl.float32)
     Ai_22 = tl.load(p_Ad_22, boundary_check=(0, 1)).to(tl.float32)
-    Ai_21 = -tl.dot(
-        tl.dot(Ai_22, A_21, input_precision="ieee"), Ai_11, input_precision="ieee"
-    )
+    Ai_21 = -tl.dot(tl.dot(Ai_22, A_21, input_precision="ieee"), Ai_11, input_precision="ieee")
     tl.store(
         p_Ai_11,
         Ai_11.to(p_Ai_11.dtype.element_ty, fp_downcast_rounding="rtne"),
@@ -342,12 +290,8 @@ def merge_32x32_to_64x64_inverse_kernel(
     i_b, i_h = i_bh // H, i_bh % H
     T_max = T
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
-            chunk_indices + i_t * 2 + 1
-        ).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
-            cu_seqlens + i_n + 1
-        ).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -361,33 +305,19 @@ def merge_32x32_to_64x64_inverse_kernel(
         Ad += (i_b * H + i_h) * T_max * 32
         Ai += (i_b * H + i_h) * T_max * 64
 
-    p_A_21 = tl.make_block_ptr(
-        A, (T, BT), (BT, 1), (i_t * 64 + 32, 0 + i_t % (BT // 64) * 64), (32, 32), (1, 0)
-    )
+    p_A_21 = tl.make_block_ptr(A, (T, BT), (BT, 1), (i_t * 64 + 32, 0 + i_t % (BT // 64) * 64), (32, 32), (1, 0))
 
-    p_Ad_11 = tl.make_block_ptr(
-        Ad, (T, 32), (32, 1), (i_t * 64, 0), (32, 32), (1, 0)
-    )
-    p_Ad_22 = tl.make_block_ptr(
-        Ad, (T, 32), (32, 1), (i_t * 64 + 32, 0), (32, 32), (1, 0)
-    )
+    p_Ad_11 = tl.make_block_ptr(Ad, (T, 32), (32, 1), (i_t * 64, 0), (32, 32), (1, 0))
+    p_Ad_22 = tl.make_block_ptr(Ad, (T, 32), (32, 1), (i_t * 64 + 32, 0), (32, 32), (1, 0))
 
-    p_Ai_11 = tl.make_block_ptr(
-        Ai, (T, 64), (64, 1), (i_t * 64, 0), (32, 32), (1, 0)
-    )
-    p_Ai_22 = tl.make_block_ptr(
-        Ai, (T, 64), (64, 1), (i_t * 64 + 32, 32), (32, 32), (1, 0)
-    )
-    p_Ai_21 = tl.make_block_ptr(
-        Ai, (T, 64), (64, 1), (i_t * 64 + 32, 0), (32, 32), (1, 0)
-    )
+    p_Ai_11 = tl.make_block_ptr(Ai, (T, 64), (64, 1), (i_t * 64, 0), (32, 32), (1, 0))
+    p_Ai_22 = tl.make_block_ptr(Ai, (T, 64), (64, 1), (i_t * 64 + 32, 32), (32, 32), (1, 0))
+    p_Ai_21 = tl.make_block_ptr(Ai, (T, 64), (64, 1), (i_t * 64 + 32, 0), (32, 32), (1, 0))
 
     A_21 = tl.load(p_A_21, boundary_check=(0, 1)).to(tl.float32)
     Ai_11 = tl.load(p_Ad_11, boundary_check=(0, 1)).to(tl.float32)
     Ai_22 = tl.load(p_Ad_22, boundary_check=(0, 1)).to(tl.float32)
-    Ai_21 = -tl.dot(
-        tl.dot(Ai_22, A_21, input_precision="ieee"), Ai_11, input_precision="ieee"
-    )
+    Ai_21 = -tl.dot(tl.dot(Ai_22, A_21, input_precision="ieee"), Ai_11, input_precision="ieee")
     tl.store(
         p_Ai_11,
         Ai_11.to(p_Ai_11.dtype.element_ty, fp_downcast_rounding="rtne"),
@@ -403,6 +333,7 @@ def merge_32x32_to_64x64_inverse_kernel(
         Ai_21.to(p_Ai_21.dtype.element_ty, fp_downcast_rounding="rtne"),
         boundary_check=(0, 1),
     )
+
 
 @triton.heuristics(
     {
@@ -425,12 +356,8 @@ def merge_64x64_to_128x128_inverse_kernel(
     i_b, i_h = i_bh // H, i_bh % H
     T_max = T
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
-            chunk_indices + i_t * 2 + 1
-        ).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
-            cu_seqlens + i_n + 1
-        ).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -444,33 +371,19 @@ def merge_64x64_to_128x128_inverse_kernel(
         Ad += (i_b * H + i_h) * T_max * 64
         Ai += (i_b * H + i_h) * T_max * 128
 
-    p_A_21 = tl.make_block_ptr(
-        A, (T, 128), (128, 1), (i_t * 128 + 64, 0), (64, 64), (1, 0)
-    )
+    p_A_21 = tl.make_block_ptr(A, (T, 128), (128, 1), (i_t * 128 + 64, 0), (64, 64), (1, 0))
 
-    p_Ad_11 = tl.make_block_ptr(
-        Ad, (T, 64), (64, 1), (i_t * 128, 0), (64, 64), (1, 0)
-    )
-    p_Ad_22 = tl.make_block_ptr(
-        Ad, (T, 64), (64, 1), (i_t * 128 + 64, 0), (64, 64), (1, 0)
-    )
+    p_Ad_11 = tl.make_block_ptr(Ad, (T, 64), (64, 1), (i_t * 128, 0), (64, 64), (1, 0))
+    p_Ad_22 = tl.make_block_ptr(Ad, (T, 64), (64, 1), (i_t * 128 + 64, 0), (64, 64), (1, 0))
 
-    p_Ai_11 = tl.make_block_ptr(
-        Ai, (T, 128), (128, 1), (i_t * 128, 0), (64, 64), (1, 0)
-    )
-    p_Ai_22 = tl.make_block_ptr(
-        Ai, (T, 128), (128, 1), (i_t * 128 + 64, 64), (64, 64), (1, 0)
-    )
-    p_Ai_21 = tl.make_block_ptr(
-        Ai, (T, 128), (128, 1), (i_t * 128 + 64, 0), (64, 64), (1, 0)
-    )
+    p_Ai_11 = tl.make_block_ptr(Ai, (T, 128), (128, 1), (i_t * 128, 0), (64, 64), (1, 0))
+    p_Ai_22 = tl.make_block_ptr(Ai, (T, 128), (128, 1), (i_t * 128 + 64, 64), (64, 64), (1, 0))
+    p_Ai_21 = tl.make_block_ptr(Ai, (T, 128), (128, 1), (i_t * 128 + 64, 0), (64, 64), (1, 0))
 
     A_21 = tl.load(p_A_21, boundary_check=(0, 1)).to(tl.float32)
     Ai_11 = tl.load(p_Ad_11, boundary_check=(0, 1)).to(tl.float32)
     Ai_22 = tl.load(p_Ad_22, boundary_check=(0, 1)).to(tl.float32)
-    Ai_21 = -tl.dot(
-        tl.dot(Ai_22, A_21, input_precision="ieee"), Ai_11, input_precision="ieee"
-    )
+    Ai_21 = -tl.dot(tl.dot(Ai_22, A_21, input_precision="ieee"), Ai_11, input_precision="ieee")
     tl.store(
         p_Ai_11,
         Ai_11.to(p_Ai_11.dtype.element_ty, fp_downcast_rounding="rtne"),
@@ -486,6 +399,7 @@ def merge_64x64_to_128x128_inverse_kernel(
         Ai_21.to(p_Ai_21.dtype.element_ty, fp_downcast_rounding="rtne"),
         boundary_check=(0, 1),
     )
+
 
 @triton.heuristics(
     {
@@ -509,12 +423,8 @@ def merge_16x16_to_64x64_inverse_kernel_reorder_all_masked(
     T_max = T
 
     if IS_VARLEN:
-        i_n, i_t_val = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
-            chunk_indices + i_t * 2 + 1
-        ).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
-            cu_seqlens + i_n + 1
-        ).to(tl.int32)
+        i_n, i_t_val = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         i_t = i_t_val
     else:
@@ -657,7 +567,7 @@ def _chunk_indices(
 
 def solve_tril(
     A: torch.Tensor,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    cu_seqlens: torch.Tensor | None = None,
     chunk_indices_out: dict[str, torch.Tensor | None] | None = None,
     output_dtype: torch.dtype | None = torch.float,
 ) -> torch.Tensor:

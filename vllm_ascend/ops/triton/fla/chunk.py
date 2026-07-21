@@ -183,9 +183,7 @@ def chunk_gated_delta_rule_fwd(
     update_chunk_offsets_chunk64 = None if prebuilt_meta is None else prebuilt_meta.update_chunk_offsets_chunk64
     final_chunk_indices_chunk64 = None if prebuilt_meta is None else prebuilt_meta.final_chunk_indices_chunk64
     chunk_indices_large_block = None if prebuilt_meta is None else prebuilt_meta.chunk_indices_large_block
-    chunk_indices_chunk32 = (
-        None if prebuilt_meta is None else getattr(prebuilt_meta, "chunk_indices_chunk32", None)
-    )
+    chunk_indices_chunk32 = None if prebuilt_meta is None else getattr(prebuilt_meta, "chunk_indices_chunk32", None)
 
     cu_seqlens = None if cu_seqlens is None else cu_seqlens.to(torch.int64)
     if cu_seqlens is not None and chunk_indices_chunk64 is None and chunk_indices_chunk64_host is None:
