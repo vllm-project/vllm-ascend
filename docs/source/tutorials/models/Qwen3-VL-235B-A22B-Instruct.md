@@ -2,7 +2,7 @@
 
 ## Introduction
 
-The Qwen-VL(Vision-Language)series from Alibaba Cloud comprises a family of powerful Large Vision-Language Models (LVLMs) designed for comprehensive multimodal understanding. They accept images, text, and bounding boxes as input, and output text and detection boxes, enabling advanced functions like image detection, multi-modal dialogue, and multi-image reasoning.
+The Qwen-VL (Vision-Language) series from Alibaba Cloud comprises a family of powerful Large Vision-Language Models (LVLMs) designed for comprehensive multimodal understanding. They accept images, text, and bounding boxes as input, and output text and detection boxes, enabling advanced functions like image detection, multi-modal dialogue, and multi-image reasoning.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, NPU deployment, accuracy and performance evaluation.
 
@@ -18,7 +18,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### Model Weight
 
-- `Qwen3-VL-235B-A22B-Instruct`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node，2 Atlas 800 A2（64G × 8）nodes. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-Instruct/)
+- `Qwen3-VL-235B-A22B-Instruct`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node, 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-Instruct/)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 

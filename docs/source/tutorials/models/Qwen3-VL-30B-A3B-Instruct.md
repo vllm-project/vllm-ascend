@@ -15,7 +15,7 @@ This document will show the main verification steps of the `Qwen3-VL-30B-A3B-Ins
 
 ### Prepare Model Weights
 
-Running this model requires 1 Atlas 800I A2 (64G × 8) node or 1 Atlas 800 A3 (64G × 16) node.
+Running this model requires 1 Atlas 800I A2 (64GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node.
 
 Download model weight at [ModelScope Website](https://modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Instruct) or download by below command:
 

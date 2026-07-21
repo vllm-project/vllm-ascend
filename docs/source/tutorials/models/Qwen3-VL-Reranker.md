@@ -99,7 +99,7 @@ query = "What is the capital of China?"
 
 documents = [
     "The capital of China is Beijing.",
-    "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun.",
+    "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun."
 ]
 
 documents = [
@@ -158,7 +158,7 @@ model = LLM(
         # Enable special handling for original Qwen3-Reranker models
         # This flag triggers conversion logic that transforms the two token
         # vectors into a single classification vector
-        "is_original_qwen3_reranker": True,
+        "is_original_qwen3_reranker": True
     },
 )
 
