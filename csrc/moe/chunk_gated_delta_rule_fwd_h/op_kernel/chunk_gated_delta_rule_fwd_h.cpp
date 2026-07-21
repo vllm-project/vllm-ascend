@@ -37,6 +37,8 @@ extern "C" __global__ __aicore__ void chunk_gated_delta_rule_fwd_h(GM_ADDR k, GM
     __gm__ ChunkGatedDeltaRuleFwdHTilingData *__restrict gdnFwdHTilingData = reinterpret_cast<__gm__ ChunkGatedDeltaRuleFwdHTilingData *__restrict>(tiling);
     using workspaceType = float;
     // dtype: 0 - fp16, 1 - bf16, 2 - fp32
+    // The 310P unified-core implementation only supports the FP16 variants.
+#ifndef CATLASS_UNIFIED_CORE
     if (gdnFwdHTilingData->dataType == 1) {
         if (gdnFwdHTilingData->stateDataType == 2) {
             if (gdnFwdHTilingData->gDataType == 2) {
@@ -63,7 +65,9 @@ extern "C" __global__ __aicore__ void chunk_gated_delta_rule_fwd_h(GM_ADDR k, GM
                 gdnFwdH.Process();
             }
         }
-    } else {
+    } else
+#endif
+    {
         if (gdnFwdHTilingData->stateDataType == 2) {
             if (gdnFwdHTilingData->gDataType == 2) {
                 using GDNFwdHKernel = Catlass::Gemm::Kernel::GDNFwdHKernel<half, float, float, workspaceType>;
