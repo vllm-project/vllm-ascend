@@ -110,11 +110,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ### Single-node Deployment
 
-<<<<<<< HEAD
-- Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
-=======
 - Quantized model `glm-5.2-w8a8` can be deployed on 1 Atlas 800 A3 (64GB × 16) .
->>>>>>> 94be3ade7 (修改AIDD)
 
 Run the following script to execute online inference.
 
@@ -161,11 +157,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 === "A3 series"
 
-<<<<<<< HEAD
-    - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A3 (64G × 16).
-=======
     - `glm-5.2-w8a8`: can be deployed on 2 Atlas 800 A3 (64GB × 16).
->>>>>>> 94be3ade7 (修改AIDD)
 
     Run the following scripts on two nodes respectively.
 
@@ -271,11 +263,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 === "A2 series"
 
-<<<<<<< HEAD
-    - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A2 (64G × 32).
-=======
     - `glm-5.2-w8a8`: can be deployed on 2 Atlas 800 A2 (64GB × 32).
->>>>>>> 94be3ade7 (修改AIDD)
 
     **node 0**
 
@@ -769,17 +757,6 @@ Before you start, please
             "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {
-<<<<<<< HEAD
-                                "dp_size": 4,
-                                "tp_size": 8
-                        },
-                        "decode": {
-                                "dp_size": 32,
-                                "tp_size": 1
-                        }
-                }
-            }'
-=======
                                 "dp_size": 2,
                                 "tp_size": 16
                         },
@@ -789,7 +766,6 @@ Before you start, please
                         }
                  }
              }'
->>>>>>> 94be3ade7 (修改AIDD)
         ```
 
 Once the preparation is done, you can start the server with the following command on each node:
