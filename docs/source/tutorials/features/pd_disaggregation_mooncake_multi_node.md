@@ -239,6 +239,11 @@ Use `launch_online_dp.py` to launch external dp vllm servers.
 Modify `run_dp_template.sh` on each node.
 [run_dp_template.sh](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh)
 
+> **Note**: If speculative decoding is enabled, `num_speculative_tokens` should be subject to one of the following conditions:
+>
+> 1. Hybrid Mamba models (e.g., Qwen-Next and Qwen3.5 series): `num_speculative_tokens` should be equal on P nodes and D nodes.
+> 2. Other models: `num_speculative_tokens` on P nodes should be 1, and `num_speculative_tokens` on D nodes should be greater or equal to 1.
+
 #### Layerwise
 
 === "Prefiller node 1"
