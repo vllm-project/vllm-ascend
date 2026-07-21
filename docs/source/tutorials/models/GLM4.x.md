@@ -76,7 +76,7 @@ You can use our official docker image to run `GLM-4.x` directly.
 
 === "A2 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```bash
 
@@ -262,7 +262,7 @@ While the previous documentation advises against multi-node deployment on the At
 
 ### 5.3 Prefill-Decode Disaggregation
 
-We'd like to show the deployment guide of `GLM-4.7` on multi-node environment with 2P1D for better performance.
+We'd like to show the deployment guide of `GLM-4.7` in a multi-node environment with 2P1D for better performance.
 
 Before you start, please
 

@@ -125,7 +125,7 @@ For more details, please refer to the [Installation Guide](../../installation.md
 
 Single-node deployment completes both Prefill and Decode within the same node. The model `Qwen3-Next-80B-A3B-Instruct` can be deployed on 1 Atlas 800 A3 (64G × 16).
 
-While a single-node setup supports all input/output scenarios, consider deploying multinodes for optimal performance.
+While a single-node setup supports all input/output scenarios, consider deploying multi-node clusters for optimal performance.
 
 Startup Command:
 

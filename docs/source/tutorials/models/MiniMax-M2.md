@@ -628,7 +628,7 @@ vllm bench serve \
 
 ### 9.1 Recommended Configurations
 
-The following configurations are validated on the self-test report (AR20260326132822) and are categorized by use case.
+The following configurations are validated in internal testing and are categorized by use case.
 
 | Scenario | Input/Output | Deployment | NPUs | P Config | D Config | Max Batched Tokens | Max Num Seqs (P/D) | Max Model Len | EAGLE3 | FUSED_MC2 | FlashComm1 | Async Scheduling |
 |----------|-------------|------------|------|----------|----------|-------------------|----------------|---------------|--------|-----------|------------|------------------|
