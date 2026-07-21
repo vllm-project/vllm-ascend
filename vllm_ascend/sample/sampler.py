@@ -187,7 +187,7 @@ def _apply_top_k_top_p_pytorch(
             kk = k.to(torch.long).clamp(min=1, max=V_local)
             top_k_count = (probs_sort.size(1) - kk).unsqueeze(1)  # [B,1]
             top_k_cutoff = probs_sort.gather(-1, top_k_count)
-            no_top_k_mask = (kk == V_local).unsqueeze(1)
+            no_top_k_mask = (kk == V_local).unsqueeze(2)
             top_k_cutoff.masked_fill_(no_top_k_mask, -float("inf"))
             elements_to_discard = probs < top_k_cutoff
             gathered_vals.masked_fill_(elements_to_discard, -float("inf"))
