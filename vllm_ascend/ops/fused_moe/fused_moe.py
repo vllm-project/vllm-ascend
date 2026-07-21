@@ -62,6 +62,19 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
     )
 
 
+def _moe_sync_lora_context(quant_method, lora_context):
+    """Push ``lora_context`` onto MoE communication singletons, or clear
+    them when ``lora_context`` is ``None``.
+
+    Encapsulates the ``hasattr``/``set_lora_context`` pattern shared by
+    setup and teardown so callers just pass the target value.
+    """
+    if hasattr(_EXTRA_CTX.moe_comm_method, "set_lora_context"):
+        _EXTRA_CTX.moe_comm_method.set_lora_context(lora_context)
+    if hasattr(quant_method, "set_lora_context"):
+        quant_method.set_lora_context(lora_context)
+
+
 @dataclass
 class FusedMoEResult:
     routed_out: torch.Tensor
@@ -557,10 +570,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         enable_force_load_balance = _EXTRA_CTX.in_profile_run
 
         lora_context = getattr(self.routed_experts, "_ascend_moe_lora_context", None)
-        if hasattr(_EXTRA_CTX.moe_comm_method, "set_lora_context"):
-            _EXTRA_CTX.moe_comm_method.set_lora_context(lora_context)
-        if hasattr(self._quant_method, "set_lora_context"):
-            self._quant_method.set_lora_context(lora_context)
+        _moe_sync_lora_context(self._quant_method, lora_context)
 
         prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
             hidden_states=hidden_states,
@@ -629,11 +639,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             padded_hidden_states_shape=padded_hidden_states_shape,
         )
 
-        # Release intermediate LoRA index tensors stored on lora_context
-        # during the forward pass to avoid retaining NPU memory between
-        # invocations.
+        # Release intermediate LoRA index tensors and clear
+        # per-forward references from long-lived singletons.
         if lora_context is not None:
             initialize_moe_lora_context_indices(lora_context)
+            _moe_sync_lora_context(self._quant_method, None)
 
         if return_with_event:
             return FusedMoEResult(
