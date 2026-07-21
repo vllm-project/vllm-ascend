@@ -544,11 +544,18 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
             initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
             clear_ssm_states(initial_state, prefill_has_initial_state)
+            if not use_head_major_conv:
+                # PCP keeps its existing token-major Conv1D path. Normalize its
+                # BTHD Q/K/V result at the chunk boundary, whose kernels use
+                # BHTD regardless of the Conv1D layout.
+                query_non_spec = query_non_spec.movedim(1, 2).contiguous()
+                key_non_spec = key_non_spec.movedim(1, 2).contiguous()
+                value_non_spec = value_non_spec.movedim(1, 2).contiguous()
             (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
                 q=query_non_spec,
                 k=key_non_spec,
                 v=value_non_spec,
-                # Q/K/V are head-major; the gate path stays token-major.
+                # Q/K/V are BHTD; the gate path stays BTH.
                 g=g_non_spec,
                 beta=beta_non_spec,
                 initial_state=initial_state,
