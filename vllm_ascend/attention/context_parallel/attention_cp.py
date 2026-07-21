@@ -29,8 +29,6 @@ from vllm_ascend.attention.attention_v1 import (
     AscendMetadata,
 )
 from vllm_ascend.attention.context_parallel.common_cp import (
-    AscendMetadataForDecode,
-    AscendMetadataForPrefill,
     DCPImplMixin,
     DCPMetadataBuilderMixin,
     _npu_attn_out_lse_update,
@@ -50,6 +48,34 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.utils import cp_chunkedprefill_comm_stream, weak_ref_tensors
+
+
+@dataclass
+class AscendMetadataForPrefill:
+    """GQA prefill metadata used only by DCP."""
+
+    @dataclass
+    class ChunkedContextMetadata:
+        actual_chunk_seq_lengths: torch.Tensor
+        actual_seq_lengths_kv: torch.Tensor
+        starts: torch.Tensor
+        chunk_seq_mask_filtered_indices: torch.Tensor
+        chunked_req_mask: list[bool] | None = None
+        local_context_lens_allranks: list[list[int]] | None = None
+        local_total_toks: int | None = None
+
+    chunked_context: ChunkedContextMetadata | None = None
+    block_tables: torch.Tensor = None
+    actual_seq_lengths_q: torch.Tensor = None
+
+
+@dataclass
+class AscendMetadataForDecode:
+    """GQA decode metadata used only by DCP."""
+
+    num_computed_tokens_of_dcp: list[list[int]] | None = None
+    block_tables: torch.Tensor = None
+    dcp_mtp_attn_mask: torch.Tensor = None
 
 
 @dataclass
@@ -161,7 +187,6 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         num_tokens,
         vllm_config=None,
         speculative_config=None,
-        num_dcp_tokens=None,
         draft_attn_metadatas=None,
     ):
         if _EXTRA_CTX.is_draft_model:

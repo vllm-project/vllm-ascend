@@ -479,7 +479,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_tokens,
         vllm_config,
         speculative_config=None,
-        num_dcp_tokens=None,
         draft_attn_metadatas=None,
     ):
         use_layer_aware_replay = needs_layer_aware_fia_graph_replay()

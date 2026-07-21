@@ -36,7 +36,7 @@ backend rather than as a parallel copy of it:
 
 The normal v1 builders remain the source of truth for request classification,
 padding, masks, graph metadata, and common KV-cache metadata. DCP-specific
-metadata is kept out of the normal GQA metadata schema.
+metadata is kept out of the normal v1 metadata schemas.
 
 ### Prefill and chunked prefill
 

@@ -23,7 +23,6 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.context_parallel.common_cp import DCPChunkedContextMetadata
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     ascend_chunked_prefill_workspace_size,
@@ -141,7 +140,7 @@ class AscendMLAPrefillMetadata:
     block_table: torch.Tensor
     max_query_len: int
     max_seq_lens: int
-    chunked_context: ChunkedContextMetadata | DCPChunkedContextMetadata | None = None
+    chunked_context: ChunkedContextMetadata | None = None
     sin: torch.Tensor = None
     cos: torch.Tensor = None
     actual_seq_lengths_q: list[int] | None = None
@@ -162,8 +161,6 @@ class AscendMLADecodeMetadata:
     attn_mask: torch.Tensor | None = None
     sin: torch.Tensor = None
     cos: torch.Tensor = None
-    cp_seq_len: torch.Tensor = None
-    dcp_mtp_attn_mask: torch.Tensor = None
 
 
 @dataclass
@@ -226,6 +223,10 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
+    decode_metadata_cls: type[AscendMLADecodeMetadata] = (
+        AscendMLADecodeMetadata
+    )
 
     def __init__(
         self,
@@ -600,8 +601,6 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             self.block_table = self.block_table[: self.graph_pad_size, ...]
         seq_lens_list = self.seq_lens.tolist()
 
-        cp_seq_len = None
-
         if self.graph_pad_size > num_reqs:
             if self.speculative_config.disable_padded_drafter_batch:
                 num_reqs_pad_size = self.graph_pad_size - num_reqs
@@ -643,7 +642,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 )
 
         cos, sin = get_cos_and_sin_mla(input_positions, use_cache=True)
-        decode_metadata = AscendMLADecodeMetadata(
+        decode_metadata = self.decode_metadata_cls(
             input_positions=input_positions,
             block_table=self.block_table,
             seq_lens=self.seq_lens,
@@ -653,7 +652,6 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             actual_seq_lengths_q=actual_seq_lengths_q,
             sin=sin[: self.num_decode_tokens, ...],
             cos=cos[: self.num_decode_tokens, ...],
-            cp_seq_len=cp_seq_len,
         )
         return decode_metadata
 
@@ -766,7 +764,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         num_tokens,
         vllm_config=None,
         speculative_config=None,
-        num_dcp_tokens=None,
         draft_attn_metadatas=None,
     ):
         if _EXTRA_CTX.is_draft_model:
@@ -1114,7 +1111,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
-        chunked_context: DCPChunkedContextMetadata,
+        chunked_context: ChunkedContextMetadata,
         chunk_idx: int,
         toks: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:

@@ -1,17 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import fields
 from types import SimpleNamespace
 
 import torch
 
-from vllm_ascend.attention.context_parallel.common_cp import (
-    DCPChunkedContextMetadata,
-)
 from vllm_ascend.attention.context_parallel.mla_cp import (
+    AscendMLADCPDecodeMetadata,
     AscendMlaDCPImpl,
     AscendMlaDCPMetadataBuilder,
+    DCPChunkedContextMetadata,
 )
 from vllm_ascend.attention.mla_v1 import (
+    AscendMLADecodeMetadata,
     AscendMLAImpl,
     AscendMLAMetadata,
     AscendMLAMetadataBuilder,
@@ -25,6 +26,13 @@ def test_mla_dcp_extends_v1_backend() -> None:
         AscendMlaDCPMetadataBuilder,
         AscendMLAMetadataBuilder,
     )
+    assert AscendMlaDCPMetadataBuilder.decode_metadata_cls is (
+        AscendMLADCPDecodeMetadata
+    )
+    base_fields = {field.name for field in fields(AscendMLADecodeMetadata)}
+    dcp_fields = {field.name for field in fields(AscendMLADCPDecodeMetadata)}
+    assert {"cp_seq_len", "dcp_mtp_attn_mask"}.isdisjoint(base_fields)
+    assert {"cp_seq_len", "dcp_mtp_attn_mask"} <= dcp_fields
 
 
 def test_mla_dcp_reorg_decode_query_gathers_fused_query() -> None:

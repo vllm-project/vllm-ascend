@@ -12,9 +12,9 @@ from vllm_ascend.attention.context_parallel.attention_cp import (
     AscendAttentionDCPImpl,
     AscendAttentionDCPMetadata,
     AscendAttentionDCPMetadataBuilder,
+    AscendMetadataForDecode,
 )
 from vllm_ascend.attention.context_parallel.common_cp import (
-    AscendMetadataForDecode,
     _update_out_and_lse,
 )
 

@@ -92,7 +92,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         logger.info_once("run_fullgraph with num_tokens=%s", num_tokens)
         ret = super().run_fullgraph(desc)
 
-        positions = self.model_runner.input_buffers.positions[:num_tokens]
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
         # calculate num_tokens_across_dp.
         num_tokens_across_dp = torch.full([self.model_runner.dp_size], num_tokens)
@@ -114,7 +113,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 num_tokens,
                 self.vllm_config,
                 self.model_runner.speculative_config,
-                positions.shape[0],
             )
         return ret
 
