@@ -632,6 +632,14 @@ class NPUModelRunner(GPUModelRunner):
                 elif self.speculative_config.method == "extract_hidden_states":
                     assert isinstance(self.drafter, AscendExtractHiddenStatesProposer)
                     self.use_aux_hidden_state_outputs = True
+                elif self.speculative_config.method == "dflash":
+                    # DFlash is trained on the target model's auxiliary
+                    # (intermediate-layer) hidden states, exactly like dspark and
+                    # eagle3. This must be set here (not under the version-guarded
+                    # dspark branch in __init__) so it takes effect on every vLLM
+                    # version; otherwise the target returns its FINAL hidden state
+                    # and the draft gets wrong context features (acceptance ~0).
+                    self.use_aux_hidden_state_outputs = True
                 self.rejection_sampler = AscendRejectionSampler(self.sampler)
         self.discard_request_indices = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
         self.num_discarded_requests = 0
@@ -3884,12 +3892,28 @@ class NPUModelRunner(GPUModelRunner):
         if not (self.speculative_config and self.speculative_config.draft_model_config):
             return None
         hf_config = self.speculative_config.draft_model_config.hf_config
-        if hasattr(hf_config, 'target_layer_ids'):
-            layer_ids = [
-                i for i in (hf_config.target_layer_ids or [])
-            ]
-            if layer_ids and isinstance(layer_ids, (list, tuple)):
-                return tuple(layer_ids)
+        # dspark exposes target_layer_ids at the top level; dflash nests it under
+        # dflash_config / eagle_config. Check all of these so the target collects
+        # the exact layers the drafter's fc was trained on (a mismatch either
+        # crashes combine_hidden_states or silently degrades acceptance).
+        candidate_ids = getattr(hf_config, "target_layer_ids", None)
+        if not candidate_ids:
+            for cfg_name in ("dflash_config", "eagle_config"):
+                cfg = getattr(hf_config, cfg_name, None)
+                if isinstance(cfg, dict) and cfg.get("target_layer_ids"):
+                    candidate_ids = cfg["target_layer_ids"]
+                    break
+        if candidate_ids and isinstance(candidate_ids, (list, tuple)):
+            # DFlash target_layer_ids are 0-based layer indices, but vLLM
+            # captures auxiliary hidden states with the ``layer_idx + 1``
+            # convention in ``_maybe_add_hidden_state`` (a config value N is
+            # otherwise matched with layer_idx N-1, capturing the wrong layer).
+            # Upstream applies this +1 only for the dflash path; eagle3/dspark
+            # use their own indexing and are left as-is. Missing this offset
+            # feeds the draft hidden states from adjacent (wrong) layers, which
+            # collapses acceptance on hybrid models like Qwen3.x-A3B.
+            offset = 1 if self.speculative_config.method == "dflash" else 0
+            return tuple(int(i) + offset for i in candidate_ids)
         return super()._get_eagle3_aux_layers_from_config()
 
     def _start_dump_data(self) -> None:

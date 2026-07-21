@@ -1074,6 +1074,28 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             logits = self.model.compute_logits(hidden_states)
             return greedy_sample(logits)
 
+    def _remap_dflash_draft_to_target(
+        self, draft_token_ids: torch.Tensor, logits: torch.Tensor
+    ) -> torch.Tensor:
+        """Map reduced draft-vocab ids to target-vocab ids for DFlash drafters.
+
+        DFlash draft heads emit logits over a reduced draft vocabulary; the
+        trained rows map back to the target vocab via the d2t buffer
+        (``target_id = draft_id + d2t[draft_id]``). The ``compute_draft_token_ids``
+        reduce-sampling path applies this bias, but the plain ``argmax`` paths do
+        not. Without the remap the verifier compares draft-local ids against
+        target-vocab ids and rejects almost every speculative token
+        (acceptance ~0). Only remap when ``logits`` are over the reduced draft
+        vocab (width == d2t length); if ``compute_logits`` already returned full
+        target-vocab logits the argmax is a target id and this is a no-op.
+        """
+        d2t = getattr(self.model, "draft_id_to_target_id", None)
+        applied = self.method == "dflash" and d2t is not None and logits.shape[-1] == d2t.shape[0]
+        if not applied:
+            return draft_token_ids
+        bias = torch.index_select(d2t, dim=0, index=draft_token_ids.view(-1)).view(draft_token_ids.shape)
+        return draft_token_ids + bias
+
     def _run_merged_draft(
         self,
         num_input_tokens,
@@ -1215,7 +1237,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         ori_token_indices_to_sample,
                         is_logits=True,
                     )
-                draft_token_ids = logits.argmax(dim=-1)
+                draft_token_ids = self._remap_dflash_draft_to_target(logits.argmax(dim=-1), logits)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
@@ -1365,7 +1387,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if lmhead_tp_enable() and num_indices < logits.shape[0]:
                     logits = logits[:num_indices]
                     token_indices_to_sample = token_indices_to_sample[:num_indices]
-                draft_token_ids = logits.argmax(dim=-1)
+                draft_token_ids = self._remap_dflash_draft_to_target(logits.argmax(dim=-1), logits)
 
             # TODO(wenlong): get more than one token for tree attention
             hidden_states = hidden_states[:batch_size]
