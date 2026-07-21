@@ -24,7 +24,13 @@ The following model variants are available. It is recommended to download the mo
 | -------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
 | Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)          |
 | Qwen3-30B-A3B-W8A8   | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards)                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
-| Eagle3 Draft Model   | NA                                                                                               | [Download](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3)            |
+| Eagle3 Draft Model   | NA                                                                                               | [Download](https://modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
+
+**Quantized Versions for Atlas inference products:**
+
+| Model | Quantization | Hardware Requirement | Download |
+|-------|-------------|---------------------|----------|
+| Qwen3-30B-A3B-w8a8-QuaRot-310  |W8A8 | Atlas inference products (TP2)                                                                                               | [Download](https://modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
 
 **Quantized Versions for Atlas inference products:**
 
@@ -262,7 +268,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --host 127.0.0.1 \
         --port 8000 \
         --tensor-parallel-size 2 \
-        --max-num-seqs 16 \
+        --max-num-seqs 32 \
         --served_model_name qwen3 \
         --dtype float16 \
         --quantization ascend \
