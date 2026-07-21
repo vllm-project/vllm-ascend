@@ -31,7 +31,6 @@ Conventions for UT directories:
 """
 
 import importlib.util
-import os
 import subprocess
 import sys
 import types
@@ -129,19 +128,6 @@ _stale_modules = [
 ]
 for _m in _stale_modules:
     del sys.modules[_m]
-
-
-def pytest_addoption(parser: pytest.Parser) -> None:
-    parser.addoption(
-        "--msa-m3-sparse-backend",
-        action="store",
-        default=os.environ.get("MINIMAX_M3_SPARSE_BACKEND", "triton"),
-        choices=("triton", "torch_npu"),
-        help=(
-            "MiniMax M3 sparse-attention kernel backend for "
-            "test_minimax_m3_sparse_attn.py: triton reference or msa_m3_npu (torch_npu)."
-        ),
-    )
 
 
 @pytest.fixture(autouse=True)

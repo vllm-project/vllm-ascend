@@ -296,10 +296,10 @@
     - vllm_ascend/models/ops/msa_m3_npu.py
     - vllm_ascend/models/ops/msa_m3_triton.py
   tests:
-    - tests/ut/models/test_minimax_m3.py
-    - tests/ut/models/test_minimax_m3_sparse_attn.py
-    - tests/ut/models/test_minimax_m3_vit.py
-    - tests/ut/models/test_msa_m3.py
+    - tests/ut/models/minimax_m3/test_minimax_m3.py
+    - tests/e2e/pull_request/one_card/test_minimax_m3_sparse_attn.py
+    - tests/ut/models/minimax_m3/test_minimax_m3_vit.py
+    - tests/ut/models/minimax_m3/test_msa_m3.py
 
 # Ops
 - name: ops_basic
