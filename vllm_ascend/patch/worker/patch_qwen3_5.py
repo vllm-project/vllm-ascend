@@ -18,7 +18,6 @@
 
 
 import torch
-from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
 from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
@@ -31,9 +30,8 @@ except ImportError:
     IntermediateTensors = None
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
-from vllm_ascend.utils import is_310p, vllm_version_is
+from vllm_ascend.utils import is_310p
 
 _GDN_PATCH_TARGET = _GDNBaseCls
 
@@ -84,11 +82,10 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
             gate = torch.sigmoid(gate)
             attn_output = attn_output * gate
 
-        if vllm_version_is("0.24.0"):
-            output[:], _ = self.o_proj(attn_output)
-        else:
-            out, _ = self.o_proj(attn_output)
-            return out
+        out, _ = self.o_proj(attn_output)
+        if output is not None:
+            output[:] = out
+        return out
 
 
 class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
@@ -105,41 +102,15 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        if vllm_version_is("0.24.0"):
-            if self.layer_idx == 0 and _EXTRA_CTX.flash_comm_v1_enabled:
-                tp_size = get_tensor_model_parallel_world_size()
-                n_out = (hidden_states.shape[0] + tp_size - 1) // tp_size
-                hidden_dim = hidden_states.shape[-1]
-                self_attention_output = torch.empty(
-                    (n_out, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device
-                )
-            else:
-                self_attention_output = torch.empty_like(hidden_states)
-
-            if self.layer_type == "linear_attention":
-                self.linear_attn(
-                    hidden_states=hidden_states,
-                    output=self_attention_output,
-                )
-            elif self.layer_type == "full_attention":
-                self.self_attn(
-                    hidden_states=hidden_states,
-                    output=self_attention_output,
-                    positions=positions,
-                )
-            else:
-                raise ValueError("Invalid layer_type")
-            hidden_states = self_attention_output
+        if self.layer_type == "linear_attention":
+            hidden_states = self.linear_attn(hidden_states=hidden_states)
+        elif self.layer_type == "full_attention":
+            hidden_states = self.self_attn(
+                hidden_states=hidden_states,
+                positions=positions,
+            )
         else:
-            if self.layer_type == "linear_attention":
-                hidden_states = self.linear_attn(hidden_states=hidden_states)
-            elif self.layer_type == "full_attention":
-                hidden_states = self.self_attn(
-                    hidden_states=hidden_states,
-                    positions=positions,
-                )
-            else:
-                raise ValueError("Invalid layer_type")
+            raise ValueError("Invalid layer_type")
 
         if self.layer_scale:
             if len(hidden_states.shape) == 2:

@@ -49,6 +49,8 @@ spec:
                 value: "{{ aop_multi_enabled }}"
               - name: GOOD_TABLE
                 value: "{{ good_table | default("/root/.cache/vllm-ascend/nightly/good_table.csv") }}"
+              - name: HCCL_INTER_HCCS_DISABLE
+                value: "TRUE"
               - name: HCCL_IF_BASE_PORT
                 value: "55000"
             command:
@@ -121,6 +123,8 @@ spec:
                 value: "{{ aop_multi_enabled }}"
               - name: GOOD_TABLE
                 value: "{{ good_table | default("/root/.cache/vllm-ascend/nightly/good_table.csv") }}"
+              - name: HCCL_INTER_HCCS_DISABLE
+                value: "TRUE"
               - name: HCCL_IF_BASE_PORT
                 value: "55000"
             command:
