@@ -32,11 +32,6 @@ from vllm import SamplingParams
 
 from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("ENABLE_COVERAGE") == "true",
-    reason="Temporarily skipped in coverage runs",
-)
-
 DEEPSEEK_V2_LITE = "vllm-ascend/DeepSeek-V2-Lite-W8A8"
 DEEPSEEK_MTP = "wemaster/deepseek_mtp_main_random_bf16"
 MAX_NUM_SEQS = 4

@@ -30,11 +30,6 @@ from tests.e2e.conftest import DPVllmRunner, wait_until_npu_memory_free
 
 MODELS = ["vllm-ascend/DeepSeek-V2-Lite-W8A8"]
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("ENABLE_COVERAGE") == "true",
-    reason="Temporarily skipped in coverage runs",
-)
-
 
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.7)
