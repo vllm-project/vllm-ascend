@@ -118,27 +118,30 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
-export VLLM_ASCEND_ENABLE_MLAPO=1
-export VLLM_VERSION=0.21.0
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --host 0.0.0.0 \
 --port 8077 \
+--api-server-count 1 \
 --data-parallel-size 2 \
---tensor-parallel-size 8 \
 --enable-expert-parallel \
+--tensor-parallel-size 8 \
 --seed 1024 \
 --served-model-name glm-52 \
---max-num-seqs 48 \
---max-model-len 20480 \
---max-num-batched-tokens 4096 \
+--tool-call-parser glm47 \
+--reasoning-parser glm45 \
+--enable-auto-tool-choice \
+--max-num-seqs 12 \
+--max-model-len 135000 \
+--max-num-batched-tokens 8192 \
 --trust-remote-code \
---gpu-memory-utilization 0.95 \
+--gpu-memory-utilization 0.92 \
 --quantization ascend \
---async-scheduling \
---additional-config '{"multistream_overlap_shared_expert":true}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
+--additional-config '{"enable_dsa_cp": true,"enable_sparse_c8": true,"enable_balance_scheduling": true}' \
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 
 ```
 
@@ -146,6 +149,11 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 The parameters are explained as follows:
 
 - For single-node deployment, we recommend using `dp1tp16` and turn off expert parallel in low-latency scenarios.
+- If the video memory is sufficient, there is no need to enable sfac8.
+- For short sequences, DCP does not need to be enabled;For long sequences, DCP needs to be enabled.
+- There are two cases:
+    1. If the GPU memory is insufficient for the sequence length, enable the DCP configuration. However, enabling the DCP configuration will affect the TPOT performance.
+    2. If the GPU memory is sufficient, you are advised not to enable the DCP configuration.
 
 ### Multi-node Deployment
 
@@ -168,9 +176,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xxxx"
 
-    export VLLM_VERSION=0.21.0
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export VLLM_ASCEND_BALANCE_SCHEDULING=0
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
@@ -179,31 +185,33 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     export OMP_NUM_THREADS=1
     export HCCL_BUFFSIZE=400
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ASCEND_ENABLE_MLAPO=1
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-    export ASCEND_LAUNCH_BLOCKING=0
+    export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
     --host 0.0.0.0 \
     --port 8077 \
-    --data-parallel-size 2 \
-    --data-parallel-size-local 1 \
+    --api-server-count 1 \
+    --data-parallel-size 8 \
+    --data-parallel-size-local 4 \
     --data-parallel-address $node0_ip \
+    --enable-expert-parallel \
     --data-parallel-rpc-port 12980 \
-    --tensor-parallel-size 16 \
+    --tensor-parallel-size 4 \
     --seed 1024 \
     --served-model-name glm-52 \
-    --max-num-seqs 48 \
-    --max-model-len 64000 \
-    --max-num-batched-tokens 4096 \
+    --tool-call-parser glm47 \
+    --reasoning-parser glm45 \
+    --enable-auto-tool-choice \
+    --max-num-seqs 8 \
+    --max-model-len 135000 \
+    --max-num-batched-tokens 8192 \
     --trust-remote-code \
-    --gpu-memory-utilization 0.93 \
+    --gpu-memory-utilization 0.92 \
     --quantization ascend \
-    --enable-prefix-caching \
-    --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"multistream_overlap_shared_expert":true}' \
-    --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
+    --additional-config '{"enable_dsa_cp": true,"enable_sparse_c8": true,"enable_balance_scheduling": true}' \
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
 
     **node 1**
@@ -217,9 +225,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xxxx"
 
-    export VLLM_VERSION=0.21.0
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export VLLM_ASCEND_BALANCE_SCHEDULING=0
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
@@ -228,33 +234,34 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     export OMP_NUM_THREADS=1
     export HCCL_BUFFSIZE=400
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ASCEND_ENABLE_MLAPO=1
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-    export ASCEND_LAUNCH_BLOCKING=0
+    export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
     --host 0.0.0.0 \
     --port 8077 \
     --headless \
-    --data-parallel-size 2 \
-    --data-parallel-size-local 1 \
-    --data-parallel-start-rank 1 \
-    --data-parallel-rpc-port 12980 \
+    --data-parallel-size 8 \
+    --data-parallel-size-local 4 \
+    --data-parallel-start-rank 4 \
     --data-parallel-address $node0_ip \
-    --tensor-parallel-size 16 \
+    --enable-expert-parallel \
+    --data-parallel-rpc-port 12980 \
+    --tensor-parallel-size 4 \
     --seed 1024 \
     --served-model-name glm-52 \
-    --max-num-seqs 48 \
-    --max-model-len 64000 \
-    --max-num-batched-tokens 4096 \
+    --tool-call-parser glm47 \
+    --reasoning-parser glm45 \
+    --enable-auto-tool-choice \
+    --max-num-seqs 8 \
+    --max-model-len 135000 \
+    --max-num-batched-tokens 8192 \
     --trust-remote-code \
-    --gpu-memory-utilization 0.93 \
+    --gpu-memory-utilization 0.92 \
     --quantization ascend \
-    --enable-prefix-caching \
-    --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"multistream_overlap_shared_expert":true}' \
-    --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
+    --additional-config '{"enable_dsa_cp": true,"enable_sparse_c8": true,"enable_balance_scheduling": true}' \
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
 
 === "A2 series"
@@ -406,8 +413,8 @@ export ACL_OP_INIT_MODE=1
 export TASK_QUEUE_ENABLE=1
 export CPU_AFFINITY_CONF=1
 export VLLM_ENGINE_READY_TIMEOUT_S=1200
+export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-export VLLM_VERSION=0.21.0
 
 vllm serve <MODEL_PATH> \
   --max_model_len 200000 \
@@ -464,8 +471,8 @@ export ACL_OP_INIT_MODE=1
 export TASK_QUEUE_ENABLE=1
 export CPU_AFFINITY_CONF=1
 export VLLM_ENGINE_READY_TIMEOUT_S=1200
+export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-export VLLM_VERSION=0.21.0
 
 vllm serve <MODEL_PATH> \
   --max_model_len 200000 \
@@ -612,28 +619,29 @@ Before you start, please
     1. Prefill node 0
 
         ```shell
-        nic_name="xxxx" # change to your own nic name
-        local_ip="xxxx" # change to your own ip
-
-        export VLLM_VERSION=0.21.0
+        local_ip=`hostname -I | awk '{print $1}'`
+        nic_name=$(ifconfig -a | grep -B1 $local_ip | grep -v 'inet' | sed 's/://g' | awk '{print $1}')
+        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export HCCL_OP_EXPANSION_MODE="AIV"
+
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
+
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=400
-        export ASCEND_AGGREGATE_ENABLE=1
-        export ASCEND_TRANSPORT_PRINT=1
+
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
+
         export ASCEND_RT_VISIBLE_DEVICES=$1
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+
+        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
             --host 0.0.0.0 \
@@ -644,17 +652,16 @@ Before you start, please
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
+            --speculative-config '{"num_speculative_tokens":1, "method":"deepseek_mtp","enforce_eager":true}' \
             --seed 1024 \
             --served-model-name glm-52 \
-            --max-model-len 135000 \
-            --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp", "enforce_eager": true}' \
-            --additional-config '{"enable_sparse_c8":false, "enable_dsa_cp": true}' \
-            --max-num-batched-tokens 4096 \
+            --max-model-len 133120 \
+            --additional-config '{"recompute_scheduler_enable" : false, "enable_dsa_cp":true,"enable_sparse_c8": true,"c8_enable_reshape_optim":True}' \
+            --max-num-batched-tokens 8192 \
             --trust-remote-code \
             --max-num-seqs 64 \
-            --async-scheduling \
             --quantization ascend \
-            --gpu-memory-utilization 0.95 \
+            --gpu-memory-utilization 0.92 \
             --enforce-eager \
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
@@ -667,12 +674,12 @@ Before you start, please
             "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {
-                                "dp_size": 2,
-                                "tp_size": 16
+                                "dp_size": 8,
+                                "tp_size":4
                         },
                         "decode": {
-                                "dp_size": 8,
-                                "tp_size": 4
+                                "dp_size": 16,
+                                "tp_size": 2
                         }
                 }
             }'
@@ -682,29 +689,30 @@ Before you start, please
     2. Prefill node 1
 
         ```shell
-        nic_name="xxxx" # change to your own nic name
-        local_ip="xxxx" # change to your own ip
-
-        export VLLM_VERSION=0.21.0
+        local_ip=`hostname -I | awk '{print $1}'`
+        nic_name=$(ifconfig -a | grep -B1 $local_ip | grep -v 'inet' | sed 's/://g' | awk '{print $1}')
+        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export HCCL_OP_EXPANSION_MODE="AIV"
+
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
+
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=400
-        export ASCEND_AGGREGATE_ENABLE=1
-        export ASCEND_TRANSPORT_PRINT=1
+
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
+
         export ASCEND_RT_VISIBLE_DEVICES=$1
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-        
+
+        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+
+
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
@@ -714,17 +722,16 @@ Before you start, please
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
+            --speculative-config '{"num_speculative_tokens":1, "method":"deepseek_mtp","enforce_eager":true}' \
             --seed 1024 \
             --served-model-name glm-52 \
-            --max-model-len 135000 \
-            --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp", "enforce_eager": true}' \
-            --additional-config '{"enable_sparse_c8":false, "enable_dsa_cp": true}' \
-            --max-num-batched-tokens 4096 \
+            --max-model-len 133120 \
+            --additional-config '{"recompute_scheduler_enable" : false,"enable_dsa_cp":true,"enable_sparse_c8": true,"c8_enable_reshape_optim":True}' \
+            --max-num-batched-tokens 8192 \
             --trust-remote-code \
             --max-num-seqs 64 \
-            --async-scheduling \
             --quantization ascend \
-            --gpu-memory-utilization 0.95 \
+            --gpu-memory-utilization 0.92 \
             --enforce-eager \
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
@@ -737,12 +744,12 @@ Before you start, please
             "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {
-                                "dp_size": 2,
-                                "tp_size": 16
+                                "dp_size": 8,
+                                "tp_size":4
                         },
                         "decode": {
-                                "dp_size": 8,
-                                "tp_size": 4
+                                "dp_size": 16,
+                                "tp_size": 2
                         }
                 }
             }'
@@ -751,30 +758,28 @@ Before you start, please
     3. Decode node 0
 
         ```shell
-        nic_name="xxxx" # change to your own nic name
-        local_ip="xxxx" # change to your own ip
+        local_ip=`hostname -I | awk '{print $1}'`
+        nic_name=$(ifconfig -a | grep -B1 $local_ip | grep -v 'inet' | sed 's/://g' | awk '{print $1}')
 
         export HCCL_OP_EXPANSION_MODE="AIV"
+
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
+
+        #Mooncake
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
+
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export HCCL_BUFFSIZE=500
-        export ASCEND_AGGREGATE_ENABLE=1
-        export ASCEND_TRANSPORT_PRINT=1
+        export HCCL_BUFFSIZE=256
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        export VLLM_VERSION=0.21.0
         export TASK_QUEUE_ENABLE=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
-        export DYNAMIC_EPLB=1
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-        export VLLM_ASCEND_ENABLE_MLAPO=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-
+        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
@@ -786,13 +791,13 @@ Before you start, please
             --enable-expert-parallel \
             --seed 1024 \
             --served-model-name glm-52 \
-            --max-model-len 135000 \
+            --max-model-len 133120 \
             --max-num-batched-tokens 164 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-            --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp", "enforce_eager": true}' \
-            --additional-config '{"enable_sparse_c8":false, "recompute_scheduler_enable": true}' \
+            --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
+            --additional-config '{"recompute_scheduler_enable":true,"enable_sparse_c8": true}' \
             --trust-remote-code \
-            --max-num-seqs 48 \
+            --max-num-seqs 32 \
             --gpu-memory-utilization 0.92 \
             --async-scheduling \
             --quantization ascend \
@@ -802,17 +807,17 @@ Before you start, please
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
-            "kv_port": "30100",
-            "engine_id": "1",
+            "kv_port": "30200",
+            "engine_id": "2",
             "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {
-                                "dp_size": 2,
-                                "tp_size": 16
+                                "dp_size":8,
+                                "tp_size": 4
                         },
                         "decode": {
-                                "dp_size": 8,
-                                "tp_size": 4
+                                "dp_size": 16,
+                                "tp_size": 2
                         }
                 }
             }'
@@ -821,30 +826,28 @@ Before you start, please
     4. Decode node 1
 
         ```shell
-        nic_name="xxxx" # change to your own nic name
-        local_ip="xxxx" # change to your own ip
-            
+        local_ip=`hostname -I | awk '{print $1}'`
+        nic_name=$(ifconfig -a | grep -B1 $local_ip | grep -v 'inet' | sed 's/://g' | awk '{print $1}')
+
         export HCCL_OP_EXPANSION_MODE="AIV"
+
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
+
+        #Mooncake
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
+
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export HCCL_BUFFSIZE=500
-        export ASCEND_AGGREGATE_ENABLE=1
-        export ASCEND_TRANSPORT_PRINT=1
+        export HCCL_BUFFSIZE=256
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
         export TASK_QUEUE_ENABLE=1
-        export VLLM_VERSION=0.21.0
         export ASCEND_RT_VISIBLE_DEVICES=$1
-        export DYNAMIC_EPLB=1
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-        export VLLM_ASCEND_ENABLE_MLAPO=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-
+        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
@@ -856,13 +859,13 @@ Before you start, please
             --enable-expert-parallel \
             --seed 1024 \
             --served-model-name glm-52 \
-            --max-model-len 135000 \
+            --max-model-len 133120 \
             --max-num-batched-tokens 164 \
-            --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp", "enforce_eager": true}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-            --additional-config '{"enable_sparse_c8":false,"recompute_scheduler_enable": true}' \
+            --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
+            --additional-config '{"recompute_scheduler_enable":true,"enable_sparse_c8": true}' \
             --trust-remote-code \
-            --max-num-seqs 48 \
+            --max-num-seqs 32 \
             --gpu-memory-utilization 0.92 \
             --async-scheduling \
             --quantization ascend \
@@ -872,51 +875,58 @@ Before you start, please
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
-            "kv_port": "30100",
-            "engine_id": "1",
+            "kv_port": "30200",
+            "engine_id": "2",
             "kv_connector_extra_config": {
-                         "use_ascend_direct": true,
-                         "prefill": {
-                                 "dp_size": 2,
-                                 "tp_size": 16
-                         },
-                         "decode": {
-                                 "dp_size": 8,
-                                 "tp_size": 4
-                         }
-                 }
-             }'
+                        "use_ascend_direct": true,
+                        "prefill": {
+                                "dp_size":8,
+                                "tp_size": 4
+                        },
+                        "decode": {
+                                "dp_size": 16,
+                                "tp_size": 2
+                        }
+                }
+            }'
         ```
-
-Once the preparation is done, you can start the server with the following command on each node:
 
 1. Prefill node 0
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 2 --tp-size 16  --dp-size-local 1 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 16591 --vllm-start-port 9081
+    python launch_online_dp.py --dp-size 8 --tp-size 4  --dp-size-local 4 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 16591 --vllm-start-port 9081
     ```
 
 2. Prefill node 1
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 2 --tp-size 16  --dp-size-local 1 --dp-rank-start 1 --dp-address $node_p0_ip --dp-rpc-port 16591 --vllm-start-port 9081
+    python launch_online_dp.py --dp-size 8 --tp-size 4  --dp-size-local 4 --dp-rank-start 4 --dp-address $node_p0_ip --dp-rpc-port 16591 --vllm-start-port 9081
     ```
 
 3. Decode node 0
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address $node_d0_ip --dp-rpc-port 16600 --vllm-start-port 9900
+    python launch_online_dp.py --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 0 --dp-address $node_d0_ip --dp-rpc-port 16600 --vllm-start-port 9900
     ```
 
 4. Decode node 1
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_d0_ip --dp-rpc-port 16600 --vllm-start-port 9900
+    python launch_online_dp.py --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 8 --dp-address $node_d0_ip --dp-rpc-port 16600 --vllm-start-port 9900
     ```
+
+**Notice:**
+The parameters are explained as follows:
+
+- Like a single node,For short sequences, DCP does not need to be enabled; For long sequences, DCP needs to be enabled.
+- If the video memory is sufficient, there is no need to enable sfac8.
+- There are two cases:
+    1. If the GPU memory is insufficient for the sequence length, enable the DCP configuration. However, enabling the DCP configuration will affect the TPOT performance.
+    2. If the GPU memory is sufficient, you are advised not to enable the DCP configuration.
 
 To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
