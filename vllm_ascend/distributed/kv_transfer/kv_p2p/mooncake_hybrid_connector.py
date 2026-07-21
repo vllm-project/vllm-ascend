@@ -631,16 +631,6 @@ class KVCacheRecvingThread(threading.Thread):
                         logger.debug("Starting async KV cache transfer for request %s.", remote_request_id)
                         batch_id = self._transfer_kv_cache_async(req_meta)
                         if batch_id is not None:
-                            with self._pending_async_lock:
-                                self._pending_async_req_meta[batch_id] = req_meta
-                                self._pending_batch_to_signal[batch_id] = {
-                                    "remote_request_id": remote_request_id,
-                                    "remote_host": remote_host,
-                                    "remote_handshake_port": remote_handshake_port,
-                                    "remote_port_send_num": remote_port_send_num,
-                                    "all_task_done": all_task_done,
-                                    "request_id": request_id,
-                                }
                             is_async_path = True
                             return
                     else:
@@ -656,16 +646,6 @@ class KVCacheRecvingThread(threading.Thread):
                         logger.debug("Starting async KV cache transfer for request %s.", remote_request_id)
                         batch_id = self._transfer_kv_cache_all_groups_async(req_meta)
                         if batch_id is not None:
-                            with self._pending_async_lock:
-                                self._pending_async_req_meta[batch_id] = req_meta
-                                self._pending_batch_to_signal[batch_id] = {
-                                    "remote_request_id": remote_request_id,
-                                    "remote_host": remote_host,
-                                    "remote_handshake_port": remote_handshake_port,
-                                    "remote_port_send_num": remote_port_send_num,
-                                    "all_task_done": all_task_done,
-                                    "request_id": request_id,
-                                }
                             is_async_path = True
                             return
                     else:
@@ -695,8 +675,8 @@ class KVCacheRecvingThread(threading.Thread):
             has_blocks = any(len(group_block_ids) > 0 for group_block_ids in req_meta["local_block_ids"])
             if has_blocks:
                 self.task_tracker.update_done_task_count(request_id)
-            if request_id in self.proc_not_transfer_request:
-                del self.proc_not_transfer_request[request_id]
+            with self.proc_not_transfer_request_lock:
+                self.proc_not_transfer_request.pop(remote_request_id, None)
         self.request_queue.task_done()
         # Always send the done signal to the remote host to ensure proper
         # resource cleanup. Failing to do so may cause a memory leak on the
@@ -795,6 +775,10 @@ class KVCacheRecvingThread(threading.Thread):
                          remote_request_id, batch_id)
             raise RuntimeError(f"Mooncake async transfer failed, batch_id: {batch_id}")
 
+        # Extract additional fields needed for cleanup
+        all_task_done = req_meta.get("all_task_done", False)
+        remote_port_send_num = req_meta.get("remote_port_send_num", {})
+
         with self._pending_async_lock:
             self._pending_async_transfers[batch_id] = (
                 req_meta["request_id"],
@@ -802,6 +786,16 @@ class KVCacheRecvingThread(threading.Thread):
                 f"transfer_{remote_request_id}",
                 req_start_time,
             )
+            # Store req_meta for post-transfer reformat
+            self._pending_async_req_meta[batch_id] = req_meta
+            self._pending_batch_to_signal[batch_id] = {
+                "remote_request_id": remote_request_id,
+                "remote_host": remote_host,
+                "remote_handshake_port": remote_handshake_port,
+                "remote_port_send_num": remote_port_send_num,
+                "all_task_done": all_task_done,
+                "request_id": req_meta["request_id"],
+            }
 
         logger.info(
             "KV cache async transfer submitted for request %s, batch_id=%s (%d groups, %d blocks). "
@@ -877,6 +871,10 @@ class KVCacheRecvingThread(threading.Thread):
                          remote_request_id, batch_id)
             raise RuntimeError(f"Mooncake async transfer failed, batch_id: {batch_id}")
 
+        # Extract additional fields needed for cleanup
+        all_task_done = req_meta.get("all_task_done", False)
+        remote_port_send_num = req_meta.get("remote_port_send_num", {})
+
         with self._pending_async_lock:
             self._pending_async_transfers[batch_id] = (
                 req_meta["request_id"],
@@ -884,6 +882,16 @@ class KVCacheRecvingThread(threading.Thread):
                 f"transfer_all_groups_{remote_request_id}",
                 req_start_time,
             )
+            # Store req_meta for post-transfer reformat
+            self._pending_async_req_meta[batch_id] = req_meta
+            self._pending_batch_to_signal[batch_id] = {
+                "remote_request_id": remote_request_id,
+                "remote_host": remote_host,
+                "remote_handshake_port": remote_handshake_port,
+                "remote_port_send_num": remote_port_send_num,
+                "all_task_done": all_task_done,
+                "request_id": req_meta["request_id"],
+            }
 
         logger.info(
             "KV cache async transfer submitted for request %s, batch_id=%s. "
@@ -943,19 +951,29 @@ class KVCacheRecvingThread(threading.Thread):
                 return []
 
         completed = []
+        failed = []
         for batch_id in batch_ids:
             try:
                 result = self.engine.get_batch_transfer_status([batch_id])
                 if result == 0:
                     completed.append(batch_id)
+                elif result < 0:
+                    # Transfer failed (negative result)
+                    failed.append(batch_id)
+                    logger.error("Async transfer failed for batch %s, result=%d", batch_id, result)
             except Exception as e:
                 logger.error("Error polling async transfer status for batch %s: %s", batch_id, e)
-                with self._pending_async_lock:
-                    if batch_id in self._pending_async_transfers:
-                        req_id, remote_req_id, group_name, req_start_time = self._pending_async_transfers.pop(
-                            batch_id
-                        )
-                        logger.warning("Marked async transfer request %s as failed due to poll error", remote_req_id)
+                failed.append(batch_id)
+
+        # Handle failed transfers: pop from pending and call _complete_async_transfer with failed=True
+        for batch_id in failed:
+            with self._pending_async_lock:
+                if batch_id in self._pending_async_transfers:
+                    req_id, remote_req_id, group_name, req_start_time = self._pending_async_transfers.pop(
+                        batch_id
+                    )
+                    logger.warning("Marked async transfer request %s as failed due to poll error", remote_req_id)
+            self._complete_async_transfer(batch_id, failed=True)
 
         if not completed:
             return []
@@ -977,8 +995,13 @@ class KVCacheRecvingThread(threading.Thread):
 
         return completed
 
-    def _complete_async_transfer(self, batch_id: int):
-        """Process a completed async transfer: reformat KV cache and cleanup."""
+    def _complete_async_transfer(self, batch_id: int, failed: bool = False):
+        """Process a completed async transfer: reformat KV cache and cleanup.
+
+        Args:
+            batch_id: The batch ID of the completed transfer.
+            failed: Whether the transfer failed.
+        """
         with self._pending_async_lock:
             if batch_id not in self._pending_async_req_meta:
                 logger.warning("No req_meta found for completed batch %s", batch_id)
@@ -988,10 +1011,14 @@ class KVCacheRecvingThread(threading.Thread):
 
         request_id = req_meta["request_id"]
 
-        try:
-            self._reformat_kv_cache_after_transfer(req_meta)
-        except Exception as e:
-            logger.exception("Failed to reformat KV cache after transfer for request %s: %s", request_id, e)
+        if failed:
+            # Mark request as failed - skip reformatting
+            logger.error("Async KV cache transfer failed for request %s", request_id)
+        else:
+            try:
+                self._reformat_kv_cache_after_transfer(req_meta)
+            except Exception as e:
+                logger.exception("Failed to reformat KV cache after transfer for request %s: %s", request_id, e)
 
         self._cleanup_after_transfer(
             remote_request_id=signal_info.get("remote_request_id", ""),

@@ -644,22 +644,34 @@ class KVCacheSendingLayerThread(threading.Thread):
                 return
 
         completed = []
+        failed = []
         for batch_id in batch_ids:
             try:
                 result = self.engine.get_batch_transfer_status([batch_id])
                 if result == 0:
                     completed.append(batch_id)
+                elif result < 0:
+                    # Transfer failed (negative result)
+                    failed.append(batch_id)
+                    logger.error("Async write transfer failed for batch %s, result=%d", batch_id, result)
             except Exception as e:
                 logger.error("Error polling async write transfer status for batch %s: %s", batch_id, e)
-                with self._pending_async_lock:
-                    if batch_id in self._pending_async_transfers:
-                        info = self._pending_async_transfers.pop(batch_id)
-                        logger.warning("Marked async write batch_id %s as failed due to poll error", batch_id)
-                        if info["layer_idx"] == (self.total_layers - 1):
-                            for req_id in info["req_ids"]:
-                                req_meta = info["send_request"][req_id]
-                                if req_meta.chunk_finish:
-                                    self.callback_func(req_id, req_meta, info["layer_group_idx"], trans_flag=False)
+                failed.append(batch_id)
+
+        # Handle failed transfers
+        for batch_id in failed:
+            with self._pending_async_lock:
+                if batch_id in self._pending_async_transfers:
+                    info = self._pending_async_transfers.pop(batch_id)
+                    logger.warning("Marked async write batch_id %s as failed", batch_id)
+                    # Add failed req_ids to self.failed_reqs
+                    for req_id in info["req_ids"]:
+                        self.failed_reqs.add(req_id)
+                    if info["layer_idx"] == (self.total_layers - 1):
+                        for req_id in info["req_ids"]:
+                            req_meta = info["send_request"][req_id]
+                            if req_meta.chunk_finish:
+                                self.callback_func(req_id, req_meta, info["layer_group_idx"], trans_flag=False)
 
         if not completed:
             return
