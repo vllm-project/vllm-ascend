@@ -22,13 +22,13 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 - `Qwen3.5-27B` (BF16 version): requires 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node or Atlas inference products. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3.5-27B)
 - `Qwen3.5-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node or Atlas inference products. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-27B-w8a8-mtp)
-- `Qwen3.5-27B-w8a8-MXFP8` (Quantized version): requires 1 Ascend950DT series (96G × 8) node. [Download model weight]() #TODO
+- `Qwen3.5-27B-w8a8-MXFP8` (Quantized version): requires 1 Ascend950DT series (96G × 8) node. [Download model weight] #TODO
 
 **Qwen3.6-27B**
 
 - `Qwen3.6-27B` (BF16 version): requires 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node or Atlas inference products. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3.6-27B)
 - `Qwen3.6-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node or Atlas inference products. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8)
-- `Qwen3.6-27B-w8a8-MXFP8` (Quantized version): requires 1 Ascend950DT series (96G × 8) node. [Download model weight]() #TODO
+- `Qwen3.6-27B-w8a8-MXFP8` (Quantized version): requires 1 Ascend950DT series (96G × 8) node. [Download model weight] #TODO
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -540,6 +540,7 @@ PD (Prefill-Decode) separation addresses these issues by running Prefill and Dec
 - **Decode nodes** focus on low-latency token generation, optimized for memory bandwidth (e.g., enabling async-scheduling and full-decode aclgraph).
 
 === "Atlas 800 A3"
+
     For `Qwen3.5-27B-w8a8` and `Qwen3.6-27B-w8a8`, a typical **1P1D** configuration requires **2 Atlas 800 A3 (64G × 16) nodes** (1 Prefill node + 1 Decode node), with **TP=2** and **DP=8** on each node, which fully utilizes all 16 NPUs of an Atlas A3. The example below uses `Qwen3.5-27B-w8a8`; for `Qwen3.6-27B-w8a8`, replace the model path with `Eco-Tech/Qwen3.6-27B-w8a8` and adjust `--served-model-name` to `qwen3.6` (and `--max-model-len` to 262144 if needed).
 
     > **Why TP=2 + DP=8 (DP-first strategy)?** The `Qwen3.5-27B-w8a8` (and `Qwen3.6-27B-w8a8`) model is only ~30 GB, which easily fits in a single NPU (each NPU has 64 GB HBM). **TP > 1 is mainly needed for models that do not fit in one NPU.** For a 27 B model, `TP=2` is sufficient to balance operator-dispatch overhead across NPUs, while **maximizing DP** keeps all 16 NPUs of an Atlas A3 busy with independent request batches, fully utilizing the hardware. This **DP-first parallelism strategy** is the standard practice for small dense models (e.g., Qwen3.5-27B, Qwen3.6-27B, Llama-3-8B) and has been validated by the [Qwen3.5-27B B200 benchmark](https://thenextgentechinsider.com/pulse/qwen-35-27b-delivers-11m-tokenssecond-on-nvidia-b200-cluster), where switching from TP=8 to DP=8 lifted per-node throughput from 9.5k to 95k tokens/s.
@@ -746,6 +747,7 @@ PD (Prefill-Decode) separation addresses these issues by running Prefill and Dec
         ```
 
 === "Ascend950DT series"
+
     For `Qwen3.5-27B-w8a8` and `Qwen3.6-27B-w8a8`, a typical **1P1D** configuration requires **2 Ascend950DT series (96G × 8) nodes** (1 Prefill node + 1 Decode node), with **TP=1** and **DP=8** on each node, which fully utilizes all 8 NPUs of an Ascend950DT series. The example below uses `Qwen3.5-27B-w8a8`; for `Qwen3.6-27B-w8a8`, replace the model path with `Eco-Tech/Qwen3.6-27B-w8a8` and adjust `--served-model-name` to `qwen3.6` (and `--max-model-len` to 262144 if needed).
 
     > **Note**: Since `Qwen3.5-27B` and `Qwen3.6-27B` fit in a single node, multi-node PD separation is only recommended for high-concurrency production deployments. For the Mooncake deployment specifics, please refer to the [Mooncake Multi-Node PD Disaggregation Guide](../features/pd_disaggregation_mooncake_multi_node.md).
@@ -796,7 +798,7 @@ PD (Prefill-Decode) separation addresses these issues by running Prefill and Dec
         export HCCL_BUFFSIZE=1024
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
-        vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
+        vllm serve Eco-Tech/Qwen3.5-27B-w8a8-MXFP8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -860,7 +862,7 @@ PD (Prefill-Decode) separation addresses these issues by running Prefill and Dec
         export HCCL_BUFFSIZE=1024
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
-        vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
+        vllm serve Eco-Tech/Qwen3.5-27B-w8a8-MXFP8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
