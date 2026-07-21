@@ -30,7 +30,7 @@ The following model variants are available. It is recommended to download the mo
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
-| Qwen3-30B-A3B-w8a8-QuaRot-310  |W8A8 | Atlas inference products (TP2)                                                                                               | [Download](https://modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
+| Qwen3-30B-A3B-w8a8-QuaRot-310  |W8A8 | Atlas inference products (TP2) | [Download](https://modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
