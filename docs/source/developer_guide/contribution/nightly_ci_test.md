@@ -245,15 +245,15 @@ This is useful for automated root-cause analysis of nightly regressions.
 
 ## Adding a New Test Case — Worked Example
 
-To add `my-new-test` to the A2 single-node section:
+To add `my-new-test` to the A3 multi-card section:
 
 1. Edit `.github/workflows/configs/nightly_config.yaml`, append under
-   `a2.single_node.test_config`:
+   `a3.multi_card.test_config`:
 
    ```yaml
      - name: my-new-test
-       os: linux-aarch64-a2b3-4
-       tests: tests/e2e/nightly/single_node/ops/multicard_ops_a2/test_my_new.py
+       os: linux-aarch64-nightly-a3-4
+       tests: tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_my_new.py
    ```
 
 2. Commit the new pytest file (`test_my_new.py`) in the same PR.
@@ -267,10 +267,10 @@ To add `my-new-test` to the A2 single-node section:
 The workflow will:
 
 - `pr_nightly_command.yml` reads your PR's `nightly_config.yaml` and resolves
-  `my-new-test` → dispatch A2 only.
-- `Nightly-A2` is dispatched at `main`, but `generate-a2-matrix` checks out your
+  `my-new-test` → dispatch A3 only.
+- `Nightly-A3` is dispatched at `main`, but `setup-vars` checks out your
   PR commit and reads the new entry from the matrix.
-- `single-node-tests` runs one matrix job for `my-new-test`, with
+- `multi-card-tests` runs one matrix job for `my-new-test`, with
   `should_run=true`. The reusable workflow checks out your PR code (via
   `vllm_ascend_ref`) and runs your pytest.
 

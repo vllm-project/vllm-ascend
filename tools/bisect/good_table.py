@@ -21,7 +21,7 @@ these columns::
 
 Example rows (columns abbreviated)::
 
-    test_custom_op_multi_card, .../multicard_ops_a2/, <link>, success, <vllm>, <vllm_ascend>, <time>
+    qwen3-30b-acc, .../test_qwen3_30b_acc.py, <link>, success, <vllm>, <vllm_ascend>, <time>
     Qwen3.5-397B-A17B-w4a8-mtp, .../Qwen3.5-...-A2.yaml, <link>, failure, <vllm>, <vllm_ascend>, <time>
 
 For a given case (matched by ``name`` or by ``yaml/path``) the last-known-good
