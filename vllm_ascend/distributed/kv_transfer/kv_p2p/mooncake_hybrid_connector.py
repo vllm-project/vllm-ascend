@@ -53,7 +53,10 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
-from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
+from vllm_ascend.distributed.kv_transfer.utils.utils import (
+    DSPARK_NUM_KV_CACHE_LAYERS,
+    get_transfer_timeout_value,
+)
 from vllm_ascend.utils import enable_custom_op, is_vl_model
 
 # isort: off
@@ -438,6 +441,13 @@ class KVCacheRecvingThread(threading.Thread):
         self.kv_cache_specs = [g.kv_cache_spec for g in kv_cache_config.kv_cache_groups]
         self.block_size = self.vllm_config.cache_config.block_size
         self.num_layers = self.model_config.hf_text_config.num_hidden_layers
+        speculative_config = self.vllm_config.speculative_config
+        draft_model_config = getattr(speculative_config, "draft_model_config", None)
+        draft_hf_config = getattr(draft_model_config, "hf_config", None)
+        dspark_block_size = getattr(draft_hf_config, "dspark_block_size", 0)
+        self.num_draft_layers = (
+            DSPARK_NUM_KV_CACHE_LAYERS if isinstance(dspark_block_size, int) and dspark_block_size > 0 else None
+        )
         self.pp_layer_indices = {
             rank: get_prefill_pp_indices(self.num_layers, rank, self._prefill_pp_size, prefill_pp_layer_partition)
             for rank in range(self._prefill_pp_size)
@@ -763,7 +773,7 @@ class KVCacheRecvingThread(threading.Thread):
         if self.vllm_config.speculative_config is not None:
             # all MTP layer use the same kv cache layer, so only need to transfer once
             if prefill_pp_rank == self._prefill_pp_size - 1:
-                end_layer_index = end_layer_index + 1
+                end_layer_index += self.num_draft_layers or 1
         num_cache_per_layer = len(list(self.kv_caches.values())[0])  # Number of KV caches per layer
         local_kv_caches_base_addrs = local_kv_caches_base_addrs_all[
             first_layer_index * num_cache_per_layer : end_layer_index * num_cache_per_layer

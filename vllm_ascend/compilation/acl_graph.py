@@ -156,7 +156,7 @@ class ACLGraphWrapper:
         batch_descriptor = forward_context.batch_descriptor
         aclgraph_runtime_mode = forward_context.cudagraph_runtime_mode
 
-        if aclgraph_runtime_mode == CUDAGraphMode.NONE or aclgraph_runtime_mode != self.runtime_mode:
+        if aclgraph_runtime_mode == CUDAGraphMode.NONE or not aclgraph_runtime_mode.has_mode(self.runtime_mode):
             # CUDAGraphMode.NONE could mean the profile run, a warmup run, or
             # running without aclgraphs.
             # We do not trigger capture/replay if the runtime mode is not

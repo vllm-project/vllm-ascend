@@ -139,19 +139,22 @@ def _get_kv_cache_groups_uniform_groups(
     # Split each SWA UniformKV group into smaller groups to align their #(layer tuples)
     # Possibly padding layer tuples for this.
     # Additionally, we also pad KV blocks in each SWA layer, to align the page size
-    # with the corresponding layer in the full-MLA group.
-    all_page_sizes = full_mla_spec.get_page_sizes()
+    # with the corresponding layer in the MLA groups. DSpark PD may introduce
+    # transferable SWA cache pages larger than the regular MLA buckets; keep
+    # those pages as their own buckets instead of rejecting the configuration.
+    base_page_sizes = sorted(set(full_mla_spec.get_page_sizes()) | set(full_mla_c128_spec.get_page_sizes()))
     swa_mla_groups = []
     for sm_spec in swa_mla_specs:
         sm_page_sizes = sm_spec.get_page_sizes()
         layers_per_size: dict[int, list[str]] = defaultdict(list)
-        assert max(sm_page_sizes) <= max(all_page_sizes)
+        oversized_page_sizes = {ps for ps in sm_page_sizes if ps > max(base_page_sizes)}
+        candidate_page_sizes = sorted(set(base_page_sizes) | oversized_page_sizes)
 
         # Unify page size by padding layers' page_size to the nearest larger page_size.
         # Compute candidate (nearest larger page_size) for each unique page size.
         size_to_candidate: dict[int, int] = {}
         for ps in sm_page_sizes:
-            size_to_candidate[ps] = min(x for x in all_page_sizes if x >= ps)
+            size_to_candidate[ps] = min(x for x in candidate_page_sizes if x >= ps)
         # Pad and collect layer names per page size.
         for layer_name, layer_spec in sm_spec.kv_cache_specs.items():
             current_size = layer_spec.page_size_bytes
@@ -159,11 +162,21 @@ def _get_kv_cache_groups_uniform_groups(
             if current_size < candidate:
                 object.__setattr__(layer_spec, "page_size_padded", candidate)
             layers_per_size[candidate].append(layer_name)
-        # NOTE(yifan): for now, inside a UniformKV group, each page_size should
-        # have the same number of layers. This also means we don't need to pad layers
-        # inside a partial-full layer tuple.
-        assert len(set(len(layers) for layers in layers_per_size.values())) == 1
-        num_layers_per_size = len(next(iter(layers_per_size.values())))
+        layer_counts_per_size = {len(layers) for layers in layers_per_size.values()}
+        if len(layer_counts_per_size) != 1:
+            # DSpark PD can mix regular SWA layers with transferable DSpark
+            # SWA layers in the same UniformKV group. Their page buckets may
+            # have different layer counts, but the draft model needs these
+            # layers to share one block table. Keep the whole group intact and
+            # let the final KV tensor layout handle uneven page buckets.
+            swa_mla_groups.append(
+                KVCacheGroupSpec(
+                    layer_names=list(sm_spec.kv_cache_specs.keys()),
+                    kv_cache_spec=sm_spec,
+                )
+            )
+            continue
+        num_layers_per_size = next(iter(layer_counts_per_size))
 
         # Split layers inside each UniformKV group for aligned #(layers).
         # See `_get_kv_cache_groups_uniform_page_size` for more details.
@@ -193,19 +206,18 @@ def _get_kv_cache_config_deepseek_v4(
 ) -> tuple[int, list[KVCacheTensor]]:
     """DeepseekV4 KV cache tensor layout planning.
 
-    Precondition: kv_cache_groups[0] is the full-MLA group; its page sizes
-    define the canonical bucket set. Non-full-MLA groups must have been
-    page_size-padded upstream (see _get_kv_cache_groups_uniform_groups) so
-    every layer's page_size matches one of the full-MLA bucket sizes.
+    Precondition: non-full-MLA groups must have been page_size-padded
+    upstream (see _get_kv_cache_groups_uniform_groups) so every layer's
+    page_size matches one of the planned bucket sizes.
 
     For each group, bucket its layers by page_size_bytes and place each
     layer at tuple_idx = position-within-bucket. Emit one KVCacheTensor
     per (tuple_idx, bucket) whose shared_by is the union of per-group
     layers at that slot.
     """
-    full_mla_spec = kv_cache_groups[0].kv_cache_spec
-    assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
-    page_sizes = sorted(full_mla_spec.get_page_sizes())
+    page_sizes: list[int] = sorted(
+        {page_size for group in kv_cache_groups for page_size in group.kv_cache_spec.get_page_sizes()}
+    )
     layer_tuple_page_bytes = sum(page_sizes)
 
     # Pre-bucket each group's layers by page_size (registration order within
