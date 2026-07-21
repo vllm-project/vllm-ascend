@@ -18,7 +18,6 @@ Starting from [PR #9064](https://github.com/vllm-project/vllm-ascend/pull/9064),
 |---------------------|------------|-----------------|
 | `VLLM_ASCEND_BALANCE_SCHEDULING` | `scheduler_config.enable_balance_scheduling` | `"1"` → `true`, `"0"` → `false` |
 | `VLLM_ASCEND_ENABLE_FLASHCOMM1` | `enable_flashcomm1` | `"1"` → `true`, `"0"` → `false` |
-| `VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE` | `enable_flashcomm2_parallel_size` | Integer (unchanged) |
 | `MSMONITOR_USE_DAEMON` | `msmonitor_use_daemon` | `"1"` → `true`, `"0"` → `false` |
 | `VLLM_ASCEND_ENABLE_MLAPO` | `enable_mlapo` | `"1"` → `true`, `"0"` → `false` |
 | `VLLM_ASCEND_ENABLE_NZ` | `weight_nz_mode` | Integer (unchanged, field name changed) |
@@ -85,7 +84,6 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_prefill_mc2`                | bool | `False` | Whether to reserve mc2_token_capacity for prefill batches. When enabled, `max_num_batched_tokens` is used to calculate the mc2_token_capacity instead of the decode-only capacity. In this scenario, the recommended maximum value of `max_num_batched_tokens` is `tp_size * 512`. This is a temporary switch; once MC2 operators are complete for all scenarios, this switch will be removed and MC2 will be enabled by default. |
 | `mega_moe_max_tokens`               | int  | `65536` | Per-rank token capacity after dispatch in the mega moe (dispatch_ffn_combine) fused operator. When load imbalance causes a rank to receive more tokens than this limit, the excess tokens are dropped and skipped from computation, degrading accuracy. Do not set this too large: workspace memory scales linearly with this value. |
 | `enable_flashcomm1`                 | bool | `False` | Whether to enable FlashComm1 optimization. Can also be configured via the `VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable during the migration period. |
-| `flashcomm2_parallel_size`          | int  | `0`     | FlashComm2 parallel size. Can also be configured via the `VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE` environment variable during the migration period. |
 | `msmonitor_use_daemon`              | bool | `False` | Whether to use daemon mode for msmonitor. Can also be configured via the `MSMONITOR_USE_DAEMON` environment variable during the migration period. |
 | `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). Can also be configured via the `VLLM_ASCEND_ENABLE_MLAPO` environment variable during the migration period. |
 | `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. Can also be configured via the `VLLM_ASCEND_ENABLE_NZ` environment variable during the migration period. |
