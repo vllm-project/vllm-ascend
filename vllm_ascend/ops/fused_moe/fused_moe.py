@@ -93,6 +93,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         super().__init__(moe=moe)
         self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
         self.tid2eid = tid2eid
+        self.lora_context = None
+
+    def set_lora_context(self, lora_context) -> None:
+        self.lora_context = lora_context
 
     @property
     def is_monolithic(self) -> bool:
@@ -212,6 +216,11 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
+        lora_context = self.lora_context
+        if lora_context is None:
+            lora_context = getattr(layer, "_ascend_moe_lora_context", None)
+        if hasattr(moe_comm_method, "set_lora_context"):
+            moe_comm_method.set_lora_context(lora_context)
         # NOTE: In the MoECommType.FUSED_MC2 branch, we wrap weights (w1, w2) into lists
         # and provide dummy scales (w1_scale, w2_scale). This is required because:
         # The underlying Ascend fused operator (e.g., dispatch_ffn_combine) expects
@@ -545,6 +554,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # TODO: The community only considers load balancing when DP > 1.
         # This approach may overlook some extreme scenarios.
         enable_force_load_balance = _EXTRA_CTX.in_profile_run
+
+        lora_context = getattr(self.routed_experts, "_ascend_moe_lora_context", None)
+        if hasattr(_EXTRA_CTX.moe_comm_method, "set_lora_context"):
+            _EXTRA_CTX.moe_comm_method.set_lora_context(lora_context)
+        if hasattr(self._quant_method, "set_lora_context"):
+            self._quant_method.set_lora_context(lora_context)
 
         prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
             hidden_states=hidden_states,
