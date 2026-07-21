@@ -3947,12 +3947,15 @@ class NPUModelRunner(GPUModelRunner):
             )
             if isinstance(self.drafter, AscendGemma4Proposer):
                 # Gemma4 MTP needs per-group kernel_block_sizes (list of ints),
-                # not a single block_size.  Pass the list directly.
-                kernel_block_sizes = (
-                    self.kernel_block_sizes
-                    if isinstance(self.kernel_block_sizes, list)
-                    else [self.kernel_block_sizes]
-                )
+                # not a single block_size.  vllm-ascend stores
+                # self.kernel_block_sizes as list[list[int]] (one inner list
+                # per kv_cache_group, e.g. [[128], [128]]), but upstream
+                # vLLM's initialize_attn_backend expects a flat list[int]
+                # indexed by kv_cache_group_id.  Flatten the inner lists.
+                kernel_block_sizes = [
+                    sz if isinstance(sz, int) else sz[0]
+                    for sz in self.kernel_block_sizes
+                ]
                 self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
             else:
                 block_size = (self.kernel_block_sizes[0] if isinstance(
