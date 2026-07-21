@@ -4,8 +4,13 @@
 
 This section guides you through container-based environment setup and large model inference, using the Qwen3-0.6B offline single-GPU inference script as an example.
 
+<<<<<<< HEAD
 - For details on using different models, see the corresponding model tutorial in the "Model Tutorials" directory, for example, [Qwen3-30B-A3B](../../docs/source/tutorials/models/Qwen3-30B-A3B.md).
 - For details on using different functions, see the corresponding function tutorial in the "Function Tutorials" directory, for example, [Prefill-Decode Disaggregation (Deepseek)](../../docs/source/tutorials/features/pd_disaggregation_mooncake_multi_node.md).
+=======
+- For details on using different models, see the corresponding model tutorial in the "Model Tutorials" directory, for example, [Qwen3-30B-A3B](tutorials/models/Qwen3-30B-A3B.md).
+- For details on using different functions, see the corresponding function tutorial in the "Function Tutorials" directory, for example, [Prefill-Decode Disaggregation (DeepSeek)](tutorials/features/pd_disaggregation_mooncake_multi_node.md).
+>>>>>>> 136ac734f... Some modifications based on aidd
 
 ## Prerequisites
 
@@ -112,7 +117,7 @@ The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/v
 
 You can use ModelScope mirror to speed up download:
 
-<!-- tests/e2e/doctests/001-quickstart-test.sh should be considered updating as well -->
+<!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
 
 ```bash
 export VLLM_USE_MODELSCOPE=True
@@ -132,6 +137,7 @@ Create and run a simple inference test. The `example.py` can be like:
 ```python
 from vllm import LLM, SamplingParams
 
+<<<<<<< HEAD
 prompts = [
     "Hello, my name is",
     "The future of AI is",
@@ -139,6 +145,15 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 # The first run will take about 3-5 mins (10 MB/s) to download models
 llm = LLM(model="Qwen/Qwen3-0.6B")
+=======
+    prompts = [
+        "Hello, my name is",
+        "The future of AI is",
+    ]
+    sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+    # The first run will take about 3-5 mins (10MB/s) to download models
+    llm = LLM(model="Qwen/Qwen3-0.6B")
+>>>>>>> 136ac734f... Some modifications based on aidd
 
 outputs = llm.generate(prompts, sampling_params)
 
@@ -197,7 +212,14 @@ vLLM can also be deployed as a server that implements the OpenAI API protocol. R
 the following command to start the vLLM server with the
 [Qwen/Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) model:
 
+<<<<<<< HEAD
 <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
+=======
+    ```bash
+    # Deploy vLLM server (The first run will take about 3-5 mins (10MB/s) to download models)
+    vllm serve Qwen/Qwen3-0.6B &
+    ```
+>>>>>>> 136ac734f... Some modifications based on aidd
 
 ```bash
 # Deploy vLLM server (The first run will take about 3-5 mins (10 MB/s) to download models)

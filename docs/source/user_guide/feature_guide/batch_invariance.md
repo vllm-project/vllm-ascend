@@ -1,5 +1,6 @@
 # Batch Invariance
 
+<<<<<<< HEAD
 ```{note}
 Batch invariance is currently in beta. Some features are still under active development.
 Track progress and planned improvements at <https://github.com/vllm-project/vllm-ascend/issues/5487>
@@ -9,6 +10,17 @@ Track progress and planned improvements at <https://github.com/vllm-project/vllm
 To install the batch invariance custom operator library, set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend.
 For installation instructions, see <https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/installation.md#set-up-using-python>
 ```
+=======
+!!! note
+
+    Batch invariance is currently in beta. Some features are still under active development.
+    Track progress and planned improvements at [tracking issue #5487](https://github.com/vllm-project/vllm-ascend/issues/5487)
+
+!!! note
+
+    To install the batch invariance custom operator library, set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend.
+    For installation instructions, see [Set Up Using Python](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/installation.md#set-up-using-python)
+>>>>>>> 136ac734f... Some modifications based on aidd
 
 This document shows how to enable batch invariance in vLLM-Ascend. Batch invariance ensures that the output of a model is deterministic and independent of the batch size or the order of requests in a batch.
 
@@ -83,7 +95,7 @@ from vllm import LLM, SamplingParams
 prompts = [
     "The future of AI is",
     "Machine learning enables",
-    "Deep learning models can",
+    "Deep learning models can"
 ]
 
 sampling_params = SamplingParams(
@@ -125,10 +137,19 @@ When batch invariance is enabled, vLLM:
 2. Ensures consistent numerical behavior across different batch sizes
 3. Disables certain optimizations that may introduce non-determinism
 
+<<<<<<< HEAD
 ```{note}
 The batch invariance attention operators currently do not support
 `FULL'、'FULL_DECODE_ONLY` cudagraph mode.
 ```
+=======
+!!! note
+
+    The batch invariance attention operators currently do not support
+    `FULL`,`FULL_DECODE_ONLY` cudagraph mode.
+
+!!! note
+>>>>>>> 136ac734f... Some modifications based on aidd
 
 ```{note}
 Enabling batch invariance may impact performance compared to the default non-deterministic mode. This trade-off is intentional to guarantee reproducibility.
@@ -139,7 +160,7 @@ Enabling batch invariance may impact performance compared to the default non-det
 The batch invariance feature is under active development. Planned improvements include:
 
 - Support for additional NPUs series
-- Support `FULL'、'FULL_DECODE_ONLY` cudagraph mode with batch invariance attention operators
+- Support `FULL`,`FULL_DECODE_ONLY` cudagraph mode with batch invariance attention operators
 - Expanded model coverage
 - Performance optimizations
 - Additional testing and validation

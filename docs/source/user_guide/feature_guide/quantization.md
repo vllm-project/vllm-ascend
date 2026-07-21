@@ -115,7 +115,7 @@ from vllm import LLM, SamplingParams
 
 prompts = [
     "Hello, my name is",
-    "The future of AI is",
+    "The future of AI is"
 ]
 # Set sampling parameters
 sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40)
