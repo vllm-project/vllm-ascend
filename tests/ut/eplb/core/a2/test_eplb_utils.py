@@ -8,7 +8,7 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig, FusedMoEParallelConfig
 
 from vllm_ascend.ascend_config import init_ascend_config
-from vllm_ascend.eplb.core.eplb_utils import generate_log2phy_map, init_eplb_config
+from vllm_ascend.eplb.core.eplb_utils import generate_global_placement, generate_log2phy_map, init_eplb_config
 # isort: on
 
 
@@ -54,11 +54,21 @@ class TestAscendConfig(unittest.TestCase):
     def test_init_eplb_config_with_eplb(self):
         eplb_config = init_ascend_config(self.vllm_config).eplb_config
         _, expert_map, log2phy, redundant_experts = init_eplb_config(eplb_config, 0, self.moe_config)
-        gt_expert_map = torch.tensor([4, -1, -1, -1, 0, 1, 2, 3])
-        gt_log2phy = torch.tensor([9, 1, 2, 3, 5, 6, 7, 8])
+        gt_expert_map = torch.tensor([3, 4, -1, -1, -1, 0, 1, 2])
+        gt_log2phy = torch.tensor([8, 9, 2, 3, 4, 5, 6, 7])
         self.assertTrue(torch.equal(expert_map, gt_expert_map))
         self.assertTrue(torch.equal(log2phy, gt_log2phy))
         self.assertEqual(redundant_experts, 2)
+
+    def test_generate_global_placement_matches_vllm_physical_layout(self):
+        placement = generate_global_placement(8, 2, 2, 0)
+
+        self.assertTrue(
+            torch.equal(
+                placement,
+                torch.tensor([[0, 1, 2, 3, 4], [5, 6, 7, 0, 1]], dtype=torch.int32),
+            )
+        )
 
     def test_init_eplb_config_with_eplb_withmap(self):
         _TEST_DIR = os.path.dirname(__file__)
