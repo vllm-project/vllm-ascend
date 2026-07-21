@@ -526,7 +526,7 @@ class KVTransferThread(threading.Thread):
     ):
         process_with_block_ids = getattr(self.token_database, "process_tokens_with_block_ids", None)
         if process_with_block_ids is not None:
-            return process_with_block_ids(
+            token_iter = process_with_block_ids(
                 token_len,
                 block_hashes,
                 block_ids,
@@ -535,23 +535,27 @@ class KVTransferThread(threading.Thread):
                 skip_null_blocks=skip_null_blocks,
                 cache_role=cache_role,
             )
+        else:
 
-        def iter_with_legacy_process_tokens():
-            try:
-                token_iter = self.token_database.process_tokens(token_len, block_hashes, mask_num)
-            except TypeError:
-                token_iter = self.token_database.process_tokens(token_len, block_hashes)
-            group_block_size = self._get_block_size(kv_cache_group_id)
-            for start, end, key in token_iter:
-                block_idx = start // group_block_size
-                if block_idx >= len(block_ids):
-                    continue
-                block_id = block_ids[block_idx]
-                if skip_null_blocks and cache_role == "kv" and block_id <= 0:
-                    continue
-                yield start, end, key, block_id
+            def iter_with_legacy_process_tokens():
+                try:
+                    token_iter = self.token_database.process_tokens(token_len, block_hashes, mask_num)
+                except TypeError:
+                    token_iter = self.token_database.process_tokens(token_len, block_hashes)
+                group_block_size = self._get_block_size(kv_cache_group_id)
+                for start, end, key in token_iter:
+                    block_idx = start // group_block_size
+                    if block_idx >= len(block_ids):
+                        continue
+                    block_id = block_ids[block_idx]
+                    if skip_null_blocks and cache_role == "kv" and block_id <= 0:
+                        continue
+                    yield start, end, key, block_id
 
-        return iter_with_legacy_process_tokens()
+            token_iter = iter_with_legacy_process_tokens()
+
+        latest_chunks = {chunk[3]: chunk for chunk in token_iter}
+        return iter(sorted(latest_chunks.values(), key=lambda chunk: chunk[0]))
 
     def _prepare_value(
         self,
@@ -733,21 +737,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     block_hashes.append(group_block_hashes[start // group_block_size])
                     key_block_ids.append(block_id)
 
-                if len(set(key_block_ids)) != len(key_block_ids):
-                    last_index_by_block_id = {block_id: index for index, block_id in enumerate(key_block_ids)}
-                    keep_indices = sorted(last_index_by_block_id.values())
-                    logger.debug(
-                        "Deduplicating %d reused physical KV blocks for request %s in group %d",
-                        len(key_block_ids) - len(keep_indices),
-                        req_id,
-                        group_id,
-                    )
-                    starts = [starts[index] for index in keep_indices]
-                    ends = [ends[index] for index in keep_indices]
-                    keys = [keys[index] for index in keep_indices]
-                    block_hashes = [block_hashes[index] for index in keep_indices]
-                    key_block_ids = [key_block_ids[index] for index in keep_indices]
-
                 if (
                     not self.dcp_size > 1
                     and not req_meta.disable_tp_key_sharding
@@ -914,10 +903,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             group_ids = req_meta.kv_cache_group_ids or [0]
             load_masks = self._load_mask(req_meta, token_len)
             for group_id in group_ids:
-                starts = []
-                ends = []
-                keys = []
-                key_block_ids = []
                 block_ids = req_meta.block_ids_by_group[group_id]
                 group_block_size = self._get_block_size(group_id)
                 mask_num = load_spec.vllm_cached_tokens // group_block_size * group_block_size
@@ -931,34 +916,14 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 ):
                     if not self._mask_allows_chunk(load_masks, group_id, start):
                         continue
-                    starts.append(start)
-                    ends.append(end)
-                    keys.append(key)
-                    key_block_ids.append(block_id)
-
-                if len(set(key_block_ids)) != len(key_block_ids):
-                    last_index_by_block_id = {block_id: index for index, block_id in enumerate(key_block_ids)}
-                    keep_indices = sorted(last_index_by_block_id.values())
-                    logger.debug(
-                        "Deduplicating %d reused physical KV blocks before load for request %s in group %d",
-                        len(key_block_ids) - len(keep_indices),
-                        req_id,
-                        group_id,
-                    )
-                    starts = [starts[index] for index in keep_indices]
-                    ends = [ends[index] for index in keep_indices]
-                    keys = [keys[index] for index in keep_indices]
-                    key_block_ids = [key_block_ids[index] for index in keep_indices]
-
-                for index, start in enumerate(starts):
                     addr, size, block_id = self._prepare_value(
                         start,
-                        ends[index],
+                        end,
                         block_ids,
                         kv_cache_group_id=group_id,
-                        block_id=key_block_ids[index],
+                        block_id=block_id,
                     )
-                    key_list.append(keys[index].to_string())
+                    key_list.append(key.to_string())
                     addr_list.append(addr)
                     size_list.append(size)
                     block_id_list.append(block_id)

@@ -195,9 +195,9 @@ class TestKVTransferThread(unittest.TestCase):
 
 
 class TestKVCacheStoreSendingThread(unittest.TestCase):
-    def _make_thread(self, exists_result=None, kv_role="kv_producer", enable_kv_event=False):
+    def _make_thread(self, exists_result=None, kv_role="kv_producer", enable_kv_event=False, db=None):
         store = FakeStore(exists_result or [0, 0, 0, 0])
-        db = FakeTokenDatabase()
+        db = db or FakeTokenDatabase()
         t = KVCacheStoreSendingThread(
             m_store=store,
             token_database=db,
@@ -228,8 +228,9 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         keys, _, _ = store.put_calls[0]
         self.assertEqual(len(keys), 2)
 
-    def test_handle_request_keeps_latest_reused_physical_block(self):
-        t, store = self._make_thread([0, 0, 0])
+    def test_handle_request_drops_reused_block_if_latest_is_masked(self):
+        db = MaskedFakeTokenDatabase(masks=([True, True, False, True],))
+        t, store = self._make_thread([0, 0], db=db)
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=64,
@@ -243,11 +244,10 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
 
         self.assertEqual(len(store.put_calls), 1)
         keys, addrs, _ = store.put_calls[0]
-        self.assertEqual(len(keys), 3)
+        self.assertEqual(len(keys), 2)
         self.assertTrue(keys[0].endswith("@k1"))
-        self.assertTrue(keys[1].endswith("@k2"))
-        self.assertTrue(keys[2].endswith("@k3"))
-        self.assertEqual(addrs, [[1002], [1001], [1003]])
+        self.assertTrue(keys[1].endswith("@k3"))
+        self.assertEqual(addrs, [[1002], [1003]])
 
     def test_handle_request_all_exist_no_put(self):
         t, store = self._make_thread([1, 1])
