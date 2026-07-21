@@ -320,7 +320,7 @@ vllm serve Eco-Tech/Qwen3-8B-w8a8sc-310-vllm/TP1/Qwen3-8B-w8a8sc-310-vllm-tp1 \
     --max-num-seqs 32 \
     --served-model-name qwen3 \
     --dtype float16 \
-    --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+    --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32]}' \
     --quantization ascend \
     --max-model-len 16384 \
@@ -342,7 +342,7 @@ vllm serve Eco-Tech/Qwen3-14B-w8a8sc-310-vllm/TP1/Qwen3-14B-w8a8sc-310-vllm-tp1 
     --max-num-seqs 16 \
     --served-model-name qwen3 \
     --dtype float16 \
-    --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+    --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}' \
     --quantization ascend \
     --max-model-len 16384 \
@@ -364,7 +364,7 @@ vllm serve Eco-Tech/Qwen3-32B-w8a8sc-310-vllm/TP4/Qwen3-32B-w8a8sc-310-vllm-tp4 
     --max-num-seqs 32 \
     --served-model-name qwen3 \
     --dtype float16 \
-    --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+    --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [16,32]}' \
     --quantization ascend \
     --max-model-len 20480 \
