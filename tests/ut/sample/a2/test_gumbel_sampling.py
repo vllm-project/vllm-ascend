@@ -10,7 +10,10 @@
 import pytest
 import torch
 
+from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature, gumbel_sample
+
+enable_custom_op()
 
 DEVICE = "npu"
 
@@ -93,7 +96,7 @@ class TestGumbelSampling:
         expanded_idx_mapping = torch.randint(0, num_reqs, (num_tokens,), dtype=torch.int32, device=DEVICE)
         temperature = torch.zeros(num_reqs, dtype=torch.float32, device=DEVICE)
         seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
-        pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
+        pos = torch.arange(num_tokens, dtype=torch.int64, device=DEVICE)
 
         sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
         torch.npu.synchronize()
@@ -111,7 +114,7 @@ class TestGumbelSampling:
         expanded_idx_mapping = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
         temperature = torch.zeros(num_reqs, dtype=torch.float32, device=DEVICE)
         seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
-        pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
+        pos = torch.arange(num_tokens, dtype=torch.int64, device=DEVICE)
 
         s_false = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
         s_true = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=True)
@@ -136,7 +139,7 @@ class TestGumbelSampling:
         expanded_idx_mapping = torch.randint(0, num_reqs, (num_tokens,), dtype=torch.int32, device=DEVICE)
         temperature = torch.rand(num_reqs, dtype=torch.float32, device=DEVICE) * 1.5 + 0.5
         seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
-        pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
+        pos = torch.arange(num_tokens, dtype=torch.int64, device=DEVICE)
 
         r1 = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
         torch.npu.synchronize()
@@ -152,7 +155,7 @@ class TestGumbelSampling:
         logits = torch.randn(num_tokens, vocab_size, dtype=torch.float32, device=DEVICE)
         expanded_idx_mapping = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
         temperature = torch.ones(num_reqs, dtype=torch.float32, device=DEVICE) * 1.0
-        pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
+        pos = torch.arange(num_tokens, dtype=torch.int64, device=DEVICE)
 
         seed1 = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
         seed2 = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
@@ -181,7 +184,7 @@ class TestGumbelSampling:
         expanded_idx_mapping = torch.randint(0, num_reqs, (num_tokens,), dtype=torch.int32, device=DEVICE)
         temperature = torch.rand(num_reqs, dtype=torch.float32, device=DEVICE) + 0.1
         seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
-        pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
+        pos = torch.arange(num_tokens, dtype=torch.int64, device=DEVICE)
 
         sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
         torch.npu.synchronize()
@@ -212,7 +215,7 @@ class TestGumbelSampling:
 
         for i in range(num_trials):
             seed = torch.tensor([i * 1000 + 42], dtype=torch.int64, device=DEVICE)
-            pos = torch.tensor([i], dtype=torch.int32, device=DEVICE)
+            pos = torch.tensor([i], dtype=torch.int64, device=DEVICE)
 
             s_low = gumbel_sample(
                 logits_base.clone(), expanded_idx_mapping, low_temp, seed, pos, apply_temperature=True
@@ -253,7 +256,7 @@ class TestGumbelSampling:
         # force first half to greedy
         temperature[: num_tokens // 2] = 0.0
         seed = torch.randint(0, 2**31, (num_tokens,), dtype=torch.int64, device=DEVICE)
-        pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
+        pos = torch.arange(num_tokens, dtype=torch.int64, device=DEVICE)
 
         sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
         torch.npu.synchronize()
@@ -276,7 +279,7 @@ class TestGumbelSampling:
         expanded_idx_mapping = torch.tensor([0, 0, 0, 1, 1, 1], dtype=torch.int32, device=DEVICE)
         temperature = torch.zeros(num_reqs, dtype=torch.float32, device=DEVICE)
         seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
-        pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
+        pos = torch.arange(num_tokens, dtype=torch.int64, device=DEVICE)
 
         sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
         torch.npu.synchronize()
@@ -301,7 +304,7 @@ class TestGumbelSampling:
         temperature = torch.tensor([0.8], dtype=torch.float32, device=DEVICE)
         seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
         # Same pos -> same Gumbel noise
-        pos = torch.tensor([5, 5], dtype=torch.int32, device=DEVICE)
+        pos = torch.tensor([5, 5], dtype=torch.int64, device=DEVICE)
 
         sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=True)
         torch.npu.synchronize()
@@ -320,7 +323,7 @@ class TestGumbelSampling:
         expanded_idx_mapping = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
         temperature = torch.rand(num_reqs, dtype=torch.float32, device=DEVICE) * 1.5 + 0.5
         seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
-        pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
+        pos = torch.arange(num_tokens, dtype=torch.int64, device=DEVICE)
 
         # Use processed_logits to verify temperature was applied
         out_logits = torch.zeros(num_reqs, vocab_size, dtype=torch.float32, device=DEVICE)
@@ -354,7 +357,7 @@ class TestGumbelSampling:
         expanded_idx_mapping = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
         temperature = torch.rand(num_reqs, dtype=torch.float32, device=DEVICE) * 1.5 + 0.5
         seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
-        pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
+        pos = torch.arange(num_tokens, dtype=torch.int64, device=DEVICE)
 
         out_logits = torch.zeros(num_reqs, vocab_size, dtype=torch.float32, device=DEVICE)
         gumbel_sample(
@@ -395,7 +398,7 @@ class TestGumbelSampling:
         expanded_idx_mapping = torch.tensor([2, 5, 7, 0], dtype=torch.int32, device=DEVICE)
         temperature = torch.ones(max_num_reqs, dtype=torch.float32, device=DEVICE) * 0.8
         seed = torch.randint(0, 2**31, (max_num_reqs,), dtype=torch.int64, device=DEVICE)
-        pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
+        pos = torch.arange(num_tokens, dtype=torch.int64, device=DEVICE)
 
         out_logits = torch.zeros(max_num_reqs, vocab_size, dtype=torch.float32, device=DEVICE)
         gumbel_sample(
@@ -439,13 +442,13 @@ class TestGumbelSampling:
         expanded_idx_mapping = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
         temperature = torch.ones(max_num_reqs, dtype=torch.float32, device=DEVICE) * 0.9
         seed = torch.randint(0, 2**31, (max_num_reqs,), dtype=torch.int64, device=DEVICE)
-        pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
+        pos = torch.arange(num_tokens, dtype=torch.int64, device=DEVICE)
 
         # Buffer: [max_num_reqs, num_steps, vocab_size]
         draft_logits = torch.zeros(max_num_reqs, num_steps, vocab_size, dtype=torch.float32, device=DEVICE)
 
         # Write to column (step) 1
-        col_tensor = torch.tensor(1, dtype=torch.int32, device=DEVICE)
+        col_tensor = torch.tensor(1, dtype=torch.int64, device=DEVICE)
         gumbel_sample(
             logits,
             expanded_idx_mapping,
@@ -490,7 +493,7 @@ class TestGumbelSampling:
         expanded_idx_mapping = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
         temperature = torch.tensor([0.0, 0.8, 1.5, 0.0], dtype=torch.float32, device=DEVICE)
         seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
-        pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
+        pos = torch.arange(num_tokens, dtype=torch.int64, device=DEVICE)
 
         out_logits = torch.zeros(num_reqs, vocab_size, dtype=torch.float32, device=DEVICE)
         gumbel_sample(
@@ -523,7 +526,7 @@ class TestGumbelSampling:
         expanded_idx_mapping = torch.tensor([0], dtype=torch.int32, device=DEVICE)
         temperature = torch.tensor([0.7], dtype=torch.float32, device=DEVICE)
         seed = torch.tensor([12345], dtype=torch.int64, device=DEVICE)
-        pos = torch.tensor([0], dtype=torch.int32, device=DEVICE)
+        pos = torch.tensor([0], dtype=torch.int64, device=DEVICE)
 
         sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=True)
         torch.npu.synchronize()
@@ -540,7 +543,7 @@ class TestGumbelSampling:
         expanded_idx_mapping = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
         temperature = torch.zeros(num_tokens, dtype=torch.float32, device=DEVICE)
         seed = torch.randint(0, 2**31, (num_tokens,), dtype=torch.int64, device=DEVICE)
-        pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
+        pos = torch.arange(num_tokens, dtype=torch.int64, device=DEVICE)
 
         sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
         torch.npu.synchronize()
@@ -555,7 +558,7 @@ class TestGumbelSampling:
         logits = torch.randn(num_tokens, vocab_size, dtype=torch.float32, device=DEVICE)
         expanded_idx_mapping = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
         seed = torch.randint(0, 2**31, (num_tokens,), dtype=torch.int64, device=DEVICE)
-        pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
+        pos = torch.arange(num_tokens, dtype=torch.int64, device=DEVICE)
 
         # Very low temperature (near-greedy)
         low_temp = torch.tensor([0.01, 0.01, 0.01, 0.01], dtype=torch.float32, device=DEVICE)
