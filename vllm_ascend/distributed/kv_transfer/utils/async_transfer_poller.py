@@ -60,6 +60,7 @@ class AsyncTransferPoller:
                 return []
 
         completed = []
+        poll_failed = []
         failed = []
         for batch_id in batch_ids:
             try:
@@ -71,10 +72,10 @@ class AsyncTransferPoller:
                     logger.error("Async transfer failed for batch %s, result=%d", batch_id, result)
             except Exception as e:
                 logger.error("Error polling async transfer status for batch %s: %s", batch_id, e)
-                failed.append(batch_id)
+                poll_failed.append(batch_id)
 
-        # Handle failed transfers: pop from pending and dispatch on_failed callback
-        for batch_id in failed:
+        # Handle poll-failed transfers (exceptions): dispatch on_poll_error callback
+        for batch_id in poll_failed:
             info = None
             with self._pending_async_lock:
                 if batch_id in self._pending_async_transfers:
@@ -83,8 +84,21 @@ class AsyncTransferPoller:
             if info is not None:
                 if self._on_poll_error:
                     self._on_poll_error(batch_id, info)
+                elif self._on_failed:
+                    self._on_failed(batch_id, info)
+
+        # Handle failed transfers (result<0): dispatch on_failed callback
+        for batch_id in failed:
+            info = None
+            with self._pending_async_lock:
+                if batch_id in self._pending_async_transfers:
+                    info = self._pending_async_transfers.pop(batch_id)
+                    self._log_transfer_warning(batch_id, info)
+            if info is not None:
                 if self._on_failed:
                     self._on_failed(batch_id, info)
+                elif self._on_poll_error:
+                    self._on_poll_error(batch_id, info)
 
         if not completed:
             return []

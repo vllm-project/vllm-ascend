@@ -625,6 +625,15 @@ class KVCacheSendingLayerThread(threading.Thread):
                     )
                     for req_id in transfer_meta.req_ids:
                         self.failed_reqs.add(req_id)
+                    # Fire callback on last layer for failed batch_id
+                    if send_task.layer_idx == (self.total_layers - 1):
+                        for req_id in transfer_meta.req_ids:
+                            req_meta = send_task.send_request[req_id]
+                            if req_meta.chunk_finish:
+                                self.callback_func(
+                                    req_id, req_meta, layer_group_idx, trans_flag=False
+                                )
+                                self.failed_reqs.discard(req_id)
                 else:
                     req_end_time = time.perf_counter()
                     total_transfer_size = sum(transfer_meta.length) / 1024
@@ -647,6 +656,21 @@ class KVCacheSendingLayerThread(threading.Thread):
                             "send_request": send_task.send_request,
                             "req_start_time": req_start_time,
                         }
+            else:
+                # Empty transfer: fire callback on last layer
+                if send_task.layer_idx == (self.total_layers - 1):
+                    for req_id in transfer_meta.req_ids:
+                        req_meta = send_task.send_request[req_id]
+                        if req_meta.chunk_finish:
+                            if req_id in self.failed_reqs:
+                                self.callback_func(
+                                    req_id, req_meta, layer_group_idx, trans_flag=False
+                                )
+                                self.failed_reqs.discard(req_id)
+                            else:
+                                self.callback_func(
+                                    req_id, req_meta, layer_group_idx, trans_flag=True
+                                )
 
     def _poll_and_complete_async(self):
         """Poll pending async writes and fire callbacks for completed ones."""
@@ -673,6 +697,7 @@ class KVCacheSendingLayerThread(threading.Thread):
                 req_meta = info["send_request"][req_id]
                 if req_meta.chunk_finish:
                     self.callback_func(req_id, req_meta, info["layer_group_idx"], trans_flag=False)
+                    self.failed_reqs.discard(req_id)
 
 
 class KVCacheRecvingLayerThread(threading.Thread):

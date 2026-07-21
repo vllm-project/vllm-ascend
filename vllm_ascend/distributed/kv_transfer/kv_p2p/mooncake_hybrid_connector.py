@@ -2299,6 +2299,11 @@ def group_concurrent_contiguous(
     # Truncate the longer list to ensure src and dst have the same length
     min_len = min(len(src), len(dst))
     if len(src) != len(dst):
+        logger.warning(
+            "group_concurrent_contiguous: src and dst length mismatch "
+            "(src=%d, dst=%d), truncating to %d",
+            len(src), len(dst), min_len,
+        )
         src = src[:min_len]
         dst = dst[:min_len]
 
