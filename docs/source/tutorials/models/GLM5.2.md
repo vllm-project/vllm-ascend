@@ -28,11 +28,16 @@ It is recommended to download the model weight to the shared directory of multip
 - You can use our official docker image to run GLM-5.2 directly.
 - [KV Cache Pool (Ascend Store) Deployment Guide](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/feature_guide/kv_pool.html)
 
-=== "A3 series"
+:::::{tab-set}
+:sync-group: install
 
-    Start the docker image on your each node.
+::::{tab-item} A3 series
+:sync: A3
 
-    ```shell
+Start the docker image on your each node.
+
+```{code-block} bash
+   :substitutions:
 
     export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
     
@@ -73,11 +78,14 @@ It is recommended to download the model weight to the shared directory of multip
     -it $IMAGE bash
     ```
 
-=== "A2 series"
+::::
+::::{tab-item} A2 series
+:sync: A2
 
-    Start the docker image on each of your nodes.
+Start the docker image on each of your nodes.
 
-    ```shell
+```{code-block} bash
+   :substitutions:
 
     export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
     docker run --rm \
@@ -104,6 +112,8 @@ It is recommended to download the model weight to the shared directory of multip
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```
+::::
+:::::
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
@@ -115,7 +125,8 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 Run the following script to execute online inference.
 
-```shell
+```{code-block} bash
+   :substitutions:
 export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
@@ -156,7 +167,11 @@ The parameters are explained as follows:
 
 If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
 
-=== "A3 series"
+:::::{tab-set}
+:sync-group: install
+
+::::{tab-item} A3 series
+:sync: A3
 
     - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A3 (64G × 16).
 
@@ -164,7 +179,8 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     **node 0**
 
-    ```shell
+```{code-block} bash
+    :substitutions:
     # this obtained through ifconfig
     # nic_name is the network interface name corresponding to local_ip of the current node
     nic_name="xxx"
@@ -214,7 +230,8 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     **node 1**
 
-    ```shell
+```{code-block} bash
+    :substitutions:
     # this obtained through ifconfig
     # nic_name is the network interface name corresponding to local_ip of the current node
     nic_name="xxx"
@@ -262,13 +279,16 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
 
-=== "A2 series"
+::::
+::::{tab-item} A2 series
+:sync: A2
 
     - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A2 (64G × 32).
 
     **node 0**
 
-    ```shell
+```{code-block} bash
+    :substitutions:
     # this obtained through ifconfig
     # nic_name is the network interface name corresponding to local_ip of the current node
     nic_name="xxx"
@@ -324,7 +344,8 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     **node 1**
 
-    ```shell
+```{code-block} bash
+   :substitutions:
     # this obtained through ifconfig
     # nic_name is the network interface name corresponding to local_ip of the current node
     nic_name="xxx"
@@ -1086,6 +1107,15 @@ Once the preparation is done, start the server with the following commands:
     ```
 
 For request forwarding on this 8-node A2 layout, use 4 prefiller hosts (1 endpoint each) and 4 decoder hosts (2 endpoints each) in the Request Forwarding command below.
+
+**Notice:**
+The parameters are explained as follows:
+
+- Like a single node,For short sequences, DCP does not need to be enabled; For long sequences, DCP needs to be enabled.
+- If the video memory is sufficient, there is no need to enable sfac8.
+- There are two cases:
+    1. If the GPU memory is insufficient for the sequence length, enable the DCP configuration. However, enabling the DCP configuration will affect the TPOT performance.
+    2. If the GPU memory is sufficient, you are advised not to enable the DCP configuration.
 
 To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
