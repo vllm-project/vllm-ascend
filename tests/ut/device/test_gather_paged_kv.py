@@ -229,6 +229,4 @@ def test_acceptance_gather_reads_only_owned_blocks_not_max_padded(monkeypatch):
         f"A max-padding regression would read [{max_padded}, {max_padded}]."
     )
     # the bug scenario must show large padding waste, else this acceptance is moot
-    assert max_padded > owned * 3, (
-        f"scenario too uniform to validate (max_padded={max_padded}, owned={owned})"
-    )
+    assert max_padded > owned * 3, f"scenario too uniform to validate (max_padded={max_padded}, owned={owned})"

@@ -146,9 +146,7 @@ def test_100k_long_short_mixed_no_oom():
     """Closest to the original 109K-token crash: one ~100K-token request plus
     short prompts issued into the same batch window. This is the shape that
     OOMed before the fix (allocated 2.52 GiB with only 470 MiB free)."""
-    jobs = [("L100k", PARA * 2630 + "\n\nReply OK", 5)] + [
-        (f"s{i}", f"Say the number {i}.", 5) for i in range(8)
-    ]
+    jobs = [("L100k", PARA * 2630 + "\n\nReply OK", 5)] + [(f"s{i}", f"Say the number {i}.", 5) for i in range(8)]
     out = _concurrent(jobs)
     failed = [(n, s) for (n, s, _, _) in out if s != 200]
     assert not failed, f"requests failed (OOM?): {failed}"
