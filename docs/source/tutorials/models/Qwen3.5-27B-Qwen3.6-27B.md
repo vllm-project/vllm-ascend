@@ -153,32 +153,32 @@ It is **recommended to use the latest release candidate (rc) version or the late
     export NAME=vllm-ascend
 
     docker run --rm \
-    --name $NAME \
-    --net=host \
-    --shm-size=1g \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/hisi_hdc \
-    --device /dev/ummu \
-    --device /dev/uburma \
-    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
-    -v /etc/hixlep/:/etc/hixlep/ \
-    -v /root/.cache:/root/.cache \
-    -v /usr/local/sbin:/usr/local/sbin \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
-    -v /usr/lib64:/usr/lib64 \
-    -it $IMAGE bash
+        --name $NAME \
+        --net=host \
+        --shm-size=1g \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/hisi_hdc \
+        --device /dev/ummu \
+        --device /dev/uburma \
+        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
+        -v /etc/hixlep/:/etc/hixlep/ \
+        -v /root/.cache:/root/.cache \
+        -v /usr/local/sbin:/usr/local/sbin \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
+        -v /usr/lib64:/usr/lib64 \
+        -it $IMAGE bash
     ```
 
 After a successful docker run, you can verify the running container service by executing the `docker ps` command. The expected result is that the container `vllm-ascend` is listed with status `Up`, confirming the docker installation is successful.
@@ -250,23 +250,23 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         export MODEL_PATH=Eco-Tech/Qwen3.5-27B-w8a8-mtp
 
         vllm serve $MODEL_PATH \
-        --host 0.0.0.0 \
-        --port 8000 \
-        --data-parallel-size 1 \
-        --tensor-parallel-size 2 \
-        --seed 1024 \
-        --quantization ascend \
-        --served-model-name qwen3.5 \
-        --max-num-seqs 32 \
-        --max-model-len 133000 \
-        --max-num-batched-tokens 8096 \
-        --trust-remote-code \
-        --gpu-memory-utilization 0.90 \
-        --no-enable-prefix-caching \
-        --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_cpu_binding":true}' \
-        --async-scheduling
+            --host 0.0.0.0 \
+            --port 8000 \
+            --data-parallel-size 1 \
+            --tensor-parallel-size 2 \
+            --seed 1024 \
+            --quantization ascend \
+            --served-model-name qwen3.5 \
+            --max-num-seqs 32 \
+            --max-model-len 133000 \
+            --max-num-batched-tokens 8096 \
+            --trust-remote-code \
+            --gpu-memory-utilization 0.90 \
+            --no-enable-prefix-caching \
+            --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --additional-config '{"enable_cpu_binding":true}' \
+            --async-scheduling
         ```
 
     === "Qwen3.6-27B-w8a8"
@@ -292,23 +292,23 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         export MODEL_PATH=Eco-Tech/Qwen3.6-27B-w8a8
 
         vllm serve $MODEL_PATH \
-        --host 0.0.0.0 \
-        --port 8000 \
-        --data-parallel-size 1 \
-        --tensor-parallel-size 2 \
-        --seed 1024 \
-        --quantization ascend \
-        --served-model-name qwen3.6 \
-        --max-num-seqs 32 \
-        --max-model-len 262144 \
-        --max-num-batched-tokens 8096 \
-        --trust-remote-code \
-        --gpu-memory-utilization 0.90 \
-        --no-enable-prefix-caching \
-        --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_cpu_binding":true}' \
-        --async-scheduling
+            --host 0.0.0.0 \
+            --port 8000 \
+            --data-parallel-size 1 \
+            --tensor-parallel-size 2 \
+            --seed 1024 \
+            --quantization ascend \
+            --served-model-name qwen3.6 \
+            --max-num-seqs 32 \
+            --max-model-len 262144 \
+            --max-num-batched-tokens 8096 \
+            --trust-remote-code \
+            --gpu-memory-utilization 0.90 \
+            --no-enable-prefix-caching \
+            --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --additional-config '{"enable_cpu_binding":true}' \
+            --async-scheduling
         ```
 
     Key Parameter Descriptions:
@@ -345,19 +345,19 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         export MODEL_PATH=Eco-Tech/Qwen3.5-27B-w8a8-mtp
 
         vllm serve $MODEL_PATH \
-        --host 127.0.0.1 \
-        --port 1025 \
-        --tensor-parallel-size 4 \
-        --served-model-name qwen3.5 \
-        --max-num-seqs 128 \
-        --max-model-len 16384 \
-        --trust-remote-code \
-        --gpu-memory-utilization 0.90 \
-        --mamba-ssm-cache-dtype float16 \
-        --dtype float16 \
-        --speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
-        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}' \
-        --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
+            --host 127.0.0.1 \
+            --port 1025 \
+            --tensor-parallel-size 4 \
+            --served-model-name qwen3.5 \
+            --max-num-seqs 128 \
+            --max-model-len 16384 \
+            --trust-remote-code \
+            --gpu-memory-utilization 0.90 \
+            --mamba-ssm-cache-dtype float16 \
+            --dtype float16 \
+            --speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
+            --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}' \
+            --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
         ```
 
     === "Qwen3.6-27B-w8a8"
@@ -373,19 +373,19 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         export MODEL_PATH=Eco-Tech/Qwen3.6-27B-w8a8
 
         vllm serve $MODEL_PATH \
-        --host 127.0.0.1 \
-        --port 1025 \
-        --tensor-parallel-size 4 \
-        --served-model-name qwen3.6 \
-        --max-num-seqs 128 \
-        --max-model-len 16384 \
-        --trust-remote-code \
-        --gpu-memory-utilization 0.90 \
-        --mamba-ssm-cache-dtype float16 \
-        --dtype float16 \
-        --speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
-        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}' \
-        --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
+            --host 127.0.0.1 \
+            --port 1025 \
+            --tensor-parallel-size 4 \
+            --served-model-name qwen3.6 \
+            --max-num-seqs 128 \
+            --max-model-len 16384 \
+            --trust-remote-code \
+            --gpu-memory-utilization 0.90 \
+            --mamba-ssm-cache-dtype float16 \
+            --dtype float16 \
+            --speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
+            --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}' \
+            --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
         ```
 
     Key Parameter Descriptions:
@@ -429,23 +429,23 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         export MODEL_PATH=Eco-Tech/Qwen3.5-27B-w8a8-MXFP8
 
         vllm serve $MODEL_PATH \
-        --host 0.0.0.0 \
-        --port 8000 \
-        --data-parallel-size 1 \
-        --tensor-parallel-size 1 \
-        --seed 1024 \
-        --quantization ascend \
-        --served-model-name qwen3.5 \
-        --max-num-seqs 32 \
-        --max-model-len 133000 \
-        --max-num-batched-tokens 8096 \
-        --trust-remote-code \
-        --gpu-memory-utilization 0.90 \
-        --no-enable-prefix-caching \
-        --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_cpu_binding":true}' \
-        --async-scheduling
+            --host 0.0.0.0 \
+            --port 8000 \
+            --data-parallel-size 1 \
+            --tensor-parallel-size 1 \
+            --seed 1024 \
+            --quantization ascend \
+            --served-model-name qwen3.5 \
+            --max-num-seqs 32 \
+            --max-model-len 133000 \
+            --max-num-batched-tokens 8096 \
+            --trust-remote-code \
+            --gpu-memory-utilization 0.90 \
+            --no-enable-prefix-caching \
+            --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --additional-config '{"enable_cpu_binding":true}' \
+            --async-scheduling
         ```
 
     === "Qwen3.6-27B-w8a8"
@@ -471,23 +471,23 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         export MODEL_PATH=Eco-Tech/Qwen3.6-27B-w8a8-MXFP8
 
         vllm serve $MODEL_PATH \
-        --host 0.0.0.0 \
-        --port 8000 \
-        --data-parallel-size 1 \
-        --tensor-parallel-size 1 \
-        --seed 1024 \
-        --quantization ascend \
-        --served-model-name qwen3.6 \
-        --max-num-seqs 32 \
-        --max-model-len 262144 \
-        --max-num-batched-tokens 8096 \
-        --trust-remote-code \
-        --gpu-memory-utilization 0.90 \
-        --no-enable-prefix-caching \
-        --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_cpu_binding":true}' \
-        --async-scheduling
+            --host 0.0.0.0 \
+            --port 8000 \
+            --data-parallel-size 1 \
+            --tensor-parallel-size 1 \
+            --seed 1024 \
+            --quantization ascend \
+            --served-model-name qwen3.6 \
+            --max-num-seqs 32 \
+            --max-model-len 262144 \
+            --max-num-batched-tokens 8096 \
+            --trust-remote-code \
+            --gpu-memory-utilization 0.90 \
+            --no-enable-prefix-caching \
+            --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --additional-config '{"enable_cpu_binding":true}' \
+            --async-scheduling
         ```
 
     Key Parameter Descriptions:
@@ -593,41 +593,41 @@ PD (Prefill-Decode) separation addresses these issues by running Prefill and Dec
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
-        --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --seed 1024 \
-        --quantization ascend \
-        --served-model-name qwen3.5 \
-        --trust-remote-code \
-        --max-num-seqs 4 \
-        --max-model-len 32768 \
-        --max-num-batched-tokens 16384 \
-        --no-enable-prefix-caching \
-        --gpu-memory-utilization 0.95 \
-        --enforce-eager \
-        --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-        --additional-config '{"enable_cpu_binding":true}' \
-        --kv-transfer-config \
-        '{"kv_connector": "MooncakeConnectorV1",
-        "kv_role": "kv_producer",
-        "kv_port": "30000",
-        "engine_id": "0",
-        "kv_connector_extra_config": {
-                    "prefill": {
-                            "dp_size": 8,
-                            "tp_size": 2
-                    },
-                    "decode": {
-                            "dp_size": 8,
-                            "tp_size": 2
+            --host 0.0.0.0 \
+            --port $2 \
+            --data-parallel-size $3 \
+            --data-parallel-rank $4 \
+            --data-parallel-address $5 \
+            --data-parallel-rpc-port $6 \
+            --tensor-parallel-size $7 \
+            --seed 1024 \
+            --quantization ascend \
+            --served-model-name qwen3.5 \
+            --trust-remote-code \
+            --max-num-seqs 4 \
+            --max-model-len 32768 \
+            --max-num-batched-tokens 16384 \
+            --no-enable-prefix-caching \
+            --gpu-memory-utilization 0.95 \
+            --enforce-eager \
+            --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+            --additional-config '{"enable_cpu_binding":true}' \
+            --kv-transfer-config \
+            '{"kv_connector": "MooncakeConnectorV1",
+            "kv_role": "kv_producer",
+            "kv_port": "30000",
+            "engine_id": "0",
+            "kv_connector_extra_config": {
+                        "prefill": {
+                                "dp_size": 8,
+                                "tp_size": 2
+                        },
+                        "decode": {
+                                "dp_size": 8,
+                                "tp_size": 2
+                    }
                 }
-            }
-        }'
+            }'
         ```
 
     3. Decode Node 0 `run_dp_template.sh` script. You can get the template in the repository's examples: [run_dp_template.sh](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh).
@@ -657,42 +657,42 @@ PD (Prefill-Decode) separation addresses these issues by running Prefill and Dec
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
-        --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --seed 1024 \
-        --quantization ascend \
-        --served-model-name qwen3.5 \
-        --trust-remote-code \
-        --max-num-seqs 16 \
-        --max-model-len 32768 \
-        --max-num-batched-tokens 2048 \
-        --no-enable-prefix-caching \
-        --gpu-memory-utilization 0.91 \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"recompute_scheduler_enable":true,"enable_cpu_binding":true}' \
-        --async-scheduling \
-        --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-        --kv-transfer-config \
-        '{"kv_connector": "MooncakeConnectorV1",
-        "kv_role": "kv_consumer",
-        "kv_port": "30200",
-        "engine_id": "1",
-        "kv_connector_extra_config": {
-                    "prefill": {
-                            "dp_size": 8,
-                            "tp_size": 2
-                    },
-                    "decode": {
-                            "dp_size": 8,
-                            "tp_size": 2
+            --host 0.0.0.0 \
+            --port $2 \
+            --data-parallel-size $3 \
+            --data-parallel-rank $4 \
+            --data-parallel-address $5 \
+            --data-parallel-rpc-port $6 \
+            --tensor-parallel-size $7 \
+            --seed 1024 \
+            --quantization ascend \
+            --served-model-name qwen3.5 \
+            --trust-remote-code \
+            --max-num-seqs 16 \
+            --max-model-len 32768 \
+            --max-num-batched-tokens 2048 \
+            --no-enable-prefix-caching \
+            --gpu-memory-utilization 0.91 \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --additional-config '{"recompute_scheduler_enable":true,"enable_cpu_binding":true}' \
+            --async-scheduling \
+            --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+            --kv-transfer-config \
+            '{"kv_connector": "MooncakeConnectorV1",
+            "kv_role": "kv_consumer",
+            "kv_port": "30200",
+            "engine_id": "1",
+            "kv_connector_extra_config": {
+                        "prefill": {
+                                "dp_size": 8,
+                                "tp_size": 2
+                        },
+                        "decode": {
+                                "dp_size": 8,
+                                "tp_size": 2
+                    }
                 }
-            }
-        }'
+            }'
         ```
 
     Key Parameter Descriptions:
@@ -719,9 +719,9 @@ PD (Prefill-Decode) separation addresses these issues by running Prefill and Dec
 
         ```shell
         python load_balance_proxy_server_example.py \
-        --port 1999 \
-        --host 141.xx.xx.1 \
-        --prefiller-hosts \
+            --port 1999 \
+            --host 141.xx.xx.1 \
+            --prefiller-hosts \
             141.xx.xx.1 \
             141.xx.xx.1 \
             141.xx.xx.1 \
@@ -730,9 +730,9 @@ PD (Prefill-Decode) separation addresses these issues by running Prefill and Dec
             141.xx.xx.1 \
             141.xx.xx.1 \
             141.xx.xx.1 \
-        --prefiller-ports \
+            --prefiller-ports \
             7100 7101 7102 7103 7104 7105 7106 7107 \
-        --decoder-hosts \
+            --decoder-hosts \
             141.xx.xx.2 \
             141.xx.xx.2 \
             141.xx.xx.2 \
@@ -741,7 +741,7 @@ PD (Prefill-Decode) separation addresses these issues by running Prefill and Dec
             141.xx.xx.2 \
             141.xx.xx.2 \
             141.xx.xx.2 \
-        --decoder-ports \
+            --decoder-ports \
             7100 7101 7102 7103 7104 7105 7106 7107 \
         ```
 
@@ -797,41 +797,41 @@ PD (Prefill-Decode) separation addresses these issues by running Prefill and Dec
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
-        --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --seed 1024 \
-        --quantization ascend \
-        --served-model-name qwen3.5 \
-        --trust-remote-code \
-        --max-num-seqs 4 \
-        --max-model-len 32768 \
-        --max-num-batched-tokens 16384 \
-        --no-enable-prefix-caching \
-        --gpu-memory-utilization 0.95 \
-        --enforce-eager \
-        --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-        --additional-config '{"enable_cpu_binding":true}' \
-        --kv-transfer-config \
-        '{"kv_connector": "MooncakeConnectorV1",
-        "kv_role": "kv_producer",
-        "kv_port": "30000",
-        "engine_id": "0",
-        "kv_connector_extra_config": {
-                    "prefill": {
-                            "dp_size": 8,
-                            "tp_size": 1
-                    },
-                    "decode": {
-                            "dp_size": 8,
-                            "tp_size": 1
+            --host 0.0.0.0 \
+            --port $2 \
+            --data-parallel-size $3 \
+            --data-parallel-rank $4 \
+            --data-parallel-address $5 \
+            --data-parallel-rpc-port $6 \
+            --tensor-parallel-size $7 \
+            --seed 1024 \
+            --quantization ascend \
+            --served-model-name qwen3.5 \
+            --trust-remote-code \
+            --max-num-seqs 4 \
+            --max-model-len 32768 \
+            --max-num-batched-tokens 16384 \
+            --no-enable-prefix-caching \
+            --gpu-memory-utilization 0.95 \
+            --enforce-eager \
+            --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+            --additional-config '{"enable_cpu_binding":true}' \
+            --kv-transfer-config \
+            '{"kv_connector": "MooncakeConnectorV1",
+            "kv_role": "kv_producer",
+            "kv_port": "30000",
+            "engine_id": "0",
+            "kv_connector_extra_config": {
+                        "prefill": {
+                                "dp_size": 8,
+                                "tp_size": 1
+                        },
+                        "decode": {
+                                "dp_size": 8,
+                                "tp_size": 1
+                    }
                 }
-            }
-        }'
+            }'
         ```
 
     3. Decode Node 0 `run_dp_template.sh` script. You can get the template in the repository's examples: [run_dp_template.sh](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh).
@@ -861,42 +861,42 @@ PD (Prefill-Decode) separation addresses these issues by running Prefill and Dec
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
-        --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --seed 1024 \
-        --quantization ascend \
-        --served-model-name qwen3.5 \
-        --trust-remote-code \
-        --max-num-seqs 16 \
-        --max-model-len 32768 \
-        --max-num-batched-tokens 2048 \
-        --no-enable-prefix-caching \
-        --gpu-memory-utilization 0.91 \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"recompute_scheduler_enable":true,"enable_cpu_binding":true}' \
-        --async-scheduling \
-        --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-        --kv-transfer-config \
-        '{"kv_connector": "MooncakeConnectorV1",
-        "kv_role": "kv_consumer",
-        "kv_port": "30200",
-        "engine_id": "1",
-        "kv_connector_extra_config": {
-                    "prefill": {
-                            "dp_size": 8,
-                            "tp_size": 1
-                    },
-                    "decode": {
-                            "dp_size": 8,
-                            "tp_size": 1
+            --host 0.0.0.0 \
+            --port $2 \
+            --data-parallel-size $3 \
+            --data-parallel-rank $4 \
+            --data-parallel-address $5 \
+            --data-parallel-rpc-port $6 \
+            --tensor-parallel-size $7 \
+            --seed 1024 \
+            --quantization ascend \
+            --served-model-name qwen3.5 \
+            --trust-remote-code \
+            --max-num-seqs 16 \
+            --max-model-len 32768 \
+            --max-num-batched-tokens 2048 \
+            --no-enable-prefix-caching \
+            --gpu-memory-utilization 0.91 \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --additional-config '{"recompute_scheduler_enable":true,"enable_cpu_binding":true}' \
+            --async-scheduling \
+            --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+            --kv-transfer-config \
+            '{"kv_connector": "MooncakeConnectorV1",
+            "kv_role": "kv_consumer",
+            "kv_port": "30200",
+            "engine_id": "1",
+            "kv_connector_extra_config": {
+                        "prefill": {
+                                "dp_size": 8,
+                                "tp_size": 1
+                        },
+                        "decode": {
+                                "dp_size": 8,
+                                "tp_size": 1
+                    }
                 }
-            }
-        }'
+            }'
         ```
 
     Key Parameter Descriptions:
@@ -923,9 +923,9 @@ PD (Prefill-Decode) separation addresses these issues by running Prefill and Dec
 
         ```shell
         python load_balance_proxy_server_example.py \
-        --port 1999 \
-        --host 141.xx.xx.1 \
-        --prefiller-hosts \
+            --port 1999 \
+            --host 141.xx.xx.1 \
+            --prefiller-hosts \
             141.xx.xx.1 \
             141.xx.xx.1 \
             141.xx.xx.1 \
@@ -934,9 +934,9 @@ PD (Prefill-Decode) separation addresses these issues by running Prefill and Dec
             141.xx.xx.1 \
             141.xx.xx.1 \
             141.xx.xx.1 \
-        --prefiller-ports \
+            --prefiller-ports \
             7100 7101 7102 7103 7104 7105 7106 7107 \
-        --decoder-hosts \
+            --decoder-hosts \
             141.xx.xx.2 \
             141.xx.xx.2 \
             141.xx.xx.2 \
@@ -945,7 +945,7 @@ PD (Prefill-Decode) separation addresses these issues by running Prefill and Dec
             141.xx.xx.2 \
             141.xx.xx.2 \
             141.xx.xx.2 \
-        --decoder-ports \
+            --decoder-ports \
             7100 7101 7102 7103 7104 7105 7106 7107 \
         ```
 
