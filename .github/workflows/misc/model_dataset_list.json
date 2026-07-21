@@ -180,6 +180,7 @@
       "unsloth/DeepSeek-V3.1-BF16",
       "unsloth/Kimi-K2-Thinking-BF16",
       "unsloth/gpt-oss-20b-BF16",
+      "UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test",
       "vllm-ascend/DeepSeek-R1-0528-W8A8",
       "vllm-ascend/DeepSeek-R1-W8A8",
       "vllm-ascend/DeepSeek-R1-fa3-pruning",

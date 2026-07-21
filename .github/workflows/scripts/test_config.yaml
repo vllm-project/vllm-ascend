@@ -75,6 +75,8 @@
   base: attention_common
   source_file_dependencies:
     - vllm_ascend/attention/attention_v1.py
+  tests:
+    - tests/e2e/pull_request/two_card/test_gemma4.py
 
 - name: attention_fa3
   optional: false
@@ -268,6 +270,7 @@
     - vllm_ascend/worker/model_runner_v1.py
     - vllm_ascend/compilation/acl_graph.py
   tests:
+    - tests/ut/model_executor
     - tests/e2e/pull_request/one_card/test_cpu_weight_offload.py
 
 # Model Loader
@@ -461,6 +464,14 @@
     - tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py
     - tests/ut/spec_decode/test_speculators_vwn_eagle3.py
 
+- name: spec_decode_dspark
+  optional: false
+  base: spec_decode_base
+  source_file_dependencies:
+    - vllm_ascend/spec_decode/dspark_proposer.py
+  tests:
+    - tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py
+
 - name: spec_decode_ngram
   optional: false
   base: spec_decode_base
@@ -577,6 +588,7 @@
   tests:
     - tests/ut/xlite
     - tests/e2e/pull_request/one_card/test_xlite.py
+    - tests/e2e/pull_request/two_card/test_xlite.py
 
 # Batch Invariant
 - name: batch_invariant
@@ -716,7 +728,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_camem.py: 140
   tests/e2e/pull_request/one_card/test_completion_with_prompt_embeds.py: 200
   tests/e2e/pull_request/one_card/test_cpu_offloading.py: 30
-  tests/e2e/pull_request/one_card/test_cpu_weight_offload.py: 830
+  tests/e2e/pull_request/one_card/test_cpu_weight_offload.py: 1400
   tests/e2e/pull_request/one_card/test_guided_decoding.py: 610
   tests/e2e/pull_request/one_card/test_minicpm.py: 330
   tests/e2e/pull_request/one_card/test_multi_instance.py: 140
@@ -756,12 +768,14 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_shared_expert_dp.py: 400
   tests/e2e/pull_request/two_card/test_sp_pass.py: 260
   tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py: 110
+  tests/e2e/pull_request/two_card/test_xlite.py: 180
   tests/e2e/pull_request/four_card/_310p/test_dense_model_310p.py: 410
   tests/e2e/pull_request/four_card/_310p/test_moe_model_310p.py: 510
   tests/e2e/pull_request/four_card/_310p/test_vl_model_310p.py: 360
   tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py: 2040
   tests/e2e/pull_request/four_card/context_parallel/test_prefix_caching_cp.py: 210
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py: 450
+  tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py: 0
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py: 30
   tests/e2e/pull_request/four_card/test_data_parallel_tp2.py: 20
   tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py: 370
@@ -771,6 +785,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_qwen3_5.py: 610
   tests/e2e/pull_request/four_card/test_qwen3_next.py: 1180
   tests/e2e/pull_request/four_card/test_graph_mode.py: 480
+  tests/e2e/pull_request/two_card/test_gemma4.py: 1200
   tests/ut/attention/a2/test_attention_cp.py: 40
   tests/ut/attention/a2/test_attention_cp_precision.py: 30
   tests/ut/attention/a2/test_attention_v1.py: 30

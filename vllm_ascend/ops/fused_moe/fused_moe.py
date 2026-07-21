@@ -49,7 +49,6 @@ from vllm_ascend.utils import (
     npu_stream_switch,
     shared_expert_dp_enabled,
     shared_experts_calculation_stream,
-    vllm_version_is,
 )
 
 
@@ -107,20 +106,11 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def process_weights_after_loading(self, layer):
         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
 
-        # vLLM PR #44589 landed after the v0.24 main-line cut point
-        # (798185d) and is present in the verified main commit only.
-        if not vllm_version_is("0.24.0"):
-            w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2)
-            layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
+        w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2)
+        layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
 
-            w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2)
-            layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
-        else:
-            w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()
-            layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
-
-            w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
-            layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
+        w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2)
+        layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
         # TODO: Current dispatch_ffn_combine fusion operator ONLY supports NZ format.
         # Therefore, we must cast weights to NZ when fusion is enabled.
