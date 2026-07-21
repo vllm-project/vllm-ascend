@@ -297,6 +297,7 @@
     - vllm_ascend/ops/linear.py
     - vllm_ascend/ops/linear_op.py
     - vllm_ascend/ops/rotary_embedding.py
+    - vllm_ascend/ops/rope_q_only.py
     - vllm_ascend/ops/vocab_parallel_embedding.py
     - vllm_ascend/ops/register_custom_ops.py
   tests:
