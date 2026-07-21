@@ -513,7 +513,7 @@ def test_chunk_fwd_preserves_head_major_k_for_kkt_and_ascendc_calls(monkeypatch:
 
     def fake_kkt(**kwargs):
         captured["kkt_k"] = kwargs["k"]
-        return torch.empty(1, 5, 3, 2, dtype=torch.float32)
+        return torch.empty(1, 3, 5, 2, dtype=torch.float32)
 
     monkeypatch.setattr(chunk, "chunk_scaled_dot_kkt_fwd", fake_kkt)
     monkeypatch.setattr(chunk, "solve_tril", lambda A, **kwargs: A)
@@ -593,4 +593,4 @@ def test_kkt_preserves_bth_gate_layout(monkeypatch: pytest.MonkeyPatch):
 
     assert captured["beta"] is beta
     assert captured["g_cumsum"] is g_cumsum
-    assert A.shape == (1, 5, 3, 2)
+    assert A.shape == (1, 3, 5, 2)
