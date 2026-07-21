@@ -33,9 +33,11 @@ from typing import Any
 
 import torch
 import vllm.envs as envs
+from vllm.compilation import backends as backends_module
 from vllm.compilation import wrapper as wrapper_module
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import CompilationMode, get_current_vllm_config
+from vllm.config.compilation import DynamicShapesType
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 
@@ -109,14 +111,46 @@ def _clone_forward(self: Any, suffix: str) -> MethodType:
     return MethodType(cloned_func, self)
 
 
+def _variant_compile_options(
+    compilation_config: Any,
+    backend: Any,
+    evaluate_guards: bool,
+) -> dict[str, Any]:
+    """Match the guard policy used by the upstream compilation wrapper."""
+
+    options = {}
+    if isinstance(backend, str) and backend == "inductor":
+        options = dict(compilation_config.inductor_compile_config)
+
+    if compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
+        return options
+
+    if evaluate_guards:
+        if compilation_config.dynamic_shapes_config.type == DynamicShapesType.UNBACKED:
+            raise AssertionError("UNBACKED dynamic shapes do not add guards")
+        options["guard_filter_fn"] = lambda entries: [
+            entry.guard_type == "SHAPE_ENV" for entry in entries
+        ]
+    elif hasattr(torch.compiler, "skip_all_guards_unsafe"):
+        options["guard_filter_fn"] = torch.compiler.skip_all_guards_unsafe
+    else:
+        options["guard_filter_fn"] = lambda entries: [False for _ in entries]
+
+    return options
+
+
 def _patched_init(
     self: Any,
     compile_prefix: str = "",
     is_encoder: bool = False,
 ) -> None:
     vllm_config = get_current_vllm_config()
+    # Speculative draft models do not own the target model's LoRA adapters.
+    # Reusing their native graph is both correct and avoids unused graph variants.
     specialize_lora = bool(
-        vllm_config.lora_config is not None and vllm_config.compilation_config.cudagraph_specialize_lora
+        vllm_config.lora_config is not None
+        and vllm_config.compilation_config.cudagraph_specialize_lora
+        and backends_module.model_tag == "backbone"
     )
     use_bytecode_hook = envs.VLLM_USE_BYTECODE_HOOK and not specialize_lora
 
@@ -151,23 +185,30 @@ def _patched_init(
         prefix=base_one_prefix,
         is_encoder=is_encoder,
     )
-    options = {}
-    if isinstance(base_backend, str) and base_backend == "inductor":
-        options = compilation_config.inductor_compile_config
+    base_options = _variant_compile_options(
+        compilation_config,
+        base_backend,
+        self.evaluate_guards,
+    )
+    base_one_options = _variant_compile_options(
+        compilation_config,
+        base_one_backend,
+        self.evaluate_guards,
+    )
 
     self._base_compiled_callable = torch.compile(
         _clone_forward(self, "base"),
         fullgraph=True,
         dynamic=False,
         backend=base_backend,
-        options=options,
+        options=base_options,
     )
     self._base_one_compiled_callable = torch.compile(
         _clone_forward(self, "base_one"),
         fullgraph=True,
         dynamic=False,
         backend=base_one_backend,
-        options=options,
+        options=base_one_options,
     )
 
 

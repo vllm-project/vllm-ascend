@@ -43,17 +43,46 @@
 #
 # Safety: only touches the real-adapter load path (dummy LoRAs already use
 # model names); leaves keys untouched if no prefix is detected (already-aligned
-# plain text models); never raises into the serving path. Disable with
-# VLLM_ASCEND_LORA_VLM_PREFIX=0.
+# plain text models); never raises into the serving path.
 # ---------------------------------------------------------------------------
-import os
-
 from vllm.logger import logger
+from vllm.lora.model_manager import LoRAModelManager
 from vllm.lora.worker_manager import WorkerLoRAManager
 
-_ENABLED = os.environ.get("VLLM_ASCEND_LORA_VLM_PREFIX", "1") not in ("0", "", "false", "False")
-
+_orig_model_manager_init = LoRAModelManager.__init__
 _orig_load_adapter = WorkerLoRAManager._load_adapter
+
+
+def _enable_wrapped_language_model_expand_slice(manager) -> None:
+    """Enable the compatible packed-LoRA path for a wrapped text tower."""
+    if not getattr(manager, "supports_mm", False):
+        return
+
+    mm_mapping = getattr(manager, "mm_mapping", None)
+    language_prefixes = getattr(mm_mapping, "language_model", ())
+    wrapper_mapping = getattr(manager, "punica_wrapper_mapping", {})
+    seen = set()
+    for prefix in language_prefixes:
+        if not prefix:
+            continue
+        wrapper = wrapper_mapping.get(prefix)
+        if wrapper is None or id(wrapper) in seen:
+            continue
+        enable = getattr(wrapper, "enable_compatible_lora_bmm_expand_slice", None)
+        if enable is None:
+            continue
+        enable()
+        seen.add(id(wrapper))
+        logger.info(
+            "[lora-vlm-prefix] wrapped language model %r detected; "
+            "enabled compatible packed-LoRA expand-slice",
+            prefix,
+        )
+
+
+def _model_manager_init(self, *args, **kwargs) -> None:
+    _orig_model_manager_init(self, *args, **kwargs)
+    _enable_wrapped_language_model_expand_slice(self)
 
 
 def _detect_prefix(lora_keys, model_module_names):
@@ -110,5 +139,5 @@ def _load_adapter(self, lora_request):
     return lora
 
 
-if _ENABLED:
-    WorkerLoRAManager._load_adapter = _load_adapter
+LoRAModelManager.__init__ = _model_manager_init
+WorkerLoRAManager._load_adapter = _load_adapter

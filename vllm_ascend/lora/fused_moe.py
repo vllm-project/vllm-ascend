@@ -32,10 +32,9 @@ Design (see plan in conversation history):
     inside `apply_wrapper` so only the active layer is in effect.
 
   - v1 deliberately limits scope to: unquant + AllGather + TP-only +
-    no shared experts + no FusedMC2 + no dynamic EPLB. These are the exact
-    conditions under which `Qwen3-30B-A3B-Thinking-2507` runs cleanly with
-    TP=4 EP=1 on 4×64GB. Other paths assert early so users get a clear
-    error rather than silently wrong outputs.
+    no FusedMC2 + no dynamic EPLB. Models with shared experts automatically
+    enable the compatible expand-slice path. Other unsupported paths assert
+    early so users get a clear error rather than silently wrong outputs.
 """
 
 from __future__ import annotations
@@ -190,29 +189,13 @@ def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
         # shared-experts LoRA through vLLM's standard dense wrappers, whose
         # expand-slice path does not match the _C_ascend.sgmv_expand stacked
         # lora_b layout (and vLLM's torch_ops einsum fallback fails on the
-        # same layout). By default this is rejected up-front.
-        #
-        # Set VLLM_ASCEND_MOE_LORA_ALLOW_SHARED_EXPERTS=1 to route the
-        # expand-slice path through PunicaWrapperNPU's torch.bmm fallback
-        # (per-token gather + bmm), which avoids both ops. This is
-        # experimental and adds overhead (a throughput drop vs the fused NPU
-        # op); the routed-experts LoRA delta is applied by this wrapper while
-        # shared-experts/dense LoRA is handled by vLLM's dense wrappers.
-        if not envs_ascend.VLLM_ASCEND_MOE_LORA_ALLOW_SHARED_EXPERTS:
-            raise AssertionError(
-                "Ascend MoE LoRA v1 does not wrap the shared_experts path by "
-                "default (Qwen3-30B-A3B-Thinking-2507 has no shared experts). "
-                "For models with shared experts (e.g. Qwen3.5-MoE, "
-                "DeepSeek-V3), set VLLM_ASCEND_MOE_LORA_ALLOW_SHARED_EXPERTS=1 "
-                "to route the expand-slice path through a torch.bmm fallback "
-                "(experimental; expect ~30-40% throughput drop)."
-            )
+        # same layout). The model wrapper enables PunicaWrapperNPU's
+        # compatible per-token gather + bmm path automatically in set_mapping.
         logger.warning_once(
-            "Ascend MoE LoRA: shared_experts detected and "
-            "VLLM_ASCEND_MOE_LORA_ALLOW_SHARED_EXPERTS=1. Routed-experts LoRA "
-            "delta is applied by this wrapper; shared-experts/dense LoRA is "
-            "handled by vLLM's standard dense wrappers, with the expand-slice "
-            "path routed to an experimental torch.bmm fallback."
+            "Ascend MoE LoRA: shared_experts detected. The compatible "
+            "expand-slice path will be enabled automatically; routed-experts "
+            "LoRA is applied by this wrapper while shared-experts/dense LoRA "
+            "is handled by vLLM's standard dense wrappers."
         )
 
 
@@ -387,6 +370,8 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         # publish it through the Ascend MoE runner. The runner stores it on
         # routed_experts; batch-local LoRA indices are refreshed before each forward.
         BaseLayerWithLoRA.set_mapping(self, punica_wrapper)
+        if getattr(self.base_layer, "_shared_experts", None) is not None:
+            punica_wrapper.enable_compatible_lora_bmm_expand_slice()
         self.base_layer.set_lora_context(self._build_lora_context())
 
 
