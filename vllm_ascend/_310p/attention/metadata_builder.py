@@ -116,6 +116,18 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
 
         num_reqs = common_attn_metadata.num_reqs
 
+        # ATB flash attention (PrefillNoCache) reads seqLen from host data to build
+        # its tiling. The base builder's parallel-drafting branch overrides both
+        # seq_lens and seq_lens_cpu with a device tensor (kept device-side for graph
+        # replay on other platforms), which has no hostData and crashes ATB with
+        # "tensor.hostData is null". Re-attach the host seq_lens that already exists
+        # on CPU (no extra D2H sync) so forward_prefill_310 can feed ATB directly.
+        # For the main model seq_lens_cpu is already host, so this is a no-op.
+        if common_attn_metadata._seq_lens_cpu is not None:
+            attn_metadata.seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
+        elif common_attn_metadata.seq_lens_cpu is not None:
+            attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
+
         splitfuse_states = (
             AscendAttentionState.SpecDecoding,
             AscendAttentionState.ChunkedPrefill,
@@ -135,7 +147,12 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
         attn_metadata.query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
 
         if is_compressed_mask_supported():
-            attn_metadata.attn_mask = AttentionMaskBuilder310.get_compressed_splitfuse_mask(self.device)
+            if common_attn_metadata.causal:
+                attn_metadata.attn_mask = AttentionMaskBuilder310.get_compressed_splitfuse_mask(self.device)
+            else:
+                attn_metadata.attn_mask = AttentionMaskBuilder310.get_compressed_non_causal_splitfuse_mask(
+                    self.device
+                )
 
         return attn_metadata
 

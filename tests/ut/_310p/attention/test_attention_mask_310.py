@@ -43,3 +43,19 @@ class TestAttentionMaskBuilder310(TestBase):
         attn_metadata.seq_lens = torch.tensor([7, 4])
         attn_mask = self.attention_mask_builder.get_splitfuse_mask(attn_metadata, torch.device("cpu"))
         self.assertEqual(attn_mask.shape, (1, self.max_seqlen // 16, 16, 16))
+
+    @patch("torch_npu.npu_format_cast")
+    def test_get_non_causal_splitfuse_mask_310(self, mock_format_cast):
+        mock_format_cast.side_effect = lambda x, y: x
+        attn_metadata = MagicMock()
+        attn_metadata.query_start_loc = torch.tensor([0, 2, 5])
+        attn_metadata.seq_lens = torch.tensor([10, 8])
+        attn_mask = AttentionMaskBuilder310.get_non_causal_splitfuse_mask(attn_metadata, torch.device("cpu"))
+        self.assertEqual(attn_mask.shape, (1, self.max_seqlen // 16, 16, 16))
+
+    def test_get_compressed_non_causal_splitfuse_mask_310(self):
+        from vllm_ascend._310p.attention.attention_mask import COMPRESSED_MASK_SEQ_LEN
+
+        mask = AttentionMaskBuilder310.get_compressed_non_causal_splitfuse_mask(torch.device("cpu"))
+        self.assertEqual(mask.shape, (COMPRESSED_MASK_SEQ_LEN, COMPRESSED_MASK_SEQ_LEN))
+        self.assertTrue(torch.all(mask == 0))

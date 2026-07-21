@@ -89,6 +89,7 @@ class TestAscendAttentionBackendImpl310(TestBase):
         metadata.attn_mask = torch.randn(1, 1, 10, 10)
         metadata.query_lens = torch.tensor([10])
         metadata.seq_lens = torch.tensor([10])
+        metadata.seq_lens_cpu = torch.tensor([10], dtype=torch.int32)
         metadata.actual_seq_lengths_q = [10]
         metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
         metadata.num_actual_tokens = 10
@@ -108,12 +109,46 @@ class TestAscendAttentionBackendImpl310(TestBase):
         self.assertIs(kwargs["key"], key)
         self.assertIs(kwargs["value"], value)
         self.assertIs(kwargs["mask"], metadata.attn_mask)
-        self.assertIs(kwargs["seq_len"], metadata.seq_lens)
+        # Host seq_lens_cpu is fed to ATB directly (no device->host sync).
+        self.assertIs(kwargs["seq_len"], metadata.seq_lens_cpu)
         self.assertEqual(kwargs["scale_value"], self.impl.scale)
         self.assertEqual(kwargs["num_heads"], self.impl.num_heads)
         self.assertEqual(kwargs["num_kv_heads"], self.impl.num_kv_heads)
         self.assertIs(kwargs["out"], output)
         self.assertIs(result, output)
+
+    @patch("torch_npu._npu_reshape_and_cache")
+    @patch("torch_npu._npu_flash_attention")
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_forward_prefill_310_falls_back_to_device_copy(
+        self, mock_get_forward_context, mock_npu_flash_attention, mock_npu_reshape_and_cache
+    ):
+        """When no host seq_lens_cpu is attached, forward_prefill_310 must copy the
+        device seq_lens to host int32 (ATB flash attention needs host data)."""
+        query = torch.randn(10, 8, 64)
+        key = torch.randn(10, 8, 64)
+        value = torch.randn(10, 8, 64)
+        output = torch.empty_like(query)
+
+        host_seq_len = torch.tensor([10], dtype=torch.int32)
+        device_seq_len = MagicMock()
+        device_seq_len.device = MagicMock(type="npu")
+        device_seq_len.to.return_value = host_seq_len
+
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.PrefillNoCache
+        metadata.attn_mask = torch.randn(1, 1, 10, 10)
+        metadata.seq_lens = device_seq_len
+        metadata.seq_lens_cpu = None
+
+        self.impl.support_compressed_mask = False
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_npu_flash_attention.return_value = torch.ones(10, 8, 64)
+        self.impl.forward_impl(query, key, value, None, metadata, output)
+
+        device_seq_len.to.assert_called_once_with("cpu", dtype=torch.int32)
+        _, kwargs = mock_npu_flash_attention.call_args
+        self.assertIs(kwargs["seq_len"], host_seq_len)
 
     @patch("torch_npu.npu_format_cast", return_value=torch.randn((1, 128, 16, 16), dtype=torch.float16))
     @patch("torch_npu._npu_reshape_and_cache")
@@ -186,6 +221,40 @@ class TestAscendAttentionBackendImpl310(TestBase):
         output = self.impl.forward_impl(query, key, value, None, metadata, output)
 
         mock_npu_paged_attention_splitfuse.assert_called_once()
+
+    @patch("torch_npu.npu_format_cast", return_value=torch.randn((1, 128, 16, 16), dtype=torch.float16))
+    @patch("torch_npu._npu_reshape_and_cache")
+    @patch("torch_npu._npu_paged_attention_splitfuse")
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_forward_chunked_prefill_non_causal_310(
+        self,
+        mock_get_forward_context,
+        mock_npu_paged_attention_splitfuse,
+        mock_npu_reshape_and_cache,
+        mock_format_cast,
+    ):
+        """Non-causal chunked prefill uses the all-zero splitfuse mask (dflash)."""
+        query = torch.randn(5, 8, 64)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.ChunkedPrefill
+        metadata.causal = False
+        metadata.attn_mask = torch.randn(1, 128, 16, 16)
+        metadata.seq_lens = torch.tensor([1, 4])
+        metadata.query_start_loc = torch.tensor([0, 1, 5])
+        metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
+        metadata.num_actual_tokens = 5
+        metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
+
+        self.impl.support_compressed_mask = False
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        with patch(
+            "vllm_ascend._310p.attention.attention_v1.AttentionMaskBuilder310.get_non_causal_splitfuse_mask",
+            return_value=torch.zeros(1, 128, 16, 16),
+        ) as mock_non_causal_mask:
+            self.impl.forward_impl(query, None, None, None, metadata, output)
+            mock_non_causal_mask.assert_called_once()
+            mock_npu_paged_attention_splitfuse.assert_called_once()
 
     @patch("torch_npu._npu_paged_attention", create=True)
     @patch("torch_npu._npu_reshape_and_cache")

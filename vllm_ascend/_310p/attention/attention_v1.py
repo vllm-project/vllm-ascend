@@ -23,7 +23,6 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
     AttentionBackendEnum,
     register_backend,
 )
-
 from vllm_ascend._310p.attention.attention_mask import (
     AttentionMaskBuilder310,
     is_compressed_mask_supported,
@@ -219,12 +218,22 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         Returns:
             The output tensor after flash attention.
         """
-        real_tokens = int(attn_metadata.seq_lens.sum().item())
-        seq_len = attn_metadata.seq_lens
+        # ATB SelfAttention reads seqLen from host data to build its tiling. Prefer
+        # the host seq_lens attached by the 310P metadata builder: the base builder
+        # leaves attn_metadata.seq_lens on device for the parallel-drafting path
+        # (dflash/dspark), which has no hostData and crashes ATB with
+        # "tensor.hostData is null". Reading the CPU copy also lets us compute the
+        # token count on host, avoiding a device->host sync in this prefill path.
+        seq_len = attn_metadata.seq_lens_cpu
+        if seq_len is None or seq_len.device.type != "cpu":
+            seq_len = attn_metadata.seq_lens.to("cpu", dtype=torch.int32)
+
+        real_tokens = int(seq_len.sum())
         aligned_tokens = int(query.shape[0])
         delta = aligned_tokens - real_tokens
 
-        # Adjust sequence length if padding (alignment) was applied to the inputs
+        # Adjust sequence length if padding (alignment) was applied to the inputs.
+        # Clone first so the shared host buffer is never mutated in place.
         if delta:
             seq_len = seq_len.clone()
             seq_len[-1] += delta
@@ -272,7 +281,10 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
 
         if self.support_compressed_mask:
             # splitfuse_v2 requires fixed ND [2048, 2048]; parent build() may set FRACTAL_NZ mask.
-            mask = AttentionMaskBuilder310.get_compressed_splitfuse_mask(query.device)
+            if attn_metadata.causal:
+                mask = AttentionMaskBuilder310.get_compressed_splitfuse_mask(query.device)
+            else:
+                mask = AttentionMaskBuilder310.get_compressed_non_causal_splitfuse_mask(query.device)
             torch_npu._npu_paged_attention_splitfuse_v2(
                 query=query,
                 key_cache=self.key_cache,
@@ -290,7 +302,10 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
             return output
 
         # Generate the specific mask for splitfuse
-        mask = AttentionMaskBuilder310.get_splitfuse_mask(attn_metadata, query.device)
+        if attn_metadata.causal:
+            mask = AttentionMaskBuilder310.get_splitfuse_mask(attn_metadata, query.device)
+        else:
+            mask = AttentionMaskBuilder310.get_non_causal_splitfuse_mask(attn_metadata, query.device)
         torch_npu._npu_paged_attention_splitfuse(
             query=query,
             key_cache=self.key_cache,

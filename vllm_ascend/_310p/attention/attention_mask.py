@@ -32,6 +32,7 @@ def is_compressed_mask_supported() -> bool:
 class AttentionMaskBuilder310:
     chunked_prefill_attn_mask = None
     compressed_chunked_prefill_attn_mask = None
+    compressed_non_causal_splitfuse_mask = None
     max_seqlen = 16384
 
     def __init__(self, device: torch.device, max_seqlen: int):
@@ -99,6 +100,36 @@ class AttentionMaskBuilder310:
         return splitfuse_mask_nz
 
     @classmethod
+    def get_non_causal_splitfuse_mask(cls, attn_metadata: AscendMetadata, device: torch.device):
+        """SplitFuse mask for full / non-causal attention (dflash/dspark draft).
+
+        Every query token must attend to the entire valid sequence ``[0, cl)``
+        (full context + all query tokens), and nothing beyond ``cl``.
+
+        A naive all-zero ``[num_query_tokens, max_seqlen]`` mask makes
+        ``_npu_paged_attention_splitfuse`` emit an all-zero output (the op
+        expects the same additive-mask structure as the causal path, where
+        out-of-range columns carry ``-inf``). Instead, reuse the causal additive
+        matrix and give every query token the row at ``cl - 1``: that row is 0
+        for columns ``< cl`` and ``-inf`` for columns ``>= cl``, i.e. full
+        attention over the valid sequence with the garbage tail masked. This
+        mirrors ``get_splitfuse_mask`` so the operator accepts it.
+        """
+        if cls.chunked_prefill_attn_mask is None:
+            cls.chunked_prefill_attn_mask = cls.gen_causal_additive_mask(cls.max_seqlen, device)
+        qsl = attn_metadata.query_start_loc.to("cpu", dtype=torch.int32)
+        qlens = qsl[1:] - qsl[:-1]
+        q_list = qlens.tolist()
+        context_lens = attn_metadata.seq_lens.to("cpu", dtype=torch.int32)
+        c_list = context_lens.tolist()
+        # Non-causal: all query tokens of a request share the last valid row (cl-1).
+        pos_list = [cl - 1 for ql, cl in zip(q_list, c_list) for _ in range(ql)]
+        position = torch.tensor(pos_list, dtype=torch.int32, device=device)
+        splitfuse_mask = cls.chunked_prefill_attn_mask.index_select(0, position)
+        splitfuse_mask_nz = torch_npu.npu_format_cast(nd_to_nz_spec(splitfuse_mask).contiguous(), ACL_FORMAT_FRACTAL_NZ)
+        return splitfuse_mask_nz
+
+    @classmethod
     def get_compressed_splitfuse_mask(cls, device: torch.device):
         """
         Generates the fixed ND attention mask for compressed SplitFuse PA.
@@ -118,6 +149,23 @@ class AttentionMaskBuilder310:
             mask = torch.triu(mask, diagonal=1)
             cls.compressed_chunked_prefill_attn_mask = mask.mul_(PAGED_ATTENTION_COMPRESSED_MASK_VALUE)
         return cls.compressed_chunked_prefill_attn_mask
+
+    @classmethod
+    def get_compressed_non_causal_splitfuse_mask(cls, device: torch.device):
+        """Fixed [2048, 2048] all-zero mask for compressed SplitFuse PA.
+
+        Matches ``sparse_mode=0`` / no-mask semantics on the generic path.
+        """
+        if (
+            cls.compressed_non_causal_splitfuse_mask is None
+            or cls.compressed_non_causal_splitfuse_mask.device != device
+        ):
+            cls.compressed_non_causal_splitfuse_mask = torch.zeros(
+                size=(COMPRESSED_MASK_SEQ_LEN, COMPRESSED_MASK_SEQ_LEN),
+                dtype=torch.float16,
+                device=device,
+            )
+        return cls.compressed_non_causal_splitfuse_mask
 
     def get_attention_mask(self, causal: bool, model_config) -> torch.Tensor:
         """
