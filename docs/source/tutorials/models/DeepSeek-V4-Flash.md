@@ -23,7 +23,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `DeepSeek-V4-Flash-w8a8-mtp` (Quantized version): requires 1 Atlas 800 A3 (128G × 8) node or 1 Atlas 800 A2 (64G × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp)
+- `DeepSeek-V4-Flash-w8a8-mtp` (Quantized version): requires 1 Atlas 800 A3 (128GB × 8) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -137,7 +137,7 @@ If you want to deploy a multi-node environment, you need to set up the environme
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node. The quantized model `DeepSeek-V4-Flash-w8a8-mtp` can be deployed on 1 Atlas 800 A3 (128G × 8) or 1 Atlas 800 A2 (64G × 8).
+Single-node deployment completes both Prefill and Decode within the same node. The quantized model `DeepSeek-V4-Flash-w8a8-mtp` can be deployed on 1 Atlas 800 A3 (128GB × 8) or 1 Atlas 800 A2 (64GB × 8).
 
 === "A2 series"
 
@@ -309,11 +309,11 @@ In the standard single-node deployment mode, Prefill (prompt processing) and Dec
 
 PD (Prefill-Decode) separation addresses these issues by running Prefill and Decode on dedicated node groups, each configured independently. This architecture is recommended for production deployments with concurrent multi-user workloads, where stable latency and high throughput are both required.
 
-The following sections describe PD separation deployment on both Atlas 800 A3 (128G × 8) and Atlas 800 A2 (64G × 8) multi-node environments.
+The following sections describe PD separation deployment on both Atlas 800 A3 (128GB × 8) and Atlas 800 A2 (64GB × 8) multi-node environments.
 
 #### 5.2.1 A3 Series PD Separation Deployment
 
-This section shows the deployment guide of DeepSeek-V4-Flash on Atlas 800 A3 (128G × 8) multi-node environment with 1P1D for better performance.
+This section shows the deployment guide of DeepSeek-V4-Flash on Atlas 800 A3 (128GB × 8) multi-node environment with 1P1D for better performance.
 
 Before you start, please:
 
@@ -922,8 +922,8 @@ Here are two accuracy evaluation methods.
 
 | dataset | version | metric | mode | vllm-api-general-chat | note |
 | ----- | ----- | ----- | ----- | ----- | ----- |
-| GPQA | - | accuracy | gen | 88.17 | 1 Atlas 800 A3 (128G × 8) |
-| GSM8K | - | accuracy | gen | 96.30 | 1 Atlas 800 A3 (128G × 8) |
+| GPQA | - | accuracy | gen | 88.17 | 1 Atlas 800 A3 (128GB × 8) |
+| GSM8K | - | accuracy | gen | 96.30 | 1 Atlas 800 A3 (128GB × 8) |
 
 ## 8 Performance Evaluation
 
@@ -967,7 +967,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more
 
 `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the [Deployment](#5-online-service-deployment) chapter.
 
-Currently, we support 4K prefix cache hit in an experimental manner. You only need to change the value of --block-size from 128 to 32 in the service.
+Currently, we support 4k prefix cache hit in an experimental manner. You only need to change the value of --block-size from 128 to 32 in the service.
 
 ### 9.2 Tuning Guidelines
 
