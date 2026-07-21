@@ -365,7 +365,8 @@ class AscendConfig:
         quant_description = getattr(quant_config, "quant_description", None)
         if not isinstance(quant_description, dict):
             return False
-        return any(isinstance(key, str) and key.endswith(".indexer.quant_type") for key in quant_description)
+        quant_suffixes = (".indexer.quant_type", ".indexer.wq_b_weight")
+        return any(isinstance(key, str) and key.endswith(quant_suffixes) for key in quant_description)
 
     @classmethod
     def _parse_sparse_li_c8_layers_from_quant_config(cls, quant_config: Any) -> tuple[set[int], set[str]]:

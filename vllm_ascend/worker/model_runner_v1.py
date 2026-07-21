@@ -4602,7 +4602,7 @@ class NPUModelRunner(GPUModelRunner):
                         assert raw_v_tensor is not None
                         v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape)
 
-                    if current_sparse_c8:
+                    if current_sparse_sfa_c8:
                         kv_caches[layer_name] = (k_cache,)
                     else:
                         assert v_cache is not None

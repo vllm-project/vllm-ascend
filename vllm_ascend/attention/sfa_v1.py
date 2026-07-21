@@ -1436,6 +1436,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             topk_indices_to_cache = topk_indices_to_cache.squeeze(1)
         topk_indices_buffer.copy_(topk_indices_to_cache)
 
+    def _use_li_c8_reshape_optim(self) -> bool:
+        """Whether this layer can use the LI C8 cache-write operator."""
+        return self.enable_sparse_li_c8 and get_ascend_config().c8_enable_reshape_optim
+
     def _execute_sparse_flash_attention_process(
         self, ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
     ):
@@ -1786,6 +1790,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if kv_cache is not None and self.has_indexer:
             assert k_li is not None
+            use_li_c8_reshape_optim = self._use_li_c8_reshape_optim()
             if self.enable_sparse_sfa_c8:
                 dsa_k_cache_idx = 1
                 dsa_k_scale_cache_idx = 2
@@ -1793,7 +1798,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 dsa_k_cache_idx = 2
                 dsa_k_scale_cache_idx = 3
 
-            if get_ascend_config().c8_enable_reshape_optim:
+            if use_li_c8_reshape_optim:
                 torch.ops._C_ascend.store_kv_block(
                     k_li,
                     kv_cache[dsa_k_cache_idx],
@@ -1811,7 +1816,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.enable_sparse_li_c8:
                 assert len(kv_cache) == (3 if self.enable_sparse_sfa_c8 else 4)
                 if k_li_scale is not None:
-                    if get_ascend_config().c8_enable_reshape_optim:
+                    if use_li_c8_reshape_optim:
                         torch.ops._C_ascend.store_kv_block(
                             k_li_scale,
                             kv_cache[dsa_k_scale_cache_idx],

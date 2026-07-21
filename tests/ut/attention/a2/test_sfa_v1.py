@@ -22,6 +22,7 @@ from vllm_ascend.attention.sfa_v1 import (
     custom_kv_rmsnorm_rope,
 )
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
+from vllm_ascend.device.device_op import BaseDeviceAdaptor
 from vllm_ascend.utils import enable_dsa_cp
 
 
@@ -106,6 +107,75 @@ class TestAscendSFACacheComposition(TestBase):
                 self.assertEqual(len(composed), len(expected))
                 for actual_tensor, expected_tensor in zip(composed, expected):
                     self.assertIs(actual_tensor, expected_tensor)
+
+    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
+    def test_li_c8_reshape_optim_requires_layer_li_c8(self, mock_get_ascend_config):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        mock_get_ascend_config.return_value.c8_enable_reshape_optim = True
+
+        impl.enable_sparse_li_c8 = False
+        self.assertFalse(impl._use_li_c8_reshape_optim())
+
+        impl.enable_sparse_li_c8 = True
+        self.assertTrue(impl._use_li_c8_reshape_optim())
+
+        mock_get_ascend_config.return_value.c8_enable_reshape_optim = False
+        self.assertFalse(impl._use_li_c8_reshape_optim())
+
+    @patch(
+        "vllm_ascend.device.device_op.torch.ops._C_ascend.npu_lightning_indexer_quant",
+        create=True,
+    )
+    def test_li_c8_indexer_uses_cache_slots_after_main_cache(self, mock_indexer):
+        expected_topk = torch.zeros(2, 1, 4, dtype=torch.int32)
+        mock_indexer.return_value = expected_topk
+        q_li = torch.zeros(2, 1, 128, dtype=torch.int8)
+        q_li_scale = torch.ones(2, 1, dtype=torch.float16)
+        weights = torch.ones(2, 1, dtype=torch.bfloat16)
+        attn_metadata = SimpleNamespace(
+            block_table=torch.zeros(1, 2, dtype=torch.int32)
+        )
+
+        for enable_sfa_c8 in (False, True):
+            with self.subTest(enable_sfa_c8=enable_sfa_c8):
+                main_cache = (
+                    (torch.empty(2, 16, 1, 656, dtype=torch.int8),)
+                    if enable_sfa_c8
+                    else (
+                        torch.empty(2, 16, 1, 512, dtype=torch.bfloat16),
+                        torch.empty(2, 16, 1, 64, dtype=torch.bfloat16),
+                    )
+                )
+                indexer_k_cache = torch.empty(2, 16, 1, 128, dtype=torch.int8)
+                indexer_scale_cache = torch.empty(2, 16, 1, 1, dtype=torch.float16)
+                kv_cache = (*main_cache, indexer_k_cache, indexer_scale_cache)
+                impl = SimpleNamespace(
+                    enable_sparse_sfa_c8=enable_sfa_c8,
+                    use_torch_npu_lightning_indexer=False,
+                )
+                mock_indexer.reset_mock()
+
+                result = BaseDeviceAdaptor.indexer_select_post_process(
+                    impl,
+                    q_li,
+                    q_li_scale,
+                    q_li.shape,
+                    weights,
+                    kv_cache,
+                    attn_metadata,
+                    torch.tensor([2], dtype=torch.int32),
+                    torch.tensor([2], dtype=torch.int32),
+                    True,
+                    False,
+                )
+
+                self.assertIs(result, expected_topk)
+                call_kwargs = mock_indexer.call_args.kwargs
+                self.assertIs(call_kwargs["key"], indexer_k_cache)
+                self.assertEqual(
+                    call_kwargs["key_dequant_scale"].data_ptr(),
+                    indexer_scale_cache.data_ptr(),
+                )
 
 
 class TestAscendSFAKVQuantSparseAttention(TestBase):
