@@ -36,8 +36,8 @@ No additional packages need to be installed; it can be enabled through command-l
 Start the online service and set the `--profiler-config` parameter to control the path for saving performance files. After the parameter is set, the collection function is enabled.
 
 ```bash
-VLLM_PROMPT_SEQ_BUCKET_MAX=128
-VLLM_PROMPT_SEQ_BUCKET_MIN=128
+export VLLM_PROMPT_SEQ_BUCKET_MAX=128
+export VLLM_PROMPT_SEQ_BUCKET_MIN=128
 python3 -m vllm.entrypoints.openai.api_server \
 --port 8080 \
 --model "facebook/opt-125m" \
@@ -48,7 +48,7 @@ python3 -m vllm.entrypoints.openai.api_server \
 --max-model-len 256
 ```
 
-> Note:**January 19, 2026: The vLLM mainline has deprecated the VLLM_TORCH_PROFILER_DIR environment variable.**[Related PR](https://github.com/vllm-project/vllm-ascend/pull/5928)  When using the vLLM Ascend mainline code to collect profiler data, remember to use the `--profiler-config` (online) parameter or the `profiler_config` (offline) parameter.
+> Note: **January 19, 2026: The vLLM mainline has deprecated the VLLM_TORCH_PROFILER_DIR environment variable.** [Related PR](https://github.com/vllm-project/vllm-ascend/pull/5928)  When using the vLLM Ascend mainline code to collect profiler data, remember to use the `--profiler-config` (online) parameter or the `profiler_config` (offline) parameter.
 
 ### 2. Start Collection
 
@@ -111,8 +111,6 @@ After analysis, the `*ascend_pt` directory will contain many files, with the mai
 - `step_trace_time.csv`: Scheduling data
 
 - `trace_view.json`: Chrome tracing format data, can be opened with [MindStudio Insight](https://www.hiascend.com/document/detail/zh/mindstudio/81RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html)
-
-[↑ Back to Top](#service-profiling-guide)
 
 ---
 
@@ -193,8 +191,6 @@ After parsing, the `output` directory will contain:
 
 ### 6. Appendix related to MS Service Profiler
 
-(profiling-configuration-file)=
-
 #### 6.1 Profiling Configuration File
 
 The profiling configuration file controls profiling parameters and behavior.
@@ -229,15 +225,13 @@ The configuration is in JSON format. Main parameters:
 
 ---
 
-(symbols-configuration-file)=
-
 #### 6.2 Symbols Configuration File
 
 The symbols configuration file defines which functions/methods to profile and supports flexible configuration with custom attribute collection.
 
 ##### File Name and Loading
 
-- Default load path:`~/.config/vllm_ascend/service_profiling_symbols.MAJOR.MINOR.PATCH.yaml`( According to the installed version of vllm )
+- Default load path: `~/.config/vllm_ascend/service_profiling_symbols.MAJOR.MINOR.PATCH.yaml` (According to the installed version of vllm)
 
 If you need to customize the profiling points, it is highly recommended to copy a symbol configuration file to your working directory and point to it with the `PROFILING_SYMBOLS_PATH` environment variable.
 
@@ -367,5 +361,3 @@ def custom_handler(original_func, this, *args, **kwargs):
 ```
 
 If the custom handler fails to import, the system will automatically fall back to the default timer mode.
-
-[↑ Back to Top](#service-profiling-guide)

@@ -102,8 +102,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "lightning_indexer"
         "sparse_flash_attention"
         "kv_quant_sparse_flash_attention"
-        "matmul_allreduce_add_rmsnorm"
-        "moe_init_routing_custom"
         "moe_gating_top_k"
         "moe_gating_top_k_hash"
         "add_rms_norm_bias"
@@ -127,14 +125,12 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "dequant_swiglu_quant"
         "grouped_matmul_swiglu_quant"
         "grouped_matmul_swiglu_quant_v2"
-        "hamming_dist_top_k"
-        "reshape_and_cache_bnsd"
         "recurrent_gated_delta_rule"
-        "fused_gdn_gating"
         "ngram_spec_decode"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
         "store_kv_block"
+        "store_kv_block_metadata"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
@@ -154,8 +150,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "dispatch_ffn_combine"
         "dispatch_ffn_combine_w4_a8"
         "dispatch_ffn_combine_bf16"
-        "dispatch_gmm_combine_decode"
-        "moe_init_routing_custom"
         "moe_gating_top_k"
         "moe_gating_top_k_hash"
         "add_rms_norm_bias"
@@ -180,14 +174,12 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "dequant_swiglu_quant"
         "grouped_matmul_swiglu_quant"
         "grouped_matmul_swiglu_quant_v2"
-        "hamming_dist_top_k"
-        "reshape_and_cache_bnsd"
         "recurrent_gated_delta_rule"
-        "fused_gdn_gating"
         "ngram_spec_decode"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
         "store_kv_block"
+        "store_kv_block_metadata"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
@@ -220,6 +212,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
         "store_kv_block"
+        "store_kv_block_metadata"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")

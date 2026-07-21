@@ -398,7 +398,7 @@ class ShortRequestFirstSchedulerMixin:
 
         if immediate_predicate is None:
             immediate_predicate = self._is_recovery_request
-        short_request_first_config = get_ascend_config().short_request_first_config
+        short_request_first_config = get_ascend_config().scheduler_config.short_request_first_config
         self.waiting = ShortRequestFirstRequestQueue(
             policy=self.policy,
             threshold=short_request_first_config.threshold,

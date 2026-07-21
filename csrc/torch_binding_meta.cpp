@@ -45,20 +45,6 @@ c10::SymInt ceil_div(const c10::SymInt& value, int64_t divisor)
 }
 
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
-std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask_meta(
-    at::Tensor &input,
-    const int64_t org_vocab_start_index,
-    const int64_t org_vocab_end_index,
-    const int64_t num_org_vocab_padding,
-    const int64_t added_vocab_start_index,
-    const int64_t added_vocab_end_index) {
-
-    at::Tensor masked_input = at::empty_like(input);
-    at::Tensor mask = at::empty_like(input, input.options().dtype(at::kBool));
-
-    return {masked_input, mask};
-}
-
 at::Tensor bgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y,
                         int64_t slice_offset, int64_t slice_size) {
     at::Tensor y_out = at::empty_like(y);
@@ -198,40 +184,6 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_v2_meta(
 
     return std::tuple<at::Tensor, at::Tensor>(output, output_scale);
 }
-std::tuple<at::Tensor, at::Tensor> dispatch_gmm_combine_decode_meta(
-    const at::Tensor &x,
-    const at::Tensor &expert_ids,
-    const at::TensorList &gmm1_permuted_weight,
-    const at::TensorList &gmm1_permuted_weight_scale,
-    const at::TensorList &gmm2_weight,
-    const at::TensorList &gmm2_weight_scale,
-    const at::Tensor &expert_scales,
-    const c10::optional<at::Tensor> &expert_smooth_scales,
-    const c10::optional<at::Tensor> &x_active_mask,
-    c10::string_view group_ep,
-    int64_t ep_rank_size,
-    int64_t ep_rank_id,
-    int64_t moe_expert_num,
-    int64_t shared_expert_num,
-    int64_t shared_expert_rank_num,
-    int64_t quant_mode,
-    int64_t global_bs)
-{
-    auto bs = x.sym_size(0);
-    auto h = x.sym_size(1);
-
-    c10::SymDimVector output_shape = {bs, h};
-    at::Tensor output = at::empty_symint(output_shape, x.options().device(at::kMeta));
-
-    bool is_shared_expert = (ep_rank_id < shared_expert_rank_num);
-    int64_t num_local_experts = is_shared_expert ? 1 : moe_expert_num / (ep_rank_size - shared_expert_rank_num);
-    auto opts = expert_ids.options().dtype(at::kLong);
-    c10::SymDimVector expert_token_nums_shape = {c10::SymInt(num_local_experts)};
-    at::Tensor expert_token_nums = at::empty_symint(expert_token_nums_shape, opts.device(at::kMeta));
-
-    return {output, expert_token_nums};
-}
-
 std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
     const at::Tensor& x,
     const at::TensorList& weight1,
@@ -424,111 +376,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_kv_quant_sparse_flash_attenti
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, softmax_max, softmax_sum);
 }
 
-std::tuple<at::Tensor, at::Tensor> matmul_allreduce_add_rmsnorm_meta(
-    const at::Tensor &x1,
-    const at::Tensor &x2,
-    const at::Tensor &residual,
-    const at::Tensor &gamma,
-    c10::string_view group_tp,
-    int64_t tp_rank_size,
-    int64_t tp_rank_id,
-    double epsilon,
-    bool is_trans_b,
-    bool is_gather_add_out)
-    {
-        at::Tensor output = at::empty_like(residual);
-        at::Tensor add_out = at::empty_like(residual);
-
-        return {output, add_out};
-    }
-
-std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_moe_init_routing_custom_meta(
-    const at::Tensor &x, const at::Tensor &expert_idx,
-    const c10::optional<at::Tensor> &scale, const c10::optional<at::Tensor> &offset, int64_t active_num,
-    int64_t expert_capacity, int64_t expert_num, int64_t drop_pad_mode, int64_t expert_tokens_num_type,
-    bool expert_tokens_num_flag, int64_t quant_mode, at::IntArrayRef active_expert_range, int64_t row_idx_type)
-{
-    constexpr int64_t DIM_X = 2;
-    constexpr int64_t DIM_EXPERT_IDX = 2;
-    constexpr int64_t LENGTH_ACTIVE_EXPERT_RANGE = 2;
-    constexpr int64_t EXPERT_TOKENS_COUNT = 1;
-    constexpr int64_t EXPERT_TOKENS_KEY_VALUE = 2;
-    constexpr int64_t QUANT_MODE_UNQUANT = -1;
-    constexpr int64_t QUANT_MODE_DYNAMIC_QUANT = 1;
-    constexpr int64_t CUMSUM = 0;
-    constexpr int64_t COUNT = 1;
-    constexpr int64_t KEY_VALUE = 2;
-
-    if (active_expert_range.empty()) {
-        active_expert_range =  at::IntArrayRef({0, expert_num});
-    }
-
-    int64_t x_dim = x.dim();
-    TORCH_CHECK(x_dim == DIM_X, "The x should be ", DIM_X,
-                "-Dimension, current is ", x_dim, "-Dimension.");
-
-    int64_t expert_idx_dim = expert_idx.dim();
-    TORCH_CHECK(expert_idx_dim == DIM_EXPERT_IDX, "The expert_idx should be ", DIM_EXPERT_IDX,
-                "-Dimension, current is ", expert_idx_dim, "-Dimension.");
-
-    // symbolic-meta-ok: active_expert_range is an IntArrayRef schema argument, not a Tensor shape.
-    int64_t active_expert_range_length = active_expert_range.size();
-    TORCH_CHECK(active_expert_range_length == LENGTH_ACTIVE_EXPERT_RANGE, "The active_expert_range should be ", LENGTH_ACTIVE_EXPERT_RANGE,
-                "-Dimension, current is ", expert_idx_dim, "-Dimension.");
-
-    int expert_length = active_expert_range[1] - active_expert_range[0];
-    auto bs = x.sym_size(0);
-    auto h = x.sym_size(1);
-    auto k = expert_idx.sym_size(1);
-    c10::SymInt expanded_scale_len(0);
-    at::Tensor expanded_x;
-
-    if (drop_pad_mode == 1) { // Drop/Pad
-        c10::SymDimVector expanded_x_shape = {c10::SymInt(expert_num), c10::SymInt(expert_capacity), h};
-        if (quant_mode == QUANT_MODE_UNQUANT) {
-            expanded_x = at::empty_symint(expanded_x_shape, x.options());
-        } else {
-            expanded_x = at::empty_symint(expanded_x_shape, x.options().dtype(at::kChar));
-        }
-        expanded_scale_len = c10::SymInt(expert_num * expert_capacity);
-    } else { // Dropless / Active
-        if (active_num > 0) { // Active
-            c10::SymInt num_out_tokens = (bs * k).min(c10::SymInt(active_num));
-            c10::SymDimVector expanded_x_shape = {num_out_tokens, h};
-            if (quant_mode == QUANT_MODE_UNQUANT) {
-                expanded_x = at::empty_symint(expanded_x_shape, x.options());
-            } else {
-                expanded_x = at::empty_symint(expanded_x_shape, x.options().dtype(at::kChar));
-            }
-            expanded_scale_len = num_out_tokens;
-        } else { // Dropless
-            c10::SymDimVector expanded_x_shape = {bs * k, h};
-            if (quant_mode == QUANT_MODE_UNQUANT) {
-                expanded_x = at::empty_symint(expanded_x_shape, x.options());
-            } else {
-                expanded_x = at::empty_symint(expanded_x_shape, x.options().dtype(at::kChar));
-            }
-            expanded_scale_len = bs * k;
-        }
-    }
-
-    c10::SymDimVector expanded_row_idx_shape = {bs * k};
-    at::Tensor expanded_row_idx = at::empty_symint(expanded_row_idx_shape, expert_idx.options());
-    at::Tensor expert_tokens_count_or_cumsum;
-    if (expert_tokens_num_type >= CUMSUM && expert_tokens_num_type <= COUNT) {
-        // expert_tokens_count_or_cumsum in [end-start, ]
-        expert_tokens_count_or_cumsum = at::empty_symint(
-            c10::SymDimVector{c10::SymInt(expert_length)}, x.options().dtype(at::kLong));
-    } else if (expert_tokens_num_type == KEY_VALUE) {
-        // key_value in [2, end-start]
-        expert_tokens_count_or_cumsum = at::empty_symint(
-            c10::SymDimVector{c10::SymInt(expert_num), c10::SymInt(2)}, x.options().dtype(at::kLong));
-    }
-
-    at::Tensor expanded_scale = at::empty_symint(
-        c10::SymDimVector{expanded_scale_len}, x.options().dtype(at::kFloat));
-    return {expanded_x, expanded_row_idx, expert_tokens_count_or_cumsum, expanded_scale};
-}
 std::tuple<at::Tensor,at::Tensor, at::Tensor> moe_gating_top_k_meta(
     const at::Tensor& x,
     int64_t k,
@@ -593,44 +440,6 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
     at::Tensor y = at::empty_symint(x1.sym_sizes(), x1.options());
     at::Tensor x = at::empty_symint(x1.sym_sizes(), x1.options());
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, rstd, x);
-}
-
-at::Tensor npu_reshape_and_cache_bnsd_meta(const at::Tensor& hashq,
-                                           const at::Tensor& hashkCache,
-                                           const at::Tensor& slotMapping,
-                                           const at::Tensor& seqLen,
-                                           const at::Tensor& hashkCacheOut) {
-    at::Tensor output = at::empty_symint(
-        hashkCache.sym_sizes(), hashkCache.options().dtype(hashkCache.dtype()).device(hashkCache.device()));
-    return output;
-}
-
-
-at::Tensor npu_hamming_dist_top_k_meta(const at::Tensor &hashq,
-                                       const at::Tensor &hashkCache,
-                                       const at::Tensor& hashkCacheRope,
-                                       const at::Tensor &topN,
-                                       const at::Tensor &seqLen,
-                                       const c10::optional<at::Tensor> &chunkSize,
-                                       const c10::optional<int64_t> maxSeqLen,
-                                       const c10::optional<int64_t> sink,
-                                       const c10::optional<int64_t> recent,
-                                       const c10::optional<int64_t> supportOffload,
-                                       const c10::optional<at::Tensor> &blockTable,
-                                       const c10::optional<at::Tensor> &mask,
-                                       const c10::optional<at::Tensor>& indices) {
-    if (indices.has_value()) {
-        return at::empty_like(indices.value());
-    }
-    uint32_t MAX_BLOCK_PER_REQ_INHSA = 512;
-
-    auto n_bs = hashq.sym_size(0);
-    auto n_kv_heads = hashkCache.sym_size(1);
-    auto n_max_kv = MAX_BLOCK_PER_REQ_INHSA;
-    at::Tensor out = at::empty_symint(
-        c10::SymDimVector{n_bs, n_kv_heads, c10::SymInt(n_max_kv)},
-        torch::TensorOptions().dtype(torch::kInt32).device(hashq.device()));
-    return out;
 }
 
 at::Tensor npu_sign_bits_pack_meta(const at::Tensor& input,
@@ -787,27 +596,6 @@ at::Tensor npu_recurrent_gated_delta_rule_meta(
     auto options = value.options().dtype(at::ScalarType::BFloat16);
     at::Tensor output = at::empty_symint(value.sym_sizes(), options);
     return output;
-}
-
-std::tuple<at::Tensor, at::Tensor> npu_fused_gdn_gating_meta(
-    const at::Tensor& A_log,
-    const at::Tensor& a,
-    const at::Tensor& b,
-    const at::Tensor& dt_bias,
-    double beta,
-    double threshold)
-{
-    (void)beta;
-    (void)threshold;
-    auto batch = a.sym_size(0);
-    auto num_heads = a.sym_size(1);
-
-    at::Tensor g = at::empty_symint(
-        c10::SymDimVector{c10::SymInt(1), batch, num_heads}, a.options().dtype(c10::kFloat));
-    at::Tensor beta_output = at::empty_symint(
-        c10::SymDimVector{c10::SymInt(1), batch, num_heads}, b.options());
-
-    return std::make_tuple(g, beta_output);
 }
 
 std::vector<at::Tensor> moe_grouped_matmul_meta(
@@ -1706,19 +1494,15 @@ at::Tensor chunk_fwd_o_meta(
     return o;
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> store_kv_block_pre(
+void store_kv_block_metadata(
     const at::Tensor &slot_mapping_npu,
-    at::IntArrayRef slot_mapping_list,
+    const at::Tensor &group_len,
+    const at::Tensor &group_key_idx,
+    const at::Tensor &group_key_cache_idx,
     int64_t block_size)
-{
-    auto s_size = slot_mapping_npu.sym_size(0);
-    c10::SymDimVector output_size = {s_size};
-    at::Tensor group_len = at::empty_symint(output_size, slot_mapping_npu.options());
-    at::Tensor group_key_idx = at::empty_symint(output_size, slot_mapping_npu.options());
-    at::Tensor group_key_cache_idx = at::empty_symint(output_size, slot_mapping_npu.options());
-    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(group_len, group_key_idx, group_key_cache_idx);
-
-}
+ {
+    return;
+ }
 
 void store_kv_block(
     const at::Tensor &key_in,
@@ -1730,7 +1514,7 @@ void store_kv_block(
 {
     return;
 
-} 
+}
 
 } // namespace meta
 } // namespace vllm_ascend
@@ -1765,7 +1549,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("device_print_tensor", &vllm_ascend::meta::device_print_tensor_meta);
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
     // Direct kernel meta implementations
-    ops.impl("get_masked_input_and_mask", &vllm_ascend::meta::get_masked_input_and_mask_meta);
     // Bgmv expand
     ops.impl("bgmv_expand", &vllm_ascend::meta::bgmv_expand_meta);
     // Sgmv expand
@@ -1783,8 +1566,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("grouped_matmul_swiglu_quant_weight_nz_tensor_list", &vllm_ascend::meta::grouped_matmul_swiglu_quant_weight_nz_tensor_list_meta);
     // Grouped matmul swiglu quant v2
     ops.impl("grouped_matmul_swiglu_quant_v2", &vllm_ascend::meta::grouped_matmul_swiglu_quant_v2_meta);
-    // dispatch_gmm_combine_decode meta implementation
-    ops.impl("dispatch_gmm_combine_decode", &vllm_ascend::meta::dispatch_gmm_combine_decode_meta);
     // Lightning indexer
     ops.impl("npu_lightning_indexer", &vllm_ascend::meta::npu_lightning_indexer_meta);
     // Sparse flash attention
@@ -1793,20 +1574,12 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
              &vllm_ascend::meta::npu_kv_quant_sparse_flash_attention_meta);
     // MoE dispatch-ffn-combine
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
-    // matmul allreduce add rmsnorm
-    ops.impl("matmul_allreduce_add_rmsnorm", &vllm_ascend::meta::matmul_allreduce_add_rmsnorm_meta);
-    // moe_init_routing_custom
-    ops.impl("npu_moe_init_routing_custom", &vllm_ascend::meta::npu_moe_init_routing_custom_meta);
     // Moe_gating_top_k
     ops.impl("moe_gating_top_k", &vllm_ascend::meta::moe_gating_top_k_meta);
     // Add_Rms_Norm_Bias
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
     // transpose_kv_cache_by_block
     ops.impl("transpose_kv_cache_by_block", &vllm_ascend::meta::transpose_kv_cache_by_block_meta);
-    // hamming_dist_top_k
-    ops.impl("npu_hamming_dist_top_k", &vllm_ascend::meta::npu_hamming_dist_top_k_meta);
-    // reshape_and_cache_bnsd
-    ops.impl("npu_reshape_and_cache_bnsd", &vllm_ascend::meta::npu_reshape_and_cache_bnsd_meta);
     // npu_sign_bits_pack
     ops.impl("npu_sign_bits_pack", &vllm_ascend::meta::npu_sign_bits_pack_meta);
     // CopyAndExpandEagleInputs
@@ -1848,10 +1621,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     // chunk_fwd_o
     ops.impl("chunk_fwd_o", &vllm_ascend::meta::chunk_fwd_o_meta);
      // store_kv_block
-    ops.impl("store_kv_block_pre", &vllm_ascend::meta::store_kv_block_pre);
+    ops.impl("store_kv_block_pre", &vllm_ascend::meta::store_kv_block_metadata);
     ops.impl("store_kv_block", &vllm_ascend::meta::store_kv_block);
-    // npu_fused_gdn_gating
-    ops.impl("npu_fused_gdn_gating", &vllm_ascend::meta::npu_fused_gdn_gating_meta);
 }
 }
 #endif
