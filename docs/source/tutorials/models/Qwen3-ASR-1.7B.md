@@ -138,7 +138,7 @@ Single-node deployment runs both audio prefill and decoding on one NPU, making i
         - `--gpu-memory-utilization 0.9` sets the fraction of device memory available to the vLLM executor. Lower this value if other workloads share the NPU.
         - `--enforce-eager` disables graph execution. It is used in the Atlas 300I A2 2UP example for compatibility.
 
-When the service starts successfully, the log contains `Application startup complete`. If startup fails, see the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) and the [Atlas inference products guide](../hardwares/310p.md).
+When the service starts successfully, the log contains `Application startup complete`. If startup fails, see the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
 
 ## 6 Functional Verification
 
@@ -201,4 +201,4 @@ For common environment, installation, and general parameter issues, see the [Pub
 
 **Cause:** On Atlas inference products, an automatically detected large context length can create a full causal attention mask whose memory consumption grows quadratically with `max_model_len`.
 
-**Solution:** Always set `--max-model-len` explicitly to a conservative value, such as `4096`, and increase it only after verifying available NPU memory. See the [Atlas inference products guide](../hardwares/310p.md) for details.
+**Solution:** Always set `--max-model-len` explicitly to a conservative value, such as `4096`, and increase it only after verifying available NPU memory.
