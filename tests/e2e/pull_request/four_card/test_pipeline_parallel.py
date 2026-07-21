@@ -22,6 +22,11 @@ import pytest
 from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
 from tests.e2e.model_utils import check_outputs_equal
 
+pytestmark = pytest.mark.skipif(
+    os.getenv("ENABLE_COVERAGE") == "true",
+    reason="Temporarily skipped in coverage runs",
+)
+
 DS3 = "deepseek-ai/DeepSeek-V2-Lite-Chat"
 MODELS = [
     DS3,
