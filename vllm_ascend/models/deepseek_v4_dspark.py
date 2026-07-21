@@ -49,6 +49,7 @@ DSPARK_WO_A_DEQUANT_BLOCK_SIZE = 128
 DSPARK_DEFAULT_BLOCK_SIZE = 5
 DSPARK_DEFAULT_NUM_LAYERS = 3
 DSPARK_SAS_OP_NAMESPACES = ("_ascend_dsv4", "_ascend_v4", "custom")
+DSparkFusedAttentionMetadata = tuple[int, torch.Tensor, torch.Tensor, torch.Tensor]
 
 
 def _get_dspark_sas_op(name: str):
@@ -199,6 +200,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         importlib.import_module("ascend_ops")
         self.dspark_sparse_attn_op = _get_dspark_sas_op("npu_sparse_attn_sharedkv")
         self.dspark_sparse_attn_metadata_op = _get_dspark_sas_op("npu_sparse_attn_sharedkv_metadata")
+        self._dspark_fused_attn_metadata_cache: dict[tuple[object, ...], DSparkFusedAttentionMetadata] = {}
         self.compress_ratio = 0
         self.dsa_attn.compress_ratio = 0
         # DSpark uses the uncompressed SWA cache as its context cache. Disable
@@ -348,9 +350,23 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         device: torch.device,
         batch_size: int,
         draft_len: int,
-    ) -> tuple[int, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> DSparkFusedAttentionMetadata:
         total_tokens = self.window_size + draft_len
         blocks_per_request = (total_tokens + self.pa_block_size - 1) // self.pa_block_size
+        key = (
+            device.type,
+            device.index,
+            batch_size,
+            draft_len,
+            total_tokens,
+            self.pa_block_size,
+            self.n_local_heads,
+            self.head_dim,
+            self.window_size,
+        )
+        cached = self._dspark_fused_attn_metadata_cache.get(key)
+        if cached is not None:
+            return cached
         block_table = torch.arange(
             batch_size * blocks_per_request,
             dtype=torch.int32,
@@ -376,7 +392,9 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             has_ori_kv=True,
             has_cmp_kv=False,
         )
-        return blocks_per_request, block_table, seqused_kv, metadata
+        fused_attention_metadata = (blocks_per_request, block_table, seqused_kv, metadata)
+        self._dspark_fused_attn_metadata_cache[key] = fused_attention_metadata
+        return fused_attention_metadata
 
     def _dspark_attention_from_cache(
         self,
@@ -615,6 +633,9 @@ class DeepseekV4DSparkModel(nn.Module):
         last_layer.hc_head_fn = self.hc_head_fn
         last_layer.hc_head_base = self.hc_head_base
         last_layer.hc_head_scale = self.hc_head_scale
+        shared_fused_attn_metadata_cache: dict[tuple[object, ...], DSparkFusedAttentionMetadata] = {}
+        for layer in self.layers.values():
+            layer.self_attn._dspark_fused_attn_metadata_cache = shared_fused_attn_metadata_cache
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         if self.embed_tokens is None:
@@ -638,6 +659,19 @@ class DeepseekV4DSparkModel(nn.Module):
     def reset_request_slots(self, request_slots: torch.Tensor | None) -> None:
         for layer in self.layers.values():
             layer.self_attn.reset_request_slots(request_slots)
+
+    def prepare_fused_attention_metadata(
+        self,
+        device: torch.device,
+        batch_size: int,
+        draft_len: int,
+    ) -> DSparkFusedAttentionMetadata:
+        first_layer = self.layers[str(self.mtp_start_layer_idx)]
+        return first_layer.self_attn._get_dspark_fused_attention_metadata(
+            device,
+            batch_size,
+            draft_len,
+        )
 
     def sync_context_cache_from_paged(
         self,
@@ -750,6 +784,14 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
             slot_mapping=slot_mapping,
             block_table=block_table,
         )
+
+    def prepare_fused_attention_metadata(
+        self,
+        device: torch.device,
+        batch_size: int,
+        draft_len: int,
+    ) -> DSparkFusedAttentionMetadata:
+        return self.model.prepare_fused_attention_metadata(device, batch_size, draft_len)
 
     def compute_logits(self, hidden_states: torch.Tensor, spec_step_idx: int = 0) -> torch.Tensor | None:
         del spec_step_idx

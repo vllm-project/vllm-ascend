@@ -325,6 +325,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                 f"{num_input_tokens} tokens for block_size={block_size}"
             )
         graph_batch_size = num_input_tokens // block_size
+        self._prepare_dspark_fused_attention_metadata(graph_batch_size)
 
         with set_ascend_forward_context(
             None,
@@ -571,6 +572,13 @@ class AscendDSparkProposer(AscendDflashProposer):
             "slot_mapping": self._slot_mapping_buffer[:num_input_tokens],
             "block_table": self._dspark_block_table_tensor,
         }
+
+    def _prepare_dspark_fused_attention_metadata(self, batch_size: int):
+        return self.model.prepare_fused_attention_metadata(
+            self.device,
+            batch_size,
+            self.num_speculative_tokens,
+        )
 
     def _reset_pending_request_slots(self) -> None:
         if not self._dspark_slots_to_reset:
@@ -855,13 +863,18 @@ class AscendDSparkProposer(AscendDflashProposer):
             num_tokens_across_dp = num_tokens_across_dp.clone()
             num_tokens_across_dp[:] = num_input_tokens
         graph_batch_size = num_input_tokens // block_size
+        model_num_actual_tokens = (
+            num_input_tokens if aclgraph_runtime_mode != CUDAGraphMode.NONE else num_tokens
+        )
 
         with set_ascend_forward_context(
             None,
             self.vllm_config,
             num_tokens=num_input_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
-            num_actual_tokens=num_tokens,
+            # Full graph executes the padded DSpark batch. The proposal is
+            # cropped back to actual_num_reqs after graph replay.
+            num_actual_tokens=model_num_actual_tokens,
             batch_descriptor=batch_descriptor,
             aclgraph_runtime_mode=aclgraph_runtime_mode,
             is_draft_model=True,
@@ -881,6 +894,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                     device=self.device,
                 )
             else:
+                self._prepare_dspark_fused_attention_metadata(graph_batch_size)
                 run_kwargs = dict(
                     num_input_tokens=num_input_tokens,
                     batch_size=graph_batch_size,
