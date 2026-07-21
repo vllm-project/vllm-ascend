@@ -5,15 +5,11 @@ import pytest
 from vllm.config import ParallelConfig
 
 from vllm_ascend.distributed.parallel_state import (
-    _FLASHCOMM2_ODP,
-    _FLASHCOMM2_OTP,
     _LMTP,
     _MC2,
     _OTP,
     _P_TP,
     destroy_ascend_model_parallel,
-    get_flashcomm2_odp_group,
-    get_flashcomm2_otp_group,
     get_global_rank,
     get_lmhead_tp_group,
     get_mc2_group,
@@ -39,11 +35,9 @@ def mock_distributed():
         patch("torch.distributed.get_world_size", return_value=16),
         patch("torch.distributed.get_backend", return_value="nccl"),
         patch("vllm_ascend.distributed.parallel_state.get_world_group") as mock_group,
-        patch("vllm_ascend.distributed.parallel_state.get_tp_group") as mock_tp_group,
     ):
         mock_group.return_value.local_rank = 0
         mock_group.return_value.device_group = MagicMock()
-        mock_tp_group.return_value.world_size = 4
         yield
 
 
@@ -53,11 +47,9 @@ def test_init_ascend_model_parallel(mock_distributed, parallel_config):
     mock_ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = 2
     mock_ascend_config.finegrained_tp_config.embedding_tensor_parallel_size = 2
     mock_ascend_config.finegrained_tp_config.mlp_tensor_parallel_size = 2
-    mock_ascend_config.flashcomm2_oproj_tensor_parallel_size = 2
     mock_ascend_config.pd_tp_ratio = 2
     mock_ascend_config.num_head_replica = 0
     mock_ascend_config.pd_head_ratio = 2
-    mock_ascend_config.enable_flashcomm2_parallel_size = 2
     mock_ascend_config.enable_context_parallel = False
     mock_vllm_config = MagicMock()
     mock_vllm_config.kv_transfer_config.is_kv_producer = True
@@ -73,13 +65,9 @@ def test_init_ascend_model_parallel(mock_distributed, parallel_config):
         mc2_group = get_mc2_group()
         lmheadtp_group = get_lmhead_tp_group()
         otp_group = get_otp_group()
-        flashcomm2_otp_group = get_flashcomm2_otp_group()
-        flashcomm2_odp_group = get_flashcomm2_odp_group()
         p_tp_group = get_p_tp_group()
         assert mc2_group is not None
         assert otp_group is not None
-        assert flashcomm2_otp_group is not None
-        assert flashcomm2_odp_group is not None
         assert lmheadtp_group is not None
         assert p_tp_group is not None
 
@@ -87,8 +75,6 @@ def test_init_ascend_model_parallel(mock_distributed, parallel_config):
         assert _MC2 is None
         assert _LMTP is None
         assert _OTP is None
-        assert _FLASHCOMM2_OTP is None
-        assert _FLASHCOMM2_ODP is None
         assert _P_TP is None
 
 

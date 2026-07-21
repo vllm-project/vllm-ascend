@@ -107,6 +107,15 @@ class AttentionMaskBuilder:
         return self.pcp_mla_mask
 
     def get_attention_mask(self, causal: bool, model_config: ModelConfig):
+        if not causal:
+            # FIA applies any provided mask as defaultMask (sparse_mode=0),
+            # which would wrongly mask out the upper triangle for
+            # bidirectional attention, so non-causal attention must not
+            # carry a mask here. The 310P mask builder overrides this
+            # because its attention operators require an explicit
+            # non-masking mask instead.
+            return None
+
         if model_config.runner_type == "pooling":
             return self.get_attn_mask(2048, torch.bool)
 
