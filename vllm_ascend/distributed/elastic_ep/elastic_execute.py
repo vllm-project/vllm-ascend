@@ -12,8 +12,8 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
-import vllm.envs as envs
 from torch.distributed import P2POp
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import reset_compile_wrapper
@@ -42,7 +42,12 @@ from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.workspace import lock_workspace, unlock_workspace
 
+from vllm.logger import init_logger
+
 from vllm_ascend.ascend_config import get_ascend_config
+
+
+logger = init_logger(__name__)
 from vllm_ascend.compilation.acl_graph import (
     ACLGraphWrapper,
     reset_graph_params,
@@ -62,7 +67,7 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
 from vllm_ascend.quantization.methods import AscendW4A8DynamicFusedMoEMethod
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod
 
-from vllm_ascend.distributed.elastic_ep.eplb_manager import ElasticEplbManager, generate_expert_maps_file
+from vllm_ascend.distributed.elastic_ep.eplb_manager import ElasticEplbManager
 
 _PATCH_LOCK = threading.Lock()
 
@@ -201,8 +206,6 @@ def setup_moe_comm_and_quant_method(module: nn.Module) -> None:
 class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
     def __init__(self, worker):
         super().__init__(worker)
-        if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
-            get_ascend_config().eplb_config.expert_map_path = generate_expert_maps_file()
         self._eplb_manager: ElasticEplbManager | None = None
         self.old_ep_size = None
 
@@ -232,8 +235,6 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
         new_ep_size = get_ep_group().world_size
         n_redundant = new_ep_size * num_local_experts - num_logical_experts
         get_ascend_config().eplb_config.num_redundant_experts = n_redundant
-        with set_current_vllm_config(self.worker.vllm_config):
-            get_ascend_config().eplb_config.expert_map_path = generate_expert_maps_file()
         self.old_ep_size = old_ep_size
         self.worker.load_model(load_dummy_weights=True)
         self.eplb_manager.expert_maps = expert_maps
@@ -336,14 +337,14 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
         # Reconfigure MoE modules with new EP size
         moe_modules = [module for module in self.worker.model_runner.model.modules() if isinstance(module, FusedMoE)]
         num_local_experts = moe_modules[0].moe_config.num_local_experts
+        num_logical_experts = self.eplb_manager.get_expert_maps().shape[-1]
         assert all(module.moe_config.num_local_experts == num_local_experts for module in moe_modules), (
             "All MoE modules must have the same number of experts"
         )
         for module in moe_modules:
-            num_logical_experts = self.eplb_manager.get_expert_maps().shape[-1]
-            module.global_redundant_expert_num = module.local_num_experts * new_ep_size - num_logical_experts
             module.moe_config.num_experts = num_local_experts * new_ep_size
             module.global_num_experts = module.moe_config.num_experts
+            module.global_redundant_expert_num = num_local_experts * new_ep_size - num_logical_experts
             tp_size = get_tp_group().world_size
             is_sequence_parallel = parallel_config.use_sequence_parallel_moe
             sp_size = tp_size if is_sequence_parallel else 1
@@ -365,11 +366,6 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
                 setup_moe_comm_and_quant_method(module)
 
         if self.worker.vllm_config.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
-            # NOTE(yongji): when using stock torch.compile,
-            # torch.compile is triggered during GPUModelRunner's load_model()
-            # TODO(yongji):check do we need to re-trigger torch.compile here?
-            # any changes to the tensor shapes in execution should already
-            # be handled internally by torch.compile.
             backend = self.worker.vllm_config.compilation_config.init_backend(self.worker.vllm_config)
             compilation_counter.stock_torch_compile_count += 1
             self.worker.model_runner.model.compile(fullgraph=True, backend=backend)
