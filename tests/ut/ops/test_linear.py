@@ -202,6 +202,42 @@ class TestColumnParallelOpDispatch(unittest.TestCase):
         self._patches[-1].start()
         self.assertIsNotNone(self._get_column_op("model.layers.0.self_attn.g_proj"))
 
+    def test_multimodal_encoder_prefixes_skip_sp_column(self):
+        """Multimodal encoder/projector linears are not SP-sharded."""
+        self._patches.append(patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True))
+        self._patches[-1].start()
+
+        for prefix in (
+            "model.vision_model.encoder.layers.0.self_attn.qkv_proj",
+            "model.vision_tower.encoder.layers.0.self_attn.qkv_proj",
+            "model.multi_modal_projector.linear_1.gate_up_proj",
+            "model.patch_merge_mlp.gate_up_proj",
+        ):
+            self.assertIsNone(self._get_column_op(prefix))
+
+    def test_lm_column_prefix_still_uses_sp(self):
+        """Language-model qkv/indexer projections still use SP."""
+        self._patches.append(patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True))
+        self._patches[-1].start()
+
+        self.assertIsNotNone(self._get_column_op("model.layers.0.self_attn.qkv_proj"))
+        self.assertIsNotNone(self._get_column_op("model.layers.0.self_attn.indexer_proj"))
+
+    def test_multimodal_skip_uses_component_match_not_substring(self):
+        """Avoid skipping SP for non-MM prefixes that only contain a substring."""
+        from vllm_ascend.ops.linear_op import _should_skip_sp_for_multimodal_encoder
+
+        self.assertTrue(
+            _should_skip_sp_for_multimodal_encoder(
+                "model.vision_model.encoder.layers.0.self_attn.qkv_proj"
+            )
+        )
+        self.assertFalse(
+            _should_skip_sp_for_multimodal_encoder(
+                "model.layers.0.not_vision_model_but_contains_text.qkv_proj"
+            )
+        )
+
 
 class TestRowParallelOpDispatch(unittest.TestCase):
     """Tests for _get_row_parallel_op — mtp_block, share_expert."""
@@ -233,6 +269,27 @@ class TestRowParallelOpDispatch(unittest.TestCase):
         self._patches[-1].start()
         self.assertIsNone(self._op("model.layers.0.mlp.share_expert.down_proj"))
         self.assertIsNone(self._op("model.layers.0.mlp.shared_expert.down_proj"))
+
+    def test_multimodal_encoder_prefixes_skip_sp_row(self):
+        """Multimodal encoder/projector output linears are not SP-sharded."""
+        self._patches.append(patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True))
+        self._patches[-1].start()
+
+        for prefix in (
+            "model.vision_model.encoder.layers.0.self_attn.o_proj",
+            "model.vision_tower.encoder.layers.0.self_attn.o_proj",
+            "model.multi_modal_projector.down_proj",
+            "model.patch_merge_mlp.down_proj",
+        ):
+            self.assertIsNone(self._op(prefix))
+
+    def test_lm_row_prefix_still_uses_sp(self):
+        """Language-model output/down projections still use SP."""
+        self._patches.append(patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True))
+        self._patches[-1].start()
+
+        self.assertIsNotNone(self._op("model.layers.0.self_attn.o_proj"))
+        self.assertIsNotNone(self._op("model.layers.0.mlp.down_proj"))
 
 
 class TestGetParallelOpShareExpert(unittest.TestCase):
