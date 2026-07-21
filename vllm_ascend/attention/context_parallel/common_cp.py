@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -140,63 +139,6 @@ class DCPImplMixin:
             ),
             dcp_size=self.dcp_size,
         )
-
-
-@dataclass
-class DCPChunkedContextMetadata:
-    """
-    Metadata for chunked context handling in Context Parallelism (CP).
-
-    Extends chunked prefill with per-rank chunk information for DCP.
-    """
-
-    # For handling chunked prefill
-    cu_seq_lens: torch.Tensor
-    starts: torch.Tensor
-    seq_tot: list[int]
-    max_seq_lens: list[int]
-    workspace: torch.Tensor
-    chunk_seq_lens: torch.Tensor
-    chunk_seq_lens_npu: torch.Tensor
-    chunk_actual_seq_lengths_kv_list: list[list[int]]
-    # MLA DCP metadata
-    padded_chunk_seq_lens_npu: torch.Tensor = None
-    padded_local_chunk_seq_lens: list[list[int]] | None = None
-    local_context_lens_allranks: list[list[int]] | None = None
-    padded_local_cu_seq_lens: torch.Tensor = None
-    cu_seq_lens_lst: list[list[int]] | None = None
-    chunk_size: int | None = None
-
-
-@dataclass
-class AscendMetadataForPrefill:
-    """Prefill-specific metadata for Ascend attention with DCP."""
-
-    @dataclass
-    class ChunkedContextMetadata:
-        """Metadata for chunked context processing within prefill phase."""
-
-        actual_chunk_seq_lengths: torch.Tensor
-        actual_seq_lengths_kv: torch.Tensor
-        starts: torch.Tensor
-        chunk_seq_mask_filtered_indices: torch.Tensor
-        chunked_req_mask: list[bool] | None = None
-        local_context_lens_allranks: list[list[int]] | None = None
-        local_total_toks: int | None = None
-
-    """ Prefill Specific Metadata for Ascend"""
-    chunked_context: ChunkedContextMetadata | None = None
-    block_tables: torch.Tensor = None
-    actual_seq_lengths_q: torch.Tensor = None
-
-
-@dataclass
-class AscendMetadataForDecode:
-    """Decode-specific metadata for Ascend attention with DCP."""
-
-    num_computed_tokens_of_dcp: list[list[int]] | None = None
-    block_tables: torch.Tensor = None
-    dcp_mtp_attn_mask: torch.Tensor = None
 
 
 def _process_attn_out_lse(

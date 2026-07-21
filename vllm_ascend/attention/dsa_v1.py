@@ -1568,7 +1568,6 @@ class AscendDSAImpl(DSAAttentionImpl):
         num_tokens,
         vllm_config=None,
         speculative_config=None,
-        num_dcp_tokens=None,
         draft_attn_metadatas=None,
     ):
         # dsa does not need to update graph params

@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 import numpy as np
 import torch
 import torch_npu
@@ -9,6 +11,7 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
 # isort: off
 from vllm_ascend.attention.mla_v1 import (
+    ChunkedContextMetadata,
     AscendMLADecodeMetadata,
     AscendMLAImpl,
     AscendMLAMetadata,
@@ -18,7 +21,6 @@ from vllm_ascend.attention.mla_v1 import (
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.context_parallel.common_cp import (
-    DCPChunkedContextMetadata,
     DCPImplMixin,
     DCPMetadataBuilderMixin,
 )
@@ -32,11 +34,33 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.utils import weak_ref_tensors
 
 
+@dataclass
+class DCPChunkedContextMetadata(ChunkedContextMetadata):
+    """MLA chunk metadata for DCP-local context shards."""
+
+    padded_chunk_seq_lens_npu: torch.Tensor = None
+    padded_local_chunk_seq_lens: list[list[int]] | None = None
+    local_context_lens_allranks: list[list[int]] | None = None
+    padded_local_cu_seq_lens: torch.Tensor = None
+    cu_seq_lens_lst: list[list[int]] | None = None
+    chunk_size: int | None = None
+
+
+@dataclass
+class AscendMLADCPDecodeMetadata(AscendMLADecodeMetadata):
+    """MLA decode metadata fields used only by DCP."""
+
+    cp_seq_len: torch.Tensor = None
+    dcp_mtp_attn_mask: torch.Tensor = None
+
+
 class AscendMlaDCPMetadataBuilder(
     DCPMetadataBuilderMixin,
     AscendMLAMetadataBuilder,
 ):
     """Build MLA metadata for decode context parallelism."""
+
+    decode_metadata_cls = AscendMLADCPDecodeMetadata
 
     def __init__(
         self,
@@ -144,7 +168,6 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         num_tokens,
         vllm_config=None,
         speculative_config=None,
-        num_dcp_tokens=None,
         draft_attn_metadatas=None,
     ):
         if _EXTRA_CTX.is_draft_model:

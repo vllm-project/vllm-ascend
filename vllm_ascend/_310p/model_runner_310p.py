@@ -648,7 +648,6 @@ class NPUModelRunner310(NPUModelRunner):
             self._update_full_graph_params_if_needed(
                 forward_context,
                 num_tokens_padded,
-                positions,
             )
             if update_before_replay:
                 torch.npu.current_stream().wait_stream(self.update_stream)
@@ -658,7 +657,6 @@ class NPUModelRunner310(NPUModelRunner):
             self._update_full_graph_params_if_needed(
                 forward_context,
                 num_tokens_padded,
-                positions,
             )
 
         if forward_context.flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):

@@ -1,15 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import fields
 from types import SimpleNamespace
 
 import torch
 
 from vllm_ascend.attention.context_parallel.sfa_cp import (
     AscendSFADCPImpl,
+    AscendSFADCPMetadata,
     AscendSFADCPMetadataBuilder,
 )
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
+    AscendSFAMetadata,
     AscendSFAMetadataBuilder,
 )
 
@@ -20,6 +23,12 @@ def test_sfa_dcp_extends_v1_backend() -> None:
         AscendSFADCPMetadataBuilder,
         AscendSFAMetadataBuilder,
     )
+    assert "dcp_context" not in {
+        field.name for field in fields(AscendSFAMetadata)
+    }
+    assert "dcp_context" in {
+        field.name for field in fields(AscendSFADCPMetadata)
+    }
 
 
 def _make_builder(rank: int = 0) -> AscendSFADCPMetadataBuilder:

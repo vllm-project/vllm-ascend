@@ -25,8 +25,6 @@ from tests.ut.base import TestBase
 from vllm_ascend.attention.context_parallel.attention_cp import (
     AscendAttentionDCPImpl,
     AscendAttentionDCPMetadata,
-)
-from vllm_ascend.attention.context_parallel.common_cp import (
     AscendMetadataForDecode,
 )
 from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
@@ -41,8 +39,39 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     set_graph_params,
     update_draft_graph_params_workspaces,
+    update_full_graph_params,
 )
 from vllm_ascend.device_allocator.sleep_mem_optimized import AclGraphSleepWakeupManager
+
+
+def test_update_full_graph_params_dispatches_draft_metadata_by_keyword():
+    impl_cls = MagicMock()
+    attn_backend = MagicMock()
+    attn_backend.get_impl_cls.return_value = impl_cls
+    update_stream = MagicMock()
+    forward_context = MagicMock()
+    vllm_config = MagicMock()
+    speculative_config = MagicMock()
+    draft_attn_metadatas = MagicMock()
+
+    update_full_graph_params(
+        attn_backend,
+        update_stream,
+        forward_context,
+        8,
+        vllm_config,
+        speculative_config,
+        draft_attn_metadatas=draft_attn_metadatas,
+    )
+
+    impl_cls.update_graph_params.assert_called_once_with(
+        update_stream,
+        forward_context,
+        8,
+        vllm_config,
+        speculative_config,
+        draft_attn_metadatas=draft_attn_metadatas,
+    )
 
 
 class TestACLGraphEntry(TestBase):
