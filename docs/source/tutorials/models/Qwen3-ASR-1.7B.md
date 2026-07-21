@@ -107,38 +107,38 @@ Single-node deployment runs both audio prefill and decoding on one NPU, making i
 
 === "Atlas A2 inference products"
 
-```shell
-vllm serve your_model_path \
-  --served-model-name qwen3-asr \
-  --tensor-parallel-size 1 \
-  --max-model-len 4096 \
-  --gpu-memory-utilization 0.9 \
-  --enforce-eager \
-  --port 8000
-```
+    ```shell
+    vllm serve your_model_path \
+      --served-model-name qwen3-asr \
+      --tensor-parallel-size 1 \
+      --max-model-len 4096 \
+      --gpu-memory-utilization 0.9 \
+      --enforce-eager \
+      --port 8000
+    ```
 
 === "Atlas inference products"
 
-```shell
-vllm serve your_model_path \
-  --served-model-name qwen3-asr \
-  --tensor-parallel-size 1 \
-  --gpu-memory-utilization 0.9 \
-  --dtype float16 \
-  --max-model-len 4096 \
-  --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false,"enable_npu_graph_ex":false}}' \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,4]}' \
-  --port 8000
-```
+  ```shell
+  vllm serve your_model_path \
+    --served-model-name qwen3-asr \
+    --tensor-parallel-size 1 \
+    --gpu-memory-utilization 0.9 \
+    --dtype float16 \
+    --max-model-len 4096 \
+    --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false,"enable_npu_graph_ex":false}}' \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,4]}' \
+    --port 8000
+  ```
 
-!!! note
+  !!! note
 
-    - `--tensor-parallel-size 1` uses one NPU. Increase it only after confirming that the hardware and deployment topology support the chosen parallel configuration.
-    - `--max-model-len 4096` limits the maximum sequence length. On Atlas 300I DUO, always specify a conservative value explicitly; automatic detection can allocate an oversized attention mask and cause an out-of-memory error.
-    - `--gpu-memory-utilization 0.9` sets the fraction of device memory available to the vLLM executor. Lower this value if other workloads share the NPU.
-    - `--enforce-eager` disables graph execution. It is used in the Atlas 300I A2 2UP example for compatibility.
+      - `--tensor-parallel-size 1` uses one NPU. Increase it only after confirming that the hardware and deployment topology support the chosen parallel configuration.
+      - `--max-model-len 4096` limits the maximum sequence length. On Atlas 300I DUO, always specify a conservative value explicitly; automatic detection can allocate an oversized attention mask and cause an out-of-memory error.
+      - `--gpu-memory-utilization 0.9` sets the fraction of device memory available to the vLLM executor. Lower this value if other workloads share the NPU.
+      - `--enforce-eager` disables graph execution. It is used in the Atlas 300I A2 2UP example for compatibility.
 
-When the service starts successfully, the log contains `Application startup complete`. If startup fails, see the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) and the [Atlas 300I DUO guide](../hardwares/310p.md).
+When the service starts successfully, the log contains `Application startup complete`. If startup fails, see the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) and the [Atlas inference products guide](../hardwares/310p.md).
 
 ## 6 Functional Verification
 
