@@ -67,6 +67,7 @@ class TestAscendConfig(TestBase):
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
         self.assertFalse(ascend_config.enable_kv_nz)
+        self.assertFalse(ascend_config.dp_allreduce_on_npu)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertTrue(ascend_compilation_config.fuse_norm_quant)
@@ -411,6 +412,21 @@ class TestAscendConfig(TestBase):
         second_ascend_config = init_ascend_config(second_vllm_config)
         self.assertIsNot(first_ascend_config, second_ascend_config)
         self.assertTrue(second_ascend_config.ascend_compilation_config.enable_npugraph_ex)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_dp_allreduce_on_npu_default(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertFalse(ascend_config.dp_allreduce_on_npu)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_dp_allreduce_on_npu_with_additional_config(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"dp_allreduce_on_npu": True}
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertTrue(ascend_config.dp_allreduce_on_npu)
 
 
 class TestShortRequestFirstConfig(TestBase):
