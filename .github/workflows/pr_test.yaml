@@ -223,6 +223,21 @@ jobs:
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
       test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
+  
+  run-selected-tests-upstream:
+    needs: lint-and-select-tests
+    if: ${{ contains(github.event.pull_request.labels.*.name, 'ready') }}
+    strategy:
+      matrix:
+        vllm_version:
+          - ${{ needs.lint-and-select-tests.outputs.main_commit }}
+          - ${{ needs.lint-and-select-tests.outputs.release_tag }}
+    uses: ./.github/workflows/_selected_tests_upstream.yaml
+    with:
+      vllm: ${{ matrix.vllm_version }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
 
   generate-hitest:
     name: Generate hitest recommendations
