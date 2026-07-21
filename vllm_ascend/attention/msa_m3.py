@@ -1337,7 +1337,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         idx_q_shape = idx_q.shape
         idx_k_shape = idx_k.shape
-        idx_q = idx_q.reshape(-1, self.index_q_size)
+        idx_q = idx_q.reshape(-1, self.idx_head_dim)
         idx_k = idx_k.reshape(-1, self.idx_head_dim)
         idx_q = self.index_q_norm(idx_q).reshape(idx_q_shape)
         idx_k = self.index_k_norm(idx_k).reshape(idx_k_shape)
