@@ -187,7 +187,8 @@ Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
         --port 8000 \
         --max-model-len 1024
     ```
-    Option Parameter Descriptions:
+    Required  Parameter Descriptions:
+
     `--compilation-config` For Atlas inference products, due to limited hardware streams, the size of cudagraph_capture_sizes is restricted.
 
 Key Parameter Descriptions:
