@@ -3,6 +3,8 @@
 import pytest
 import torch
 
+pytest.importorskip("vllm_ascend.vllm_ascend_C")
+
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril
 from vllm_ascend.ops.triton.fla.utils import prepare_chunk_indices
 

@@ -7,7 +7,7 @@ import torch
 from vllm_ascend.utils import bootstrap_custom_op_env
 
 bootstrap_custom_op_env()
-import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401,E402
+pytest.importorskip("vllm_ascend.vllm_ascend_C")
 
 
 def _has_npu() -> bool:
