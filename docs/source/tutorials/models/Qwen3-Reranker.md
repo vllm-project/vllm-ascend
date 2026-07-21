@@ -26,37 +26,12 @@ You can use our official docker image to run `Qwen3-Reranker` model directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-=== "A3 series"
+=== "A3/A2 series"
 
     Start the docker image on your each node.
 
     ```shell
     export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
-    docker run --rm \
-        --name vllm-ascend \
-        --shm-size=1g \
-        --net=host \
-        --privileged=true \
-        --device /dev/davinci0 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
-        -v /root/.cache:/root/.cache \
-        -it $IMAGE bash
-    ```
-
-=== "A2 series"
-
-    Start the docker image on your each node.
-
-    ```shell
-      export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -113,23 +88,11 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ## 5 Online Service Deployment
 
-=== "A3 series"
+=== "A3/A2 series"
 
     ```shell
     #!/bin/sh
     vllm serve Qwen/Qwen3-VL-Reranker-2B \
-        --served-model-name Qwen/Qwen3-Reranker-0.6B \
-        --runner pooling \
-        --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}' \
-        --port 8000 \
-        --max-model-len 1024
-    ```
-
-=== "A2 series"
-
-    ```shell
-    #!/bin/sh
-    vllm serve Qwen/Qwen3-Reranker-0.6B \
         --served-model-name Qwen/Qwen3-Reranker-0.6B \
         --runner pooling \
         --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}' \
@@ -296,25 +259,8 @@ Take the `serve` as an example. Run the code as follows.
 vllm bench serve --model Qwen/Qwen3-Reranker-0.6B --backend vllm-rerank  --prot 8000 --dataset-name random-rerank --endpoint /v1/rerank --random-input 200  --save-result --result-dir ./
 ```
 
-After about several minutes, you can get the performance evaluation result. With this tutorial, the performance result is:
+After about several minutes, you can get the performance evaluation result.
 
-```bash
-============ Serving Benchmark Result ============
-Successful requests:                     1000
-Failed requests:                         0
-Benchmark duration (s):                  13.70
-Total input tokens:                      265122
-Request throughput (req/s):              72.99
-Total token throughput (tok/s):          19351.23
-----------------End-to-end Latency----------------
-Mean E2EL (ms):                          7474.64
-Median E2EL (ms):                        7528.72
-P99 E2EL (ms):                           13523.32
-==================================================
-```
-
-## 9 Performance Tuning
-
-## 10 FAQ
+## 9 FAQ
 
 For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).

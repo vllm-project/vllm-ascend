@@ -25,33 +25,10 @@ You can use our official docker image to run `Qwen3-VL-Embedding` model directly
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-=== "A3 series"
+=== "A3/A2 series"
 
     ```shell
     export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
-    docker run --rm \
-        --name vllm-ascend \
-        --shm-size=1g \
-        --net=host \
-        --privileged=true \
-        --device /dev/davinci0 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
-        -v /root/.cache:/root/.cache \
-        -it $IMAGE bash
-    ```
-
-=== "A2 series"
-
-    ```shell
-      export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -106,20 +83,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ## 5 Online Service Deployment
 
-=== "A3 series"
-
-    Start the docker image on your each node.
-
-    ```shell
-    #!/bin/sh
-    vllm serve Qwen/Qwen3-VL-Embedding-2B  \
-      --served-model-name Qwen/Qwen3-VL-Embedding-2B  \
-      --runner pooling \
-      --port 8000 \
-      --max-model-len 1024
-    ```
-
-=== "A2 series"
+=== "A3/A2 series"
 
     Start the docker image on your each node.
 
@@ -263,25 +227,8 @@ Take the `serve` as an example. Run the code as follows.
 vllm bench serve --model Qwen/Qwen3-VL-Embedding-2B --backend openai-embeddings --port 8000 --dataset-name random --endpoint /v1/embeddings --random-input 200 --save-result --result-dir ./
 ```
 
-After about several minutes, you can get the performance evaluation result. With this tutorial, the performance result is:
+After about several minutes, you can get the performance evaluation result.
 
-```bash
-============ Serving Benchmark Result ============
-Successful requests:                     1000
-Failed requests:                         0
-Benchmark duration (s):                  19.53
-Total input tokens:                      200000
-Request throughput (req/s):              51.20
-Total token throughput (tok/s):          10240.42
-----------------End-to-end Latency----------------
-Mean E2EL (ms):                          10360.53
-Median E2EL (ms):                        10354.37
-P99 E2EL (ms):                           19423.21
-==================================================
-```
-
-## 9 Performance Tuning
-
-## 10 FAQ
+## 9 FAQ
 
 For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
