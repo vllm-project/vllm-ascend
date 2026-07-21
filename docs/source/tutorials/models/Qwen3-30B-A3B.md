@@ -267,7 +267,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --dtype float16 \
         --quantization ascend \
         --max-model-len 16384 \
-        --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+        --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false,"enable_npu_graph_ex":false}}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,32]}' \
         --no-enable-prefix-caching
     ```

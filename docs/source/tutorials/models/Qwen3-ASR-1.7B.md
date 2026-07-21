@@ -126,7 +126,7 @@ vllm serve your_model_path \
   --gpu-memory-utilization 0.9 \
   --dtype float16 \
   --max-model-len 4096 \
-  --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+  --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false,"enable_npu_graph_ex":false}}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,4]}' \
   --port 8000
 ```
