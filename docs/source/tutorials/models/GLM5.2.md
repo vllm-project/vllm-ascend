@@ -181,9 +181,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A3 (64G × 16).
 
     Run the following scripts on two nodes respectively.
-
-    **node 0**
-
+**node 0**
 ```{code-block} bash
     :substitutions:
     # this obtained through ifconfig
@@ -231,9 +229,9 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '{"enable_dsa_cp": true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true,"enable_balance_scheduling": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"c8_enable_reshape_optim":false,    "enable_reduce_sample": "True"}'  \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
-    ```
+```
 
-    **node 1**
+**node 1**
 
 ```{code-block} bash
     :substitutions:
@@ -282,7 +280,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '{"enable_dsa_cp": true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true,"enable_balance_scheduling": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"c8_enable_reshape_optim":false,     "enable_reduce_sample": "True"}'  \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
-    ```
+```
 
 ::::
 ::::{tab-item} A2 series
@@ -290,7 +288,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A2 (64G × 32).
 
-    **node 0**
+**node 0**
 
 ```{code-block} bash
     :substitutions:
@@ -345,9 +343,9 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --additional-config '{"multistream_overlap_shared_expert": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
-    ```
+```
 
-    **node 1**
+**node 1**
 
 ```{code-block} bash
    :substitutions:
@@ -403,7 +401,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --additional-config '{"multistream_overlap_shared_expert": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
-    ```
+```
 ::::
 :::::
 
