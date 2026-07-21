@@ -791,7 +791,7 @@ Key Parameter Descriptions:
 
 ::::::
 
-::::::{tab-item} "Ascend950DT series
+::::::{tab-item} Ascend950DT series
 
 For `Qwen3.5-27B-w8a8` and `Qwen3.6-27B-w8a8`, a typical **1P1D** configuration requires **2 Ascend950DT series (96G × 8) nodes** (1 Prefill node + 1 Decode node), with **TP=1** and **DP=8** on each node, which fully utilizes all 8 NPUs of an Ascend950DT series. The example below uses `Qwen3.5-27B-w8a8`; for `Qwen3.6-27B-w8a8`, replace the model path with `Eco-Tech/Qwen3.6-27B-w8a8` and adjust `--served-model-name` to `qwen3.6` (and `--max-model-len` to 262144 if needed).
 
