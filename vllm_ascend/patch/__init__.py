@@ -165,22 +165,27 @@
 # ** 7a. File: platform/patch_glm_tool_call_streaming.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
+#      `vllm.tool_parsers.glm4_moe_tool_parser.Glm4MoeModelToolParser`
 #    Why:
 #       GLM tool-call streaming can emit final remaining-argument chunks with
 #       repeated tool-call metadata, and can combine terminal argument bytes with
-#       `finish_reason="tool_calls"` in the same SSE chunk.
+#       `finish_reason="tool_calls"` in the same SSE chunk. Nullable or unknown
+#       argument schemas can also stream string values without an opening quote,
+#       while normalized non-string values can rewrite an already-sent prefix.
 #    How：
 #       Monkey-patch remaining-argument delta construction to emit only argument
 #       fragments by default, and split terminal argument chunks into an argument
-#       chunk followed by an empty finish chunk.
+#       chunk followed by an empty finish chunk. Default unknown schemas to string
+#       and buffer confirmed non-string values until their closing tag.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/issues/44098
 #       https://github.com/vllm-project/vllm/pull/44099
 #       https://github.com/vllm-project/vllm-ascend/issues/8327
 #       https://github.com/vllm-project/vllm-ascend/pull/8178
+#       https://github.com/vllm-project/vllm-ascend/issues/12261
 #    Future Plan:
 #       Remove this patch once the supported vLLM version contains the upstream
-#       GLM tool-call final chunk fixes.
+#       GLM tool-call streaming fixes.
 #
 # ** 7b. File: platform/patch_glm47_tool_call_parser.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

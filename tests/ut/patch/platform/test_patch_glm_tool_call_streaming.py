@@ -2,16 +2,127 @@
 
 import json
 
+import pytest
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
+    FunctionDefinition,
+)
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
 )
+from vllm.tool_parsers.glm4_moe_tool_parser import Glm4MoeModelToolParser
 
 from vllm_ascend.patch.platform import (
     patch_glm_tool_call_streaming as glm_streaming_patch,
 )
+
+
+class _Tokenizer:
+    def get_vocab(self):
+        return {"<tool_call>": 1, "</tool_call>": 2}
+
+
+def _stream_tool_arguments(schema, value_chunks, tool_name="run", argument_name="value"):
+    tools = [
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name=tool_name,
+                parameters={
+                    "type": "object",
+                    "properties": {argument_name: schema},
+                },
+            ),
+        ),
+    ]
+    request = ChatCompletionRequest(model="test", messages=[], tools=tools)
+    parser = Glm4MoeModelToolParser(_Tokenizer(), tools=tools)
+    chunks = [
+        "<tool_call>",
+        tool_name,
+        "<arg_key>",
+        argument_name,
+        "</arg_key>",
+        "<arg_value>",
+        *value_chunks,
+        "</arg_value>",
+        "</tool_call>",
+    ]
+
+    current_text = ""
+    argument_fragments = []
+    for chunk in chunks:
+        previous_text = current_text
+        current_text += chunk
+        result = parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=chunk,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=request,
+        )
+        if result is not None and result.tool_calls:
+            for tool_call in result.tool_calls:
+                function = tool_call.function
+                if isinstance(function, dict):
+                    arguments = function.get("arguments")
+                else:
+                    arguments = function.arguments
+                if arguments:
+                    argument_fragments.append(arguments)
+
+    return "".join(argument_fragments)
+
+
+def test_issue_12261_nullable_string_schema_streams_valid_json():
+    schema = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+
+    arguments = _stream_tool_arguments(
+        schema,
+        ["P", "ura", "90"],
+        tool_name="start_app",
+        argument_name="hvd",
+    )
+
+    assert json.loads(arguments) == {"hvd": "Pura90"}
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {},
+        True,
+        {"type": ["string", "null"]},
+        {"oneOf": [{"type": "string"}, {"type": "null"}]},
+    ],
+)
+def test_unknown_and_nullable_string_schemas_stream_as_strings(schema):
+    arguments = _stream_tool_arguments(schema, ["P", "ura", "90"])
+
+    assert json.loads(arguments) == {"value": "Pura90"}
+
+
+@pytest.mark.parametrize(
+    ("schema", "value_chunks", "expected"),
+    [
+        ({"type": "object"}, ["{", '"x"', ":", "1", "}"], {"x": 1}),
+        ({"type": "number"}, ["1", "e", "3"], 1000.0),
+        (
+            {"oneOf": [{"type": "integer"}, {"type": "null"}]},
+            ["1", "2", "3"],
+            123,
+        ),
+    ],
+)
+def test_confirmed_non_string_values_wait_for_complete_serialization(schema, value_chunks, expected):
+    arguments = _stream_tool_arguments(schema, value_chunks)
+
+    assert json.loads(arguments) == {"value": expected}
 
 
 def test_remaining_args_delta_omits_metadata_by_default():
