@@ -161,7 +161,6 @@ Key Parameter Descriptions:
 - `--compilation-config` For Atlas inference products, due to limited hardware streams, the size of cudagraph_capture_sizes is restricted.
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
-
 ## 6 Functional Verification
 
 Once your server is started, you can verify by follow command:
