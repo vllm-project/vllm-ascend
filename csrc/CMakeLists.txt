@@ -582,6 +582,11 @@ if (BUILD_OPS_RTY_KERNEL)
                 OPTIONAL
         )
 
+        install(DIRECTORY ${op_dir}/arch20
+            DESTINATION ${IMPL_INSTALL_DIR}/ascendc/${_op_name}
+            OPTIONAL
+        )
+
         install(DIRECTORY ${op_dir}/arch32
             DESTINATION ${IMPL_INSTALL_DIR}/ascendc/${_op_name}
             OPTIONAL

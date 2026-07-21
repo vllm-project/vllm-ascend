@@ -12,7 +12,10 @@
  * \brief
  */
 
-#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 200
+#include "arch20/compat_310p.h"
+#include "arch20/gemm/kernel/gdn_fwd_h_kernel.hpp"
+#elif defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
 #include "arch35/gemm/kernel/gdn_fwd_h_kernel.hpp"
 #else
 #include "gemm/kernel/gdn_fwd_h_kernel.hpp"
