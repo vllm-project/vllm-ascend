@@ -88,7 +88,7 @@ Select an image based on your machine type and start the docker image on your no
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     
     # deepseek-v4-flash-dspark uses the following image
-    export IMAGE=swr.cn-north-4.myhuaweicloud.com/desaysv/vllm-ascend-dspark:910b4
+    export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
     
     docker run --rm \
         --name vllm-ascend \
@@ -195,6 +195,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export HCCL_BUFFSIZE=1024
     export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE=AIV
 
     vllm serve /root/.cache/modelscope/hub/models/UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test \
         --max-model-len 800000 \
@@ -214,7 +215,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --quantization ascend \
         --port 8000 \
         --block-size 128 \
-        --speculative-config '{"method": "dspark", "num_speculative_tokens": 5, "enforce_eager": true}'  \
+        --speculative-config '{"method": "dspark", "num_speculative_tokens": 7, "enforce_eager": true}'  \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
     ```
     tps more than 50+ ,its reach  2X speed of dsv4f with mtp
