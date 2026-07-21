@@ -155,7 +155,12 @@ If you want to deploy multi-node environment, you need to set up environment on 
       --max-model-len 1024
     ```
 
-    The `--max-model-len` option is added to prevent errors when generating the attention operator mask on the Atlas inference products.
+Key Parameter Descriptions:
+
+- `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. For Atlas inference products if automatic parsing resolves to a large context length, allocating this mask (O(max_model_len^2)) may exceed NPU memory and trigger OOM. Be sure to set an explicit and conservative value, such as --max-model-len 1024.
+- `--compilation-config` For Atlas inference products, due to limited hardware streams, the size of cudagraph_capture_sizes is restricted.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+
 
 ## 6 Functional Verification
 
@@ -207,7 +212,7 @@ The service returns HTTP 200 OK with a JSON response containing the `embedding` 
 }
 ```
 
-For more usage examples, please check the [link](https://github.com/vllm-project/vllm/tree/main/examples/pooling/embed)
+For more usage examples, please reference the [link](https://github.com/vllm-project/vllm/tree/main/examples/pooling/embed)
 
 ## 7 Accuracy Evaluation
 
@@ -230,7 +235,7 @@ Here are two accuracy evaluation methods.
     
         data_path = "/home/data/mteb_data"
         os.environ["HF_DATASETS_CACHE"] = data_path
-        os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"  # ⭐ 添加这行，确保有 https:// 前缀
+        os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
     
         model = VllmEncoderWrapper(f"/root/.cache/Qwen3-Embedding-0.6B",
                                     revision="norm",

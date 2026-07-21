@@ -153,11 +153,10 @@ Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
     vllm serve Qwen/Qwen3-VL-Reranker-2B \
         --served-model-name Qwen/Qwen3-VL-Reranker-2B \
         --runner pooling \
-        --max-model-len 4096 \
         --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}' \
         --chat-template ./qwen3_vl_reranker.jinja \
         --port 8000 \
-        --max-model-len 10240
+        --max-model-len 1024
     ```
 
 === "Atlas A2 inference products"
@@ -169,11 +168,10 @@ Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
     vllm serve Qwen/Qwen3-VL-Reranker-2B \
         --served-model-name Qwen/Qwen3-VL-Reranker-2B \
         --runner pooling \
-        --max-model-len 4096 \
         --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}' \
         --chat-template ./qwen3_vl_reranker.jinja \
         --port 8000 \
-        --max-model-len 10240
+        --max-model-len 1024
     ```
 
 === "Atlas inference products"
@@ -185,17 +183,20 @@ Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
     vllm serve Qwen/Qwen3-VL-Reranker-2B \
         --served-model-name Qwen/Qwen3-VL-Reranker-2B \
         --runner pooling \
-        --max-model-len 4096 \
         --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}' \
         --chat-template ./qwen3_vl_reranker.jinja \
         --compilation-config '{"cudagraph_capture_sizes": [1024,512]}' \
         --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
         --dtype float16 \
         --port 8000 \
-        --max-model-len 10240
+        --max-model-len 1024
     ```
 
-    The `--max-model-len` option is added to prevent errors when generating the attention operator mask on the Atlas inference products.
+Key Parameter Descriptions:
+
+- `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. For Atlas inference products if automatic parsing resolves to a large context length, allocating this mask (O(max_model_len^2)) may exceed NPU memory and trigger OOM. Be sure to set an explicit and conservative value, such as --max-model-len 1024.
+- `--compilation-config` For Atlas inference products, due to limited hardware streams, the size of cudagraph_capture_sizes is restricted.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
 ## 6 Functional Verification
 
@@ -217,7 +218,7 @@ The service returns HTTP 200 OK with a JSON response containing the `relevance_s
 ```json
 {
     "id": "score-xxxxx",
-    "model": "/home/data/Qwen3-VL-Reranker-2B",
+    "model": "Qwen/Qwen3-VL-Reranker-2B",
     "usage": {
         "prompt_tokens": 179,
         "total_tokens": 179
@@ -243,7 +244,7 @@ The service returns HTTP 200 OK with a JSON response containing the `relevance_s
 }
 ```
 
-For more usage examples, please check the [link](https://github.com/vllm-project/vllm/tree/main/examples/pooling/score)
+For more usage examples, please reference the [link](https://github.com/vllm-project/vllm/tree/main/examples/pooling/score)
 
 ## 7 Accuracy Evaluation
 
@@ -266,7 +267,7 @@ Here are two accuracy evaluation methods.
     
         data_path = "/home/data/mteb_data"
         os.environ["HF_DATASETS_CACHE"] = data_path
-        os.environ["HF_DATASETS_OFFLINE"] = "1"
+        os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
     
         model = VllmCrossEncoderWrapper(f"/home/data/Qwen3-VL-Reranker-2B",
                                     revision="norm",
