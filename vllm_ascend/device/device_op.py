@@ -59,8 +59,8 @@ class BaseDeviceAdaptor:
     def npu_fused_infer_attention_score(
         cls,
         query: torch.Tensor,
-        key: torch.Tensor | None,
-        value: torch.Tensor | None,
+        key: torch.Tensor,
+        value: torch.Tensor,
         attn_metadata: Any,
         *,
         key_cache: torch.Tensor | None,
@@ -95,8 +95,8 @@ class BaseDeviceAdaptor:
 
         return torch_npu.npu_fused_infer_attention_score(
             query=query,
-            key=key,
-            value=value,
+            key=key.contiguous(),
+            value=value.contiguous(),
             num_key_value_heads=num_key_value_heads,
             num_heads=num_heads,
             scale=scale,
@@ -993,7 +993,7 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def fused_gdn_gating(A_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor):
-        return torch.ops._C_ascend.npu_fused_gdn_gating(A_log, a, b, dt_bias.to(A_log.dtype))
+        return fused_gdn_gating_patch(A_log, a, b, dt_bias)
 
     @staticmethod
     def split_qkv_rmsnorm_rope(
@@ -1046,8 +1046,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     def npu_fused_infer_attention_score(
         cls,
         query: torch.Tensor,
-        key: torch.Tensor | None,
-        value: torch.Tensor | None,
+        key: torch.Tensor,
+        value: torch.Tensor,
         attn_metadata: Any,
         *,
         key_cache: torch.Tensor | None,
@@ -1063,8 +1063,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     ):
         return torch_npu.npu_fused_infer_attention_score(
             query=query,
-            key=key,
-            value=value,
+            key=key.contiguous(),
+            value=value.contiguous(),
             num_key_value_heads=num_key_value_heads,
             num_heads=num_heads,
             scale=scale,

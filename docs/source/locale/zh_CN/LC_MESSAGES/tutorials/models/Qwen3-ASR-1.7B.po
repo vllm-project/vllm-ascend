@@ -81,7 +81,7 @@ msgstr "此外，如果您不想使用上述Docker镜像，也可以从源码构
 msgid ""
 "- Install `vllm-ascend` from source, refer to "
 "[installation](../../installation.md)."
-msgstr "- 从源码安装 `vllm-ascend`，请参考[安装](../../installation.md)。"
+msgstr "- 从源码安装 `vllm-ascend`，请参考[安装指南](../../installation.md)。"
 
 msgid "## Deployment"
 msgstr "## 部署"

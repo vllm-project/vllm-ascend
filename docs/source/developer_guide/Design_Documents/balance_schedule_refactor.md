@@ -11,7 +11,7 @@ conditional activation). The `schedule()` copy is **kept for now** — upstream
 exposes no finer-grained hook to borrow, and deleting it depends on contributing
 an override seam upstream, tracked as later Phase 2B. The file therefore does
 not shrink to a few dozen lines: the `schedule()` body is still a verbatim
-upstream copy (**aligned verbatim to release tag `v0.23.0`**, with only 3
+upstream copy (**aligned verbatim to release tag `v0.24.0`**, with only 3
 balance deltas), and the file is ~830 lines. Aligning to a stable release tag
 (rather than a moving main-verified commit hash) makes "verbatim comparison
 against upstream" a reproducible drift check — a fixed tag points at the same
@@ -85,24 +85,24 @@ three large upstream units verbatim:
 This "copy whole units" approach has three concrete harms:
 
 1. **The `schedule()` copy is now aligned verbatim to a release tag (the
-   production pin, currently `v0.23.0`).** The **single source of truth** for
+   production pin, currently `v0.24.0`).** The **single source of truth** for
    the release tag is `.github/vllm-release-tag.commit` (CI reads the same file
    via `tr -d '[:space:]' < .github/vllm-release-tag.commit`), currently
-   `v0.23.0`; dev/CI actually installs the main-verified commit pointed at by
-   `.github/vllm-main-verified.commit` (which already carries `throttle_prefills`
-   and other v0.23.1+ evolution). The old patch copied a `schedule()` from an
-   older vLLM than v0.23.0, so it was stale as a whole. This round aligns the
+   `v0.24.0`; dev/CI actually installs the main-verified commit pointed at by
+   `.github/vllm-main-verified.commit` (which carries later scheduler
+   evolution). The old patch copied a `schedule()` from an
+   older vLLM than v0.24.0, so it was stale as a whole. This round aligns the
    `schedule()` copy **verbatim to the release tag's `Scheduler.schedule()`**,
    keeping only the 3 balance deltas (disabled-path early return,
    `balance_flag` gate, `if request_queue is None: break`); the
    `run_busy_loop()` / `run_engine_core()` copies were deleted in Phase 1.
-   **Note: any concrete `v0.23.0` in this document is just a snapshot of the pin
+   **Note: any concrete `v0.24.0` in this document is just a snapshot of the pin
    file's current value — it goes stale as the pin advances and must NOT be
    used as a version authority; any code/test that needs this tag must read the
    file at runtime.**
 
-   **Why align to the v0.23.0 tag rather than the installed main-verified
-   commit?** Two reasons: (a) production actually runs the v0.23.0 release, so
+   **Why align to the v0.24.0 tag rather than the installed main-verified
+   commit?** Two reasons: (a) production actually runs the v0.24.0 release, so
    aligning the copy to it keeps production behavior consistent with runtime;
    (b) a fixed git tag points at the **same** source on every CI run, so
    "verbatim comparison of the copy against upstream (allowing only the 3
@@ -110,22 +110,15 @@ This "copy whole units" approach has three concrete harms:
    main-verified hash makes the comparison drift forward with every commit and
    cannot serve as a stable guardrail.
 
-   **Cost and boundary:** the copy (v0.23.0 logic) and the main-verified
+   **Cost and boundary:** the copy (v0.24.0 logic) and the main-verified
    runtime differ slightly in behavior, but balance's real scheduling path is
    only reached under NPU + DP + MoE, never by CPU UT (see Test plan); and
-   those differences do not affect the gate's own semantics. **Key: vllm-ascend
-   CI runs two vllm versions at once** (release tag v0.23.0 + main-verified
-   commit 1f486d96), whose engines call `schedule()` differently — v0.23.0 calls
-   `schedule()`, 1f486d96 calls `schedule(throttle_prefills)`. So the override
-   signature takes the **union of both versions**
-   (`schedule(self, throttle_prefills=False)`, a default-carrying superset) so
-   both engines can call it; the disabled path delegates to `super()` and uses
-   **signature introspection** (`_SUPER_SCHEDULE_HAS_THROTTLE`, decided once at
-   import) to decide whether to forward `throttle_prefills`, rather than a
-   version string — this is correct on both lanes and is not affected by a dev
-   checkout's non-standard PEP 440 `__version__` (which would make
-   `vllm_version_is` raise). I.e.: **body aligned to the release tag; signature
-   takes the two-version union; disabled path uses signature introspection.**
+   those differences do not affect the gate's own semantics. Both supported
+   revisions — release tag v0.24.0 and main-verified commit e5588e49 — expose
+   `schedule(self, throttle_prefills=False)`, so the override matches that
+   shared signature and the disabled path forwards `throttle_prefills`
+   directly to `super()`. I.e.: **body aligned to the release tag; signature
+   matches both supported revisions; disabled path delegates directly.**
 
 2. **It violates the `AGENTS.md` patch policy.** The policy requires patches to
    be "minimal and focused" with "a long-term plan to contribute upstream". A
@@ -138,31 +131,11 @@ This "copy whole units" approach has three concrete harms:
    `if request_queue is None: break`. Such deviations make future diffs
    untrustworthy.
 
-> Lesson learned this round (a pit we hit — `schedule()` signature drift across
-> versions + dual-version CI). vLLM's `Scheduler.schedule()` signature changes
-> across versions: release tag **v0.23.0** is `schedule(self)` (engine calls
-> `schedule()`), main-verified commit **1f486d96** adds
-> `throttle_prefills: bool = False` (engine calls
-> `schedule(self._should_throttle_prefills())`). And **vllm-ascend CI runs both
-> at once**, so the override cannot hardcode either signature — `schedule(self)`
-> would `TypeError` on 1f486d96 when the engine passes the arg. The right fix:
-> the override signature takes the **union of both versions**
-> `def schedule(self, throttle_prefills: bool = False)` (a default-carrying
-> superset callable by both engines); the disabled path delegates to `super()`
-> and uses **signature introspection** (computed once at import:
-> `_SUPER_SCHEDULE_HAS_THROTTLE = "throttle_prefills" in inspect.signature(Scheduler.schedule).parameters`)
-> to decide whether to forward `throttle_prefills`, instead of a
-> `vllm_version_is("0.23.0")` version string — the latter raises `ValueError`
-> on a dev checkout (non-PEP 440 `__version__`) and fundamentally reframes the
-> factual question "does super() accept this arg?" as a brittle "does the
-> version string match?". Conclusion: **when CI runs multiple upstream versions
-> at once, take the union for override signatures and drive version-dependent
-> branches by signature introspection, not version strings.** At the unit-test
-> level, "signature equals installed vLLM's" is **wrong** under dual versions
-> (the two lanes' installed signatures differ by definition, so an equality
-> assertion can only ever pass on one lane); it is replaced by "the override is
-> bindable by both engines' call shapes and is a superset of the installed
-> signature".
+> Lesson learned this round: after v0.23 support is dropped, both supported
+> revisions expose the same `Scheduler.schedule(self, throttle_prefills=False)`
+> contract. Compatibility introspection and version-string branching therefore
+> add no value and should be removed. The unit test now requires the override's
+> signature to equal the installed upstream signature in each CI lane.
 
 ## Design
 
@@ -198,8 +171,7 @@ probing to two fallbacks (AscendConfig → additional_config) and **removes the
 direct environment-variable read** — `VLLM_ASCEND_BALANCE_SCHEDULING` is still
 parsed centrally by `AscendConfig` (as a deprecated fallback for
 `additional_config`), but `_balance_scheduling_enabled` no longer reads it
-itself, bypassing `AscendConfig`. Details in
-[Phased rollout](#phased-rollout).
+itself, bypassing `AscendConfig`. Details in [Phased rollout](#phased-rollout).
 
 ### Step 1 — Hook gather onto `_has_global_unfinished_reqs` and delete the EngineCore copies
 
@@ -310,17 +282,11 @@ currently no overridable seam. This is solved in two phases.
 
 Keep the `schedule()` override, but:
 
-- **The override signature takes the two-version union:**
-  `def schedule(self, throttle_prefills: bool = False)`. vllm-ascend CI runs
-  v0.23.0 (engine calls `schedule()`) and 1f486d96 (engine calls
-  `schedule(throttle_prefills)`) at the same time, so the override carries
-  `throttle_prefills` with a default and is callable by both engines. **The
-  disabled path delegates to `super()` via signature introspection** — compute
-  `_SUPER_SCHEDULE_HAS_THROTTLE` once at import; if true call
-  `super().schedule(throttle_prefills)`, else `super().schedule()`. This
-  replaces the old `vllm_version_is("0.23.0")` version-string branch (which
-  `ValueError`s on a dev checkout and reframes "does super accept the arg?" as
-  "does the version match?").
+- **The override matches the shared supported signature:**
+  `def schedule(self, throttle_prefills: bool = False)`. Both v0.24.0 and
+  e5588e49 expose this signature, and the disabled path delegates directly via
+  `super().schedule(throttle_prefills)`. The old v0.23 compatibility branch and
+  signature introspection are no longer needed.
 - Collapse the balance changes into 3 clearly-commented deltas: (1) the
   disabled-path early return delegating to `super()`; (2) the `balance_flag`
   gate inside the WAITING loop; (3) `if request_queue is None: break` (upstream
@@ -329,7 +295,7 @@ Keep the `schedule()` override, but:
 - **Verbatim comparison is now reproducible:** the `schedule()` copy is aligned
   to the release tag (only the 3 balance deltas differ), so the fixed tag makes
   "verbatim comparison against upstream" yield the same baseline on every CI
-  run. The "intent lock" tests (signature callable by both engines, the 3 delta
+  run. The "intent lock" tests (signature equality, the 3 delta
   lines present, upstream seams still exist) remain as CPU-reachable guardrails,
   and a new "verbatim comparison against the release tag (allowing only the 3
   deltas)" drift test is added (see Test plan). The drift test **reads the tag
@@ -426,7 +392,8 @@ deviation is a bug.
    `_balance_run_engine_core` restores the module-level `DPEngineCoreProc` to
    the upstream original and the engine core runs upstream's implementation
    verbatim; `BalanceScheduler` with `_balance_enabled=False` delegates
-   `schedule()` to `super().schedule()`, does not allocate `balance_queue`, and
+   `schedule(throttle_prefills)` to `super().schedule(throttle_prefills)`, does
+   not allocate `balance_queue`, and
    performs no collective communication. I.e. balance does not touch any config
    when off (including PD-disaggregated recompute / `AsyncRecomputeScheduler`,
    which is already mutually exclusive with balance via `platform.py`; this is a
@@ -438,14 +405,11 @@ deviation is a bug.
 ## Post-refactor file shape
 
 After this round (Phase 1 + 2A + 3), the key structure is as follows. The
-`schedule()` body is a verbatim copy of release tag `v0.23.0` (cannot be
-deleted before Phase 2B), with three documented deltas (disabled-path early
-return + the `balance_flag` gate in the WAITING loop + `if request_queue is
-None: break`):
+`schedule()` body is a verbatim copy of release tag `v0.24.0` (cannot be
+deleted before Phase 2B), with three documented deltas (disabled-path early return + the `balance_flag` gate in the WAITING loop + `if request_queue is None: break`):
 
 ```python
 # vllm_ascend/patch/platform/patch_balance_schedule.py
-import inspect
 import torch
 import torch.distributed as dist
 import vllm.v1.core.sched.scheduler as _sched_mod
@@ -481,16 +445,11 @@ class BalanceScheduler(Scheduler):
         running_tensor = torch.tensor([len(self.running)], dtype=torch.int, device="cpu")
         dist.all_gather(self.balance_queue, running_tensor, group=self.dp_group)
 
-    def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:  # two-version union: both v0.23.0's schedule() and 1f486d96's schedule(throttle_prefills) bind
+    def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:  # shared by v0.24.0 and e5588e49
         if not self._balance_enabled:  # delta 1: disabled-path early return
-            # Whether to forward throttle_prefills is decided by signature introspection
-            # (_SUPER_SCHEDULE_HAS_THROTTLE), not a version string -- correct on both CI lanes
-            # and unaffected by a dev checkout's bad __version__.
-            if _SUPER_SCHEDULE_HAS_THROTTLE:
-                return super().schedule(throttle_prefills)
-            return super().schedule()
+            return super().schedule(throttle_prefills)
         # NOTE: balance_gather is NOT called here -- see BalanceDPEngineCoreProc.
-        # ... upstream schedule() body (verbatim-aligned to the v0.23.0 tag) ...
+        # ... upstream schedule() body (verbatim-aligned to the v0.24.0 tag) ...
         #   # inside the WAITING loop (deltas 2, 3):
         #   if max(t.item() for t in self.balance_queue) == self.max_num_running_reqs:  # delta 2: leader-at-cap => global freeze
         #       break
@@ -551,13 +510,11 @@ first inside `schedule()`, then inside `_process_engine_step`; now after
 ## Test plan
 
 1. **Signature + intent lock + verbatim drift test (Phase 2A).** Assert: (a)
-   `BalanceScheduler.schedule`'s signature is **bindable by both engine call
-   shapes** (`schedule()` and `schedule(throttle_prefills=...)`) **and is a
-   superset of the installed `Scheduler.schedule` parameter set** — note this is
-   NOT "signature line equals installed", because under dual-version CI the two
-   lanes' installed signatures differ and an equality assertion can only pass on
-   one lane (this locks the "dual versions ⇒ take the union" lesson); (b) the 3
-   balance delta lines must exist in the body (disabled-path `super().schedule()`
+   `BalanceScheduler.schedule`'s signature **equals the installed
+   `Scheduler.schedule` signature**; both supported revisions share this
+   contract, so each CI lane checks the same invariant; (b) the 3
+   balance delta lines must exist in the body (disabled-path
+   `super().schedule(throttle_prefills)`
    delegation, the `balance_flag` gate in the WAITING loop,
    `if request_queue is None: break`); (c) the `_balance_run_engine_core`
    wrapper is installed and `DPEngineCoreProc` is **not** swapped at import
@@ -587,19 +544,19 @@ first inside `schedule()`, then inside `_process_engine_step`; now after
    that each `balance_gather()` does exactly one `all_gather`, with payload
    `len(self.running)` and the injected dp_group (contract item 3).
 4. **Disabled-path test.** With the flag off, assert `balance_queue` is not
-   allocated, `all_gather` is not called, and `schedule()` delegates to
-   `super().schedule()` (contract item 4).
+   allocated, `all_gather` is not called, and `schedule(throttle_prefills)`
+   delegates to `super().schedule(throttle_prefills)` (contract item 4).
 5. **NPU performance check.** Per AGENTS.md's NPU guidance,
    `max(t.item() for t in self.balance_queue)` triggers one host sync per step
    (unavoidable, since this value drives host-side control flow). Profile to
    confirm the refactor introduces **no** extra sync beyond the current one.
 
-## Phased rollout
+## Phased rollout {: #phased-rollout }
 
 | Phase | Scope                                                                                                                  | Risk | Depends on     | Status        |
 |-------|------------------------------------------------------------------------------------------------------------------------|------|----------------|---------------|
 | 1     | Hook gather onto `_has_global_unfinished_reqs` (after the cross-rank all-reduce — avoids both the schedule()-skip deadlock and the _process_engine_step wave-boundary deadlock); slim `BalanceDPEngineCoreProc` to that hook; delete the `run_engine_core`/`run_busy_loop` copies; `run_engine_core` wrapper conditionally activates `DPEngineCoreProc`; module-level `Scheduler` swap | Low  | none           | ✅ Done       |
-| 2A    | Override signature takes the **two-version union** (`schedule(self, throttle_prefills=False)`, CI runs v0.23.0 + 1f486d96 at once); **body aligned verbatim to the release tag** (only the 3 balance deltas); disabled path delegates to `super()` via **signature introspection** (`_SUPER_SCHEDULE_HAS_THROTTLE`); signature-callability + intent-lock + release-tag verbatim drift tests | Low  | none           | ✅ Done       |
+| 2A    | Override matches the shared supported signature (`schedule(self, throttle_prefills=False)` on v0.24.0 + e5588e49); **body aligned verbatim to the release tag** (only the 3 balance deltas); disabled path delegates directly to `super()`; signature equality + intent-lock + release-tag verbatim drift tests | Low  | none           | ✅ Done       |
 | 3     | Collapse config probing to two fallbacks (AscendConfig → additional_config); remove the direct env-var read (still parsed centrally by AscendConfig) | Low  | Phase 1        | ✅ Done       |
 | 2B    | Upstream `_should_stop_admitting_waiting` PR; delete the `schedule()` copy                                            | Med  | upstream review | ⏳ TODO      |
 | Tests | Drift regression / behavior equivalence / gather cadence / disabled path / NPU performance check                      | Low  | Phase 1 + 2A   | ⏳ TODO (needs NPU) |

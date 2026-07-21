@@ -80,7 +80,7 @@ class ProfilingChunkScheduler(Scheduler):
         from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 
         init_ascend_config(vllm_config)
-        profiling_cfg = get_ascend_config().profiling_chunk_config
+        profiling_cfg = get_ascend_config().scheduler_config.profiling_chunk_config
         self.profiling_chunk_config = profiling_cfg
         base_chunk = self.max_num_scheduled_tokens
 

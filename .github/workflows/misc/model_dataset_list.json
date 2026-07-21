@@ -140,6 +140,8 @@
       "facebook/opt-125m",
       "google/gemma-2-9b",
       "google/gemma-3n-E2B-it",
+      "google/gemma-4-26B-A4B-it",
+      "google/gemma-4-31B-it",
       "google/siglip2-base-patch16-224",
       "hmellor/Ilama-3.2-1B",
       "ibm-research/PowerMoE-3b",
@@ -278,14 +280,17 @@
       "z-lab/Qwen3-8B-DFlash-b16",
       "Eco-Tech/GLM-5.1-w8a8",
       "Eco-Tech/GLM-5.2-w8a8",
-      "Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp", 
+      "Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp",
       "lightseekorg/kimi-k2.5-eagle3",
       "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp",
       "vllm-ascend/Qwen3-30B-A3B-vwn-eagle-model",
-      "Eco-Tech/Qwen3-8B-w8a8sc-310-vllm/TP1/Qwen3-8B-w8a8sc-310-vllm-tp1",
-      "Eco-Tech/Qwen3-14B-w8a8sc-310-vllm/TP1/Qwen3-14B-w8a8sc-310-vllm-tp1",
-      "Eco-Tech/Qwen3-32B-w8a8sc-310-vllm/TP4/Qwen3-32B-w8a8sc-310-vllm-tp4",
-      "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
+      "vllm-ascend/Qwen3-8B-w8a8sc-310-vllm-tp1",
+      "vllm-ascend/Qwen3-14B-w8a8sc-310-vllm-tp1",
+      "vllm-ascend/Qwen3-32B-w8a8sc-310-vllm-tp4",
+      "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp",
+      "Eco-Tech/DeepSeek-V3.1-Terminus-w8a8-mtp-QuaRot",
+      "Eco-Tech/Kimi-K2.6-w4a8",
+      "lightseekorg/kimi-k2.6-eagle3"
     ],
     "datasets": [
       "vllm-ascend/GSM8K-in1024-bs210",
@@ -328,7 +333,10 @@
       "vllm-ascend/GSM8K_prefix0_in65536_bs400_deepseek",
       "vllm-ascend/SuperGLUE",
       "vllm-ascend/ceval",
-      "vllm-ascend/GSM8K-in512-bs100-qwen3"
-
+      "vllm-ascend/GSM8K-in512-bs100-qwen3",
+      "vllm-ascend/GSM8K_in131072_bs100_deepseek",
+      "vllm-ascend/GSM8K_in3500_bs2800_deepseek",
+      "vllm-ascend/GSM8K-in3500-bs2800-qwen3",
+      "vllm-ascend/GSM8K-in2048-bs4000-ds3.2"
     ]
   }
