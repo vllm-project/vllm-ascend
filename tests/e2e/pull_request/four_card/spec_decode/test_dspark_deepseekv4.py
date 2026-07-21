@@ -37,7 +37,7 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 @pytest.mark.parametrize("model_name", MODELS)
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
 def test_deepseek_v4_dspark_acceptance_tp4(model_name):
-    golden = [0.88, 0.74, 0.58, 0.49, 0.40]
+    golden = [0.89, 0.78, 0.68, 0.59, 0.48]
 
     example_prompts = [
         "Hello, my name is",
