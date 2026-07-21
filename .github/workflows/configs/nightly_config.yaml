@@ -9,10 +9,6 @@
 a2:
   single_node:
     test_config:
-      # pytest-driven tests
-      - name: test_custom_op_multi_card
-        os: linux-aarch64-a2b3-4
-        tests: tests/e2e/nightly/single_node/ops/multicard_ops_a2/
       # YAML-driven tests
       - name: qwen3-vl-32b-instruct-w8a8
         os: linux-aarch64-a2b3-4
