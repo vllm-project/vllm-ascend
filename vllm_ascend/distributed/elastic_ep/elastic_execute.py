@@ -343,7 +343,7 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
         self._release_cuda_graphs()
         with use_stateless_pg_with_world_registration():
             _replace_active_groups(world=None, dp=None, ep=None, eplb=None, node_count=None)
-            _replace_ascend_active_groups(mc2=None, dynamic_eplb=None, fc3_quant_x=None)
+            _replace_ascend_active_groups(mc2=None, dynamic_eplb=None)
 
     def switch_and_prepare(self) -> None:
         self.old_ep_size = get_ep_group().world_size

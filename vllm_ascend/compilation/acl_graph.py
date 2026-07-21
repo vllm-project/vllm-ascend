@@ -95,7 +95,7 @@ class ACLGraphWrapper:
         global _acl_graph_pool
         if _acl_graph_pool is None:
             _acl_graph_pool = current_platform.graph_pool_handle()
-        return cls._graph_pool
+        return _acl_graph_pool
 
     def __init__(
         self,
@@ -326,6 +326,13 @@ class GraphParams:
 
 
 _graph_params: GraphParams | None = None
+
+
+def reset_graph_params():
+    global _graph_params, _draft_graph_params, _draft_graph_prefill_params
+    _graph_params = None
+    _draft_graph_params = None
+    _draft_graph_prefill_params = None
 
 
 def set_graph_params(aclgraph_capture_sizes: list[int]):

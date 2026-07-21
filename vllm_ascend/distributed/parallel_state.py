@@ -134,22 +134,6 @@ def init_ascend_model_parallel(
             _DYNAMIC_EPLB = init_model_parallel_group(
                 group_ranks, get_world_group().local_rank, backend, group_name="dynamic_eplb"
             )
-
-    if get_ascend_config().multistream_overlap_gate:
-        global _FC3_QUANT_X
-        if enable_elastic_ep:
-            _FC3_QUANT_X = _init_stateless_group(
-                group_ranks,
-                "fc3_quant_x",
-                parallel_config.data_parallel_master_ip,
-                backend,
-                coord_store=coord_store,
-            )
-        else:
-            _FC3_QUANT_X = init_model_parallel_group(
-                group_ranks, get_world_group().local_rank, backend, group_name="fc3_quant_x"
-            )
-
     # Initialize fine-grained TP process groups on Ascend for four components:
     # 1. LM Head: output logits projection (`lmhead_tensor_parallel_size`)
     # 2. O Proj: attention output projection (`oproj_tensor_parallel_size`)
@@ -196,20 +180,18 @@ def _replace_ascend_active_groups(
     *,
     mc2: GroupCoordinator | None,
     dynamic_eplb: GroupCoordinator | None,
-    fc3_quant_x: GroupCoordinator | None,
 ) -> None:
     """Destroy the current DP/EP/WORLD/EPLB groups and replace them.
 
     Destruction is collective — all ranks in the old groups must call this
     function together.  Pass all-``None`` to tear down without replacement.
     """
-    global _MC2, _DYNAMIC_EPLB, _FC3_QUANT_X
-    for group in (_MC2, _DYNAMIC_EPLB, _FC3_QUANT_X):
+    global _MC2, _DYNAMIC_EPLB
+    for group in (_MC2, _DYNAMIC_EPLB):
         if group is not None:
             group.destroy()
     _MC2 = mc2
     _DYNAMIC_EPLB = dynamic_eplb
-    _FC3_QUANT_X = fc3_quant_x
 
 
 def model_parallel_initialized():
