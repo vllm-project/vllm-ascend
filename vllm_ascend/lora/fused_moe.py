@@ -81,7 +81,6 @@ def prepare_lora_indices(
     token_indices = token_indices[:num_tokens]
     if pad_size > 0:
         token_indices = torch.nn.functional.pad(token_indices, (0, pad_size), value=-1)
-        lora_context.punica_wrapper.token_lora_indices = token_indices
     if tp_size > 1:
         lora_context.split_lora_indices = torch.tensor_split(token_indices, tp_size, dim=0)[tp_rank]
     else:
