@@ -92,7 +92,7 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 
 ### 4.1 Docker Image Installation
 
-**Example: (The following uses MkDocs syntax, applicable to v0.24.0rc and later versions. For v0.23.0 and earlier versions, please refer to the Version Compatibility Notes.)**
+**Example: (Applicable to v0.24.0rc and later versions (MkDocs syntax). For v0.23.0 and earlier versions (Sphinx framework), please refer to the Sphinx official documentation for more syntax details.)**
 
 === "A3 series"
 
