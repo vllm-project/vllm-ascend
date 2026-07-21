@@ -33,6 +33,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.is_kv_consumer = False
         runner.vllm_config = MagicMock()
         runner.vllm_config.kv_transfer_config = None
+        # Required by _get_layer_kv_cache_specs (MiniMax indexer override path).
+        runner.compilation_config = SimpleNamespace(static_forward_context={})
         runner.model_config = MagicMock()
         runner.model_config.use_mla = True
         backend = MagicMock()
