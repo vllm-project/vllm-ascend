@@ -177,7 +177,9 @@ def penalties_triton_warmup(worker: NPUWorker) -> None:
     )
 
     for num_seqs, prompt_len, output_len in penalty_cases:
-        print(f"[zz] num_seqs={num_seqs}, prompt_len={prompt_len}, output_len={output_len}")
+        logger.info("Warming up penalties Triton kernels: num_seqs=%d, prompt_len=%d, output_len=%d",
+                    num_seqs, prompt_len, output_len
+                    )
         _warm_apply_penalties_triton(
             device,
             num_seqs,

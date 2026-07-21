@@ -248,6 +248,14 @@ def _warm_sample_recovered_tokens_kernel(
     enable_reduce_sampling: bool,
     block_verify: bool,
 ) -> None:
+    logger.info(
+        "Warming up sample recovered Triton kernels: no_draft_probs=%s, "
+        "enable_reduce_sampling=%s, block_verify=%s",
+        no_draft_probs,
+        enable_reduce_sampling,
+        block_verify,
+    )
+
     global_vocab_size = tensors["global_vocab_size"]
     assert isinstance(global_vocab_size, int)
     prob_vocab_size = tensors["prob_vocab_size"]
@@ -392,35 +400,35 @@ def _warm_rejection_random_path(
     grid, block_size = cal_grid_and_block_size(batch_size)
     for enable_reduce_sampling in (False, True):
         for no_draft_probs in (False, True):
-            for block_verify in (False, True):
-                with_draft_probs = not no_draft_probs
-                # Match rejection_sampler: block verify needs draft_probs and spec_len >= 3.
-                tensors = _make_rejection_tensors(
-                    batch_size,
-                    max_spec_len,
-                    vocab_size,
-                    device,
-                    with_draft_probs=with_draft_probs,
-                    enable_reduce_sampling=enable_reduce_sampling,
-                )
-                _warm_sample_recovered_tokens_kernel(
-                    batch_size,
-                    max_spec_len,
-                    tensors,
-                    no_draft_probs=no_draft_probs,
-                    enable_reduce_sampling=enable_reduce_sampling,
-                    block_verify=block_verify,
-                )
-                _warm_rejection_random_sample_kernel(
-                    batch_size,
-                    max_spec_len,
-                    block_size,
-                    grid,
-                    tensors,
-                    no_draft_probs=no_draft_probs,
-                    enable_reduce_sampling=enable_reduce_sampling,
-                    block_verify=block_verify,
-                )
+            with_draft_probs = not no_draft_probs
+            # Match rejection_sampler: block verify needs draft_probs and spec_len >= 3.
+            block_verify = max_spec_len >= 3 and with_draft_probs
+            tensors = _make_rejection_tensors(
+                batch_size,
+                max_spec_len,
+                vocab_size,
+                device,
+                with_draft_probs=with_draft_probs,
+                enable_reduce_sampling=enable_reduce_sampling,
+            )
+            _warm_sample_recovered_tokens_kernel(
+                batch_size,
+                max_spec_len,
+                tensors,
+                no_draft_probs=no_draft_probs,
+                enable_reduce_sampling=enable_reduce_sampling,
+                block_verify=block_verify,
+            )
+            _warm_rejection_random_sample_kernel(
+                batch_size,
+                max_spec_len,
+                block_size,
+                grid,
+                tensors,
+                no_draft_probs=no_draft_probs,
+                enable_reduce_sampling=enable_reduce_sampling,
+                block_verify=block_verify,
+            )
 
 
 @torch.inference_mode()
