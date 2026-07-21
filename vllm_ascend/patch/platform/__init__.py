@@ -22,7 +22,7 @@ import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_mla_prefill_backend  # noqa
 import vllm_ascend.patch.platform.patch_pp_mtp  # noqa
 import vllm_ascend.patch.platform.patch_use_v2_model_runner  # noqa
-from vllm_ascend.utils import is_310p, vllm_version_is
+from vllm_ascend.utils import is_310p
 
 if not is_310p():
     import vllm_ascend.patch.platform.patch_mamba_config  # noqa
@@ -30,9 +30,6 @@ else:
     import vllm_ascend.patch.platform.patch_mamba_config_310  # noqa
 import vllm_ascend.patch.platform.patch_minimax_m2_config  # noqa
 
-if vllm_version_is("0.24.0"):
-    import vllm_ascend.patch.platform.patch_deepseek_v4_tool_call_parser  # noqa
-    import vllm_ascend.patch.platform.patch_parser_reasoning_usage  # noqa
 import vllm_ascend.patch.platform.patch_structured_output  # noqa
 import vllm_ascend.patch.platform.patch_weight_transfer_engine  # noqa
 import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa

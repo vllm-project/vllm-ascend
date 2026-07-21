@@ -180,6 +180,18 @@ class ModelWithContext(nn.Module):
         # draft model has `compute_logits`, which is not in ModelWithContext
         return self.original_model.compute_logits(hidden_states)
 
+    def compute_draft_logits(self, hidden_states: torch.Tensor):
+        return self.original_model.compute_draft_logits(hidden_states)
+
+    def markov_embed(self, token_ids: torch.Tensor):
+        return self.original_model.markov_embed(token_ids)
+
+    def markov_bias(self, markov_embed: torch.Tensor):
+        return self.original_model.markov_bias(markov_embed)
+
+    def map_draft_to_target(self, draft_ids: torch.Tensor):
+        return self.original_model.map_draft_to_target(draft_ids)
+
 
 @contextmanager
 def model_capture_wrapper(speculator, is_draft_model_prefill):
