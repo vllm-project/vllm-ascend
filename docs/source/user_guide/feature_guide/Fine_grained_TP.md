@@ -94,11 +94,11 @@ To evaluate the effectiveness of fine-grained TP in large-scale service scenario
 
 | Module           | Memory Savings | TPOT Impact (batch=24)    |
 | ---------------- | -------------- | ------------------------- |
-| o_proj TP = 8    | 5.8 GB         | **+1.5 ms** (degradation) |
-| LM head TP = 8   | 1.51 GB        | **−1.2 ms** (improvement) |
-|  FFN TP = 8 | 0.9 GB         | **−1.0 ms** (improvement) |
-| Embedding TP = 8 | 1.51 GB        | **−1.0 ms** (improvement) |
-| **Total**        | **9.72 GB**    | —                         |
+| o_proj TP = 8    | 5.8GB          | **+1.5 ms** (degradation) |
+| LM head TP = 8   | 1.51GB         | **−1.2 ms** (improvement) |
+| FFN TP = 8 | 0.9GB          | **−1.0 ms** (improvement) |
+| Embedding TP = 8 | 1.51GB         | **−1.0 ms** (improvement) |
+| **Total**        | **9.72GB**     | —                         |
 
 - We achieved significant gains in terms of high memory capacity on a single card, as well as the benefits of TPOT.
 

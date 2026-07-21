@@ -99,7 +99,7 @@ When this warning appears:
 - increase `short_request_first_config.threshold`
 - or disable `short_request_first_config.enabled`
 
-ShortRequestFirst also emits an aggregate stats log every 5 seconds so queue behavior is visible without adding extra configuration.
+ShortRequestFirst also emits an aggregate stats log every 5s so queue behavior is visible without adding extra configuration.
 
 ## Relationship with recompute scheduler
 

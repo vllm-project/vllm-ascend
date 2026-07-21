@@ -43,7 +43,7 @@ This section uses the `deepseek-ai/DeepSeek-V2-Lite` example, but you can swap i
 
 ### 2.2 Deploy Prefill-Decode Disaggregated DeepSeek-V2-Lite on Kubernetes
 
-A concrete example is provided in Kthena as <https://github.com/volcano-sh/kthena/blob/main/examples/model-serving/prefill-decode-disaggregation.yaml>
+A concrete example is provided in Kthena as [prefill-decode-disaggregation.yaml](https://github.com/volcano-sh/kthena/blob/main/examples/model-serving/prefill-decode-disaggregation.yaml)
 
 Deploy it with the command below:
 

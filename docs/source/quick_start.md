@@ -5,7 +5,7 @@
 This section guides you through container-based environment setup and large model inference, using the Qwen3-0.6B offline single-GPU inference script as an example.
 
 - For details on using different models, see the corresponding model tutorial in the "Model Tutorials" directory, for example, [Qwen3-30B-A3B](tutorials/models/Qwen3-30B-A3B.md).
-- For details on using different functions, see the corresponding function tutorial in the "Function Tutorials" directory, for example, [Prefill-Decode Disaggregation (Deepseek)](tutorials/features/pd_disaggregation_mooncake_multi_node.md).
+- For details on using different functions, see the corresponding function tutorial in the "Function Tutorials" directory, for example, [Prefill-Decode Disaggregation (DeepSeek)](tutorials/features/pd_disaggregation_mooncake_multi_node.md).
 
 ## Prerequisites
 
@@ -164,7 +164,7 @@ The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/v
 
 You can use ModelScope mirror to speed up download:
 
-<!-- tests/e2e/doctests/001-quickstart-test.sh should be considered updating as well -->
+<!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
 
 ```bash
 export VLLM_USE_MODELSCOPE=True
@@ -188,7 +188,7 @@ There are two ways to start vLLM on Ascend NPU:
         "The future of AI is",
     ]
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
-    # The first run will take about 3-5 mins (10 MB/s) to download models
+    # The first run will take about 3-5 mins (10MB/s) to download models
     llm = LLM(model="Qwen/Qwen3-0.6B")
 
     outputs = llm.generate(prompts, sampling_params)
@@ -247,7 +247,7 @@ There are two ways to start vLLM on Ascend NPU:
     <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
 
     ```bash
-    # Deploy vLLM server (The first run will take about 3-5 mins (10 MB/s) to download models)
+    # Deploy vLLM server (The first run will take about 3-5 mins (10MB/s) to download models)
     vllm serve Qwen/Qwen3-0.6B &
     ```
 
