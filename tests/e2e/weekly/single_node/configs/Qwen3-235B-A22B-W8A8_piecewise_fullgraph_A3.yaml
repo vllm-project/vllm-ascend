@@ -10,7 +10,7 @@ _envs: &envs
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "1"
   VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
-  VLLM_ENGINE_READY_TIMEOUT_S: "1"
+  VLLM_ENGINE_READY_TIMEOUT_S: "1800"
   SERVER_PORT: "DEFAULT_PORT"
 
 _server_cmd: &server_cmd
@@ -19,14 +19,13 @@ _server_cmd: &server_cmd
   - "4"
   - "--data-parallel-size"
   - "4"
-  - "--data-parallel"
-  - "size-local"
+  - "--data-parallel-size-local"
   - "4"
-  - "-data-parallel-start-rank"
+  - "--data-parallel-start-rank"
   - "0"
   - "--data-parallel-rpc-port"
   - "2345"
-  - "-max-num-seqs"
+  - "--max-num-seqs"
   - "120"
   - "--max-model-len"
   - "40960"
@@ -34,13 +33,17 @@ _server_cmd: &server_cmd
   - "16384"
   - "--gpu-memory-utilization"
   - "0.9"
-  - "-enable-expert-parallel "
+  - "--enable-expert-parallel "
   - "--port"
   - "$SERVER_PORT"
   - "--no-enable-prefix-caching"
-  - "-quantization"
+  - "--quantization"
   - "ascend"
   - "--trust-remote-code"
+  - "--host"
+  - "0.0.0.0"
+  - "--data-parallel-address"
+  - "0.0.0.0"
 
 _benchmarks: &benchmarks
   acc:
@@ -49,7 +52,7 @@ _benchmarks: &benchmarks
     request_conf: vllm_api_general_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
     max_out_len: 38912
-    num_prompts: 16
+    num_prompts: 32
     batch_size: 32
     baseline: 90
     threshold: 0
@@ -67,9 +70,9 @@ test_cases:
     server_cmd_extra:
       - "--compilation-config"
       - '{"cudagraph_mode": "PIECEWISE"}'
-      - "-hf-overrides"
+      - "--hf-overrides"
       - '{"rope_parameters": {"rope_type":"yarn","rope_theta": 1000000.0,"factor":4.3,"original_max_position_embeddings":32768}}'
-      - "-additional-config"
+      - "--additional-config"
       - '{"ascend_scheduler_config":{"enabled":false},"pa_shape_list": [4,8,16,32,48,64,96,128,160,192]}'
     benchmarks:
       <<: *benchmarks
@@ -82,9 +85,9 @@ test_cases:
     server_cmd_extra:
       - "--compilation-config"
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-      - - "-hf-overrides"
+      - "--hf-overrides"
       - '{"rope_parameters": {"rope_type":"yarn","rope_theta": 1000000.0,"factor":4.3,"original_max_position_embeddings":32768}}'
-      - "-additional-config"
+      - "--additional-config"
       - '{"ascend_scheduler_config":{"enabled":false},"pa_shape_list": [4,8,16,32,48,64,96,128,160,192]}'
     benchmarks:
       <<: *benchmarks
