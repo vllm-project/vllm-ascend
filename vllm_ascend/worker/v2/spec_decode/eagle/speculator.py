@@ -34,12 +34,8 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
-
-if not vllm_version_is("0.25.1"):
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -149,16 +145,13 @@ class AscendEagleSpeculator(EagleSpeculator):
         target_input_buffers: Any = None,
         target_attn_groups: Any = None,
     ) -> None:
-        if vllm_version_is("0.25.1"):
-            super().set_attn(
-                model_state,
-                kv_cache_config,
-                block_tables,
-                target_input_buffers,
-                target_attn_groups,
-            )
-        else:
-            super().set_attn(model_state, kv_cache_config, block_tables)
+        super().set_attn(
+            model_state,
+            kv_cache_config,
+            block_tables,
+            target_input_buffers,
+            target_attn_groups,
+        )
 
         # npu needs attn_backends to update graph params
         attn_backends: dict[str, type[AttentionBackend]] = {}
@@ -212,7 +205,7 @@ class AscendEagleSpeculator(EagleSpeculator):
         assert self.decode_cudagraph_manager is not None
         with build_attn_metadata_wrapper():
             self.decode_cudagraph_manager.capture(
-                self._multi_step_decode,
+                self._generate_draft,
                 self.model_state,
                 self.input_buffers,
                 self.block_tables,

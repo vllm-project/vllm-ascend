@@ -16,7 +16,6 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
     DFlashSpeculator,
 )
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 
 logger = logging.getLogger(__name__)
@@ -47,16 +46,13 @@ class AscendDFlashSpeculator(DFlashSpeculator):
         target_input_buffers: Any = None,
         target_attn_groups: Any = None,
     ) -> None:
-        if vllm_version_is("0.25.1"):
-            super().set_attn(
-                model_state,
-                kv_cache_config,
-                block_tables,
-                target_input_buffers,
-                target_attn_groups,
-            )
-        else:
-            super().set_attn(model_state, kv_cache_config, block_tables)
+        super().set_attn(
+            model_state,
+            kv_cache_config,
+            block_tables,
+            target_input_buffers,
+            target_attn_groups,
+        )
         self._context_slot_mappings = torch.zeros(
             len(self.draft_kv_cache_group_ids),
             self.max_num_tokens,

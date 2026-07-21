@@ -16,6 +16,9 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
+    SpeculatorCudaGraphManager,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -24,30 +27,14 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_prefill_params,
     update_full_graph_params,
 )
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import (
     collect_sorted_captured_token_sizes,
     model_capture_wrapper,
 )
 from vllm_ascend.worker.v2.utils import communicator_switch
 
-if not vllm_version_is("0.25.1"):
-    from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (  # type: ignore[import-not-found]
-        DecodeSpeculatorCudaGraphManager,
-        PrefillSpeculatorCudaGraphManager,
-    )
-else:
-    from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (  # type: ignore[import-not-found]
-        SpeculatorCudaGraphManager,
-    )
-
-
-if not vllm_version_is("0.25.1"):
-    _PrefillParent = PrefillSpeculatorCudaGraphManager
-    _DecodeParent = DecodeSpeculatorCudaGraphManager
-else:
-    _PrefillParent = SpeculatorCudaGraphManager
-    _DecodeParent = SpeculatorCudaGraphManager
+_PrefillParent = SpeculatorCudaGraphManager
+_DecodeParent = SpeculatorCudaGraphManager
 
 
 class PrefillEagleAclGraphManager(_PrefillParent):
@@ -95,27 +82,15 @@ class PrefillEagleAclGraphManager(_PrefillParent):
     ) -> None:
         """Capture ACL graphs for Eagle."""
         with communicator_switch(), model_capture_wrapper(self.speculator, self.is_draft_model_prefill):
-            if not vllm_version_is("0.25.1"):
-                # PrefillSpeculatorCudaGraphManager.capture takes
-                # (forward_fn, attn_states, progress_bar_desc)
-                super().capture(
-                    forward_fn,
-                    arg2,
-                    progress_bar_desc=progress_bar_desc,
-                )
-            else:
-                # SpeculatorCudaGraphManager.capture takes
-                # (forward_fn, model_state, input_buffers, block_tables,
-                #  attn_groups, kv_cache_config, progress_bar_desc)
-                super().capture(
-                    forward_fn,
-                    arg2,
-                    arg3,
-                    arg4,
-                    arg5,
-                    arg6,
-                    progress_bar_desc=progress_bar_desc,
-                )
+            super().capture(
+                forward_fn,
+                arg2,
+                arg3,
+                arg4,
+                arg5,
+                arg6,
+                progress_bar_desc=progress_bar_desc,
+            )
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
@@ -214,7 +189,7 @@ class DecodeEagleAclGraphManager(_DecodeParent):
             num_tokens_across_dp = (
                 torch.full((self.dp_size,), num_tokens, dtype=torch.int32, device="cpu") if self.dp_size > 1 else None
             )
-            attn_state = prepare_inputs_to_capture(
+            prepare_inputs_to_capture(
                 num_reqs,
                 num_tokens,
                 model_state,
@@ -229,9 +204,7 @@ class DecodeEagleAclGraphManager(_DecodeParent):
                 BatchExecutionDescriptor(cg_mode=cg_mode, num_tokens=num_tokens, num_reqs=num_reqs),
                 num_tokens_across_dp,
             )
-            if vllm_version_is("0.25.1"):
-                return fwd
-            return fwd, attn_state
+            return fwd
 
         with communicator_switch(), model_capture_wrapper(self.speculator, self.is_draft_model_prefill):
             # Skip DecodeSpeculatorCudaGraphManager.capture (which builds
