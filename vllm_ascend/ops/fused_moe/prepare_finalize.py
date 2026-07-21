@@ -172,8 +172,9 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
                 hidden_states = split_hidden_states[self.tp_rank]
                 router_logits = split_router_logits[self.tp_rank]
                 if token_lora_indices is not None:
-                    split_lora_indices = torch.tensor_split(token_lora_indices, self.tp_size, dim=0)[self.tp_rank]
-                    lora_context.split_lora_indices = split_lora_indices
+                    lora_context.split_lora_indices = torch.tensor_split(token_lora_indices, self.tp_size, dim=0)[
+                        self.tp_rank
+                    ]
             else:
                 lora_context.split_lora_indices = token_lora_indices
 
