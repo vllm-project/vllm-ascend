@@ -84,10 +84,10 @@ Select an image based on your machine type and start the docker image on your no
     Start the docker image on each node.
 
     ```bash
-    # deepseek-v4-flash use follow images
+    # deepseek-v4-flash uses the following image
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     
-    # deepseek-v4-flash-dspark use follow images
+    # deepseek-v4-flash-dspark uses the following image
     export IMAGE=swr.cn-north-4.myhuaweicloud.com/desaysv/vllm-ascend-dspark:910b4
     
     docker run --rm \
