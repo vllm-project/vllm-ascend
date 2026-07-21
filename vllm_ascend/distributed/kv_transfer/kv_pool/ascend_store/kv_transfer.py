@@ -524,38 +524,40 @@ class KVTransferThread(threading.Thread):
         skip_null_blocks: bool = False,
         cache_role: str = "kv",
     ):
+        def keep_latest(token_iter):
+            latest_chunks = {chunk[3]: chunk for chunk in token_iter}
+            return iter(sorted(latest_chunks.values(), key=lambda chunk: chunk[0]))
+
         process_with_block_ids = getattr(self.token_database, "process_tokens_with_block_ids", None)
         if process_with_block_ids is not None:
-            token_iter = process_with_block_ids(
-                token_len,
-                block_hashes,
-                block_ids,
-                mask_num,
-                kv_cache_group_id=kv_cache_group_id,
-                skip_null_blocks=skip_null_blocks,
-                cache_role=cache_role,
+            return keep_latest(
+                process_with_block_ids(
+                    token_len,
+                    block_hashes,
+                    block_ids,
+                    mask_num,
+                    kv_cache_group_id=kv_cache_group_id,
+                    skip_null_blocks=skip_null_blocks,
+                    cache_role=cache_role,
+                )
             )
-        else:
 
-            def iter_with_legacy_process_tokens():
-                try:
-                    token_iter = self.token_database.process_tokens(token_len, block_hashes, mask_num)
-                except TypeError:
-                    token_iter = self.token_database.process_tokens(token_len, block_hashes)
-                group_block_size = self._get_block_size(kv_cache_group_id)
-                for start, end, key in token_iter:
-                    block_idx = start // group_block_size
-                    if block_idx >= len(block_ids):
-                        continue
-                    block_id = block_ids[block_idx]
-                    if skip_null_blocks and cache_role == "kv" and block_id <= 0:
-                        continue
-                    yield start, end, key, block_id
+        def iter_with_legacy_process_tokens():
+            try:
+                token_iter = self.token_database.process_tokens(token_len, block_hashes, mask_num)
+            except TypeError:
+                token_iter = self.token_database.process_tokens(token_len, block_hashes)
+            group_block_size = self._get_block_size(kv_cache_group_id)
+            for start, end, key in token_iter:
+                block_idx = start // group_block_size
+                if block_idx >= len(block_ids):
+                    continue
+                block_id = block_ids[block_idx]
+                if skip_null_blocks and cache_role == "kv" and block_id <= 0:
+                    continue
+                yield start, end, key, block_id
 
-            token_iter = iter_with_legacy_process_tokens()
-
-        latest_chunks = {chunk[3]: chunk for chunk in token_iter}
-        return iter(sorted(latest_chunks.values(), key=lambda chunk: chunk[0]))
+        return keep_latest(iter_with_legacy_process_tokens())
 
     def _prepare_value(
         self,
