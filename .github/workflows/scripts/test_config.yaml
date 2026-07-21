@@ -682,6 +682,7 @@
     - tools/
   tests:
     - tests/ut/_tools
+    - tests/ut/tools/test_check_log_quality.py
 
 ---
 # === Estimated Times ===
