@@ -72,6 +72,7 @@ def _shared_dequant_swiglu_quant(
         swiglu = swiglu.to(output_dtype if output_dtype in (torch.float16, torch.bfloat16) else torch.bfloat16)
     return torch_npu.npu_dynamic_quant(swiglu)
 
+
 def _small_ops_dequant_swiglu_quant(
     x: torch.Tensor,
     weight_scale: torch.Tensor,
@@ -101,11 +102,12 @@ def _small_ops_dequant_swiglu_quant(
     quantized_x, swiglu_out_scale = torch_npu.npu_dynamic_quant(swiglu_out)
     return quantized_x, swiglu_out_scale
 
+
 _REPRO_CASES = [
     ([4608, 2048], 0.0, "large_2048_aligned"),
-    ([2, 192],     0.0, "small_192_misaligned"),
-    ([4, 192],     0.0, "small_192_misaligned_4rows"),
-    ([8, 384],     0.0, "small_384_aligned"),
+    ([2, 192], 0.0, "small_192_misaligned"),
+    ([4, 192], 0.0, "small_192_misaligned_4rows"),
+    ([8, 384], 0.0, "small_384_aligned"),
 ]
 
 
@@ -125,8 +127,7 @@ def test_npu_dequant_swiglu_quant_with_limit(x_shape, clamp_limit, desc):
 
     out_dimy = x_shape[1] // 2
     print(f"\n=== Case: {desc} ===")
-    print(f"x_shape={x_shape}, outDimy={out_dimy}, "
-          f"outDimy%64={out_dimy % 64}, clamp_limit={clamp_limit}")
+    print(f"x_shape={x_shape}, outDimy={out_dimy}, outDimy%64={out_dimy % 64}, clamp_limit={clamp_limit}")
 
     # 1. Golden reference (pure PyTorch + npu_dynamic_quant)
     output_golden, output_scale_golden = _shared_dequant_swiglu_quant(
@@ -158,18 +159,16 @@ def test_npu_dequant_swiglu_quant_with_limit(x_shape, clamp_limit, desc):
     graph.replay()
 
     # 3. Small ops workaround (manual dequant + npu_swiglu + npu_dynamic_quant)
-    workaround_output, workaround_scale = _small_ops_dequant_swiglu_quant(
-        x, weight_scale, activate_scale
-    )
+    workaround_output, workaround_scale = _small_ops_dequant_swiglu_quant(x, weight_scale, activate_scale)
 
     def _diff(a, b):
         d = (a.float().cpu() - b.float().cpu()).abs()
         return f"max_abs={d.max().item():.4f}, mean_abs={d.mean().item():.4f}"
 
-    print(f"\n--- Output diff ---")
+    print("\n--- Output diff ---")
     print(f"Golden vs Fused      : {_diff(output_golden, output)}")
     print(f"Golden vs Workaround : {_diff(output_golden, workaround_output)}")
-    print(f"--- Scale diff ---")
+    print("--- Scale diff ---")
     print(f"Golden vs Fused      : {_diff(output_scale_golden, output_scale)}")
     print(f"Golden vs Workaround : {_diff(output_scale_golden, workaround_scale)}")
 
