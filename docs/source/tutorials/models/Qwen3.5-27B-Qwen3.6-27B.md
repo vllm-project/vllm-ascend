@@ -54,7 +54,7 @@ Start the docker image on your each node.
 
 ```{code-block} bash
   :substitutions:
-export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
 docker run --rm \
     --name vllm-ascend \
     --shm-size=1g \
@@ -97,7 +97,7 @@ Start the docker image on your each node.
 
 ```{code-block} bash
   :substitutions:
-export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
     --name vllm-ascend \
     --shm-size=1g \
@@ -132,7 +132,7 @@ Start the docker image on your each node.
 
 ```{code-block} bash
   :substitutions:
-export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p
 docker run --rm \
     --name vllm-ascend \
     --shm-size=1g \
@@ -633,7 +633,6 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     export HCCL_BUFFSIZE=1024
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
@@ -793,7 +792,7 @@ Key Parameter Descriptions:
 
 ::::::{tab-item} Ascend950DT series
 
-For `Qwen3.5-27B-w8a8` and `Qwen3.6-27B-w8a8`, a typical **1P1D** configuration requires **2 Ascend950DT series (96G × 8) nodes** (1 Prefill node + 1 Decode node), with **TP=1** and **DP=8** on each node, which fully utilizes all 8 NPUs of an Ascend950DT series. The example below uses `Qwen3.5-27B-w8a8`; for `Qwen3.6-27B-w8a8`, replace the model path with `Eco-Tech/Qwen3.6-27B-w8a8` and adjust `--served-model-name` to `qwen3.6` (and `--max-model-len` to 262144 if needed).
+For `Qwen3.5-27B-w8a8-MXFP8` and `Qwen3.6-27B-w8a8-MXFP8`, a typical **1P1D** configuration requires **2 Ascend950DT series (96G × 8) nodes** (1 Prefill node + 1 Decode node), with **TP=1** and **DP=8** on each node, which fully utilizes all 8 NPUs of an Ascend950DT series. The example below uses `Qwen3.5-27B-w8a8-MXFP8`; for `Qwen3.6-27B-w8a8-MXFP8`, replace the model path with `Eco-Tech/Qwen3.6-27B-w8a8-MXFP8` and adjust `--served-model-name` to `qwen3.6` (and `--max-model-len` to 262144 if needed).
 
 > **Note**: Since `Qwen3.5-27B` and `Qwen3.6-27B` fit in a single node, multi-node PD separation is only recommended for high-concurrency production deployments. For the Mooncake deployment specifics, please refer to the [Mooncake Multi-Node PD Disaggregation Guide](../features/pd_disaggregation_mooncake_multi_node.md).
 
