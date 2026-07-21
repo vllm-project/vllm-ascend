@@ -300,7 +300,7 @@ def expand_kernel(
         tl.store(output_ptr + start_idx1 + offset1, src_val1, mask=offset1 < num_tokens1)
 
 
-@triton.jit(do_not_specialize=["output_token_ids_ptr", "cu_num_draft_tokens_ptr", "draft_token_ids_ptr"])
+@triton.jit(do_not_specialize=["output_token_ids_ptr", "cu_num_draft_tokens_ptr", "draft_token_ids_ptr", "vocab_size", "global_vocab_size"])
 def sample_recovered_tokens_kernel(
     output_token_ids_ptr,
     cu_num_draft_tokens_ptr,
