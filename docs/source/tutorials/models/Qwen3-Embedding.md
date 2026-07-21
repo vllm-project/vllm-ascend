@@ -197,7 +197,7 @@ The service returns HTTP 200 OK with a JSON response containing the `embedding` 
 }
 ```
 
-For more usage examples, please reference the [link](https://github.com/vllm-project/vllm/tree/main/examples/pooling/embed)
+For more usage examples, please reference the [examples](https://github.com/vllm-project/vllm/tree/main/examples/pooling/embed)
 
 ## 7 Accuracy Evaluation
 
