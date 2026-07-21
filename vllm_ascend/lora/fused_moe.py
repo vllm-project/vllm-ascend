@@ -98,8 +98,7 @@ def _recover_moe_lora_routing_allgather(lora_context, expanded_row_idx, topk_ids
     inv_perm = torch.argsort(expanded)
     expert_per_row = topk_ids.reshape(-1)[inv_perm].to(torch.long)
 
-    # punica_wrapper.token_lora_indices is a 1D LongTensor sized to
-    # max_num_batched_tokens
+    # token_lora_indices is a 1D LongTensor sized to max_num_batched_tokens
     # (host-known constant). Clamping defensively to the last index is a no-op
     # in normal operation but keeps the gather graph-safe.
     orig_token = inv_perm // top_k
