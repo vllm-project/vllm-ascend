@@ -60,7 +60,8 @@ _MOE_LORA_INDEX_FIELDS = (
 
 def reset_lora_indices(lora_context) -> None:
     for field in _MOE_LORA_INDEX_FIELDS:
-        setattr(lora_context, field, None)
+        if hasattr(lora_context, field):
+            delattr(lora_context, field)
 
 
 def prepare_lora_indices(
@@ -74,21 +75,21 @@ def prepare_lora_indices(
     """Truncate, pad, and TP-split the per-token LoRA index tensor,
     storing the result in ``lora_context.split_lora_indices``.
 
-    No-op when ``lora_context`` is ``None`` (no LoRA adapter active).
+    Caller must ensure ``lora_context`` is not ``None``.
     """
-    if lora_context is None:
-        return
     token_indices = lora_context.punica_wrapper.token_lora_indices
     token_indices = token_indices[:num_tokens]
     if pad_size > 0:
         token_indices = torch.nn.functional.pad(
             token_indices, (0, pad_size), value=-1
         )
+        lora_context.punica_wrapper.token_lora_indices = token_indices
     if tp_size > 1:
         lora_context.split_lora_indices = torch.tensor_split(
             token_indices, tp_size, dim=0
         )[tp_rank]
     else:
+        # use ep for dp without tp.
         lora_context.split_lora_indices = token_indices
 
 
@@ -105,11 +106,9 @@ def preprocess_lora_indices(
     hidden states, and stores the result in
     ``lora_context.permuted_lora_indices``.
 
-    No-op when ``lora_context`` is ``None`` or ``split_lora_indices``
-    has not been populated by the prepare stage.
+    Caller must ensure ``lora_context`` is not ``None`` and
+    ``split_lora_indices`` has been populated.
     """
-    if lora_context is None:
-        return
     split_indices = getattr(lora_context, "split_lora_indices", None)
     if split_indices is None:
         return
@@ -130,11 +129,9 @@ def postprocess_lora_indices(
     Reads ``lora_context.exchanged_lora_indices``, applies the
     global permutation, and writes the result back.
 
-    No-op when ``lora_context`` is ``None`` or
-    ``exchanged_lora_indices`` has not been set.
+    Caller must ensure ``lora_context`` is not ``None`` and
+    ``exchanged_lora_indices`` has been populated.
     """
-    if lora_context is None:
-        return
     exchanged = getattr(lora_context, "exchanged_lora_indices", None)
     if exchanged is None:
         return
@@ -155,11 +152,9 @@ def all2all_lora_indices(
     exchange with the given splits and group, and stores the result in
     ``lora_context.exchanged_lora_indices``.
 
-    No-op when ``lora_context`` is ``None`` or ``permuted_lora_indices``
-    has not been set.
+    Caller must ensure ``lora_context`` is not ``None`` and
+    ``permuted_lora_indices`` has been populated.
     """
-    if lora_context is None:
-        return
     permuted = getattr(lora_context, "permuted_lora_indices", None)
     if permuted is None:
         return

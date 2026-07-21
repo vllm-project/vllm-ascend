@@ -152,13 +152,14 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         if not (self.replace_allreduce or self.enable_shared_expert_dp):
             self.num_tokens, _ = hidden_states.shape
             pad_size = self.tp_size - self.num_tokens  # Pad to TP size (cyclic)
-            prepare_lora_indices(
-                self.lora_context,
-                num_tokens=self.num_tokens,
-                pad_size=pad_size,
-                tp_size=self.tp_size,
-                tp_rank=self.tp_rank,
-            )
+            if self.lora_context is not None:
+                prepare_lora_indices(
+                    self.lora_context,
+                    num_tokens=self.num_tokens,
+                    pad_size=pad_size,
+                    tp_size=self.tp_size,
+                    tp_rank=self.tp_rank,
+                )
 
             if pad_size > 0:
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))

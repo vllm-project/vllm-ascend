@@ -520,12 +520,13 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         permute1_ep_all_to_all_handle.wait()
         permutated_local_input_tokens.untyped_storage().resize_(0)
 
-        all2all_lora_indices(
-            self.lora_context,
-            output_splits=output_splits,
-            input_splits=input_splits,
-            ep_group=self.ep_group,
-        )
+        if self.lora_context is not None:
+            all2all_lora_indices(
+                self.lora_context,
+                output_splits=output_splits,
+                input_splits=input_splits,
+                ep_group=self.ep_group,
+            )
 
         # Postprocess
         global_input_tokens, dynamic_scale_final, reversed_global_input_permutation_mapping = (
@@ -594,11 +595,12 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             num_out_tokens=num_out_tokens,
         )
 
-        preprocess_lora_indices(
-            self.lora_context,
-            topk_ids=topk_ids,
-            reversed_permutation_mapping=reversed_local_input_permutation_mapping,
-        )
+        if self.lora_context is not None:
+            preprocess_lora_indices(
+                self.lora_context,
+                topk_ids=topk_ids,
+                reversed_permutation_mapping=reversed_local_input_permutation_mapping,
+            )
 
         return (
             permutated_local_input_tokens,
@@ -704,10 +706,11 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         global_input_tokens, reversed_global_input_permutation_mapping = torch_npu.npu_moe_token_permute(
             global_input_tokens, global_input_tokens_local_experts_indices
         )
-        postprocess_lora_indices(
-            self.lora_context,
-            reversed_permutation_mapping=reversed_global_input_permutation_mapping,
-        )
+        if self.lora_context is not None:
+            postprocess_lora_indices(
+                self.lora_context,
+                reversed_permutation_mapping=reversed_global_input_permutation_mapping,
+            )
         return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
 
     def _combine_preprocess(
