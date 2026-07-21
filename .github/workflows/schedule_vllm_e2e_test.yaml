@@ -44,7 +44,7 @@ env:
 
 jobs:
     resolve-tag:
-        runs-on: ubuntu-latest
+        runs-on: linux-amd64-cpu-4-hk
         outputs:
             release_tag: ${{ steps.vllm.outputs.release_tag }}
         steps:
@@ -60,7 +60,7 @@ jobs:
           fail-fast: false
           matrix:
             part: [0, 1, 2, 3]
-            image_tag: [9.0.0-910b-ubuntu22.04-py3.12]
+            image_tag: [9.0.1-910b-ubuntu22.04-py3.12]
             num_npus: [1]
         container:
           image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
@@ -180,7 +180,7 @@ jobs:
           fail-fast: false
           matrix:
             part: [0]
-            image_tag: [9.0.0-910b-ubuntu22.04-py3.12]
+            image_tag: [9.0.1-910b-ubuntu22.04-py3.12]
             num_npus: [2, 4]
         container:
           image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
@@ -291,7 +291,7 @@ jobs:
           fail-fast: false
           matrix:
             part: [0]
-            image_tag: [9.0.0-910b-ubuntu22.04-py3.12]
+            image_tag: [9.0.1-910b-ubuntu22.04-py3.12]
             num_npus: [1]
         container:
           image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}

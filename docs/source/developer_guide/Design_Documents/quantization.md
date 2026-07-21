@@ -50,7 +50,7 @@ Based on the above content, we present a brief description of the adaptation pro
 
 ### Quantization Algorithm Adaptation
 
-- **Step 1: Algorithm Design**. Define the algorithm ID (e.g., `W4A8_DYNAMIC`), determine supported layers (linear, moe, attention), and design the quantization scheme (static/dynamic, pertensor/perchannel/pergroup).
+- **Step 1: Algorithm Design**. Define the algorithm ID (e.g., `W4A8_DYNAMIC`), determine supported layers (linear, moe, attention), and design the quantization scheme (static/dynamic, Per-Tensor/Per-Channel/Per-Group).
 - **Step 2: Registration**. Use the `@register_scheme` decorator in `vllm_ascend/quantization/methods/registry.py` to register your quantization scheme class.
 
 ```python
@@ -111,4 +111,4 @@ vLLM Ascend supports multiple quantization algorithms. The following table provi
 
 **Static vs Dynamic:** Static quantization uses pre-computed scaling factors with better performance, while dynamic quantization computes scaling factors on-the-fly for each token/activation tensor with higher precision.
 
-**Granularity:** Refers to the scope of scaling factor computation (e.g., per-tensor, per-channel, per-group).
+**Granularity:** Refers to the scope of scaling factor computation (e.g., Per-Tensor, Per-Channel, Per-Group).

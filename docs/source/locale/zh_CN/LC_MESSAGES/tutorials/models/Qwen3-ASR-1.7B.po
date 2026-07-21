@@ -1,143 +1,121 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend \n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-02 07:02+0000\n"
-"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
-"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language: zh_CN\n"
+"POT-Creation-Date: 2026-07-08 14:01+0000\n"
+"PO-Revision-Date: 2026-07-08 14:01+0000\n"
+"Last-Translator: \n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.18.0\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:1
-msgid "Qwen3-ASR-1.7B"
-msgstr "Qwen3-ASR-1.7B"
+msgid "# Qwen3-ASR-1.7B"
+msgstr "# Qwen3-ASR-1.7B"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:3
-msgid "Introduction"
-msgstr "简介"
+msgid "## Introduction"
+msgstr "## 简介"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:5
 msgid ""
 "The released Qwen3-ASR-1.7B is a lightweight, high-performance automatic "
 "speech recognition (ASR) model developed by the Qwen Team. It delivers "
 "industry-leading recognition accuracy across Chinese/English multi-scene "
 "speech, Chinese dialects, multilingual and singing voice scenarios, with "
-"native support for long audio and streaming inference, and deep "
-"optimization for Ascend NPU hardware."
+"native support for long audio and streaming inference, and deep optimization"
+" for Ascend NPU hardware."
 msgstr ""
-"发布的Qwen3-ASR-1.7B是Qwen团队开发的轻量级高性能自动语音识别(ASR)模型。它在中英文多场景语音、中文方言、多语言及歌唱场景中提供行业领先的识别精度，原生支持长音频和流式推理，并针对Ascend"
+"发布的Qwen3-ASR-1.7B是由Qwen团队开发的轻量级高性能自动语音识别（ASR）模型。它在中英文多场景语音、中文方言、多语言及唱歌场景中均提供行业领先的识别精度，原生支持长音频和流式推理，并针对Ascend"
 " NPU硬件进行了深度优化。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:7
 msgid ""
-"This document will show the main verification steps of the model, "
-"including supported features, feature configuration, environment "
-"preparation, single-node deployment, accuracy and performance evaluation."
+"This document will show the main verification steps of the model, including "
+"supported features, feature configuration, environment preparation, single-"
+"node deployment, accuracy and performance evaluation."
 msgstr "本文档将展示该模型的主要验证步骤，包括支持特性、特性配置、环境准备、单节点部署、精度和性能评估。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:9
-msgid "Environment Preparation"
-msgstr "环境准备"
+msgid "## Environment Preparation"
+msgstr "## 环境准备"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:11
-msgid "Model Weight"
-msgstr "模型权重"
+msgid "### Model Weight"
+msgstr "### 模型权重"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:13
 msgid ""
-"`Qwen3-ASR-1.7B`(BF16 version): requires 1 Ascend 910B (with 1 x 64G "
-"NPUs)."
+"`Qwen3-ASR-1.7B`(BF16 version): requires 1 Ascend 910B (with 1 x 64G NPUs)."
+msgstr "`Qwen3-ASR-1.7B`（BF16版本）：需要1个Ascend 910B（配备1 x 64G NPU）。"
+
+msgid ""
+"`Qwen3-ASR-1.7B`(BF16 version): requires 1 Ascend 310P (with 1 x 48G NPUs).\n"
+"[Download model weight](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)."
 msgstr ""
-"`Qwen3-ASR-1.7B`(BF16版本)：需要1个Ascend 910B（1 x 64G "
-"NPU）。[下载模型权重](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)"
+"`Qwen3-ASR-1.7B`（BF16版本）：需要1个Ascend 310P（配备1 x 48G NPU）。\n"
+"[下载模型权重](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:15
 msgid ""
-"`Qwen3-ASR-1.7B`(BF16 version): requires 1 Ascend 310P (with 1 x 48G "
-"NPUs). [Download model "
-"weight](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)."
-msgstr ""
-"`Qwen3-ASR-1.7B`(BF16版本)：需要1个Ascend 310P（1 x 48G "
-"NPU）。[下载模型权重](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)。"
+"It is recommended to download the model weight to the shared directory of "
+"multiple nodes, such as `/root/.cache/`."
+msgstr "建议将模型权重下载到多节点共享目录，例如 `/root/.cache/`。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:18
-msgid ""
-"It is recommended to download the model weight to the shared directory of"
-" multiple nodes, such as `/root/.cache/`."
-msgstr "建议将模型权重下载到多节点共享目录，例如`/root/.cache/`。"
+msgid "### Installation"
+msgstr "### 安装"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:20
-msgid "Installation"
-msgstr "安装"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:22
 msgid "`Qwen3-ASR-1.7B` is supported in `vllm-ascend`."
-msgstr "`Qwen3-ASR-1.7B`在`vllm-ascend`中得到支持。"
+msgstr "`vllm-ascend` 支持 `Qwen3-ASR-1.7B`。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:24
-msgid "You can use our official docker image to run `Qwen3-ASR-1.7B` directly."
-msgstr "您可以直接使用我们的官方docker镜像运行`Qwen3-ASR-1.7B`。"
+msgid ""
+"You can use our official docker image to run `Qwen3-ASR-1.7B` directly."
+msgstr "您可以直接使用我们的官方Docker镜像运行 `Qwen3-ASR-1.7B`。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:47
 msgid ""
 "In addition, if you don't want to use the docker image as above, you can "
 "also build all from source:"
-msgstr "此外，如果您不想像上面那样使用docker镜像，也可以从源码构建所有内容："
+msgstr "此外，如果您不想使用上述Docker镜像，也可以从源码构建所有内容："
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:49
 msgid ""
-"Install `vllm-ascend` from source, refer to "
+"- Install `vllm-ascend` from source, refer to "
 "[installation](../../installation.md)."
-msgstr "从源码安装`vllm-ascend`，请参考[安装](../../installation.md)。"
+msgstr "- 从源码安装 `vllm-ascend`，请参考[安装指南](../../installation.md)。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:51
-msgid "Deployment"
-msgstr "部署"
+msgid "## Deployment"
+msgstr "## 部署"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:53
-msgid "Atlas 300I A2 2UP"
-msgstr "Atlas 300I A2 2UP"
+msgid "### Atlas 300I A2 2UP"
+msgstr "### Atlas 300I A2 2UP"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:64
-msgid "Atlas 300I DUO"
-msgstr "Atlas 300I DUO"
+msgid "### Atlas 300I DUO"
+msgstr "### Atlas 300I DUO"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:77
-msgid "Functional Verification"
-msgstr "功能验证"
+msgid "## Functional Verification"
+msgstr "## 功能验证"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:79
-msgid "Once your server is started, you can query the model with input prompts:"
-msgstr "服务器启动后，您可以使用输入提示词查询模型："
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:95
-msgid "Accuracy Evaluation"
-msgstr "精度评估"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:97
 msgid ""
-"After all samples were processed, transcription quality was measured "
-"using:"
+"Once your server is started, you can query the model with input prompts:"
+msgstr "服务器启动后，您可以使用输入提示查询模型："
+
+msgid "## Accuracy Evaluation"
+msgstr "## 精度评估"
+
+msgid ""
+"After all samples were processed, transcription quality was measured using:"
 msgstr "处理完所有样本后，使用以下指标衡量转录质量："
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:99
-msgid "WER (Word Error Rate) for word-level recognition accuracy"
-msgstr "WER（词错误率）用于词级识别精度"
+msgid ""
+"- WER (Word Error Rate) for word-level recognition accuracy\n"
+"- CER (Character Error Rate) for character-level recognition accuracy"
+msgstr ""
+"- WER（词错误率）用于词级识别精度\n"
+"- CER（字符错误率）用于字符级识别精度"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:100
-msgid "CER (Character Error Rate) for character-level recognition accuracy"
-msgstr "CER（字符错误率）用于字符级识别精度"
+msgid "### Remarks"
+msgstr "### 备注"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:102
-msgid "Remarks"
-msgstr "备注"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:104
 msgid ""
 "This result reflects end-to-end serving performance, including audio "
 "preprocessing, request construction, API communication, inference, and "
@@ -145,7 +123,6 @@ msgid ""
 "concurrency, audio length, and deployment configuration."
 msgstr "该结果反映了端到端服务性能，包括音频预处理、请求构建、API通信、推理和响应解析。实际性能可能因硬件、并发数、音频长度和部署配置而异。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:106
 msgid ""
 "Further benchmarking is recommended for latency distribution, concurrent "
 "throughput, long-audio scenarios, and system resource utilization."

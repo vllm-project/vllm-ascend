@@ -47,6 +47,11 @@ on:
         required: false
         default: ''
         type: string
+      aop_enabled:
+        description: 'Enable AOP hooks (capture / classify / skip-or-process)'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -69,7 +74,7 @@ env:
   # Single source of truth for all shared variables across jobs.
   # NOTE: GitHub Actions does not support env context in reusable workflow `with:` inputs,
   # so these values are exported as job outputs via the `setup-vars` job below.
-  CANN_IMAGE: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12'
+  CANN_IMAGE: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-910b-ubuntu22.04-py3.12'
   ASCEND_LOG_PREFIX: '/root/.cache/ascend-logs'
 
 jobs:
@@ -128,20 +133,20 @@ jobs:
           } >> $GITHUB_OUTPUT
 
       - name: Checkout repository
-        uses: actions/checkout@v4 
+        uses: actions/checkout@v7 
         with:
           ref: ${{ inputs.vllm_ascend_branch }}
 
       - name: Checkout PR code
         if: github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != ''
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.vllm_ascend_ref }}
           sparse-checkout: .github/workflows/configs/
           path: ./pr
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -193,6 +198,7 @@ jobs:
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
+      aop_single_enabled: ${{ inputs.aop_enabled }}
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -230,6 +236,7 @@ jobs:
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
+      aop_multi_enabled: ${{ inputs.aop_enabled }}
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -261,14 +268,14 @@ jobs:
 
       - name: Checkout PR code
         if: github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != ''
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.vllm_ascend_ref }}
           sparse-checkout: .github/workflows/configs/
           path: ./pr
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 

@@ -40,7 +40,6 @@ class BaseLinearTest(unittest.TestCase):
             patch("vllm_ascend.utils.mlp_tp_enable", return_value=True),
             patch("vllm_ascend.utils.oproj_tp_enable", return_value=True),
             patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
-            patch("vllm_ascend.ops.linear_op.enable_dsa_cp_with_layer_shard", return_value=False),
         ]
 
         for p in self.patches:
@@ -90,16 +89,15 @@ class TestAscendUnquantizedLinearMethod(TestBase):
 
 
 class TestAscendRowParallelLinear(BaseLinearTest):
-    @patch("vllm_ascend.ops.linear_op.get_weight_prefetch_method", return_value=MagicMock())
     @patch("vllm_ascend.ops.linear.get_current_vllm_config", return_value=MagicMock())
     @patch("vllm_ascend.ops.linear.enable_sp", return_value=False)
     @patch(
         "vllm_ascend.ops.linear.AscendUnquantizedLinearMethod.apply",
         new=lambda self, layer, x, bias=None: torch.nn.functional.linear(x, layer.weight, bias),
     )
-    def test_mlp_optimize(self, mock_enable_sp, mock_get_current_vllm_config, mock_get_weight_prefetch_method):
+    def test_mlp_optimize(self, mock_enable_sp, mock_get_current_vllm_config):
         ascend_config._ASCEND_CONFIG = MagicMock()
-        ascend_config._ASCEND_CONFIG.recompute_scheduler_enable = False
+        ascend_config._ASCEND_CONFIG.scheduler_config.recompute_scheduler_enable = False
         ascend_config._ASCEND_CONFIG.finegrained_tp_config.mlp_tensor_parallel_size = 2
         ascend_config._ASCEND_CONFIG.ascend_scheduler_config.enabled = False
 
@@ -113,16 +111,15 @@ class TestAscendRowParallelLinear(BaseLinearTest):
         input_tensor = torch.randn(16, 8)
         linear(input_tensor)
 
-    @patch("vllm_ascend.ops.linear_op.get_weight_prefetch_method", return_value=MagicMock())
     @patch("vllm_ascend.ops.linear.get_current_vllm_config", return_value=MagicMock())
     @patch("vllm_ascend.ops.linear.enable_sp", return_value=False)
     @patch(
         "vllm_ascend.ops.linear.AscendUnquantizedLinearMethod.apply",
         new=lambda self, layer, x, bias=None: torch.nn.functional.linear(x, layer.weight, bias),
     )
-    def test_oproj_tp(self, mock_enable_sp, mock_get_current_vllm_config, mock_get_weight_prefetch_method):
+    def test_oproj_tp(self, mock_enable_sp, mock_get_current_vllm_config):
         ascend_config._ASCEND_CONFIG = MagicMock()
-        ascend_config._ASCEND_CONFIG.recompute_scheduler_enable = False
+        ascend_config._ASCEND_CONFIG.scheduler_config.recompute_scheduler_enable = False
         ascend_config._ASCEND_CONFIG.finegrained_tp_config.oproj_tensor_parallel_size = 2
         ascend_config._ASCEND_CONFIG.ascend_scheduler_config.enabled = False
 
@@ -140,7 +137,7 @@ class TestAscendRowParallelLinear(BaseLinearTest):
 class TestAscendMergedColumnParallelLinear(BaseLinearTest):
     def test_merged_mlp_tp_init(self):
         ascend_config._ASCEND_CONFIG = MagicMock()
-        ascend_config._ASCEND_CONFIG.recompute_scheduler_enable = False
+        ascend_config._ASCEND_CONFIG.scheduler_config.recompute_scheduler_enable = False
         ascend_config._ASCEND_CONFIG.finegrained_tp_config.mlp_tensor_parallel_size = 2
         ascend_config._ASCEND_CONFIG.ascend_scheduler_config.enabled = False
 
@@ -166,6 +163,111 @@ class TestAscendReplicatedLinear(BaseLinearTest):
             output_size=8,
         )
         self.assertTrue(isinstance(linear.quant_method, AscendUnquantizedLinearMethod))
+
+
+class TestColumnParallelOpDispatch(unittest.TestCase):
+    """Tests for _get_column_parallel_op factory — share_expert, g_proj."""
+
+    def setUp(self):
+        self.mock_layer = MagicMock()
+        self._patches = [
+            patch("vllm_ascend.ops.linear_op.mlp_tp_enable", return_value=False),
+            patch("vllm_ascend.ops.linear_op.oproj_tp_enable", return_value=False),
+            patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
+            patch("vllm_ascend.ops.linear_op.enable_sp", return_value=False),
+            patch("vllm_ascend.ops.linear_op.is_moe_layer", return_value=False),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+
+    def _get_column_op(self, prefix: str):
+        from vllm_ascend.ops.linear_op import _get_column_parallel_op
+
+        return _get_column_parallel_op(prefix, self.mock_layer)
+
+    def test_share_expert_disabled_with_sp_column(self):
+        """share_expert / shared_expert prefix → None when SP enabled."""
+        self._patches.append(patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True))
+        self._patches[-1].start()
+        self.assertIsNone(self._get_column_op("model.layers.0.mlp.share_expert.gate_up_proj"))
+        self.assertIsNone(self._get_column_op("model.layers.0.mlp.shared_expert.gate_up_proj"))
+
+    def test_g_proj_matches_sp_column_path(self):
+        """g_proj (Step3p5 attention gate) is included in SP column prefixes."""
+        self._patches.append(patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True))
+        self._patches[-1].start()
+        self.assertIsNotNone(self._get_column_op("model.layers.0.self_attn.g_proj"))
+
+
+class TestRowParallelOpDispatch(unittest.TestCase):
+    """Tests for _get_row_parallel_op — mtp_block, share_expert."""
+
+    def setUp(self):
+        self.mock_layer = MagicMock()
+        self._patches = [
+            patch("vllm_ascend.ops.linear_op.mlp_tp_enable", return_value=False),
+            patch("vllm_ascend.ops.linear_op.oproj_tp_enable", return_value=False),
+            patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
+            patch("vllm_ascend.ops.linear_op.enable_sp", return_value=False),
+            patch("vllm_ascend.ops.linear_op.is_moe_layer", return_value=False),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+
+    def _op(self, prefix: str):
+        from vllm_ascend.ops.linear_op import _get_row_parallel_op
+
+        return _get_row_parallel_op(prefix, self.mock_layer)
+
+    def test_share_expert_disabled_with_sp_row(self):
+        """share_expert / shared_expert prefix → None when SP enabled."""
+        self._patches.append(patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True))
+        self._patches[-1].start()
+        self.assertIsNone(self._op("model.layers.0.mlp.share_expert.down_proj"))
+        self.assertIsNone(self._op("model.layers.0.mlp.shared_expert.down_proj"))
+
+
+class TestGetParallelOpShareExpert(unittest.TestCase):
+    """Tests for get_parallel_op — share_expert/shared_expert disables TP."""
+
+    def setUp(self):
+        self.mock_layer = MagicMock()
+        self.mock_group = MagicMock()
+        self._patches = [
+            patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=self.mock_group),
+            patch("vllm_ascend.ops.linear_op.shared_expert_dp_enabled", return_value=True),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+
+    def _call(self, prefix: str):
+        from vllm_ascend.ops.linear_op import get_parallel_op
+
+        return get_parallel_op(False, prefix, self.mock_layer, False)
+
+    def test_share_expert_disables_tp(self):
+        """share_expert / shared_expert / shared_experts → (None, 0, 1)."""
+        for prefix in (
+            "model.layers.0.mlp.share_expert.gate_up_proj",
+            "model.layers.0.mlp.shared_expert.gate_up_proj",
+            "model.layers.0.mlp.shared_experts.gate_up_proj",
+        ):
+            custom_op, tp_rank, tp_size = self._call(prefix)
+            self.assertIsNone(custom_op)
+            self.assertEqual(tp_rank, 0)
+            self.assertEqual(tp_size, 1)
 
 
 if __name__ == "__main__":

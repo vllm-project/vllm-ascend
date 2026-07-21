@@ -57,7 +57,7 @@ env_common: &env_common
   TASK_QUEUE_ENABLE: "1"
   ASCEND_BUFFER_POOL: "4:8"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
-
+  VLLM_USE_MODELSCOPE: "true"
 env_prefill: &env_prefill
   <<: *env_common
   HCCL_BUFFSIZE: "256"
@@ -238,6 +238,7 @@ benchmarks:
     dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs1024_kimi25
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    trust_remote_code: true
     num_prompts: 1024
     max_out_len: 1024
     batch_size: 256
