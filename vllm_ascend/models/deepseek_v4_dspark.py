@@ -38,15 +38,6 @@ from .deepseek_v4 import (
     _normalize_dsv4_layer_weight_name,
 )
 
-FP8_E4M3_EXP_MIN = -6
-FP8_E4M3_EXP_MAX = 8
-FP8_E4M3_MANTISSA_STEPS = 8
-FP8_E4M3_MANTISSA_MAX = 7
-FP8_E4M3_MAX_EXP_MANTISSA_MAX = 6
-FP8_E4M3_SUBNORMAL_EXP = -9
-FP8_E4M3_MAX_VALUE = 448.0
-DSPARK_FP8_AMAX_EPS = 1e-4
-DSPARK_NOPE_QDQ_BLOCK_SIZE = 64
 DSPARK_WO_A_DEQUANT_BLOCK_SIZE = 128
 DSPARK_DEFAULT_BLOCK_SIZE = 5
 DSPARK_DEFAULT_NUM_LAYERS = 3
@@ -146,52 +137,6 @@ def _wo_a_weight_for_eager_projection(
 
 def _grouped_wo_a_projection(attn_out: torch.Tensor, wo_a: torch.Tensor) -> torch.Tensor:
     return torch.matmul(attn_out.transpose(0, 1), wo_a.transpose(1, 2)).transpose(0, 1)
-
-
-def _fp8_e4m3fn_quantized_abs(abs_scaled: torch.Tensor) -> torch.Tensor:
-    subnormal_step = 2.0**FP8_E4M3_SUBNORMAL_EXP
-    min_normal = 2.0**FP8_E4M3_EXP_MIN
-    subnormal_normal_midpoint = (FP8_E4M3_MANTISSA_MAX * subnormal_step + min_normal) * 0.5
-    subnormal = torch.floor(abs_scaled / subnormal_step + 0.5).clamp(0, FP8_E4M3_MANTISSA_MAX) * subnormal_step
-    normal_exp = torch.floor(torch.log2(abs_scaled.clamp_min(min_normal))).clamp(FP8_E4M3_EXP_MIN, FP8_E4M3_EXP_MAX)
-    normal_base = torch.exp2(normal_exp)
-    mantissa = torch.floor((abs_scaled / normal_base - 1.0) * FP8_E4M3_MANTISSA_STEPS + 0.5)
-    carry = mantissa >= FP8_E4M3_MANTISSA_STEPS
-    normal_exp = torch.where(carry, normal_exp + 1.0, normal_exp).clamp(FP8_E4M3_EXP_MIN, FP8_E4M3_EXP_MAX)
-    mantissa = torch.where(carry, torch.zeros_like(mantissa), mantissa)
-    mantissa = torch.where(
-        normal_exp >= FP8_E4M3_EXP_MAX,
-        mantissa.clamp(0, FP8_E4M3_MAX_EXP_MANTISSA_MAX),
-        mantissa.clamp(0, FP8_E4M3_MANTISSA_MAX),
-    )
-    normal = (1.0 + mantissa / FP8_E4M3_MANTISSA_STEPS) * torch.exp2(normal_exp)
-    return torch.where(abs_scaled < subnormal_normal_midpoint, subnormal, normal)
-
-
-def _fp8_e4m3fn_qdq(x: torch.Tensor, block_size: int) -> torch.Tensor:
-    if x.numel() == 0:
-        return x
-    orig_shape = x.shape
-    last_dim = orig_shape[-1]
-    if last_dim % block_size != 0:
-        return x
-    x_view = x.float().reshape(-1, last_dim)
-    blocks = x_view.reshape(-1, last_dim // block_size, block_size)
-    amax = blocks.abs().amax(dim=-1, keepdim=True).clamp_min(DSPARK_FP8_AMAX_EPS)
-    scale = torch.pow(
-        torch.full((), 2.0, dtype=torch.float32, device=x.device), torch.ceil(torch.log2(amax / FP8_E4M3_MAX_VALUE))
-    )
-    scaled = (blocks / scale).clamp(-FP8_E4M3_MAX_VALUE, FP8_E4M3_MAX_VALUE)
-    quantized_abs = _fp8_e4m3fn_quantized_abs(scaled.abs())
-    qdq = torch.where(scaled < 0, -quantized_abs, quantized_abs) * scale
-    return qdq.reshape(orig_shape).to(x.dtype)
-
-
-def _dspark_qdq_nope_dims(kv: torch.Tensor, nope_head_dim: int) -> torch.Tensor:
-    if nope_head_dim <= 0:
-        return kv
-    kv_nope = _fp8_e4m3fn_qdq(kv[..., :nope_head_dim], DSPARK_NOPE_QDQ_BLOCK_SIZE)
-    return torch.cat([kv_nope, kv[..., nope_head_dim:]], dim=-1)
 
 
 def dspark_sparse_attn_sharedkv(
@@ -334,7 +279,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         kv = self.kv_norm(_linear_output(self.wkv, hidden_states))
         k_nope, k_pe = kv.split([self.nope_head_dim, self.rope_head_dim], dim=-1)
         k_pe = _apply_dsv4_rope(self.rotary_emb, positions, k_pe.unsqueeze(1)).squeeze(1)
-        return _dspark_qdq_nope_dims(torch.cat([k_nope, k_pe], dim=-1), self.nope_head_dim).contiguous()
+        return torch.cat([k_nope, k_pe], dim=-1).contiguous()
 
     def precompute_context_kv(
         self,
