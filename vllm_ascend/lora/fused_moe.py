@@ -80,14 +80,10 @@ def prepare_lora_indices(
     token_indices = lora_context.punica_wrapper.token_lora_indices
     token_indices = token_indices[:num_tokens]
     if pad_size > 0:
-        token_indices = torch.nn.functional.pad(
-            token_indices, (0, pad_size), value=-1
-        )
+        token_indices = torch.nn.functional.pad(token_indices, (0, pad_size), value=-1)
         lora_context.punica_wrapper.token_lora_indices = token_indices
     if tp_size > 1:
-        lora_context.split_lora_indices = torch.tensor_split(
-            token_indices, tp_size, dim=0
-        )[tp_rank]
+        lora_context.split_lora_indices = torch.tensor_split(token_indices, tp_size, dim=0)[tp_rank]
     else:
         # use ep for dp without tp.
         lora_context.split_lora_indices = token_indices
@@ -159,9 +155,7 @@ def all2all_lora_indices(
     if permuted is None:
         return
     lora_dtype = permuted.dtype
-    _, exchanged, handle = async_all_to_all(
-        permuted, output_splits, input_splits, ep_group
-    )
+    _, exchanged, handle = async_all_to_all(permuted, output_splits, input_splits, ep_group)
     handle.wait()
     lora_context.exchanged_lora_indices = exchanged.to(lora_dtype)
 
@@ -315,6 +309,7 @@ def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
     # the remaining combine/finalize stages.
     reset_lora_indices(lora_context)
 
+
 class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
     """Ascend-native MoE-LoRA wrapper.
 
@@ -365,8 +360,7 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         # publish it through the Ascend MoE runner. The runner stores it on
         # routed_experts; batch-local LoRA indices are refreshed before each forward.
         BaseLayerWithLoRA.set_mapping(self, punica_wrapper)
-        lora_context = self._build_lora_context()
-        self.base_layer.set_lora_context(lora_context)
+        self.base_layer.set_lora_context(self._build_lora_context())
 
 
 class AscendFusedMoE3DWithLoRA(AscendFusedMoEWithLoRA, FusedMoE3DWithLoRA):

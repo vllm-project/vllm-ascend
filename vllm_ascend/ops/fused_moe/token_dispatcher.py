@@ -29,14 +29,14 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.lora.fused_moe import (
-    preprocess_lora_indices,
-    postprocess_lora_indices,
-    all2all_lora_indices,
-)
 from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
+from vllm_ascend.lora.fused_moe import (
+    all2all_lora_indices,
+    postprocess_lora_indices,
+    preprocess_lora_indices,
+)
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all, gather_from_sequence_parallel_region
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEAllGatherCombineMetadata,
