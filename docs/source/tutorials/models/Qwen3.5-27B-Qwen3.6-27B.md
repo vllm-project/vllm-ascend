@@ -576,7 +576,7 @@ In the standard single-node deployment mode, Prefill (prompt processing) and Dec
 
 PD (Prefill-Decode) separation addresses these issues by running Prefill and Decode on dedicated node groups, each configured independently:
 
-- **Prefill nodes** focus on high-throughput prompt processing, optimized for compute and communication (e.g., enabling FlashComm for Allreduce acceleration).
+- **Prefill nodes** focus on high-throughput prompt processing, optimized for compute and communication.
 - **Decode nodes** focus on low-latency token generation, optimized for memory bandwidth (e.g., enabling async-scheduling and full-decode aclgraph).
 
 :::::::{tab-set}
@@ -740,7 +740,6 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
 
 Key Parameter Descriptions:
 
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the Allreduce communication optimization on prefill nodes, which reduces the communication overhead of long-context prefill.
 - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
 - `--async-scheduling` (on decode nodes): enables asynchronous scheduling, which can reduce TPOT for high-concurrency decode workloads.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` (on decode nodes): enables the full-decode aclgraph mode, which significantly reduces scheduling latency on the decode side.
