@@ -693,12 +693,6 @@ def sample_recovered_tokens(
 
     recovered_token_ids = torch.empty_like(draft_token_ids)
     if HAS_TRITON:
-        no_draft_probs = draft_probs is None
-        if draft_probs is None:
-            draft_probs = torch.zeros((1, 1,), dtype=torch.float32, device=device)
-        if target_indices is None:
-            target_indices = torch.zeros((1, 1,), dtype=torch.int32, device=device)
-
         sample_recovered_tokens_kernel[(batch_size, max_spec_len)](
             recovered_token_ids,
             cu_num_draft_tokens,
@@ -709,7 +703,7 @@ def sample_recovered_tokens(
             q,
             vocab_size,
             global_vocab_size if global_vocab_size is not None else vocab_size,
-            NO_DRAFT_PROBS=no_draft_probs,
+            NO_DRAFT_PROBS=draft_probs is None,
             BLOCK_VERIFY=use_block_verify,
             ENABLE_REDUCE_SAMPLING=enable_reduce_sampling,
             SUB_BLOCK=512,
