@@ -21,6 +21,30 @@ from __future__ import annotations
 
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 
+def _count_minimax_reasoning_tokens(
+    token_ids: Sequence[int],
+    end_token_id: int | None,
+) -> int:
+    if end_token_id is None:
+        return 0
+
+    for idx, token_id in enumerate(token_ids):
+        if token_id == end_token_id:
+            return idx
+    return len(token_ids)
+
+
+def _patched_count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+    return _count_minimax_reasoning_tokens(token_ids, self.end_token_id)
+
+
+Glm47MoeModelToolParser.count_reasoning_tokens = _patched_count_reasoning_tokens
+
+if not hasattr(Glm47MoeModelToolParser, "_ascend_original_extract_tool_call_regions"):
+    Glm47MoeModelToolParser._ascend_original_extract_tool_call_regions = (
+        Glm47MoeModelToolParser._extract_tool_call_regions
+    )
+    
 if not hasattr(Glm47MoeModelToolParser, "_ascend_original_extract_tool_call_regions"):
     Glm47MoeModelToolParser._ascend_original_extract_tool_call_regions = (
         Glm47MoeModelToolParser._extract_tool_call_regions
