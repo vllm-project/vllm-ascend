@@ -235,6 +235,26 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertTrue(keys[0].endswith("@k1"))
         self.assertTrue(keys[1].endswith("@k3"))
 
+    def test_handle_request_keeps_latest_reused_physical_block(self):
+        t, store = self._make_thread([0, 0, 0])
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=64,
+            block_ids=[1, 2, 1, 3],
+            block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
+            current_event=None,
+        )
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+        t._handle_request(req)
+
+        keys, addrs, _ = store.put_calls[0]
+        self.assertEqual(len(keys), 3)
+        self.assertTrue(keys[0].endswith("@k1"))
+        self.assertTrue(keys[1].endswith("@k2"))
+        self.assertTrue(keys[2].endswith("@k3"))
+        self.assertEqual(addrs, [[1002], [1001], [1003]])
+
     def test_handle_request_all_exist_no_put(self):
         t, store = self._make_thread([1, 1])
         req = ReqMeta(
