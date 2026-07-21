@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import torch
+from vllm.compilation import monitor as cudagraph_monitor
 from vllm.config import CUDAGraphMode
 
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
@@ -147,7 +148,14 @@ def test_dspark_context_kv_bucket_rejects_unsupported_shape():
     assert AscendDSparkProposer._get_dspark_context_kv_bucket(proposer, 17) is None
 
 
-def test_dspark_bucket_graph_uses_bucket_and_restores_query_descriptor():
+def test_dspark_bucket_graph_restores_descriptor_and_capture_monitor(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        cudagraph_monitor,
+        "cudagraph_capturing_enabled",
+        False,
+    )
     proposer = _make_proposer()
     graph = _GraphRecorder()
     query_descriptor = object()
@@ -163,6 +171,7 @@ def test_dspark_bucket_graph_uses_bucket_and_restores_query_descriptor():
     assert graph.positions.shape[0] == 8
     assert graph.slot_mapping.shape[0] == 8
     assert forward_context.batch_descriptor is query_descriptor
+    assert not cudagraph_monitor.cudagraph_capturing_enabled
     assert proposer._dspark_context_kv_precomputed
 
 

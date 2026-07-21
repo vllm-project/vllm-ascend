@@ -5,6 +5,7 @@ import os
 from typing import Any
 
 import torch
+from vllm.compilation import monitor as cudagraph_monitor
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import BatchDescriptor, ForwardContext
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -181,6 +182,8 @@ class AscendDSparkProposer(AscendDflashProposer):
 
         query_batch_descriptor = forward_context.batch_descriptor
         forward_context.batch_descriptor = BatchDescriptor(num_tokens=bucket)
+        capture_was_enabled = cudagraph_monitor.cudagraph_capturing_enabled
+        cudagraph_monitor.set_cudagraph_capturing_enabled(True)
         try:
             self._dspark_context_kv_graph(
                 self._dflash_hidden_states[:bucket],
@@ -188,6 +191,9 @@ class AscendDSparkProposer(AscendDflashProposer):
                 context_slots[:bucket],
             )
         finally:
+            cudagraph_monitor.set_cudagraph_capturing_enabled(
+                capture_was_enabled
+            )
             forward_context.batch_descriptor = query_batch_descriptor
 
         self._dspark_context_kv_precomputed = True
