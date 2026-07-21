@@ -48,5 +48,10 @@
         "chip": "a2",
         "npu_num": 4,
         "image_tag": "9.0.1-910b-ubuntu22.04-py3.12"
+    },
+    "linux-aarch64-a5-4": {
+        "chip": "a5",
+        "npu_num": 4,
+        "image_tag": "9.0.1-950-ubuntu22.04-py3.12"
     }
 }
