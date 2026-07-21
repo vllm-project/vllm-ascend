@@ -381,8 +381,11 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         if self.multistream_overlap_gate:
             assert PrepareAndFinalize.quant_stream is not None
             PrepareAndFinalize.quant_stream.wait_stream(torch.npu.current_stream())
+            main_stream = torch.npu.current_stream()
+            hidden_states.record_stream(PrepareAndFinalize.quant_stream)
             with npu_stream_switch(PrepareAndFinalize.quant_stream, enabled=self.multistream_overlap_gate):
                 hidden_states = fc3_all_gather_and_maybe_unpad_impl(hidden_states)
+                hidden_states.record_stream(main_stream)
         else:
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, True, True)
             router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(router_logits, True, True)
