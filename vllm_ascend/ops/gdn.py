@@ -527,10 +527,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert prefill_has_initial_state is not None
             assert g_non_spec is not None
             assert beta_non_spec is not None
+            assert query_non_spec is not None
+            assert key_non_spec is not None
+            assert value_non_spec is not None
             if split_non_spec:
-                assert query_non_spec is not None
-                assert key_non_spec is not None
-                assert value_non_spec is not None
                 if use_head_major_conv:
                     query_non_spec = query_non_spec[:, :, num_decode_tokens:]
                     key_non_spec = key_non_spec[:, :, num_decode_tokens:]
