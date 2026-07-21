@@ -4,7 +4,6 @@ from vllm.distributed import get_cached_tcp_store_client
 from vllm.distributed.parallel_state import (
     GroupCoordinator,
     _init_stateless_group,
-    get_tp_group,
     get_world_group,
     init_model_parallel_group,
 )
@@ -191,82 +190,6 @@ def init_ascend_model_parallel(
         _EMBED_TP = _create_or_get_group(embedding_tp_size, "emtp")
     if mlp_tp_size > 0:
         _MLP_TP = _create_or_get_group(mlp_tp_size, "mlptp")
-
-    # TODO: Extract and unify the logic across different communication group.
-    flashcomm2_otp_group_ranks = []
-    if flashcomm2_enable():
-        flashcomm2_otp_size = get_ascend_config().flashcomm2_oproj_tensor_parallel_size
-        num_fc2_oproj_tensor_parallel_groups: int = global_tp_size // flashcomm2_otp_size
-        global _FLASHCOMM2_OTP
-        global _FLASHCOMM2_ODP
-
-        _FLASHCOMM2_OTP = None
-        _FLASHCOMM2_ODP = get_tp_group()
-
-        if flashcomm2_otp_size > 1:
-            dp_size = 1 if enable_elastic_ep else global_dp_size
-            odp_group_ranks: list[list[int]] = [[] for _ in range(flashcomm2_otp_size * dp_size * global_pp_size)]
-            for dp_group_index in range(dp_size):
-                for pp_group_index in range(global_pp_size):
-                    dp_pp_serial_index = dp_group_index * global_pp_size + pp_group_index
-                    tp_base_rank = dp_pp_serial_index * global_tp_size
-                    odp_base_index = dp_pp_serial_index * flashcomm2_otp_size
-
-                    for i in range(num_fc2_oproj_tensor_parallel_groups):
-                        ranks = []
-                        for j in range(flashcomm2_otp_size):
-                            tp_local_rank = i + j * num_fc2_oproj_tensor_parallel_groups
-                            assert tp_local_rank < global_tp_size
-                            global_rank = tp_base_rank + tp_local_rank
-                            ranks.append(global_rank)
-
-                            odp_group_index = odp_base_index + j
-                            odp_group_ranks[odp_group_index].append(global_rank)
-                        flashcomm2_otp_group_ranks.append(ranks)
-
-            _FLASHCOMM2_OTP = init_model_parallel_group(
-                flashcomm2_otp_group_ranks, get_world_group().local_rank, backend, group_name="flashcomm2_otp"
-            )
-            _FLASHCOMM2_ODP = init_model_parallel_group(
-                odp_group_ranks, get_world_group().local_rank, backend, group_name="flashcomm2_odp"
-            )
-
-    def create_shard_weight_group(module_tp_group_ranks: None) -> GroupCoordinator:
-        # Argument module_tp_group_ranks: The module specific tensor parallel group.
-        # There are three situations.
-        # 1. If it is None, then the TP_size of the specific module is 1 and is replicated linear layer.
-        # 2. If it is not None, and the module tp_group is same as the global tp_group.
-        # 3. If it is not None, and the module tp_group is different from the global tp_group.(eg. flashcomm2_otp)
-        group_ranks = []
-        pp_group_ranks = all_ranks.transpose(2, 4).reshape(-1, global_pp_size)
-        if module_tp_group_ranks is None:
-            # If it is None, then the TP_size of this shard weight is 1.
-            shard_weight_group_ranks = pp_group_ranks.transpose(0, 1).unbind(0)
-            group_ranks = [x.tolist() for x in shard_weight_group_ranks]
-        else:
-            # combine standard tp group and non-standard tp group to build  shard_weight comm_group
-            module_tp_tanspose_ranks = module_tp_group_ranks.transpose(0, 1)
-            G = world_size // (global_pp_size * module_tp_group_ranks.size(1))
-            shard_weight_group_ranks = torch.stack([t.view(global_pp_size, G) for t in module_tp_tanspose_ranks], dim=1)
-            group_ranks = shard_weight_group_ranks.view(-1, G).tolist()
-        return init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="shard_weight")
-
-    # Create shard weight group if enabled
-    if get_ascend_config().layer_sharding is not None:
-        global _SHARD_WEIGHT
-        if flashcomm2_enable():
-            if len(flashcomm2_otp_group_ranks) == 0:
-                FC2_group_ranks = None
-            else:
-                FC2_group_ranks = torch.tensor(flashcomm2_otp_group_ranks).squeeze(0)
-            _SHARD_WEIGHT = create_shard_weight_group(FC2_group_ranks)
-        elif enable_dsa_cp_with_layer_shard():
-            # For dsa_cp, all shard layers are replicated.
-            _SHARD_WEIGHT = create_shard_weight_group(None)
-        else:
-            # For standard tp, use global tp group_ranks
-            tp_group_ranks = all_ranks.view(-1, global_tp_size)
-            _SHARD_WEIGHT = create_shard_weight_group(tp_group_ranks)
 
 
 def _replace_ascend_active_groups(
