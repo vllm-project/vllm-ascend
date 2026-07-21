@@ -12,7 +12,6 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed import P2POp
 from vllm.compilation.counter import compilation_counter

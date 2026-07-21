@@ -682,7 +682,6 @@ class NPUWorker(WorkerBase):
         with context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model(load_dummy_weights)
 
-        self.model_runner.eplb_warmup()
         if self.elastic_ep_executor is not None:
             self.elastic_ep_executor.init_eplb_manager()
 
