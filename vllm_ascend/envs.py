@@ -99,6 +99,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Whether to use Mooncake async KV cache transfer (batch_transfer_async_read)
+    # Default is 0 (sync). Set to 1 to enable async/non-blocking transfer.
+    "VLLM_MOONCAKE_ASYNC_TRANSFER": lambda: bool(int(os.getenv("VLLM_MOONCAKE_ASYNC_TRANSFER", "0"))),
+    # Poll interval for Mooncake async transfer completion check (in seconds).
+    # Default is 0.001 (1ms). Only used when VLLM_MOONCAKE_ASYNC_TRANSFER=1.
+    "VLLM_MOONCAKE_ASYNC_POLL_INTERVAL": lambda: float(os.getenv("VLLM_MOONCAKE_ASYNC_POLL_INTERVAL", "0.001")),
 }
 
 # end-env-vars-definition
