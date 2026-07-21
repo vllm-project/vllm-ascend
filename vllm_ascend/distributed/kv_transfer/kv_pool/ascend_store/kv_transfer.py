@@ -733,6 +733,21 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     block_hashes.append(group_block_hashes[start // group_block_size])
                     key_block_ids.append(block_id)
 
+                if len(set(key_block_ids)) != len(key_block_ids):
+                    last_index_by_block_id = {block_id: index for index, block_id in enumerate(key_block_ids)}
+                    keep_indices = sorted(last_index_by_block_id.values())
+                    logger.debug(
+                        "Deduplicating %d reused physical KV blocks for request %s in group %d",
+                        len(key_block_ids) - len(keep_indices),
+                        req_id,
+                        group_id,
+                    )
+                    starts = [starts[index] for index in keep_indices]
+                    ends = [ends[index] for index in keep_indices]
+                    keys = [keys[index] for index in keep_indices]
+                    block_hashes = [block_hashes[index] for index in keep_indices]
+                    key_block_ids = [key_block_ids[index] for index in keep_indices]
+
                 if (
                     not self.dcp_size > 1
                     and not req_meta.disable_tp_key_sharding
