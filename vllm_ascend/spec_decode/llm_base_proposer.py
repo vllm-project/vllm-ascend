@@ -1175,7 +1175,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # Dspark speculation requires autoregressive applications of MarkovHead and ConfidenceHead.
                 # The MarkovHead performs bias correction on logits.
                 # The ConfidenceHead predicts the expected acceptance length of tokens(Not yet achieved).
-                raw_logits = self.model.compute_logits(last_hidden_states)
+                raw_logits = self.model.compute_logits(sample_hidden_states)
                 logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
                 num_blk = logits.shape[0]
                 draft_token_ids = self._dspark_draft_buffer[:num_blk]
