@@ -2,7 +2,7 @@
 
 ## Introduction
 
-Hunyuan-A13B-Instruct is a fine-grained hybrid expert model (MoE) developed by Tencent. This model has a total of 80 billion parameters, 13 billion activation parameters, supports 256K ultra-long contexts, and possesses native thought chain (CoT) reasoning capabilities.
+Hunyuan-A13B-Instruct is a fine-grained hybrid expert model (MoE) developed by Tencent. This model has a total of 80 billion parameters, 13 billion activation parameters, supports 256k ultra-long contexts, and possesses native thought chain (CoT) reasoning capabilities.
 
 ## Environment Preparation
 
@@ -154,7 +154,7 @@ output:
 ╒══════════════════════════╤═════════╤═════════════════╤═════════════════╤═════════════════╤═════════════════╤═════════════════╤═════════════════╤═════════════════╤═════╕
 │ Performance Parameters   │ Stage   │ Average         │ Min             │ Max             │ Median          │ P75             │ P90             │ P99             │  N  │
 ╞══════════════════════════╪═════════╪═════════════════╪═════════════════╪═════════════════╪═════════════════╪═════════════════╪═════════════════╪═════════════════╪═════╡
-│ E2EL                     │ total   │ 29982.6 ms      │ 16472.9 ms      │ 41147.2 ms      │ 30919.1 ms      │ 33514.9 ms      │ 39413.8 ms      │ 40973.9 ms      │  8  │
+│ E2EL                     │ total   │ 29.98 s         │ 16.47 s         │ 41.15 s         │ 30.92 s         │ 33.51 s         │ 39.41 s         │ 40.97    s      │  8  │
 ├──────────────────────────┼─────────┼─────────────────┼─────────────────┼─────────────────┼─────────────────┼─────────────────┼─────────────────┼─────────────────┼─────┤
 │ TTFT                     │ total   │ 238.6 ms        │ 107.9 ms        │ 276.7 ms        │ 254.0 ms        │ 265.6 ms        │ 272.4 ms        │ 276.3 ms        │  8  │
 ├──────────────────────────┼─────────┼─────────────────┼─────────────────┼─────────────────┼─────────────────┼─────────────────┼─────────────────┼─────────────────┼─────┤

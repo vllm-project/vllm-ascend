@@ -47,7 +47,7 @@ llm = LLM(
     speculative_config={
         "method": "eagle3",
         "model": "path/to/draft/model",
-        "num_speculative_tokens": 3,
+        "num_speculative_tokens": 3
     },
 )
 ```
@@ -72,7 +72,7 @@ The following code configures vLLM Ascend to use speculative decoding where prop
     from vllm import LLM, SamplingParams
 
     prompts = [
-        "The future of AI is",
+        "The future of AI is"
     ]
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
@@ -82,7 +82,7 @@ The following code configures vLLM Ascend to use speculative decoding where prop
         speculative_config={
             "method": "ngram",
             "num_speculative_tokens": 5,
-            "prompt_lookup_max": 4,
+            "prompt_lookup_max": 4
         },
     )
     outputs = llm.generate(prompts, sampling_params)
@@ -103,7 +103,7 @@ The following code configures vLLM Ascend to use speculative decoding where prop
     from vllm import LLM, SamplingParams
 
     prompts = [
-        "The future of AI is",
+        "The future of AI is"
     ]
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
@@ -116,7 +116,7 @@ The following code configures vLLM Ascend to use speculative decoding where prop
             "method": "eagle",
             "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
             "draft_tensor_parallel_size": 1,
-            "num_speculative_tokens": 2,
+            "num_speculative_tokens": 2
         },
     )
 
@@ -153,7 +153,7 @@ MTP (Multi-Token Prediction) boosts inference performance by parallelizing the p
 - Online inference
 
     ```shell
-    vllm serve /deepseek-ai/DeepSeek-V3.2-Exp-W8A8 \
+    vllm serve deepseek-ai/DeepSeek-V3.2-Exp-W8A8 \
     --port 20004 \
     --data-parallel-size 1 \
     --tensor-parallel-size 16 \
@@ -192,7 +192,7 @@ Suffix Decoding can achieve better performance for tasks with high repetition, s
     from vllm import LLM, SamplingParams
 
     prompts = [
-        "The future of AI is",
+        "The future of AI is"
     ]
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
@@ -202,7 +202,7 @@ Suffix Decoding can achieve better performance for tasks with high repetition, s
         enforce_eager=True,
         speculative_config={
             "method": "suffix",
-            "num_speculative_tokens": 15,
+            "num_speculative_tokens": 15
         },
     )
 
@@ -248,7 +248,7 @@ The `extract_hidden_states` method is a special speculative decoding mode that d
                     "kv_connector": "ExampleHiddenStatesConnector",
                     "kv_role": "kv_producer",
                     "kv_connector_extra_config": {
-                        "shared_storage_path": tmpdirname,
+                        "shared_storage_path": tmpdirname
                     },
                 },
             )
@@ -315,8 +315,8 @@ This entropy-aware threshold is controlled by two parameters:
 
     ```shell
     vllm serve <model> --additional-config \
-        '{"rejection_sampler_config": {"enable_block_verify": true, \
-        "enable_entropy_verify": true, "posterior_threshold": 0.95, \
+        '{"rejection_sampler_config": {"enable_block_verify": true, 
+        "enable_entropy_verify": true, "posterior_threshold": 0.95, 
         "posterior_alpha": 0.4}}'
     ```
 
@@ -330,7 +330,7 @@ This entropy-aware threshold is controlled by two parameters:
                 "enable_block_verify": True,
                 "enable_entropy_verify": True,
                 "posterior_threshold": 0.95,
-                "posterior_alpha": 0.4,
+                "posterior_alpha": 0.4
             }
         },
     )

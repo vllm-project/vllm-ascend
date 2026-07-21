@@ -3,12 +3,12 @@
 !!! note
 
     Batch invariance is currently in beta. Some features are still under active development.
-    Track progress and planned improvements at <https://github.com/vllm-project/vllm-ascend/issues/5487>
+    Track progress and planned improvements at [tracking issue #5487](https://github.com/vllm-project/vllm-ascend/issues/5487)
 
 !!! note
 
     To install the batch invariance custom operator library, set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend.
-    For installation instructions, see <https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/installation.md#set-up-using-python>
+    For installation instructions, see [Set Up Using Python](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/installation.md#set-up-using-python)
 
 This document shows how to enable batch invariance in vLLM-Ascend. Batch invariance ensures that the output of a model is deterministic and independent of the batch size or the order of requests in a batch.
 
@@ -83,7 +83,7 @@ from vllm import LLM, SamplingParams
 prompts = [
     "The future of AI is",
     "Machine learning enables",
-    "Deep learning models can",
+    "Deep learning models can"
 ]
 
 sampling_params = SamplingParams(
@@ -128,7 +128,7 @@ When batch invariance is enabled, vLLM:
 !!! note
 
     The batch invariance attention operators currently do not support
-    `FULL'、'FULL_DECODE_ONLY` cudagraph mode.
+    `FULL`,`FULL_DECODE_ONLY` cudagraph mode.
 
 !!! note
 
@@ -139,7 +139,7 @@ When batch invariance is enabled, vLLM:
 The batch invariance feature is under active development. Planned improvements include:
 
 - Support for additional NPUs series
-- Support `FULL'、'FULL_DECODE_ONLY` cudagraph mode with batch invariance attention operators
+- Support `FULL`,`FULL_DECODE_ONLY` cudagraph mode with batch invariance attention operators
 - Expanded model coverage
 - Performance optimizations
 - Additional testing and validation

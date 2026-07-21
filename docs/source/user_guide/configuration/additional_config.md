@@ -91,7 +91,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_context_parallel`           | bool | `False` | Whether to enable context parallelism. Can also be configured via the `VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL` environment variable during the migration period. |
 | `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. Can also be configured via the `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable during the migration period. |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. Can also be configured via the `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable during the migration period. |
-| `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature depends on FLASHCOMM1. Please ensure that FLASHCOMM1 is enabled before enabling this feature.|
+| `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature depends on FlashComm1. Please ensure that FlashComm1 is enabled before enabling this feature.|
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
 | `enable_reduce_sample`              | bool | `False` | Whether to enable reduce sample optimization to reduce communication and computation overheads in the tensor parallelism scenario. When enabled, logits are kept partitioned across TP ranks and only the small set of top-k candidate values/indices is communicated, instead of performing a full-vocabulary all-to-all/all-gather. |
@@ -201,7 +201,7 @@ An example of additional configuration is as follows:
         "lmhead_tensor_parallel_size": 8,
         "oproj_tensor_parallel_size": 8,
         "embedding_tensor_parallel_size": 8,
-        "mlp_tensor_parallel_size": 8,
+        "mlp_tensor_parallel_size": 8
     },
     "enable_kv_nz": False,
     "multistream_overlap_shared_expert": True,
@@ -209,7 +209,7 @@ An example of additional configuration is as follows:
         "enable_block_verify": True,
         "enable_entropy_verify": True,
         "posterior_threshold": 0.95,
-        "posterior_alpha": 0.4,
+        "posterior_alpha": 0.4
     },
     "refresh": False
 }
