@@ -41,13 +41,7 @@ try:
     subprocess.run(["npu-smi", "info"], capture_output=True, check=True)
     _npu_available = True
 except (subprocess.CalledProcessError, FileNotFoundError):
-    try:
-        import torch
-        import torch_npu  # noqa: F401
-
-        _npu_available = hasattr(torch, "npu") and torch.npu.is_available()
-    except Exception:
-        _npu_available = False
+    _npu_available = False
 
 if not _npu_available:
     triton_runtime = MagicMock()
