@@ -214,7 +214,8 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --quantization ascend \
         --port 8000 \
         --block-size 128 \
-        --speculative-config '{"method": "dspark", "num_speculative_tokens": 5, "enforce_eager": true}' 
+        --speculative-config '{"method": "dspark", "num_speculative_tokens": 5, "enforce_eager": true}'  \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
     ```
     tps more than 50+ ,its reach  2X speed of dsv4f with mtp
 
