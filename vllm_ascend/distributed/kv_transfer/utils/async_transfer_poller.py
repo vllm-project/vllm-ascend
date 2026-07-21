@@ -75,14 +75,16 @@ class AsyncTransferPoller:
 
         # Handle failed transfers: pop from pending and dispatch on_failed callback
         for batch_id in failed:
+            info = None
             with self._pending_async_lock:
                 if batch_id in self._pending_async_transfers:
                     info = self._pending_async_transfers.pop(batch_id)
                     self._log_transfer_warning(batch_id, info)
-            if self._on_poll_error:
-                self._on_poll_error(batch_id, info)
-            if self._on_failed:
-                self._on_failed(batch_id, info)
+            if info is not None:
+                if self._on_poll_error:
+                    self._on_poll_error(batch_id, info)
+                if self._on_failed:
+                    self._on_failed(batch_id, info)
 
         if not completed:
             return []

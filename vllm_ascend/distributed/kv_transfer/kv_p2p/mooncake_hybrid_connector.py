@@ -974,6 +974,7 @@ class KVCacheRecvingThread(threading.Thread):
 
         if failed:
             # Mark request as failed - skip reformatting
+            self._mark_failed_recv_request(request_id, req_meta.get("local_block_ids", []))
             logger.error("Async KV cache transfer failed for request %s", request_id)
         else:
             try:
