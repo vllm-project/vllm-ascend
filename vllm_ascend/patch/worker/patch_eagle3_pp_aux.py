@@ -155,7 +155,12 @@ def _make_eagle_mixin_forward():
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = self._maybe_add_hidden_state(list(prev_aux_list), 0, hidden_states, residual)
+        aux_hidden_states = self._maybe_add_hidden_state(
+            list(prev_aux_list),
+            self.start_layer,
+            hidden_states,
+            residual,
+        )
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
