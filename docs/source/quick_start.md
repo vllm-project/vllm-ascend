@@ -35,6 +35,8 @@ This section guides you through container-based environment setup and large mode
 ```{note}
 Atlas inference products use CANN 9.1.0 beta and `float16`. Use the `-310p` image suffix for Ubuntu or `-310p-openeuler` for openEuler. Atlas inference products do not support `triton` or `triton-ascend`.
 
+Atlas inference products and Atlas 200I Pro do not support `enable_npugraph_ex`. Set --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}'.
+
 Atlas 200I Pro requires additional device nodes and driver mounts. See [Set up using Docker](installation.md#set-up-using-docker) for the complete container commands.
 ```
 
