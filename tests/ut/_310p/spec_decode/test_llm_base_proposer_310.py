@@ -81,3 +81,35 @@ class TestAscendSpecDecodeBaseProposer310(TestBase):
                 )
 
         self.assertFalse(AscendRotaryEmbedding310._is_drafting_update_enabled)
+
+    def test_dummy_run_wrapper_enables_and_restores_flag(self):
+        from vllm_ascend._310p.spec_decode.dflash_proposer_310 import wrap_dummy_run_with_draft_flag
+
+        AscendRotaryEmbedding310.set_rope_position_flag_310p(False)
+        seen = []
+
+        def original(self, *args, **kwargs):
+            seen.append(AscendRotaryEmbedding310._is_drafting_update_enabled)
+            return "ok"
+
+        wrapped = wrap_dummy_run_with_draft_flag(original)
+        result = wrapped(object())
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(seen, [True])
+        # Restored to the prior value after the call.
+        self.assertFalse(AscendRotaryEmbedding310._is_drafting_update_enabled)
+
+    def test_dummy_run_wrapper_restores_flag_on_exception(self):
+        from vllm_ascend._310p.spec_decode.dflash_proposer_310 import wrap_dummy_run_with_draft_flag
+
+        AscendRotaryEmbedding310.set_rope_position_flag_310p(False)
+
+        def original(self, *args, **kwargs):
+            raise RuntimeError("boom")
+
+        wrapped = wrap_dummy_run_with_draft_flag(original)
+        with self.assertRaises(RuntimeError):
+            wrapped(object())
+
+        self.assertFalse(AscendRotaryEmbedding310._is_drafting_update_enabled)

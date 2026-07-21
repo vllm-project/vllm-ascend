@@ -15,8 +15,20 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from vllm_ascend._310p.spec_decode.dflash_model_310 import (
+    patch_dflash_read_mask_embedding_310,
+    precompute_and_store_context_kv_310,
+)
+from vllm_ascend._310p.spec_decode.dflash_proposer_310 import (
+    AscendDflashProposer310,
+    AscendDsparkProposer310,
+)
 from vllm_ascend._310p.spec_decode.llm_base_proposer_310 import AscendSpecDecodeBaseProposer310
 
 __all__ = [
     "AscendSpecDecodeBaseProposer310",
+    "AscendDflashProposer310",
+    "AscendDsparkProposer310",
+    "precompute_and_store_context_kv_310",
+    "patch_dflash_read_mask_embedding_310",
 ]
