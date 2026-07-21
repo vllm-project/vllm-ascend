@@ -78,7 +78,7 @@ Select an image based on your machine type and start the docker image on your no
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```
-
+    
 === "A2 series"
 
     Start the docker image on each node.
@@ -216,10 +216,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --block-size 128 \
         --speculative-config '{"method": "dspark", "num_speculative_tokens": 5, "enforce_eager": true}' 
     ```
-
     tps more than 50+ ,its reach  2X speed of dsv4f with mtp
-
-
 
 === "A3 series"
 
