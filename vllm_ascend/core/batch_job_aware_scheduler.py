@@ -652,7 +652,9 @@ class BatchJobAwareScheduler(Scheduler):
         self._block_reserver.invalidate_cache()
         return super().schedule(*args, **kwargs)
 
-    def _free_request(self, request: Request, delay_free_blocks: bool = False) -> dict[str, Any] | None:
+    def _free_request(
+        self, request: Request, delay_free_blocks: bool = False
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         """Observe the decode length for naturally stopped requests."""
         if request.status == RequestStatus.FINISHED_STOPPED:
             job_name = self._job_name_parser.parse(request.request_id)
