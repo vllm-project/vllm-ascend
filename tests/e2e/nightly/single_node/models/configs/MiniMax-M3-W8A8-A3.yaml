@@ -51,3 +51,15 @@ test_cases:
         temperature: 1.0
         top_p: 0.95
         ignore_eos: false
+      acc_textvqa:
+        case_type: accuracy
+        dataset_path: vllm-ascend/textvqa-lite
+        request_conf: vllm_api_general_chat
+        dataset_conf: textvqa/textvqa_gen_base64
+        num_prompts: 1000
+        max_out_len: 512
+        batch_size: 8
+        baseline: 72
+        temperature: 1.0
+        top_p: 0.95
+        threshold: 5
