@@ -32,13 +32,24 @@ from vllm_ascend.sample.rejection_sampler import (
 
 
 @contextmanager
-def _bind_sample_recovered_tokens(fn):
-    original = rejection_sampler_module.sample_recovered_tokens
+def _force_pytorch_rejection_path(fn):
+    """Route the base rejection sampler through its PyTorch fallbacks on 310P.
+
+    310P has no working Triton, so ``HAS_TRITON`` is forced off (otherwise the base
+    ``rejection_sample`` hits ``cal_grid_and_block_size`` -> ``get_vectorcore_num``
+    and fails with "Device properties not initialized"). The PyTorch
+    recovered-token sampler is bound at the same time. Both module globals are
+    restored on exit so nothing else is affected.
+    """
+    original_has_triton = rejection_sampler_module.HAS_TRITON
+    original_recovered = rejection_sampler_module.sample_recovered_tokens
+    rejection_sampler_module.HAS_TRITON = False
     rejection_sampler_module.sample_recovered_tokens = fn
     try:
         yield
     finally:
-        rejection_sampler_module.sample_recovered_tokens = original
+        rejection_sampler_module.HAS_TRITON = original_has_triton
+        rejection_sampler_module.sample_recovered_tokens = original_recovered
 
 
 class AscendRejectionSampler310(AscendRejectionSampler):
@@ -51,7 +62,7 @@ class AscendRejectionSampler310(AscendRejectionSampler):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
-        with _bind_sample_recovered_tokens(self.sample_recovered_tokens):
+        with _force_pytorch_rejection_path(self.sample_recovered_tokens):
             return super().forward(metadata, draft_probs, logits, sampling_metadata)
 
     def sample_recovered_tokens(
