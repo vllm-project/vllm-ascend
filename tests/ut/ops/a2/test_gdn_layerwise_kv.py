@@ -56,7 +56,7 @@ def test_npu_connector_observes_updated_gdn_state_after_compile():
     def chunk_attention(**kwargs):
         initial_state = kwargs["initial_state"]
         value = kwargs["v"]
-        return value + 1, initial_state + 1
+        return value.movedim(1, 2).contiguous() + 1, initial_state + 1
 
     gating = (
         torch.zeros(1, 2, 1, device=device),
