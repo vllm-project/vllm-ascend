@@ -19,6 +19,7 @@ from vllm_ascend._310p.ops import rotary_embedding as rotary_310
 from vllm_ascend._310p.ops.rotary_embedding import (
     AscendMRotaryEmbedding310,
     AscendRotaryEmbedding310,
+    _build_draft_cos_sin_slice,
     set_mrope_apply_rotary_slices,
 )
 
@@ -83,3 +84,48 @@ def test_ascend_rotary_embedding_310_drafting_flag():
     assert AscendRotaryEmbedding310._is_drafting_update_enabled is True
     AscendRotaryEmbedding310.set_rope_position_flag_310p(False)
     assert AscendRotaryEmbedding310._is_drafting_update_enabled is False
+
+
+def _reset_draft_globals():
+    rotary_310._draft_cos = None
+    rotary_310._draft_sin = None
+    rotary_310._draft_rope_dim = None
+
+
+def test_build_draft_cos_sin_slice_uses_own_cache():
+    # Draft rotary dim (128) may differ from the main model's; the slice must be
+    # built from the passed cache, independent of the main model's global buffers.
+    _reset_draft_globals()
+    try:
+        rotary_dim = 128
+        cos_sin_cache = torch.randn(64, rotary_dim, dtype=torch.float32)
+        positions = torch.arange(5, dtype=torch.long)
+
+        cos, sin = _build_draft_cos_sin_slice(cos_sin_cache, positions)
+
+        assert tuple(cos.shape) == (1, 5, 1, rotary_dim)
+        assert tuple(sin.shape) == (1, 5, 1, rotary_dim)
+        # npu_apply_rotary_pos_emb requires contiguous cos/sin; the leading-dim-1
+        # slice of the persistent buffer stays contiguous.
+        assert cos.is_contiguous()
+        assert sin.is_contiguous()
+        # cos/sin are the two halves derived from the selected cache rows.
+        expected = cos_sin_cache.index_select(0, positions).view(5, 2, -1).repeat(1, 1, 2)
+        torch.testing.assert_close(cos, expected.chunk(2, dim=-2)[0].reshape(1, 5, 1, rotary_dim))
+        torch.testing.assert_close(sin, expected.chunk(2, dim=-2)[1].reshape(1, 5, 1, rotary_dim))
+    finally:
+        _reset_draft_globals()
+
+
+def test_build_draft_cos_sin_slice_reuses_buffer_address():
+    # Second call with <= capacity must reuse the same persistent buffer.
+    _reset_draft_globals()
+    try:
+        cos_sin_cache = torch.randn(64, 128, dtype=torch.float32)
+        cos1, _ = _build_draft_cos_sin_slice(cos_sin_cache, torch.arange(8, dtype=torch.long))
+        first_ptr = cos1.data_ptr()
+        cos2, _ = _build_draft_cos_sin_slice(cos_sin_cache, torch.arange(4, dtype=torch.long))
+        assert cos2.data_ptr() == first_ptr
+        assert tuple(cos2.shape) == (1, 4, 1, 128)
+    finally:
+        _reset_draft_globals()

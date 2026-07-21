@@ -25,7 +25,7 @@ from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.layers.rotary_embedding.mrope import apply_interleaved_rope
 
-from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, get_cos_and_sin_slice, update_cos_sin
+from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, get_cos_and_sin_slice
 
 # Filled once per model forward in NPUModelRunner310._model_forward; read by every MRoPE layer.
 _mrope_cos_slice: torch.Tensor | None = None
@@ -118,6 +118,55 @@ def set_mrope_apply_rotary_slices(
     _mrope_sin_slice[:, :num_tokens].copy_(sin_view)
 
 
+# Persistent draft cos/sin buffers, mirroring the global _cos/_sin used by the
+# main model. npu_apply_rotary_pos_emb requires cos/sin to be slices of a
+# persistently-allocated (stream-registered) buffer; freshly-allocated tensors
+# fail with an allocator/stream error ("aclrtAllocatorGetByStream failed").
+# These are draft-local so a draft whose rotary dim differs from the main
+# model's (e.g. VL main + text dflash draft) works without touching the main
+# model's buffers.
+_draft_cos: torch.Tensor | None = None
+_draft_sin: torch.Tensor | None = None
+_draft_rope_dim: int | None = None
+
+
+def _build_draft_cos_sin_slice(
+    cos_sin_cache: torch.Tensor, positions: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build cos/sin slices for the ``head_size==128`` / ``rotary_dim==64`` NPU
+    apply-rotary paths from a rotary's own ``cos_sin_cache``.
+
+    Mirrors ``update_cos_sin`` (persistent buffer + slice) but is draft-local, so
+    a draft model whose rotary dim differs from the main model's works correctly
+    (e.g. VL main + text dflash draft). Returns tensors shaped
+    ``[1, num_tokens, 1, rotary_dim]`` matching ``get_cos_and_sin_slice``. The
+    ``[:, :num_tokens]`` slice stays contiguous because the leading dim is 1.
+    """
+    global _draft_cos, _draft_sin, _draft_rope_dim
+    num_tokens = positions.size(0)
+    rope_dim = cos_sin_cache.shape[-1]
+    if (
+        _draft_cos is None
+        or _draft_rope_dim != rope_dim
+        or _draft_cos.shape[1] < num_tokens
+        or _draft_cos.device != cos_sin_cache.device
+        or _draft_cos.dtype != cos_sin_cache.dtype
+    ):
+        capacity = max(num_tokens, 0 if _draft_cos is None else _draft_cos.shape[1])
+        _draft_cos = torch.ones(
+            1, capacity, 1, rope_dim, dtype=cos_sin_cache.dtype, device=cos_sin_cache.device
+        )
+        _draft_sin = torch.zeros(
+            1, capacity, 1, rope_dim, dtype=cos_sin_cache.dtype, device=cos_sin_cache.device
+        )
+        _draft_rope_dim = rope_dim
+
+    sel = cos_sin_cache.index_select(0, positions).view(num_tokens, 2, -1).repeat(1, 1, 2)
+    _draft_cos[:, :num_tokens] = sel.chunk(2, dim=-2)[0]
+    _draft_sin[:, :num_tokens] = sel.chunk(2, dim=-2)[1]
+    return _draft_cos[:, :num_tokens], _draft_sin[:, :num_tokens]
+
+
 def _rope_forward_oot(
     self,
     positions: torch.Tensor,
@@ -134,9 +183,15 @@ def _rope_forward_oot(
 
     # This flag should set to True when doing drafting.
     if getattr(self, "_is_drafting_update_enabled", False):
-        update_cos_sin(positions)
-
-    cos, sin = get_cos_and_sin_slice()
+        # Draft models build cos/sin from THIS rotary's own cos_sin_cache rather
+        # than the global _cos/_sin buffers. The global buffers/_cos_sin_cache
+        # belong to the main model, whose rotary dim can differ from the draft's
+        # (e.g. a VL main model using MRoPE + a text dflash draft), which would
+        # otherwise corrupt cos/sin or raise a shape/index error in
+        # update_cos_sin.
+        cos, sin = _build_draft_cos_sin_slice(self.cos_sin_cache, positions)
+    else:
+        cos, sin = get_cos_and_sin_slice()
     if offsets is not None:
         raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
     rotary_mode = "half" if is_neox_style else "interleave"
