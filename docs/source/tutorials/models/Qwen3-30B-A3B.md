@@ -262,7 +262,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --host 127.0.0.1 \
         --port 8000 \
         --tensor-parallel-size 2 \
-        --max-num-seqs 32 \
+        --max-num-seqs 16 \
         --served_model_name qwen3 \
         --dtype float16 \
         --quantization ascend \
