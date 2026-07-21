@@ -56,7 +56,7 @@ Select an image based on your machine type and start the docker image on your no
 
     ```shell
       export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-    docker run --rm \
+      docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
         --net=host \
@@ -146,8 +146,6 @@ Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
 
 === "A3 series"
 
-    Start the docker image on your each node.
-
      ```shell
     #!/bin/sh
     vllm serve Qwen/Qwen3-VL-Reranker-2B \
@@ -160,8 +158,6 @@ Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
     ```
 
 === "A2 series"
-
-    Start the docker image on your each node.
 
     ```shell
     #!/bin/sh
@@ -320,6 +316,8 @@ P99 E2EL (ms):                           13523.32
 ==================================================
 ```
 
-## 9 FAQ
+## 9 Performance Tuning
+
+## 10 FAQ
 
 For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).

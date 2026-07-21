@@ -115,8 +115,6 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 === "A3 series"
 
-    Start the docker image on your each node.
-
     ```shell
     #!/bin/sh
     vllm serve Qwen/Qwen3-Embedding-0.6B  \
@@ -128,8 +126,6 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 === "A2 series"
 
-    Start the docker image on your each node.
-
     ```shell
     #!/bin/sh
     vllm serve Qwen/Qwen3-Embedding-0.6B  \
@@ -140,8 +136,6 @@ If you want to deploy multi-node environment, you need to set up environment on 
     ```
 
 === "Atlas inference products"
-
-    Start the docker image on your each node.
 
     ```shell
     #!/bin/sh
@@ -283,6 +277,8 @@ P99 E2EL (ms):                           40630.55
 ==================================================
 ```
 
-## 9 FAQ
+## 9 Performance Tuning
+
+## 10 FAQ
 
 For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).

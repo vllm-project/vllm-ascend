@@ -27,8 +27,6 @@ Select an image based on your machine type and start the docker image on your no
 
 === "A3 series"
 
-    Start the docker image on your each node.
-
     ```shell
     export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
     docker run --rm \
@@ -52,8 +50,6 @@ Select an image based on your machine type and start the docker image on your no
 
 === "A2 series"
 
-    Start the docker image on your each node.
-
     ```shell
       export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
     docker run --rm \
@@ -76,8 +72,6 @@ Select an image based on your machine type and start the docker image on your no
     ```
 
 === "Atlas inference products"
-
-    Start the docker image on your each node.
 
     ```shell
     export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p
@@ -283,6 +277,8 @@ P99 E2EL (ms):                           19423.21
 ==================================================
 ```
 
-## 9 FAQ
+## 9 Performance Tuning
+
+## 10 FAQ
 
 For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
