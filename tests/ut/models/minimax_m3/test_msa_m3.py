@@ -12,7 +12,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.v1.attention.backend import CommonAttentionMetadata
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 
 from vllm_ascend.models.minimax_m3 import MiniMaxM3SparseAttention
 from vllm_ascend.models.minimax_m3.msa_m3 import (
@@ -151,7 +153,7 @@ def test_sparse_backend_get_name() -> None:
 
 
 @patch("vllm_ascend.models.minimax_m3.msa_m3.get_current_vllm_config")
-def test_indexer_cache_uses_key_only_mla_spec(mock_get_vllm_config: MagicMock) -> None:
+def test_indexer_cache_uses_sfa_indexer_spec(mock_get_vllm_config: MagicMock) -> None:
     mock_get_vllm_config.return_value = SimpleNamespace(
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
@@ -170,7 +172,7 @@ def test_indexer_cache_uses_key_only_mla_spec(mock_get_vllm_config: MagicMock) -
         dtype=torch.bfloat16,
     )
 
-    assert type(spec) is MLAAttentionSpec
+    assert type(spec) is AscendSFAIndexerCacheSpec
     assert spec.page_size_bytes * 2 == old_full_spec.page_size_bytes
     assert AscendMiniMaxM3IndexerBackend.get_kv_cache_shape(
         num_blocks=4,
