@@ -25,7 +25,7 @@ You can use our official docker image to run `Qwen3-VL-Embedding` model directly
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-=== "Atlas A3 inference products"
+=== "A3 series"
 
     Start the docker image on your each node.
 
@@ -50,7 +50,7 @@ Select an image based on your machine type and start the docker image on your no
         -it $IMAGE bash
     ```
 
-=== "Atlas A2 inference products"
+=== "A2 series"
 
     Start the docker image on your each node.
 
@@ -112,7 +112,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ## 5 Online Service Deployment
 
-=== "Atlas A3 inference products"
+=== "A3 series"
 
     Start the docker image on your each node.
 
@@ -125,7 +125,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
       --max-model-len 1024
     ```
 
-=== "Atlas A2 inference products"
+=== "A2 series"
 
     Start the docker image on your each node.
 
@@ -158,6 +158,7 @@ Key Parameter Descriptions:
 
 - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. For Atlas inference products if automatic parsing resolves to a large context length, allocating this mask (O(max_model_len^2)) may exceed NPU memory and trigger OOM. Be sure to set an explicit and conservative value, such as --max-model-len 1024.
 - `--compilation-config` For Atlas inference products, due to limited hardware streams, the size of cudagraph_capture_sizes is restricted.
+
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
 ## 6 Functional Verification

@@ -26,7 +26,7 @@ You can use our official docker image to run `Qwen3-Reranker` model directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-=== "Atlas A3 inference products"
+=== "A3 series"
 
     Start the docker image on your each node.
 
@@ -51,7 +51,7 @@ Select an image based on your machine type and start the docker image on your no
         -it $IMAGE bash
     ```
 
-=== "Atlas A2 inference products"
+=== "A2 series"
 
     Start the docker image on your each node.
 
@@ -113,7 +113,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ## 5 Online Service Deployment
 
-=== "Atlas A3 inference products"
+=== "A3 series"
 
     Start the docker image on your each node.
 
@@ -127,7 +127,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
         --max-model-len 1024
     ```
 
-=== "Atlas A2 inference products"
+=== "A2 series"
 
     Start the docker image on your each node.
 
@@ -162,6 +162,7 @@ Key Parameter Descriptions:
 
 - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. For Atlas inference products if automatic parsing resolves to a large context length, allocating this mask (O(max_model_len^2)) may exceed NPU memory and trigger OOM. Be sure to set an explicit and conservative value, such as --max-model-len 1024.
 - `--compilation-config` For Atlas inference products, due to limited hardware streams, the size of cudagraph_capture_sizes is restricted.
+
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
 ## 6 Functional Verification
@@ -173,7 +174,7 @@ Service Verification:
 ```python
 import requests
 
-url = "http://127.0.0.1:8888/v1/rerank"
+url = "http://127.0.0.1:8000/v1/rerank"
 
 # Please use the query_template and document_template to format the query and
 # document for better reranker results.
@@ -214,28 +215,28 @@ The service returns HTTP 200 OK with a JSON response containing the `relevance_s
 
 ```json
 {
-    "id": "score-xxxxx",
+    "id": "score-xxx",
     "model": "Qwen/Qwen3-Reranker-0.6B",
     "usage": {
-        "prompt_tokens": 179,
-        "total_tokens": 179
+        "prompt_tokens": 193,
+        "total_tokens": 193
     },
     "results": [
         {
             "index": 0,
             "document": {
-                "text": "The capital of China is Beijing.",
+                "text": "<Document>: The capital of China is Beijing.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
                 "multi_modal": null
             },
-            "relevance_score": 0.7209711670875549
+            "relevance_score": 0.9994981288909912
         },
         {
             "index": 1,
             "document": {
-                "text": "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun.",
+                "text": "<Document>: Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
                 "multi_modal": null
             },
-            "relevance_score": 0.18871910870075226
+            "relevance_score": 0.00000506485957885161
         }
     ]
 }
