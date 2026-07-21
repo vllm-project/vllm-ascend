@@ -287,6 +287,20 @@
   tests:
     - tests/e2e/pull_request/four_card/test_deepseek_v4.py
 
+- name: models_minimax_m3
+  optional: false
+  source_file_dependencies:
+    - vllm_ascend/models/minimax_m3.py
+    - vllm_ascend/models/minimax_m3_vl.py
+    - vllm_ascend/models/ops/msa_m3.py
+    - vllm_ascend/models/ops/msa_m3_npu.py
+    - vllm_ascend/models/ops/msa_m3_triton.py
+  tests:
+    - tests/ut/models/test_minimax_m3.py
+    - tests/ut/models/test_minimax_m3_sparse_attn.py
+    - tests/ut/models/test_minimax_m3_vit.py
+    - tests/ut/models/test_msa_m3.py
+
 # Ops
 - name: ops_basic
   optional: false
@@ -839,4 +853,3 @@ partition:
   a3_x2: 3
   a3_x4: 3
   cpu_x0: 1
-
