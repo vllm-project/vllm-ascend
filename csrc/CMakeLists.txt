@@ -51,7 +51,9 @@ set(VENDOR_NAME                   "custom"                     CACHE   STRING   
 set(ASCEND_ALL_COMPUTE_UNIT       "ascend310p;ascend910b;ascend910_93;ascend950;kirinx90" CACHE STRING "all soc list")
 
 set(SOC_VERSION_LIST ascend310p ascend910b ascend910_93 ascend950 kirinx90)
-set(ARCH_DIRECTORY_LIST arch22 arch32 arch32 arch35 arch32)
+# The 310P custom GDN kernels use the dav_m200 implementation under arch20.
+# Keep the staged dynamic-kernel sources aligned with the runtime target.
+set(ARCH_DIRECTORY_LIST arch20 arch32 arch32 arch35 arch32)
 
 if ("ascend950" IN_LIST ASCEND_COMPUTE_UNIT)
 message(STATUS "build with 3~8 packages........")
