@@ -30,6 +30,7 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.lora.fused_moe import prepare_lora_indices
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEPrepareOutput
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import enable_sp, enable_sp_by_pass
@@ -146,23 +147,22 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         """
         self.replace_allreduce = replace_allreduce
         self.enable_shared_expert_dp = enable_shared_expert_dp
-        lora_context = self.lora_context
-        token_lora_indices = None
-        if lora_context is not None:
-            token_lora_indices = lora_context.punica_wrapper.token_lora_indices
 
         padded_hidden_states_shape = hidden_states.shape
         if not (self.replace_allreduce or self.enable_shared_expert_dp):
             self.num_tokens, _ = hidden_states.shape
             pad_size = self.tp_size - self.num_tokens  # Pad to TP size (cyclic)
-            if token_lora_indices is not None:
-                token_lora_indices = token_lora_indices[: self.num_tokens]
+            prepare_lora_indices(
+                self.lora_context,
+                num_tokens=self.num_tokens,
+                pad_size=pad_size,
+                tp_size=self.tp_size,
+                tp_rank=self.tp_rank,
+            )
 
             if pad_size > 0:
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
-                if token_lora_indices is not None:
-                    token_lora_indices = nn.functional.pad(token_lora_indices, (0, pad_size), value=-1)
                 padded_hidden_states_shape = hidden_states.shape
 
             if self.tp_size > 1:
@@ -171,13 +171,6 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
 
                 hidden_states = split_hidden_states[self.tp_rank]
                 router_logits = split_router_logits[self.tp_rank]
-                if token_lora_indices is not None:
-                    lora_context.split_lora_indices = torch.tensor_split(token_lora_indices, self.tp_size, dim=0)[
-                        self.tp_rank
-                    ]
-            else:
-                if lora_context is not None:
-                    lora_context.split_lora_indices = token_lora_indices
 
         return MoEPrepareOutput(
             hidden_states=hidden_states,

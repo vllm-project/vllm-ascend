@@ -29,6 +29,11 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.lora.fused_moe import (
+    preprocess_lora_indices,
+    postprocess_lora_indices,
+    all2all_lora_indices,
+)
 from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
@@ -515,17 +520,12 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         permute1_ep_all_to_all_handle.wait()
         permutated_local_input_tokens.untyped_storage().resize_(0)
 
-        lora_context = self.lora_context
-        permuted_lora_indices = (
-            getattr(lora_context, "permuted_lora_indices", None) if lora_context is not None else None
+        all2all_lora_indices(
+            self.lora_context,
+            output_splits=output_splits,
+            input_splits=input_splits,
+            ep_group=self.ep_group,
         )
-        if permuted_lora_indices is not None:
-            lora_dtype = permuted_lora_indices.dtype
-            _, exchanged_lora, lora_all_to_all_handle = async_all_to_all(
-                permuted_lora_indices, output_splits, input_splits, self.ep_group
-            )
-            lora_all_to_all_handle.wait()
-            lora_context.exchanged_lora_indices = exchanged_lora.to(lora_dtype)
 
         # Postprocess
         global_input_tokens, dynamic_scale_final, reversed_global_input_permutation_mapping = (
@@ -593,16 +593,12 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             indices=topk_ids,
             num_out_tokens=num_out_tokens,
         )
-        lora_context = self.lora_context
-        split_lora_indices = getattr(lora_context, "split_lora_indices", None) if lora_context is not None else None
-        permuted_lora_indices = None
-        if split_lora_indices is not None:
-            expanded_lora = split_lora_indices.repeat_interleave(topk_ids.shape[1])
-            # npu_moe_token_permute returns original-row -> permuted-row indices.
-            local_lora_permutation = torch.argsort(reversed_local_input_permutation_mapping.reshape(-1).long())
-            permuted_lora_indices = expanded_lora[local_lora_permutation]
-        if lora_context is not None:
-            lora_context.permuted_lora_indices = permuted_lora_indices
+
+        preprocess_lora_indices(
+            self.lora_context,
+            topk_ids=topk_ids,
+            reversed_permutation_mapping=reversed_local_input_permutation_mapping,
+        )
 
         return (
             permutated_local_input_tokens,
@@ -669,10 +665,6 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         dst_type,
         scale_type,
     ):
-        lora_context = self.lora_context
-        exchanged_lora_indices = (
-            getattr(lora_context, "exchanged_lora_indices", None) if lora_context is not None else None
-        )
         # Early return if no local experts or no tokens
         if self.num_local_experts <= 1:
             return global_input_tokens, dynamic_scale_after_all2all, None
@@ -712,10 +704,10 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         global_input_tokens, reversed_global_input_permutation_mapping = torch_npu.npu_moe_token_permute(
             global_input_tokens, global_input_tokens_local_experts_indices
         )
-        if exchanged_lora_indices is not None:
-            global_lora_permutation = torch.argsort(reversed_global_input_permutation_mapping.reshape(-1).long())
-            exchanged_lora_indices = exchanged_lora_indices[global_lora_permutation]
-            lora_context.exchanged_lora_indices = exchanged_lora_indices
+        postprocess_lora_indices(
+            self.lora_context,
+            reversed_permutation_mapping=reversed_global_input_permutation_mapping,
+        )
         return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
 
     def _combine_preprocess(

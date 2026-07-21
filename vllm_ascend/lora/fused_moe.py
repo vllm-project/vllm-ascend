@@ -48,6 +48,8 @@ from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.layers.utils import _get_lora_device
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all
 
 _MOE_LORA_INDEX_FIELDS = (
     "split_lora_indices",
@@ -56,9 +58,130 @@ _MOE_LORA_INDEX_FIELDS = (
 )
 
 
-def initialize_moe_lora_context_indices(lora_context) -> None:
+def reset_lora_indices(lora_context) -> None:
     for field in _MOE_LORA_INDEX_FIELDS:
         setattr(lora_context, field, None)
+
+
+def prepare_lora_indices(
+    lora_context,
+    *,
+    num_tokens: int,
+    pad_size: int,
+    tp_size: int,
+    tp_rank: int,
+) -> None:
+    """Truncate, pad, and TP-split the per-token LoRA index tensor,
+    storing the result in ``lora_context.split_lora_indices``.
+
+    No-op when ``lora_context`` is ``None`` (no LoRA adapter active).
+    """
+    if lora_context is None:
+        return
+    token_indices = lora_context.punica_wrapper.token_lora_indices
+    token_indices = token_indices[:num_tokens]
+    if pad_size > 0:
+        token_indices = torch.nn.functional.pad(
+            token_indices, (0, pad_size), value=-1
+        )
+    if tp_size > 1:
+        lora_context.split_lora_indices = torch.tensor_split(
+            token_indices, tp_size, dim=0
+        )[tp_rank]
+    else:
+        lora_context.split_lora_indices = token_indices
+
+
+def preprocess_lora_indices(
+    lora_context,
+    *,
+    topk_ids: torch.Tensor,
+    reversed_permutation_mapping: torch.Tensor,
+) -> None:
+    """Expand and permute LoRA token indices for the AlltoAll dispatch path.
+
+    Reads ``lora_context.split_lora_indices``, repeats each entry by
+    ``topk``, applies the token permutation to align with the dispatched
+    hidden states, and stores the result in
+    ``lora_context.permuted_lora_indices``.
+
+    No-op when ``lora_context`` is ``None`` or ``split_lora_indices``
+    has not been populated by the prepare stage.
+    """
+    if lora_context is None:
+        return
+    split_indices = getattr(lora_context, "split_lora_indices", None)
+    if split_indices is None:
+        return
+    expanded = split_indices.repeat_interleave(topk_ids.shape[1])
+    permutation = torch.argsort(reversed_permutation_mapping.reshape(-1).long())
+    lora_context.permuted_lora_indices = expanded[permutation]
+
+
+def postprocess_lora_indices(
+    lora_context,
+    *,
+    reversed_permutation_mapping: torch.Tensor,
+) -> None:
+    """Re-permute exchanged LoRA indices to align with the global token
+    ordering after ``npu_moe_token_permute`` in the AlltoAll dispatch
+    postprocess.
+
+    Reads ``lora_context.exchanged_lora_indices``, applies the
+    global permutation, and writes the result back.
+
+    No-op when ``lora_context`` is ``None`` or
+    ``exchanged_lora_indices`` has not been set.
+    """
+    if lora_context is None:
+        return
+    exchanged = getattr(lora_context, "exchanged_lora_indices", None)
+    if exchanged is None:
+        return
+    permutation = torch.argsort(reversed_permutation_mapping.reshape(-1).long())
+    lora_context.exchanged_lora_indices = exchanged[permutation]
+
+
+def all2all_lora_indices(
+    lora_context,
+    *,
+    output_splits,
+    input_splits,
+    ep_group,
+) -> None:
+    """Exchange permuted LoRA indices across EP ranks via all_to_all.
+
+    Reads ``lora_context.permuted_lora_indices``, performs the all_to_all
+    exchange with the given splits and group, and stores the result in
+    ``lora_context.exchanged_lora_indices``.
+
+    No-op when ``lora_context`` is ``None`` or ``permuted_lora_indices``
+    has not been set.
+    """
+    if lora_context is None:
+        return
+    permuted = getattr(lora_context, "permuted_lora_indices", None)
+    if permuted is None:
+        return
+    lora_dtype = permuted.dtype
+    _, exchanged, handle = async_all_to_all(
+        permuted, output_splits, input_splits, ep_group
+    )
+    handle.wait()
+    lora_context.exchanged_lora_indices = exchanged.to(lora_dtype)
+
+
+def sync_lora_context(quant_method, lora_context):
+    """Push ``lora_context`` onto MoE communication singletons, or clear
+    them when ``lora_context`` is ``None``.
+
+    Encapsulates the ``hasattr``/``set_lora_context`` pattern shared by
+    setup and teardown so callers just pass the target value.
+    """
+    if hasattr(_EXTRA_CTX.moe_comm_method, "set_lora_context"):
+        _EXTRA_CTX.moe_comm_method.set_lora_context(lora_context)
+    if hasattr(quant_method, "set_lora_context"):
+        quant_method.set_lora_context(lora_context)
 
 
 def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
@@ -192,7 +315,10 @@ def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
         adapter_enabled=lora_context.adapter_enabled,
         token_lora_mapping=lora_per_row,
     )
-
+    # Clear per-forward intermediate indices now that the LoRA delta
+    # for this layer has been fully applied — they are not needed for
+    # the remaining combine/finalize stages.
+    reset_lora_indices(lora_context)
 
 class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
     """Ascend-native MoE-LoRA wrapper.
@@ -245,7 +371,6 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         # routed_experts; batch-local LoRA indices are refreshed before each forward.
         BaseLayerWithLoRA.set_mapping(self, punica_wrapper)
         lora_context = self._build_lora_context()
-        initialize_moe_lora_context_indices(lora_context)
         self.base_layer.set_lora_context(lora_context)
 
 
