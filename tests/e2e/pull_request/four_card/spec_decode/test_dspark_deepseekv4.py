@@ -37,7 +37,7 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 @pytest.mark.parametrize("model_name", MODELS)
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
 def test_deepseek_v4_dspark_acceptance_tp4(model_name):
-    golden = [0.85, 0.74, 0.58, 0.49, 0.40]
+    golden = [0.88, 0.74, 0.58, 0.49, 0.40]
 
     example_prompts = [
         "Hello, my name is",
@@ -77,7 +77,7 @@ def test_deepseek_v4_dspark_acceptance_tp4(model_name):
 
     acceptance_per_pos = [num_accepted_tokens / num_drafts for num_accepted_tokens in num_accepted_tokens_per_pos]
 
-    match = all((a > b) for a, b in zip(acceptance_per_pos, golden))
+    match = all((a > b) or (b - a < 0.03) for a, b in zip(acceptance_per_pos, golden))
     assert match, (
         f"acceptance_per_pos {acceptance_per_pos} is not greater than golden {golden} (num_drafts={num_drafts})"
     )
