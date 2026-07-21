@@ -27,8 +27,6 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
-from PIL import Image
-from vllm import SamplingParams
 
 from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
 
