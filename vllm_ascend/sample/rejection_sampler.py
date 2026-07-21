@@ -574,10 +574,6 @@ def rejection_sample(
     # For random sampling with selected logits
     # target_logits is [num_tokens, top_k*tp_size] with indices [num_tokens, top_k*tp_size]
     if target_indices is not None:
-        if draft_probs is None:
-            logger.warning(
-                "[spec/dfx] rejection_sample: draft_probs is None in random sampling path; acceptance may be degraded.",
-            )
         # Enable reduce_sampling: logits are [num_tokens, top_k*tp_size]
         # We need to handle rejection sampling with selected vocab
         selected_vocab_size = target_logits.shape[-1]
