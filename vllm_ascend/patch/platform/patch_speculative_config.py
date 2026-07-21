@@ -3,6 +3,8 @@ from typing import TYPE_CHECKING, Any
 from vllm.config.speculative import SpeculativeConfig
 from vllm.utils.import_utils import LazyLoader
 
+_orig_post_init = SpeculativeConfig.__post_init__
+
 if TYPE_CHECKING:
     import vllm.model_executor.layers.quantization as me_quant
     from transformers import PretrainedConfig
@@ -111,12 +113,19 @@ def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
                 "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
             }
         )
-    if hf_config.model_type == "longcat_flash":
+    if hf_config.model_type in ("longcat_flash", "longcat_flash_ngram"):
         hf_config.model_type = "longcat_flash_mtp"
         n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
         hf_config.update({"n_predict": n_predict, "architectures": ["LongCatFlashMTPModel"]})
 
-    if hf_config.model_type == "step3p5":
+    if hf_config.model_type in ("step3p5", "step3p7") or hf_config.architectures[0] in (
+        "Step3p5ForCausalLM",
+        "Step3p7ForConditionalGeneration",
+    ):
+        quantization_config = getattr(hf_config, "quantization_config", None)
+        hf_config = getattr(hf_config, "text_config", hf_config)
+        if quantization_config is not None and getattr(hf_config, "quantization_config", None) is None:
+            hf_config.update({"quantization_config": quantization_config})
         hf_config.model_type = "step3p5_mtp"
         n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
         hf_config.update({"n_predict": n_predict, "architectures": ["Step3p5MTP"]})
@@ -127,4 +136,18 @@ def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
     return hf_config
 
 
+def _dspark_post_init(self):
+    _orig_post_init(self)
+    if self.use_dspark():
+        draft_model_config = getattr(self, "draft_model_config", None)
+        draft_hf_config = getattr(draft_model_config, "hf_config", None)
+        # deepseek v4 dspark
+        if getattr(draft_hf_config, "ptd_token_id", None) is None:  # type: ignore
+            draft_hf_config.ptd_token_id = getattr(draft_hf_config, "dspark_noise_token_id", None)  # type: ignore
+        # gqa backend dspark
+        if getattr(draft_hf_config, "ptd_token_id", None) is None:  # type: ignore
+            draft_hf_config.ptd_token_id = getattr(draft_hf_config, "mask_token_id", None)  # type: ignore
+
+
 SpeculativeConfig.hf_config_override = hf_config_override
+SpeculativeConfig.__post_init__ = _dspark_post_init

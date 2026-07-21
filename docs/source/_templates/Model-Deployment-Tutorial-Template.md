@@ -37,11 +37,11 @@ This section introduces the features supported by the model, including supported
 
 **Example 1: Feature Support List**
 
-| Model Name | Support Status | Remarks | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Caching | LoRA | Speculative Decoding | Asynchronous Scheduling | Tensor Parallelism | Pipeline Parallelism | Expert Parallelism | Data Parallelism | Prefill-Decode Separation | Segmented ACL Graph Execution | Full ACL Graph Execution | Max Model Length | MLP Weight Prefetch | Documentation |
-| ------ | ---------- | ------ | ------ | ---------- | ------ | ------------ | -------------- | ------ | ---------- | ---------- | ---------- | ------------ | ---------- | ---------- | ------------------- | ----------- | ----------- | ------------- | ------------- | ---------- |
-| DeepSeek V3/3.1 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | | ✅ | | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 240k | | [DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md) |
-| DeepSeek V3.2 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 160k | ✅ | [DeepSeek-V3.2](../../tutorials/models/DeepSeek-V3.2.md) |
-| Qwen3 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | | | ✅ | ✅ | | | ✅ | | ✅ | ✅ | 128k | ✅ | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
+| Model Name | Support Status | Remarks | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Caching | LoRA | Speculative Decoding | Asynchronous Scheduling | Tensor Parallelism | Pipeline Parallelism | Expert Parallelism | Data Parallelism | Prefill-Decode Separation | Segmented ACL Graph Execution | Full ACL Graph Execution | Max Model Length | Documentation |
+| ------ | ---------- | ------ | ------ | ---------- | ------ | ------------ | -------------- | ------ | ---------- | ---------- | ---------- | ------------ | ---------- | ---------- | ------------------- | ----------- | ----------- | ---------- | ---- |
+| DeepSeek V3/3.1 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | | ✅ | | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 240k | [DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md) |
+| DeepSeek V3.2 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 160k | [DeepSeek-V3.2](../../tutorials/models/DeepSeek-V3.2.md) |
+| Qwen3 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | | | ✅ | ✅ | | | ✅ | | ✅ | ✅ | 128k | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
 
 >**Note**: This is a simplified example. Please refer to the complete feature matrix for the full table.
 
@@ -77,35 +77,25 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 - Provide specific installation steps and commands (parameters should be explained with meaning, value range, units, etc.).
 - **Version Number Writing Specification:** Prefer using placeholders (values are centrally configured). If a fixed value is used and it differs from the documented validation version, a comment MUST be added stating: "Please replace with your actual version."
 - Provide verification commands and expected status: guide users to check the installation result by executing commands (e.g., docker ps), specifying success criteria such as status codes or output characteristics.
-- When content involves multiple hardware series (e.g., A3/A2), the `tab-set` markup syntax must be used to present them in separate tabs,and the tabs should be arranged with the newest models first.
+- When multiple hardware series (e.g., A3/A2 series) are involved, the MkDocs tab syntax `=== "tab name"` must be used to present content in separate tabs, with tabs ordered by newer models first.
 
 ### 4.1 Docker Image Installation
 
 **Example:**
 
-:::::{tab-set}
-:sync-group: install
+=== "A3 series"
 
-::::{tab-item} A3 series
-:sync: A3
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+    docker run ...
+    ```
 
-```bash
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
-docker run ...
-```
+=== "A2 series"
 
-::::
-
-::::{tab-item} A2 series
-:sync: A2
-
-```bash
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-docker run ...
-```
-
-::::
-:::::
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+    docker run ...
+    ```
 
 ### 4.2 Source Code Installation
 
@@ -120,8 +110,8 @@ docker run ...
 - Describe the architectural characteristics and applicable scenarios of single-node deployment.
 - Provide startup command templates and key parameter descriptions.
 - Provide service verification methods (e.g., curl commands) and expected results, specifying success indicators (e.g., 200 OK).
-- When content involves multiple hardware series (e.g., A3/A2), the `tab-set` markup syntax must be used to present them in separate tabs,and the tabs should be arranged with the newest models first.
 - Below the startup command, provide guidance on common issues; if already described in the public FAQ, a direct link may be provided.
+- When multiple hardware series (e.g., A3/A2 series) are involved, the MkDocs tab syntax `=== "tab name"` must be used to present content in separate tabs, with tabs ordered by newer models first.
 
 **Example:**
 
@@ -227,7 +217,7 @@ Provide recommended configurations for three typical scenarios (long context, lo
 #### Table 1: Scenario Overview
 
 | Scenario | Deployment Mode | *Total NPUs | Weight Version | Key Considerations |
-|----------|----------------|-------------|----------------|------------------------|
+| ---------- | ---------------- | ------------- | ---------------- | ------------------------ |
 | High Throughput<br>(32K context → 1K output) | 1P1D deployment | 16 (A3) | glm5.1w4a8 | For short-sequence high throughput, try adjusting xxx parameters |
 | Long Context | | | | |
 | Low Latency | | | | |
@@ -237,7 +227,7 @@ Provide recommended configurations for three typical scenarios (long context, lo
 #### Table 2: Detailed Node Configuration
 
 | Scenario | Configuration | NPUs | TP | DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | MTP Speculation Num | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
-|----------|---------------|-------|----|----|----|-------------|--------------------|---------------------|-----------|-----------|--------------|------------------|
+| ---------- | --------------- | ------- | ---- | ---- | ---- | ------------- | -------------------- | --------------------- | ----------- | ----------- | -------------- | ------------------ |
 | High Throughput (32K→1K) | Server-P Node / Single Machine | 8 | 8 | 2 | 32 | 4096 | 30k | 3 | Off | On | On | On |
 | High Throughput (32K→1K) | Server-D Node | 8 | 2 | 8 | 8 | 4096 | 30k | 12 | Off | On | Off | On |
 | Long Context | Server-P Node / Single Machine | | | | | | | | | | | |
@@ -285,11 +275,10 @@ The following optimizations are enabled by default and require no additional con
 | --------------------- | -------------------- | ----------------- | ------------------- | ----------- |
 | FlashComm_v1 | High-concurrency, Tensor Parallelism (TP) scenarios | `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` | Decomposes traditional Allreduce into Reduce-Scatter and All-Gather, reducing RMSNorm computation dimensions | Threshold protection: Only takes effect when the actual number of tokens exceeds the threshold to avoid performance degradation in low-concurrency scenarios |
 | Matmul-ReduceScatter Fusion | Large-scale distributed environments | Automatically enabled after enabling FlashComm_v1 | Fuses matrix multiplication and Reduce-Scatter operations to achieve pipelined parallel processing | Same as FlashComm_v1, has threshold protection |
-| Weight Prefetch | MLP-intensive scenarios (Dense models) | `export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1` | Utilizes vector computation time to prefetch MLP weights into L2 cache in advance | Requires coordination with prefetch buffer size adjustment |
 
 ## 10 FAQ
 
 **Content Writing Requirements:**
 
-- Add a note at the beginning of the section: For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
+- Add a note at the beginning of the section: For common environment, installation, and general parameter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
 - For **model-specific issues**, provide the following elements: problem phenomenon description, cause analysis, and solution measures.

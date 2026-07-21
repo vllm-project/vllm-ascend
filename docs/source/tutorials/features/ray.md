@@ -57,14 +57,14 @@ For setting up a multi-node inference cluster with Ray, **containerized deployme
 
 Below is the example container setup command, which should be executed on **all nodes** :
 
-```{code-block} bash
-   :substitutions:
+```bash
 # Update the vllm-ascend image
-export IMAGE=quay.nju.edu.cn/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=quay.nju.edu.cn/ascend/vllm-ascend:{{ vllm_ascend_version }}
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
 # Note if you are running bridge network with docker, please expose available ports for multiple nodes communication in advance.
+# IMPORTANT: The cache directory mounted at /root/.cache must be a shared directory accessible by all nodes.
 docker run --rm \
 --name $NAME \
 --net=host \
@@ -86,8 +86,7 @@ docker run --rm \
 -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
 -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
-# IMPORTANT: This must be a shared directory accessible by all nodes
--v /path/to/shared/cache:/root/.cache \ 
+-v /path/to/shared/cache:/root/.cache \
 -it $IMAGE bash
 ```
 
@@ -103,10 +102,10 @@ Below are the commands for the primary and secondary nodes:
 
 **Primary node**:
 
-:::{note}
-When starting a Ray cluster for multi-node inference, the environment variables on each node must be set **before** starting the Ray cluster for them to take effect.
-Updating the environment variables requires restarting the Ray cluster.
-:::
+!!! note
+
+    When starting a Ray cluster for multi-node inference, the environment variables on each node must be set **before** starting the Ray cluster for them to take effect.
+    Updating the environment variables requires restarting the Ray cluster.
 
 ```shell
 # Head node
@@ -120,9 +119,9 @@ ray start --head
 
 **Secondary node**:
 
-:::{note}
-When starting a Ray cluster for multi-node inference, the environment variables on each node must be set **before** starting the Ray cluster for them to take effect. Updating the environment variables requires restarting the Ray cluster.
-:::
+!!! note
+
+    When starting a Ray cluster for multi-node inference, the environment variables on each node must be set **before** starting the Ray cluster for them to take effect. Updating the environment variables requires restarting the Ray cluster.
 
 ```shell
 # Worker node

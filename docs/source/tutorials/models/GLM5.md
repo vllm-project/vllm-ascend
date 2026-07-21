@@ -39,69 +39,21 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 
 You can use our official docker image to run GLM-5/5.1 directly.
 
-:::::{tab-set}
-:sync-group: install
+=== "A3 series"
 
-::::{tab-item} A3 series
-:sync: A3
+    Start the docker image on your each node.
 
-Start the docker image on your each node.
+    ```shell
 
-```{code-block} bash
-   :substitutions:
+    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+    export NAME=vllm-ascend
 
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
-export NAME=vllm-ascend
-
-# Run the container using the defined variables
-# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
-docker run --rm \
---name $NAME \
---net=host \
---shm-size=1g \
---device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci2 \
---device /dev/davinci3 \
---device /dev/davinci4 \
---device /dev/davinci5 \
---device /dev/davinci6 \
---device /dev/davinci7 \
---device /dev/davinci8 \
---device /dev/davinci9 \
---device /dev/davinci10 \
---device /dev/davinci11 \
---device /dev/davinci12 \
---device /dev/davinci13 \
---device /dev/davinci14 \
---device /dev/davinci15 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/.cache:/root/.cache \
--it $IMAGE bash
-```
-
-::::
-::::{tab-item} A2 series
-:sync: A2
-
-Start the docker image on your each node.
-
-```{code-block} bash
-   :substitutions:
-
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=1g \
+    # Run the container using the defined variables
+    # Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
+    docker run --rm \
+    --name $NAME \
     --net=host \
+    --shm-size=1g \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \
@@ -110,6 +62,14 @@ docker run --rm \
     --device /dev/davinci5 \
     --device /dev/davinci6 \
     --device /dev/davinci7 \
+    --device /dev/davinci8 \
+    --device /dev/davinci9 \
+    --device /dev/davinci10 \
+    --device /dev/davinci11 \
+    --device /dev/davinci12 \
+    --device /dev/davinci13 \
+    --device /dev/davinci14 \
+    --device /dev/davinci15 \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
     --device /dev/hisi_hdc \
@@ -121,10 +81,39 @@ docker run --rm \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/.cache:/root/.cache \
     -it $IMAGE bash
-```
+    ```
 
-::::
-:::::
+=== "A2 series"
+
+    Start the docker image on your each node.
+
+    ```shell
+
+    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --net=host \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
@@ -142,131 +131,119 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ### 5.1 Single-Node Online Deployment
 
-:::::{tab-set}
-:sync-group: install
+=== "A3 series"
 
-::::{tab-item} A3 series
-:sync: A3
+    - Quantized model `glm-5-w4a8` and `glm-5.1-w4a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
 
-- Quantized model `glm-5-w4a8` and `glm-5.1-w4a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
+    Run the following script to execute online inference.
 
-Run the following script to execute online inference.
+    Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
-Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+    ```shell
+    # The version of transformers needs to be upgraded to 5.2.0.
+    # pip install transformers==5.2.0 --upgrade
 
-```{code-block} bash
-   :substitutions:
-# The version of transformers needs to be upgraded to 5.2.0.
-# pip install transformers==5.2.0 --upgrade
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export HCCL_BUFFSIZE=200
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_ASCEND_BALANCE_SCHEDULING=1
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-export HCCL_OP_EXPANSION_MODE="AIV"
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export HCCL_BUFFSIZE=200
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
+    --host 0.0.0.0 \
+    --port 8077 \
+    --data-parallel-size 1 \
+    --tensor-parallel-size 16 \
+    --enable-expert-parallel \
+    --seed 1024 \
+    --served-model-name glm-5 \
+    --max-num-seqs 8 \
+    --max-model-len 200000 \
+    --max-num-batched-tokens 4096 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.95 \
+    --quantization ascend \
+    --enable-chunked-prefill \
+    --enable-prefix-caching \
+    --additional-config '{"multistream_overlap_shared_expert": true}' \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' 
+    ```
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
---host 0.0.0.0 \
---port 8077 \
---data-parallel-size 1 \
---tensor-parallel-size 16 \
---enable-expert-parallel \
---seed 1024 \
---served-model-name glm-5 \
---max-num-seqs 8 \
---max-model-len 200000 \
---max-num-batched-tokens 4096 \
---trust-remote-code \
---gpu-memory-utilization 0.95 \
---quantization ascend \
---enable-chunked-prefill \
---enable-prefix-caching \
---additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' 
-```
+    - Quantized model `glm-5-w8a8` and `glm-5.1-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
 
-- Quantized model `glm-5-w8a8` and `glm-5.1-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
+    Run the following script to execute online inference.
 
-Run the following script to execute online inference.
+    ```shell
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export HCCL_BUFFSIZE=200
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_ASCEND_BALANCE_SCHEDULING=1
+    export VLLM_ASCEND_ENABLE_MLAPO=1
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-```{code-block} bash
-   :substitutions:
-export HCCL_OP_EXPANSION_MODE="AIV"
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export HCCL_BUFFSIZE=200
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
-export VLLM_ASCEND_ENABLE_MLAPO=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
+    --host 0.0.0.0 \
+    --port 8077 \
+    --data-parallel-size 1 \
+    --tensor-parallel-size 16 \
+    --enable-expert-parallel \
+    --seed 1024 \
+    --served-model-name glm-5 \
+    --max-num-seqs 8 \
+    --max-model-len 40960 \
+    --max-num-batched-tokens 4096 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.95 \
+    --quantization ascend \
+    --enable-chunked-prefill \
+    --enable-prefix-caching \
+    --additional-config '{"multistream_overlap_shared_expert": true}' \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' 
+    ```
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
---host 0.0.0.0 \
---port 8077 \
---data-parallel-size 1 \
---tensor-parallel-size 16 \
---enable-expert-parallel \
---seed 1024 \
---served-model-name glm-5 \
---max-num-seqs 8 \
---max-model-len 40960 \
---max-num-batched-tokens 4096 \
---trust-remote-code \
---gpu-memory-utilization 0.95 \
---quantization ascend \
---enable-chunked-prefill \
---enable-prefix-caching \
---additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' 
-```
+=== "A2 series"
 
-::::
-::::{tab-item} A2 series
-:sync: A2
+    - Quantized model `glm-5-w4a8` can be deployed on 1 Atlas 800 A2 (64G × 8) .
 
-- Quantized model `glm-5-w4a8` can be deployed on 1 Atlas 800 A2 (64G × 8) .
+    Run the following script to execute online inference.
 
-Run the following script to execute online inference.
+    Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
-Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+    ```shell
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export HCCL_BUFFSIZE=200
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_ASCEND_BALANCE_SCHEDULING=1
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-```{code-block} bash
-   :substitutions:
-export HCCL_OP_EXPANSION_MODE="AIV"
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export HCCL_BUFFSIZE=200
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
---host 0.0.0.0 \
---port 8077 \
---data-parallel-size 1 \
---tensor-parallel-size 8 \
---enable-expert-parallel \
---seed 1024 \
---served-model-name glm-5 \
---max-num-seqs 2 \
---max-model-len 32768 \
---max-num-batched-tokens 4096 \
---trust-remote-code \
---gpu-memory-utilization 0.95 \
---quantization ascend \
---enable-chunked-prefill \
---enable-prefix-caching \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
-```
-
-::::
-:::::
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
+    --host 0.0.0.0 \
+    --port 8077 \
+    --data-parallel-size 1 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --seed 1024 \
+    --served-model-name glm-5 \
+    --max-num-seqs 2 \
+    --max-model-len 32768 \
+    --max-num-batched-tokens 4096 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.95 \
+    --quantization ascend \
+    --enable-chunked-prefill \
+    --enable-prefix-caching \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --additional-config '{"multistream_overlap_shared_expert": true}' \
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
+    ```
 
 **Notice:**
 The parameters are explained as follows:
@@ -279,212 +256,199 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
-:::::{tab-set}
-:sync-group: install
+=== "A3 series"
 
-::::{tab-item} A3 series
-:sync: A3
+    - `glm-5-bf16` and `glm-5.1-bf16`: require at least 2 Atlas 800 A3 (64G × 16).
 
-- `glm-5-bf16` and `glm-5.1-bf16`: require at least 2 Atlas 800 A3 (64G × 16).
+    Run the following scripts on two nodes respectively.
 
-Run the following scripts on two nodes respectively.
+    **node 0**
 
-**node 0**
+    ```shell
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="xxx"
 
-```{code-block} bash
-   :substitutions:
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="xxx"
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxxx"
 
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxxx"
+    export HCCL_OP_EXPANSION_MODE="AIV"
 
-export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export HCCL_BUFFSIZE=200
+    export VLLM_ASCEND_BALANCE_SCHEDULING=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export HCCL_BUFFSIZE=200
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 \
+    --host 0.0.0.0 \
+    --port 8077 \
+    --data-parallel-size 2 \
+    --data-parallel-size-local 1 \
+    --data-parallel-address $node0_ip \
+    --data-parallel-rpc-port 12890 \
+    --tensor-parallel-size 16 \
+    --seed 1024 \
+    --served-model-name glm-5 \
+    --enable-expert-parallel \
+    --max-num-seqs 16 \
+    --max-model-len 8192 \
+    --max-num-batched-tokens 4096 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.95 \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
+    ```
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 \
---host 0.0.0.0 \
---port 8077 \
---data-parallel-size 2 \
---data-parallel-size-local 1 \
---data-parallel-address $node0_ip \
---data-parallel-rpc-port 12890 \
---tensor-parallel-size 16 \
---seed 1024 \
---served-model-name glm-5 \
---enable-expert-parallel \
---max-num-seqs 16 \
---max-model-len 8192 \
---max-num-batched-tokens 4096 \
---trust-remote-code \
---gpu-memory-utilization 0.95 \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
-```
+    **node 1**
 
-**node 1**
+    ```shell
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="xxx"
 
-```{code-block} bash
-   :substitutions:
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="xxx"
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxxx"
 
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxxx"
+    export HCCL_OP_EXPANSION_MODE="AIV"
 
-export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export HCCL_BUFFSIZE=200
+    export VLLM_ASCEND_BALANCE_SCHEDULING=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export HCCL_BUFFSIZE=200
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 \
+    --host 0.0.0.0 \
+    --port 8077 \
+    --headless \
+    --data-parallel-size 2 \
+    --data-parallel-size-local 1 \
+    --data-parallel-start-rank 1 \
+    --data-parallel-address $node0_ip \
+    --data-parallel-rpc-port 12890 \
+    --tensor-parallel-size 16 \
+    --seed 1024 \
+    --served-model-name glm-5 \
+    --enable-expert-parallel \
+    --max-num-seqs 16 \
+    --max-model-len 8192 \
+    --max-num-batched-tokens 4096 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.95 \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
+    ```
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 \
---host 0.0.0.0 \
---port 8077 \
---headless \
---data-parallel-size 2 \
---data-parallel-size-local 1 \
---data-parallel-start-rank 1 \
---data-parallel-address $node0_ip \
---data-parallel-rpc-port 12890 \
---tensor-parallel-size 16 \
---seed 1024 \
---served-model-name glm-5 \
---enable-expert-parallel \
---max-num-seqs 16 \
---max-model-len 8192 \
---max-num-batched-tokens 4096 \
---trust-remote-code \
---gpu-memory-utilization 0.95 \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
-```
+=== "A2 series"
 
-::::
-::::{tab-item} A2 series
-:sync: A2
+    Run the following scripts on two nodes respectively.
 
-Run the following scripts on two nodes respectively.
+    **node 0**
 
-**node 0**
+    ```shell
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="xxx"
 
-```{code-block} bash
-   :substitutions:
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="xxx"
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxx"
 
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxx"
+    export HCCL_OP_EXPANSION_MODE="AIV"
 
-export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export HCCL_BUFFSIZE=200
+    export VLLM_ASCEND_BALANCE_SCHEDULING=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export HCCL_BUFFSIZE=200
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
+    --host 0.0.0.0 \
+    --port 8077 \
+    --data-parallel-size 2 \
+    --data-parallel-size-local 1 \
+    --data-parallel-address $node0_ip \
+    --data-parallel-rpc-port 13389 \
+    --tensor-parallel-size 8 \
+    --quantization ascend \
+    --seed 1024 \
+    --served-model-name glm-5 \
+    --enable-expert-parallel \
+    --max-num-seqs 2 \
+    --max-model-len 131072 \
+    --max-num-batched-tokens 4096 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.95 \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --additional-config '{"multistream_overlap_shared_expert": true}' \
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
+    ```
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
---host 0.0.0.0 \
---port 8077 \
---data-parallel-size 2 \
---data-parallel-size-local 1 \
---data-parallel-address $node0_ip \
---data-parallel-rpc-port 13389 \
---tensor-parallel-size 8 \
---quantization ascend \
---seed 1024 \
---served-model-name glm-5 \
---enable-expert-parallel \
---max-num-seqs 2 \
---max-model-len 131072 \
---max-num-batched-tokens 4096 \
---trust-remote-code \
---gpu-memory-utilization 0.95 \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
-```
+    **node 1**
 
-**node 1**
+    ```shell
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="xxx"
 
-```{code-block} bash
-   :substitutions:
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="xxx"
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxx"
 
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxx"
+    export HCCL_OP_EXPANSION_MODE="AIV"
 
-export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export HCCL_BUFFSIZE=200
+    export VLLM_ASCEND_BALANCE_SCHEDULING=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export HCCL_BUFFSIZE=200
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
---host 0.0.0.0 \
---port 8077 \
---headless \
---data-parallel-size 2 \
---data-parallel-size-local 1 \
---data-parallel-start-rank 1 \
---data-parallel-address $node0_ip \
---data-parallel-rpc-port 13389 \
---tensor-parallel-size 8 \
---quantization ascend \
---seed 1024 \
---served-model-name glm-5 \
---enable-expert-parallel \
---max-num-seqs 2 \
---max-model-len 131072 \
---max-num-batched-tokens 4096 \
---trust-remote-code \
---gpu-memory-utilization 0.95 \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
-```
-
-::::
-:::::
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
+    --host 0.0.0.0 \
+    --port 8077 \
+    --headless \
+    --data-parallel-size 2 \
+    --data-parallel-size-local 1 \
+    --data-parallel-start-rank 1 \
+    --data-parallel-address $node0_ip \
+    --data-parallel-rpc-port 13389 \
+    --tensor-parallel-size 8 \
+    --quantization ascend \
+    --seed 1024 \
+    --served-model-name glm-5 \
+    --enable-expert-parallel \
+    --max-num-seqs 2 \
+    --max-model-len 131072 \
+    --max-num-batched-tokens 4096 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.95 \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --additional-config '{"multistream_overlap_shared_expert": true}' \
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
+    ```
 
 - For bf16 weight, use this script on each node to enable [Multi Token Prediction (MTP)](../../user_guide/feature_guide/speculative_decoding.md).
 
@@ -544,20 +508,13 @@ if __name__ == "__main__":
          json.dump(json_data, f, indent=2)
 ```
 
-:::::{tab-set}
-:sync-group: install
-
-::::{tab-item} A3 series
-:sync: A3
-
 - `glm-5-w8a8`: require 2 Atlas 800 A3 (64G × 16).
 
 Run the following scripts on two nodes respectively.
 
 **node 0**
 
-```{code-block} bash
-   :substitutions:
+```shell
 # this obtained through ifconfig
 # nic_name is the network interface name corresponding to local_ip of the current node
 nic_name="xxx"
@@ -600,14 +557,13 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --enable-chunked-prefill \
 --enable-prefix-caching \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+--additional-config '{"multistream_overlap_shared_expert": true}' \
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
 **node 1**
 
-```{code-block} bash
-   :substitutions:
+```shell
 # this obtained through ifconfig
 # nic_name is the network interface name corresponding to local_ip of the current node
 nic_name="xxx"
@@ -652,12 +608,9 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --enable-chunked-prefill \
 --enable-prefix-caching \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+--additional-config '{"multistream_overlap_shared_expert": true}' \
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
-
-::::
-:::::
 
 ### 5.3 Prefill-Decode Disaggregation
 
@@ -770,7 +723,6 @@ Before you start, please
 
 2. prepare the script `run_dp_template.sh` on each node.
 
-    To support a 200k context window on the stage of prefill, the parameter `"layer_sharding": ["q_b_proj", "o_proj"]` needs to be added to `--additional_config` on each prefill node.
     1. Prefill node 0
 
         ```shell
@@ -811,7 +763,7 @@ Before you start, please
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
-            --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp", "enforce_eager": true}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
@@ -819,7 +771,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
-            --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "enable_dsa_cp": true}' \
+            --additional-config '{"enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -891,7 +843,7 @@ Before you start, please
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
-            --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp", "enforce_eager": true}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
@@ -899,7 +851,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
-            --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "enable_dsa_cp": true}' \
+            --additional-config '{"enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -973,7 +925,7 @@ Before you start, please
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
-            --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp", "enforce_eager": true}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
@@ -982,8 +934,8 @@ Before you start, please
             --served-model-name glm-5 \
             --max-model-len 200000 \
             --max-num-batched-tokens 32 \
-            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}' \
-            --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --additional-config '{"recompute_scheduler_enable": true}' \
             --trust-remote-code \
             --max-num-seqs 8 \
             --gpu-memory-utilization 0.92 \
@@ -1053,7 +1005,7 @@ Before you start, please
              --data-parallel-rpc-port $6 \
              --tensor-parallel-size $7 \
              --enable-expert-parallel \
-             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp"}' \
+             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp", "enforce_eager": true}' \
              --profiler-config \
              '{"profiler": "torch",
              "torch_profiler_dir": "./vllm_profile",
@@ -1062,8 +1014,8 @@ Before you start, please
              --served-model-name glm-5 \
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
-             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}' \
-             --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+             --additional-config '{"recompute_scheduler_enable": true}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
@@ -1133,7 +1085,7 @@ Before you start, please
              --data-parallel-rpc-port $6 \
              --tensor-parallel-size $7 \
              --enable-expert-parallel \
-             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp"}' \
+             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp", "enforce_eager": true}' \
              --profiler-config \
              '{"profiler": "torch",
              "torch_profiler_dir": "./vllm_profile",
@@ -1142,8 +1094,8 @@ Before you start, please
              --served-model-name glm-5 \
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
-             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}' \
-             --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+             --additional-config '{"recompute_scheduler_enable": true}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
@@ -1213,7 +1165,7 @@ Before you start, please
              --data-parallel-rpc-port $6 \
              --tensor-parallel-size $7 \
              --enable-expert-parallel \
-             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp"}' \
+             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp", "enforce_eager": true}' \
              --profiler-config \
              '{"profiler": "torch",
              "torch_profiler_dir": "./vllm_profile",
@@ -1222,8 +1174,8 @@ Before you start, please
              --served-model-name glm-5 \
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
-             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}' \
-             --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+             --additional-config '{"recompute_scheduler_enable": true}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
@@ -1339,7 +1291,7 @@ python load_balance_proxy_server_example.py \
 Some configurations for optimization are shown below:
 
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node. With FlashComm enabled, layer_sharding list cannot include o_proj as an element.
-- `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable following fused operators: dispatch_gmm_combine_decode and dispatch_ffn_combine operator.
+- `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable the dispatch_ffn_combine fused operator.
 - `VLLM_ASCEND_ENABLE_MLAPO`: Enable fused operator MlaPreprocessOperation.
 
 Please refer to the following python file for further explanation and restrictions of the environment variables above: [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py)

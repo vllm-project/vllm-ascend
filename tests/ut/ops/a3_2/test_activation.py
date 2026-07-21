@@ -24,7 +24,7 @@ from vllm_ascend.ops.activation import (
     AscendQuickGELU,
     AscendSiluAndMul,
     AscendSwigluOAIAndMul,
-    swiglustep_and_mul,
+    AscendSwigluStepAndMul,
 )
 from vllm_ascend.utils import is_310p as is_310p_hw
 
@@ -66,11 +66,9 @@ def test_AscendQuickGELU_forward_oot(mock_gelu, dummy_tensor, default_vllm_confi
     mock_gelu.assert_called_once_with(dummy_tensor)
 
 
-@patch("vllm_ascend.ops.activation.get_weight_prefetch_method", return_value=MagicMock())
 @patch("torch_npu.npu_swiglu", side_effect=lambda x: x + 1)
 def test_SiluAndMul_forward(
     mock_swiglu,
-    mock_get_weight_prefetch_method,
     dummy_tensor,
     default_vllm_config,
 ):
@@ -88,25 +86,15 @@ def test_SiluAndMul_forward(
     assert torch.allclose(out, expected_out)
 
 
-@patch("vllm_ascend.ops.activation.get_weight_prefetch_method")
 @patch("torch_npu.npu_swiglu", side_effect=lambda x: x + 1)
-def test_AscendSiluAndMul_forward_oot_prefetch(
+def test_AscendSiluAndMul_forward_oot(
     mock_swiglu,
-    mock_get_weight_prefetch_method,
     dummy_tensor,
     default_vllm_config,
 ):
-    weight_prefetch_method = MagicMock()
-    weight_prefetch_method.MLP_DOWN = "mlp_down"
-    mock_get_weight_prefetch_method.return_value = weight_prefetch_method
-
     layer = AscendSiluAndMul()
     out = layer.forward_oot(dummy_tensor)
 
-    weight_prefetch_method.maybe_prefetch_mlp_weight_preprocess.assert_called_once_with(
-        weight_prefetch_method.MLP_DOWN, dummy_tensor
-    )
-    weight_prefetch_method.maybe_prefetch_mlp_weight_postprocess.assert_called_once_with(out)
     mock_swiglu.assert_called_once_with(dummy_tensor)
     assert torch.allclose(out, dummy_tensor + 1)
 
@@ -206,53 +194,72 @@ class TestAscendSwigluOAIAndMul:
 
 class TestSwiglustepAndMul:
     def test_swiglustep_and_mul_matches_reference_formula(self):
-        x = torch.tensor([[1.0, 2.0, -3.0, 4.0, 5.0, -6.0, 7.0, -8.0]], dtype=torch.float32)
-        result = swiglustep_and_mul(x)
-        expected = _swiglustep_and_mul_reference(x)
+        # last dim 16 => N=8 satisfies the triton kernel's N%(32/elem_size)==0
+        # UB alignment on NPU (fp32: N%8==0), so this runs the fused kernel.
+        x = torch.tensor(
+            [[1.0, 2.0, -3.0, 4.0, 5.0, -6.0, 7.0, -8.0, -1.0, -2.0, 3.0, -4.0, -5.0, 6.0, -7.0, 8.0]],
+            dtype=torch.float32,
+            device="npu",
+        )
+        result = AscendSwigluStepAndMul.swiglustep_forward(x)
+        expected = _swiglustep_and_mul_reference(x.cpu())
 
         assert result.shape == (1, x.shape[-1] // 2)
         assert result.dtype == x.dtype
-        assert torch.allclose(result, expected, atol=1e-6)
+        assert torch.allclose(result.cpu(), expected, atol=1e-5)
 
     def test_swiglustep_and_mul_uses_contiguous_gate_up_layout(self):
         # gate = first half, up = second half (contiguous split via chunk),
         # NOT the interleaved layout used by SwigluOAI.
-        x = torch.tensor([[1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0]], dtype=torch.float32)
-        result = swiglustep_and_mul(x, limit=100.0)
-        expected = _swiglustep_and_mul_reference(x, limit=100.0)
-        interleaved = torch.nn.functional.silu(x[..., ::2]) * x[..., 1::2]
+        x = torch.tensor(
+            [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0]],
+            dtype=torch.float32,
+            device="npu",
+        )
+        result = AscendSwigluStepAndMul.swiglustep_forward(x, limit=100.0)
+        expected = _swiglustep_and_mul_reference(x.cpu(), limit=100.0)
+        interleaved = torch.nn.functional.silu(x.cpu()[..., ::2]) * x.cpu()[..., 1::2]
 
-        assert torch.allclose(result, expected, atol=1e-6)
-        assert not torch.allclose(result, interleaved, atol=1e-6)
+        assert torch.allclose(result.cpu(), expected, atol=1e-5)
+        assert not torch.allclose(result.cpu(), interleaved, atol=1e-5)
 
     def test_swiglustep_and_mul_with_custom_limit_matches_reference(self):
-        x = torch.tensor([[9.0, 8.0, -5.0, -9.0]], dtype=torch.float32)
+        x = torch.tensor(
+            [[9.0, 8.0, -5.0, -9.0, 7.0, -3.0, 6.0, -2.0, 1.0, -9.0, 8.0, -5.0, 4.0, -7.0, 3.0, -1.0]],
+            dtype=torch.float32,
+            device="npu",
+        )
         limit = 3.0
-        result = swiglustep_and_mul(x, limit=limit)
-        expected = _swiglustep_and_mul_reference(x, limit=limit)
+        result = AscendSwigluStepAndMul.swiglustep_forward(x, limit=limit)
+        expected = _swiglustep_and_mul_reference(x.cpu(), limit=limit)
 
-        assert torch.allclose(result, expected, atol=1e-6)
+        assert torch.allclose(result.cpu(), expected, atol=1e-5)
 
     def test_swiglustep_and_mul_clamps_gate_and_up_values(self):
-        # gate = [100, 100] -> silu(~100) clamped to 7.0;
-        # up   = [-100, -100] -> clamped to -7.0  =>  7.0 * -7.0 = -49.0
-        x = torch.tensor([[100.0, 100.0, -100.0, -100.0]], dtype=torch.float32)
-        result = swiglustep_and_mul(x)
-        expected = _swiglustep_and_mul_reference(x)
+        # gate = [100]*8 -> silu(~100) clamped to 7.0;
+        # up   = [-100]*8 -> clamped to -7.0  =>  7.0 * -7.0 = -49.0
+        x = torch.tensor([[100.0] * 8 + [-100.0] * 8], dtype=torch.float32, device="npu")
+        result = AscendSwigluStepAndMul.swiglustep_forward(x)
+        expected = _swiglustep_and_mul_reference(x.cpu())
 
-        assert torch.allclose(result, expected, atol=1e-5)
-        assert torch.allclose(result, torch.tensor([[-49.0, -49.0]]), atol=1e-4)
-        assert not torch.isnan(result).any()
-        assert not torch.isinf(result).any()
+        assert torch.allclose(result.cpu(), expected, atol=1e-5)
+        assert torch.allclose(result.cpu(), torch.full((1, 8), -49.0), atol=1e-4)
+        assert not torch.isnan(result.cpu()).any()
+        assert not torch.isinf(result.cpu()).any()
 
     def test_swiglustep_and_mul_large_input(self):
-        x = torch.randn(64, 128, dtype=torch.float32)
-        result = swiglustep_and_mul(x)
-        expected = _swiglustep_and_mul_reference(x)
+        x = torch.randn(64, 128, dtype=torch.float32, device="npu")
+        result = AscendSwigluStepAndMul.swiglustep_forward(x)
+        expected = _swiglustep_and_mul_reference(x.cpu())
 
         assert result.shape == (64, 64)
-        assert torch.allclose(result, expected, atol=1e-5)
-        assert not torch.isnan(result).any()
+        assert torch.allclose(result.cpu(), expected, atol=1e-5)
+        assert not torch.isnan(result.cpu()).any()
+
+    def test_swiglustep_and_mul_validates_limit(self):
+        x = torch.tensor([[8.0, 9.0, -2.0, -8.0]], dtype=torch.float32)
+        with pytest.raises(ValueError, match="requires limit"):
+            AscendSwigluStepAndMul.swiglustep_forward(x, limit=None)
 
 
 class TestActivationNPUPrecision:
@@ -281,18 +288,13 @@ class TestActivationNPUPrecision:
             (torch.bfloat16, 2e-2, 2e-2),
         ],
     )
-    @patch("vllm_ascend.ops.activation.get_weight_prefetch_method")
     def test_ascend_silu_and_mul_matches_cpu_reference_on_npu(
         self,
-        mock_get_weight_prefetch_method,
         dtype,
         atol,
         rtol,
         default_vllm_config,
     ):
-        weight_prefetch_method = MagicMock()
-        weight_prefetch_method.MLP_DOWN = "mlp_down"
-        mock_get_weight_prefetch_method.return_value = weight_prefetch_method
         x_cpu = torch.randn(16, 16, dtype=torch.float32)
         x_npu = x_cpu.to(dtype=dtype, device="npu")
 
@@ -328,11 +330,13 @@ class TestActivationNPUPrecision:
         ],
     )
     def test_swiglustep_and_mul_matches_cpu_reference_on_npu(self, dtype, atol, rtol):
-        x_cpu = torch.randn(16, 16, dtype=torch.float32) * 4
+        # last dim 32 => N=16 satisfies the triton kernel's N%16==0 UB
+        # alignment, so bf16/fp16 exercise the fused kernel (not native).
+        x_cpu = torch.randn(16, 32, dtype=torch.float32) * 4
         x_npu = x_cpu.to(dtype=dtype, device="npu")
 
-        result = swiglustep_and_mul(x_npu).cpu()
+        result = AscendSwigluStepAndMul.swiglustep_forward(x_npu).cpu()
         expected = _swiglustep_and_mul_reference(x_cpu.to(dtype=dtype)).float()
 
-        assert result.shape == (16, 8)
+        assert result.shape == (16, 16)
         assert torch.allclose(result.float(), expected, atol=atol, rtol=rtol)

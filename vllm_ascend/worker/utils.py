@@ -6,9 +6,16 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import largest_power_of_2_divisor
 from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+
+
+def copy_snapshot_to_gpu(buffer: CpuGpuBuffer) -> torch.Tensor:
+    """Copy a pinned snapshot of a CPU buffer to its GPU buffer."""
+    cpu_snapshot = buffer.cpu.clone().pin_memory()
+    return buffer.gpu.copy_(cpu_snapshot, non_blocking=True)
 
 
 @triton.jit
@@ -69,7 +76,7 @@ class AscendKVBlockZeroer(KVBlockZeroer):
     def init_meta(
         self,
         attn_groups_iter: Iterable["AttentionGroup"],
-        kernel_block_sizes: list[int],
+        kernel_block_sizes: list[list[int]],
         cache_dtype: str,
         runner_only_attn_layers: set[str],
         static_forward_context: dict[str, Any],

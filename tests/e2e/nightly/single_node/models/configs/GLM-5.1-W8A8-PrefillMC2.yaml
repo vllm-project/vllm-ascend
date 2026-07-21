@@ -1,0 +1,82 @@
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "GLM-5.1-W8A8-PrefillMC2"
+    model: "Eco-Tech/GLM-5.1-w8a8"  #need update
+    envs:
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "1"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_USE_V1: "1"
+      HCCL_BUFFSIZE: "1800"
+      ASCEND_AGGREGATE_ENABLE: "1"
+      ASCEND_TRANSPORT_PRINT: "1"
+      ACL_OP_INIT_MODE: "1"
+      ASCEND_A3_ENABLE: "1"
+      VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
+      TASK_QUEUE_ENABLE: "1"
+      VLLM_ASCEND_ENABLE_MLAPO: "1"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--tensor-parallel-size"
+      - "16"
+      - "--data-parallel-size"
+      - "1"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--seed"
+      - "1024"
+      - "--max-model-len"
+      - "10240"
+      - "--max-num-batched-tokens"
+      - "4096"
+      - "--max-num-seqs"
+      - "32"
+      - "--trust-remote-code"
+      - "--quantization"
+      - "ascend"
+      - "--async-scheduling"
+      - "--no-enable-prefix-caching"
+      - "--enable-expert-parallel"
+      - "--gpu-memory-utilization"
+      - "0.94"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative-config"
+      - '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager": true}'
+      - "--additional_config"
+      - '{"enable_prefill_mc2": true}'      
+      - "--reasoning-parser"
+      - "glm45"
+      - "--tool-call-parser"
+      - "glm47"
+      
+    benchmarks:
+      acc_gsm8k:
+        case_type: accuracy
+        dataset_path: vllm-ascend/gsm8k-lite
+        request_conf: vllm_api_general_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+        max_out_len: 8192
+        batch_size: 32
+        baseline: 96.88
+        temperature: 1.0
+        top_p: 0.95
+        thinking: true
+        threshold: 5
+
+      perf_2:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in3500-bs400
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 64
+        max_out_len: 1500
+        batch_size: 32
+        request_rate: 0
+        baseline: 1
+        threshold: 0.97

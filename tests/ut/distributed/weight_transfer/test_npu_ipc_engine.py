@@ -69,16 +69,16 @@ def test_init_accepts_model_argument():
 
 
 def test_init_passes_model_to_super():
-    """Bug 1: the ``model`` argument must be forwarded to the base engine."""
-    captured = {}
+    captured: dict = {}
 
-    def fake_init(self, config, parallel_config, model=None):
-        captured["args"] = (config, parallel_config, model)
+    def fake_init_v1(self, config, vllm_config, device, model):
+        captured["args"] = (config, vllm_config, device, model)
 
-    with patch.object(npu_ipc_engine.WeightTransferEngine, "__init__", fake_init):
-        NPUIPCWeightTransferEngine("config", "parallel_config", "model")
+    with patch.object(npu_ipc_engine.WeightTransferEngine, "__init__", fake_init_v1):
+        device = torch.device("npu:0")
+        NPUIPCWeightTransferEngine("config", "vllm_config", device, "model")
 
-    assert captured["args"] == ("config", "parallel_config", "model")
+    assert captured["args"] == ("config", "vllm_config", device, "model")
 
 
 def test_unpacked_send_stores_reduce_tensor_args_only():

@@ -135,7 +135,12 @@ jobs:
               - 'requirements.txt'
               - 'pyproject.toml'
               - 'cmake/**'
-              - '.github/**'
+              - '.github/workflows/pr_test.yaml'
+              - '.github/workflows/_selected_tests.yaml'
+              - '.github/workflows/scripts/select_tests.py'
+              - '.github/workflows/scripts/run_selected_tests.sh'
+              - '.github/workflows/scripts/test_config.yaml'
+              - '.github/workflows/scripts/runner_label.json'
               - 'tests/**'
               - 'tools/**'
               - 'CMakeLists.txt'
@@ -156,10 +161,14 @@ jobs:
 
       - name: Run pre-commit
         env:
+          PRE_COMMIT_HOME: /tmp/pre-commit-cache
           PRE_COMMIT_COLOR: always
           FORCE_COLOR: "1"
           TERM: xterm-256color
           SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086"
+          # Keep golang-based pre-commit hooks on a domestic module proxy.
+          GOPROXY: https://repo.huaweicloud.com/repository/goproxy/
+          GONOSUMDB: '*'
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           pre-commit run --all-files --hook-stage manual --show-diff-on-failure
@@ -214,3 +223,47 @@ jobs:
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
       test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
+
+  generate-hitest:
+    name: Generate hitest recommendations
+    needs: lint-and-select-tests
+    if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' }}
+    uses: ./.github/workflows/_manual-hitest.yaml
+    secrets:
+      HITEST_APIG_APPCODE: ${{ secrets.HITEST_APIG_APPCODE }}
+      HITEST_KEY: ${{ secrets.HITEST_KEY }}
+      HITEST_SECRET: ${{ secrets.HITEST_SECRET }}
+
+  # Summary gate job — use this single, stable name as the required status check
+  # in GitHub branch protection rules instead of tracking individual matrix job names.
+  ci-gate:
+    needs: [lint-and-select-tests, run-selected-tests]
+    if: ${{ always() && contains(github.event.pull_request.labels.*.name, 'ready') }}
+    runs-on: linux-amd64-cpu-2-hk
+    steps:
+      - name: Check all required jobs
+        run: |
+          set -euo pipefail
+
+          LINT_RESULT="${{ needs.lint-and-select-tests.result }}"
+          HAS_TESTS="${{ needs.lint-and-select-tests.outputs.has_tests }}"
+
+          echo "=== CI Gate Summary ==="
+          echo "lint-and-select-tests: ${LINT_RESULT}"
+          echo "has_tests: ${HAS_TESTS}"
+
+          if [ "${LINT_RESULT}" != "success" ] && [ "${LINT_RESULT}" != "skipped" ]; then
+            echo "::error::lint-and-select-tests did not succeed (result: ${LINT_RESULT})"
+            exit 1
+          fi
+
+          if [ "${HAS_TESTS}" = "true" ]; then
+            TESTS_RESULT="${{ needs.run-selected-tests.result }}"
+            echo "run-selected-tests: ${TESTS_RESULT}"
+            if [ "${TESTS_RESULT}" != "success" ]; then
+              echo "::error::run-selected-tests did not succeed (result: ${TESTS_RESULT})"
+              exit 1
+            fi
+          fi
+
+          echo "=== CI Gate: PASSED ==="

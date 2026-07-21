@@ -1,552 +1,378 @@
 # SOME DESCRIPTIVE TITLE.
-# Copyright (C) 2025, vllm-ascend team
-# This file is distributed under the same license as the vllm-ascend
-# package.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend \n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-22 05:29+0000\n"
-"PO-Revision-Date: 2026-01-22 16:35+0800\n"
-"Last-Translator: Gemini\n"
-"Language: zh_CN\n"
+"POT-Creation-Date: 2026-07-08 14:01+0000\n"
+"PO-Revision-Date: 2026-07-08 14:01+0000\n"
+"Last-Translator: \n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.18.0\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:1
-msgid "Speculative Decoding Guide"
-msgstr "推测解码指南"
+msgid "# Speculative Decoding Guide"
+msgstr "# 推测解码指南"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:3
 msgid ""
 "This guide shows how to use Speculative Decoding with vLLM Ascend. "
-"Speculative decoding is a technique which improves inter-token latency in"
-" memory-bound LLM inference."
-msgstr "本指南介绍如何在 vLLM Ascend 中使用推测解码。推测解码是一种技术，用于改善受内存带宽限制的 LLM 推理中的 token 间延迟。"
+"Speculative decoding is a technique which improves inter-token latency in "
+"memory-bound LLM inference."
+msgstr "本指南介绍如何在 vLLM Ascend 中使用推测解码。推测解码是一种在内存受限的 LLM 推理中改善令牌间延迟的技术。"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:5
-msgid "Overview"
-msgstr "概述"
+msgid "## Overview"
+msgstr "## 概述"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:7
 msgid ""
-"vLLM Ascend implements speculative decoding through a **proposer-"
-"verifier** architecture:"
-msgstr "vLLM Ascend 通过**提议器-验证器**架构实现推测解码："
+"vLLM Ascend implements speculative decoding through a **proposer-verifier** "
+"architecture:"
+msgstr "vLLM Ascend 通过**提议者-验证者**架构实现推测解码："
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:9
 msgid ""
-"**Proposer** (`vllm_ascend/spec_decode/`): Generates draft (speculative) "
-"tokens using various methods — from simple n-gram matching to neural-"
-"network-based draft models."
-msgstr "**提议器** (`vllm_ascend/spec_decode/`)：使用多种方法生成草稿（推测）token——从简单的 n-gram 匹配到基于神经网络的草稿模型。"
+"1. **Proposer** (`vllm_ascend/spec_decode/`): Generates draft (speculative) tokens using various methods — from simple n-gram matching to neural-network-based draft models.\n"
+"2. **Rejection Sampler** (`vllm_ascend/sample/`): Verifies draft tokens against the target model's output, accepting matches and rejecting mismatches, with optional optimizations including [Block Verify and Entropy Verify](#block-verify-and-entropy-verify)."
+msgstr ""
+"1. **提议者** (`vllm_ascend/spec_decode/`)：使用多种方法生成草稿（推测）令牌——从简单的 n-gram 匹配到基于神经网络的草稿模型。\n"
+"2. **拒绝采样器** (`vllm_ascend/sample/`)：根据目标模型的输出验证草稿令牌，接受匹配项并拒绝不匹配项，可选的优化包括[块验证和熵验证](#block-verify-and-entropy-verify)。"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:10
-msgid ""
-"**Rejection Sampler** (`vllm_ascend/sample/`): Verifies draft tokens "
-"against the target model's output, accepting matches and rejecting "
-"mismatches, with optional optimizations including [Block Verify and "
-"Entropy Verify](#block-verify-and-entropy-verify)."
-msgstr "**拒绝采样器** (`vllm_ascend/sample/`)：根据目标模型的输出验证草稿 token，接受匹配项并拒绝不匹配项，可选优化包括[块验证和熵验证](#block-verify-and-entropy-verify)。"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:12
 msgid "The following speculative decoding methods are supported:"
 msgstr "支持以下推测解码方法："
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md
-msgid "Method"
-msgstr "方法"
+msgid "## Common Configuration"
+msgstr "## 通用配置"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md
-msgid "Description"
-msgstr "描述"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md
-msgid "`ngram`"
-msgstr "`ngram`"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md
-msgid "Match n-grams from the prompt"
-msgstr "匹配提示词中的 n-gram"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md
-msgid "`suffix`"
-msgstr "`suffix`"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md
-msgid "Suffix-based pattern matching (requires Arctic Inference)"
-msgstr "基于后缀的模式匹配（需要 Arctic Inference）"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md
-msgid "`medusa`"
-msgstr "`medusa`"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md
-msgid "Medusa heads embedded in the target model"
-msgstr "嵌入在目标模型中的 Medusa 头"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md
-msgid "`eagle`"
-msgstr "`eagle`"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md
-msgid "EAGLE-based draft model"
-msgstr "基于 EAGLE 的草稿模型"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md
-msgid "`eagle3`"
-msgstr "`eagle3`"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md
-msgid "EAGLE-3 based draft model"
-msgstr "基于 EAGLE-3 的草稿模型"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md
-msgid "`mtp`"
-msgstr "`mtp`"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md
-msgid "Multi-Token Prediction with shared embedding head"
-msgstr "使用共享嵌入头的多 token 预测"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md
-msgid "`dflash`"
-msgstr "`dflash`"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md
-msgid "Draft-and-Flash with cross-attention"
-msgstr "使用交叉注意力的 Draft-and-Flash"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md
-msgid "`draft_model`"
-msgstr "`draft_model`"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md
-msgid "Generic external draft LLM"
-msgstr "通用外部草稿 LLM"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md
-msgid "`extract_hidden_states`"
-msgstr "`extract_hidden_states`"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md
-msgid "Extract hidden states for EAGLE training"
-msgstr "提取隐藏状态用于 EAGLE 训练"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:26
-msgid "Common Configuration"
-msgstr "通用配置"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:28
 msgid ""
 "All speculative decoding methods are configured through the "
-"`speculative_config` parameter when initializing the model or starting "
-"the server:"
-msgstr "所有推测解码方法都通过初始化模型或启动服务器时的 `speculative_config` 参数进行配置："
+"`speculative_config` parameter when initializing the model or starting the "
+"server:"
+msgstr "所有推测解码方法在初始化模型或启动服务器时通过 `speculative_config` 参数进行配置："
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:30
-msgid ""
-"**`method`** (str, required): The speculative decoding method. Must be "
-"one of the supported method names listed in the table above."
-msgstr "**`method`** (str, 必需)：推测解码方法。必须是上表中列出的受支持方法名称之一。"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:31
-msgid ""
-"**`num_speculative_tokens`** (int, required): Number of speculative "
-"tokens to generate per forward pass. Auto-filled from the draft model's "
-"`n_predict` config (e.g., MTP) or `suffix_decoding_max_tree_depth` "
-"(suffix method) when available."
-msgstr "**`num_speculative_tokens`** (int, 必需)：每次前向传播生成的推测 token 数量。当可用时，从草稿模型的 `n_predict` 配置（例如 MTP）或 `suffix_decoding_max_tree_depth`（后缀方法）自动填充。"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:32
-msgid ""
-"**`model`** (str, optional): Path or HF repo ID for the draft model. "
-"Required for `eagle`, `eagle3`, `dflash`, `medusa`, and `draft_model`. "
-"Automatically resolved for `mtp` (reuses target model), `ngram`, "
-"`suffix`, and `extract_hidden_states`."
-msgstr "**`model`** (str, 可选)：草稿模型的路径或 HF 仓库 ID。对于 `eagle`、`eagle3`、`dflash`、`medusa` 和 `draft_model` 是必需的。对于 `mtp`（重用目标模型）、`ngram`、`suffix` 和 `extract_hidden_states` 会自动解析。"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:33
-msgid ""
-"**`draft_tensor_parallel_size`** (int, optional): Tensor parallelism size"
-" for the draft model. Can only be `1` or the same as the target model's "
-"tensor parallel size."
-msgstr "**`draft_tensor_parallel_size`** (int, 可选)：草稿模型的张量并行大小。只能为 `1` 或与目标模型的张量并行大小相同。"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:34
-msgid ""
-"**`disable_padded_drafter_batch`** (bool, default: `False`): Disable "
-"input padding for speculative decoding. If set to `True`, speculative "
-"input batches can contain sequences of different lengths, which may only "
-"be supported by certain attention backends. **Note:** Only effective with"
-" `eagle`, `eagle3`, `mtp`, `dflash`, `draft_model`, and "
-"`extract_hidden_states` methods."
-msgstr "**`disable_padded_drafter_batch`** (bool, 默认值: `False`)：禁用推测解码的输入填充。如果设置为 `True`，推测输入批次可以包含不同长度的序列，这可能仅受某些注意力后端支持。**注意：** 仅对 `eagle`、`eagle3`、`mtp`、`dflash`、`draft_model` 和 `extract_hidden_states` 方法有效。"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:36
 msgid ""
 "**Offline inference** — pass `speculative_config` as a Python dict to "
 "`LLM()`:"
 msgstr "**离线推理** — 将 `speculative_config` 作为 Python 字典传递给 `LLM()`："
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:51
 msgid ""
 "**Online serving** — pass `--speculative-config` (or `-sc`) as a JSON "
 "string:"
 msgstr "**在线服务** — 将 `--speculative-config`（或 `-sc`）作为 JSON 字符串传递："
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:58
 msgid ""
-"[!NOTE] On Ascend NPUs, the `npu_fused_infer_attention_score` operator "
-"supports a maximum of 16 tokens per decode round. Therefore, "
-"`(num_speculative_tokens + 1)` must be ≤ 15."
-msgstr "[!NOTE] 在 Ascend NPU 上，`npu_fused_infer_attention_score` 算子每轮解码最多支持 16 个 token。因此，`(num_speculative_tokens + 1)` 必须 ≤ 15。"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:61
-msgid "Speculating by matching n-grams in the prompt"
-msgstr "通过匹配提示词中的 n-gram 进行推测"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:63
-msgid ""
-"The following code configures vLLM Ascend to use speculative decoding "
-"where proposals are generated by matching n-grams in the prompt."
-msgstr "以下代码配置 vLLM Ascend 使用推测解码，其中候选 token 通过匹配提示词中的 n-gram 生成。"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:65
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:98
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:188
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:223
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:324
-msgid "Offline inference"
-msgstr "离线推理"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:92
-msgid "Speculating using EAGLE based draft models"
-msgstr "使用基于 EAGLE 的草稿模型进行推测"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:94
-msgid ""
-"The following code configures vLLM Ascend to use speculative decoding "
-"where proposals are generated by an [EAGLE (Extrapolation Algorithm for "
-"Greater Language-model Efficiency)](https://arxiv.org/pdf/2401.15077) "
-"based draft model."
+"> [!NOTE]\n"
+"> On Ascend NPUs, the `npu_fused_infer_attention_score` operator supports a maximum of 16 tokens per decode round. Therefore, `(num_speculative_tokens + 1)` must be ≤ 16."
 msgstr ""
-"以下代码配置 vLLM Ascend 使用推测解码，其中候选 token 由基于 [EAGLE (Extrapolation Algorithm "
-"for Greater Language-model Efficiency)](https://arxiv.org/pdf/2401.15077)"
-" 的草稿模型生成。"
+"> [!NOTE]\n"
+"> 在 Ascend NPU 上，`npu_fused_infer_attention_score` 算子每轮解码最多支持 16 个令牌。因此，`(num_speculative_tokens + 1)` 必须 ≤ 16。"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:96
+msgid "## Speculating by matching n-grams in the prompt"
+msgstr "## 通过匹配提示中的 n-gram 进行推测"
+
 msgid ""
-"In v0.12.0rc1 of vLLM Ascend, the async scheduler is more stable and "
-"ready to be enabled. We have adapted it to support EAGLE, and you can use"
-" it by setting `async_scheduling=True` as follows. If you encounter any "
-"issues, please feel free to open an issue on GitHub. As a workaround, you"
-" can disable this feature by unsetting `async_scheduling=True` when "
-"initializing the model."
+"The following code configures vLLM Ascend to use speculative decoding where "
+"proposals are generated by matching n-grams in the prompt."
+msgstr "以下代码配置 vLLM Ascend 使用推测解码，其中通过匹配提示中的 n-gram 生成提议。"
+
+msgid "## Speculating using EAGLE based draft models"
+msgstr "## 使用基于 EAGLE 的草稿模型进行推测"
+
+msgid ""
+"The following code configures vLLM Ascend to use speculative decoding where "
+"proposals are generated by an [EAGLE (Extrapolation Algorithm for Greater "
+"Language-model Efficiency)](https://arxiv.org/pdf/2401.15077) based draft "
+"model."
 msgstr ""
-"在 vLLM Ascend v0.12.0rc1 中，异步调度器更加稳定并已准备就绪。我们已对其进行适配以支持 EAGLE，您可以通过如下设置 "
-"`async_scheduling=True` 来使用它。如果遇到任何问题，请随时在 GitHub 上提交 "
-"issue。作为一种变通方法，您可以在初始化模型时取消设置 `async_scheduling=True` 来禁用此功能。"
+"以下代码配置 vLLM Ascend 使用推测解码，其中提议由基于 [EAGLE（Extrapolation Algorithm for Greater"
+" Language-model Efficiency）](https://arxiv.org/pdf/2401.15077) 的草稿模型生成。"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:130
 msgid ""
-"A few important things to consider when using the EAGLE based draft "
-"models:"
+"In v0.12.0rc1 of vLLM Ascend, the async scheduler is more stable and ready "
+"to be enabled. We have adapted it to support EAGLE, and you can use it by "
+"setting `async_scheduling=True` as follows. If you encounter any issues, "
+"please feel free to open an issue on GitHub. As a workaround, you can "
+"disable this feature by unsetting `async_scheduling=True` when initializing "
+"the model."
+msgstr ""
+"在 vLLM Ascend 的 v0.12.0rc1 版本中，异步调度器更加稳定并已准备好启用。我们已对其进行适配以支持 EAGLE，您可以通过如下设置"
+" `async_scheduling=True` 来使用它。如果遇到任何问题，请随时在 GitHub 上提交 "
+"issue。作为临时解决方案，您可以在初始化模型时取消设置 `async_scheduling=True` 来禁用此功能。"
+
+msgid ""
+"A few important things to consider when using the EAGLE based draft models:"
 msgstr "使用基于 EAGLE 的草稿模型时需要考虑的几个重要事项："
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:132
 msgid ""
-"The EAGLE draft models available in the [HF repository for EAGLE "
-"models](https://huggingface.co/yuhuili) should be loaded and used "
-"directly by vLLM. This functionality was added in PR "
-"[#4893](https://github.com/vllm-project/vllm-ascend/pull/4893). If you "
-"are using a vLLM version released before this pull request was merged, "
-"please update to a more recent version."
+"1. The EAGLE draft models available in the [HF repository for EAGLE models](https://huggingface.co/yuhuili) should\n"
+"   be loaded and used directly by vLLM. This functionality was added in PR [#4893](https://github.com/vllm-project/vllm-ascend/pull/4893).\n"
+"   If you are using a vLLM version released before this pull request was merged, please update to a more recent version."
 msgstr ""
-"[EAGLE 模型的 HF 仓库](https://huggingface.co/yuhuili) 中可用的 EAGLE 草稿模型应由 vLLM "
-"直接加载和使用。此功能已在 PR [#4893](https://github.com/vllm-project/vllm-"
-"ascend/pull/4893) 中添加。如果您使用的 vLLM 版本早于该拉取请求合并的时间，请更新到较新的版本。"
+"1. [HF 仓库中的 EAGLE 模型](https://huggingface.co/yuhuili) 提供的 EAGLE 草稿模型应由 vLLM 直接加载和使用。此功能在 PR [#4893](https://github.com/vllm-project/vllm-ascend/pull/4893) 中添加。\n"
+"   如果您使用的 vLLM 版本在此拉取请求合并之前发布，请更新到更新版本。"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:136
 msgid ""
-"The EAGLE based draft models need to be run without tensor parallelism "
-"(i.e. draft_tensor_parallel_size is set to 1 in `speculative_config`), "
-"although it is possible to run the main model using tensor parallelism "
-"(see example above)."
+"2. The EAGLE based draft models need to be run without tensor parallelism\n"
+"   (i.e. draft_tensor_parallel_size is set to 1 in `speculative_config`), although\n"
+"   it is possible to run the main model using tensor parallelism (see example above)."
 msgstr ""
-"基于 EAGLE 的草稿模型需要在不使用张量并行的情况下运行（即 `speculative_config` 中的 "
-"`draft_tensor_parallel_size` 设置为 1），尽管主模型可以使用张量并行运行（参见上面的示例）。"
+"2. 基于 EAGLE 的草稿模型需要在没有张量并行的情况下运行\n"
+"   （即 `speculative_config` 中的 draft_tensor_parallel_size 设置为 1），尽管\n"
+"   主模型可以使用张量并行运行（参见上面的示例）。"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:140
 msgid ""
-"When using EAGLE-3 based draft model, option \"method\" must be set to "
-"\"eagle3\". That is, to specify `\"method\": \"eagle3\"` in "
-"`speculative_config`."
+"3. When using EAGLE-3 based draft model, option \"method\" must be set to \"eagle3\".\n"
+"   That is, to specify `\"method\": \"eagle3\"` in `speculative_config`."
 msgstr ""
-"当使用基于 EAGLE-3 的草稿模型时，选项 \"method\" 必须设置为 \"eagle3\"。也就是说，在 "
-"`speculative_config` 中指定 `\"method\": \"eagle3\"`。"
+"3. 使用基于 EAGLE-3 的草稿模型时，选项 \"method\" 必须设置为 \"eagle3\"。\n"
+"   也就是说，在 `speculative_config` 中指定 `\"method\": \"eagle3\"`。"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:143
 msgid ""
-"After enabling EAGLE, the main model needs to verify `(1 + K)` tokens "
-"generated by the main model and the draft model in one decoding process. "
-"And the fullgraph mode will fix the number of tokens during the "
-"verification stage, so `cudagraph_capture_sizes` must be a list of "
-"capture sizes, where each size is calculated as `n * (K + 1)` for each "
-"batch size `n` you want to support. For instance, to support batch sizes "
-"from 1 to 4 with `num_speculative_tokens = 4`, `cudagraph_capture_sizes` "
-"should be set to `[5, 10, 15, 20]`."
+"4. After enabling EAGLE, the main model needs to verify `(1 + K)` tokens generated by the main model and the draft model in one decoding process.\n"
+"   And the fullgraph mode will fix the number of tokens during the verification stage,\n"
+"   so `cudagraph_capture_sizes` must be a list of capture sizes, where each size is calculated as `n * (K + 1)` for each batch size `n` you want to support.\n"
+"   For instance, to support batch sizes from 1 to 4 with `num_speculative_tokens = 4`, `cudagraph_capture_sizes` should be set to `[5, 10, 15, 20]`."
 msgstr ""
-"启用 EAGLE 后，主模型需要在一个解码过程中验证由主模型和草稿模型生成的 `(1 + K)` 个 token。而全图模式将在验证阶段固定 "
-"token 的数量，因此 `cudagraph_capture_sizes` 必须是一个捕获大小的列表，其中每个大小计算为 `n * (K + "
-"1)`，`n` 是您希望支持的每个批次大小。例如，要支持批次大小从 1 到 4 且 `num_speculative_tokens = "
-"4`，`cudagraph_capture_sizes` 应设置为 `[5, 10, 15, 20]`。"
+"4. 启用 EAGLE 后，主模型需要在一个解码过程中验证主模型和草稿模型生成的 `(1 + K)` 个令牌。\n"
+"   并且全图模式将固定验证阶段的令牌数量，\n"
+"   因此 `cudagraph_capture_sizes` 必须是一个捕获大小列表，其中每个大小计算为 `n * (K + 1)`，`n` 是您想要支持的每个批次大小。\n"
+"   例如，要支持批次大小从 1 到 4 且 `num_speculative_tokens = 4`，`cudagraph_capture_sizes` 应设置为 `[5, 10, 15, 20]`。"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:148
-msgid "Speculating using MTP"
-msgstr "使用 MTP 进行推测"
+msgid "## Speculating using MTP"
+msgstr "## 使用 MTP 进行推测"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:150
 msgid ""
-"MTP (Multi-Token Prediction) boosts inference performance by "
-"parallelizing the prediction of multiple tokens, shifting from single-"
-"token to multi-token generation. This approach significantly increases "
-"generation throughput and achieves multiplicative acceleration in "
-"inference speed — all without compromising output quality."
-msgstr "MTP（多 Token 预测）通过并行化多个 token 的预测来提升推理性能，从单 token 生成转变为多 token 生成。这种方法显著提高了生成吞吐量，并在推理速度上实现了乘法加速——所有这些都不会影响输出质量。"
+"MTP (Multi-Token Prediction) boosts inference performance by parallelizing "
+"the prediction of multiple tokens, shifting from single-token to multi-token"
+" generation. This approach significantly increases generation throughput and"
+" achieves multiplicative acceleration in inference speed — all without "
+"compromising output quality."
+msgstr ""
+"MTP（多令牌预测）通过并行化预测多个令牌，将生成方式从单令牌转变为多令牌，从而提升推理性能。这种方法显著提高了生成吞吐量，并实现了推理速度的倍增加速——同时不牺牲输出质量。"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:152
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:315
-msgid "Online inference"
-msgstr "在线推理"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:172
 msgid ""
-"[!NOTE] Due to the fact that only a single layer of weights is exposed in"
-" DeepSeek's MTP, accuracy and performance are not effectively guaranteed "
-"in scenarios where `num_speculative_tokens > 1` (especially ≥ 3)."
-msgstr "[!NOTE] 由于 DeepSeek 的 MTP 仅暴露单层权重，在 `num_speculative_tokens > 1`（尤其是 ≥ 3）的场景下，准确性和性能无法得到有效保证。"
+"> [!NOTE]\n"
+"> Due to the fact that only a single layer of weights is exposed in DeepSeek's MTP, accuracy and performance are not effectively guaranteed in scenarios where `num_speculative_tokens > 1` (especially ≥ 3).\n"
+">\n"
+"> In the fullgraph mode with `num_speculative_tokens > 1`, the capture size of each ACLGraph must be an integer multiple of `(num_speculative_tokens + 1)`."
+msgstr ""
+"> [!NOTE]\n"
+"> 由于 DeepSeek 的 MTP 仅暴露单层权重，在 `num_speculative_tokens > 1`（尤其是 ≥ 3）的场景下，精度和性能无法得到有效保证。\n"
+">\n"
+"> 在 `num_speculative_tokens > 1` 的全图模式下，每个 ACLGraph 的捕获大小必须是 `(num_speculative_tokens + 1)` 的整数倍。"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:175
-msgid ""
-"In the fullgraph mode with `num_speculative_tokens > 1`, the capture size"
-" of each ACLGraph must be an integer multiple of `(num_speculative_tokens"
-" + 1)`."
-msgstr "在 `num_speculative_tokens > 1` 的全图模式下，每个 ACLGraph 的捕获大小必须是 `(num_speculative_tokens + 1)` 的整数倍。"
+msgid "## Speculating using Suffix Decoding"
+msgstr "## 使用后缀解码进行推测"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:177
-msgid "Speculating using Suffix Decoding"
-msgstr "使用后缀解码进行推测"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:179
 msgid ""
 "The following code configures vLLM to use speculative decoding where "
 "proposals are generated using Suffix Decoding [(SuffixDecoding: Extreme "
 "Speculative Decoding for Emerging AI "
 "Applications)](https://arxiv.org/abs/2411.04975)."
 msgstr ""
-"以下代码配置 vLLM 使用推测解码，其中候选 token 使用后缀解码生成 [(SuffixDecoding: Extreme "
-"Speculative Decoding for Emerging AI "
-"Applications)](https://arxiv.org/abs/2411.04975)。"
+"以下代码配置 vLLM 使用推测解码，其中候选令牌通过后缀解码生成 [(SuffixDecoding: Extreme Speculative "
+"Decoding for Emerging AI Applications)](https://arxiv.org/abs/2411.04975)。"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:181
 msgid ""
-"Like n-gram, Suffix Decoding can generate draft tokens by pattern-"
-"matching using the last `n` generated tokens. Unlike n-gram, Suffix "
-"Decoding (1) can pattern-match against both the prompt and previous "
-"generations, (2) uses frequency counts to propose the most likely "
-"continuations, and (3) speculates an adaptive number of tokens for each "
-"request at each iteration to get better acceptance rates."
+"Like n-gram, Suffix Decoding can generate draft tokens by pattern-matching "
+"using the last `n` generated tokens. Unlike n-gram, Suffix Decoding (1) can "
+"pattern-match against both the prompt and previous generations, (2) uses "
+"frequency counts to propose the most likely continuations, and (3) "
+"speculates an adaptive number of tokens for each request at each iteration "
+"to get better acceptance rates."
 msgstr ""
-"与 n-gram 类似，后缀解码可以通过使用最后 `n` 个生成的 token 进行模式匹配来生成草稿 token。与 n-gram "
-"不同，后缀解码 (1) 可以针对提示词和之前的生成内容进行模式匹配，(2) 使用频率计数来提议最可能的后续内容，(3) "
-"为每个请求在每次迭代中推测自适应数量的 token，以获得更好的接受率。"
+"与 n-gram 类似，后缀解码可以通过使用最后 `n` 个生成的令牌进行模式匹配来生成草稿令牌。与 n-gram 不同，后缀解码 (1) "
+"可以针对提示和先前生成的内容进行模式匹配，(2) 使用频率计数来提出最可能的续写内容，以及 (3) "
+"在每次迭代中为每个请求推测自适应数量的令牌，以获得更好的接受率。"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:183
 msgid ""
 "Suffix Decoding can achieve better performance for tasks with high "
-"repetition, such as code-editing, agentic loops (e.g. self-reflection, "
-"self-consistency), and RL rollouts."
-msgstr "后缀解码可以在高重复性任务中实现更好的性能，例如代码编辑、智能体循环（例如自我反思、自洽性）和强化学习（RL）的 rollout。"
+"repetition, such as code-editing, agentic loops (e.g. self-reflection, self-"
+"consistency), and RL rollouts."
+msgstr "后缀解码在具有高重复性的任务上可以实现更好的性能，例如代码编辑、智能体循环（例如自我反思、自我一致性）和强化学习展开。"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:185
 msgid ""
-"[!NOTE] Suffix Decoding requires Arctic Inference. You can install it "
-"with `pip install arctic-inference`."
-msgstr "[!注意] 后缀解码需要 Arctic Inference。您可以通过 `pip install arctic-inference` 安装它。"
+"> [!NOTE]\n"
+"> Suffix Decoding requires Arctic Inference. You can install it with `pip install arctic-inference`."
+msgstr ""
+"> [!NOTE]\n"
+"> 后缀解码需要 Arctic Inference。您可以使用 `pip install arctic-inference` 进行安装。"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:216
-msgid "Extracting Hidden States"
-msgstr "提取隐藏状态"
+msgid "## Extracting Hidden States"
+msgstr "## 提取隐藏状态"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:218
 msgid ""
-"The `extract_hidden_states` method is a special speculative decoding mode"
-" that does not perform actual speculation. Instead, it extracts hidden "
-"states from specified layers of the target model and saves them to disk. "
-"This is primarily used for collecting training data for EAGLE-style draft"
-" models."
+"The `extract_hidden_states` method is a special speculative decoding mode "
+"that does not perform actual speculation. Instead, it extracts hidden states"
+" from specified layers of the target model and saves them to disk. This is "
+"primarily used for collecting training data for EAGLE-style draft models."
 msgstr ""
 "`extract_hidden_states` "
-"方法是一种特殊的推测解码模式，不执行实际的推测。相反，它从目标模型的指定层提取隐藏状态并将其保存到磁盘。这主要用于收集 EAGLE "
-"风格草稿模型的训练数据。"
+"方法是一种特殊的推测解码模式，它不执行实际的推测。相反，它从目标模型的指定层提取隐藏状态并将其保存到磁盘。这主要用于为 EAGLE "
+"风格的草稿模型收集训练数据。"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:220
 msgid ""
-"[!NOTE] This method produces only 1 output token per request. The primary"
-" output is the hidden states saved to disk, not the generated text."
-msgstr "[!注意] 此方法每个请求仅生成 1 个输出 token。主要输出是保存到磁盘的隐藏状态，而不是生成的文本。"
+"> [!NOTE]\n"
+"> This method produces only 1 output token per request. The primary output is the hidden states saved to disk, not the generated text."
+msgstr ""
+"> [!NOTE]\n"
+"> 此方法每个请求仅生成 1 个输出令牌。主要输出是保存到磁盘的隐藏状态，而不是生成的文本。"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:278
 msgid "Key configuration parameters:"
 msgstr "关键配置参数："
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:280
 msgid ""
-"**`num_speculative_tokens`**: Must be set to `1`. This method does not "
+"1. **`num_speculative_tokens`**: Must be set to `1`. This method does not "
 "perform actual speculation, so the value is fixed."
-msgstr "**`num_speculative_tokens`**：必须设置为 `1`。此方法不执行实际的推测，因此该值是固定的。"
+msgstr "1. **`num_speculative_tokens`**：必须设置为 `1`。此方法不执行实际推测，因此该值是固定的。"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:282
 msgid ""
-"**`eagle_aux_hidden_state_layer_ids`**: List of layer indices from which "
-"to extract hidden states. For example, `[2, 18, 34]` extracts from layers"
-" 2, 18, and 34."
+"2. **`eagle_aux_hidden_state_layer_ids`**: List of layer indices from which "
+"to extract hidden states. For example, `[2, 18, 34]` extracts from layers 2,"
+" 18, and 34."
 msgstr ""
-"**`eagle_aux_hidden_state_layer_ids`**：要从中提取隐藏状态的层索引列表。例如，`[2, 18, 34]` "
+"2. **`eagle_aux_hidden_state_layer_ids`**：要从中提取隐藏状态的层索引列表。例如，`[2, 18, 34]` "
 "从第 2、18 和 34 层提取。"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:284
 msgid ""
-"**`kv_connector`**: Must be set to `\"ExampleHiddenStatesConnector\"` to "
+"3. **`kv_connector`**: Must be set to `\"ExampleHiddenStatesConnector\"` to "
 "enable saving hidden states to disk."
-msgstr "**`kv_connector`**：必须设置为 `\"ExampleHiddenStatesConnector\"` 以启用将隐藏状态保存到磁盘。"
+msgstr ""
+"3. **`kv_connector`**：必须设置为 `\"ExampleHiddenStatesConnector\"` "
+"以启用将隐藏状态保存到磁盘。"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:286
-msgid "**`kv_role`**: Must be set to `\"kv_producer\"` for the extraction mode."
-msgstr "**`kv_role`**：对于提取模式，必须设置为 `\"kv_producer\"`。"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:288
 msgid ""
-"**`shared_storage_path`**: Directory where hidden states will be saved as"
+"4. **`kv_role`**: Must be set to `\"kv_producer\"` for the extraction mode."
+msgstr "4. **`kv_role`**：对于提取模式，必须设置为 `\"kv_producer\"`。"
+
+msgid ""
+"5. **`shared_storage_path`**: Directory where hidden states will be saved as"
 " `.safetensors` files (one per request)."
-msgstr "**`shared_storage_path`**：隐藏状态将保存为 `.safetensors` 文件的目录（每个请求一个文件）。"
+msgstr "5. **`shared_storage_path`**：隐藏状态将保存为 `.safetensors` 文件（每个请求一个文件）的目录。"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:290
-msgid "Block Verify and Entropy Verify"
-msgstr "块验证与熵验证"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:292
 msgid ""
-"vLLM Ascend provides two optional optimizations for the rejection sampler"
-" in speculative decoding: **Block Verify** and **Entropy Verify**. These "
+"## Block Verify and Entropy Verify {: #block-verify-and-entropy-verify }"
+msgstr "## 块验证和熵验证 {: #block-verify-and-entropy-verify }"
+
+msgid ""
+"vLLM Ascend provides two optional optimizations for the rejection sampler in"
+" speculative decoding: **Block Verify** and **Entropy Verify**. These "
 "features trade a small amount of output precision for improved inference "
 "throughput."
 msgstr ""
-"vLLM Ascend "
-"为推测解码中的拒绝采样器提供了两种可选优化：**块验证**和**熵验证**。这些功能以少量输出精度为代价，换取推理吞吐量的提升。"
+"vLLM Ascend 为推测解码中的拒绝采样器提供了两个可选优化：**块验证**和**熵验证**。这些功能以少量输出精度为代价，换取推理吞吐量的提升。"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:294
 msgid ""
-"[!WARNING] Both Block Verify and Entropy Verify modify the token "
-"acceptance criteria and may cause minor precision degradation (e.g., "
-"slightly different output tokens compared to the standard rejection "
-"sampler). Evaluate the quality impact on your specific workload before "
-"enabling them in production."
+"> [!WARNING]\n"
+"> Both Block Verify and Entropy Verify modify the token acceptance criteria and may cause minor precision degradation (e.g., slightly different output tokens compared to the standard rejection sampler). Evaluate the quality impact on your specific workload before enabling them in production."
 msgstr ""
-"[!警告] 块验证和熵验证都会修改 token 接受标准，可能导致轻微的精度下降（例如，与标准拒绝采样器相比，输出 token "
-"略有不同）。在生产环境中启用它们之前，请评估对您特定工作负载的质量影响。"
+"> [!WARNING]\n"
+"> 块验证和熵验证都会修改令牌接受标准，并可能导致轻微的精度下降（例如，与标准拒绝采样器相比，输出令牌略有不同）。在生产环境中启用它们之前，请评估对特定工作负载的质量影响。"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:297
-msgid "Block Verify"
-msgstr "块验证"
+msgid "### Block Verify"
+msgstr "### 块验证"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:299
 msgid ""
 "Block Verify evaluates all draft tokens as a block using cumulative "
-"probability products, rather than checking each token independently. This"
-" can improve the acceptance rate and reduce the overhead of rejection "
+"probability products, rather than checking each token independently. This "
+"can improve the acceptance rate and reduce the overhead of rejection "
 "sampling, especially when `num_speculative_tokens >= 3`."
 msgstr ""
-"块验证使用累积概率乘积将所有草稿 token 作为一个整体进行评估，而不是独立检查每个 token。这可以提高接受率并减少拒绝采样的开销，尤其是在"
-" `num_speculative_tokens >= 3` 时。"
+"块验证使用累积概率乘积将所有草稿令牌作为一个整体进行评估，而不是独立检查每个令牌。这可以提高接受率并减少拒绝采样的开销，尤其是在 "
+"`num_speculative_tokens >= 3` 时。"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:301
-msgid "Entropy Verify"
-msgstr "熵验证"
+msgid "### Entropy Verify"
+msgstr "### 熵验证"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:303
 msgid ""
-"Entropy Verify adjusts the acceptance threshold based on the entropy of "
-"the target distribution:"
+"Entropy Verify adjusts the acceptance threshold based on the entropy of the "
+"target distribution:"
 msgstr "熵验证根据目标分布的熵调整接受阈值："
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:305
 msgid ""
-"**High entropy** (uncertain distribution) → lower effective threshold → "
-"more tokens accepted"
-msgstr "**高熵**（不确定分布）→ 较低的有效阈值 → 接受更多 token"
+"- **High entropy** (uncertain distribution) → lower effective threshold → more tokens accepted\n"
+"- **Low entropy** (confident distribution) → higher effective threshold → stricter rejection"
+msgstr ""
+"- **高熵**（不确定分布）→ 较低的有效阈值 → 接受更多令牌\n"
+"- **低熵**（确定分布）→ 较高的有效阈值 → 更严格的拒绝"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:306
-msgid ""
-"**Low entropy** (confident distribution) → higher effective threshold → "
-"stricter rejection"
-msgstr "**低熵**（确定分布）→ 较高的有效阈值 → 更严格的拒绝"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:308
 msgid "This entropy-aware threshold is controlled by two parameters:"
-msgstr "这种熵感知阈值由两个参数控制："
+msgstr "这个熵感知阈值由两个参数控制："
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:310
 msgid ""
-"**`posterior_threshold`** (default: `0.95`, range: `(0, 1]`): The upper "
-"bound of the modified threshold. Even when entropy is very low, the "
-"effective threshold will not exceed this value."
+"- **`posterior_threshold`** (default: `0.95`, range: `(0, 1]`): The upper bound of the modified threshold. Even when entropy is very low, the effective threshold will not exceed this value.\n"
+"- **`posterior_alpha`** (default: `0.4`, range: `>= 0`): Controls how strongly entropy influences the threshold. A higher alpha makes the threshold more sensitive to entropy changes, resulting in a higher acceptance rate for speculative tokens but also greater precision loss. You need to tune this value based on your specific model and dataset. When alpha is `0`, entropy has no effect and the threshold equals `posterior_threshold`."
 msgstr ""
-"**`posterior_threshold`**（默认值：`0.95`，范围：`(0, 1]`）：修改后阈值的上限。即使熵非常低，有效阈值也不会超过此值。"
+"- **`posterior_threshold`**（默认值：`0.95`，范围：`(0, 1]`）：修改后阈值的上限。即使熵非常低，有效阈值也不会超过此值。\n"
+"- **`posterior_alpha`**（默认值：`0.4`，范围：`>= 0`）：控制熵对阈值的影响程度。alpha 值越高，阈值对熵变化越敏感，导致推测令牌的接受率更高，但精度损失也更大。您需要根据特定的模型和数据集调整此值。当 alpha 为 `0` 时，熵不起作用，阈值等于 `posterior_threshold`。"
 
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:311
+msgid "### Usage"
+msgstr "### 使用方法"
+
+msgid "- Online inference"
+msgstr "- 在线推理"
+
+msgid "- Offline inference"
+msgstr "- 离线推理"
+
 msgid ""
-"**`posterior_alpha`** (default: `0.4`, range: `>= 0`): Controls how "
-"strongly entropy influences the threshold. A higher alpha makes the "
-"threshold more sensitive to entropy changes, resulting in a higher "
-"acceptance rate for speculative tokens but also greater precision loss. "
-"You need to tune this value based on your specific model and dataset. "
-"When alpha is `0`, entropy has no effect and the threshold equals "
-"`posterior_threshold`."
+"Both features can be enabled independently or together. When used together, "
+"the cumulative acceptance from Block Verify is combined with the entropy-"
+"adjusted threshold from Entropy Verify."
+msgstr "这两个功能可以独立或同时启用。同时使用时，块验证的累积接受率将与熵验证的熵调整阈值相结合。"
+
+msgid "| Method | Description |"
+msgstr "| 方法 | 描述 |"
+
+msgid "| `ngram` | Match n-grams from the prompt |"
+msgstr "| `ngram` | 从提示中匹配 n-gram |"
+
+msgid ""
+"| `suffix` | Suffix-based pattern matching (requires Arctic Inference) |"
+msgstr "| `suffix` | 基于后缀的模式匹配（需要 Arctic Inference） |"
+
+msgid "| `medusa` | Medusa heads embedded in the target model |"
+msgstr "| `medusa` | 嵌入在目标模型中的 Medusa 头 |"
+
+msgid "| `eagle` | EAGLE-based draft model |"
+msgstr "| `eagle` | 基于 EAGLE 的草稿模型 |"
+
+msgid "| `eagle3` | EAGLE-3 based draft model |"
+msgstr "| `eagle3` | 基于 EAGLE-3 的草稿模型 |"
+
+msgid "| `mtp` | Multi-Token Prediction with shared embedding head |"
+msgstr "| `mtp` | 使用共享嵌入头的多令牌预测 |"
+
+msgid "| `draft_model` | Generic external draft LLM |"
+msgstr "| `draft_model` | 通用外部草稿 LLM |"
+
+msgid "| `extract_hidden_states` | Extract hidden states for EAGLE training |"
+msgstr "| `extract_hidden_states` | 提取隐藏状态用于 EAGLE 训练 |"
+
+msgid "| `dflash` | Block diffusion-based parallel draft model |"
+msgstr "| `dflash` | 基于块扩散的并行草稿模型 |"
+
+msgid ""
+"- **`method`** (str, required): The speculative decoding method. Must be one of the supported method names listed in the table above.\n"
+"- **`num_speculative_tokens`** (int, required): Number of speculative tokens to generate per forward pass. Auto-filled from the draft model's `n_predict` config (e.g., MTP) or `suffix_decoding_max_tree_depth` (suffix method) when available.\n"
+"    > **Note**: For PD Separation deployment, `num_speculative_tokens` should be subject to one of the following conditions:\n"
+"    >\n"
+"    > 1. Hybrid Mamba models (e.g., Qwen-Next and Qwen3.5 series): `num_speculative_tokens` should be equal on P nodes and D nodes.\n"
+"    > 2. Other models: `num_speculative_tokens` on P nodes should be 1, and `num_speculative_tokens` on D nodes should be greater or equal to 1.\n"
+"- **`model`** (str, optional): Path or HF repo ID for the draft model. Required for `eagle`, `eagle3`, `dflash`, `medusa`, and `draft_model`. Automatically resolved for `mtp` (reuses target model), `ngram`, `suffix`, and `extract_hidden_states`.\n"
+"- **`draft_tensor_parallel_size`** (int, optional): Tensor parallelism size for the draft model. Can only be `1` or the same as the target model's tensor parallel size.\n"
+"- **`disable_padded_drafter_batch`** (bool, default: `False`): Disable input padding for speculative decoding. If set to `True`, speculative input batches can contain sequences of different lengths, which may only be supported by certain attention backends. **Note:** Only effective with `eagle`, `eagle3`, `mtp`, `dflash`, `draft_model`, and `extract_hidden_states` methods."
 msgstr ""
-"**`posterior_alpha`**（默认值：`0.4`，范围：`>= 0`）：控制熵影响阈值的强度。较高的 alpha 使阈值对熵变化更敏感，导致推测 "
-"token 的接受率更高，但精度损失也更大。您需要根据具体的模型和数据集调整此值。当 alpha 为 `0` 时，熵无效，阈值等于 "
-"`posterior_threshold`。"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:313
-msgid "Usage"
-msgstr "用法"
-
-#: ../../source/user_guide/feature_guide/speculative_decoding.md:340
-msgid ""
-"Both features can be enabled independently or together. When used "
-"together, the cumulative acceptance from Block Verify is combined with "
-"the entropy-adjusted threshold from Entropy Verify."
-msgstr "这两个功能可以独立启用，也可以同时启用。同时使用时，块验证的累积接受率将与熵验证的熵调整阈值相结合。"
-
-#~ msgid ""
-#~ "The following code configures vLLM "
-#~ "Ascend to use speculative decoding where"
-#~ " proposals are generated by MTP "
-#~ "(Multi Token Prediction), boosting inference"
-#~ " performance by parallelizing the "
-#~ "prediction of multiple tokens. For more"
-#~ " information about MTP see "
-#~ "[Multi_Token_Prediction](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/Multi_Token_Prediction.html)"
-#~ msgstr ""
-#~ "以下代码配置 vLLM Ascend 使用推测解码，其中候选 token 由"
-#~ " MTP（多 Token 预测）生成，通过并行化多个 token "
-#~ "的预测来提升推理性能。有关 MTP 的更多信息，请参阅 "
-#~ "[Multi_Token_Prediction](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/Multi_Token_Prediction.html)"
+"- **`method`** (str, 必填): 推测解码方法。必须是上表中列出的受支持方法名称之一。\n"
+"- **`num_speculative_tokens`** (int, 必填): 每次前向传播生成的推测令牌数量。当可用时，从草稿模型的 `n_predict` 配置（例如 MTP）或 `suffix_decoding_max_tree_depth`（后缀方法）自动填充。\n"
+"    > **注意**: 对于 PD 分离部署，`num_speculative_tokens` 应满足以下条件之一：\n"
+"    >\n"
+"    > 1. 混合 Mamba 模型（例如 Qwen-Next 和 Qwen3.5 系列）：`num_speculative_tokens` 在 P 节点和 D 节点上应相等。\n"
+"    > 2. 其他模型：P 节点上的 `num_speculative_tokens` 应为 1，D 节点上的 `num_speculative_tokens` 应大于或等于 1。\n"
+"- **`model`** (str, 可选): 草稿模型的路径或 HF 仓库 ID。对于 `eagle`、`eagle3`、`dflash`、`medusa` 和 `draft_model` 是必需的。对于 `mtp`（重用目标模型）、`ngram`、`suffix` 和 `extract_hidden_states` 会自动解析。\n"
+"- **`draft_tensor_parallel_size`** (int, 可选): 草稿模型的张量并行大小。只能是 `1` 或与目标模型的张量并行大小相同。\n"
+"- **`disable_padded_drafter_batch`** (bool, 默认值: `False`): 禁用推测解码的输入填充。如果设置为 `True`，推测输入批次可以包含不同长度的序列，这可能仅受某些注意力后端支持。**注意:** 仅对 `eagle`、`eagle3`、`mtp`、`dflash`、`draft_model` 和 `extract_hidden_states` 方法有效。"

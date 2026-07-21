@@ -130,6 +130,7 @@ class MoECommMethod(ABC):
             torch.bfloat16,
             torch.int8,
             torch.float8_e4m3fn,
+            torch.uint8,
         ], f"Unsupported hidden_states dtype: {fused_experts_input.hidden_states.dtype}"
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
@@ -317,30 +318,13 @@ class FusedMC2CommImpl(MoECommMethod):
                 bias2=fused_experts_input.weights.w2_scale_bias,
                 probs=fused_experts_input.topk_weights.to(torch.float32),
                 group=self.token_dispatcher.moe_all_to_all_group_name,
-                max_output_size=131072,
+                max_output_size=get_ascend_config().mega_moe_max_tokens,
                 swiglu_limit=fused_experts_input.swiglu_limit,
                 x_active_mask=fused_experts_input.routing.mc2_mask,
                 out=out,
                 expert_token_nums=self.expert_token_nums,
             )
             expert_tokens = self.expert_token_nums
-        elif get_ascend_config().enable_fused_mc2 == 2:
-            assert fused_experts_input.routing.expert_map is not None, "expert_map cannot be None."
-            out, expert_tokens = torch.ops._C_ascend.dispatch_gmm_combine_decode(  # type: ignore
-                x=fused_experts_input.hidden_states,
-                expert_ids=topk_ids,
-                gmm1_permuted_weight=fused_experts_input.weights.w1,
-                gmm1_permuted_weight_scale=fused_experts_input.weights.w1_scale,
-                gmm2_weight=fused_experts_input.weights.w2,
-                gmm2_weight_scale=fused_experts_input.weights.w2_scale,
-                expert_smooth_scales=None,
-                expert_scales=fused_experts_input.topk_weights.to(torch.float32),
-                group_ep=self.token_dispatcher.moe_all_to_all_group_name,
-                ep_rank_size=self.token_dispatcher.ep_world_size,
-                ep_rank_id=self.token_dispatcher.ep_rank_id,
-                moe_expert_num=self.moe_config.num_experts,
-                global_bs=self.token_dispatcher.global_bs,
-            )
         else:
             raise ValueError(f"Wrong value of {get_ascend_config().enable_fused_mc2=}")
         return FusedExpertsResult(

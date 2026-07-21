@@ -118,7 +118,7 @@ class TestChunkedTokenDatabase(unittest.TestCase):
     def setUp(self):
         self.meta = KeyMetadata("llama", 0, 0, 0, 0)
         self.db = ChunkedTokenDatabase([self.meta], block_size=[16], partitions=None)
-        self.db.set_group_buffers({0: [1000, 2000]}, {0: [160, 320]})
+        self.db.set_group_buffers({0: [1000, 2000]}, {0: [160, 320]}, group_num_layers={0: 1})
 
     def test_make_key_by_hash(self):
         key = self.db._make_key_by_hash("abc")
@@ -149,6 +149,27 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         # first chunk (start=0 < mask_num=16) should be skipped
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0][0], 16)
+
+    def test_process_tokens_with_tail_clipped_block_ids_maps_tail_chunks(self):
+        db = ChunkedTokenDatabase([self.meta], block_size=[128], partitions=None)
+        hashes = [bytes([idx % 251]) * 32 for idx in range(128)]
+
+        result = list(
+            db.process_tokens_with_block_ids(
+                128 * 128,
+                hashes,
+                [1000, 1001, 1002, 1003],
+            )
+        )
+
+        self.assertEqual(
+            [start for start, _, _, _ in result],
+            [124 * 128, 125 * 128, 126 * 128, 127 * 128],
+        )
+        self.assertEqual(
+            [block_id for _, _, _, block_id in result],
+            [1000, 1001, 1002, 1003],
+        )
 
     def test_process_tokens_token_len_shorter_than_all_blocks(self):
         hashes = ["a", "b", "c", "d"]
@@ -198,13 +219,21 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(size[0], 80)  # 160/16*8
         self.assertEqual(size[1], 160)  # 320/16*8
 
+    def test_prepare_value_uses_block_id_override(self):
+        addr, size, block_id = self.db.prepare_value(64, 80, [5], block_id=99)
+        self.assertEqual(block_id, 99)
+        self.assertEqual(addr[0], 1000 + 99 * 160)
+        self.assertEqual(addr[1], 2000 + 99 * 320)
+        self.assertEqual(size[0], 160)
+        self.assertEqual(size[1], 320)
+
     def test_prepare_value_layer(self):
         addr, size, block_id = self.db.prepare_value_layer(0, 16, [5, 6], layer_id=0)
         self.assertEqual(block_id, 5)
         self.assertEqual(len(addr), 2)
-        # layer_id=0 => kv_caches_base_addr[0*2] and [0*2+... index mod length]
+        # layer_id=0, entries_per_layers=2 => group_addrs[0] and group_addrs[1]
         self.assertEqual(addr[0], 1000 + 5 * 160)
-        self.assertEqual(addr[1], 1000 + 5 * 320)
+        self.assertEqual(addr[1], 2000 + 5 * 320)
 
     def test_decode_adaptor_prefill_pp_no_partitions(self):
         key, addr, size = self.db.decode_adaptor_prefill_pp(["k1"], [[1, 2]], [[10, 20]])
@@ -447,7 +476,15 @@ class TestReqMeta(unittest.TestCase):
             allocated_block_ids=[0, 1],
             num_saved_tokens=0,
         )
-        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, original_block_size=8)
+        # Provide block_hashes (2 full blocks for token_len=32 / granularity=16)
+        # so the boundary_without_hash short-circuit does not zero out the save
+        # length and skip; this exercises the original_block_size propagation.
+        meta = ReqMeta.from_request_tracker(
+            tracker,
+            cache_transfer_granularity=16,
+            original_block_size=8,
+            block_hashes=[b"h0", b"h1"],
+        )
         self.assertIsNotNone(meta)
         self.assertEqual(meta.original_block_size, 8)
 

@@ -2,7 +2,7 @@
 
 ## v0.22.1rc1 - 2026.06.30
 
-We're excited to announce the release of v0.22.1rc1 for vLLM Ascend. This is the first release candidate for the v0.22.1 release line, building on v0.21.0rc1 and aligning the plugin with upstream vLLM v0.22.1. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest) to get started.
+We're excited to announce the release of v0.22.1rc1 for vLLM Ascend. This is the first release candidate for the v0.22.1 release line, building on v0.21.0rc1 and aligning the plugin with upstream vLLM v0.22.1. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/releases-v0.22.1rc) to get started.
 
 ### Highlights
 
@@ -21,7 +21,7 @@ We're excited to announce the release of v0.22.1rc1 for vLLM Ascend. This is the
 ### Hardware and Operator Support
 
 - Added W8A8/W4A8 dynamic quantization support for Ascend 950. [#10236](https://github.com/vllm-project/vllm-ascend/pull/10236)
-- Added Ascend 950 CPU binding support for A5 server topology and process layout. [#10483](https://github.com/vllm-project/vllm-ascend/pull/10483)
+- Added Ascend 950 CPU binding support for Ascend 950 server topology and process layout. [#10483](https://github.com/vllm-project/vllm-ascend/pull/10483)
 
 ### Performance
 
@@ -526,7 +526,6 @@ Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest)
 **Other Bug Fixes:**
 
 - MTP recurrent batch size after lmhead TP logits truncation ([#8718](https://github.com/vllm-project/vllm-ascend/pull/8718))
-- Fix error caused by layer_sharding in DSV32 mixed deployment ([#8717](https://github.com/vllm-project/vllm-ascend/pull/8717))
 - EPLB topk_ids uses logical experts count ([#8501](https://github.com/vllm-project/vllm-ascend/pull/8501))
 - EPLB validation logic optimization and MTP support redundant experts ([#8710](https://github.com/vllm-project/vllm-ascend/pull/8710))
 - SP Preserve graph stringification in MoE sequence parallel ([#8780](https://github.com/vllm-project/vllm-ascend/pull/8780))
@@ -949,7 +948,6 @@ Many custom ops and triton kernels were added in this release to speed up model 
 - **Weight Transpose**: Fixed weight transpose in RL scenarios. [#5567](https://github.com/vllm-project/vllm-ascend/pull/5567)
 - **Eagle3 SP**: Adapted SP to eagle3. [#5562](https://github.com/vllm-project/vllm-ascend/pull/5562)
 - **GLM4.6 MTP**: GLM4.6 now supports MTP with full graph. [#5460](https://github.com/vllm-project/vllm-ascend/pull/5460)
-- **Flashcomm2 Oshard**: Flashcomm2 now works with oshard generalized feature. [#4723](https://github.com/vllm-project/vllm-ascend/pull/4723)
 - **Fine-grained Shared Expert Overlap**: Support fine-grained shared expert overlap. [#5962](https://github.com/vllm-project/vllm-ascend/pull/5962)
 
 ### Known Issue
@@ -1045,7 +1043,6 @@ We mainly focus on quality and performance improvement in this release. The spec
 - Adapted SP to eagle3 [#5562](https://github.com/vllm-project/vllm-ascend/pull/5562)
 - Context Parallel(PCP&DCP) support mlapo [#5672](https://github.com/vllm-project/vllm-ascend/pull/5672)
 - GLM4.6 support mtp with full graph [#5460](https://github.com/vllm-project/vllm-ascend/pull/5460)
-- Flashcomm2 now works with oshard generalized feature [#4723](https://github.com/vllm-project/vllm-ascend/pull/4723)
 - Support setting tp=1 for the Eagle draft model [#5804](https://github.com/vllm-project/vllm-ascend/pull/5804)
 - Flashcomm1 feature now works with qwen3-vl [#5848](https://github.com/vllm-project/vllm-ascend/pull/5848)
 - Support fine-grained shared expert overlap [#5962](https://github.com/vllm-project/vllm-ascend/pull/5962)
