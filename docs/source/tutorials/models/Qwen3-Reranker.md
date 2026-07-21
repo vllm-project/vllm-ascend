@@ -115,7 +115,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 === "A3 series"
 
-     ```shell
+    ```shell
     #!/bin/sh
     vllm serve Qwen/Qwen3-VL-Reranker-2B \
         --served-model-name Qwen/Qwen3-Reranker-0.6B \
@@ -152,10 +152,12 @@ If you want to deploy multi-node environment, you need to set up environment on 
         --max-model-len 1024
     ```
 
+    Option Parameter Descriptions:
+    `--compilation-config` For Atlas inference products, due to limited hardware streams, the size of cudagraph_capture_sizes is restricted.
+
 Key Parameter Descriptions:
 
 - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. For Atlas inference products if automatic parsing resolves to a large context length, allocating this mask (O(max_model_len^2)) may exceed NPU memory and trigger OOM. Be sure to set an explicit and conservative value, such as --max-model-len 1024.
-- `--compilation-config` For Atlas inference products, due to limited hardware streams, the size of cudagraph_capture_sizes is restricted.
 
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
