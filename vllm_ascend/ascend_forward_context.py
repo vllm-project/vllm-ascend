@@ -148,8 +148,6 @@ def set_ascend_forward_context(
         if has_layer_idx(model_instance):
             forward_context.layer_idx = model_instance.model.start_layer
 
-        forward_context.prefetch_mlp_gate_up_proj = False
-        forward_context.prefetch_mlp_down_proj = False
         forward_context.model_instance = model_instance
         forward_context.is_draft_model = is_draft_model
         forward_context.is_draft_model_prefill = False
@@ -356,8 +354,6 @@ class _ExtraForwardContextProxy:
         "mc2_mask",
         "is_draft_model",
         "is_draft_model_prefill",
-        "prefetch_mlp_gate_up_proj",
-        "prefetch_mlp_down_proj",
         "model_instance",
         "layer_idx",
         "max_tokens_across_dp",

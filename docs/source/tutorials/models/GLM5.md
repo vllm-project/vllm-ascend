@@ -1290,7 +1290,7 @@ python load_balance_proxy_server_example.py \
 
 Some configurations for optimization are shown below:
 
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node. With FlashComm enabled, layer_sharding list cannot include o_proj as an element.
+- `VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node.
 - `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable the dispatch_ffn_combine fused operator.
 - `VLLM_ASCEND_ENABLE_MLAPO`: Enable fused operator MlaPreprocessOperation.
 

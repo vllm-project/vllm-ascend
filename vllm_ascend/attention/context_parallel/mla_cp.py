@@ -49,8 +49,6 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.utils import weak_ref_tensors
 
-MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
-
 M = TypeVar("M", bound=AscendMLAMetadata)
 
 

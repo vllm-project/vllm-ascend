@@ -347,14 +347,10 @@
 
 - name: ops_distributed_inference
   optional: false
-  source_file_dependencies:
-    - vllm_ascend/ops/flashcomm2_oshard_manager.py
-    - vllm_ascend/ops/layer_shard_linear.py
   tests:
     - tests/ut/ops
     - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_deepseek_v2_lite_fc1_tp2
     - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_qwen3_dense_fc1_tp2
-    - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_qwen3_dense_prefetch_mlp_weight_tp2
 
 - name: ops_gdn
   optional: false
