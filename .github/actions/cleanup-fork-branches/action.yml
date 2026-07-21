@@ -1,0 +1,83 @@
+name: 'Cleanup stale fork branches'
+description: >-
+  Delete branches on a fork repo whose associated PRs in the upstream repo
+  are 'merged' or 'closed'. Branches with open PRs or no associated PRs are
+  left untouched. Results are written to $GITHUB_STEP_SUMMARY.
+
+inputs:
+  prefix:
+    description: 'Branch name prefix to match (e.g. auto-pr/doc-translate-)'
+    required: true
+  fork:
+    description: 'Fork repository (owner/name) holding the branches'
+    required: false
+    default: 'vllm-ascend-ci/vllm-ascend'
+  upstream:
+    description: 'Upstream repository to query PR state'
+    required: false
+    default: 'vllm-project/vllm-ascend'
+  token:
+    description: 'GitHub token with contents:write on the fork'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Run cleanup
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        PREFIX: ${{ inputs.prefix }}
+        FORK: ${{ inputs.fork }}
+        UPSTREAM: ${{ inputs.upstream }}
+      shell: bash
+      run: |
+        set +e
+        branches_json=$(gh api "repos/${FORK}/branches?per_page=100" --paginate \
+          --jq --arg p "$PREFIX" '[.[] | select(.name | startswith($p))]')
+
+        deleted=()
+        skipped_open=()
+        skipped_orphan=()
+        failed=()
+
+        while IFS= read -r b; do
+          [ -z "$b" ] && continue
+          pr_state=$(gh pr list --repo "$UPSTREAM" \
+            --head "${FORK%%/*}:${b}" --state all --json state \
+            --jq '.[0].state // "none"')
+          case "$pr_state" in
+            merged|closed)
+              if gh api -X DELETE "repos/${FORK}/git/refs/heads/${b}" >/dev/null 2>&1; then
+                deleted+=("${b} (PR ${pr_state})")
+              else
+                failed+=("$b")
+              fi
+              ;;
+            open)
+              skipped_open+=("$b")
+              ;;
+            *)
+              skipped_orphan+=("${b} (PR state: ${pr_state})")
+              ;;
+          esac
+        done < <(echo "$branches_json" | jq -r '.[].name')
+
+        {
+          echo "## Cleanup stale fork branches"
+          echo ""
+          echo "**Fork:** \`${FORK}\`  **Upstream:** \`${UPSTREAM}\`  **Prefix:** \`${PREFIX}\`"
+          echo ""
+          echo "### Deleted (${#deleted[@]})"
+          if [ "${#deleted[@]}" -gt 0 ]; then printf -- '- %s\n' "${deleted[@]}"; else echo "- (none)"; fi
+          echo ""
+          echo "### Skipped — open PR (${#skipped_open[@]})"
+          if [ "${#skipped_open[@]}" -gt 0 ]; then printf -- '- %s\n' "${skipped_open[@]}"; else echo "- (none)"; fi
+          echo ""
+          echo "### Skipped — orphan / no PR (${#skipped_orphan[@]})"
+          if [ "${#skipped_orphan[@]}" -gt 0 ]; then printf -- '- %s\n' "${skipped_orphan[@]}"; else echo "- (none)"; fi
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo ""
+            echo "### Failed (${#failed[@]})"
+            printf -- '- %s\n' "${failed[@]}"
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
