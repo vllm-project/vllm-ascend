@@ -423,6 +423,38 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         finished = t.get_and_clear_finished_requests()
         self.assertIn("r1", finished)
 
+    def test_handle_request_keeps_latest_reused_physical_block(self):
+        store = FakeStore()
+        db = FakeTokenDatabase()
+        t = KVCacheStoreRecvingThread(
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            ready_event=threading.Event(),
+            invalid_block_ids=set(),
+            invalid_block_ids_lock=threading.Lock(),
+        )
+        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=64, can_load=True, token_len=64)
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=64,
+            block_ids=[1, 2, 1, 3],
+            block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
+            load_spec=load_spec,
+        )
+        t.request_queue.put(req)
+        t._handle_request(req)
+
+        self.assertEqual(len(store.get_calls), 1)
+        keys, addrs, _ = store.get_calls[0]
+        self.assertEqual(len(keys), 3)
+        self.assertTrue(keys[0].endswith("@k1"))
+        self.assertTrue(keys[1].endswith("@k2"))
+        self.assertTrue(keys[2].endswith("@k3"))
+        self.assertEqual(addrs, [[1002], [1001], [1003]])
+
     def test_handle_request_applies_load_mask(self):
         store = FakeStore()
         db = MaskedFakeTokenDatabase(masks=([True, False],))
