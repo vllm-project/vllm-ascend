@@ -3839,10 +3839,15 @@ class NPUModelRunner(GPUModelRunner):
                         patch_eagle3_pp_aux_propagation,
                     )
 
-                    if patch_eagle3_pp_aux_propagation(inner_model):
-                        self.model.make_empty_intermediate_tensors = (
-                            inner_model.make_empty_intermediate_tensors
+                    if not patch_eagle3_pp_aux_propagation(inner_model):
+                        raise RuntimeError(
+                            "Eagle3 aux hidden states must be propagated "
+                            "through PP, but the PP aux patch does not "
+                            f"support {type(inner_model).__name__}."
                         )
+                    self.model.make_empty_intermediate_tensors = (
+                        inner_model.make_empty_intermediate_tensors
+                    )
 
             if self.lora_config:
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
@@ -3885,7 +3890,21 @@ class NPUModelRunner(GPUModelRunner):
         # the aux hidden states below what Eagle3's combine fc expects.
         if not (self.speculative_config and self.speculative_config.draft_model_config):
             return None
-        return super()._get_eagle3_aux_layers_from_config()
+        aux_layers = super()._get_eagle3_aux_layers_from_config()
+        if (
+            aux_layers
+            and get_pp_group().world_size > 1
+            and self.speculative_config.method == "eagle3"
+            and self._eagle3_uses_aux_hidden_state()
+            and len(aux_layers) != 3
+        ):
+            logger.warning(
+                "Ignoring Eagle3 aux layer config %s in PP because the "
+                "Ascend Eagle3 drafter expects 3 auxiliary hidden states.",
+                aux_layers,
+            )
+            return None
+        return aux_layers
 
     def _start_dump_data(self) -> None:
         if self.debugger is None or self._debugger_started:
