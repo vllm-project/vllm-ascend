@@ -71,22 +71,33 @@ from vllm_ascend.distributed.elastic_ep.eplb_manager import ElasticEplbManager
 _PATCH_LOCK = threading.Lock()
 
 
+def make_p2p_ops(params: List[torch.Tensor]):
+    assert len(params) > 0
+    p2p_ops = []
+    for param in params:
+        op = object.__new__(P2POp)
+        if is_sender:
+            op.op = torch.distributed.isend
+            op.tensor = param
+        else:
+            op.op = torch.distributed.irecv
+            op.tensor = param
+        op.group_peer = peer_rank
+        p2p_ops.append(op)
+
+    return p2p_ops
+
+
 def ascend_batch_transfer_weights(
     model: nn.Module,
     is_sender: bool,
     peer_rank: int,
     dp_group: StatelessGroupCoordinator,
-    expert_weights: Sequence[Iterable[torch.Tensor]],
 ) -> None:
     device_comm = dp_group.device_communicator
     tcp_store_group = dp_group.tcp_store_group
     if device_comm is None:
         raise ValueError("No device communicator found")
-
-    expert_weights_set = set()
-    for weight_group in expert_weights:
-        for weight in weight_group:
-            expert_weights_set.add(weight.data_ptr())
 
     state_dict = model.state_dict()
     all_params = []
@@ -94,7 +105,7 @@ def ascend_batch_transfer_weights(
     all_params_name = []
 
     for name, param in state_dict.items():
-        if name.endswith("expert_map"):
+        if "experts" in name:
             continue
         ptr = param.data_ptr()
         if ptr not in expert_weights_set and ptr not in all_params_ptrs:
@@ -103,13 +114,13 @@ def ascend_batch_transfer_weights(
                 all_params_ptrs.add(ptr)
                 all_params_name.append(name)
 
-    def handle_sub_module(submodule, submodule_name):
+    def handle_sub_module(submodule, submodule_name, skip_experts=True):
+        if skip_experts and submodule_name.endswith("experts"):
+            return
         for attr_name, attr_value in submodule.__dict__.items():
-            if attr_name.endswith("expert_map"):
-                continue
             if isinstance(attr_value, torch.Tensor):
                 data_ptr = attr_value.data_ptr()
-                if data_ptr not in expert_weights_set and data_ptr not in all_params_ptrs:
+                if data_ptr not in all_params_ptrs:
                     if attr_value.device.type == "npu":
                         all_params.append(attr_value)
                         all_params_ptrs.add(data_ptr)
@@ -140,24 +151,18 @@ def ascend_batch_transfer_weights(
         ids = [all_params_name.index(name) for name in common]
         all_params = [param for idx, param in enumerate(all_params) if idx in ids]
 
-    assert len(all_params) > 0
-    p2p_ops = []
-    for param in all_params:
-        op = object.__new__(P2POp)
-        if is_sender:
-            op.op = torch.distributed.isend
-            op.tensor = param
-        else:
-            op.op = torch.distributed.irecv
-            op.tensor = param
-        op.group_peer = peer_rank
-        p2p_ops.append(op)
+    device_comm.batch_isend_irecv(make_p2p_ops(all_params))
 
-    device_comm.batch_isend_irecv(p2p_ops)
+    for npu_tensor, cpu_tensor in expert_map_params:
+        cpu_tensor.copy_(npu_tensor)
 
-    if len(expert_map_params) > 0:
-        for npu_tensor, cpu_tensor in expert_map_params:
-            cpu_tensor.copy_(npu_tensor)
+    all_params = []
+    all_params_name = []
+    all_params_ptrs = set()
+    for module_name, module in model.named_modules():
+        if module_name.endswith("experts"):
+            handle_sub_module(module, module_name, skip_experts=False)
+            device_comm.batch_isend_irecv(make_p2p_ops(all_params))
 
 
 def broadcast_expert_mapping(
@@ -262,10 +267,6 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
             )
 
     def transfer_weights(self, old_dp_size: int, new_dp_size: int) -> None:
-        model = self.worker.model_runner.get_model()
-        model.expert_weights = []
-        get_standby_dp_group().barrier()
-        get_tp_group().barrier()
         with _PATCH_LOCK, self._use_ascend_transfer_impl():
             super().transfer_weights(old_dp_size=old_dp_size, new_dp_size=new_dp_size)
 
@@ -396,10 +397,6 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
         self.eplb_manager.eplb(old_ep_size, new_ep_size)
 
     def receive_weights(self) -> None:
-        model = self.worker.model_runner.get_model()
-        model.expert_weights = []
-        get_dp_group().barrier()
-        get_tp_group().barrier()
         with _PATCH_LOCK, self._use_ascend_transfer_impl():
             super().receive_weights()
 
