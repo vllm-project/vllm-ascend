@@ -82,10 +82,13 @@ class AsyncTransferPoller:
                     info = self._pending_async_transfers.pop(batch_id)
                     self._log_transfer_warning(batch_id, info)
             if info is not None:
-                if self._on_poll_error:
-                    self._on_poll_error(batch_id, info)
-                elif self._on_failed:
-                    self._on_failed(batch_id, info)
+                try:
+                    if self._on_poll_error:
+                        self._on_poll_error(batch_id, info)
+                    elif self._on_failed:
+                        self._on_failed(batch_id, info)
+                except Exception as e:
+                    logger.exception("Error executing poll error callback for batch %s: %s", batch_id, e)
 
         # Handle failed transfers (result<0): dispatch on_failed callback
         for batch_id in failed:
@@ -95,10 +98,13 @@ class AsyncTransferPoller:
                     info = self._pending_async_transfers.pop(batch_id)
                     self._log_transfer_warning(batch_id, info)
             if info is not None:
-                if self._on_failed:
-                    self._on_failed(batch_id, info)
-                elif self._on_poll_error:
-                    self._on_poll_error(batch_id, info)
+                try:
+                    if self._on_failed:
+                        self._on_failed(batch_id, info)
+                    elif self._on_poll_error:
+                        self._on_poll_error(batch_id, info)
+                except Exception as e:
+                    logger.exception("Error executing failed callback for batch %s: %s", batch_id, e)
 
         if not completed:
             return []
@@ -116,7 +122,10 @@ class AsyncTransferPoller:
         for batch_id, info, elapsed in completed_transfers:
             self._log_transfer_completed(batch_id, info, elapsed)
             if self._on_completed:
-                self._on_completed(batch_id, info)
+                try:
+                    self._on_completed(batch_id, info)
+                except Exception as e:
+                    logger.exception("Error executing completed callback for batch %s: %s", batch_id, e)
 
         return completed
 

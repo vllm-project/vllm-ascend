@@ -560,9 +560,9 @@ class KVCacheRecvingThread(threading.Thread):
                 pending_async_transfers=self._pending_async_transfers,
                 pending_async_lock=self._pending_async_lock,
                 callback_map={
-                    "on_completed": lambda batch_id, info: self._complete_async_transfer(batch_id, failed=False),
-                    "on_failed": lambda batch_id, info: self._complete_async_transfer(batch_id, failed=True),
-                    "on_poll_error": lambda batch_id, info: self._complete_async_transfer(batch_id, failed=True),
+                    "on_completed": lambda batch_id, info: self.executor.submit(self._complete_async_transfer, batch_id, False),
+                    "on_failed": lambda batch_id, info: self.executor.submit(self._complete_async_transfer, batch_id, True),
+                    "on_poll_error": lambda batch_id, info: self.executor.submit(self._complete_async_transfer, batch_id, True),
                 },
             )
 

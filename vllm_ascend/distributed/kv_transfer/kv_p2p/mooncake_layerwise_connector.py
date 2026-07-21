@@ -273,6 +273,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         if self._use_async_transfer:
             self._pending_async_transfers: dict[int, dict[str, Any]] = {}
             self._pending_async_lock = threading.Lock()
+            self._callback_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="kv_callback")
 
             self._async_poller = AsyncTransferPoller(
                 engine=self.engine,
@@ -683,10 +684,10 @@ class KVCacheSendingLayerThread(threading.Thread):
                 req_meta = info["send_request"][req_id]
                 if req_meta.chunk_finish:
                     if req_id in self.failed_reqs:
-                        self.callback_func(req_id, req_meta, info["layer_group_idx"], trans_flag=False)
+                        self._callback_executor.submit(self.callback_func, req_id, req_meta, info["layer_group_idx"], False)
                         self.failed_reqs.discard(req_id)
                     else:
-                        self.callback_func(req_id, req_meta, info["layer_group_idx"], trans_flag=True)
+                        self._callback_executor.submit(self.callback_func, req_id, req_meta, info["layer_group_idx"], True)
 
     def _on_async_write_failed(self, batch_id: int, info: dict[str, Any]) -> None:
         """Handle a failed async write transfer."""
@@ -696,7 +697,7 @@ class KVCacheSendingLayerThread(threading.Thread):
             for req_id in info["req_ids"]:
                 req_meta = info["send_request"][req_id]
                 if req_meta.chunk_finish:
-                    self.callback_func(req_id, req_meta, info["layer_group_idx"], trans_flag=False)
+                    self._callback_executor.submit(self.callback_func, req_id, req_meta, info["layer_group_idx"], False)
                     self.failed_reqs.discard(req_id)
 
 

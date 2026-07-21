@@ -75,7 +75,7 @@ def get_cp_group(tp: int, heads: int, dcp: int):
     # head_group is all blocks for request in the same head
     # tp8 dcp2 heads4 return[[0,1,2,3]]
     # tp8 dcp1 heads4 return[[0,2,4,6],[1,3,5,7]]
-    if tp is None or heads is None or dcp is None:
+    if tp is None or heads is None or dcp is None or heads == 0 or dcp == 0:
         return [[i for i in range(tp or 1)]]
     step = tp // heads
     if step == 0:
