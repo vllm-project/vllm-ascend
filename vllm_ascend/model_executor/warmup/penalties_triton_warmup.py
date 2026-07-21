@@ -135,7 +135,7 @@ def _warm_apply_penalties_triton(
     output_len: int,
     logits_dtype: torch.dtype,
 ) -> None:
-    logits = torch.randn(num_seqs, vocab_size, dtype=logits_dtype, device=device)
+    logits = torch.randn(num_seqs, vocab_size, dtype=torch.float32, device=device)
     prompt_tokens = _make_history_tokens(num_seqs, prompt_len, vocab_size, device)
     output_tokens = _make_history_tokens(num_seqs, output_len, vocab_size, device)
     repetition_penalties = torch.ones(num_seqs, dtype=torch.float32, device=device)

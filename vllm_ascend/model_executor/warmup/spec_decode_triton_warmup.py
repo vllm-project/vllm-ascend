@@ -275,6 +275,7 @@ def _warm_sample_recovered_tokens_kernel(
         BLOCK_VERIFY=block_verify,
         ENABLE_REDUCE_SAMPLING=enable_reduce_sampling,
         SUB_BLOCK=_SUB_BLOCK,
+        multibuffer=False,
     )
 
 
