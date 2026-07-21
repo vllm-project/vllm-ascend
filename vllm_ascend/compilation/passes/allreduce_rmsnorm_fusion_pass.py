@@ -14,8 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import os
+
 import torch
 from torch._inductor.pattern_matcher import PatternMatcherPass, PatternPrettyPrinter
+from torch.fx.experimental.symbolic_shapes import statically_known_true
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 from vllm.config.compilation import Range
@@ -24,9 +27,71 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
 
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 # computation-communication tiling block is 512
 ALLREDUCE_NORM_FUSE_THRESHOLD = 512
+MATMUL_ALLREDUCE_RMSNORM_910C_MAX_M = 2
+MATMUL_ALLREDUCE_RMSNORM_910C_K = 12800
+MATMUL_ALLREDUCE_RMSNORM_910C_N = 5120
+
+
+def _get_match_tensor(match, name: str) -> torch.Tensor | None:
+    node = match.kwargs.get(name)
+    if node is None:
+        return None
+    value = node.meta.get("val")
+    if value is None:
+        value = node.meta.get("example_value")
+    return value if isinstance(value, torch.Tensor) else None
+
+
+def _shape_matches(tensor: torch.Tensor | None, expected: tuple[int | None, ...]) -> bool:
+    if tensor is None or len(tensor.shape) != len(expected):
+        return False
+    return all(
+        wanted is None or statically_known_true(actual == wanted)
+        for actual, wanted in zip(tensor.shape, expected)
+    )
+
+
+def _is_supported_910c_down_proj_match(match) -> bool:
+    x = _get_match_tensor(match, "x")
+    weight = _get_match_tensor(match, "weight")
+    residual = _get_match_tensor(match, "residual")
+    gamma = _get_match_tensor(match, "rms_norm_weight")
+    tensors = (x, weight, residual, gamma)
+    return (
+        all(tensor is not None and tensor.dtype == torch.bfloat16 for tensor in tensors)
+        and x is not None
+        and len(x.shape) >= 2
+        and statically_known_true(x.shape[-1] == MATMUL_ALLREDUCE_RMSNORM_910C_K)
+        and _shape_matches(
+            weight,
+            (MATMUL_ALLREDUCE_RMSNORM_910C_N, MATMUL_ALLREDUCE_RMSNORM_910C_K),
+        )
+        and residual is not None
+        and len(residual.shape) == len(x.shape)
+        and all(
+            statically_known_true(actual == expected)
+            for actual, expected in zip(
+                residual.shape,
+                (*x.shape[:-1], MATMUL_ALLREDUCE_RMSNORM_910C_N),
+            )
+        )
+        and _shape_matches(gamma, (MATMUL_ALLREDUCE_RMSNORM_910C_N,))
+    )
+
+
+def should_use_910c_op(vllm_config: VllmConfig, tp_size: int | None = None) -> bool:
+    if tp_size is None:
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+    hf_config = vllm_config.model_config.hf_config
+    return (
+        get_ascend_device_type() == AscendDeviceType.A3
+        and tp_size == 2
+        and getattr(hf_config, "hidden_size", None) == 5120
+    )
 
 
 class MiddleLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
@@ -38,11 +103,14 @@ class MiddleLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
     def __init__(self, vllm_config, eps=1e-6):
         self.vllm_config = vllm_config
         self.eps = eps
-        device_group = get_tp_group().device_group
+        tp_group = get_tp_group()
+        device_group = tp_group.device_group
         backend = device_group._get_backend(torch.device("npu"))
         self.local_rank = torch.distributed.get_rank(group=device_group)
         self.tp_group_name = backend.get_hccl_comm_name(self.local_rank)
+        self.fallback_group_name = tp_group.unique_name
         self.tp_size = get_tensor_model_parallel_world_size()
+        self.use_910c_op = should_use_910c_op(self.vllm_config, self.tp_size)
 
     def get_inputs(self):
         batch_size, seq_len = 2, 4
@@ -65,9 +133,12 @@ class MiddleLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
 
         return pattern
 
+    def get_extra_check(self):
+        return _is_supported_910c_down_proj_match if self.use_910c_op else super().get_extra_check()
+
     def get_replacement(self):
         def replacement(x, weight, residual, rms_norm_weight):
-            out0, out1 = torch.ops._C_ascend.matmul_allreduce_add_rmsnorm(
+            args = (
                 x,
                 weight,
                 residual,
@@ -79,6 +150,12 @@ class MiddleLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
                 True,
                 False,
             )
+            if self.use_910c_op:
+                out0, out1 = torch.ops._C_ascend.matmul_allreduce_add_rmsnorm_910c(
+                    *args, self.fallback_group_name
+                )
+            else:
+                out0, out1 = torch.ops._C_ascend.matmul_allreduce_add_rmsnorm(*args)
             return out0, out1
 
         return replacement
@@ -87,11 +164,14 @@ class MiddleLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
 class LastLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
     def __init__(self, vllm_config, eps=1e-6):
         super().__init__(vllm_config, eps)
-        device_group = get_tp_group().device_group
+        tp_group = get_tp_group()
+        device_group = tp_group.device_group
         backend = device_group._get_backend(torch.device("npu"))
         self.local_rank = torch.distributed.get_rank(group=device_group)
         self.tp_group_name = backend.get_hccl_comm_name(self.local_rank)
+        self.fallback_group_name = tp_group.unique_name
         self.tp_size = get_tensor_model_parallel_world_size()
+        self.use_910c_op = should_use_910c_op(self.vllm_config, self.tp_size)
 
     def get_inputs(self):
         batch_size, seq_len = 2, 4
@@ -112,9 +192,12 @@ class LastLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
 
         return pattern
 
+    def get_extra_check(self):
+        return _is_supported_910c_down_proj_match if self.use_910c_op else super().get_extra_check()
+
     def get_replacement(self):
         def replacement(x, weight, residual, rms_norm_weight):
-            out0, _ = torch.ops._C_ascend.matmul_allreduce_add_rmsnorm(
+            args = (
                 x,
                 weight,
                 residual,
@@ -126,6 +209,12 @@ class LastLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
                 True,
                 False,
             )
+            if self.use_910c_op:
+                out0, _ = torch.ops._C_ascend.matmul_allreduce_add_rmsnorm_910c(
+                    *args, self.fallback_group_name
+                )
+            else:
+                out0, _ = torch.ops._C_ascend.matmul_allreduce_add_rmsnorm(*args)
             return out0
 
         return replacement
@@ -134,14 +223,51 @@ class LastLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
 class MatmulAllReduceAddRMSNormPass(VllmInductorPass):
     def __init__(self, vllm_config: VllmConfig):
         super().__init__(vllm_config)
+        self.use_910c_op = should_use_910c_op(vllm_config)
         self.pattern_match_passes: PatternMatcherPass = PatternMatcherPass(pass_name="allreduce_rmsnorm_fusion_pass")
 
-        MiddleLayerMatmulAllReduceAddRMSNormPattern(vllm_config).register(self.pattern_match_passes)
-        LastLayerMatmulAllReduceAddRMSNormPattern(vllm_config).register(self.pattern_match_passes)
+        middle_pattern = MiddleLayerMatmulAllReduceAddRMSNormPattern(vllm_config)
+        last_pattern = LastLayerMatmulAllReduceAddRMSNormPattern(vllm_config)
+        middle_pattern.register(self.pattern_match_passes, register_nge=not self.use_910c_op)
+        last_pattern.register(self.pattern_match_passes, register_nge=not self.use_910c_op)
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
-        self.matched_count = self.pattern_match_passes.apply(graph)
+        limit_value = os.getenv("VLLM_ASCEND_MAR910C_FUSION_LIMIT")
+        limit = int(limit_value) if limit_value is not None else None
+        original_checks = []
+        accepted = 0
+
+        if limit is not None:
+            if limit < 0:
+                raise ValueError("VLLM_ASCEND_MAR910C_FUSION_LIMIT must be non-negative")
+
+            for entries in self.pattern_match_passes.patterns.values():
+                for entry in entries:
+                    original_check = entry.extra_check
+                    original_checks.append((entry, original_check))
+
+                    def limited_check(match, check=original_check):
+                        nonlocal accepted
+                        if accepted >= limit or not check(match):
+                            return False
+                        accepted += 1
+                        return True
+
+                    entry.extra_check = limited_check
+
+        try:
+            self.matched_count = self.pattern_match_passes.apply(graph)
+        finally:
+            for entry, original_check in original_checks:
+                entry.extra_check = original_check
+
+        if limit is not None:
+            logger.info(
+                "Applied matmul-allreduce-rmsnorm fusion limit %d: replaced %d patterns",
+                limit,
+                self.matched_count,
+            )
         pattern_idx = 0
         for pattern_entry in self.pattern_match_passes.patterns.values():
             for p in pattern_entry:
@@ -155,5 +281,8 @@ class MatmulAllReduceAddRMSNormPass(VllmInductorPass):
         """
         Check if the pass is applicable for the current configuration.
         """
-        applicable = compile_range.start > ALLREDUCE_NORM_FUSE_THRESHOLD
+        if self.use_910c_op:
+            applicable = compile_range.end <= MATMUL_ALLREDUCE_RMSNORM_910C_MAX_M
+        else:
+            applicable = compile_range.start > ALLREDUCE_NORM_FUSE_THRESHOLD
         return applicable
