@@ -259,6 +259,35 @@ jobs:
           pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py \
             2>&1 | tee /tmp/test-logs/yaml-test.log
 
+      - name: Update good_table.csv on success
+        if: >-
+          ${{ always() &&
+          inputs.request_id == '' &&
+          (steps.pytest-driven.outcome == 'success' || steps.pytest-driven.outcome == 'skipped') &&
+          (steps.yaml-test.outcome == 'success' || steps.yaml-test.outcome == 'skipped') &&
+          (steps.pytest-driven.outcome == 'success' || steps.yaml-test.outcome == 'success') }}
+        working-directory: /vllm-workspace/vllm-ascend
+        env:
+          TEST_NAME: ${{ inputs.name || inputs.config_file_path || inputs.tests }}
+          TEST_PATH: ${{ inputs.config_file_path || inputs.tests }}
+          CONFIG_BASE_PATH: ${{ inputs.config_base_path }}
+          RUN_LINK: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          VLLM_ASCEND_VERSION: ${{ env.VLLM_ASCEND_VERSION }}
+        run: |
+          python3 tests/e2e/nightly/scripts/update_good_table.py \
+            --cache-csv "/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}/nightly/good_table.csv" \
+            --test-name "$TEST_NAME" \
+            --test-path "$TEST_PATH" \
+            --config-base-path "$CONFIG_BASE_PATH" \
+            --run-link  "$RUN_LINK" \
+            --vllm-dir  "/vllm-workspace/vllm" \
+            --vllm-ascend-dir "/vllm-workspace/vllm-ascend" \
+            --vllm-ascend-version "$VLLM_ASCEND_VERSION"
+
+      # ============================================
+      # AOP hooks: intercept test results uniformly
+      # ============================================
+
       - name: Capture test result
         id: test-result
         if: ${{ always() && inputs.aop_single_enabled && (inputs.config_file_path != '' || inputs.tests != '') }}
@@ -275,6 +304,12 @@ jobs:
         run: |
           bash tests/e2e/nightly/scripts/aop_classify.sh \
             "${{ steps.test-result.outputs.failed_test }}"
+
+      # ============================================================
+      # Decision gate:
+      #   env_failure     → Skip directly (no need to check age)
+      #   not_env_failure → Check commit age → old? Skip : Process
+      # ============================================================
 
       - name: Skip - env issue
         if: >-
@@ -338,6 +373,8 @@ jobs:
         if: ${{ always() && inputs.aop_single_enabled && steps.test-result.outputs.result == 'success' }}
         run: |
           echo ">>> All tests passed!"
+
+      # ============================================
 
       - name: Set benchmark artifact timestamp
         if: ${{ always() && inputs.config_file_path != '' }}
