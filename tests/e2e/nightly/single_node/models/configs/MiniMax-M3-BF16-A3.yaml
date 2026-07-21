@@ -14,15 +14,17 @@ test_cases:
       VLLM_USE_MODELSCOPE: "true"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
+      - "--data-parallel-size"
+      - "2"
       - "--tensor-parallel-size"
-      - "16"
+      - "8"
       - "--port"
       - "$SERVER_PORT"
       - "--trust-remote-code"
       - "--gpu-memory-utilization"
       - "0.92"
       - "--max-model-len"
-      - "43008"
+      - "15000"
       - "--enable-expert-parallel"
       - "--max-num-seqs"
       - "16"
@@ -35,7 +37,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--additional-config"
-      - '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":true,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2}'
+      - '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":true,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_flashcomm1": true,"enable_reduce_sample": true}'
     benchmarks:
       acc:
         case_type: accuracy
