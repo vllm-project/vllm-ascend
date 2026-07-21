@@ -22,6 +22,7 @@ from vllm.config import KVTransferConfig, VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import (
+    AscendConfig,
     SchedulerConfig,
     ShortRequestFirstConfig,
     clear_ascend_config,
@@ -58,6 +59,46 @@ class TestAscendConfig(TestBase):
             model_arch_config=SimpleNamespace(total_num_attention_heads=total_num_attention_heads),
             get_total_num_kv_heads=lambda: total_num_kv_heads,
         )
+
+    @staticmethod
+    def _make_sparse_li_c8_config(quant_description):
+        quant_config = SimpleNamespace(quant_description=quant_description)
+        config = AscendConfig.__new__(AscendConfig)
+        config.enable_sparse_li_c8 = True
+        (
+            config._sparse_li_c8_layer_ids,
+            config._sparse_li_c8_layer_names,
+        ) = AscendConfig._parse_sparse_li_c8_layers_from_quant_config(quant_config)
+        config._sparse_li_c8_layer_filter_enabled = AscendConfig._has_sparse_li_c8_layer_config(quant_config)
+        return config
+
+    def test_sparse_li_c8_layer_filter_uses_indexer_quant_type(self):
+        config = self._make_sparse_li_c8_config(
+            {
+                "model.layers.1.self_attn.indexer.quant_type": "INT8_DYNAMIC",
+                "model.layers.2.self_attn.indexer.quant_type": "BF16",
+            }
+        )
+
+        self.assertTrue(config.is_sparse_li_c8_layer("model.layers.1.self_attn.indexer.k_cache"))
+        self.assertFalse(config.is_sparse_li_c8_layer("model.layers.2.self_attn.indexer.k_cache"))
+
+    def test_sparse_li_c8_layer_filter_uses_indexer_wq_b_weight(self):
+        config = self._make_sparse_li_c8_config(
+            {
+                "model.layers.3.self_attn.indexer.wq_b_weight": "W8A8_MXFP8",
+                "model.layers.4.self_attn.indexer.wq_b_weight": "W8A8_DYNAMIC",
+            }
+        )
+
+        self.assertTrue(config.is_sparse_li_c8_layer("model.layers.3.self_attn.indexer.k_cache"))
+        self.assertFalse(config.is_sparse_li_c8_layer("model.layers.4.self_attn.indexer.k_cache"))
+
+    def test_sparse_li_c8_without_layer_metadata_applies_to_all_indexers(self):
+        config = self._make_sparse_li_c8_config({"indexer_quant_type": "INT8_DYNAMIC"})
+
+        self.assertTrue(config.is_sparse_li_c8_layer("model.layers.1.self_attn.indexer.k_cache"))
+        self.assertTrue(config.is_sparse_li_c8_layer("model.layers.2.self_attn.indexer.k_cache"))
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
