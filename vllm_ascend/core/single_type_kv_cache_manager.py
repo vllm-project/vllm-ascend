@@ -41,6 +41,7 @@ class CompressAttentionManager(FullAttentionManager):
         num_tokens: int,
         new_computed_blocks: Sequence[KVCacheBlock],
         total_computed_tokens: int,
+        num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
     ) -> int:
@@ -56,6 +57,7 @@ class CompressAttentionManager(FullAttentionManager):
             num_tokens,
             new_computed_blocks,
             total_computed_tokens,
+            num_local_computed_tokens,
             num_tokens_main_model,
             apply_admission_cap,
         )
@@ -201,11 +203,11 @@ class CompressAttentionManager(FullAttentionManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
+        drop_eagle_block: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-        drop_eagle_block: bool = False,
-    ) -> tuple[list[KVCacheBlock], ...]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         eagle_drop = drop_eagle_block
         # assert isinstance(
         #     kv_cache_spec, Compress4AttentionSpec | Compress128AttentionSpec | C4IndexerSpec
@@ -239,7 +241,16 @@ class CompressAttentionManager(FullAttentionManager):
         ):
             for computed in computed_blocks:
                 computed.pop()
-        return computed_blocks
+        if vllm_version_is("0.25.1"):
+            hit_length = len(computed_blocks[0]) * logical_block_size
+            if drop_eagle_block and hit_length > 0:
+                hit_length -= min(alignment_tokens, logical_block_size)
+            hit_length -= hit_length % alignment_tokens
+            num_blocks = cdiv(hit_length, logical_block_size)
+            for computed in computed_blocks:
+                del computed[num_blocks:]
+            return computed_blocks, hit_length
+        return computed_blocks  # type: ignore[return-value]
 
 
 def get_manager_for_kv_cache_spec(

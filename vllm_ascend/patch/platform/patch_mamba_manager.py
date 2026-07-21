@@ -16,6 +16,8 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     MambaSpec,
 )
 
+from vllm_ascend.utils import vllm_version_is
+
 
 class AscendMambaManager(MambaManager):
     def __init__(self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs) -> None:
@@ -30,11 +32,11 @@ class AscendMambaManager(MambaManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
+        drop_eagle_block: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-        drop_eagle_block: bool = False,
-    ) -> tuple[list[KVCacheBlock], ...]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         assert isinstance(kv_cache_spec, MambaSpec), "MambaManager can only be used for mamba groups"
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple([] for _ in range(len(kv_cache_group_ids)))
         block_size = kv_cache_spec.block_size
@@ -47,7 +49,10 @@ class AscendMambaManager(MambaManager):
                     computed.extend([block_pool.null_block] * i)
                     computed.append(cached)
                 break
-        return computed_blocks
+        if vllm_version_is("0.25.1"):
+            hit_length = (i + 1) * block_size if computed_blocks[0] else 0
+            return computed_blocks, hit_length
+        return computed_blocks  # type: ignore[return-value]
 
     def get_num_blocks_to_allocate(
         self,
@@ -55,6 +60,7 @@ class AscendMambaManager(MambaManager):
         num_tokens: int,
         new_computed_blocks: Sequence[KVCacheBlock],
         total_computed_tokens: int,
+        num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
     ) -> int:
@@ -63,6 +69,7 @@ class AscendMambaManager(MambaManager):
             num_tokens,
             new_computed_blocks,
             total_computed_tokens,
+            num_local_computed_tokens,
             num_tokens_main_model,
             apply_admission_cap,
         )
