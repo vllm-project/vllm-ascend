@@ -341,18 +341,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             draft_attn_layers_dict[self.attn_layer_names[0]].get_attn_backend().get_supported_kernel_block_sizes()[0]
         )
 
-    def _get_graph_runnable(self) -> Callable[..., Any]:
-        return self._run_merged_draft
-
-    def get_aclgraph_capture_sizes(self, capture_sizes: list[int]) -> list[int]:
-        return capture_sizes
-
-    def take_draft_probs(self, num_draft_tokens: list[int], req_ids: list[str]) -> torch.Tensor | None:
-        del num_draft_tokens, req_ids
-        return None
-
-    @property
-
         self.piece_all_attn_layer_name = []
         for _ in range(self.num_speculative_tokens):
             self.piece_all_attn_layer_name.append([name for name in self.attn_layer_names])
@@ -400,6 +388,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             len(self._draft_attn_layer_names),
             self.kernel_block_size,
         )
+
+    def _get_graph_runnable(self) -> Callable[..., Any]:
+        return self._run_merged_draft
+
+    def get_aclgraph_capture_sizes(self, capture_sizes: list[int]) -> list[int]:
+        return capture_sizes
+
+    def take_draft_probs(self, num_draft_tokens: list[int], req_ids: list[str]) -> torch.Tensor | None:
+        del num_draft_tokens, req_ids
+        return None
 
     def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:
         """
