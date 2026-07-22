@@ -145,6 +145,7 @@ class AscendMlaDCPMetadataBuilder(
         common_attn_metadata: AscendCommonAttentionMetadata,
     ) -> AscendMLADecodeMetadata:
         decode_metadata = super().build_decode_metadata(common_prefix_len, common_attn_metadata)
+        assert isinstance(decode_metadata, AscendMLADCPDecodeMetadata)
         dcp_metadata = self._require_dcp_metadata(common_attn_metadata)
         decode_metadata.cp_seq_len = self._get_dcp_rank_context_lens(
             common_attn_metadata,
@@ -288,6 +289,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
     ) -> torch.Tensor:
         decode_meta = attn_metadata.decode
         assert decode_meta is not None
+        assert isinstance(decode_meta, AscendMLADCPDecodeMetadata)
         num_tokens = q_nope.size(0)
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
@@ -432,7 +434,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         self,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
-        chunked_context: DCPChunkedContextMetadata,
+        chunked_context: ChunkedContextMetadata,
         chunk_idx: int,
         toks: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -456,7 +458,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             chunk_idx: chunk idx of chunked_prefill.
             toks: the number of tokens for local gather cache.
         """
-        assert chunked_context is not None
+        assert isinstance(chunked_context, DCPChunkedContextMetadata)
         assert chunked_context.padded_local_chunk_seq_lens is not None
         assert chunked_context.local_context_lens_allranks is not None
         assert chunked_context.cu_seq_lens_lst is not None
