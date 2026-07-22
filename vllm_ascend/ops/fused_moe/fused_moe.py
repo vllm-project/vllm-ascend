@@ -38,6 +38,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
+from vllm_ascend.lora.fused_moe import sync_lora_context
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
@@ -93,6 +94,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         super().__init__(moe=moe)
         self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
         self.tid2eid = tid2eid
+        self.lora_context = None
+
+    def set_lora_context(self, lora_context) -> None:
+        self.lora_context = lora_context
 
     @property
     def is_monolithic(self) -> bool:
@@ -546,6 +551,10 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # This approach may overlook some extreme scenarios.
         enable_force_load_balance = _EXTRA_CTX.in_profile_run
 
+        lora_context = getattr(self.routed_experts, "_ascend_moe_lora_context", None)
+        if lora_context is not None:
+            sync_lora_context(self._quant_method, lora_context)
+
         prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -612,6 +621,10 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             reduce_results=isinstance(_EXTRA_CTX.moe_comm_method, AllGatherCommImpl),
             padded_hidden_states_shape=padded_hidden_states_shape,
         )
+
+        # clear per-forward LoRA state from long-lived singletons.
+        if lora_context is not None:
+            sync_lora_context(self._quant_method, None)
 
         if return_with_event:
             return FusedMoEResult(
