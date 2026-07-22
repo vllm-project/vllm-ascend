@@ -57,6 +57,7 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
 from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
 
+
 @contextmanager
 def patch_tensor_parallel_group(tp_group):
     """Temporarily swap the global TP group for draft-model spec decode.
