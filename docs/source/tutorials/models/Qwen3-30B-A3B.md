@@ -286,8 +286,6 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     - `--no-enable-prefix-caching` is the default recommendation for this Atlas inference products example to reduce memory pressure.
     - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
     
-
-
 :::{note}
 
     - `ASCEND_RT_VISIBLE_DEVICES`: must be set to the NPU chip IDs allocated to your environment (e.g., `0,1,2,3` for 4 chips).
