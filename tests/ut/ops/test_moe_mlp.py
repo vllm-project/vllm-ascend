@@ -260,6 +260,41 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
         self.assertEqual(quant_kwargs["swiglu_limit"], 5.0)
         mock_unquant.assert_not_called()
 
+    def test_request_quant_path_passes_minimax_swiglu_parameters(self):
+        expected = torch.randn(1, 2)
+        mlp_compute_input = MoEMlpComputeInput(
+            hidden_states=torch.ones((1, 2), dtype=torch.float32),
+            group_list=torch.tensor([1], dtype=torch.int64),
+            group_list_type=1,
+            dynamic_scale=None,
+            topk_scales=None,
+            weights=MoEWeights(
+                w1=[torch.ones((1, 2, 4), dtype=torch.float32)],
+                w2=[torch.ones((1, 2, 2), dtype=torch.float32)],
+                w1_scale=[torch.ones((1,), dtype=torch.float32)],
+                w2_scale=[torch.ones((1,), dtype=torch.float32)],
+            ),
+            quant=MoEQuantParams(quant_type=QuantType.W8A8),
+            fusion=True,
+            activation="swigluoai_uninterleave",
+            swiglu_limit=7.0,
+            swiglu_alpha=1.702,
+            swiglu_beta=1.0,
+        )
+
+        with patch(
+            "vllm_ascend.ops.fused_moe.moe_mlp.quant_apply_mlp",
+            return_value=expected,
+        ) as mock_quant:
+            output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+
+        self.assertTrue(output is expected)
+        quant_kwargs = mock_quant.call_args.kwargs
+        self.assertEqual(quant_kwargs["activation"], "swigluoai_uninterleave")
+        self.assertEqual(quant_kwargs["swiglu_limit"], 7.0)
+        self.assertEqual(quant_kwargs["swiglu_alpha"], 1.702)
+        self.assertEqual(quant_kwargs["swiglu_beta"], 1.0)
+
     def test_request_quant_path_passes_gelu_activation(self):
         expected = torch.randn(1, 2)
         mlp_compute_input = MoEMlpComputeInput(
@@ -575,6 +610,116 @@ class TestQuantApplyMlpNoGeluImpact(_GeluPathBase):
     def test_swigluoai_activation_skips_gelu_path(self):
         mock_gelu, _ = self._run_non_gelu(MoEActivation.SWIGLUOAI)
         mock_gelu.assert_not_called()
+
+
+class TestMiniMaxSwiGluOAIPath(_GeluPathBase):
+    def test_w8a8_uses_uninterleaved_clipped_swiglu(self):
+        gate_up = torch.randn(1, 8)
+        activated = torch.randn(1, 4)
+        kwargs = self._common_w8a8_kwargs(activation="swigluoai_uninterleave")
+        kwargs.update(swiglu_limit=7.0, swiglu_alpha=1.702, swiglu_beta=1.0)
+
+        with (
+            _mock_w8a8_gelu_compute(gate_up),
+            patch(f"{MOE_MLP}._EXTRA_CTX") as mock_ctx,
+            patch(f"{MOE_MLP}.HAS_TRITON", False),
+            patch(
+                "torch_npu.npu_clipped_swiglu",
+                return_value=activated,
+                create=True,
+            ) as mock_clipped_swiglu,
+            patch("torch_npu.npu_swiglu", create=True) as mock_swiglu,
+            patch.object(DeviceOperator, "npu_grouped_matmul_swiglu_quant") as mock_fused,
+        ):
+            mock_ctx.moe_comm_type = -1
+            quant_apply_mlp(**kwargs)
+
+        mock_clipped_swiglu.assert_called_once_with(
+            gate_up,
+            alpha=1.702,
+            limit=7.0,
+            bias=1.0,
+            interleaved=False,
+        )
+        mock_swiglu.assert_not_called()
+        mock_fused.assert_not_called()
+
+    def test_w8a8_mc2_uses_minimax_dequant_swiglu_mode(self):
+        gate_up = torch.randint(-8, 8, (1, 8), dtype=torch.int32)
+        activated = torch.randn(1, 4)
+        activation_scale = torch.ones(1)
+        kwargs = self._common_w8a8_kwargs(activation="swigluoai_uninterleave")
+        kwargs.update(
+            fusion=True,
+            swiglu_limit=7.0,
+            swiglu_alpha=1.702,
+            swiglu_beta=1.0,
+        )
+        stream_patch, _ = _patch_npu_stream()
+
+        with (
+            stream_patch,
+            patch(f"{MOE_MLP}._EXTRA_CTX") as mock_ctx,
+            patch("torch_npu.npu_grouped_matmul", return_value=[gate_up], create=True),
+            patch(
+                "torch.ops._C_ascend.npu_dequant_swiglu_quant",
+                return_value=(activated, activation_scale),
+                create=True,
+            ) as mock_dequant_swiglu,
+            patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=torch.randn(1, 4)),
+            patch.object(DeviceOperator, "npu_grouped_matmul_swiglu_quant") as mock_fused,
+            patch(f"{MOE_MLP}.dispose_tensor"),
+        ):
+            mock_ctx.moe_comm_type = MoECommType.MC2
+            quant_apply_mlp(**kwargs)
+
+        dequant_kwargs = mock_dequant_swiglu.call_args.kwargs
+        self.assertEqual(dequant_kwargs["swiglu_mode"], 1)
+        self.assertEqual(dequant_kwargs["clamp_limit"], 7.0)
+        self.assertEqual(dequant_kwargs["glu_alpha"], 1.702)
+        self.assertEqual(dequant_kwargs["glu_bias"], 1.0)
+        mock_fused.assert_not_called()
+
+    def test_unquantized_uses_uninterleaved_clipped_swiglu(self):
+        hidden_states = torch.randn(1, 4)
+        gate_up = torch.randn(1, 8)
+        activated = torch.randn(1, 4)
+        output = torch.randn(1, 4)
+
+        with (
+            patch(
+                "torch_npu.npu_grouped_matmul",
+                side_effect=[[gate_up], [output]],
+                create=True,
+            ),
+            patch(
+                "torch_npu.npu_clipped_swiglu",
+                return_value=activated,
+                create=True,
+            ) as mock_clipped_swiglu,
+            patch("torch_npu.npu_swiglu", create=True) as mock_swiglu,
+        ):
+            actual, _ = unquant_apply_mlp(
+                hidden_states=hidden_states,
+                w1=torch.randn(1, 4, 8),
+                w2=torch.randn(1, 4, 4),
+                group_list=torch.tensor([1], dtype=torch.int64),
+                activation="swigluoai_uninterleave",
+                need_trans=False,
+                swiglu_limit=7.0,
+                swiglu_alpha=1.702,
+                swiglu_beta=1.0,
+            )
+
+        self.assertTrue(actual is output)
+        mock_clipped_swiglu.assert_called_once_with(
+            gate_up,
+            alpha=1.702,
+            limit=7.0,
+            bias=1.0,
+            interleaved=False,
+        )
+        mock_swiglu.assert_not_called()
 
 
 if __name__ == "__main__":
