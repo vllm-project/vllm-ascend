@@ -1256,3 +1256,26 @@
 #       make UvaBuffer a dummy class, mimic the interface of vllm UvaBuffer.
 #    Future Plan:
 #       Remove this patch when NPU support UVA.
+#
+# ** 36. File: hunyuan_vl_processor_compat.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.hunyuan_vision.HunYuanVLProcessingInfo.get_hf_processor`
+#      and the vLLM processor lazy registry
+#    Why:
+#       The supported vLLM refs currently straddle the HunyuanVL processor
+#       cleanup. v0.25.1 still bundles the processor and retains stale
+#       lazy-registry entries, while the verified main ref uses the native
+#       Transformers processor and has the upstream registry cleanup.
+#    How:
+#       Normalize the processor registry, loader, and tokenizer schema on both
+#       refs, and preserve the correct image-token protocol for each lane.
+#    Related PR:
+#       1. https://github.com/vllm-project/vllm/pull/47872
+#       2. https://github.com/vllm-project/vllm/pull/47867
+#    Future Plan:
+#       Remove this patch and delete the `install_hunyuan_vl_processor_compat()`
+#       call from `vllm_ascend/__init__.py` only after both supported vLLM refs
+#       contain `4a6440acefbd4d977620bdb6dfb7fb325cd9bda7` (vLLM PR #47867,
+#       merged into vLLM main at 2026-07-11 07:56:14 UTC), or an equivalent
+#       fix, and the supported HunyuanOCR tokenizer artifacts expose the named
+#       special-token schema required by Transformers 5.13.

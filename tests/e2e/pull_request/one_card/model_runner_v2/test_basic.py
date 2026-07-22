@@ -24,6 +24,7 @@ from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
+from vllm_ascend.utils import vllm_version_is
 
 MODELS = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
 
@@ -33,6 +34,11 @@ DFLASH_MAIN_MODEL = ["Qwen/Qwen3-8B"]
 DFLASH_MODELS = ["z-lab/Qwen3-8B-DFlash-b16"]
 DSPARK_MAIN_MODEL = ["Qwen/Qwen3-8B"]
 DSPARK_MODELS = ["deepseek-ai/dspark_qwen3_8b_block7"]
+
+_SKIP_V025_MRV2_SPEC_DECODE = pytest.mark.skipif(
+    vllm_version_is("0.25.1"),
+    reason="MRV2 speculative decoding is only supported on the verified vLLM main commit",
+)
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -72,6 +78,7 @@ def test_qwen3_dense_eager_mode(
         runner.generate(prompts, sampling_params)
 
 
+@_SKIP_V025_MRV2_SPEC_DECODE
 @pytest.mark.parametrize("model", MAIN_MODELS)
 @pytest.mark.parametrize("eagle_model", EGALE_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
@@ -129,6 +136,7 @@ def test_egale_spec_decoding(
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
+@_SKIP_V025_MRV2_SPEC_DECODE
 @pytest.mark.parametrize("model", DFLASH_MAIN_MODEL)
 @pytest.mark.parametrize("dflash_model", DFLASH_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
@@ -188,6 +196,7 @@ def test_dflash_spec_decoding(
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
+@_SKIP_V025_MRV2_SPEC_DECODE
 @pytest.mark.parametrize("model", DSPARK_MAIN_MODEL)
 @pytest.mark.parametrize("dspark_model", DSPARK_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
