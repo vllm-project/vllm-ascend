@@ -30,7 +30,7 @@ You can use our official docker image to run `PaddleOCR-VL` directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-=== "A2 series"
+=== "Atlas A2 inference products"
 
     ```bash
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
@@ -90,7 +90,7 @@ If you don't want to use the docker image as above, you can also build all from 
 
 ### 5.1 Single-Node Online Deployment
 
-PaddleOCR-VL supports single-node single-card deployment on the A2 series and Atlas inference products platform. Single-node deployment completes both Prefill and Decode within the same node.
+PaddleOCR-VL supports single-node single-card deployment on the Atlas A2 inference products and Atlas inference products platform. Single-node deployment completes both Prefill and Decode within the same node.
 
 Follow these steps to start the inference service:
 
@@ -100,7 +100,7 @@ Follow these steps to start the inference service:
 
 Startup Command:
 
-=== "A2 series"
+=== "Atlas A2 inference products"
 
     ```bash
     #!/bin/sh
@@ -120,6 +120,13 @@ Startup Command:
               --additional_config '{"enable_cpu_binding":true}' \
               --port 8000
     ```
+    Key Parameter Descriptions:
+
+    - `--max-num-batched-tokens` specifies the maximum number of tokens batched in a single forward pass. Adjust this parameter for throughput optimization.
+    - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
+    - `--mm-processor-cache-gb` sets the size of the multimodal processor cache (in GB). A value of `0` disables caching.
+    - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode graph compilation for improved performance.
+    - `--additional_config '{"enable_cpu_binding":true}'` enables CPU binding to improve performance.
 
 === "Atlas inference products"
 
@@ -138,28 +145,25 @@ Startup Command:
               --mm-processor-cache-gb 0 \
               --dtype float16 \
               --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-              --additional_config '{"ascend_compilation_config": {"fuse_norm_quant": false}, "enable_cpu_binding":true}' \
+              --additional_config '{"enable_cpu_binding":true}' \
               --port 8000
     ```
 
-!!! note
+    !!! note
 
-    On Atlas inference products:
+        On Atlas inference products:
 
-    - Only `float16` dtype is supported.
-    - The `--max_model_len` option is added to prevent errors when generating the attention operator mask.
-    - Graph compilation (`--compilation-config`) requires **CANN version >= 9.0.0**. If your CANN version is lower, please revert to eager mode by replacing the `--compilation-config` argument with `--enforce-eager`.
-    - The `fuse_norm_quant` option in `--additional_config` is disabled (`false`) because it is not supported by the graph compilation on this hardware. Keep this setting unchanged.
+        - Only `float16` dtype is supported.
+        - Graph compilation (`--compilation-config`) requires **CANN version >= 9.0.0**. If your CANN version is lower, please revert to eager mode by replacing the `--compilation-config` argument with `--enforce-eager`.
 
-Key Parameter Descriptions:
+    Key Parameter Descriptions:
 
-- `--max-num-batched-tokens` specifies the maximum number of tokens batched in a single forward pass. Adjust this parameter for throughput optimization.
-- `--max_model_len` specifies the maximum context length — that is, the sum of input and output tokens for a single request.
-- `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
-- `--mm-processor-cache-gb` sets the size of the multimodal processor cache (in GB). A value of `0` disables caching.
-- `--dtype float16` specifies the model dtype. On Atlas inference products, only `float16` is supported.
-- `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode graph compilation for improved performance. On Atlas inference products, `fuse_norm_quant` in graph compilation is disabled by default in `--additional_config`.
-- `--additional_config '{"enable_cpu_binding":true}'` enables CPU binding to improve performance.
+    - `--max_model_len` specifies the maximum context length — that is, the sum of input and output tokens for a single request.
+    - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
+    - `--mm-processor-cache-gb` sets the size of the multimodal processor cache (in GB). A value of `0` disables caching.
+    - `--dtype float16` specifies the model dtype. On Atlas inference products, only `float16` is supported.
+    - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode graph compilation for improved performance.
+    - `--additional_config '{"enable_cpu_binding":true}'` enables CPU binding to improve performance.
 
 Common Issues Tip: If you encounter startup issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
@@ -177,9 +181,9 @@ In the above example, we demonstrated how to use vLLM to infer the PaddleOCR-VL-
 
     Use separate virtual environments for VLLM and PP-DocLayoutV2 to prevent dependency conflicts.
 
-=== "A2 series"
+=== "Atlas A2 inference products"
 
-    The A2 series device supports inference using the PaddlePaddle framework.
+    The Atlas A2 inference products device supports inference using the PaddlePaddle framework.
 
     1. Pull the PaddlePaddle-compatible CANN image
 
@@ -342,7 +346,7 @@ PaddleOCR-VL is a lightweight model that runs on a single NPU. The key tuning pa
 
 | Scenario | Hardware | *Total NPUs | Weight Version | Key Considerations |
 |----------|----------|------------|---------------|-------------------|
-| High Throughput | A2 series | 1 | PaddleOCR-VL-0.9B | - |
+| High Throughput | Atlas A2 inference products | 1 | PaddleOCR-VL-0.9B | - |
 | High Throughput | Atlas inference products | 1 | PaddleOCR-VL-0.9B | Graph compilation requires **CANN >= 9.0.0** |
 
 > `*Total NPUs` indicates the total number of NPUs used across all nodes.
@@ -351,8 +355,8 @@ PaddleOCR-VL is a lightweight model that runs on a single NPU. The key tuning pa
 
 | Scenario | Configuration | NPUs | TP | DP | Max Model Len | Max Num Batched Tokens | Graph Compilation | dtype |
 |----------|-------------|------|----|----|---------------|------------------------|--------------------|-------|
-| High Throughput | A2 series / Single Machine | 1 | — | — | — | 16384 | FULL_DECODE_ONLY | bfloat16 (default) |
-| High Throughput | Atlas inference products / Single Machine | 1 | — | — | 16384 | — | FULL_DECODE_ONLY; otherwise enforce-eager | float16 |
+| High Throughput | Atlas A2 inference products / Single Machine | 1 | — | — | — | — | FULL_DECODE_ONLY | bfloat16 (default) |
+| High Throughput | Atlas inference products / Single Machine | 1 | — | — | — | — | FULL_DECODE_ONLY; otherwise enforce-eager | float16 |
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment).
 
