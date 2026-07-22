@@ -2356,10 +2356,6 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
-        # Gemma4 MTP reads the target's KV cache; record an NPU event so the
-        # draft can wait on the target's async KV writes before reading.
-        if getattr(self, "drafter", None) is not None and isinstance(self.drafter, AscendGemma4Proposer):
-            self.drafter.notify_target_forward_done()
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
