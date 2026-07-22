@@ -81,6 +81,7 @@ if not _npu_available:
     except RuntimeError:
         pass
     torch.npu = MagicMock()
+    torch.npu.is_available = MagicMock(return_value=False)
     torch.npu.Stream = MagicMock
     torch.version.cann = None
     torch.distributed.is_hccl_available = MagicMock(return_value=True)
