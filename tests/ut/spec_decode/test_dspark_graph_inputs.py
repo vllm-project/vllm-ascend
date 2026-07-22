@@ -41,9 +41,7 @@ def _make_proposer():
         _context_positions_buffer=positions,
         _context_slot_mapping_buffers=[slots],
         _per_group_context_slot_mapping_buffers={0: slots},
-        _per_group_query_slot_mapping_buffers={
-            0: torch.ones(16, dtype=torch.int32)
-        },
+        _per_group_query_slot_mapping_buffers={0: torch.ones(16, dtype=torch.int32)},
         input_ids=torch.zeros(16, dtype=torch.int32),
         positions=torch.zeros(16, dtype=torch.int32),
         model=_ContextRecorder(),
@@ -54,9 +52,7 @@ def _make_proposer():
         _dspark_context_kv_precomputed=False,
         _precompute_live_context_kv=lambda: None,
     )
-    proposer._primary_context_slot_mapping = lambda: (
-        AscendDSparkProposer._primary_context_slot_mapping(proposer)
-    )
+    proposer._primary_context_slot_mapping = lambda: (AscendDSparkProposer._primary_context_slot_mapping(proposer))
     proposer._use_dspark_context_kv_bucket_graph = lambda _: False
     proposer._get_dspark_context_kv_bucket = lambda num_context: (
         AscendDSparkProposer._get_dspark_context_kv_bucket(
@@ -68,9 +64,7 @@ def _make_proposer():
 
 
 def _bind_live_context_precompute(proposer):
-    proposer._precompute_live_context_kv = lambda: (
-        AscendDSparkProposer._precompute_live_context_kv(proposer)
-    )
+    proposer._precompute_live_context_kv = lambda: (AscendDSparkProposer._precompute_live_context_kv(proposer))
 
 
 def test_dspark_precompute_filters_rejected_context_rows():
@@ -188,9 +182,7 @@ def test_dspark_graph_initializes_only_graph_visible_padding(monkeypatch):
     proposer.input_ids.fill_(1)
     proposer.positions.fill_(1)
     proposer._slot_mapping_buffer = torch.ones(16, dtype=torch.int32)
-    proposer._per_group_query_slot_mapping_buffers = {
-        0: proposer._slot_mapping_buffer
-    }
+    proposer._per_group_query_slot_mapping_buffers = {0: proposer._slot_mapping_buffer}
 
     AscendDSparkProposer._initialize_graph_padding(
         proposer,

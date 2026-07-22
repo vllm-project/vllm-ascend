@@ -57,9 +57,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                 f"num_speculative_tokens={self.num_speculative_tokens}"
             )
         self._dspark_query_tokens_per_req = int(checkpoint_block_size)
-        self._dspark_sample_from_anchor = (
-            self._dspark_query_tokens_per_req == self.num_speculative_tokens
-        )
+        self._dspark_sample_from_anchor = self._dspark_query_tokens_per_req == self.num_speculative_tokens
         self._dspark_draft_buffer = torch.zeros((self.max_batch_size, blk), dtype=torch.int64, device=device)
         self._dspark_seed_buffer = torch.zeros(self.max_batch_size, dtype=torch.int64, device=device)
         # DSpark is not supported in vllm v1, so related property needs to be reset here.
@@ -191,9 +189,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                 context_slots[:bucket],
             )
         finally:
-            cudagraph_monitor.set_cudagraph_capturing_enabled(
-                capture_was_enabled
-            )
+            cudagraph_monitor.set_cudagraph_capturing_enabled(capture_was_enabled)
             forward_context.batch_descriptor = query_batch_descriptor
 
         self._dspark_context_kv_precomputed = True
@@ -215,21 +211,11 @@ class AscendDSparkProposer(AscendDflashProposer):
         filtered_slots: torch.Tensor | list[torch.Tensor | None]
         if isinstance(context_slots, list):
             filtered_slots = [
-                (
-                    slots[:num_context][valid_context]
-                    .to(torch.int32)
-                    .contiguous()
-                    if slots is not None
-                    else None
-                )
+                (slots[:num_context][valid_context].to(torch.int32).contiguous() if slots is not None else None)
                 for slots in context_slots
             ]
         else:
-            filtered_slots = (
-                primary_slots[:num_context][valid_context]
-                .to(torch.int32)
-                .contiguous()
-            )
+            filtered_slots = primary_slots[:num_context][valid_context].to(torch.int32).contiguous()
 
         self.model.precompute_and_store_context_kv(
             self._dflash_hidden_states[:num_context][valid_context].contiguous(),
@@ -259,9 +245,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                 slots[num_context:context_bucket].fill_(-1)
 
         if self.max_query_tokens > num_query_total:
-            self.input_ids[num_query_total : self.max_query_tokens].fill_(
-                self.parallel_drafting_token_id
-            )
+            self.input_ids[num_query_total : self.max_query_tokens].fill_(self.parallel_drafting_token_id)
             self.positions[num_query_total : self.max_query_tokens].zero_()
             for slots in self._per_group_query_slot_mapping_buffers.values():
                 slots[num_query_total : self.max_query_tokens].fill_(-1)
@@ -270,10 +254,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         self,
         forward_context: ForwardContext,
     ) -> bool:
-        if (
-            not self.use_cuda_graph
-            or forward_context.cudagraph_runtime_mode != CUDAGraphMode.FULL
-        ):
+        if not self.use_cuda_graph or forward_context.cudagraph_runtime_mode != CUDAGraphMode.FULL:
             return False
         if self._use_dspark_context_kv_bucket_graph(forward_context):
             if self._precompute_context_kv_bucket_graph(forward_context):
@@ -299,9 +280,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             seq_lens_cpu[actual_num_reqs:padded_num_reqs].fill_(1)
             setattr(common_attn_metadata, attr_name, seq_lens_cpu)
         if hasattr(common_attn_metadata, "actual_seq_lengths_q"):
-            common_attn_metadata.actual_seq_lengths_q = [
-                self._dspark_query_tokens_per_req
-            ] * padded_num_reqs
+            common_attn_metadata.actual_seq_lengths_q = [self._dspark_query_tokens_per_req] * padded_num_reqs
 
     def build_model_inputs_first_pass(
         self,
@@ -389,9 +368,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             attn_group.kv_cache_group_id: torch.zeros(self.max_num_tokens, dtype=torch.int32, device=self.device)
             for attn_group in self.draft_attn_groups
         }
-        self._slot_mapping_buffer = self._per_group_query_slot_mapping_buffers[
-            self.kv_cache_gid
-        ]
+        self._slot_mapping_buffer = self._per_group_query_slot_mapping_buffers[self.kv_cache_gid]
 
     def set_per_group_attn_metadata(
         self,
@@ -498,9 +475,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         else:
             last_position_indices = old_query_start_loc[1:] - 1
             if has_num_rejected:
-                last_position_indices = (
-                    last_position_indices - num_rejected_tokens_gpu
-                )
+                last_position_indices = last_position_indices - num_rejected_tokens_gpu
             last_position_indices = torch.maximum(
                 last_position_indices,
                 old_query_start_loc[:-1],
@@ -511,13 +486,10 @@ class AscendDSparkProposer(AscendDflashProposer):
             ).to(torch.int32)
             new_seq_lens = last_valid_positions + num_query_per_req + 1
 
-        cad.query_start_loc = (
-            self.arange_dflash[: batch_size + 1] * num_query_per_req
-        )
+        cad.query_start_loc = self.arange_dflash[: batch_size + 1] * num_query_per_req
         cad.seq_lens = new_seq_lens
         cad.query_start_loc_cpu = (
-            torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone()
-            * num_query_per_req
+            torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone() * num_query_per_req
         ).to(torch.int32)
         if getattr(cad, "_seq_lens_cpu", None) is not None:
             cad._seq_lens_cpu = new_seq_lens.detach().cpu()

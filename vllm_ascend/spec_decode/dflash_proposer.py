@@ -242,17 +242,13 @@ class AscendDflashProposer(AscendEagleProposer):
                     None,
                 )
                 context_kv_precomputed = (
-                    prepare_context_kv(get_forward_context())
-                    if callable(prepare_context_kv)
-                    else False
+                    prepare_context_kv(get_forward_context()) if callable(prepare_context_kv) else False
                 )
                 try:
                     self._runnable(
                         num_input_tokens=num_input_tokens,
                         batch_size=num_reqs,
-                        token_indices_to_sample=self.token_indices_to_sample[
-                            : num_reqs * self.num_speculative_tokens
-                        ],
+                        token_indices_to_sample=self.token_indices_to_sample[: num_reqs * self.num_speculative_tokens],
                         target_positions=self._get_positions(num_input_tokens),
                         inputs_embeds=None,
                         multi_steps_attn_metadata=multi_steps_attn_metadata,

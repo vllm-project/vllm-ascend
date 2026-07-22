@@ -12,6 +12,7 @@ from vllm.model_executor.models.utils import (
     process_eagle_weight,
 )
 
+
 def get_embedding_tensor(directory_path):
     """
     Scans the directory and returns the first tensor found that contains 'embed' in its key.
@@ -228,15 +229,13 @@ def make_qwen3_dspark_load_weights(rotation_path, original_load_weights):
         result = original_load_weights(self, transformed_weights())
         if transformed_fc:
             logger.warning(
-                "Applied target QuaRot rotation to Qwen3 DSpark fc.weight: "
-                "shape=%s, rotation=%s",
+                "Applied target QuaRot rotation to Qwen3 DSpark fc.weight: shape=%s, rotation=%s",
                 tuple(self.model.fc.weight.shape),
                 rotation_path,
             )
         else:
             logger.warning(
-                "Qwen3 DSpark checkpoint did not provide the expected fc.weight; "
-                "target QuaRot rotation was not applied"
+                "Qwen3 DSpark checkpoint did not provide the expected fc.weight; target QuaRot rotation was not applied"
             )
         return result
 

@@ -118,11 +118,7 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid(
                     0,
                     tl.minimum(pos // block_size, block_table_stride - 1),
                 )
-                block_id_ctx = tl.load(
-                    block_table_ptr
-                    + req_idx * block_table_stride
-                    + block_num_ctx
-                ).to(tl.int64)
+                block_id_ctx = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_ctx).to(tl.int64)
                 slot = block_id_ctx * block_size + (pos % block_size)
                 slot = tl.where(ctx_pos_idx < valid_ctx_end, slot, -1)
             else:

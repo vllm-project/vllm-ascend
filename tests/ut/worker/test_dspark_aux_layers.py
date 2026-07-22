@@ -6,10 +6,7 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 def _runner_with_draft_config(**hf_config_fields):
     runner = object.__new__(NPUModelRunner)
     runner.speculative_config = SimpleNamespace(
-        use_dspark=lambda: True,
-        draft_model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(**hf_config_fields)
-        )
+        use_dspark=lambda: True, draft_model_config=SimpleNamespace(hf_config=SimpleNamespace(**hf_config_fields))
     )
     return runner
 

@@ -229,13 +229,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         enable_glm_dspark_draft_graph = (
             self.method == "dspark"
             and _is_dspark_draft_model(draft_model_config)
-            and os.getenv("VLLM_ASCEND_ENABLE_GLM_DSPARK_DRAFT_GRAPH", "0").lower()
-            in ("1", "true", "yes", "on")
+            and os.getenv("VLLM_ASCEND_ENABLE_GLM_DSPARK_DRAFT_GRAPH", "0").lower() in ("1", "true", "yes", "on")
         )
-        if (
-            _is_glm_model(self.vllm_config.model_config)
-            and not enable_glm_dspark_draft_graph
-        ):
+        if _is_glm_model(self.vllm_config.model_config) and not enable_glm_dspark_draft_graph:
             if self.use_cuda_graph:
                 logger.warning(
                     "GLM series models with speculative decoding currently do "
@@ -1077,11 +1073,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "prepare_dspark_context_kv_for_graph",
                 None,
             )
-            context_kv_precomputed = (
-                prepare_context_kv(forward_context)
-                if callable(prepare_context_kv)
-                else False
-            )
+            context_kv_precomputed = prepare_context_kv(forward_context) if callable(prepare_context_kv) else False
 
             try:
                 # DSpark rewrites cross-attention sequence lengths and slots
@@ -1089,8 +1081,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # replay so the draft query observes the current rollback
                 # state instead of the previous iteration's metadata.
                 update_graph_params_before_run = self.enable_enpu or (
-                    self.method == "dspark"
-                    and forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
+                    self.method == "dspark" and forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
                 )
                 if update_graph_params_before_run:
                     self._update_full_graph_params_if_needed(
