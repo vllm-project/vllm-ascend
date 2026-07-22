@@ -232,6 +232,7 @@ class TestRecordFailedBlocksEdgeCases(unittest.TestCase):
         self.assertEqual(result, {11, 21})
         mock_logger.error.assert_called_once()
 
+
 class TestAscendStoreConnector(unittest.TestCase):
     """Regression tests for connector-level load failure reporting."""
 
