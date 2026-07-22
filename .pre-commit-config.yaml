@@ -64,9 +64,10 @@ repos:
     name: Gitleaks Secret Scan(Local Binary)
     entry: gitleaks
     language: system
-    pass_filenames: true
+    pass_filenames: false
     args:
       - protect
+      - --staged
       - --verbose
       - --redact
       - --config=pre-commit/.gitleaks.toml
