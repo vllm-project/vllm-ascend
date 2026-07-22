@@ -29,42 +29,8 @@
 
 import vllm.model_executor.layers.fused_moe as _fused_moe_pkg
 import vllm.model_executor.layers.fused_moe.layer as _fused_moe_layer
-from vllm.model_executor.layers.fused_moe import MoERunner as _UpstreamMoERunner
 
 from vllm_ascend.utils import is_310p
-
-
-def _has_actual_quantization() -> bool:
-    """Check whether the current model has actual quantization targets.
-
-    Models like Kimi-K2-Thinking declare ``quantization=compressed-tensors``
-    in their config but have no actual quantization scheme (``quantization_config
-    is None``).  For these models we must NOT force AscendMoERunner because
-    the Ascend runner triggers NPU-specific weight-layout processing that
-    doubles peak memory during weight creation and causes OOM on large MoE
-    models.
-
-    Returns:
-        True if the model has real quantization that requires AscendMoERunner.
-    """
-    try:
-        from vllm.config import get_current_vllm_config
-
-        vllm_config = get_current_vllm_config()
-        quant_config = vllm_config.quantization_config
-        if quant_config is None:
-            return False
-        from vllm_ascend.quantization.compressed_tensors_config import (
-            AscendCompressedTensorsConfig,
-        )
-
-        if isinstance(quant_config, AscendCompressedTensorsConfig):
-            target_scheme_map = getattr(quant_config, "target_scheme_map", None)
-            if not target_scheme_map:
-                return False
-        return True
-    except Exception:
-        return True
 
 # Capture the real original before fused_moe.py's module-level code runs.
 _original_FusedMoE = _fused_moe_layer.FusedMoE
@@ -77,13 +43,7 @@ else:
 
 def _ascend_FusedMoE(*args, runner_cls=None, runner_args=None, **kwargs):
     if runner_cls is None:
-        if _has_actual_quantization():
-            runner_cls = _DefaultAscendMoERunner
-        else:
-            # Use the upstream default MoERunner for unquantized models.
-            # This avoids the Ascend-specific weight-layout processing that
-            # doubles peak memory during loading.
-            runner_cls = _UpstreamMoERunner
+        runner_cls = _DefaultAscendMoERunner
     # 'hash' is a DeepSeek V4 flag already consumed before FusedMoE is called;
     # 'tid2eid' is Ascend-specific and must reach AscendMoERunner via runner_args.
     kwargs.pop("hash", None)
