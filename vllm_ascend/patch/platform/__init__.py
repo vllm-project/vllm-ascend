@@ -52,3 +52,6 @@ import vllm_ascend.patch.platform.patch_speculative_config  # noqa
 if not vllm_version_is("0.23.0"):
     import vllm_ascend.patch.platform.patch_fused_moe  # noqa
     import vllm_ascend.patch.platform.patch_dp_device_ids  # noqa
+
+if os.getenv("VLLM_ASCEND_TRACE", "0") == "1":
+    import vllm_ascend.patch.platform.patch_trace  # noqa

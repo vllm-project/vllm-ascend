@@ -539,6 +539,15 @@ def adapt_patch(is_global_patch: bool = False):
         from vllm_ascend.patch import platform  # noqa: F401
     else:
         from vllm_ascend.patch import worker  # noqa: F401
+        # Worker trace patches wrap NPUModelRunner, which is only fully
+        # defined after vllm_ascend.worker.model_runner_v1 finishes
+        # importing. That module imports from vllm_ascend.patch.worker
+        # (via patch_draft_quarot), so applying trace at patch-worker
+        # import time re-enters a partially-initialized model_runner_v1
+        # and raises a circular-import error. Deferring to here ensures
+        # model_runner_v1 is already loaded when trace wraps its targets.
+        if os.getenv("VLLM_ASCEND_TRACE", "0") == "1":
+            import vllm_ascend.patch.worker.patch_trace  # noqa: F401
 
 
 def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None) -> None:
