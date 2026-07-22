@@ -382,8 +382,8 @@ PaddleOCR-VL is a lightweight model that runs on a single NPU. The key tuning pa
 
 | Scenario | Configuration | NPUs | TP | DP | Max Model Len | Max Num Batched Tokens | Graph Compilation | dtype |
 |----------|-------------|------|----|----|---------------|------------------------|--------------------|-------|
-| High Throughput | Atlas A2 inference products / Single Machine | 1 | — | — | — | 16384 | FULL_DECODE_ONLY | bfloat16 (default) |
-| High Throughput | Atlas inference products / Single Machine | 1 | — | — | 16384 | — | FULL_DECODE_ONLY; otherwise enforce-eager | float16 |
+| High Throughput | Atlas A2 inference products / Single Machine | 1 | — | — | — | — | FULL_DECODE_ONLY | bfloat16 (default) |
+| High Throughput | Atlas inference products / Single Machine | 1 | — | — | — | — | FULL_DECODE_ONLY; otherwise enforce-eager | float16 |
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment).
 
