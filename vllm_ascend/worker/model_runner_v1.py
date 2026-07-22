@@ -26,7 +26,7 @@ from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
-from functools import partial
+from functools import partial, reduce
 from multiprocessing import Manager
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
 
@@ -4809,26 +4809,22 @@ class NPUModelRunner(GPUModelRunner):
 
     def calculate_reorder_batch_threshold(self) -> None:
         """
-        Check that if any backends reorder batches; that the reordering
-        is compatible (e.g., decode threshold is the same)
+        Choose the minimum reorder batch threshold from all attention groups.
+        Backends should be able able to support lower threshold then what they request
+        just may have a performance penalty due to that backend treating decodes
+        as prefills
         """
-        for group in self._attn_group_iterator():
-            attn_metadata_builder_i = group.get_metadata_builder()
-            if hasattr(attn_metadata_builder_i, "reorder_batch_threshold"):  # noqa
-                # check that if any backends reorder batches; that the reordering
-                # is compatible (e.g., decode threshold is the same)
-                reorder_batch_threshold_i = attn_metadata_builder_i.reorder_batch_threshold
-                if reorder_batch_threshold_i is not None:  # noqa
-                    if self.reorder_batch_threshold is not None:
-                        if reorder_batch_threshold_i != self.reorder_batch_threshold:
-                            raise ValueError(
-                                f"Attention backend reorders decodes with "
-                                f"threshold {reorder_batch_threshold_i} but other "
-                                f"backend uses threshold "
-                                f"{self.reorder_batch_threshold}"
-                            )
-                    else:
-                        self.reorder_batch_threshold = reorder_batch_threshold_i  # noqa
+        min_none_high = lambda a, b: a if b is None else b if a is None else min(a, b)
+
+        reorder_batch_thresholds: list[int | None] = [
+            group.get_metadata_builder().reorder_batch_threshold
+            for group in self._attn_group_iterator()
+            if hasattr(group.get_metadata_builder(), "reorder_batch_threshold")
+        ]
+        if len(reorder_batch_thresholds) == 0:
+            self.reorder_batch_threshold = None
+            return 
+        self.reorder_batch_threshold = reduce(min_none_high, reorder_batch_thresholds)  # type: ignore[assignment]
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """

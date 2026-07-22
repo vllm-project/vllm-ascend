@@ -267,7 +267,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 speculative_config is not None
                 and speculative_config.num_speculative_tokens is not None
                 and hasattr(speculative_config, "method")
-                and speculative_config.method == "dflash"
+                and speculative_config.method in ("dflash", "dspark")
             ):
                 self.reorder_batch_threshold = 1 + speculative_config.num_speculative_tokens
 
