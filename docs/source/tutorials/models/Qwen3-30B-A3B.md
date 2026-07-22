@@ -36,7 +36,7 @@ These are the recommended numbers of cards, which can be adjusted according to t
 
 If the W8A8 quantized weights are not available for direct download, you can obtain them by quantizing the BF16 model using **msmodelslim**. Refer to the [Quantization Guide](../../user_guide/feature_guide/quantization.md) for details. All model paths in this document should be adjusted to your actual local paths.
 
-!!! note
+:::{note}
 
     Qwen3-30B-A3B-W8A8 adopts a hybrid quantization strategy (ordered by model structure):
 
@@ -45,7 +45,7 @@ If the W8A8 quantized weights are not available for direct download, you can obt
     - **Attention projections** (q/k/v/o_proj): Static W8A8 with pre-computed per-tensor scales
     - **MoE routing gate** (mlp.gate): BF16
     - **MoE expert projections** (gate/up/down_proj): Dynamic W8A8 where input scales are computed on-the-fly during inference
-
+:::
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
@@ -55,9 +55,6 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
 :::::{tab-set}
 ::::{tab-item} Atlas A3 inference products
 :sync: A3
-=== "A3 series"
-
-
     ```{code-block} bash
         :substitutions:
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
@@ -132,12 +129,12 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
 ::::
 ::::{tab-item} Atlas inference products
 
-    ```{code-block} bash
+```{code-block} bash
    :substitutions:
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
 
-    docker run --rm \
+docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
         --net=host \
@@ -153,7 +150,7 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
         -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
-    ```
+```
 ::::
 :::::
 
