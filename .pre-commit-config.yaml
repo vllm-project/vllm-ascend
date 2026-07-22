@@ -68,7 +68,6 @@ repos:
     always_run: true
     args:
       - protect
-      - --staged
       - --verbose
       - --redact
       - --config=pre-commit/.gitleaks.toml
