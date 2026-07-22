@@ -1,6 +1,6 @@
 default_install_hook_types:
   - pre-commit
-  - commit-msg
+  - prepare-commit-msg
 
 default_stages:
   - pre-commit # Run locally
@@ -76,12 +76,13 @@ repos:
     args:
       - -c
       - |
-        if ! grep -q "^Signed-off-by: $(git config user.name) <$(git config user.email)>" "$(git rev-parse --git-path COMMIT_EDITMSG)"; then
-          printf "\nSigned-off-by: $(git config user.name) <$(git config user.email)>\n" >> "$(git rev-parse --git-path COMMIT_EDITMSG)"
+        if ! grep -q "^Signed-off-by: $(git config user.name) <$(git config user.email)>" "$1"; then
+          printf "\nSigned-off-by: $(git config user.name) <$(git config user.email)>\n" >> "$1"
         fi
+      - --
     language: system
     verbose: true
-    stages: [commit-msg]
+    stages: [prepare-commit-msg]
   - id: check-filenames
     name: Check for spaces in all filenames
     entry: bash
