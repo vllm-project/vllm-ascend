@@ -1,0 +1,171 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+# Reusable workflow that polls GitHub commit statuses to determine when all
+# pods for a given test matrix have been launched.
+#
+# Used by:
+#   - schedule_nightly_test_a3.yaml  (double-node)
+#   - schedule_weekly_test_a3.yaml   (double-node)
+#   - schedule_nightly_test_a2.yaml  (multi-node, future)
+
+name: 'Wait for pods launched signal'
+
+on:
+  workflow_call:
+    inputs:
+      matrix_json:
+        required: true
+        type: string
+        description: 'JSON array of test configs [{name, config_file_path}, ...]'
+      filter:
+        required: true
+        type: string
+        description: '"all" or ",name1,name2," (same as parse-trigger output)'
+      context_prefix:
+        required: true
+        type: string
+        description: 'Commit status context prefix, e.g. "double-node-pods-ready"'
+      run_id:
+        required: true
+        type: string
+        description: 'Unique run identifier to match the correct signal (e.g. github.run_id)'
+      max_parallel:
+        required: false
+        default: 4
+        type: number
+        description: 'max-parallel of the upstream matrix job'
+      testcase_timeout_minutes:
+        required: false
+        default: 120
+        type: number
+        description: 'timeout per test case (minutes)'
+      pod_wait_minutes:
+        required: false
+        default: 20
+        type: number
+        description: 'max time for a single pod launch + wait (minutes)'
+      buffer_minutes:
+        required: false
+        default: 20
+        type: number
+        description: 'extra safety buffer (minutes)'
+
+jobs:
+  poll:
+    name: Poll GitHub commit statuses
+    runs-on: ubuntu-latest
+    timeout-minutes: 720
+    steps:
+      - uses: actions/github-script@v9
+        id: poll
+        env:
+          MATRIX_JSON: ${{ inputs.matrix_json }}
+          FILTER: ${{ inputs.filter }}
+          CONTEXT_PREFIX: ${{ inputs.context_prefix }}
+          RUN_ID: ${{ inputs.run_id }}
+          MAX_PARALLEL: ${{ inputs.max_parallel }}
+          TESTCASE_TIMEOUT_MINUTES: ${{ inputs.testcase_timeout_minutes }}
+          POD_WAIT_MINUTES: ${{ inputs.pod_wait_minutes }}
+          BUFFER_MINUTES: ${{ inputs.buffer_minutes }}
+        with:
+          script: |
+            const matrix = JSON.parse(process.env.MATRIX_JSON);
+            const filter = process.env.FILTER.trim();
+            const contextPrefix = process.env.CONTEXT_PREFIX;
+            const runId = process.env.RUN_ID;
+
+            let runningEntries = matrix;
+            if (filter !== 'all') {
+              runningEntries = matrix.filter(entry =>
+                filter.includes(`,${entry.name},`)
+              );
+            }
+
+            const expectedContexts = runningEntries.map(entry =>
+              `${contextPrefix}/${runId}/${entry.name || entry.config_file_path}`
+            );
+
+            console.log(`Expecting ${expectedContexts.length} entries from matrix:`);
+            expectedContexts.forEach(c => console.log(`  - ${c}`));
+
+            if (expectedContexts.length === 0) {
+              console.log('No entries to wait for, done.');
+              return;
+            }
+
+            const maxParallel = parseInt(process.env.MAX_PARALLEL, 10) || 4;
+            const testcaseTimeoutMin = parseInt(process.env.TESTCASE_TIMEOUT_MINUTES, 10) || 120;
+            const podWaitMin = parseInt(process.env.POD_WAIT_MINUTES, 10) || 20;
+            const bufferMin = parseInt(process.env.BUFFER_MINUTES, 10) || 20;
+
+            const N = expectedContexts.length;
+            const batches = Math.ceil(N / maxParallel);
+            const dynamicTimeoutMin = podWaitMin + testcaseTimeoutMin * (batches - 1) + bufferMin;
+
+            console.log(
+              `N=${N} max_parallel=${maxParallel} batches=${batches} ` +
+              `dynamic_timeout=${dynamicTimeoutMin}min`
+            );
+
+            const POLL_INTERVAL_MS = 10_000;
+            const MAX_ATTEMPTS = Math.ceil(dynamicTimeoutMin * 60 * 1000 / POLL_INTERVAL_MS);
+            let readyCount = 0;
+
+            for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+              const { data: statuses } = await github.rest.repos.listCommitStatusesForRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: context.sha,
+              });
+
+              const signaledContexts = new Set(
+                statuses
+                  .filter(s => s.state === 'success' || s.state === 'failure')
+                  .map(s => s.context)
+              );
+
+              if (expectedContexts.every(c => signaledContexts.has(c))) {
+                const failed = expectedContexts.filter(c => {
+                  const st = statuses.find(s => s.context === c);
+                  return st && st.state === 'failure';
+                });
+                if (failed.length > 0) {
+                  console.log(
+                    `Note: ${failed.length} entries signaled failure ` +
+                    `(no pods running, safe to proceed):`
+                  );
+                  failed.forEach(c => console.log(`  - ${c}`));
+                }
+                console.log(`All ${expectedContexts.length} entries have signaled!`);
+                return;
+              }
+
+              readyCount = expectedContexts.filter(c => signaledContexts.has(c)).length;
+              console.log(
+                `[${new Date().toISOString()}] ` +
+                `Waiting... ${readyCount}/${expectedContexts.length} entries signaled ` +
+                `(attempt ${attempt + 1}/${MAX_ATTEMPTS})`
+              );
+
+              await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+            }
+
+            core.setFailed(
+              `Timeout after ${dynamicTimeoutMin} min. ` +
+              `Only ${readyCount}/${expectedContexts.length} entries signaled.`
+            );
