@@ -18,6 +18,7 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from https://github.com/vllm-project/vllm/tree/main/tools
 #
+#
 
 check_command() {
     if ! command -v "$1" &> /dev/null; then
