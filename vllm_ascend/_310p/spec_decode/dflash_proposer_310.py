@@ -37,6 +37,16 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.dspark_proposer import AscendDsparkProposer
 
+# On 310P the target spec-verify forward miscomputes for a verify query length
+# >= 9 (i.e. num_speculative_tokens >= 8): the per-token pre-attention pipeline
+# gets corrupted by the batch token count, collapsing draft acceptance to ~0
+# (verified: qlen<=8 healthy, qlen==9 collapses). The attention op, KV slots,
+# RoPE positions and verify input ids were all proven correct, so the ceiling is
+# a hardware/library limit of the 310P verify path, not this code. Keep
+# num_speculative_tokens within the healthy regime; small values are also best
+# for acceptance in practice (num_spec=3 gives the highest observed rate).
+MAX_RELIABLE_NUM_SPEC_TOKENS_310P = 7
+
 
 def _draft_cache_block_size_310(proposer: Any) -> int | None:
     """Read the block_size actually used by the allocated draft KV cache.
@@ -114,6 +124,22 @@ def _ensure_kernel_block_size_matches_cache_310(proposer: Any) -> None:
     if getattr(proposer, "_kernel_block_size_fixed_310", False):
         return
     proposer._kernel_block_size_fixed_310 = True
+
+    num_spec = getattr(proposer, "num_speculative_tokens", None)
+    if num_spec is not None and num_spec > MAX_RELIABLE_NUM_SPEC_TOKENS_310P:
+        logger.warning(
+            "dflash/dspark on 310P: num_speculative_tokens=%s exceeds the reliable "
+            "limit %s. The 310P target spec-verify forward corrupts draft "
+            "acceptance (drops to ~0) once the verify query length reaches %s "
+            "(num_speculative_tokens>=%s); set num_speculative_tokens<=%s "
+            "(num_speculative_tokens=3 gives the best observed acceptance).",
+            num_spec,
+            MAX_RELIABLE_NUM_SPEC_TOKENS_310P,
+            MAX_RELIABLE_NUM_SPEC_TOKENS_310P + 2,
+            MAX_RELIABLE_NUM_SPEC_TOKENS_310P + 1,
+            MAX_RELIABLE_NUM_SPEC_TOKENS_310P,
+        )
+
     current = getattr(proposer, "kernel_block_size", None)
     try:
         cache_block_size = _draft_cache_block_size_310(proposer)
