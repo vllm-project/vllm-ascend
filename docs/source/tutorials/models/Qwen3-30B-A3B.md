@@ -239,7 +239,8 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 
 > The following command is an example configuration. Adjust the parameters based on your actual scenario.
 
-=== "Atlas 800I A2/A3"
+:::::{tab-set}
+::::{tab-item} Atlas A2 inference products / Atlas A3 inference products
 
     ```bash
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
@@ -268,7 +269,8 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "draft_tensor_parallel_size": 1, "num_speculative_tokens": 3}'
     ```
 
-=== "Atlas inference products"
+::::
+::::{tab-item} Atlas inference products
 
     ```bash
     export VLLM_USE_MODELSCOPE=True
@@ -306,7 +308,9 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     - `--port`: adjust to avoid conflicts with other services running on the same machine.
     - `--no-enable-prefix-caching`: disabled by default as prefix caching effectiveness for this model on Ascend NPUs has not been fully characterized. You can try enabling it to evaluate the cache hit rate for your workload.
     - `--quantization ascend`: required for W8A8 quantized models. Remove this parameter when using BF16 weights.
-:::
+:::{note}
+::::
+:::::
 **Service Verification:**
 
 After the service is started, verify it is running by sending a prompt. Refer to [Section 6](#6-functional-verification) for a usage example.
