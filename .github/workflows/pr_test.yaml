@@ -277,20 +277,11 @@ jobs:
       - name: Recommend tests for current PR
         run: |
           set -euo pipefail
-          PR_SPEC="vllm-project/vllm-ascend#12379"
+          PR_SPEC="vllm-project/vllm-ascend#${{ github.event.pull_request.number }}"
           echo "Selecting tests for PR: ${PR_SPEC}"
           python3 .github/workflows/scripts/test_selector.py \
             --github-pr "${PR_SPEC}" \
             --map-file test_case_map.json
-
-      - name: Upload recommended pytest paths artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-recommended-pytest-paths
-          path: recommended_pytest_paths.txt
-          if-no-files-found: warn
-          retention-days: 14
 
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
