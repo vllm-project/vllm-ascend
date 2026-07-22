@@ -154,7 +154,6 @@ Key parameters Descriptions:
 - `--gpu-memory-utilization 0.9` sets the fraction of device memory available to the vLLM executor. Lower this value if other workloads share the NPU.
 - `--enforce-eager` disables graph execution. It is used in the Atlas 300I A2 2UP example for compatibility.
 
-
 When the service starts successfully, the log contains `Application startup complete`. If startup fails, see the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
 
 ## 6 Functional Verification

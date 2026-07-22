@@ -279,6 +279,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 
 ::::
 :::::
+
 Key parameters:
 
 - `--tensor-parallel-size 2` maps the model across two Atlas inference devices. Adjust it together with `ASCEND_RT_VISIBLE_DEVICES` according to the available devices and memory.
@@ -290,14 +291,16 @@ Key parameters:
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,32]}'` enables decode ACLGraph replay and explicitly limits capture sizes for Atlas inference products.
 - `--no-enable-prefix-caching` is the default recommendation for this Atlas inference products example to reduce memory pressure.
 - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
-    
+
+
 :::{note}
 
-    - `ASCEND_RT_VISIBLE_DEVICES`: must be set to the NPU chip IDs allocated to your environment (e.g., `0,1,2,3` for 4 chips).
-    - `--port`: adjust to avoid conflicts with other services running on the same machine.
-    - `--no-enable-prefix-caching`: disabled by default as prefix caching effectiveness for this model on Ascend NPUs has not been fully characterized. You can try enabling it to evaluate the cache hit rate for your workload.
-    - `--quantization ascend`: required for W8A8 quantized models. Remove this parameter when using BF16 weights.
+- `ASCEND_RT_VISIBLE_DEVICES`: must be set to the NPU chip IDs allocated to your environment (e.g., `0,1,2,3` for 4 chips).
+- `--port`: adjust to avoid conflicts with other services running on the same machine.
+- `--no-enable-prefix-caching`: disabled by default as prefix caching effectiveness for this model on Ascend NPUs has not been fully characterized. You can try enabling it to evaluate the cache hit rate for your workload.
+- `--quantization ascend`: required for W8A8 quantized models. Remove this parameter when using BF16 weights.
 :::
+
 :::{tip}
 
     For parameter details, refer to:
