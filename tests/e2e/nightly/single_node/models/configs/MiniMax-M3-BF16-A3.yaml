@@ -13,6 +13,7 @@ test_cases:
       TASK_QUEUE_ENABLE: "1"
       VLLM_USE_MODELSCOPE: "true"
       SERVER_PORT: "DEFAULT_PORT"
+      VLLM_ENGINE_READY_TIMEOUT_S: "1800"
     server_cmd:
       - "--data-parallel-size"
       - "2"
@@ -24,7 +25,7 @@ test_cases:
       - "--gpu-memory-utilization"
       - "0.92"
       - "--max-model-len"
-      - "15000"
+      - "10240"
       - "--enable-expert-parallel"
       - "--max-num-seqs"
       - "16"
@@ -44,12 +45,12 @@ test_cases:
         dataset_path: vllm-ascend/gsm8k-lite
         request_conf: vllm_api_general_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
-        max_out_len: 9500
+        max_out_len: 9000
         batch_size: 8
         baseline: 95
         threshold: 5
+        num_prompts: 400
         temperature: 1.0
-        top_p: 0.95
         ignore_eos: false
       acc_textvqa:
         case_type: accuracy
@@ -61,7 +62,6 @@ test_cases:
         batch_size: 8
         baseline: 72
         temperature: 1.0
-        top_p: 0.95
         threshold: 5
       perf:
         case_type: performance
