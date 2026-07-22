@@ -576,12 +576,8 @@ In the standard single-node deployment mode, Prefill (prompt processing) and Dec
 
 PD (Prefill-Decode) separation addresses these issues by running Prefill and Decode on dedicated node groups, each configured independently:
 
-- **Prefill nodes** focus on high-throughput prompt processing, optimized for compute and communication.
+- **Prefill nodes** focus on high-throughput prompt processing, optimized for compute and communication (e.g., enabling FlashComm for Allreduce acceleration).
 - **Decode nodes** focus on low-latency token generation, optimized for memory bandwidth (e.g., enabling async-scheduling and full-decode aclgraph).
-
-:::::::{tab-set}
-
-::::::{tab-item} Atlas 800 A3
 
 For `Qwen3.5-27B-w8a8` and `Qwen3.6-27B-w8a8`, a typical **1P1D** configuration requires **2 Atlas 800 A3 (64G × 16) nodes** (1 Prefill node + 1 Decode node), with **TP=2** and **DP=8** on each node, which fully utilizes all 16 NPUs of an Atlas A3. The example below uses `Qwen3.5-27B-w8a8`; for `Qwen3.6-27B-w8a8`, replace the model path with `Eco-Tech/Qwen3.6-27B-w8a8` and adjust `--served-model-name` to `qwen3.6` (and `--max-model-len` to 262144 if needed).
 
@@ -633,34 +629,35 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     export HCCL_BUFFSIZE=1024
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
-        --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --seed 1024 \
-        --quantization ascend \
-        --served-model-name qwen3.5 \
-        --trust-remote-code \
-        --max-num-seqs 4 \
-        --max-model-len 32768 \
-        --max-num-batched-tokens 16384 \
-        --no-enable-prefix-caching \
-        --gpu-memory-utilization 0.95 \
-        --enforce-eager \
-        --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-        --additional-config '{"enable_cpu_binding":true}' \
-        --kv-transfer-config \
-        '{"kv_connector": "MooncakeConnectorV1",
-        "kv_role": "kv_producer",
-        "kv_port": "30000",
-        "engine_id": "0",
-        "kv_connector_extra_config": {
+      --host 0.0.0.0 \
+      --port $2 \
+      --data-parallel-size $3 \
+      --data-parallel-rank $4 \
+      --data-parallel-address $5 \
+      --data-parallel-rpc-port $6 \
+      --tensor-parallel-size $7 \
+      --seed 1024 \
+      --quantization ascend \
+      --served-model-name qwen3.5 \
+      --trust-remote-code \
+      --max-num-seqs 4 \
+      --max-model-len 32768 \
+      --max-num-batched-tokens 16384 \
+      --no-enable-prefix-caching \
+      --gpu-memory-utilization 0.95 \
+      --enforce-eager \
+      --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+      --additional-config '{"enable_cpu_binding":true}' \
+      --kv-transfer-config \
+      '{"kv_connector": "MooncakeConnectorV1",
+      "kv_role": "kv_producer",
+      "kv_port": "30000",
+      "engine_id": "0",
+      "kv_connector_extra_config": {
                 "prefill": {
                         "dp_size": 8,
                         "tp_size": 2
@@ -668,9 +665,9 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
                 "decode": {
                         "dp_size": 8,
                         "tp_size": 2
-                }
             }
-        }'
+        }
+      }'
     ```
 
 3. Decode Node 0 `run_dp_template.sh` script. You can get the template in the repository's examples: [run_dp_template.sh](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh).
@@ -700,46 +697,47 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
-        --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --seed 1024 \
-        --quantization ascend \
-        --served-model-name qwen3.5 \
-        --trust-remote-code \
-        --max-num-seqs 16 \
-        --max-model-len 32768 \
-        --max-num-batched-tokens 2048 \
-        --no-enable-prefix-caching \
-        --gpu-memory-utilization 0.91 \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"recompute_scheduler_enable":true,"enable_cpu_binding":true}' \
-        --async-scheduling \
-        --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-        --kv-transfer-config \
-        '{"kv_connector": "MooncakeConnectorV1",
-        "kv_role": "kv_consumer",
-        "kv_port": "30200",
-        "engine_id": "1",
-        "kv_connector_extra_config": {
-                    "prefill": {
-                            "dp_size": 8,
-                            "tp_size": 2
-                    },
-                    "decode": {
-                            "dp_size": 8,
-                            "tp_size": 2
-                }
+      --host 0.0.0.0 \
+      --port $2 \
+      --data-parallel-size $3 \
+      --data-parallel-rank $4 \
+      --data-parallel-address $5 \
+      --data-parallel-rpc-port $6 \
+      --tensor-parallel-size $7 \
+      --seed 1024 \
+      --quantization ascend \
+      --served-model-name qwen3.5 \
+      --trust-remote-code \
+      --max-num-seqs 16 \
+      --max-model-len 32768 \
+      --max-num-batched-tokens 2048 \
+      --no-enable-prefix-caching \
+      --gpu-memory-utilization 0.91 \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --additional-config '{"recompute_scheduler_enable":true,"enable_cpu_binding":true}' \
+      --async-scheduling \
+      --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+      --kv-transfer-config \
+      '{"kv_connector": "MooncakeConnectorV1",
+      "kv_role": "kv_consumer",
+      "kv_port": "30200",
+      "engine_id": "1",
+      "kv_connector_extra_config": {
+                "prefill": {
+                        "dp_size": 8,
+                        "tp_size": 2
+                },
+                "decode": {
+                        "dp_size": 8,
+                        "tp_size": 2
             }
-        }'
+        }
+      }'
     ```
 
 Key Parameter Descriptions:
 
+- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the Allreduce communication optimization on prefill nodes, which reduces the communication overhead of long-context prefill.
 - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
 - `--async-scheduling` (on decode nodes): enables asynchronous scheduling, which can reduce TPOT for high-concurrency decode workloads.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` (on decode nodes): enables the full-decode aclgraph mode, which significantly reduces scheduling latency on the decode side.
@@ -786,216 +784,6 @@ Key Parameter Descriptions:
       --decoder-ports \
         7100 7101 7102 7103 7104 7105 7106 7107 \
     ```
-
-::::::
-
-::::::{tab-item} Ascend950DT series
-
-For `Qwen3.5-27B-w8a8-MXFP8` and `Qwen3.6-27B-w8a8-MXFP8`, a typical **1P1D** configuration requires **2 Ascend950DT series (96G × 8) nodes** (1 Prefill node + 1 Decode node), with **TP=1** and **DP=8** on each node, which fully utilizes all 8 NPUs of an Ascend950DT series. The example below uses `Qwen3.5-27B-w8a8-MXFP8`; for `Qwen3.6-27B-w8a8-MXFP8`, replace the model path with `Eco-Tech/Qwen3.6-27B-w8a8-MXFP8` and adjust `--served-model-name` to `qwen3.6` (and `--max-model-len` to 262144 if needed).
-
-> **Note**: Since `Qwen3.5-27B` and `Qwen3.6-27B` fit in a single node, multi-node PD separation is only recommended for high-concurrency production deployments. For the Mooncake deployment specifics, please refer to the [Mooncake Multi-Node PD Disaggregation Guide](../features/pd_disaggregation_mooncake_multi_node.md).
-
-To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
-
-- Deploy a `launch_online_dp.py` script and a `run_dp_template.sh` script on each node;
-- Deploy a `load_balance_proxy_server_example.py` script on the prefill master node to forward requests.
-
-1. `launch_online_dp.py` is used to launch external dp vllm servers.
-    [launch_online_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
-
-    Parameter descriptions:
-
-    |Parameter|Type|Required|Default|Description|
-    |---------|----|--------|-------|-----------|
-    |`--dp-size`|int|Yes|-|Data parallel size (total number of DP ranks across all nodes).|
-    |`--tp-size`|int|No|1|Tensor parallel size within each DP rank.|
-    |`--dp-size-local`|int|No|(same as `--dp-size`)|Number of DP ranks on the current node. If not set, defaults to `--dp-size`.|
-    |`--dp-rank-start`|int|No|0|Starting rank offset for data parallel ranks on this node.|
-    |`--dp-address`|str|Yes|-|IP address of the data parallel master node (node 0).|
-    |`--dp-rpc-port`|str|No|12345|RPC port for data parallel master communication.|
-    |`--vllm-start-port`|int|No|9000|Starting port for each vLLM engine instance on this node. Each DP rank's engine port = `vllm_start_port` + local rank index.|
-
-2. Prefill Node 0 `run_dp_template.sh` script. You can get the template in the repository's examples: [run_dp_template.sh](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh).
-
-    ```shell
-    # nic_name is the network interface name corresponding to local_ip of the current node
-    nic_name="xxx"
-    local_ip="141.xx.xx.1"
-
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-
-    # [Optional] jemalloc
-    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-    # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
-    export TASK_QUEUE_ENABLE=1
-    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
-
-    export HCCL_BUFFSIZE=1024
-    export ASCEND_RT_VISIBLE_DEVICES=$1
-
-    vllm serve Eco-Tech/Qwen3.5-27B-w8a8-MXFP8 \
-        --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --seed 1024 \
-        --quantization ascend \
-        --served-model-name qwen3.5 \
-        --trust-remote-code \
-        --max-num-seqs 4 \
-        --max-model-len 32768 \
-        --max-num-batched-tokens 16384 \
-        --no-enable-prefix-caching \
-        --gpu-memory-utilization 0.95 \
-        --enforce-eager \
-        --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-        --additional-config '{"enable_cpu_binding":true}' \
-        --kv-transfer-config \
-        '{"kv_connector": "MooncakeConnectorV1",
-        "kv_role": "kv_producer",
-        "kv_port": "30000",
-        "engine_id": "0",
-        "kv_connector_extra_config": {
-                    "prefill": {
-                            "dp_size": 8,
-                            "tp_size": 1
-                    },
-                    "decode": {
-                            "dp_size": 8,
-                            "tp_size": 1
-                }
-            }
-        }'
-    ```
-
-3. Decode Node 0 `run_dp_template.sh` script. You can get the template in the repository's examples: [run_dp_template.sh](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh).
-
-    ```shell
-    # nic_name is the network interface name corresponding to local_ip of the current node
-    nic_name="xxx"
-    local_ip="141.xx.xx.2"
-
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-
-    # [Optional] jemalloc
-    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-    # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
-    export TASK_QUEUE_ENABLE=1
-    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
-
-    export HCCL_BUFFSIZE=1024
-    export ASCEND_RT_VISIBLE_DEVICES=$1
-
-    vllm serve Eco-Tech/Qwen3.5-27B-w8a8-MXFP8 \
-        --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --seed 1024 \
-        --quantization ascend \
-        --served-model-name qwen3.5 \
-        --trust-remote-code \
-        --max-num-seqs 16 \
-        --max-model-len 32768 \
-        --max-num-batched-tokens 2048 \
-        --no-enable-prefix-caching \
-        --gpu-memory-utilization 0.91 \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"recompute_scheduler_enable":true,"enable_cpu_binding":true}' \
-        --async-scheduling \
-        --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-        --kv-transfer-config \
-        '{"kv_connector": "MooncakeConnectorV1",
-        "kv_role": "kv_consumer",
-        "kv_port": "30200",
-        "engine_id": "1",
-        "kv_connector_extra_config": {
-                    "prefill": {
-                            "dp_size": 8,
-                            "tp_size": 1
-                    },
-                    "decode": {
-                            "dp_size": 8,
-                            "tp_size": 1
-                }
-            }
-        }'
-    ```
-
-Key Parameter Descriptions:
-
-- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
-- `--async-scheduling` (on decode nodes): enables asynchronous scheduling, which can reduce TPOT for high-concurrency decode workloads.
-- `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` (on decode nodes): enables the full-decode aclgraph mode, which significantly reduces scheduling latency on the decode side.
-
-4. Run server for each node:
-
-    ```shell
-    # p0 (Prefill node 0)
-    python launch_online_dp.py --dp-size 8 --tp-size 1 --dp-size-local 8 --dp-rank-start 0 --dp-address 141.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
-    # d0 (Decode node 0)
-    python launch_online_dp.py --dp-size 8 --tp-size 1 --dp-size-local 8 --dp-rank-start 0 --dp-address 141.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
-    ```
-
-5. Run the proxy server on the prefill master node.
-
-    You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py).
-
-    Note: Since each node has 8 DP ranks (with `--vllm-start-port 7100` + local rank index, occupying ports 7100-7107), you need to list all 8 ports for each node in the proxy command:
-
-    ```shell
-    python load_balance_proxy_server_example.py \
-        --port 1999 \
-        --host 141.xx.xx.1 \
-        --prefiller-hosts \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
-        --prefiller-ports \
-        7100 7101 7102 7103 7104 7105 7106 7107 \
-        --decoder-hosts \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
-        --decoder-ports \
-        7100 7101 7102 7103 7104 7105 7106 7107 \
-    ```
-
-::::::
-
-:::::::
 
 Deployment Verification:
 
