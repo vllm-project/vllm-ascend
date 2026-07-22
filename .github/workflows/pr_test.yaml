@@ -291,6 +291,7 @@ jobs:
       - name: Recommend tests for current PR
         run: |
           set -euo pipefail
+          pip install regex --quiet
           PR_SPEC="vllm-project/vllm-ascend#${{ github.event.pull_request.number }}"
           echo "Selecting tests for PR: ${PR_SPEC}"
           python3 .github/workflows/scripts/test_selector.py \
