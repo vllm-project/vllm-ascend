@@ -38,7 +38,19 @@ class BasePattern(ABC):
     def get_extra_stream_scope_check(self):
         return extra_stream_scope_check
 
-    def register(self, pm_pass: PatternMatcherPass) -> None:
+    def get_extra_check(self):
+        return lambda _: True
+
+    def get_combined_extra_check(self):
+        stream_check = self.get_extra_stream_scope_check()
+        extra_check = self.get_extra_check()
+
+        def combined_check(match):
+            return stream_check(match) and extra_check(match)
+
+        return combined_check
+
+    def register(self, pm_pass: PatternMatcherPass, *, register_nge: bool = True) -> None:
         # Create a unique identifier for this pattern based on class name and eps
         pattern_id = f"{self.__class__.__name__}_{self.eps}"
 
@@ -50,14 +62,23 @@ class BasePattern(ABC):
         replacement_fn = self.get_replacement()
         example_inputs = self.get_inputs()
 
-        pm.register_replacement(pattern_fn, replacement_fn, example_inputs, pm.fwd_only, pm_pass)
-
-        nge.register_replacement(
-            search_fn=pattern_fn,
-            replace_fn=replacement_fn,
-            example_inputs=example_inputs,
-            extra_check=self.get_extra_stream_scope_check(),
+        extra_check = self.get_extra_check()
+        pm.register_replacement(
+            pattern_fn,
+            replacement_fn,
+            example_inputs,
+            pm.fwd_only,
+            pm_pass,
+            extra_check=extra_check,
         )
+
+        if register_nge:
+            nge.register_replacement(
+                search_fn=pattern_fn,
+                replace_fn=replacement_fn,
+                example_inputs=example_inputs,
+                extra_check=self.get_combined_extra_check(),
+            )
 
         # Mark this pattern as registered
         _registered_patterns.add(pattern_id)
