@@ -896,8 +896,8 @@ class KVPoolWorker:
                             continue
                         peer_block_id = peer_block_ids_for_group[peer_block_idx]
                         peer_skip_null = (
-                                peer_group_id < len(self.group_uses_align_state)
-                                and self.group_uses_align_state[peer_group_id]
+                            peer_group_id < len(self.group_uses_align_state)
+                            and self.group_uses_align_state[peer_group_id]
                         )
                         if peer_skip_null and peer_block_id <= 0:
                             continue

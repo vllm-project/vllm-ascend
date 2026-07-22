@@ -621,11 +621,11 @@ class KVTransferThread(threading.Thread):
         return mask_allows_chunk(masks, group_id, start)
 
     def _collect_peer_block_ids(
-            self,
-            start: int,
-            block_ids_by_group: list[list[int]],
-            group_ids: list[int],
-            skip_null_blocks_by_group: list[bool] | None = None,
+        self,
+        start: int,
+        block_ids_by_group: list[list[int]],
+        group_ids: list[int],
+        skip_null_blocks_by_group: list[bool] | None = None,
     ) -> set[int]:
         peer_block_ids: set[int] = set()
         for group_id in group_ids:
@@ -637,9 +637,9 @@ class KVTransferThread(threading.Thread):
                 continue
             block_id = group_block_ids[block_idx]
             skip_null = (
-                    skip_null_blocks_by_group is not None
-                    and group_id < len(skip_null_blocks_by_group)
-                    and skip_null_blocks_by_group[group_id]
+                skip_null_blocks_by_group is not None
+                and group_id < len(skip_null_blocks_by_group)
+                and skip_null_blocks_by_group[group_id]
             )
             if skip_null and block_id <= 0:
                 continue
