@@ -73,12 +73,13 @@ class AscendDFlashSpeculator(DFlashSpeculator):
     # keep the current name for now as upstream may change it again.
     def build_draft_attn_metadatas(self, num_reqs_padded):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
+        causal = not self.requires_non_causal
         with build_attn_metadata_wrapper():
             attn_metadata = self._build_draft_attn_metadata(
                 num_reqs=num_reqs_padded,
                 num_reqs_padded=num_reqs_padded,
                 num_tokens_padded=num_tokens_padded,
-                causal=self.dflash_causal,
+                causal=causal,
             )
         return [attn_metadata]
 
