@@ -366,17 +366,17 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         pertoken_scale = None
         if quant_type == QuantType.W8A8:
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
-        elif quant_type in (QuantType.MXFP8, QuantType.W4A8MXFP):
+        elif quant_type == QuantType.MXFP8:
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
                 hidden_states,
                 dst_type=torch.float8_e4m3fn,
             )
-        elif quant_type == QuantType.MXFP4:
-            hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
-                hidden_states,
-                dst_type=torch_npu.float4_e2m1fn_x2,
-                round_mode="round",
-            )
+        elif quant_type in (QuantType.MXFP4, QuantType.W4A8MXFP):
+            # Keep MXFP4 activation quantization in the MoE MLP path. For
+            # W4A8MXFP, init routing performs activation quantization with
+            # quant_mode=3. Pre-quantizing either type here requires routing
+            # operator variants that are not available in all CANN runtimes.
+            pass
 
         if self.multistream_overlap_gate:
             assert PrepareAndFinalize.quant_stream is not None
