@@ -16,6 +16,7 @@
 #
 
 import torch
+import torch_npu
 from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
@@ -28,12 +29,69 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
+
+def _chunk_gated_delta_rule_fused(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    initial_state: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    scale: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused prefill path using ``torch_npu.npu_chunk_gated_delta_rule``.
+
+    Drop-in replacement for the Triton ``chunk_gated_delta_rule`` pipeline
+    (chunk_scaled_dot_kkt_fwd + solve_tril + recompute_w_u_fwd + ...).
+    The fused CANN operator expects TND layout and does NOT apply q/k L2 norm
+    or the chunk-local cumsum of ``g`` internally, so q/k are normalized here
+    and the raw ``g`` is passed through.
+
+    Args:
+        q, k: ``[1, T, Nk, Dk]``   v: ``[1, T, Nv, Dv]``
+        g, beta: ``[1, T, Nv]``    g is fp32 (<=0), beta is (0, 1).
+        initial_state: ``[N, Nv, Dv, Dk]`` — same layout as ``ssm_state``,
+            no transpose required.
+        cu_seqlens: cumulative prefill query start locations ``[N+1]``.
+        scale: query scaling factor (``Dk ** -0.5``).
+
+    Returns:
+        o: ``[1, T, Nv, Dv]`` and final_state: ``[N, Nv, Dv, Dk]``.
+    """
+    # TND layout: drop the leading batch dim (batch size is always 1 here).
+    q = l2norm_fwd(q).squeeze(0).contiguous()  # [T, Nk, Dk]
+    k = l2norm_fwd(k).squeeze(0).contiguous()  # [T, Nk, Dk]
+    v = v.squeeze(0).contiguous()  # [T, Nv, Dv]
+    g = g.squeeze(0).to(torch.float32).contiguous()  # [T, Nv]
+    beta = beta.squeeze(0).to(v.dtype).contiguous()  # [T, Nv]
+
+    # The fused op only supports a bfloat16 initial_state, while ssm_state may be
+    # float32 (the recurrent path keeps fp32 state). Cast to bf16 here.
+    initial_state = initial_state.to(torch.bfloat16).contiguous()
+
+    # actual_seq_lengths is per-batch sequence length [N] (per the interface doc),
+    # derived from the cumulative query_start_loc.
+    actual_seq_lengths = torch.diff(cu_seqlens).to(torch.int32)
+
+    o, final_state = torch_npu.npu_chunk_gated_delta_rule(
+        q,
+        k,
+        v,
+        beta=beta,
+        initial_state=initial_state,
+        actual_seq_lengths=actual_seq_lengths,
+        scale=scale,
+        g=g,
+    )
+    return o.unsqueeze(0), final_state
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
@@ -399,22 +457,47 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 g_non_spec = g_non_spec[:, num_decode_tokens:]
                 beta_non_spec = beta_non_spec[:, num_decode_tokens:]
 
-            initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
-            clear_ssm_states(initial_state, prefill_has_initial_state)
-            (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
-                q=query_non_spec,
-                k=key_non_spec,
-                v=value_non_spec,
-                g=g_non_spec,
-                beta=beta_non_spec,
-                initial_state=initial_state,
-                output_final_state=True,
-                cu_seqlens=prefill_query_start_loc,
-                prebuilt_meta=attn_metadata.non_spec_prefill_metadata.chunk,
-                head_first=False,
-                use_qk_l2norm_in_kernel=True,
+            # Select the fused CANN operator via env var. The fused op only
+            # supports the non-PCP case; keep the Triton pipeline as default.
+            use_fused_chunk = (
+                get_ascend_config().enable_gdn_fused_chunk and get_pcp_group().world_size == 1
             )
-            ssm_state[prefill_state_indices] = last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
+            if use_fused_chunk:
+                # The fused op's state layout [N, Nv, Dv, Dk] matches ssm_state
+                # directly, so no transpose is needed. Advanced indexing already
+                # returns a copy, safe to clear in place.
+                initial_state = ssm_state[prefill_state_indices]
+                clear_ssm_states(initial_state, prefill_has_initial_state)
+                (core_attn_out_non_spec, last_recurrent_state) = _chunk_gated_delta_rule_fused(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    initial_state=initial_state,
+                    cu_seqlens=prefill_query_start_loc,
+                    scale=key_non_spec.shape[-1] ** -0.5,
+                )
+                ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+            else:
+                initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
+                clear_ssm_states(initial_state, prefill_has_initial_state)
+                (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    initial_state=initial_state,
+                    output_final_state=True,
+                    cu_seqlens=prefill_query_start_loc,
+                    prebuilt_meta=attn_metadata.non_spec_prefill_metadata.chunk,
+                    head_first=False,
+                    use_qk_l2norm_in_kernel=True,
+                )
+                ssm_state[prefill_state_indices] = (
+                    last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
+                )
             if split_non_spec:
                 core_attn_out_non_spec = torch.cat(
                     [core_attn_out_decode, core_attn_out_non_spec],
