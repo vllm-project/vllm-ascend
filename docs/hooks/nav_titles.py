@@ -189,7 +189,6 @@ TITLES = {
         "en": "Expert Parallelism Load Balancer",
         "zh": "专家并行负载均衡",
     },
-    "user_guide/feature_guide/external_dp.md": {"en": "External DP", "zh": "外部数据并行"},
     "user_guide/feature_guide/flash_attention.md": {"en": "Flash Attention", "zh": "Flash 注意力"},
     "user_guide/feature_guide/graph_mode.md": {"en": "Graph Mode", "zh": "图模式"},
     "user_guide/feature_guide/kv_cache_cpu_offload.md": {"en": "KV Cache CPU Offload", "zh": "KV Cache CPU 卸载"},
