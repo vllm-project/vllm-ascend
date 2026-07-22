@@ -336,7 +336,6 @@ curl http://localhost:8000/v1/chat/completions \
 :::
 Expected result: HTTP 200 with a JSON response containing the `choices` field with generated text.
 
-
 ## 7 Accuracy Evaluation
 
 ### Using AISBench
