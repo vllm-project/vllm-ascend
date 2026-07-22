@@ -459,9 +459,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
             # Select the fused CANN operator via env var. The fused op only
             # supports the non-PCP case; keep the Triton pipeline as default.
-            use_fused_chunk = (
-                get_ascend_config().enable_gdn_fused_chunk and get_pcp_group().world_size == 1
-            )
+            use_fused_chunk = get_ascend_config().enable_gdn_fused_chunk and get_pcp_group().world_size == 1
             if use_fused_chunk:
                 # The fused op's state layout [N, Nv, Dv, Dk] matches ssm_state
                 # directly, so no transpose is needed. Advanced indexing already
@@ -495,9 +493,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     head_first=False,
                     use_qk_l2norm_in_kernel=True,
                 )
-                ssm_state[prefill_state_indices] = (
-                    last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
-                )
+                ssm_state[prefill_state_indices] = (last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype))
             if split_non_spec:
                 core_attn_out_non_spec = torch.cat(
                     [core_attn_out_decode, core_attn_out_non_spec],
