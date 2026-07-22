@@ -117,7 +117,7 @@ If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci
 ```{code-block} bash
    :substitutions:
 
-export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 
 docker run \
         --name vllm-ascend-env \
