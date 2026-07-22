@@ -251,13 +251,14 @@ def _patch_make_empty_intermediate_tensors(
 def patch_eagle3_pp_aux_propagation(inner_model: nn.Module) -> bool:
     from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model
     from vllm.model_executor.models.interfaces import EagleModelMixin
+    from vllm.model_executor.models.minimax_m2 import MiniMaxM2Model
 
     if isinstance(inner_model, DeepseekV2Model):
         make_forward = _make_deepseek_v2_forward
         include_boundary_aux = False
     elif isinstance(inner_model, EagleModelMixin):
         _install_eagle_mixin_pp_aux_helpers()
-        make_forward = _make_eagle_mixin_forward
+        make_forward = None if isinstance(inner_model, MiniMaxM2Model) else _make_eagle_mixin_forward
         include_boundary_aux = True
     else:
         logger.warning(
@@ -267,7 +268,7 @@ def patch_eagle3_pp_aux_propagation(inner_model: nn.Module) -> bool:
         )
         return False
 
-    if not getattr(inner_model, "_eagle3_pp_aux_forward_patched", False):
+    if make_forward is not None and not getattr(inner_model, "_eagle3_pp_aux_forward_patched", False):
         inner_model.forward = make_forward().__get__(inner_model, type(inner_model))
         inner_model._eagle3_pp_aux_forward_patched = True
     _patch_make_empty_intermediate_tensors(inner_model, include_boundary_aux)
