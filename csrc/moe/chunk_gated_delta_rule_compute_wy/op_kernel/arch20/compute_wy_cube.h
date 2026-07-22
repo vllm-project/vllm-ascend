@@ -106,26 +106,20 @@ class WyCubeGemm {
   }
 
   // R = R + P @ R for one RHS block (U or W). rLda may be alignN > nDim.
+  // Bulk UB<->GM copies (no per-row sync). halfScratch holds P then R as contiguous half;
+  // floatScratch (>= 64*nDim floats, e.g. tmpBuf_ [64,max(K,V)]) holds C for Add.
   __aicore__ inline void GemmApplyAdd(LocalTensor<float> rUb, const LocalTensor<float> pUb,
-                                      LocalTensor<half> halfScratch, LocalTensor<half> halfRow,
-                                      LocalTensor<float> rowScratch, uint32_t nDim, uint32_t rLda, bool useU)
+                                      LocalTensor<half> halfScratch, LocalTensor<float> floatScratch, uint32_t nDim,
+                                      uint32_t rLda, bool useU)
   {
+    // P[64,64] -> A on GM
     Cast(halfScratch, pUb, RoundMode::CAST_NONE, WY_CUBE_CHUNK * WY_CUBE_CHUNK);
     PipeBarrier<PIPE_V>();
     CopyHalfRowsToGm(aGm_, halfScratch, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
 
-    for (uint32_t row = 0; row < WY_CUBE_CHUNK; ++row) {
-      Cast(halfRow, rUb[row * rLda], RoundMode::CAST_NONE, nDim);
-      PipeBarrier<PIPE_V>();
-      event_t evtV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
-      SetFlag<HardEvent::V_MTE3>(evtV);
-      WaitFlag<HardEvent::V_MTE3>(evtV);
-      DataCopyParams params{1, static_cast<uint16_t>((nDim * sizeof(half) + 31) / 32), 0, 0};
-      DataCopy(bGm_[static_cast<uint64_t>(row) * nDim], halfRow, params);
-      event_t evtM = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
-      SetFlag<HardEvent::MTE3_V>(evtM);
-      WaitFlag<HardEvent::MTE3_V>(evtM);
-    }
+    // R[64,nDim] (possibly strided) -> contiguous half -> B on GM
+    CastFloatRowsToHalfContiguous(halfScratch, rUb, WY_CUBE_CHUNK, nDim, rLda);
+    CopyHalfRowsToGm(bGm_, halfScratch, WY_CUBE_CHUNK, nDim, nDim);
     PipeBarrier<PIPE_ALL>();
 
     if (useU) {
@@ -145,18 +139,35 @@ class WyCubeGemm {
     }
     PipeBarrier<PIPE_ALL>();
 
-    for (uint32_t row = 0; row < WY_CUBE_CHUNK; ++row) {
-      DataCopyParams params{1, static_cast<uint16_t>((nDim * sizeof(float) + 31) / 32), 0, 0};
-      DataCopy(rowScratch, cGm_[static_cast<uint64_t>(row) * nDim], params);
-      event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
-      SetFlag<HardEvent::MTE2_V>(evt);
-      WaitFlag<HardEvent::MTE2_V>(evt);
-      Add(rUb[row * rLda], rUb[row * rLda], rowScratch, nDim);
-      PipeBarrier<PIPE_V>();
+    // C[64,nDim] from GM -> floatScratch, then R += C
+    CopyFloatRowsFromGm(floatScratch, cGm_, WY_CUBE_CHUNK, nDim, nDim);
+    event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+    SetFlag<HardEvent::MTE2_V>(evt);
+    WaitFlag<HardEvent::MTE2_V>(evt);
+    if (rLda == nDim) {
+      Add(rUb, rUb, floatScratch, WY_CUBE_CHUNK * nDim);
+    } else {
+      for (uint32_t row = 0; row < WY_CUBE_CHUNK; ++row) {
+        Add(rUb[row * rLda], rUb[row * rLda], floatScratch[row * nDim], nDim);
+      }
     }
+    PipeBarrier<PIPE_V>();
   }
 
  private:
+  __aicore__ inline void CastFloatRowsToHalfContiguous(LocalTensor<half> dst, const LocalTensor<float> src,
+                                                       uint32_t rows, uint32_t cols, uint32_t srcLda) const
+  {
+    if (srcLda == cols) {
+      Cast(dst, src, RoundMode::CAST_NONE, rows * cols);
+    } else {
+      for (uint32_t row = 0; row < rows; ++row) {
+        Cast(dst[row * cols], src[row * srcLda], RoundMode::CAST_NONE, cols);
+      }
+    }
+    PipeBarrier<PIPE_V>();
+  }
+
   __aicore__ inline void CopyHalfRowsToGm(GlobalTensor<half> dst, const LocalTensor<half> src, uint32_t rows,
                                           uint32_t cols, uint32_t lda) const
   {
