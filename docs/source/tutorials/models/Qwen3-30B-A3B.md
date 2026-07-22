@@ -36,7 +36,7 @@ These are the recommended numbers of cards, which can be adjusted according to t
 
 If the W8A8 quantized weights are not available for direct download, you can obtain them by quantizing the BF16 model using **msmodelslim**. Refer to the [Quantization Guide](../../user_guide/feature_guide/quantization.md) for details. All model paths in this document should be adjusted to your actual local paths.
 
-!!! note
+:::{note}
 
     Qwen3-30B-A3B-W8A8 adopts a hybrid quantization strategy (ordered by model structure):
 
@@ -45,22 +45,35 @@ If the W8A8 quantized weights are not available for direct download, you can obt
     - **Attention projections** (q/k/v/o_proj): Static W8A8 with pre-computed per-tensor scales
     - **MoE routing gate** (mlp.gate): BF16
     - **MoE expert projections** (gate/up/down_proj): Dynamic W8A8 where input scales are computed on-the-fly during inference
-
+:::
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
 You can use the official all-in-one Docker image for Qwen3 MoE models.
 
-=== "A3 series"
+**Docker Pull:**
 
-    **Docker Run:**
+```{code-block} bash
+   :substitutions:
 
-    ```bash
+docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+```
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+**Docker Run:**
 
-    docker run \
+Start the docker image on your each node.
+
+:::::{tab-set}
+::::{tab-item} Atlas A3 inference products
+:sync: A3
+
+```{code-block} bash
+   :substitutions:
+
+export IMAGE=quay.io/ascend/vllm-ascend:| vllm_ascend_version |-a3
+
+docker run \
         --name vllm-ascend-env \
         --ipc host \
         --net host \
@@ -91,20 +104,22 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
         -it -d $IMAGE bash
     ```
 
-    !!! note
+:::{note}
 
-        A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
-        If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
+A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
+If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
+:::
 
-=== "A2 series"
+::::
+::::{tab-item} Atlas A2 inference products
+:sync: A2
 
-    **Docker Run:**
+```{code-block} bash
+   :substitutions:
 
-    ```bash
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
-
-    docker run \
+docker run \
         --name vllm-ascend-env \
         --ipc host \
         --net host \
@@ -126,13 +141,15 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
         -v /usr/local/sbin:/usr/local/sbin \
         -it -d $IMAGE bash
     ```
-=== "Atlas inference products"
+::::
+::::{tab-item} Atlas inference products
 
-    **Docker Run:**
+```{code-block} bash
+   :substitutions:
 
-    ```bash
+**Docker Run:**
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
 
     docker run --rm \
         --name vllm-ascend \
@@ -150,12 +167,9 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
         -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
-    ```
 
-!!! tip
-    The mounts above are the minimum required for NPU driver access. Add additional `-v` mounts (e.g., model weight paths, datasets) as needed for your environment.
-
-The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed as Python packages in site-packages.
+::::
+:::::
 
 **Installation Verification:**
 
@@ -193,14 +207,15 @@ If you prefer not to use the Docker image, you can build from source. Install vL
    pip install -e .
    ```
 
-!!! note
+:::{note}
+
 
     For Atlas inference products, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas inference products:
 
     ```bash
     pip uninstall -y triton-ascend triton
     ```   
-
+:::
 **Installation Verification:**
 
 ```bash
@@ -209,11 +224,12 @@ pip show vllm vllm-ascend
 
 Expected result: The version information for both packages is displayed, confirming a successful installation.
 
-!!! note
+:::{note}
 
     If deploying a multi-node environment, set up the environment on each node.
 
 For more details, please refer to the [Installation Guide](../../installation.md).
+:::
 
 ## 5 Online Service Deployment
 
@@ -285,21 +301,13 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
     - To enable MTP speculative decoding, use --speculative_config '{"method": "mtp", "num_speculative_tokens": 1}'. We recommend setting num_speculative_tokens to 1.
 
-!!! note
+:::{note}
 
     - `ASCEND_RT_VISIBLE_DEVICES`: must be set to the NPU chip IDs allocated to your environment (e.g., `0,1,2,3` for 4 chips).
     - `--port`: adjust to avoid conflicts with other services running on the same machine.
     - `--no-enable-prefix-caching`: disabled by default as prefix caching effectiveness for this model on Ascend NPUs has not been fully characterized. You can try enabling it to evaluate the cache hit rate for your workload.
     - `--quantization ascend`: required for W8A8 quantized models. Remove this parameter when using BF16 weights.
-
-!!! tip
-
-    For parameter details, refer to:
-
-    - [vLLM CLI documentation](https://docs.vllm.ai/en/stable/cli/) — standard serve parameters (`--host`, `--port`, `--max-model-len`, etc.)
-    - [Environment Variables](../../user_guide/configuration/env_vars.md) — Ascend-specific environment variables (`HCCL_*`, etc.)
-    - [Additional Configuration](../../user_guide/configuration/additional_config.md) — `--additional-config` format and options
-
+:::
 **Service Verification:**
 
 After the service is started, verify it is running by sending a prompt. Refer to [Section 6](#6-functional-verification) for a usage example.
@@ -325,12 +333,13 @@ curl http://localhost:8000/v1/chat/completions \
     }'
 ```
 
-!!! note
+:::{note}
 
     Adjust the following fields based on your deployment:
 
     - **URL** (`http://localhost:8000`): Replace `localhost` and `8000` with your server IP and the `--port` value from the `vllm serve` command.
     - **`model`**: Must match the `--served-model-name` value from the `vllm serve` command (e.g., `qwen3`).
+:::
 
 Expected result: HTTP 200 with a JSON response containing the `choices` field with generated text.
 
@@ -388,14 +397,14 @@ The following table lists the `--datasets` parameter for each evaluation dataset
 
 For dataset preparation, please refer to the [AISBench Datasets Guide](https://github.com/AISBench/benchmark/blob/master/docs/source_zh_cn/get_started/datasets.md).
 
-!!! note
+:::{note}
 
     vLLM-Ascend also supports the following evaluation tools:
 
     - [lm_eval](../../developer_guide/evaluation/using_lm_eval.md)
     - [OpenCompass](../../developer_guide/evaluation/using_opencompass.md)
     - [EvalScope](../../developer_guide/evaluation/using_evalscope.md)
-
+:::
 **Accuracy Results (Atlas 800I A3, vLLM-Ascend v0.22.1rc, W8A8):**
 
 | Dataset       | Metric                | Score  |

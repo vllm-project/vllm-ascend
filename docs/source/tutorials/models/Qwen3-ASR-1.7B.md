@@ -28,12 +28,28 @@ Download the weights to a directory that is accessible from the deployment envir
 
 Use the vLLM-Ascend Docker image that corresponds to your hardware. Replace the model-weight mount with the path used in your environment.
 
-=== "Atlas A2 inference products"
+**Docker Pull:**
 
-    ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+```{code-block} bash
+   :substitutions:
 
-    docker run --rm \
+docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+```
+
+**Docker Run:**
+
+Start the docker image on your each node.
+
+:::::{tab-set}
+::::{tab-item} A2 series
+:sync: A22
+
+```{code-block} bash
+   :substitutions:
+
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+
+docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
         --net host \
@@ -48,14 +64,19 @@ Use the vLLM-Ascend Docker image that corresponds to your hardware. Replace the 
         -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it -d $IMAGE bash
-    ```
+```
 
-=== "Atlas inference products"
+::::
+::::{tab-item} Atlas inference products
 
-    ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
+```{code-block} bash
+   :substitutions:
 
-    docker run --rm \
+**Docker Run:**
+
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
+
+docker run --rm \
         --name vllm-ascend \
         --shm-size=10g \
         --net host \
@@ -70,8 +91,9 @@ Use the vLLM-Ascend Docker image that corresponds to your hardware. Replace the 
         -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it -d $IMAGE bash
-    ```
-
+```
+::::
+:::::
 Verify that the container is running and that the installed package version matches the image tag:
 
 ```bash
@@ -85,14 +107,14 @@ Expected result: `docker ps` lists the container with status `Up`, and `pip show
 
 f you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../installation.md).
 
-!!! note
+:::{note}
 
     For Atlas inference products, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas inference products:
 
     ```bash
     pip uninstall -y triton-ascend triton
     ```
-
+:::
 To verify the source installation:
 
 ```bash
@@ -105,9 +127,9 @@ pip show vllm-ascend
 
 Single-node deployment runs both audio prefill and decoding on one NPU, making it suitable for development, testing, and small-scale ASR services. Replace `your_model_path` with the local model directory, or use `Qwen/Qwen3-ASR-1.7B` to download the model through the configured model hub.
 
-=== "Atlas A2 inference products"
+Atlas A2 inference products
 
-    ```shell
+    ```bash
     vllm serve your_model_path \
       --served-model-name qwen3-asr \
       --tensor-parallel-size 1 \
@@ -117,9 +139,9 @@ Single-node deployment runs both audio prefill and decoding on one NPU, making i
       --port 8000
     ```
 
-=== "Atlas inference products"
+Atlas inference products
 
-    ```shell
+    ```bash
     vllm serve your_model_path \
       --served-model-name qwen3-asr \
       --tensor-parallel-size 1 \
@@ -131,12 +153,13 @@ Single-node deployment runs both audio prefill and decoding on one NPU, making i
       --port 8000
     ```
 
-    !!! note
+    :::{note}
 
         - `--tensor-parallel-size 1` uses one NPU. Increase it only after confirming that the hardware and deployment topology support the chosen parallel configuration.
         - `--max-model-len 4096` limits the maximum sequence length. On Atlas 300I DUO, always specify a conservative value explicitly; automatic detection can allocate an oversized attention mask and cause an out-of-memory error.
         - `--gpu-memory-utilization 0.9` sets the fraction of device memory available to the vLLM executor. Lower this value if other workloads share the NPU.
         - `--enforce-eager` disables graph execution. It is used in the Atlas 300I A2 2UP example for compatibility.
+    :::
 
 When the service starts successfully, the log contains `Application startup complete`. If startup fails, see the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
 
