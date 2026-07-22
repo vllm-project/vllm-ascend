@@ -311,14 +311,14 @@ def filter_chunked_req_indices(
     """
     assert mask_for_non_zero_chunk is not None and len(seq_len) == len(mask_for_non_zero_chunk)
     offsets = torch.cumsum(torch.cat([torch.tensor([0]), seq_len[:-1]]), dim=0)
-    filtered_indices = torch.cat(
-        [
-            torch.arange(offsets[i], offsets[i] + seq_len[i])
-            for i in range(len(mask_for_non_zero_chunk))
-            if mask_for_non_zero_chunk[i]
-        ]
-    )
-    return filtered_indices
+    filtered_ranges = [
+        torch.arange(offsets[i], offsets[i] + seq_len[i])
+        for i in range(len(mask_for_non_zero_chunk))
+        if mask_for_non_zero_chunk[i]
+    ]
+    if not filtered_ranges:
+        return torch.empty(0, dtype=torch.long, device=seq_len.device)
+    return torch.cat(filtered_ranges)
 
 
 def split_decodes_and_prefills(

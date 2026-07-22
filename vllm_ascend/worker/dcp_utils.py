@@ -468,7 +468,7 @@ class DCPManager:
         cumulative = np.cumsum(scheduled)
         self.query_start_loc_full.np[0] = 0
         self.query_start_loc_full.np[1 : self.num_reqs + 1] = cumulative
-        self.query_start_loc_full.np[self.num_reqs + 1 :].fill_(-1)
+        self.query_start_loc_full.np[self.num_reqs + 1 :].fill(-1)
         self.query_start_loc_full.copy_to_gpu()
 
         if self.use_async_scheduling:
@@ -577,7 +577,7 @@ class DCPManager:
             target[rank_seq_lens.shape[0] :].fill_(0)
         elif is_mla:
             attn_metadata.decode.cp_seq_len = rank_seq_lens
-        else:
+        elif attn_metadata.decode_meta is not None:
             attn_metadata.decode_meta.num_computed_tokens_of_dcp = (
                 local_seq_lens.numpy()
             )

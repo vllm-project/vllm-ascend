@@ -10,7 +10,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -128,3 +128,52 @@ def test_generate_mtp_attention_mask_for_decode(dcp_rank: int) -> None:
         actual[0, :num_scheduled, :local_k_len],
         expected,
     )
+
+
+def test_generate_dcp_mtp_input_fills_query_start_loc_tail() -> None:
+    manager = object.__new__(DCPManager)
+    manager.num_reqs = 2
+    manager.use_async_scheduling = False
+    manager.decode_threshold = 2
+    manager.query_start_loc_full = MagicMock()
+    manager.query_start_loc_full.np = np.zeros(5, dtype=np.int32)
+    input_batch = MagicMock()
+    input_batch.req_ids = ["request-0", "request-1"]
+
+    manager.generate_dcp_mtp_input(
+        total_num_scheduled_tokens=5,
+        num_scheduled_tokens={"request-0": 2, "request-1": 3},
+        input_batch=input_batch,
+        req_indices=np.arange(5, dtype=np.int32),
+        positions_np=np.arange(5, dtype=np.int64),
+        cu_num_tokens=np.array([2], dtype=np.int32),
+    )
+
+    np.testing.assert_array_equal(
+        manager.query_start_loc_full.np,
+        np.array([0, 2, 5, -1, -1], dtype=np.int32),
+    )
+    manager.query_start_loc_full.copy_to_gpu.assert_called_once_with()
+
+
+def test_update_spec_decode_drafting_metadata_skips_prefill() -> None:
+    manager = object.__new__(DCPManager)
+    manager.dcp_world_rank = 0
+    manager._get_dcp_local_seq_lens = MagicMock(
+        return_value=torch.tensor([[4, 3]], dtype=torch.int32)
+    )
+    attn_metadata = MagicMock()
+    attn_metadata.decode_meta = None
+
+    with (
+        patch.object(DCPManager, "_is_mla_kv_cache_spec", return_value=False),
+        patch.object(DCPManager, "_is_sfa_dcp_metadata_builder", return_value=False),
+    ):
+        manager.update_spec_decode_drafting_cp_metadata(
+            attn_metadata=attn_metadata,
+            kv_cache_spec=object(),
+            seq_lens=torch.tensor([3]),
+            draft_index=0,
+        )
+
+    assert attn_metadata.decode_meta is None
