@@ -52,12 +52,14 @@ If the W8A8 quantized weights are not available for direct download, you can obt
 
 You can use the official all-in-one Docker image for Qwen3 MoE models.
 
+:::::{tab-set}
+::::{tab-item} Atlas A3 inference products
+:sync: A3
 === "A3 series"
 
-    **Docker Run:**
 
-    ```bash
-
+    ```{code-block} bash
+        :substitutions:
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
 
     docker run \
@@ -91,17 +93,17 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
         -it -d $IMAGE bash
     ```
 
-    !!! note
+    :::{note}
 
         A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
         If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
+:::
 
-=== "A2 series"
-
-    **Docker Run:**
-
-    ```bash
-
+::::
+::::{tab-item} Atlas A2 inference products
+:sync: A2
+  ```{code-block} bash
+   :substitutions:
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
     docker run \
@@ -126,11 +128,12 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
         -v /usr/local/sbin:/usr/local/sbin \
         -it -d $IMAGE bash
     ```
-=== "Atlas inference products"
 
-    **Docker Run:**
+::::
+::::{tab-item} Atlas inference products
 
-    ```bash
+    ```{code-block} bash
+   :substitutions:
 
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
 
@@ -151,9 +154,8 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```
-
-!!! tip
-    The mounts above are the minimum required for NPU driver access. Add additional `-v` mounts (e.g., model weight paths, datasets) as needed for your environment.
+::::
+:::::
 
 The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed as Python packages in site-packages.
 
@@ -193,14 +195,14 @@ If you prefer not to use the Docker image, you can build from source. Install vL
    pip install -e .
    ```
 
-!!! note
+:::{note}
 
     For Atlas inference products, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas inference products:
 
     ```bash
     pip uninstall -y triton-ascend triton
     ```   
-
+:::
 **Installation Verification:**
 
 ```bash
@@ -209,10 +211,10 @@ pip show vllm vllm-ascend
 
 Expected result: The version information for both packages is displayed, confirming a successful installation.
 
-!!! note
+:::{note}
 
     If deploying a multi-node environment, set up the environment on each node.
-
+:::
 For more details, please refer to the [Installation Guide](../../installation.md).
 
 ## 5 Online Service Deployment
@@ -222,8 +224,8 @@ For more details, please refer to the [Installation Guide](../../installation.md
 Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and small-to-medium scale inference scenarios. For the Qwen3-30B-A3B MoE model, Expert Parallelism (EP) is required to distribute experts across NPUs.
 
 > The following command is an example configuration. Adjust the parameters based on your actual scenario.
-
-=== "Atlas 800I A2/A3"
+:::::{tab-set}
+::::{tab-item} Atlas A2 inference products / Atlas A3 inference products
 
     ```bash
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
@@ -251,8 +253,8 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --port 8000 \
         --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "draft_tensor_parallel_size": 1, "num_speculative_tokens": 3}'
     ```
-
-=== "Atlas inference products"
+::::
+::::{tab-item} Atlas inference products
 
     ```bash
     export VLLM_USE_MODELSCOPE=True
@@ -280,25 +282,28 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     - `--max-num-seqs 16` limits concurrent active requests to reduce KV cache and graph capture pressure on Atlas inference products.
     - `--gpu-memory-utilization` controls KV cache capacity. Reduce it if startup or runtime requests report OOM.
     - `--additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}'` disables norm-quant fusion for the Atlas inference products serving path.
-    - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}'` enables decode ACLGraph replay and explicitly limits capture sizes for Atlas inference products.
+    - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,32]}'` enables decode ACLGraph replay and explicitly limits capture sizes for Atlas inference products.
     - `--no-enable-prefix-caching` is the default recommendation for this Atlas inference products example to reduce memory pressure.
     - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
-    - To enable MTP speculative decoding, use --speculative_config '{"method": "mtp", "num_speculative_tokens": 1}'. We recommend setting num_speculative_tokens to 1.
+    
+::::
+:::::
 
-!!! note
+:::{note}
 
     - `ASCEND_RT_VISIBLE_DEVICES`: must be set to the NPU chip IDs allocated to your environment (e.g., `0,1,2,3` for 4 chips).
     - `--port`: adjust to avoid conflicts with other services running on the same machine.
     - `--no-enable-prefix-caching`: disabled by default as prefix caching effectiveness for this model on Ascend NPUs has not been fully characterized. You can try enabling it to evaluate the cache hit rate for your workload.
     - `--quantization ascend`: required for W8A8 quantized models. Remove this parameter when using BF16 weights.
-
-!!! tip
+:::
+:::{tip}
 
     For parameter details, refer to:
 
     - [vLLM CLI documentation](https://docs.vllm.ai/en/stable/cli/) — standard serve parameters (`--host`, `--port`, `--max-model-len`, etc.)
     - [Environment Variables](../../user_guide/configuration/env_vars.md) — Ascend-specific environment variables (`HCCL_*`, etc.)
     - [Additional Configuration](../../user_guide/configuration/additional_config.md) — `--additional-config` format and options
+:::
 
 **Service Verification:**
 
@@ -310,7 +315,7 @@ After the service is started, the model can be invoked by sending a prompt.
 
 **Chat Completions API:**
 
-```shell
+```bash
 curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
@@ -324,15 +329,14 @@ curl http://localhost:8000/v1/chat/completions \
         "max_completion_tokens": 4096
     }'
 ```
-
-!!! note
-
+:::{note}
     Adjust the following fields based on your deployment:
 
     - **URL** (`http://localhost:8000`): Replace `localhost` and `8000` with your server IP and the `--port` value from the `vllm serve` command.
     - **`model`**: Must match the `--served-model-name` value from the `vllm serve` command (e.g., `qwen3`).
-
+:::
 Expected result: HTTP 200 with a JSON response containing the `choices` field with generated text.
+
 
 ## 7 Accuracy Evaluation
 
@@ -388,14 +392,14 @@ The following table lists the `--datasets` parameter for each evaluation dataset
 
 For dataset preparation, please refer to the [AISBench Datasets Guide](https://github.com/AISBench/benchmark/blob/master/docs/source_zh_cn/get_started/datasets.md).
 
-!!! note
+:::{note}
 
     vLLM-Ascend also supports the following evaluation tools:
 
     - [lm_eval](../../developer_guide/evaluation/using_lm_eval.md)
     - [OpenCompass](../../developer_guide/evaluation/using_opencompass.md)
     - [EvalScope](../../developer_guide/evaluation/using_evalscope.md)
-
+:::
 **Accuracy Results (Atlas 800I A3, vLLM-Ascend v0.22.1rc, W8A8):**
 
 | Dataset       | Metric                | Score  |
@@ -545,14 +549,14 @@ vllm serve your_model_path \
     --speculative-config '{"method": "eagle3","model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
 ```
 
-!!! tip
+:::{tip}
 
     Example AISBench settings for this configuration:
 
     - `request_rate`: 0
     - `batch_size`: 32
     - Input/Output length: 2048/2048 or 3500/1500
-
+:::
 **High Throughput Configuration:**
 
 ```shell
@@ -581,14 +585,14 @@ vllm serve your_model_path \
     --speculative-config '{"method": "eagle3","model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
 ```
 
-!!! tip
+:::{tip}
 
     Example AISBench settings for this configuration:
 
     - `request_rate`: 0
     - `batch_size`: 32
     - Input/Output length: 2048/2048 or 3500/1500
-
+:::
 **Long Context Configuration:**
 
 ```shell
@@ -619,14 +623,14 @@ vllm serve your_model_path \
     --hf-overrides '{"rope_parameters": {"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}}'
 ```
 
-!!! tip
+:::{tip}
 
     Example AISBench settings for this configuration:
 
     - `request_rate`: 0
     - `batch_size`: 32
     - Input/Output length: 65536/1024 or 131072/1024
-
+:::
 ### 9.2 Tuning Guidelines
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
