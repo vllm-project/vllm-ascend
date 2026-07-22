@@ -42,6 +42,7 @@ Atlas inference products and Atlas 200I Pro do not support `enable_npugraph_ex`.
 
 Atlas 200I Pro requires additional device nodes and driver mounts. See [Set up using Docker](installation.md#set-up-using-docker) for the complete container commands.
 ```
+
 ::::
 ::::{tab-item} Atlas inference products
 
