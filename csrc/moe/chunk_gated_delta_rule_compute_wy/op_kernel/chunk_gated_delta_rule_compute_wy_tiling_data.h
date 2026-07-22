@@ -25,8 +25,9 @@ struct alignas(8) ChunkGatedDeltaRuleComputeWyTilingData {
     uint32_t usedCoreNum;
     uint32_t reserved0;
     TCubeTiling mmAttn;
-    TCubeTiling mmU;
-    TCubeTiling mmW;
+    TCubeTiling mmSquare;
+    TCubeTiling mmApplyU;
+    TCubeTiling mmApplyW;
 };
 #pragma pack(pop)
 

@@ -22,8 +22,9 @@ TILING_DATA_FIELD_DEF(uint32_t, perCoreWorkspaceBytes);
 TILING_DATA_FIELD_DEF(uint32_t, usedCoreNum);
 TILING_DATA_FIELD_DEF(uint32_t, reserved0);
 TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, mmAttn);
-TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, mmU);
-TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, mmW);
+TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, mmSquare);
+TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, mmApplyU);
+TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, mmApplyW);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(ChunkGatedDeltaRuleComputeWy, ChunkGatedDeltaRuleComputeWyTilingData)
