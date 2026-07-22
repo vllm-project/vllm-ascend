@@ -22,8 +22,8 @@ from torch import nn
 from vllm.logger import logger
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
-from vllm_ascend.spec_decode.domino_correction import domino_correct, domino_correct_fused
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
+from vllm_ascend.spec_decode.domino_correction import domino_correct, domino_correct_fused
 
 
 class AscendDominoProposer(AscendDflashProposer):
@@ -35,8 +35,40 @@ class AscendDominoProposer(AscendDflashProposer):
     above are layered on top.
     """
 
+    # Domino's correction hook is semantic model logic, not an optional reduce-
+    # sampling optimization. The base proposer must call it even when
+    # enable_reduce_sample is disabled.
+    requires_custom_draft_sampling = True
+    _SUPPORTED_CANDIDATE_TOPK = (0, 64)
+
     def __init__(self, vllm_config, device: torch.device, runner=None):
         super().__init__(vllm_config, device, runner=runner)
+
+        parallel_config = getattr(vllm_config, "parallel_config", None)
+        target_tp = getattr(parallel_config, "tensor_parallel_size", 1) or 1
+        draft_tp = getattr(self.speculative_config, "draft_tensor_parallel_size", 1) or 1
+        if target_tp != 1 or draft_tp != 1:
+            raise ValueError(
+                "Domino currently requires target and draft tensor_parallel_size=1; "
+                f"got target_tp={target_tp}, draft_tp={draft_tp}. The correction "
+                "head is not vocab-sharded and cannot index a TP-local embedding safely."
+            )
+
+        self._domino_shift_label = None
+        additional_config = getattr(vllm_config, "additional_config", None) or {}
+        candidate_topk = additional_config.get("domino_candidate_topk", 0)
+        if (
+            isinstance(candidate_topk, bool)
+            or not isinstance(candidate_topk, int)
+            or candidate_topk not in self._SUPPORTED_CANDIDATE_TOPK
+        ):
+            raise ValueError(
+                "additional_config.domino_candidate_topk must be one of "
+                f"{self._SUPPORTED_CANDIDATE_TOPK}; got {candidate_topk!r}."
+            )
+        # Fixed at engine initialization, so top-k output shapes stay stable
+        # across ACL graph capture and replay.
+        self.domino_candidate_topk = candidate_topk
         # Bonus (last accepted) token buffer for aclgraph capture. Must be a
         # FIXED tensor (not None) so the captured graph's control flow matches
         # between dummy_run (zeros) and real propose (actual bonus copied in by
@@ -48,12 +80,19 @@ class AscendDominoProposer(AscendDflashProposer):
         # it is populated later by ``load_model()``. Do not touch it here.
         logger.info(
             "[spec_decode/domino] AscendDominoProposer initialized: "
-            "num_speculative_tokens=%s.",
+            "num_speculative_tokens=%s, candidate_topk=%s.",
             self.num_speculative_tokens,
+            self.domino_candidate_topk,
         )
 
     def load_model(self, model: nn.Module) -> None:
         super().load_model(model)
+        self._domino_shift_label = getattr(self.model, "shift_label", None)
+        if self._domino_shift_label is not True:
+            raise ValueError(
+                "Domino requires dflash_config.shift_label=true because its "
+                "proposal positions are shifted to include the bonus token."
+            )
         # Precompute the gi lookup table (and split fc1 into w_z/w_s) BEFORE
         # aclgraph capture (dummy_run), so these are cached on the draft model
         # and not re-recorded on every graph replay. super().load_model has
@@ -63,6 +102,14 @@ class AscendDominoProposer(AscendDflashProposer):
         )
 
         _get_domino_correction_weights(self.model)
+        if self.domino_candidate_topk:
+            vocab_size = self.model.lm_head.weight.shape[0]
+            if self.domino_candidate_topk > vocab_size:
+                raise ValueError(
+                    "additional_config.domino_candidate_topk must not exceed "
+                    f"the draft vocabulary size; got {self.domino_candidate_topk} "
+                    f"for vocab_size={vocab_size}."
+                )
 
     def set_inputs_first_pass(
         self,
@@ -91,6 +138,11 @@ class AscendDominoProposer(AscendDflashProposer):
             num_prefill_reqs=num_prefill_reqs,
             num_decode_reqs=num_decode_reqs,
         )
+
+        if self._domino_shift_label is not True:
+            raise RuntimeError(
+                "Domino proposal requested without validated shift_label=true."
+            )
 
         # shift_label=true: the bonus (root) position (q_idx=0) contributes the
         # first draft token via next-token prediction. The DFlash kernel wrote
@@ -127,6 +179,7 @@ class AscendDominoProposer(AscendDflashProposer):
                 num_speculative_tokens=self.num_speculative_tokens,
                 model=self.model,
                 bonus_token_ids=self._domino_bonus_buf,
+                candidate_topk=self.domino_candidate_topk,
             )
         except ImportError:
             return domino_correct(
@@ -134,4 +187,5 @@ class AscendDominoProposer(AscendDflashProposer):
                 num_speculative_tokens=self.num_speculative_tokens,
                 model=self.model,
                 bonus_token_ids=self._domino_bonus_buf,
+                candidate_topk=self.domino_candidate_topk,
             )

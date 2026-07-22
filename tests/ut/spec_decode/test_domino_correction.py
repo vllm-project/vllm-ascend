@@ -89,6 +89,15 @@ class StubDominoModel(nn.Module):
         return self.prefix_gru(embeds)
 
 
+class _ConstantProjection(nn.Module):
+    def __init__(self, correction_bias: torch.Tensor):
+        super().__init__()
+        self.register_buffer("correction_bias", correction_bias)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        return self.correction_bias.expand(*inputs.shape[:-1], -1)
+
+
 def _reference_domino_correct(
     hidden_states: torch.Tensor,
     k: int,
@@ -192,6 +201,61 @@ def test_domino_correct_zero_prefix(deterministic):
     assert torch.equal(got, ref)
 
 
+def test_domino_correct_candidate_vocab_equivalent(deterministic):
+    """Candidate correction with K=vocab must exactly reproduce full Domino."""
+    domino_correct = _load_domino_correct()
+    k = 4
+    batch_size = 3
+    model = StubDominoModel(vocab_size=64, pure_draft_prefix_len=1).eval()
+    hidden = torch.randn(batch_size * k, model.hidden_size, dtype=torch.float32)
+    bonus = torch.randint(0, model.vocab_size, (batch_size,))
+
+    with torch.no_grad():
+        full = domino_correct(hidden, k, model, bonus)
+        candidate = domino_correct(
+            hidden,
+            k,
+            model,
+            bonus,
+            candidate_topk=model.vocab_size,
+        )
+
+    assert torch.equal(candidate, full)
+
+
+def test_domino_correct_candidate_tie_uses_lowest_token_id(deterministic):
+    domino_correct = _load_domino_correct()
+    vocab_size = 64
+    k = 3
+    model = StubDominoModel(
+        vocab_size=vocab_size,
+        pure_draft_prefix_len=1,
+    ).eval()
+
+    base_logits = torch.full((k, vocab_size), -10.0)
+    base_logits[:, 5] = 2.0
+    base_logits[:, 3] = 1.0
+    model.logits_processor = lambda _head, _hidden: base_logits
+    correction_bias = torch.zeros(vocab_size)
+    correction_bias[3] = 1.0
+    model.embed_proj = _ConstantProjection(correction_bias)
+
+    hidden = torch.zeros(k, model.hidden_size)
+    bonus = torch.tensor([0])
+    with torch.no_grad():
+        full = domino_correct(hidden, k, model, bonus)
+        candidate = domino_correct(
+            hidden,
+            k,
+            model,
+            bonus,
+            candidate_topk=vocab_size,
+        )
+
+    assert torch.equal(candidate, full)
+    assert candidate.view(1, k)[0, 1:].tolist() == [3, 3]
+
+
 def test_domino_correct_dummy_bonus(deterministic):
     """bonus_token_ids=None (dummy_run): still produces correct shape/dtype."""
     domino_correct = _load_domino_correct()
@@ -290,6 +354,14 @@ def test_domino_correct_fused_runs_on_npu(deterministic):
 
     with torch.no_grad():
         out = domino_correct_fused(hidden, k, model, bonus)
+        candidate_out = domino_correct_fused(
+            hidden,
+            k,
+            model,
+            bonus,
+            candidate_topk=model.vocab_size,
+        )
 
     assert out.shape == (batch_size * k,)
     assert out.dtype == torch.long
+    assert torch.equal(candidate_out, out)

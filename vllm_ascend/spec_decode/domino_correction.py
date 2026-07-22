@@ -27,11 +27,23 @@ from __future__ import annotations
 import torch
 
 
+def _candidate_greedy_argmax(
+    candidate_scores: torch.Tensor,
+    candidate_ids: torch.Tensor,
+) -> torch.Tensor:
+    """Select the lowest token id among maximum-score candidates."""
+    max_scores = candidate_scores.max(dim=-1, keepdim=True).values
+    sentinel = torch.iinfo(candidate_ids.dtype).max
+    tied_ids = torch.where(candidate_scores == max_scores, candidate_ids, sentinel)
+    return tied_ids.min(dim=-1).values
+
+
 def domino_correct(
     hidden_states: torch.Tensor,
     num_speculative_tokens: int,
     model,
     bonus_token_ids: torch.Tensor | None,
+    candidate_topk: int = 0,
 ) -> torch.Tensor:
     """Run the Domino recurrent correction over parallel draft hidden states.
 
@@ -44,6 +56,10 @@ def domino_correct(
             ``pure_draft_prefix_len``.
         bonus_token_ids: ``[B]`` last-accepted (root) token per request, used to
             seed the GRU. ``None`` during shape-only dummy runs.
+        candidate_topk: 0 selects full-vocabulary correction. A positive value
+            restricts each corrected position to the base-logit top-k set. This
+            eager fallback retains the full correction projection, but preserves
+            the same candidate-only semantics as the fused NPU path.
 
     Returns:
         ``[B*k]`` corrected draft token ids (greedy). The caller reshapes to
@@ -87,7 +103,18 @@ def domino_correct(
         z_i = h[:, i, :]  # [B, H]
         s = gru_state.squeeze(0).to(z_i.dtype)  # [B, gru_hidden] in model dtype
         bias = model.embed_proj(torch.cat([z_i, s], dim=-1))  # [B, V]
-        token = (base_logits[:, i, :] + bias).argmax(dim=-1)  # [B]
+        corrected_logits = base_logits[:, i, :] + bias
+        if candidate_topk:
+            base_top_values, candidate_ids = torch.topk(
+                base_logits[:, i, :], k=candidate_topk, dim=-1
+            )
+            candidate_bias = bias.gather(dim=-1, index=candidate_ids)
+            token = _candidate_greedy_argmax(
+                base_top_values + candidate_bias,
+                candidate_ids,
+            )
+        else:
+            token = corrected_logits.argmax(dim=-1)  # [B]
         out[:, i] = token
         if i + 1 < k:
             embed = model.embed_input_ids(token).unsqueeze(1)  # [B, 1, H]
@@ -158,7 +185,8 @@ def _get_domino_correction_weights(model) -> _DominoCorrectionWeights:
     fc2 = model.embed_proj[2]  # Linear(M -> V, bias=False)
     # ``config`` is the hf_config on the real model; the UT stub exposes
     # ``hidden_size`` directly.
-    hidden_size = getattr(getattr(model, "config", model), "hidden_size")
+    config = getattr(model, "config", model)
+    hidden_size = config.hidden_size
     gru_hidden_dim = model.prefix_gru.hidden_size
 
     # fc1.weight is [M, H+gru]; split into the z-branch [:, :H] and s-branch [:, H:].
@@ -178,9 +206,7 @@ def _get_domino_correction_weights(model) -> _DominoCorrectionWeights:
     embed_weight = inner.embed_tokens.weight  # target-shared
     gi_table = F.linear(embed_weight, gru_w_ih).contiguous()
 
-    weights = _DominoCorrectionWeights(
-        w_z, w_s, fc1_bias, fc2_weight, fc2_bias, gru_w_hh, gi_table, gru_hidden_dim
-    )
+    weights = _DominoCorrectionWeights(w_z, w_s, fc1_bias, fc2_weight, fc2_bias, gru_w_hh, gi_table, gru_hidden_dim)
     model._domino_corr_weights = weights
     return weights
 
@@ -190,21 +216,26 @@ def domino_correct_fused(
     num_speculative_tokens: int,
     model,
     bonus_token_ids: torch.Tensor | None,
+    candidate_topk: int = 0,
 ) -> torch.Tensor:
     """Fused Domino correction (triton kernels + precompute).
 
-    Each correction step is 2 kernel launches (fused mlp+bias+base+argmax +
-    fused GRU cell) instead of ~5-6 eager kernels, and the GRU bypasses Ascend's
-    fp16-only DynamicGRUV2 (bf16-safe). The z-branch and gi lookup table are
-    precomputed.
+    The correction argmax writes directly to the output token column, and the
+    GRU reads gi from the lookup table in-kernel, eliminating standalone token
+    copy and gi-gather kernels. The GRU bypasses Ascend's fp16-only
+    DynamicGRUV2 (bf16-safe). The z-branch and gi lookup table are precomputed.
     """
+    import torch.nn.functional as F
+
     # Lazy import so this module stays importable on CPU (UT) without triton.
     from vllm_ascend.ops.triton.spec_decode.domino import (
-        fused_gru_cell,
+        fused_gru_cell_from_tokens,
         fused_mlp_bias_argmax,
     )
-
-    import torch.nn.functional as F
+    if candidate_topk:
+        from vllm_ascend.ops.triton.spec_decode.domino_candidate import (
+            fused_candidate_mlp_argmax,
+        )
 
     k = num_speculative_tokens
     num_indices = hidden_states.shape[0]
@@ -217,6 +248,17 @@ def domino_correct_fused(
 
     base_logits = model.logits_processor(model.lm_head, hidden_states)
     base_logits = base_logits.view(batch_size, k, -1)  # [B, k, V]
+    if candidate_topk:
+        if candidate_topk > base_logits.shape[-1]:
+            raise ValueError(
+                "Domino candidate_topk must not exceed the vocabulary size; "
+                f"got {candidate_topk} for vocab_size={base_logits.shape[-1]}."
+            )
+        if candidate_topk & (candidate_topk - 1):
+            raise ValueError(
+                "Domino candidate_topk must be a positive power of two; "
+                f"got {candidate_topk}."
+            )
 
     # Precompute the z-branch for ALL steps at once (z is known up front).
     z_part_all = F.linear(h, weights.w_z, weights.fc1_bias)  # [B, k, M]
@@ -240,24 +282,36 @@ def domino_correct_fused(
 
     gru_state = torch.zeros(batch_size, weights.gru_hidden_dim, dtype=dtype, device=device)
     for t in range(seed_tokens.shape[1]):
-        gi = weights.gi_table[seed_tokens[:, t]]  # [B, 3*gru]
         gh = F.linear(gru_state, weights.gru_w_hh)  # [B, 3*gru]
-        gru_state = fused_gru_cell(gi, gh, gru_state)  # [B, gru]
+        gru_state = fused_gru_cell_from_tokens(weights.gi_table, seed_tokens[:, t], gh, gru_state)  # [B, gru]
 
     # Sequential correction (vectorized over the batch).
     for i in range(prefix_len, k):
         s_proj = F.linear(gru_state, weights.w_s)  # [B, M]
-        token = fused_mlp_bias_argmax(
-            z_part_all[:, i, :],  # [B, M]
-            s_proj,
-            base_logits[:, i, :],  # [B, V]
-            weights.fc2_weight,
-            weights.fc2_bias,
-        )  # [B]
-        out[:, i] = token
+        if candidate_topk:
+            base_top_values, candidate_ids = torch.topk(
+                base_logits[:, i, :], k=candidate_topk, dim=-1
+            )
+            token = fused_candidate_mlp_argmax(
+                z_part_all[:, i, :],
+                s_proj,
+                base_top_values,
+                candidate_ids,
+                weights.fc2_weight,
+                weights.fc2_bias,
+                out_tokens=out[:, i],
+            )
+        else:
+            token = fused_mlp_bias_argmax(
+                z_part_all[:, i, :],  # [B, M]
+                s_proj,
+                base_logits[:, i, :],  # [B, V]
+                weights.fc2_weight,
+                weights.fc2_bias,
+                out_tokens=out[:, i],
+            )  # [B]
         if i + 1 < k:
-            gi = weights.gi_table[token]
             gh = F.linear(gru_state, weights.gru_w_hh)
-            gru_state = fused_gru_cell(gi, gh, gru_state)
+            gru_state = fused_gru_cell_from_tokens(weights.gi_table, token, gh, gru_state)
 
     return out.view(-1)  # [B*k]

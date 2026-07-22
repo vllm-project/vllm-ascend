@@ -60,6 +60,13 @@ class DominoQwen3ForCausalLM(DFlashQwen3ForCausalLM):
                 f"(projector_type == 'domino'); got projector_type={projector_type!r}."
             )
 
+        self.shift_label = drafter_config.get("shift_label")
+        if self.shift_label is not True:
+            raise ValueError(
+                "Domino checkpoints require dflash_config.shift_label=true; "
+                f"got {self.shift_label!r}."
+            )
+
         hidden_size = config.hidden_size
         vocab_size = getattr(config, "draft_vocab_size", None) or config.vocab_size
         emb_dim = drafter_config.get("emb_dim")
