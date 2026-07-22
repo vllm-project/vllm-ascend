@@ -584,7 +584,7 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.compilation.wrapper.TorchCompileWithNoGuardsWrapper`
 #    Why:
-#       vLLM e5588e49 drops non-shape Dynamo guards after the first trace, so a
+#       vLLM 54503ece drops non-shape Dynamo guards after the first trace, so a
 #       LoRA-specialized service cannot keep independent base and adapter full
 #       graphs. Reusing one callable either mixes graph resources or forces the
 #       base path back to eager execution.

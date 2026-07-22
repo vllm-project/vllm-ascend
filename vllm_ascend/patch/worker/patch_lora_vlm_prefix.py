@@ -74,8 +74,7 @@ def _enable_wrapped_language_model_expand_slice(manager) -> None:
         enable()
         seen.add(id(wrapper))
         logger.info(
-            "[lora-vlm-prefix] wrapped language model %r detected; "
-            "enabled compatible packed-LoRA expand-slice",
+            "[lora-vlm-prefix] wrapped language model %r detected; enabled compatible packed-LoRA expand-slice",
             prefix,
         )
 

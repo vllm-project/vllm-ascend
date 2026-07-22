@@ -16,7 +16,7 @@
 
 """Keep base and LoRA full graphs in separate vLLM compile variants.
 
-vLLM e5588e49 drops non-shape Dynamo guards after the first trace. With LoRA
+vLLM 54503ece drops non-shape Dynamo guards after the first trace. With LoRA
 specialization enabled, that makes base and adapter requests reuse one compiled
 callable. Ascend needs independent callables because each variant owns a
 different ACL Graph and graph-task resource set.
@@ -43,7 +43,7 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-_SUPPORTED_VLLM_COMMIT = "e5588e49bc2642670116664a7fc4096e27adb179"
+_SUPPORTED_VLLM_COMMIT = "54503ecec0f3ac31e5ecfc5f28652e4cc42307b5"
 _SUPPORTED_WRAPPER_SHA256 = "c1b1fca679ea16aa07a696831a810c0d531da2bb0ea32dd6f1a95cdaef36de07"
 _PATCH_MARKER = "_vllm_ascend_lora_dual_graph_patch"
 _ORIGINAL_INIT_ATTR = "_vllm_ascend_lora_dual_graph_original_init"
@@ -128,9 +128,7 @@ def _variant_compile_options(
     if evaluate_guards:
         if compilation_config.dynamic_shapes_config.type == DynamicShapesType.UNBACKED:
             raise AssertionError("UNBACKED dynamic shapes do not add guards")
-        options["guard_filter_fn"] = lambda entries: [
-            entry.guard_type == "SHAPE_ENV" for entry in entries
-        ]
+        options["guard_filter_fn"] = lambda entries: [entry.guard_type == "SHAPE_ENV" for entry in entries]
     elif hasattr(torch.compiler, "skip_all_guards_unsafe"):
         options["guard_filter_fn"] = torch.compiler.skip_all_guards_unsafe
     else:

@@ -59,9 +59,7 @@ def test_specialized_init_creates_base_variants(monkeypatch):
         cudagraph_specialize_lora = True
         backend = "vllm-ascend"
         mode = patch_module.CompilationMode.VLLM_COMPILE
-        dynamic_shapes_config = SimpleNamespace(
-            type=patch_module.DynamicShapesType.BACKED
-        )
+        dynamic_shapes_config = SimpleNamespace(type=patch_module.DynamicShapesType.BACKED)
 
         def init_backend(self, _vllm_config, prefix, is_encoder):
             backend_prefixes.append((prefix, is_encoder))
