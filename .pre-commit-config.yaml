@@ -71,7 +71,6 @@ repos:
       - --verbose
       - --redact
       - --config=pre-commit/.gitleaks.toml
-    stages: [pre-commit]
   - id: shellcheck
     name: Lint shell scripts
     entry: tools/shellcheck.sh
