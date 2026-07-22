@@ -138,11 +138,7 @@ class VllmEplbAdaptor:
             self.expert_param_per_layer[local_idx] = list()
             for name in expert_weight_names:
                 param_key = f"{local_idx}.{name}"
-                # The refactored MoERunner owns EPLB state while its
-                # RoutedExperts child owns weights. Legacy AscendFusedMoE
-                # layers continue to expose weights directly.
-                get_parameter = getattr(layer, "get_eplb_parameter", None)
-                self.param_dict[param_key] = get_parameter(name) if get_parameter is not None else getattr(layer, name)
+                self.param_dict[param_key] = getattr(layer, name)
             for local_expert_id in range(self.num_local_experts):
                 per_expert_param = list()
                 for name in expert_weight_names:
