@@ -637,13 +637,31 @@ class NPUPlatform(Platform):
 
         short_request_first_config = scheduler_extension_config.short_request_first_config
         enable_short_request_first = short_request_first_config.enabled
-        short_request_first_supported_policy = vllm_config.scheduler_config.policy == "fcfs"
-        if enable_short_request_first and not short_request_first_supported_policy:
-            logger.warning_once(
-                "ShortRequestFirst scheduling currently supports only FCFS scheduler policy; "
-                "current policy=%s. The default waiting queue will be used.",
-                vllm_config.scheduler_config.policy,
-            )
+        if enable_short_request_first:
+            kv_transfer_config = vllm_config.kv_transfer_config
+            kv_role = getattr(kv_transfer_config, "kv_role", None)
+            if vllm_config.scheduler_config.policy != "fcfs":
+                raise ValueError(
+                    "ShortRequestFirst scheduling requires scheduler_config.policy='fcfs', "
+                    f"but got {vllm_config.scheduler_config.policy!r}."
+                )
+            if vllm_config.scheduler_config.async_scheduling:
+                raise ValueError("ShortRequestFirst scheduling does not support async_scheduling=true.")
+            if scheduler_extension_config.batch_job_sched_config.enabled:
+                raise ValueError(
+                    "ShortRequestFirst scheduling cannot be enabled with batch_job_sched_config. "
+                    "Please disable one of them."
+                )
+            if scheduler_extension_config.profiling_chunk_config.enabled:
+                raise ValueError(
+                    "ShortRequestFirst scheduling cannot be enabled with profiling_chunk_config. "
+                    "Please disable one of them."
+                )
+            if kv_role == "kv_consumer":
+                raise ValueError(
+                    "ShortRequestFirst scheduling is supported only on prefill or PD-mixed nodes, "
+                    "not PD-disaggregated D nodes (kv_role='kv_consumer')."
+                )
 
         if scheduler_extension_config.recompute_scheduler_enable:
             kv_transfer_config = vllm_config.kv_transfer_config
@@ -666,20 +684,6 @@ class NPUPlatform(Platform):
 
                 recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
                 vllm_config.scheduler_config = recompute_scheduler_config
-                if enable_short_request_first:
-                    logger.info(
-                        "Ascend ShortRequestFirst scheduler selected through recompute "
-                        "scheduler: scheduler_cls=%s, policy=%s, threshold=%d, long_max_wait_ms=%.3f",
-                        vllm_config.scheduler_config.scheduler_cls,
-                        vllm_config.scheduler_config.policy,
-                        short_request_first_config.threshold,
-                        short_request_first_config.long_max_wait_ms,
-                    )
-        elif enable_short_request_first:
-            logger.warning_once(
-                "ShortRequestFirst scheduling requires recompute_scheduler_enable=true "
-                "in additional_config. ShortRequestFirst scheduling will not be activated.",
-            )
 
         # Use ProfilingChunkScheduler when profiling-based chunk sizing is on.
         if scheduler_extension_config.profiling_chunk_config.enabled:
