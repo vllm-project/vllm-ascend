@@ -673,7 +673,6 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
                 dynamic_scale_after_all2all = routed_scale.view(torch.uint8)
                 experts_indices_2d_copy.untyped_storage().resize_(0)
                 return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
-                
             dynamic_scale_after_all2all, _ = torch_npu.npu_moe_token_permute(
                 dynamic_scale_after_all2all.unsqueeze(-1), global_input_tokens_local_experts_indices
             )
