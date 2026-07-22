@@ -2579,39 +2579,19 @@ class NPUModelRunner(GPUModelRunner):
                         for req_id in req_ids_output_copy
                     ]
 
-        num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
-        req_ids = self.input_batch.req_ids
-        for req_idx in range(num_sampled_tokens):
-            req_id = req_ids[req_idx]
-            req_state = self.requests[req_id]
-            sampled_ids = sampler_output.sampled_token_ids[req_idx]
-            draft_token_ids = None
-            if self.input_batch.sampling_metadata.spec_token_ids:
-                draft_token_ids = self.input_batch.sampling_metadata.spec_token_ids[req_idx]
-            self.dumper.check_acceptance_anomaly(
-                req_idx=req_idx,
-                req_id=req_id,
-                req_state=req_state,
-                sampled_ids=sampled_ids,
-            )
-
-        model_runner_output_kwargs = {
-            "req_ids": req_ids_output_copy,
-            "req_id_to_index": req_id_to_index_output_copy,
-            "sampled_token_ids": valid_sampled_token_ids,
-            "spec_token_ids": output_spec_token_ids,
-            "logprobs": logprobs_lists,
-            "prompt_logprobs_dict": prompt_logprobs_dict,
-            "kv_connector_output": kv_connector_output,
-            "pooler_output": [],
-            "ec_connector_output": ec_connector_output if self.supports_mm_inputs else None,
-            "cudagraph_stats": cudagraph_stats,
-            "routed_experts": None,
-        }
-        model_runner_output_fields = getattr(ModelRunnerOutput, "__dataclass_fields__", {})
-        if "debug_log_full" in model_runner_output_fields:
-            model_runner_output_kwargs["debug_log_full"] = self.dumper.full_log_requests_this_step
-        model_runner_output = ModelRunnerOutput(**model_runner_output_kwargs)
+        model_runner_output = ModelRunnerOutput(
+            req_ids=req_ids_output_copy,
+            req_id_to_index=req_id_to_index_output_copy,
+            sampled_token_ids=valid_sampled_token_ids,
+            spec_token_ids=output_spec_token_ids,
+            logprobs=logprobs_lists,
+            prompt_logprobs_dict=prompt_logprobs_dict,
+            kv_connector_output=kv_connector_output,
+            pooler_output=[],
+            ec_connector_output=ec_connector_output if self.supports_mm_inputs else None,
+            cudagraph_stats=cudagraph_stats,
+            routed_experts=None,
+        )
         if self.ascend_config.profiling_chunk_config.need_timing and hasattr(self, '_execution_start_time'):
             self._sync_device()
             model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
@@ -2629,6 +2609,16 @@ class NPUModelRunner(GPUModelRunner):
             ):
                 global_stream().wait_event(self.sampling_done_event)
                 self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
+            # Wait for D2H of num_accepted_tokens_cpu before MTP anomaly checks.
+            if self.num_accepted_tokens_event is not None:
+                self.num_accepted_tokens_event.synchronize()
+            self.dumper.check_all_acceptance(
+                sampled_tokens=sampler_output.sampled_token_ids,
+                accepted_token_nums=self.input_batch.num_accepted_tokens_cpu,
+            )
+
+        # Snapshot after check so later start_dump_data().clear() cannot wipe this step's flags.
+        model_runner_output.debug_log_full = dict(self.dumper.full_log_requests_this_step)
 
         if not self.use_async_scheduling:
             if self.routed_experts_initialized:

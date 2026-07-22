@@ -22,13 +22,13 @@ import time
 from collections import defaultdict, deque
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import logger
-from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -128,11 +128,12 @@ class Dumper:
         req_idx: int,
         req_id: str,
         req_state: Any,
+        accepted_token_num: int,
         sampled_ids: list[int] | torch.Tensor | None = None,
     ) -> None:
         if self._msprobe_dump_max_times == 0:
             return
-        if not req_id or not self.runner.need_accepted_tokens:
+        if not req_id or not getattr(self.runner, "need_accepted_tokens", False):
             return
         if not get_pp_group().is_last_rank:
             logger.warning("[Anomaly MTP] req_id=%s not last pp rank", req_id)
@@ -146,14 +147,7 @@ class Dumper:
                 logger.warning("[Anomaly MTP] req_id=%s draft_len=%d", req_id, draft_len)
             return
         self._debug_log_full_by_req_id.pop(req_id, None)
-
-        sampled_token_ids = self._normalize_token_ids(sampled_ids)
-        accepted_tokens = 0
-        for token_id in sampled_token_ids:
-            if token_id == PLACEHOLDER_TOKEN_ID:
-                break
-            accepted_tokens += 1
-        accepted_draft_tokens = max(0, accepted_tokens - 1)
+        accepted_draft_tokens = max(0, accepted_token_num - 1)
         invalid_spec_tokens = 0
         effective_draft_len = max(0, draft_len - invalid_spec_tokens)
         history = self._mtp_acceptance_history[req_id]
@@ -162,8 +156,11 @@ class Dumper:
             history.popleft()
 
         prompt_token_ids_raw = getattr(req_state, "prompt_token_ids", None)
-        req_output_token_ids = self.runner.input_batch.req_output_token_ids
-        output_token_ids_raw = req_output_token_ids[req_idx] if 0 <= req_idx < len(req_output_token_ids) else None
+        req_output_token_ids = getattr(self.runner.input_batch, "req_output_token_ids", None)
+        if req_output_token_ids is not None and 0 <= req_idx < len(req_output_token_ids):
+            output_token_ids_raw = req_output_token_ids[req_idx]
+        else:
+            output_token_ids_raw = getattr(req_state, "output_token_ids", None)
         prompt_token_count = len(prompt_token_ids_raw) if prompt_token_ids_raw is not None else 0
         output_token_count = len(output_token_ids_raw) if output_token_ids_raw is not None else 0
         accepted_sum = sum(accepted for accepted, _ in history)
@@ -181,7 +178,7 @@ class Dumper:
                 draft_len,
                 effective_draft_len,
                 invalid_spec_tokens,
-                accepted_tokens,
+                accepted_token_num,
                 accepted_draft_tokens,
                 acceptance_rate,
                 acceptance_len,
@@ -213,10 +210,11 @@ class Dumper:
         if log_leader:
             self._debug_log_full_by_req_id[req_id] = True
         if log_leader:
+            sampled_token_ids = self._normalize_token_ids(sampled_ids)
             self.log_mtp_token_details(
                 req_id=req_id,
                 sampled_ids=sampled_token_ids,
-                accepted_tokens=accepted_tokens,
+                accepted_token_num=accepted_token_num,
                 prompt_token_ids_raw=prompt_token_ids_raw,
                 output_token_ids_raw=output_token_ids_raw,
             )
@@ -225,11 +223,11 @@ class Dumper:
         self,
         req_id: str,
         sampled_ids: list[int],
-        accepted_tokens: int,
+        accepted_token_num: int,
         prompt_token_ids_raw: Any,
         output_token_ids_raw: Any,
     ) -> None:
-        accepted_token_ids = sampled_ids[:accepted_tokens] if accepted_tokens > 0 else []
+        accepted_token_ids = sampled_ids[:accepted_token_num] if accepted_token_num > 0 else []
         prompt_token_ids = list(prompt_token_ids_raw) if prompt_token_ids_raw is not None else []
         output_token_ids = list(output_token_ids_raw) if output_token_ids_raw is not None else []
         output_token_ids = [
@@ -326,6 +324,25 @@ class Dumper:
 
     def is_related_local_request(self, req_id: str, req_idx: int | None = None) -> bool:
         input_batch = getattr(self.runner, "input_batch", None)
+        req_ids = getattr(input_batch, "req_ids", None) if input_batch is not None else None
+
+        # v2 (and batch-local) path: req_idx is the position in input_batch.req_ids.
+        if req_ids is not None and req_idx is not None:
+            if req_idx < 0 or req_idx >= len(req_ids) or req_ids[req_idx] != req_id:
+                return False
+            requests = getattr(self.runner, "requests", None)
+            if requests is not None and req_id not in requests:
+                return False
+            req_states = getattr(self.runner, "req_states", None)
+            req_id_to_index = getattr(req_states, "req_id_to_index", None)
+            if req_id_to_index is not None and req_id not in req_id_to_index:
+                return False
+            discard_request_mask = getattr(self.runner, "discard_request_mask", None)
+            if discard_request_mask is not None and hasattr(discard_request_mask, "np"):
+                if req_idx < len(discard_request_mask.np) and discard_request_mask.np[req_idx]:
+                    return False
+            return True
+
         req_id_to_index = getattr(input_batch, "req_id_to_index", None)
         if req_id_to_index is None:
             req_states = getattr(self.runner, "req_states", None)
@@ -359,7 +376,6 @@ class Dumper:
         if mapped_idx < 0 or mapped_idx >= num_reqs:
             return False
 
-        req_ids = getattr(input_batch, "req_ids", None)
         if req_ids is not None and mapped_idx < len(req_ids) and req_ids[mapped_idx] != req_id:
             return False
 
@@ -427,9 +443,65 @@ class Dumper:
         self._debugger._maybe_reload_config(force=True)
         return True
 
+    def check_all_acceptance(
+        self,
+        sampled_tokens: torch.Tensor,
+        accepted_token_nums: Any,
+    ) -> None:
+        """Batch entry for v1/v2: fan out into check_acceptance_anomaly per request.
+
+        Args:
+            sampled_tokens: [num_reqs, max_tokens] sampled token ids.
+            accepted_token_nums: per-request accepted token counts (tensor/ndarray/list).
+        """
+        if self._msprobe_dump_max_times == 0:
+            return
+        if not getattr(self.runner, "need_accepted_tokens", False):
+            return
+        input_batch = getattr(self.runner, "input_batch", None)
+        if input_batch is None or not getattr(input_batch, "req_ids", None):
+            return
+
+        num_reqs = len(input_batch.req_ids)
+        if torch.is_tensor(accepted_token_nums):
+            accepted_list = accepted_token_nums[:num_reqs].tolist()
+        else:
+            accepted_list = [int(x) for x in accepted_token_nums[:num_reqs]]
+
+        sampled_token_rows = sampled_tokens[:num_reqs]
+        requests = getattr(self.runner, "requests", None)
+        draft_lens = getattr(input_batch, "num_draft_tokens_per_req", None)
+
+        for batch_idx, req_id in enumerate(input_batch.req_ids):
+            accepted_token_num = int(accepted_list[batch_idx])
+            sampled_ids = sampled_token_rows[batch_idx]
+
+            if requests is not None and req_id in requests:
+                req_state = requests[req_id]
+            else:
+                draft_len = int(draft_lens[batch_idx]) if draft_lens is not None else 0
+                req_state = SimpleNamespace(
+                    prev_num_draft_len=draft_len,
+                    prompt_token_ids=None,
+                    output_token_ids=None,
+                )
+
+            self.check_acceptance_anomaly(
+                req_idx=batch_idx,
+                req_id=req_id,
+                req_state=req_state,
+                accepted_token_num=accepted_token_num,
+                sampled_ids=sampled_ids,
+            )
+
     def save_sample_param(self, target_req_id: str) -> None:
-        sampling_metadata = self.runner.input_batch.sampling_metadata
-        req_ids = self.runner.input_batch.req_ids
+        input_batch = getattr(self.runner, "input_batch", None)
+        if input_batch is None:
+            return
+        sampling_metadata = getattr(input_batch, "sampling_metadata", None)
+        if sampling_metadata is None:
+            return
+        req_ids = input_batch.req_ids
         for req_idx, req_id in enumerate(req_ids):
             if target_req_id and req_id != target_req_id:
                 continue
