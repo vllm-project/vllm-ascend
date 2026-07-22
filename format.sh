@@ -17,6 +17,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 # Adapted from https://github.com/vllm-project/vllm/tree/main/tools
+# v023_base branch marker
 #
 
 check_command() {
