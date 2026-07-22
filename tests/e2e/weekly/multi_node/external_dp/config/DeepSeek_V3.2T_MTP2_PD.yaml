@@ -122,8 +122,6 @@ templates:
       - "deepseek_v3"
       - --speculative-config
       - '{"method": "deepseek_mtp", "num_speculative_tokens": 2}'
-      - --additional-config
-      - '{"layer_sharding": ["q_b_proj", "o_proj"]}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 16}, "decode": {"dp_size": 8, "tp_size": 4}}}'
 
@@ -168,8 +166,6 @@ templates:
       - "deepseek_v3"
       - --speculative-config
       - '{"method": "deepseek_mtp", "num_speculative_tokens": 2}'
-      - --additional-config
-      - '{"layer_sharding": ["q_b_proj", "o_proj"]}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 16}, "decode": {"dp_size": 8, "tp_size": 4}}}'
 

@@ -67,7 +67,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        output: torch.Tensor,
+        output: torch.Tensor = None,
     ):
         """
         Forward pass with three parts:
@@ -134,7 +134,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
-        maybe_save_kv_layer_to_connector("", [])
         z_shape_og = z.shape
         # Reshape input data into 2D tensor
         core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
@@ -142,7 +141,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
-        output[:num_tokens], _ = self.out_proj(core_attn_out)
+        out, _ = self.out_proj(core_attn_out)
+        if output is not None:
+            output[:num_tokens] = out
+        return out
 
     def _forward_core(
         self,
@@ -452,3 +454,4 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
+        maybe_save_kv_layer_to_connector("", [])

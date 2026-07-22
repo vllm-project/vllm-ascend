@@ -5,7 +5,6 @@ import pytest
 import torch
 from vllm.config import CompilationConfig, VllmConfig
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker import encoder_acl_graph
 from vllm_ascend.worker.encoder_acl_graph import (
     EncoderAclGraphManager,
@@ -32,27 +31,61 @@ def _reset_state():
 @pytest.mark.parametrize(
     "cu_seqlens, num_tokens, expected",
     [
-        (torch.tensor([0, 4, 8], dtype=torch.int32), 8, [4, 8]),
-        (torch.tensor([0, 4, 16], dtype=torch.int32), 8, [4, 8]),
+        (torch.tensor([0, 4, 16], dtype=torch.int32), 8, [4, 16]),
     ],
 )
-def test_maybe_compute_actual_seq_lengths(cu_seqlens, num_tokens, expected):
+def test_maybe_compute_actual_seq_lengths_eager(cu_seqlens, num_tokens, expected):
     actual_q, actual_kv = maybe_compute_actual_seq_lengths(
-        num_query_tokens=num_tokens,
-        cu_seqlens=cu_seqlens,
+        cu_seqlens,
+        num_tokens,
+        num_tokens,
+        cudagraph_mm_encoder=False,
     )
     assert actual_q == expected
     assert actual_kv == expected
 
 
-def test_update_encoder_graph_params_uses_cu_seqlens():
+def test_maybe_compute_actual_seq_lengths_eager_unequal_q_kv():
+    """Molmo-style uniform cross-attention: scale KV endpoints by kv/q ratio."""
+    cu_seqlens = torch.tensor([0, 1, 2], dtype=torch.int32)
+    actual_q, actual_kv = maybe_compute_actual_seq_lengths(
+        cu_seqlens,
+        2,
+        8,
+        cudagraph_mm_encoder=False,
+    )
+    assert actual_q == [1, 2]
+    assert actual_kv == [4, 8]
+
+
+@pytest.mark.parametrize(
+    "cu_seqlens, num_tokens, expected",
+    [
+        (torch.tensor([0, 4, 8], dtype=torch.int32), 8, [4, 8]),
+        (torch.tensor([0, 4, 16], dtype=torch.int32), 8, [4, 8]),
+    ],
+)
+def test_maybe_compute_actual_seq_lengths_graph(cu_seqlens, num_tokens, expected):
+    actual_q, actual_kv = maybe_compute_actual_seq_lengths(
+        cu_seqlens,
+        num_tokens,
+        num_tokens,
+        cudagraph_mm_encoder=True,
+    )
+    assert actual_q == expected
+    assert actual_kv == expected
+
+
+def test_update_encoder_graph_params_cu_seqlens():
     set_encoder_graph_params([2048])
     params = get_encoder_graph_params()
     query = MagicMock()
     query.shape = [8, 4, 72]
+    key = MagicMock()
+    key.shape = [8, 4, 72]
     packed = (
         query,
-        MagicMock(),
+        key,
         MagicMock(),
         None,
         None,
@@ -115,7 +148,7 @@ def _make_manager():
     return EncoderAclGraphManager(vllm_config, "npu", "bfloat16", model), model
 
 
-def test_manager_capture_registers_graph_params():
+def test_capture_graph_params():
     mgr, _ = _make_manager()
     mgr.token_budgets = [2048]
 
@@ -127,7 +160,7 @@ def test_manager_capture_registers_graph_params():
     assert 2048 in params.events
 
 
-def test_manager_uses_npu_graph_in_capture_budget_graph():
+def test_capture_budget_graph_npu():
     mgr, model = _make_manager()
     mgr.max_batch_size = 2
     mgr.max_frames_per_batch = 0
@@ -148,9 +181,6 @@ def test_manager_uses_npu_graph_in_capture_budget_graph():
     ):
         mgr._capture_budget_graph(2048)
 
-    if vllm_version_is("0.23.0"):
-        graph_meta = mgr.budget_graphs[2048]
-    else:
-        graph_meta = mgr._get_graph_set("default")[2048]
+    graph_meta = mgr._get_graph_set("default")[2048]
     assert graph_meta.graph is fake_graph
     assert graph_meta.input_buffers is capture_values

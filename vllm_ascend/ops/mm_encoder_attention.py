@@ -116,16 +116,20 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         self,
         bsz: int,
         q_len: int,
-        cu_seqlens: torch.Tensor | None = None,
+        cu_seqlens: torch.Tensor | None,
+        *,
+        is_capturing: bool = False,
     ) -> torch.Tensor:
-        if cu_seqlens is not None and cu_seqlens.device.type == "cpu":
+        # In the eager path, if cu_seqlens is provided by the model we use it; if it is not provided, we create a
+        # default one assuming all sequences have the same length. This is used by models such as Hunyuan-OCR, which
+        # always pass None as cu_seqlens and rely on the operator to compute it internally.
+        # In the capture path, we always create the default cu_seqlens on CPU instead of using the model tensor, to
+        # avoid a device-to-host sync (.cpu()).
+        if is_capturing or cu_seqlens is None:
+            cu_seqlens = torch.arange(0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device="cpu")
             return cu_seqlens
 
-        # If cu_seqlens is not provided, we create a default one assuming all sequences have the same length.
-        # This is used by models such as Hunyuan-OCR, which always pass None as cu_seqlens and rely on the operator to
-        # compute it internally.
-        cu_seqlens = torch.arange(0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device="cpu")
-        return cu_seqlens
+        return cu_seqlens.cpu()
 
     @staticmethod
     def _maybe_unpad_output(
@@ -203,8 +207,10 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         q_len: int,
     ) -> torch.Tensor:
         actual_seq_lengths_q, actual_seq_lengths_kv = maybe_compute_actual_seq_lengths(
-            num_query_tokens=query.shape[0],
-            cu_seqlens=self._maybe_compute_cu_seqlens(bsz, q_len, cu_seqlens),
+            self._maybe_compute_cu_seqlens(bsz, q_len, cu_seqlens),
+            query.shape[0],
+            key.shape[0],
+            cudagraph_mm_encoder=False,
         )
         q, k, v, origin_head_dim = self._maybe_pad_qkv(query, key, value)
         context_layer = self._run_vit_fia(q, k, v, actual_seq_lengths_q, actual_seq_lengths_kv)
@@ -229,13 +235,16 @@ class AscendMMEncoderAttention(MMEncoderAttention):
     ) -> torch.Tensor:
         context = get_encoder_forward_context()
         token_budget = context.token_budget
+        is_capturing = context.capturing
         params = get_encoder_graph_params()
         if token_budget is None or params is None:
             raise RuntimeError("Encoder graph capture state was not initialized (missing token_budget).")
 
         actual_seq_lengths_q, actual_seq_lengths_kv = maybe_compute_actual_seq_lengths(
-            num_query_tokens=query.shape[0],
-            cu_seqlens=self._maybe_compute_cu_seqlens(bsz, q_len, cu_seqlens),
+            self._maybe_compute_cu_seqlens(bsz, q_len, cu_seqlens, is_capturing=is_capturing),
+            query.shape[0],
+            key.shape[0],
+            cudagraph_mm_encoder=True,
         )
         q, k, v, origin_head_dim = self._maybe_pad_qkv(query, key, value)
 

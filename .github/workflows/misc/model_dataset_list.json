@@ -139,6 +139,8 @@
       "facebook/opt-125m",
       "google/gemma-2-9b",
       "google/gemma-3n-E2B-it",
+      "google/gemma-4-26B-A4B-it",
+      "google/gemma-4-31B-it",
       "google/siglip2-base-patch16-224",
       "hmellor/Ilama-3.2-1B",
       "ibm-research/PowerMoE-3b",
@@ -178,6 +180,7 @@
       "unsloth/DeepSeek-V3.1-BF16",
       "unsloth/Kimi-K2-Thinking-BF16",
       "unsloth/gpt-oss-20b-BF16",
+      "UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test",
       "vllm-ascend/DeepSeek-R1-0528-W8A8",
       "vllm-ascend/DeepSeek-R1-W8A8",
       "vllm-ascend/DeepSeek-R1-fa3-pruning",
@@ -285,7 +288,9 @@
       "vllm-ascend/Qwen3-14B-w8a8sc-310-vllm-tp1",
       "vllm-ascend/Qwen3-32B-w8a8sc-310-vllm-tp4",
       "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp",
-      "Eco-Tech/DeepSeek-V3.1-Terminus-w8a8-mtp-QuaRot"
+      "Eco-Tech/DeepSeek-V3.1-Terminus-w8a8-mtp-QuaRot",
+      "Eco-Tech/Kimi-K2.6-w4a8",
+      "lightseekorg/kimi-k2.6-eagle3"
     ],
     "datasets": [
       "vllm-ascend/GSM8K-in1024-bs210",

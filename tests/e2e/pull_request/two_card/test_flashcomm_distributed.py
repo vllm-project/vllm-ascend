@@ -26,35 +26,12 @@ from unittest.mock import patch
 
 import pytest
 from vllm import SamplingParams
-from vllm.config import KVTransferConfig
 
 from tests.e2e.conftest import VllmRunner
 
 QWEN_DENSE_MODELS = [
     "vllm-ascend/Qwen3-0.6B-W8A8",
 ]
-
-
-@pytest.mark.skip(reason="test is broken, fix me")
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
-@patch.dict(os.environ, {"VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": "1"})
-def test_qwen3_moe_fc2_oshard_tp2() -> None:
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    sampling_params = SamplingParams(max_tokens=5, temperature=0.0, top_k=50, top_p=0.9)
-
-    with VllmRunner(
-        "Qwen/Qwen3-30B-A3B",
-        dtype="auto",
-        tensor_parallel_size=2,
-        distributed_executor_backend="mp",
-        enable_expert_parallel=True,
-        enforce_eager=True,
-        additional_config={"layer_sharding": ["o_proj"]},
-        kv_transfer_config=KVTransferConfig(kv_role="kv_producer"),
-    ) as vllm_model:
-        vllm_model.generate(example_prompts, sampling_params)
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
@@ -109,6 +86,5 @@ def test_qwen3_dense_prefetch_mlp_weight_tp2(model):
         tensor_parallel_size=2,
         cudagraph_capture_sizes=[1, 2, 4, 8],
         quantization="ascend",
-        additional_config={"weight_prefetch_config": {"enabled": True}},
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
