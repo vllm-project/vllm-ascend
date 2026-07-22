@@ -56,6 +56,7 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
 :::::{tab-set}
 ::::{tab-item} Atlas A3 inference products
 :sync: A3
+
 ```{code-block} bash
    :substitutions:
 export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
@@ -101,6 +102,7 @@ docker run \
 
 ::::{tab-item} Atlas A2 inference products
 :sync: A2
+
   ```{code-block} bash
    :substitutions:
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
