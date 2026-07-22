@@ -110,7 +110,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ### Single-node Deployment
 
-- Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (64G × 16) or 1 Atlas 800 A2 (64G × 8)  .
+- Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (64G × 16) or 1 Atlas 800 A2 (64G × 8).
 
 Run the following script to execute online inference.
 === "A2 series"
