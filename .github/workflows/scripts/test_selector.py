@@ -12,7 +12,6 @@ import ast
 import hashlib
 import json
 import os
-import regex as re
 import sqlite3
 import ssl
 import subprocess
@@ -21,7 +20,8 @@ import urllib.error
 import urllib.request
 from collections import defaultdict
 from pathlib import Path
-from typing import Set, Dict, List, Tuple, Optional
+
+import regex as re
 
 # ==================== Configuration ====================
 # Repository name: used for filtering and path normalization
@@ -40,7 +40,7 @@ MIN_AFFECTED_LINES = 1
 # ==================== Configuration ====================
 
 
-def _get_test_files_from_pr_diff(diff_file: str, test_case_map: Dict) -> List[str]:
+def _get_test_files_from_pr_diff(diff_file: str, test_case_map: dict) -> list[str]:
     """
     Extract new/modified test files from PR diff and match to test cases.
     Test files are in vllm_ascend/tests/ directory with test_*.py pattern.
@@ -55,7 +55,7 @@ def _get_test_files_from_pr_diff(diff_file: str, test_case_map: Dict) -> List[st
     test_files_found = []
 
     try:
-        with open(diff_file, "r", encoding="utf-8") as f:
+        with open(diff_file, encoding="utf-8") as f:
             diff_content = f.read()
     except Exception as e:
         print(f"  Warning: Failed to read diff file for test file detection: {e}")
@@ -99,7 +99,7 @@ def _get_test_files_from_pr_diff(diff_file: str, test_case_map: Dict) -> List[st
     return test_files_found
 
 
-def _get_deleted_test_files_from_pr(diff_file: str, test_case_map: Dict) -> List[str]:
+def _get_deleted_test_files_from_pr(diff_file: str, test_case_map: dict) -> list[str]:
     """
     Extract deleted test files from PR diff.
     Test files are in vllm_ascend/tests/ directory with test_*.py pattern.
@@ -114,7 +114,7 @@ def _get_deleted_test_files_from_pr(diff_file: str, test_case_map: Dict) -> List
     deleted_test_files = []
 
     try:
-        with open(diff_file, "r", encoding="utf-8") as f:
+        with open(diff_file, encoding="utf-8") as f:
             diff_content = f.read()
     except Exception as e:
         print(f"  Warning: Failed to read diff file for deleted test detection: {e}")
@@ -128,6 +128,7 @@ def _get_deleted_test_files_from_pr(diff_file: str, test_case_map: Dict) -> List
         test_file_path = match.group(1)
         # Normalize: tests/ut/core/test_xxx.py -> tests/ut/core/test_xxx
         test_case_name = test_file_path.rsplit(".py", 1)[0]
+        deleted_test_files.append(test_case_name)
         deleted_test_files.append(test_case_name)
 
     if deleted_test_files:
@@ -149,7 +150,7 @@ class CoverageSelector:
         self.source_dir = Path(source_dir) if source_dir else None
         self.test_case_map = {}  # test_case_name -> {files: {filepath: {lines}}}
 
-    def scan_test_cases(self) -> List[str]:
+    def scan_test_cases(self) -> list[str]:
         """Scan all test case directories"""
         test_cases = []
         for item in self.coverage_data_dir.iterdir():
@@ -175,7 +176,7 @@ class CoverageSelector:
         result = result.replace("__", "/")
         return result
 
-    def get_covered_lines_from_file(self, cov_file: str, filename: str) -> Set[int]:
+    def get_covered_lines_from_file(self, cov_file: str, filename: str) -> set[int]:
         """
         Get covered line numbers for a file from a single coverage SQLite file
         """
@@ -205,7 +206,7 @@ class CoverageSelector:
             print(f"  Warning: Error reading {cov_file}: {e}")
         return lines
 
-    def get_covered_files_from_file(self, cov_file: str) -> Set[str]:
+    def get_covered_files_from_file(self, cov_file: str) -> set[str]:
         """Get all covered files from a single coverage file"""
         files = set()
         try:
@@ -221,7 +222,7 @@ class CoverageSelector:
             print(f"  Warning: Error reading {cov_file}: {e}")
         return files
 
-    def build_test_case_map(self) -> Dict:
+    def build_test_case_map(self) -> dict:
         """Build test case -> covered files mapping (with line numbers)"""
         print("Scanning test cases...")
         test_cases = self.scan_test_cases()
@@ -268,7 +269,7 @@ class CoverageSelector:
 
     def load_map(self, input_path: str = "test_case_map.json"):
         """Load test case mapping from file"""
-        with open(input_path, "r", encoding="utf-8") as f:
+        with open(input_path, encoding="utf-8") as f:
             serializable_map = json.load(f)
 
         self.test_case_map = {}
@@ -300,7 +301,7 @@ class CodeChangeDetector:
             print(f"  Warning: Error computing file hash: {filepath}: {e}")
             return ""
 
-    def scan_source_files(self) -> Dict[str, str]:
+    def scan_source_files(self) -> dict[str, str]:
         """扫描源码文件，计算哈希"""
         self.file_hashes = {}
         for py_file in self.source_dir.rglob("*.py"):
@@ -308,7 +309,7 @@ class CodeChangeDetector:
             self.file_hashes[rel_path] = self.compute_file_hash(str(py_file))
         return self.file_hashes
 
-    def detect_changes_by_comparison(self) -> Dict[str, Set[int]]:
+    def detect_changes_by_comparison(self) -> dict[str, set[int]]:
         """通过文件哈希比对检测变更（返回所有变更文件的全部行）"""
         changed_files = {}
         current_hashes = {}
@@ -319,7 +320,7 @@ class CodeChangeDetector:
 
         baseline_path = self.source_dir / ".file_hashes.json"
         if baseline_path.exists():
-            with open(baseline_path, "r") as f:
+            with open(baseline_path) as f:
                 old_hashes = json.load(f)
 
             for rel_path, current_hash in current_hashes.items():
@@ -334,7 +335,7 @@ class CodeChangeDetector:
 
         return changed_files
 
-    def parse_git_diff(self, diff_output: str, filter_prefix: Optional[str] = None) -> Dict[str, Set[int]]:
+    def parse_git_diff(self, diff_output: str, filter_prefix: str | None = None) -> dict[str, set[int]]:
         """
         解析 git diff 输出，提取变更的行号
 
@@ -415,7 +416,7 @@ class CodeChangeDetector:
 
         return changed_files
 
-    def parse_pr_diff_file(self, diff_file_path: str) -> Dict[str, Set[int]]:
+    def parse_pr_diff_file(self, diff_file_path: str) -> dict[str, set[int]]:
         """
         从 PR diff 文件解析变更行号
 
@@ -423,7 +424,7 @@ class CodeChangeDetector:
             diff_file_path: diff 文件路径
         """
         try:
-            with open(diff_file_path, "r", encoding="utf-8") as f:
+            with open(diff_file_path, encoding="utf-8") as f:
                 diff_content = f.read()
             return self.parse_git_diff(diff_content)
         except Exception as e:
@@ -435,14 +436,14 @@ class FunctionParser:
     """Python函数解析器 - 用于获取函数和分支的行号范围"""
 
     @staticmethod
-    def get_function_ranges(filepath: str) -> Dict[str, List[Tuple[int, int]]]:
+    def get_function_ranges(filepath: str) -> dict[str, list[tuple[int, int]]]:
         """
         解析Python文件，返回函数名 -> [(起始行, 结束行), ...] 的映射
         支持同一函数名出现多次的情况（返回所有匹配的区间）
         """
         function_ranges = defaultdict(list)
         try:
-            with open(filepath, "r", encoding="utf-8") as f:
+            with open(filepath, encoding="utf-8") as f:
                 tree = ast.parse(f.read(), filename=filepath)
 
             for node in ast.walk(tree):
@@ -454,13 +455,13 @@ class FunctionParser:
         return function_ranges
 
     @staticmethod
-    def _get_import_lines(filepath: str) -> Set[int]:
+    def _get_import_lines(filepath: str) -> set[int]:
         """
         获取文件中所有 import 语句的行号
         """
         import_lines = set()
         try:
-            with open(filepath, "r", encoding="utf-8") as f:
+            with open(filepath, encoding="utf-8") as f:
                 tree = ast.parse(f.read(), filename=filepath)
             for node in ast.walk(tree):
                 if isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -472,7 +473,7 @@ class FunctionParser:
         return import_lines
 
     @staticmethod
-    def get_lines_functions(filepath: str, lines: Set[int], skip_imports: bool = False) -> Dict[int, str]:
+    def get_lines_functions(filepath: str, lines: set[int], skip_imports: bool = False) -> dict[int, str]:
         """
         获取每行所属的函数名
 
@@ -502,20 +503,20 @@ class FunctionParser:
 class TestSelector:
     """测试选择器 - 根据代码变更（行粒度）选择需要运行的测试用例"""
 
-    def __init__(self, test_case_map: Dict):
+    def __init__(self, test_case_map: dict):
         self.test_case_map = test_case_map
 
     def select_tests(
         self,
-        changed_files_with_lines: Dict[str, Set[int]],
+        changed_files_with_lines: dict[str, set[int]],
         min_affected_lines: int = 1,
-        source_dir: Optional[str] = None,
+        source_dir: str | None = None,
         enable_line_match: bool = True,
         enable_function_match: bool = True,
         enable_file_match: bool = True,
         enable_skip_imports: bool = False,
         enable_dedup: bool = False,
-    ) -> Tuple[List[Tuple[str, Dict[str, Set[int]], int]], str]:
+    ) -> tuple[list[tuple[str, dict[str, set[int]], int]], str]:
         """
         根据变更文件选择受影响的测试用例，支持3种独立匹配粒度：
         - 行级匹配：精确的变更行与覆盖行交集
@@ -884,8 +885,8 @@ class TestSelector:
 
     def print_selection(
         self,
-        selected: List[Tuple[str, Dict[str, Set[int]], int]],
-        changed_files: Dict[str, Set[int]],
+        selected: list[tuple[str, dict[str, set[int]], int]],
+        changed_files: dict[str, set[int]],
         min_affected_lines: int = 1,
         expand_reason: str = "",
     ):
@@ -937,7 +938,7 @@ class TestSelector:
                 line_str = self._format_line_range(sorted(lines))
                 print(f"    - {filepath}: {line_str}")
 
-    def _format_line_range(self, lines: List[int]) -> str:
+    def _format_line_range(self, lines: list[int]) -> str:
         """将行号列表压缩为范围表示"""
         if not lines:
             return ""
@@ -964,7 +965,7 @@ class TestSelector:
 
         return ", ".join(ranges)
 
-    def _format_changed_files(self, changed_files: Dict[str, Set[int]]) -> str:
+    def _format_changed_files(self, changed_files: dict[str, set[int]]) -> str:
         """格式化变更文件"""
         result = []
         for f, lines in sorted(changed_files.items()):
