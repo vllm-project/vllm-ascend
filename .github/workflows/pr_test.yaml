@@ -291,6 +291,13 @@ jobs:
       - name: Recommend tests for current PR
         run: |
           set -euo pipefail
+          if ! python3 -c "import regex" >/dev/null 2>&1; then
+            echo "regex not found for $(python3 -V); bootstrapping pip and installing regex"
+            curl -fsSL https://bootstrap.pypa.io/get-pip.py -o get-pip.py
+            python3 get-pip.py --break-system-packages
+            python3 -m pip install --break-system-packages regex
+          fi
+          python3 -c "import regex; print('regex ok:', regex.__file__)"
           PR_SPEC="vllm-project/vllm-ascend#${{ github.event.pull_request.number }}"
           echo "Selecting tests for PR: ${PR_SPEC}"
           python3 .github/workflows/scripts/test_selector.py \
