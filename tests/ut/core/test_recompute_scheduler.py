@@ -92,7 +92,7 @@ def test_finish_recomputed_request_uses_normal_abort_cleanup():
     scheduler.finished_req_ids_dict = None
     scheduler._free_request_blocks = MagicMock()
 
-    recomputed_reqs = []
+    recomputed_reqs: list[RecomputeReqInfo] = []
     scheduler._finish_recomputed_request(request, recomputed_reqs)
 
     assert request.status == RequestStatus.FINISHED_ABORTED
