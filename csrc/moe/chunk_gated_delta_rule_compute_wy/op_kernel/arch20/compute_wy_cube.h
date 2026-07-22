@@ -116,6 +116,9 @@ class WyCubeGemm {
     Cast(halfScratch, pUb, RoundMode::CAST_NONE, WY_CUBE_CHUNK * WY_CUBE_CHUNK);
     PipeBarrier<PIPE_V>();
     CopyHalfRowsToGm(aGm_, halfScratch, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
+    event_t pUploadDone = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
+    SetFlag<HardEvent::MTE3_V>(pUploadDone);
+    WaitFlag<HardEvent::MTE3_V>(pUploadDone);
 
     // R[64,nDim] (possibly strided) -> contiguous half -> B on GM
     CastFloatRowsToHalfContiguous(halfScratch, rUb, WY_CUBE_CHUNK, nDim, rLda);
