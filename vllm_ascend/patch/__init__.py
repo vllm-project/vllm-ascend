@@ -969,23 +969,29 @@
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for ops.*.
 #
-# ** 19. File: worker/patch_qwen3_dspark.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.spec_decode.llm_base_proposer.SpecDecodeBaseProposer`
+# ** 19. File: hunyuan_vl_processor_compat.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.hunyuan_vision.HunYuanVLProcessingInfo.get_hf_processor`
+#      and the vLLM processor lazy registry
 #    Why:
-#       The config.json of the open-source dspark contains two types of
-#       "mask_token_id" with different variable names and indentation.
-#       Currently, the vllm community has only added support for deepseek,
-#       but not for the qwen/glm series. In model_runner_v1, since the
-#       initialization of vllm/eagle_proposer is performed first, followed
-#       by the initialization of vllm-ascend/llm_base_proposer, this
-#       modification cannot be implemented in vllm-ascend/llm_base_proposer.
+#       The supported vLLM refs currently straddle the HunyuanVL processor
+#       migration. v0.23.0 still bundles the processor, while the verified
+#       main ref uses the Transformers-native processor but predates the full
+#       Transformers 5.13 registry and prompt-protocol cleanup.
 #    How:
-#       Override the `SpecDecodeBaseProposer._init_parallel_drafting_params`
-#       method and add the reading of the `dspark config.json` for `qwen/glm`
+#       Preserve the bundled v0.23.0 processor protocol, translate its image
+#       processor registration to Transformers 5.13, and complete the native
+#       processor registry, loader, and tokenizer schema on the main ref.
+#    Related PR:
+#       1. https://github.com/vllm-project/vllm/pull/47872
+#       2. https://github.com/vllm-project/vllm/pull/47867
 #    Future Plan:
-#       Remove this patch once vllm-ascend fully supports the v2 model
-#       runner.
+#       Remove this patch and delete the `install_hunyuan_vl_processor_compat()`
+#       call from `vllm_ascend/__init__.py` only after both supported vLLM refs
+#       contain `4a6440acefbd4d977620bdb6dfb7fb325cd9bda7` (vLLM PR #47867,
+#       merged into vLLM main at 2026-07-11 07:56:14 UTC), or an equivalent
+#       fix, and the supported HunyuanOCR tokenizer artifacts expose the named
+#       special-token schema required by Transformers 5.13.
 #
 # ** 20. File: worker/patch_qwen3_next_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1250,27 +1256,3 @@
 #       make UvaBuffer a dummy class, mimic the interface of vllm UvaBuffer.
 #    Future Plan:
 #       Remove this patch when NPU support UVA.
-#
-# ** 36. File: hunyuan_vl_processor_compat.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.hunyuan_vision.HunYuanVLProcessingInfo.get_hf_processor`
-#      and the vLLM processor lazy registry
-#    Why:
-#       The supported vLLM refs currently straddle the HunyuanVL processor
-#       migration. v0.23.0 still bundles the processor, while the verified
-#       main ref uses the Transformers-native processor but predates the full
-#       Transformers 5.13 registry and prompt-protocol cleanup.
-#    How:
-#       Preserve the bundled v0.23.0 processor protocol, translate its image
-#       processor registration to Transformers 5.13, and complete the native
-#       processor registry, loader, and tokenizer schema on the main ref.
-#    Related PR:
-#       1. https://github.com/vllm-project/vllm/pull/47872
-#       2. https://github.com/vllm-project/vllm/pull/47867
-#    Future Plan:
-#       Remove this patch and delete the `install_hunyuan_vl_processor_compat()`
-#       call from `vllm_ascend/__init__.py` only after both supported vLLM refs
-#       contain `4a6440acefbd4d977620bdb6dfb7fb325cd9bda7` (vLLM PR #47867,
-#       merged into vLLM main at 2026-07-11 07:56:14 UTC), or an equivalent
-#       fix, and the supported HunyuanOCR tokenizer artifacts expose the named
-#       special-token schema required by Transformers 5.13.

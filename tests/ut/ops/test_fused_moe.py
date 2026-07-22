@@ -73,8 +73,8 @@ def test_process_weights_after_loading_uses_version_specific_layout(
 
     torch.testing.assert_close(layer.w13_weight, original_w13.transpose(1, 2))
     torch.testing.assert_close(layer.w2_weight, original_w2.transpose(1, 2))
-    assert layer.w13_weight.is_contiguous() is False
-    assert layer.w2_weight.is_contiguous() is False
+    assert layer.w13_weight.is_contiguous() is True
+    assert layer.w2_weight.is_contiguous() is True
 
 
 @pytest.mark.parametrize("moe_comm_type", [MoECommType.ALLGATHER, MoECommType.FUSED_MC2])
