@@ -182,6 +182,7 @@ def test_dspark_first_pass_uses_anchor_width_and_updates_metadata(
     )
 
     assert kernel.grid == (1,)
+    assert kernel.kwargs is not None
     assert kernel.kwargs["num_query_per_req"] == num_query_per_req
     assert kernel.kwargs["num_speculative_tokens"] == 7
     assert kernel.kwargs["SAMPLE_FROM_ANCHOR"] is sample_from_anchor
