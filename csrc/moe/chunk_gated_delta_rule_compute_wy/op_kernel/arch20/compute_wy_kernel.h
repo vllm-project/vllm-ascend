@@ -84,8 +84,13 @@ class KernelComputeWy {
     cubeGemm_.Init(&tiling->mmAttn, &tiling->mmSquare, &tiling->mmApplyU, &tiling->mmApplyW, pipe_,
                    mmLocalWsBuf_.Get<uint8_t>(), localWsBytes, workspace, perCoreWorkspaceBytes_, usedCoreNum_);
 
+    uint32_t maxAlign = (alignK_ > alignV_ ? alignK_ : alignV_);
+    if (maxAlign < FIXED_CHUNK_SIZE) {
+      maxAlign = FIXED_CHUNK_SIZE;
+    }
+    // halfScratch for GemmApplyAdd/GemmSquare: P is 64x64, R is 64xN — need 64*max(64,K,V).
+    pipe_->InitBuffer(qHalfBuf_, FIXED_CHUNK_SIZE * maxAlign * sizeof(half));
     pipe_->InitBuffer(kHalfBuf_, chunkKElems_ * sizeof(half));
-    pipe_->InitBuffer(qHalfBuf_, chunkKElems_ * sizeof(half));
     pipe_->InitBuffer(vHalfBuf_, chunkVElems_ * sizeof(half));
     pipe_->InitBuffer(kFloatBuf_, chunkKElems_ * sizeof(float));
     pipe_->InitBuffer(vFloatBuf_, chunkVElems_ * sizeof(float));
@@ -93,9 +98,8 @@ class KernelComputeWy {
     pipe_->InitBuffer(attnBuf_, ATTEN_ELEMS * sizeof(float));
     pipe_->InitBuffer(gBuf_, FIXED_CHUNK_SIZE * sizeof(float));
     pipe_->InitBuffer(expGBuf_, FIXED_CHUNK_SIZE * sizeof(float));
-    uint32_t maxAlign = (alignK_ > alignV_ ? alignK_ : alignV_);
-    uint32_t tmpBufSize = (maxAlign > FIXED_CHUNK_SIZE ? maxAlign : FIXED_CHUNK_SIZE);
-    pipe_->InitBuffer(tmpBuf_, tmpBufSize * sizeof(float));
+    // Contiguous C scratch for bulk GemmApplyAdd: [64, max(K,V,64)].
+    pipe_->InitBuffer(tmpBuf_, FIXED_CHUNK_SIZE * maxAlign * sizeof(float));
     pipe_->InitBuffer(rowBuf_, FIXED_CHUNK_SIZE * sizeof(float));
     valid_ = true;
   }
@@ -335,10 +339,10 @@ class KernelComputeWy {
 
     // Nilpotent doubling: R ← (I−A)⁻¹ R without forming T.
     // Apply to U and W separately to keep N≤128 and UB within 310P budget.
-    LocalTensor<half> halfRow = kHalf;
+    // scratch (tmpBuf_) is [64, max(K,V)] — contiguous C staging for bulk ApplyAdd.
     for (uint32_t round = 0; round < DOUBLING_ROUNDS; ++round) {
-      cubeGemm_.GemmApplyAdd(vFloat, attnLocal, qHalf, halfRow, scratch, vHeadDim_, alignV_, /*useU=*/true);
-      cubeGemm_.GemmApplyAdd(kBeta, attnLocal, qHalf, halfRow, scratch, kHeadDim_, alignK_, /*useU=*/false);
+      cubeGemm_.GemmApplyAdd(vFloat, attnLocal, qHalf, scratch, vHeadDim_, alignV_, /*useU=*/true);
+      cubeGemm_.GemmApplyAdd(kBeta, attnLocal, qHalf, scratch, kHeadDim_, alignK_, /*useU=*/false);
       if (round + 1 < DOUBLING_ROUNDS) {
         cubeGemm_.GemmSquare(attnLocal, qHalf);
         SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
