@@ -58,19 +58,30 @@ repos:
   - id: actionlint
     exclude: '.*\.github/workflows/(scripts|configs)/.*\.ya?ml$'
 
+- repo: https://github.com/gitleaks/gitleaks-pre-commit
+  rev: v8.21.0
+  hooks:
+    - id: gitleaks
+      name: Gitleaks Secret Scan
+      args:
+        - protect
+        - --verbose
+        - --redact
+        - --config=pre-commit/.gitleaks.toml
+        
 - repo: local
   hooks:
-  - id: gitleaks-offline-scan
-    name: Gitleaks Secret Scan(Local Binary)
-    entry: gitleaks
-    language: system
-    pass_filenames: false
-    always_run: true
-    args:
-      - protect
-      - --verbose
-      - --redact
-      - --config=pre-commit/.gitleaks.toml
+  # - id: gitleaks-offline-scan
+  #   name: Gitleaks Secret Scan(Local Binary)
+  #   entry: gitleaks
+  #   language: system
+  #   pass_filenames: false
+  #   always_run: true
+  #   args:
+  #     - protect
+  #     - --verbose
+  #     - --redact
+  #     - --config=pre-commit/.gitleaks.toml
   - id: shellcheck
     name: Lint shell scripts
     entry: tools/shellcheck.sh
