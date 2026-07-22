@@ -56,8 +56,6 @@ from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kerne
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
 from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
-from vllm_ascend.worker.utils import copy_snapshot_to_gpu
-
 
 @contextmanager
 def patch_tensor_parallel_group(tp_group):
@@ -615,7 +613,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             # num_reqs is already the padded version
             self.query_start_loc.cpu[: num_reqs + 1].copy_(self.runner.query_start_loc.cpu[: num_reqs + 1])
-            copy_snapshot_to_gpu(self.query_start_loc)
+            self.query_start_loc.copy_to_gpu()
 
             common_attn_metadata = AscendCommonAttentionMetadata(
                 query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
