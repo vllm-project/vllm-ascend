@@ -52,7 +52,7 @@ class TestAscendConfig(TestBase):
         architectures: list[str] | None = None,
     ):
         return SimpleNamespace(
-            architectures=architectures,
+            architectures=architectures or [],
             is_deepseek_mla=is_deepseek_mla,
             use_mla=is_deepseek_mla,
             enforce_eager=True,

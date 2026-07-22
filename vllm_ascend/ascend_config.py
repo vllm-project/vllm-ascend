@@ -169,6 +169,7 @@ class AscendConfig:
         assert self.enable_fused_mc2 in (0, 1), f"enable_fused_mc2 must be 0 or 1, got {self.enable_fused_mc2}"
         assert not (
             self.enable_fused_mc2 == 1
+            and vllm_config.model_config is not None
             and any(architecture.startswith("MiniMaxM3") for architecture in vllm_config.model_config.architectures)
         ), (
             "MiniMax M3 does not support enable_fused_mc2=1. Please set "
