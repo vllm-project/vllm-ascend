@@ -110,46 +110,83 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ### Single-node Deployment
 
-- Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
+- Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (64G × 16) or 1 Atlas 800 A2 (64G × 8)  .
+
+Run the following script to execute online inference.
+=== "A2 series"
+
+    Run the following script to execute online inference.
+
+    ```shell
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    export HCCL_BUFFSIZE=1024
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE=AIV
+
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
+    --host 0.0.0.0 \
+    --port 8077 \
+    --api-server-count 1 \
+    --enable-expert-parallel \
+    --tensor-parallel-size 8 \
+    --seed 1024 \
+    --served-model-name glm-5 \
+    --tool-call-parser glm47 \
+    --reasoning-parser glm45 \
+    --enable-auto-tool-choice \
+    --max-num-seqs 5 \
+    --max-model-len 16000 \
+    --max-num-batched-tokens 8192 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.95 \
+    --quantization ascend \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_dsa_cp": true,"multistream_overlap_shared_expert":true}'
+    ```
+=== "A3 series"
 
 Run the following script to execute online inference.
 
-```shell
-export HCCL_OP_EXPANSION_MODE="AIV"
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export HCCL_BUFFSIZE=200
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=0
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
---host 0.0.0.0 \
---port 8077 \
---api-server-count 1 \
---data-parallel-size 2 \
---enable-expert-parallel \
---tensor-parallel-size 8 \
---seed 1024 \
---served-model-name glm-5 \
---tool-call-parser glm47 \
---reasoning-parser glm45 \
---enable-auto-tool-choice \
---max-num-seqs 12 \
---max-model-len 135000 \
---max-num-batched-tokens 8192 \
---trust-remote-code \
---gpu-memory-utilization 0.92 \
---quantization ascend \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"enable_dsa_cp": true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true,"enable_balance_scheduling": true,"multistream_overlap_shared_expert":true}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
+    ```shell
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export HCCL_BUFFSIZE=200
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    export VLLM_ASCEND_ENABLE_FUSED_MC2=0
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
+    --host 0.0.0.0 \
+    --port 8077 \
+    --api-server-count 1 \
+    --data-parallel-size 2 \
+    --enable-expert-parallel \
+    --tensor-parallel-size 8 \
+    --seed 1024 \
+    --served-model-name glm-5 \
+    --tool-call-parser glm47 \
+    --reasoning-parser glm45 \
+    --enable-auto-tool-choice \
+    --max-num-seqs 12 \
+    --max-model-len 135000 \
+    --max-num-batched-tokens 8192 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.92 \
+    --quantization ascend \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_dsa_cp": true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true,"enable_balance_scheduling": true,"multistream_overlap_shared_expert":true}' \
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 
 ```
 
 **Notice:**
 The parameters are explained as follows:
 
-- For single-node deployment, we recommend using `dp1tp16` and turn off expert parallel in low-latency scenarios.
+- For single-node deployment, we recommend using `tp8 or tp16` and turn off expert parallel in low-latency scenarios.
 
 ### Multi-node Deployment
 
