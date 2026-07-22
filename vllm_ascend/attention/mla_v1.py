@@ -29,6 +29,7 @@ from vllm_ascend.attention.utils import (
     ascend_chunked_prefill_workspace_size,
     enable_cp,
     enabling_mlapo,
+    get_host_seq_lens,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -445,14 +446,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         self.query_lens = query_seq_lens_cpu[:num_reqs]
-        # Prefer _seq_lens_cpu (always available, updated during draft
-        # iterations) over seq_lens_cpu (None in async spec decode mode).
-        if common_attn_metadata._seq_lens_cpu is not None:
-            self.seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
-        elif common_attn_metadata.seq_lens_cpu is not None:
-            self.seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
-        else:
-            self.seq_lens = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
+        self.seq_lens = get_host_seq_lens(common_attn_metadata, num_reqs)
 
         self.graph_pad_size = common_attn_metadata.graph_pad_size
         block_table_size = self.get_block_table_size(common_attn_metadata, BUILD_METADATA_STEP_PREFILL)

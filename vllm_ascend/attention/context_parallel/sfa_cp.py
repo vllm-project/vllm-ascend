@@ -12,13 +12,15 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
+from vllm_ascend.attention.context_parallel.common_cp import (
+    AscendPCPMetadata,
+    DCPContext,
+    DCPQueryGatherContext,
+)
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
-    DCPContext,
-    DCPQueryGatherContext,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enabling_mlapo, split_decodes_and_prefills
 from vllm_ascend.device.device_op import DeviceOperator

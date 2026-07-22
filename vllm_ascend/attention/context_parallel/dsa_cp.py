@@ -15,6 +15,7 @@ from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    get_host_seq_lens,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -312,15 +313,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.common_ratio_to_sas_metadata["sin"] = sin
             self.seq_lens = common_attn_metadata.seq_lens[:num_reqs]
             self.common_ratio_to_sas_metadata["seq_lens"] = self.seq_lens
-            # Prefer _seq_lens_cpu (always available, updated during draft
-            # iterations) over seq_lens_cpu (None in async spec decode mode).
-            if common_attn_metadata._seq_lens_cpu is not None:
-                _seq_lens_cpu = common_attn_metadata._seq_lens_cpu
-            elif common_attn_metadata.seq_lens_cpu is not None:
-                _seq_lens_cpu = common_attn_metadata.seq_lens_cpu
-            else:
-                _seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
-            self.seq_lens_cpu = _seq_lens_cpu
+            self.seq_lens_cpu = get_host_seq_lens(common_attn_metadata)
             self.common_ratio_to_sas_metadata["seq_lens_cpu"] = self.seq_lens_cpu
         else:
             self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = (

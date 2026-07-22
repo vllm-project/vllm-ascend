@@ -47,6 +47,7 @@ from vllm_ascend.attention.utils import (
     PagedAttentionGraphParam,
     cache_graph_workspace,
     enable_cp,
+    get_host_seq_lens,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -281,14 +282,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         )
 
         block_table = common_attn_metadata.block_table_tensor
-        # Prefer _seq_lens_cpu (always available, updated during draft
-        # iterations) over seq_lens_cpu (None in async spec decode mode).
-        if common_attn_metadata._seq_lens_cpu is not None:
-            seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
-        elif common_attn_metadata.seq_lens_cpu is not None:
-            seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
-        else:
-            seq_lens = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
+        seq_lens = get_host_seq_lens(common_attn_metadata, num_reqs)
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         # this slot_mapping override doesn't work since vllm will override it again. We should fix it vllm.

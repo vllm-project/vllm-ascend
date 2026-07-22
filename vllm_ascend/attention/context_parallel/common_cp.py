@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import torch
 import torch.distributed as dist
@@ -6,6 +7,40 @@ import torch_npu
 from vllm.distributed import get_dcp_group, get_pcp_group
 
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
+
+
+class DCPQueryGatherContext(NamedTuple):
+    """State needed to finish the async fused DCP query all-gather."""
+
+    # The gathered fused query tensor: cat([ql_nope, q_pe], dim=-1).
+    gathered: torch.Tensor
+    # Async all-gather work handle. None means the gather completed synchronously.
+    handle: torch.distributed.Work | None
+    # Permutation that restores the original dimension order after dim>0 gather.
+    restore_perm: tuple[int, ...] | None
+    # Last-dimension sizes used to split the fused query back into ql_nope/q_pe.
+    ql_nope_dim: int
+    q_pe_dim: int
+
+
+@dataclass
+class DCPContext:
+    slot_mapping: torch.Tensor
+    block_table: torch.Tensor
+    seq_lens: torch.Tensor
+    query_gather_context: DCPQueryGatherContext | None = None
+
+
+@dataclass
+class DSACPContext:
+    num_tokens: int
+    num_tokens_pad: int
+    local_start: int
+    local_end: int
+    local_end_with_pad: int
+    slot_mapping_cp: torch.Tensor
+    actual_seq_lengths_query: torch.Tensor
+    actual_seq_lengths_key: torch.Tensor
 
 
 @dataclass

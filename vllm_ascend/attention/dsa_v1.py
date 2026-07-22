@@ -20,6 +20,7 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    get_host_seq_lens,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -738,14 +739,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if self.prefill_ratio_to_sas_metadata.get("prefill_input_positions", None) is None:
             input_positions = common_attn_metadata.positions[: self.num_actual_tokens].long()
             max_query_len = self.query_lens[reqs_start:].max().item()
-            # Prefer _seq_lens_cpu (always available, updated during draft
-            # iterations) over seq_lens_cpu (None in async spec decode mode).
-            if common_attn_metadata._seq_lens_cpu is not None:
-                _seq_lens_cpu = common_attn_metadata._seq_lens_cpu
-            elif common_attn_metadata.seq_lens_cpu is not None:
-                _seq_lens_cpu = common_attn_metadata.seq_lens_cpu
-            else:
-                _seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+            _seq_lens_cpu = get_host_seq_lens(common_attn_metadata)
             max_seq_lens = _seq_lens_cpu[reqs_start:].max().item()
             self.prefill_ratio_to_sas_metadata["input_positions"] = input_positions
             self.prefill_ratio_to_sas_metadata["max_query_len"] = max_query_len
@@ -958,14 +952,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: self.num_decodes + 1]
 
-            # Prefer _seq_lens_cpu (always available, updated during draft
-            # iterations) over seq_lens_cpu (None in async spec decode mode).
-            if common_attn_metadata._seq_lens_cpu is not None:
-                _seq_lens_cpu = common_attn_metadata._seq_lens_cpu
-            elif common_attn_metadata.seq_lens_cpu is not None:
-                _seq_lens_cpu = common_attn_metadata.seq_lens_cpu
-            else:
-                _seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+            _seq_lens_cpu = get_host_seq_lens(common_attn_metadata)
             max_seq_lens = _seq_lens_cpu[: self.num_decodes].max().item()
             seq_lens_list = _seq_lens_cpu[: self.num_decodes].tolist()
             self.decode_ratio_to_sas_metadata["query_start_loc_cpu"] = query_start_loc_cpu
@@ -1337,12 +1324,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_decodes_typed + 1]
         max_seqlen_q = torch.max(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).item()
 
-        if common_attn_metadata._seq_lens_cpu is not None:
-            _seq_lens_cpu = common_attn_metadata._seq_lens_cpu
-        elif common_attn_metadata.seq_lens_cpu is not None:
-            _seq_lens_cpu = common_attn_metadata.seq_lens_cpu
-        else:
-            _seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+        _seq_lens_cpu = get_host_seq_lens(common_attn_metadata)
         max_seqlen_kv = torch.max(_seq_lens_cpu[:num_decodes]).item()
 
         input_positions = common_attn_metadata.positions[:num_decode_tokens_typed].long()
