@@ -257,18 +257,12 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Download test_selector.py
-        run: |
-          set -euo pipefail
-          SCRIPT_REPO="${{ github.event.pull_request.head.repo.full_name }}"
-          SCRIPT_REF="${{ github.event.pull_request.head.sha }}"
-          curl -fsSL \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/vnd.github.raw" \
-            "https://api.github.com/repos/${SCRIPT_REPO}/contents/.github/workflows/scripts/test_selector.py?ref=${SCRIPT_REF}" \
-            -o test_selector.py
-          test -s test_selector.py
-          echo "Downloaded test_selector.py from ${SCRIPT_REPO}@${SCRIPT_REF}"
+      - name: Checkout vllm-ascend scripts
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: |
+            .github/workflows/scripts
+          sparse-checkout-cone-mode: false
 
       - name: Download coverage package
         run: |
@@ -309,7 +303,7 @@ jobs:
         working-directory: vllm-ascend
         run: |
           set -euo pipefail
-          python3 ../test_selector.py \
+          python3 ../.github/workflows/scripts/test_selector.py \
             --build-map \
             --coverage-dir "${{ steps.coverage.outputs.TASK_NAME }}" \
             --source-dir ./covstub \
@@ -321,7 +315,7 @@ jobs:
           set -euo pipefail
           PR_SPEC="vllm-project/vllm-ascend#${{ github.event.pull_request.number }}"
           echo "Selecting tests for PR: ${PR_SPEC}"
-          python3 ../test_selector.py \
+          python3 ../.github/workflows/scripts/test_selector.py \
             --github-pr "${PR_SPEC}" \
             --source-dir ./covstub \
             --map-file test_case_map.json
