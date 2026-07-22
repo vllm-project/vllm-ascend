@@ -116,7 +116,9 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
-            common_attn_metadata, decode_threshold=self.decode_threshold
+            common_attn_metadata,
+            decode_threshold=self.decode_threshold,
+            treat_short_extends_as_decodes=False,
         )
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_actual_tokens
@@ -221,6 +223,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 pcp_fa_query_idx=common_long_seq_metadata.pcp_fa_query_idx,
                 pcp_padded_tokens_fla=common_long_seq_metadata.pcp_padded_tokens_fla,
                 pcp_enter_fa_restore_idx=common_long_seq_metadata.pcp_enter_fa_restore_idx,
+                pcp_fa_padding_restore_idx=common_long_seq_metadata.pcp_fa_padding_restore_idx,
                 max_num_tokens_across_pcp=common_long_seq_metadata.max_num_tokens_across_pcp,
                 total_num_scheduled_tokens=common_long_seq_metadata.total_num_scheduled_tokens,
             )
@@ -439,8 +442,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         if k_nomask is not None:
             attn_out_nomask, attn_lse_nomask = torch.ops.npu.npu_fused_infer_attention_score(
                 q,
-                k_nomask,
-                v_nomask,
+                k_nomask.contiguous(),
+                v_nomask.contiguous(),
                 num_heads=self.num_heads,
                 num_key_value_heads=self.num_kv_heads,
                 input_layout="TND",
@@ -457,8 +460,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         # mask Attention
         attn_out_mask, attn_lse_mask = torch.ops.npu.npu_fused_infer_attention_score(
             q,
-            k_mask,
-            v_mask,
+            k_mask.contiguous(),
+            v_mask.contiguous(),
             num_heads=self.num_heads,
             num_key_value_heads=self.num_kv_heads,
             input_layout="TND",
@@ -758,8 +761,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
         prefix_chunk_output, prefix_chunk_lse = torch.ops.npu.npu_fused_infer_attention_score(
             query,
-            key,
-            value,
+            key.contiguous(),
+            value.contiguous(),
             num_heads=num_heads,
             num_key_value_heads=self.num_kv_heads,
             input_layout="TND",
@@ -891,18 +894,18 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             attn_metadata.prefill.pcp_metadata.pcp_enter_fa_restore_idx if attn_metadata.prefill.pcp_metadata else None
         )
         actual_qkv = torch.index_select(all_qkv, 0, pcp_enter_fa_restore_idx)
-        qkv_fa_padding_workspace = query.new_empty(
-            (num_actual_tokens_pcp_padded, (self.num_heads + 2 * self.num_kv_heads) * self.head_size)
-        )
-
         decode_offset = attn_metadata.num_decode_tokens * self.pcp_size
-        qkv_fa_padding_workspace[:decode_offset] = actual_qkv[:decode_offset]
-
-        pcp_unpad_mask = attn_metadata.prefill.pcp_metadata.pcp_unpad_mask[
-            attn_metadata.num_decode_tokens * self.pcp_size :
-        ]
-        qkv_fa_padding_workspace[decode_offset:][pcp_unpad_mask] = actual_qkv[decode_offset:]
-        qkv_fa_padding_workspace[decode_offset:][~pcp_unpad_mask] = 0
+        pcp_fa_padding_restore_idx = attn_metadata.prefill.pcp_metadata.pcp_fa_padding_restore_idx
+        if actual_qkv.shape[0] == num_actual_tokens_pcp_padded:
+            qkv_fa_padding_workspace = actual_qkv[:num_actual_tokens_pcp_padded]
+        else:
+            assert pcp_fa_padding_restore_idx is not None
+            actual_qkv_with_zero = F.pad(actual_qkv, pad=(0, 0, 0, 1), mode="constant", value=0)
+            qkv_fa_padding_workspace = torch.index_select(
+                actual_qkv_with_zero,
+                0,
+                pcp_fa_padding_restore_idx,
+            )
 
         q, k, v = qkv_fa_padding_workspace.split(
             [
@@ -1013,8 +1016,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 # Scenario of Enabling DCP Individually
                 attn_output_prefill, attn_lse_prefill = torch.ops.npu.npu_fused_infer_attention_score(
                     prefill_query,
-                    key,
-                    value,
+                    key.contiguous(),
+                    value.contiguous(),
                     num_heads=self.num_heads,
                     num_key_value_heads=self.num_kv_heads,
                     input_layout="TND",

@@ -15,7 +15,7 @@
 
 from unittest.mock import MagicMock, patch
 
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig, FusedMoEParallelConfig
 from vllm.model_executor.layers.linear import LinearBase
 
@@ -91,7 +91,7 @@ class TestAscendModelSlimConfig310(TestBase):
         )
 
     def test_get_quant_method_for_fused_moe_310(self):
-        fused_moe_layer = MagicMock(spec=FusedMoE)
+        fused_moe_layer = MagicMock(spec=RoutedExperts)
         fused_moe_layer.moe = MagicMock(spec=FusedMoEConfig)
         fused_moe_layer.moe_config = MagicMock(spec=FusedMoEConfig)
         fused_moe_layer.moe_config.moe_backend = "auto"

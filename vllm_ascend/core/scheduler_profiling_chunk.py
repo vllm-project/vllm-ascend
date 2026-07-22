@@ -80,7 +80,7 @@ class ProfilingChunkScheduler(Scheduler):
         from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 
         init_ascend_config(vllm_config)
-        profiling_cfg = get_ascend_config().profiling_chunk_config
+        profiling_cfg = get_ascend_config().scheduler_config.profiling_chunk_config
         self.profiling_chunk_config = profiling_cfg
         base_chunk = self.max_num_scheduled_tokens
 
@@ -237,7 +237,7 @@ class ProfilingChunkScheduler(Scheduler):
     # Modified sections are marked with ">>> PROFILING CHUNK" comments.
     # ------------------------------------------------------------------
 
-    def schedule(self) -> SchedulerOutput:  # noqa: C901
+    def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:  # noqa: C901
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []

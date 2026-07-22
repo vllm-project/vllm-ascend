@@ -61,7 +61,7 @@ class TestAscendW8A8FP8FusedMoEMethod(TestBase):
     def test_quant_type_is_w8a8fp8(self):
         from vllm_ascend.quantization.quant_type import QuantType
 
-        self.assertEqual(self.quant_method.quant_type, QuantType.W8A8FP8)
+        self.assertEqual(self.quant_method.quant_type, QuantType.W8A8FP)
 
     def test_get_weight_dtype_is_float8_e4m3fn(self):
         param_dict = self.quant_method.get_weight(
@@ -111,7 +111,6 @@ class TestAscendW8A8FP8FusedMoEMethod(TestBase):
         mock_comm.fused_experts.return_value = torch.randn(tokens, hidden_size, dtype=torch.float32)
         mock_extra_ctx.moe_comm_method = mock_comm
         mock_extra_ctx.moe_comm_type = MoECommType.ALLGATHER
-        self.quant_method.multistream_overlap_gate = False
         self.quant_method.in_dtype = torch.float32
 
         self.quant_method.apply(

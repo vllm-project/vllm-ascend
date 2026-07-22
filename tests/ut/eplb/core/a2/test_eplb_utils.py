@@ -25,14 +25,16 @@ class TestAscendConfig(unittest.TestCase):
         from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 
         moe_parallel_config = FusedMoEParallelConfig(2, 0, 1, 2, 1, 1, 1, 1, 1, True, "hccl", enable_eplb=True)
+        from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+
         moe_config = FusedMoEConfig(
             num_experts=8,
             experts_per_token=8,
             hidden_dim=8192,
-            intermediate_size_per_partition=5,
+            intermediate_size=10,
             num_local_experts=8,
             num_logical_experts=8,
-            activation="silu",
+            activation=MoEActivation.SILU,
             device="npu",
             routing_method=RoutingMethodType.Simulated,
             moe_parallel_config=moe_parallel_config,

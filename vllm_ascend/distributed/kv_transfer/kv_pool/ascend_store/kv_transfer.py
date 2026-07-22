@@ -36,16 +36,6 @@ def _circular_shift(lst: list, offset: int) -> list:
     return lst[offset:] + lst[:offset]
 
 
-def _circular_shift_array(value: np.ndarray, offset: int) -> np.ndarray:
-    length = len(value)
-    if length == 0:
-        return value
-    offset %= length
-    if offset == 0:
-        return value
-    return np.concatenate((value[offset:], value[:offset]))
-
-
 class LayerBatchBuilder:
     def __init__(
         self,
@@ -54,19 +44,21 @@ class LayerBatchBuilder:
         num_ranks_per_layer: int,
         page_size_bytes: int,
         num_layers: int,
+        group_id: int = 0,
     ) -> None:
         self.my_key_index = my_key_index
         self.num_ranks_per_layer = num_ranks_per_layer
         self.page_size_bytes = page_size_bytes
         self.num_layers = num_layers
-        self._block_len_np = np.asarray(token_database.group_block_len[0], dtype=np.int64)
+        self.group_id = group_id
+        self._block_len_np = np.asarray(token_database.group_block_len[group_id], dtype=np.int64)
         self._kv_caches_base_addr_np = np.asarray(
-            token_database.group_kv_caches_base_addr[0],
+            token_database.group_kv_caches_base_addr[group_id],
             dtype=np.int64,
         )
-        group_block_stride = token_database.group_block_stride.get(0, token_database.group_block_len[0])
+        group_block_stride = token_database.group_block_stride.get(group_id, token_database.group_block_len[group_id])
         self._block_stride_np = np.asarray(group_block_stride, dtype=np.int64)
-        # group_block_len[0] / kv_caches_base_addr[0] are laid out flat as
+        # group_block_len[group_id] / kv_caches_base_addr[group_id] are laid out flat as
         # [layer0_caches..., layer1_caches..., ...]; the per-layer stride is the
         # total length divided by the number of layers (mirrors
         # ChunkedTokenDatabase caches_per_layer computation).
@@ -122,7 +114,19 @@ class LayerBatchBuilder:
         layer_inner_offsets = np.concatenate(
             (np.zeros(1, dtype=np.int64), np.cumsum(layer_block_len[:-1], dtype=np.int64))
         )
-        rank_layer_offset = (layer_id * self.num_ranks_per_layer + self.my_key_index) * self.page_size_bytes
+        rank_layer_offset = layer_id * self.page_size_bytes
+        logger.debug(
+            "[KVPOOL] build_transfer layer=%d page_size=%d caches_per_layer=%d "
+            "rank_layer_offset=%d layer_block_len=%s layer_inner_offsets=%s "
+            "base_gvas=%s",
+            layer_id,
+            self.page_size_bytes,
+            caches_per_layer,
+            rank_layer_offset,
+            layer_block_len.tolist(),
+            layer_inner_offsets.tolist(),
+            base_gvas_arr.tolist(),
+        )
 
         addr_arr = layer_base_addrs[None, :] + block_ids_arr[:, None] * layer_block_stride[None, :]
         size_arr = np.broadcast_to(layer_block_len, addr_arr.shape)
@@ -134,16 +138,51 @@ class LayerBatchBuilder:
             gvas_arr.ravel(),
         )
 
-    @staticmethod
     def _require_request_arrays(
+        self,
         block_range: LayerBlockRange,
+        is_save: bool = True,
     ) -> tuple[np.ndarray, np.ndarray]:
         request = block_range.request
-        if request.block_ids_np is None or request.block_gvas_np is None:
-            raise RuntimeError("ReqMeta numpy block metadata is not initialized")
-        return request.block_ids_np, request.block_gvas_np
+        group_id = self.group_id
+        block_ids_np: np.ndarray | None
+        block_gvas_np: np.ndarray | None
+        if is_save:
+            group_block_ids = request.block_ids_by_group_np
+            group_block_gvas = request.block_gvas_by_group_np
+            if (
+                group_block_ids is not None
+                and group_block_gvas is not None
+                and group_id < len(group_block_ids)
+                and group_id < len(group_block_gvas)
+            ):
+                block_ids_np = group_block_ids[group_id]
+                block_gvas_np = group_block_gvas[group_id]
+            else:
+                block_ids_np = request.block_ids_np
+                block_gvas_np = request.block_gvas_np
+        else:
+            group_block_ids = request.block_ids_by_group_np
+            group_block_gvas = request.load_block_gvas_by_group_np
+            if (
+                group_block_ids is not None
+                and group_block_gvas is not None
+                and group_id < len(group_block_ids)
+                and group_id < len(group_block_gvas)
+            ):
+                block_ids_np = group_block_ids[group_id]
+                block_gvas_np = group_block_gvas[group_id]
+            else:
+                block_ids_np = request.block_ids_np
+                block_gvas_np = request.load_block_gvas_np
+        if block_ids_np is None or block_gvas_np is None:
+            raise RuntimeError(
+                f"ReqMeta {'save' if is_save else 'load'} block metadata"
+                f" is not initialized for request {request.req_id}"
+            )
+        return block_ids_np, block_gvas_np
 
-    def build_shared(self, task: LayerTransferTask) -> SharedBlockData | None:
+    def build_shared(self, task: LayerTransferTask, is_save: bool = True) -> SharedBlockData | None:
         """Pre-compute shared block data that is identical across all layers."""
         if not task.block_ranges:
             return None
@@ -157,23 +196,27 @@ class LayerBatchBuilder:
         block_ids_arr, block_gvas_arr = self._ensure_buf(total)
         req_ids: list[str] = []
         is_last_chunks: list[bool | None] = []
+        all_load_keys: list[str] = []
         offset = 0
 
         for block_range in task.block_ranges:
             request = block_range.request
             req_ids.append(request.req_id)
             is_last_chunks.append(request.is_last_chunk)
-            block_ids_np, block_gvas_np = self._require_request_arrays(block_range)
+            if request.load_keys:
+                all_load_keys.extend(request.load_keys)
+            block_ids_np, block_gvas_np = self._require_request_arrays(block_range, is_save)
+            gva_block_offset = request.gva_block_offset if is_save else request.load_gva_block_offset
 
             num_blocks = block_range.end_block - block_range.start_block
             if num_blocks > 0:
-                gva_start = block_range.start_block - request.gva_block_offset
-                gva_end = block_range.end_block - request.gva_block_offset
+                gva_start = block_range.start_block - gva_block_offset
+                gva_end = block_range.end_block - gva_block_offset
                 if gva_start < 0 or gva_end > len(block_gvas_np):
                     raise RuntimeError(
                         "ReqMeta GVA metadata does not cover requested block "
                         f"range [{block_range.start_block}, {block_range.end_block}) "
-                        f"with offset {request.gva_block_offset}"
+                        f"with offset {gva_block_offset}"
                     )
                 end = offset + num_blocks
                 block_ids_arr[offset:end] = block_ids_np[block_range.start_block : block_range.end_block]
@@ -188,11 +231,18 @@ class LayerBatchBuilder:
 
         block_ids_arr, block_gvas_arr = self._dedupe_transfer_blocks(block_ids_arr[:offset], block_gvas_arr[:offset])
 
+        logger.debug(
+            "[KVPOOL] build_shared req_ids=%s block_gvas_arr=%s block_ids_arr=%s",
+            req_ids,
+            block_gvas_arr.tolist(),
+            block_ids_arr.tolist(),
+        )
         return SharedBlockData(
             block_ids_arr=block_ids_arr,
             block_gvas_arr=block_gvas_arr,
             req_ids=req_ids,
             is_last_chunks=is_last_chunks,
+            load_keys=all_load_keys,
         )
 
     def build_addrs(
@@ -212,14 +262,15 @@ class LayerBatchBuilder:
             addr_array=addr_array,
             size_array=size_array,
             gvas_array=gvas_array,
+            load_keys=shared.load_keys,
         )
 
-    def build(self, task: LayerTransferTask) -> LayerBatchReqMeta | None:
+    def build(self, task: LayerTransferTask, is_save: bool = True) -> LayerBatchReqMeta | None:
         """Full build: shared data + per-layer addresses (backward compat)."""
-        shared = self.build_shared(task)
+        shared = self.build_shared(task, is_save)
         if shared is None:
             return None
-        return self.build_addrs(shared, task.layer_id)
+        return self.build_addrs(shared, task.layer_idx_in_group)
 
 
 class KVTransferThread(threading.Thread):
@@ -351,6 +402,15 @@ class KVTransferThread(threading.Thread):
         if len(gvas) == 0:
             return 0
 
+        # direction: 0/SMEMB_COPY_L2G = save (write), 1/SMEMB_COPY_G2L = load (read)
+        dir_name = "save(L2G)" if direction == 0 else "load(G2L)" if direction == 1 else f"dir{direction}"
+        logger.debug(
+            "[KVPOOL] batch_copy %s gvas=%d total_bytes=%d",
+            dir_name,
+            len(gvas),
+            int(sizes.sum()) if len(sizes) else 0,
+        )
+
         max_transfer_addrs = 0
         if max_transfer_blocks > 0:
             max_transfer_addrs = max_transfer_blocks * self.num_addrs_per_block
@@ -366,6 +426,12 @@ class KVTransferThread(threading.Thread):
                 sizes[start:end],
                 max_transfer_bytes,
             )
+            logger.debug(
+                "[KVPOOL] batch_copy %s split_gvas=%s split_sizes=%s",
+                dir_name,
+                split_gvas.tolist(),
+                split_sizes.tolist(),
+            )
             res = self.m_store.store.batch_copy(
                 split_gvas.tolist(),
                 split_addrs.tolist(),
@@ -373,6 +439,7 @@ class KVTransferThread(threading.Thread):
                 direction,
             )
             if res != 0:
+                logger.error("[KVPOOL] batch_copy %s FAILED res=%d", dir_name, res)
                 return res
         return 0
 
@@ -399,7 +466,8 @@ class KVTransferThread(threading.Thread):
                 self._handle_request(request_data)
             except Exception as e:
                 logger.error(
-                    "Error in KVCacheTransferThread. type=%s, error=%s. Check thread state and request processing.",
+                    "Error in KVCacheTransferThread(%s). type=%s, error=%s. Check thread state and request processing.",
+                    self.name,
                     type(e).__name__,
                     e,
                 )
@@ -492,6 +560,7 @@ class KVTransferThread(threading.Thread):
         block_ids: list[int],
         kv_cache_group_id: int = 0,
         cache_role: str = "kv",
+        block_id: int | None = None,
     ):
         try:
             return self.token_database.prepare_value(
@@ -500,6 +569,7 @@ class KVTransferThread(threading.Thread):
                 block_ids,
                 kv_cache_group_id=kv_cache_group_id,
                 cache_role=cache_role,
+                block_id=block_id,
             )
         except TypeError:
             return self.token_database.prepare_value(start, end, block_ids)
@@ -523,6 +593,33 @@ class KVTransferThread(threading.Thread):
         except TypeError:
             return self.token_database.decode_adaptor_prefill_pp(keys, addrs, sizes)
 
+    def _store_mask(self, req_meta: ReqMeta) -> tuple[list[bool], ...] | None:
+        store_mask = getattr(self.token_database, "store_mask", None)
+        if store_mask is None:
+            return None
+        try:
+            return store_mask(req_meta.token_len_chunk, req_meta.num_prompt_tokens)
+        except AssertionError as exc:
+            logger.debug("Skip AscendStore store mask for unaligned request %s: %s", req_meta.req_id, exc)
+            return None
+
+    def _load_mask(self, req_meta: ReqMeta, token_len: int) -> tuple[list[bool], ...] | None:
+        load_mask = getattr(self.token_database, "load_mask", None)
+        if load_mask is None:
+            return None
+        return load_mask(req_meta.block_hashes, token_len)
+
+    def _mask_allows_chunk(
+        self,
+        masks: tuple[list[bool], ...] | None,
+        group_id: int,
+        start: int,
+    ) -> bool:
+        mask_allows_chunk = getattr(self.token_database, "mask_allows_chunk", None)
+        if mask_allows_chunk is None:
+            return True
+        return mask_allows_chunk(masks, group_id, start)
+
 
 class KVCacheStoreSendingThread(KVTransferThread):
     def __init__(
@@ -538,6 +635,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         ready_event: threading.Event | None = None,
         group_uses_align_state: list[bool] | None = None,
         enable_kv_event: bool = False,
+        worker: Any = None,
     ):
         super().__init__(
             m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheSendingThread"
@@ -549,6 +647,28 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.enable_kv_event = enable_kv_event
         self.completed_events_lock = threading.Lock()
         self.completed_events: dict[int, int] = {}
+        self.worker = worker
+
+    def add_stored_request(self, req_id: str):
+        with self.done_task_lock:
+            self.stored_requests[req_id] += 1
+
+    def is_stored_request(self, req_id: str) -> bool:
+        with self.done_task_lock:
+            return req_id in self.stored_requests
+
+    def get_stored_request_count(self, req_id: str) -> int | None:
+        with self.done_task_lock:
+            return self.stored_requests.get(req_id)
+
+    def get_stored_requests_snapshot(self) -> dict[str, int]:
+        with self.done_task_lock:
+            return dict(self.stored_requests)
+
+    def dec_stored_request(self, req_id: str):
+        with self.done_task_lock:
+            if req_id in self.stored_requests:
+                self.stored_requests[req_id] -= 1
 
     def delete_finished_stored_request(self, req_id: str):
         with self.done_task_lock:
@@ -569,6 +689,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
         return completed_events
 
     def _handle_request(self, req_meta: ReqMeta):
+        if self.worker is not None and getattr(self.worker, "tp_mismatch", False):
+            try:
+                self.worker._store_kv_tp_mismatch(req_meta)
+            finally:
+                self.request_queue.task_done()
+            return
         token_len = req_meta.token_len_chunk
         req_id = req_meta.req_id
         current_event = req_meta.current_event
@@ -577,11 +703,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 self.request_queue.task_done()
                 return
 
+            store_masks = self._store_mask(req_meta)
             for group_id in req_meta.kv_cache_group_ids or [0]:
                 starts = []
                 ends = []
                 keys = []
                 block_hashes = []
+                key_block_ids = []
                 block_ids = req_meta.block_ids_by_group[group_id]
                 group_block_size = self._get_block_size(group_id)
                 group_block_hashes = get_block_hashes(
@@ -590,17 +718,20 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     getattr(self.token_database, "hash_block_size", group_block_size),
                 )
 
-                for start, end, key, _ in self._process_tokens_with_block_ids(
+                for start, end, key, block_id in self._process_tokens_with_block_ids(
                     token_len,
                     req_meta.block_hashes,
                     block_ids,
                     kv_cache_group_id=group_id,
                     skip_null_blocks=self._skip_null_blocks(req_meta, group_id),
                 ):
+                    if not self._mask_allows_chunk(store_masks, group_id, start):
+                        continue
                     starts.append(start)
                     ends.append(end)
                     keys.append(key.to_string())
                     block_hashes.append(group_block_hashes[start // group_block_size])
+                    key_block_ids.append(block_id)
 
                 if (
                     not self.dcp_size > 1
@@ -611,6 +742,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     ends = ends[self.tp_rank % self.put_step :: self.put_step]
                     keys = keys[self.tp_rank % self.put_step :: self.put_step]
                     block_hashes = block_hashes[self.tp_rank % self.put_step :: self.put_step]
+                    key_block_ids = key_block_ids[self.tp_rank % self.put_step :: self.put_step]
 
                 if not keys:
                     continue
@@ -625,8 +757,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 ends = [ends[index] for index in missing_indices]
                 keys = [keys[index] for index in missing_indices]
                 block_hashes = [block_hashes[index] for index in missing_indices]
+                key_block_ids = [key_block_ids[index] for index in missing_indices]
 
-                logger.info(
+                logger.debug(
                     "Storing KV cache for %d out of %d blocks (missing_count=%d) for request %s in group %d",
                     len(keys),
                     token_len // group_block_size,
@@ -646,14 +779,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 addrs = []
                 sizes = []
                 stored_events: list[BlockStored] = []
-                prev_key = None
-                new_block_hashes = [maybe_convert_block_hash(bh) for bh in block_hashes]
+                all_hashes = [maybe_convert_block_hash(bh) for bh in group_block_hashes]
                 for index, start in enumerate(starts):
                     addr, size, _ = self._prepare_value(
                         start,
                         ends[index],
                         block_ids,
                         kv_cache_group_id=group_id,
+                        block_id=key_block_ids[index],
                     )
                     addrs.append(addr)
                     sizes.append(size)
@@ -667,9 +800,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
                             else req_meta.original_block_size
                         )
                         if block_size is not None:
+                            block_idx = start // group_block_size
+                            if block_idx >= len(all_hashes):
+                                continue
+                            current_hash = all_hashes[block_idx]
+                            parent_hash = all_hashes[block_idx - 1] if block_idx > 0 else None
                             stored_event = BlockStored(
-                                block_hashes=[new_block_hashes[index]],
-                                parent_block_hash=prev_key,
+                                block_hashes=[current_hash],
+                                parent_block_hash=parent_hash,
                                 token_ids=token_ids,
                                 block_size=block_size,
                                 lora_id=None,
@@ -677,7 +815,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
                                 lora_name=None,
                             )
                             stored_events.append(stored_event)
-                            prev_key = new_block_hashes[index]
                             logger.debug("Added kv cache event '%s' to kv cache events queue", stored_event)
 
                 if self.kv_role == "kv_consumer":
@@ -717,6 +854,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         ready_event: threading.Event | None = None,
         invalid_block_ids: set[int] | None = None,
         invalid_block_ids_lock: threading.Lock | None = None,
+        worker: Any = None,
     ):
         super().__init__(
             m_store,
@@ -730,83 +868,121 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         )
         self._invalid_block_ids = invalid_block_ids if invalid_block_ids is not None else set()
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
+        self.worker = worker
 
     def _handle_request(self, req_meta: ReqMeta):
-        token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
-        req_id = req_meta.req_id
-        addr_list = []
-        size_list = []
-        key_list = []
-        block_id_list: list[int] = []
-        group_ids = req_meta.kv_cache_group_ids or [0]
-        for group_id in group_ids:
-            block_ids = req_meta.block_ids_by_group[group_id]
-            group_block_size = self._get_block_size(group_id)
-            mask_num = (
-                req_meta.load_spec.vllm_cached_tokens  # type: ignore[union-attr]
-                // group_block_size
-                * group_block_size
-            )
-            for start, end, key, _ in self._process_tokens_with_block_ids(
-                token_len,
-                req_meta.block_hashes,
-                block_ids,
-                mask_num,
-                kv_cache_group_id=group_id,
-                skip_null_blocks=self._skip_null_blocks(req_meta, group_id),
-            ):
-                addr, size, block_id = self._prepare_value(
-                    start,
-                    end,
-                    block_ids,
-                    kv_cache_group_id=group_id,
+        try:
+            load_spec = req_meta.load_spec
+            req_id = req_meta.req_id
+            if load_spec is None:
+                logger.error("KV pool async recv request %s has no load spec; skip load.", req_id)
+                self.set_finished_request(req_id)
+                return
+
+            token_len = load_spec.token_len
+            if self.worker is not None and getattr(self.worker, "tp_mismatch", False):
+                group_block_size = self._get_block_size(0)
+                mask_num = load_spec.vllm_cached_tokens // group_block_size * group_block_size
+                self.worker._load_kv_tp_mismatch(
+                    req_meta.block_hashes,
+                    req_meta.block_ids_by_group[0],
+                    token_len,
+                    mask_num,
                 )
-                key_list.append(key.to_string())
-                addr_list.append(addr)
-                size_list.append(size)
-                block_id_list.append(block_id)
-        if not key_list:
+                self.set_finished_request(req_id)
+                return
+
+            addr_list = []
+            size_list = []
+            key_list = []
+            block_id_list: list[int] = []
+            group_ids = req_meta.kv_cache_group_ids or [0]
+            load_masks = self._load_mask(req_meta, token_len)
+            for group_id in group_ids:
+                block_ids = req_meta.block_ids_by_group[group_id]
+                group_block_size = self._get_block_size(group_id)
+                mask_num = load_spec.vllm_cached_tokens // group_block_size * group_block_size
+                for start, end, key, block_id in self._process_tokens_with_block_ids(
+                    token_len,
+                    req_meta.block_hashes,
+                    block_ids,
+                    mask_num,
+                    kv_cache_group_id=group_id,
+                    skip_null_blocks=self._skip_null_blocks(req_meta, group_id),
+                ):
+                    if not self._mask_allows_chunk(load_masks, group_id, start):
+                        continue
+                    addr, size, block_id = self._prepare_value(
+                        start,
+                        end,
+                        block_ids,
+                        kv_cache_group_id=group_id,
+                        block_id=block_id,
+                    )
+                    key_list.append(key.to_string())
+                    addr_list.append(addr)
+                    size_list.append(size)
+                    block_id_list.append(block_id)
+            if not key_list:
+                self.set_finished_request(req_id)
+                return
+            key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
+            addr_list_c = addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
+            size_list_c = size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
+            block_id_list_c = (
+                block_id_list[self.tp_rank % len(block_id_list) :] + block_id_list[: self.tp_rank % len(block_id_list)]
+            )
+            logger.debug(
+                "KV pool async recv calls backend get request=%s token_len=%d groups=%s keys=%d sample_keys=%s",
+                req_id,
+                token_len,
+                req_meta.kv_cache_group_ids or [0],
+                len(key_list_c),
+                key_list_c[:3],
+            )
+            ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            if ret is not None and any(r != 0 for r in ret):
+                missing_block_ids = record_failed_blocks(
+                    block_id_list_c,
+                    ret,
+                )
+                if len(req_meta.block_ids_by_group) == 1:
+                    with self._invalid_block_ids_lock:
+                        self._invalid_block_ids.update(missing_block_ids)
+                elif missing_block_ids:
+                    logger.error(
+                        "KV load failed for hybrid request %s. "
+                        "Skip invalid-block fallback to avoid scheduler crash. "
+                        "failed_blocks=%s",
+                        req_id,
+                        missing_block_ids,
+                    )
+            elif ret is None:
+                missing_block_ids = record_failed_blocks(
+                    block_id_list_c,
+                    [1] * len(block_id_list_c),
+                )
+                if len(req_meta.block_ids_by_group) == 1:
+                    with self._invalid_block_ids_lock:
+                        self._invalid_block_ids.update(missing_block_ids)
+                elif missing_block_ids:
+                    logger.error(
+                        "KV load failed for hybrid request %s. "
+                        "Skip invalid-block fallback to avoid scheduler crash. "
+                        "failed_blocks=%s",
+                        req_id,
+                        missing_block_ids,
+                    )
+            logger.debug(
+                "KV pool async recv backend get returned request=%s token_len=%d groups=%s keys=%d",
+                req_id,
+                token_len,
+                req_meta.kv_cache_group_ids or [0],
+                len(key_list_c),
+            )
             self.set_finished_request(req_id)
+        finally:
             self.request_queue.task_done()
-            return
-        key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
-        addr_list_c = addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
-        size_list_c = size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
-        block_id_list_c = (
-            block_id_list[self.tp_rank % len(block_id_list) :] + block_id_list[: self.tp_rank % len(block_id_list)]
-        )
-        logger.debug(
-            "KV pool async recv calls backend get request=%s token_len=%d groups=%s keys=%d sample_keys=%s",
-            req_id,
-            token_len,
-            req_meta.kv_cache_group_ids or [0],
-            len(key_list_c),
-            key_list_c[:3],
-        )
-        ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
-        if ret is not None and any(r != 0 for r in ret):
-            missing_block_ids = record_failed_blocks(
-                block_id_list_c,
-                ret,
-            )
-            with self._invalid_block_ids_lock:
-                self._invalid_block_ids.update(missing_block_ids)
-        elif ret is None:
-            missing_block_ids = record_failed_blocks(
-                block_id_list_c,
-                [1] * len(block_id_list_c),
-            )
-            with self._invalid_block_ids_lock:
-                self._invalid_block_ids.update(missing_block_ids)
-        logger.debug(
-            "KV pool async recv backend get returned request=%s token_len=%d groups=%s keys=%d",
-            req_id,
-            token_len,
-            req_meta.kv_cache_group_ids or [0],
-            len(key_list_c),
-        )
-        self.set_finished_request(req_id)
-        self.request_queue.task_done()
 
 
 class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
@@ -1094,6 +1270,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         sync_save_events: list[torch.npu.Event],
         max_transfer_blocks: int = 0,
         max_transfer_bytes: int = 0,
+        group_builders: list[LayerBatchBuilder] | None = None,
     ):
         super().__init__(
             m_store,
@@ -1113,13 +1290,18 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self.sync_save_events = sync_save_events
         self.max_transfer_blocks = max_transfer_blocks
         self.max_transfer_bytes = max_transfer_bytes
-        self.layer_batch_builder = LayerBatchBuilder(
-            token_database,
-            my_key_index,
-            num_ranks_per_layer,
-            page_size_bytes,
-            num_layers,
-        )
+        self.group_builders: list[LayerBatchBuilder] | None = group_builders
+        if group_builders is not None:
+            self.layer_batch_builder = group_builders[0]
+        else:
+            self.layer_batch_builder = LayerBatchBuilder(
+                token_database,
+                my_key_index,
+                num_ranks_per_layer,
+                page_size_bytes,
+                num_layers,
+                group_id=0,
+            )
 
     def add_stored_request(self, req_id: str):
         with self.done_task_lock:
@@ -1137,7 +1319,11 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
 
     def build_shared_data(self, task: LayerTransferTask) -> SharedBlockData | None:
         """Pre-compute shared block data for all layers (GVA path)."""
-        return self.layer_batch_builder.build_shared(task)
+        if self.group_builders is not None:
+            builder = self.group_builders[task.group_id]
+        else:
+            builder = self.layer_batch_builder
+        return builder.build_shared(task, is_save=True)
 
     def add_request(  # type: ignore[override]
         self, req_meta: list[LayerTransferTask]
@@ -1150,42 +1336,63 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         if len(transfer_tasks) == 0:
             self.request_queue.task_done()
             return
-        if len(transfer_tasks) > 1:
-            raise ValueError(f"Expected at most one layer transfer task, got {len(transfer_tasks)}")
-        task = transfer_tasks[0]
-        shared = task.shared_block_data
-        if shared is None:
-            layer_id = task.layer_id
-            assert not self.layer_save_finished_events[layer_id].is_set(), f"thread: {layer_id} save failed "
-            logger.debug("Layer save event set: layer %d", layer_id)
-            self.layer_save_finished_events[layer_id].set()
+        physical_layer = transfer_tasks[0].layer_id
+        has_any_save = False
+        all_gvas = []
+        all_addrs = []
+        all_sizes = []
+        all_req_ids = []
+        for task in transfer_tasks:
+            shared = task.shared_block_data
+            if shared is None:
+                continue
+            has_any_save = True
+            builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
+            req_meta = builder.build_addrs(shared, task.layer_idx_in_group)
+            for req_id in req_meta.req_ids:
+                self.dec_stored_request(req_id)
+                all_req_ids.append(req_id)
+            all_gvas.append(req_meta.gvas_array)
+            all_addrs.append(req_meta.addr_array)
+            all_sizes.append(req_meta.size_array)
+        if has_any_save:
+            self.sync_save_events[physical_layer].synchronize()
+            gvas_array = np.concatenate(all_gvas) if len(all_gvas) > 1 else all_gvas[0]
+            addr_array = np.concatenate(all_addrs) if len(all_addrs) > 1 else all_addrs[0]
+            size_array = np.concatenate(all_sizes) if len(all_sizes) > 1 else all_sizes[0]
+            res = self._batch_copy_with_limits(
+                gvas_array,
+                addr_array,
+                size_array,
+                0,
+                self.max_transfer_blocks,
+                self.max_transfer_bytes,
+            )
+            if physical_layer <= 2 or res != 0:
+                logger.info(
+                    "save_thread: layer=%d groups=%d blocks=%d res=%d",
+                    physical_layer,
+                    len(all_gvas),
+                    len(gvas_array),
+                    res,
+                )
+            if res != 0:
+                logger.error("Layerwise %d save batch_copy failed with return code %d", physical_layer, res)
+            for req_id in all_req_ids:
+                if self.try_finish_and_delete_stored_request(req_id):
+                    self.set_finished_request(req_id)
+        if not has_any_save:
+            assert not self.layer_save_finished_events[physical_layer].is_set(), (
+                f"thread: {physical_layer} save failed "
+            )
+            logger.debug("Layer save event set: layer %d", physical_layer)
+            self.layer_save_finished_events[physical_layer].set()
+            transfer_tasks.clear()
             self.request_queue.task_done()
             return
-        req_meta = self.layer_batch_builder.build_addrs(shared, task.layer_id)
-        layer_id = req_meta.layer_id
-        rank_start = self.tp_rank % self.put_step
-        addr_array = req_meta.addr_array[rank_start :: self.put_step]
-        size_array = req_meta.size_array[rank_start :: self.put_step]
-        gvas_array = req_meta.gvas_array[rank_start :: self.put_step]
-        for req_id in req_meta.req_ids:
-            self.dec_stored_request(req_id)
-        self.sync_save_events[layer_id].synchronize()
-        res = self._batch_copy_with_limits(
-            gvas_array,
-            addr_array,
-            size_array,
-            0,
-            self.max_transfer_blocks,
-            self.max_transfer_bytes,
-        )
-        if res != 0:
-            logger.error("Layerwise %d save batch_copy failed with return code %d", layer_id, res)
-        for req_id in req_meta.req_ids:
-            if self.try_finish_and_delete_stored_request(req_id):
-                self.set_finished_request(req_id)
-        assert not self.layer_save_finished_events[layer_id].is_set(), f"thread: {layer_id} save failed "
-        logger.debug("Layer save event set: layer %d", layer_id)
-        self.layer_save_finished_events[layer_id].set()
+        assert not self.layer_save_finished_events[physical_layer].is_set(), f"thread: {physical_layer} save failed "
+        logger.debug("Layer save event set: layer %d", physical_layer)
+        self.layer_save_finished_events[physical_layer].set()
         transfer_tasks.clear()
         self.request_queue.task_done()
 
@@ -1210,6 +1417,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         h2d_stagger_us: int = 0,
         max_transfer_blocks: int = 0,
         max_transfer_bytes: int = 0,
+        group_builders: list[LayerBatchBuilder] | None = None,
     ):
         super().__init__(
             m_store,
@@ -1228,17 +1436,26 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self.h2d_stagger_us = h2d_stagger_us
         self.max_transfer_blocks = max_transfer_blocks
         self.max_transfer_bytes = max_transfer_bytes
-        self.layer_batch_builder = LayerBatchBuilder(
-            token_database,
-            my_key_index,
-            num_ranks_per_layer,
-            page_size_bytes,
-            num_layers,
-        )
+        self.group_builders: list[LayerBatchBuilder] | None = group_builders
+        if group_builders is not None:
+            self.layer_batch_builder = group_builders[0]
+        else:
+            self.layer_batch_builder = LayerBatchBuilder(
+                token_database,
+                my_key_index,
+                num_ranks_per_layer,
+                page_size_bytes,
+                num_layers,
+                group_id=0,
+            )
 
     def build_shared_data(self, task: LayerTransferTask) -> SharedBlockData | None:
         """Pre-compute shared block data for all layers (GVA path)."""
-        return self.layer_batch_builder.build_shared(task)
+        if self.group_builders is not None:
+            builder = self.group_builders[task.group_id]
+        else:
+            builder = self.layer_batch_builder
+        return builder.build_shared(task, is_save=False)
 
     def add_request(  # type: ignore[override]
         self, req_meta: LayerLoadTask
@@ -1279,21 +1496,25 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             self.request_queue.task_done()
             return
 
-        if len(transfer_tasks) > 1:
-            raise ValueError(f"Expected at most one layer transfer task, got {len(transfer_tasks)}")
-        task = transfer_tasks[0]
-        shared = task.shared_block_data
-        if shared is not None:
-            req_meta: LayerBatchReqMeta | None = self.layer_batch_builder.build_addrs(shared, task.layer_id)
-        else:
-            req_meta = self.layer_batch_builder.build(task)
-        if req_meta is None:
+        # Build req_meta for all tasks first; if all are None, early return
+        # before wait_for_save (matches original single-task behavior).
+        task_metas: list[tuple[LayerTransferTask, LayerBatchReqMeta]] = []
+        for task in transfer_tasks:
+            shared = task.shared_block_data
+            builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
+            if shared is not None:
+                req_meta: LayerBatchReqMeta | None = builder.build_addrs(shared, task.layer_idx_in_group)
+            else:
+                req_meta = builder.build(task, is_save=False)
+            if req_meta is not None:
+                task_metas.append((task, req_meta))
+
+        if not task_metas:
             assert not self.layer_load_finished_events[layer_id].is_set()
             logger.debug("Layer load event set: layer %d", layer_id)
             self.layer_load_finished_events[layer_id].set()
             self.request_queue.task_done()
             return
-        layer_id = req_meta.layer_id
 
         if wait_for_save is not None:
             while not self.layer_save_finished_events[wait_for_save].wait(timeout=10):
@@ -1305,19 +1526,27 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             while not attention_start_gate.wait(timeout=10):
                 logger.info("Layerwise %d load waits for attention compute start", layer_id)
 
-        gvas_array = _circular_shift_array(
-            req_meta.gvas_array,
-            (self.tp_rank * len(req_meta.gvas_array)) // self.tp_size,
-        )
-        addr_array = _circular_shift_array(
-            req_meta.addr_array,
-            (self.tp_rank * len(req_meta.addr_array)) // self.tp_size,
-        )
-        size_array = _circular_shift_array(
-            req_meta.size_array,
-            (self.tp_rank * len(req_meta.size_array)) // self.tp_size,
-        )
+        all_load_keys: list[str] = []
+        all_req_ids: set[str] = set()
+        last_chunk_req_ids: set[str] = set()
+        all_gvas = []
+        all_addrs = []
+        all_sizes = []
+        for task, req_meta in task_metas:
+            if req_meta.load_keys:
+                all_load_keys.extend(req_meta.load_keys)
+            for req_id, is_last_chunk in zip(req_meta.req_ids, req_meta.is_last_chunks):
+                all_req_ids.add(req_id)
+                if is_last_chunk:
+                    last_chunk_req_ids.add(req_id)
+            all_gvas.append(req_meta.gvas_array)
+            all_addrs.append(req_meta.addr_array)
+            all_sizes.append(req_meta.size_array)
+
         self._stagger_h2d_submit(layer_id)
+        gvas_array = np.concatenate(all_gvas) if len(all_gvas) > 1 else all_gvas[0]
+        addr_array = np.concatenate(all_addrs) if len(all_addrs) > 1 else all_addrs[0]
+        size_array = np.concatenate(all_sizes) if len(all_sizes) > 1 else all_sizes[0]
         res = self._batch_copy_with_limits(
             gvas_array,
             addr_array,
@@ -1326,11 +1555,27 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             self.max_transfer_blocks,
             self.max_transfer_bytes,
         )
+        if layer_id <= 2 or res != 0:
+            logger.info(
+                "load_thread: layer=%d groups=%d blocks=%d res=%d",
+                layer_id,
+                len(all_gvas),
+                len(gvas_array),
+                res,
+            )
         if res != 0:
             logger.error("Layerwise %d load batch_copy failed with return code %d", layer_id, res)
+
+        if layer_id == self.final_layer_id and all_load_keys:
+            self.m_store.batch_remove_lease(all_load_keys)
+            logger.info(
+                "[KVPOOL] load_thread released %d leases after final layer %d",
+                len(all_load_keys),
+                layer_id,
+            )
         if layer_id == self.final_layer_id:
-            for req_id, is_last_chunk in zip(req_meta.req_ids, req_meta.is_last_chunks):
-                if is_last_chunk:
+            for req_id in all_req_ids:
+                if req_id in last_chunk_req_ids:
                     self.set_finished_request(req_id)
         assert not self.layer_load_finished_events[layer_id].is_set(), f"thread: {layer_id} load failed "
         logger.debug("Layer load event set: layer %d", layer_id)

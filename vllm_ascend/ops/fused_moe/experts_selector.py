@@ -24,7 +24,6 @@ from vllm.forward_context import get_forward_context
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import split_tensor_along_first_dim
-from vllm_ascend.utils import get_weight_prefetch_method
 
 
 def select_experts(
@@ -68,10 +67,6 @@ def select_experts(
         topk_weights: router weights of shape (num_tokens, top_k).
         topk_ids: selected expert IDs of shape (num_tokens, top_k).
     """
-    # prefetch w1_w3_proj.weight preprocess
-    weight_prefetch_method = get_weight_prefetch_method()
-    if weight_prefetch_method:
-        weight_prefetch_method.maybe_prefetch_moe_weight_preprocess(hidden_states, "gate_up")
     is_support_npu_moe_gating_top_k = check_npu_moe_gating_top_k(
         hidden_states=hidden_states,
         top_k=top_k,
@@ -110,7 +105,6 @@ def select_experts(
             scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
-            num_experts=num_experts,
             tid2eid=None,
             input_ids=None,
         )
@@ -322,7 +316,6 @@ def _native_select_experts(
     scoring_func: str = "softmax",
     routed_scaling_factor: float = 1.0,
     e_score_correction_bias: torch.Tensor | None = None,
-    num_experts: torch.Tensor | None = None,
     use_hash: bool = False,
     tid2eid: dict[int, int] | None = None,
     input_ids: torch.Tensor | None = None,
@@ -379,7 +372,6 @@ def _native_select_experts(
             gating_output=router_logits,
             topk=top_k,
             renormalize=renormalize,
-            num_experts=num_experts,
         )
         # Required by npu_moe_init_routing
         topk_ids = topk_ids.to(torch.int32)

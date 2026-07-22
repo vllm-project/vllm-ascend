@@ -50,28 +50,88 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         result = cls.check_all_layers_exists(None, [0, 0, 0], 3)
         self.assertEqual(result, [0])
 
-    def test_find_max_hit_index_found(self):
+    def test_find_all_continuous_hit_positions_found(self):
         cls = self._make_worker_class()
         arr = [[1, 1, 0], [1, 0, 1]]
-        result = cls.find_max_hit_index(None, arr, 3)
-        self.assertEqual(result, 0)
+        result = cls.find_all_continuous_hit_positions(arr, [16, 32, 48], 3, 48, 16)
+        self.assertEqual(result, [16])
 
-    def test_find_max_hit_index_all_one(self):
+    def test_find_all_continuous_hit_positions_all_one(self):
         cls = self._make_worker_class()
         arr = [[1, 1, 1], [1, 1, 1]]
-        result = cls.find_max_hit_index(None, arr, 3)
-        self.assertEqual(result, 2)
+        result = cls.find_all_continuous_hit_positions(arr, [16, 32, 48], 3, 48, 16)
+        self.assertEqual(result, [16, 32, 48])
 
-    def test_find_max_hit_index_first_pos(self):
+    def test_find_all_continuous_hit_positions_first_pos(self):
         cls = self._make_worker_class()
         arr = [[0, 1], [1, 0]]
-        result = cls.find_max_hit_index(None, arr, 3)
-        self.assertEqual(result, -1)
+        result = cls.find_all_continuous_hit_positions(arr, [16, 32], 2, 48, 16)
+        self.assertEqual(result, [])
 
-    def test_find_max_hit_index_empty(self):
+    def test_find_all_continuous_hit_positions_empty(self):
         cls = self._make_worker_class()
-        result = cls.find_max_hit_index(None, [], 0)
-        self.assertEqual(result, -1)
+        result = cls.find_all_continuous_hit_positions([], [], 0, 48, 16)
+        self.assertEqual(result, [])
+
+    def test_find_all_discontinuous_hit_positions_all_tp_hits(self):
+        cls = self._make_worker_class()
+        arr = [[0, 0, 1, 0, 0, 1], [0, 0, 1, 0, 0, 1]]
+        result = cls.find_all_discontinuous_hit_positions(arr, [16, 32, 48, 64, 80, 96], 6, 128, 16)
+        self.assertEqual(result, [48, 96])
+
+    def test_find_all_discontinuous_hit_positions_some_tp_hits(self):
+        cls = self._make_worker_class()
+        arr = [[0, 0, 1, 0, 0, 1], [0, 0, 1, 0, 0, 0]]
+        result = cls.find_all_discontinuous_hit_positions(arr, [16, 32, 48, 64, 80, 96], 6, 128, 16)
+        self.assertEqual(result, [48])
+
+    def test_find_all_discontinuous_hit_positions_all_tp_hits_with_limits(self):
+        cls = self._make_worker_class()
+        arr = [[0, 0, 1, 0, 0, 1], [0, 0, 1, 0, 0, 1]]
+        result = cls.find_all_discontinuous_hit_positions(arr, [16, 32, 48, 64, 80, 96], 6, 64, 16)
+        self.assertEqual(result, [48])
+
+    def test_max_intersection_hit_position_single_group(self):
+        cls = self._make_worker_class()
+        hits = [[16, 32, 48]]
+        self.assertEqual(48, cls._max_intersection_hit_position(hits))
+
+    def test_max_intersection_hit_position_empty_group(self):
+        cls = self._make_worker_class()
+        hits: list[list[int]] = []
+        self.assertEqual(0, cls._max_intersection_hit_position(hits))
+
+    def test_max_intersection_hit_position_multi_group(self):
+        cls = self._make_worker_class()
+        hits = [[16, 32, 48], [32, 48], [16, 32], [32, 48, 64]]
+        self.assertEqual(32, cls._max_intersection_hit_position(hits))
+
+    def test_external_coordinator_lookup_disables_eagle_drop(self):
+        cls = self._make_worker_class()
+        worker = object.__new__(cls)
+        worker.num_kv_cache_groups = 1
+        worker.cache_coordinator = MagicMock()
+        worker.cache_coordinator.find_longest_cache_hit.return_value = ((), 128)
+        worker.m_store = MagicMock()
+        worker.m_store.exists.return_value = [1]
+
+        key = MagicMock()
+        key.chunk_hash = "ab" * 32
+        key.to_string.return_value = "key"
+        worker.token_database = MagicMock()
+        worker.token_database.process_tokens.return_value = [(0, 128, key)]
+
+        hit = worker._lookup_with_coordinator(
+            128,
+            [b"h0"],
+            [0],
+            use_layerwise=False,
+            include_all_ranks=False,
+        )
+
+        self.assertEqual(hit, 128)
+        worker.cache_coordinator.find_longest_cache_hit.assert_called_once()
+        self.assertFalse(worker.cache_coordinator.find_longest_cache_hit.call_args.kwargs["apply_eagle"])
 
 
 class TestKVPoolWorkerInit(unittest.TestCase):
@@ -84,6 +144,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         config.model_config.hf_text_config = MagicMock(spec=[])  # no index_topk
         config.model_config.get_num_layers.return_value = 32
         config.model_config.get_total_num_kv_heads.return_value = 8
+        config.model_config.max_model_len = 1024
         config.parallel_config.data_parallel_rank = 0
         config.parallel_config.rank = 0
         config.parallel_config.pipeline_parallel_size = 1
@@ -420,6 +481,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         config.model_config.model = "org/llama-7b"
         config.model_config.use_mla = False
         config.model_config.hf_text_config = MagicMock(spec=[])
+        config.model_config.max_model_len = 1024
         config.model_config.get_num_layers.return_value = 2
         config.model_config.get_total_num_kv_heads.return_value = 1
         config.parallel_config.data_parallel_rank = 0
@@ -478,6 +540,28 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         meta.add_request(req)
         worker.start_load_kv(meta)
         worker.m_store.get.assert_called_once()
+
+    def test_start_load_kv_sync_uses_tail_block_id(self):
+        worker = self._make_worker()
+        worker.m_store.get = MagicMock()
+        worker.token_database.set_group_buffers({0: [1000]}, {0: [160]})
+
+        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=64, can_load=True, token_len=64)
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=64,
+            block_ids=[99],
+            block_hashes=["h0", "h1", "h2", "h3"],
+            load_spec=load_spec,
+        )
+        meta = AscendConnectorMetadata(set(), set())
+        meta.add_request(req)
+
+        worker.start_load_kv(meta)
+
+        _, addrs, sizes = worker.m_store.get.call_args.args
+        self.assertEqual(addrs, [[1000 + 99 * 160]])
+        self.assertEqual(sizes, [[160]])
 
     def test_start_load_kv_no_load(self):
         worker = self._make_worker()
@@ -813,115 +897,6 @@ class TestKVPoolWorkerGetGroupTpSize(unittest.TestCase):
         worker.group_uses_align_state = [False]
         # _get_group_num_kv_heads returns 1 for MLA
         self.assertEqual(worker.get_group_tp_size(0), 1)
-
-
-class TestKVPoolWorkerLookupGateGroupIds(unittest.TestCase):
-    """Test _get_lookup_gate_group_ids and _is_lookup_gate_group."""
-
-    def _make_worker(self):
-        patches = {
-            "tp_rank": patch(
-                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_rank",
-                return_value=0,
-            ),
-            "tp_size": patch(
-                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_world_size",
-                return_value=1,
-            ),
-            "pcp_group": patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_pcp_group"),
-            "dcp_ws": patch(
-                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_decode_context_model_parallel_world_size",
-                return_value=1,
-            ),
-            "dcp_rank": patch(
-                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_decode_context_model_parallel_rank",
-                return_value=0,
-            ),
-            "importlib": patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.importlib"),
-        }
-        mocks = {}
-        for name, p in patches.items():
-            mocks[name] = p.start()
-        pcp_group = MagicMock()
-        pcp_group.world_size = 1
-        mocks["pcp_group"].return_value = pcp_group
-        mocks["importlib"].import_module.return_value = MagicMock()
-
-        config = MagicMock()
-        config.model_config.model = "org/llama-7b"
-        config.model_config.use_mla = False
-        config.model_config.hf_text_config = MagicMock(spec=[])
-        config.model_config.get_num_layers.return_value = 2
-        config.model_config.get_total_num_kv_heads.return_value = 1
-        config.parallel_config.data_parallel_rank = 0
-        config.parallel_config.rank = 0
-        config.parallel_config.pipeline_parallel_size = 1
-        config.kv_transfer_config.kv_role = "kv_producer"
-        config.kv_transfer_config.kv_connector_extra_config = {"backend": "mooncake"}
-        config.cache_config.block_size = 16
-        config.kv_events_config = None
-
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-
-        worker = KVPoolWorker(config, use_layerwise=False)
-        self._patches = patches
-        return worker
-
-    def tearDown(self):
-        for p in self._patches.values():
-            p.stop()
-
-    def test_is_lookup_gate_group_c128_family(self):
-        worker = self._make_worker()
-        worker.kv_cache_group_families = ["c128"]
-        worker.group_uses_align_state = [False]
-        self.assertFalse(worker._is_lookup_gate_group(0))
-
-    def test_is_lookup_gate_group_c4_family(self):
-        worker = self._make_worker()
-        worker.kv_cache_group_families = ["c4"]
-        worker.group_uses_align_state = [False]
-        self.assertFalse(worker._is_lookup_gate_group(0))
-
-    def test_is_lookup_gate_group_c1_family_matching_block_size(self):
-        worker = self._make_worker()
-        worker.kv_cache_group_families = ["c1"]
-        worker.group_uses_align_state = [False]
-        worker.grouped_block_size = [16]
-        worker.block_size = 16
-        self.assertTrue(worker._is_lookup_gate_group(0))
-
-    def test_is_lookup_gate_group_c1_family_wrong_block_size(self):
-        worker = self._make_worker()
-        worker.kv_cache_group_families = ["c1"]
-        worker.group_uses_align_state = [False]
-        worker.grouped_block_size = [8]
-        worker.block_size = 16
-        self.assertFalse(worker._is_lookup_gate_group(0))
-
-    def test_is_lookup_gate_group_align_state(self):
-        worker = self._make_worker()
-        worker.kv_cache_group_families = ["default"]
-        worker.group_uses_align_state = [True]
-        self.assertFalse(worker._is_lookup_gate_group(0))
-
-    def test_get_lookup_gate_group_ids_no_gate_groups(self):
-        worker = self._make_worker()
-        worker.kv_cache_group_families = ["c128"]
-        worker.group_uses_align_state = [False]
-        # No gate groups -> return original
-        result = worker._get_lookup_gate_group_ids([0])
-        self.assertEqual(result, [0])
-
-    def test_get_lookup_gate_group_ids_with_gate_groups(self):
-        worker = self._make_worker()
-        worker.kv_cache_group_families = ["c1", "c128"]
-        worker.group_uses_align_state = [False, False]
-        worker.grouped_block_size = [16, 16]
-        worker.block_size = 16
-        result = worker._get_lookup_gate_group_ids([0, 1])
-        # Only group 0 is a gate group (c1 + matching block_size)
-        self.assertEqual(result, [0])
 
 
 class TestKVPoolWorkerBuildConnectorWorkerMeta(unittest.TestCase):
@@ -1412,6 +1387,377 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         )
         worker._process_load_for_layer_batch([req], 0)
         self.assertEqual(len(worker.layer_load_tasks[0]), 0)
+
+
+class TestKVPoolWorkerTpMismatch(unittest.TestCase):
+    """Tests for TP-asymmetric prefill/decode strided KV transfer.
+
+    Scenario: decode node (tp2) stores KV, prefill node (tp4) loads/hits.
+    Qwen3-8B GQA: num_kv_heads=8 -> decode tp2 holds 4 heads/rank, prefill tp4
+    holds 2 heads/rank; effective_tp=4, decode num_sub_keys=2.
+    """
+
+    def _make_vllm_config(self, kv_role="kv_consumer", extra_config=None, num_kv_heads=8, use_sparse=False):
+        config = MagicMock()
+        config.model_config.model = "qwen/qwen3-8b"
+        config.model_config.use_mla = False
+        if use_sparse:
+            config.model_config.hf_text_config = MagicMock()
+            config.model_config.hf_text_config.index_topk = 32
+        else:
+            config.model_config.hf_text_config = MagicMock(spec=[])  # no index_topk
+        config.model_config.get_num_layers.return_value = 36
+        config.model_config.get_total_num_kv_heads.return_value = num_kv_heads
+        config.model_config.max_model_len = 4096
+        config.parallel_config.data_parallel_rank = 0
+        config.parallel_config.rank = 0
+        config.parallel_config.pipeline_parallel_size = 1
+        config.kv_transfer_config.kv_role = kv_role
+        config.kv_transfer_config.kv_connector_extra_config = extra_config or {"backend": "mooncake"}
+        config.cache_config.block_size = 16
+        config.kv_events_config = None
+        return config
+
+    def _patches(self, tp_rank=0, tp_size=2):
+        return [
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_rank",
+                return_value=tp_rank,
+            ),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_world_size",
+                return_value=tp_size,
+            ),
+            patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_pcp_group"),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_decode_context_model_parallel_world_size",
+                return_value=1,
+            ),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_decode_context_model_parallel_rank",
+                return_value=0,
+            ),
+            patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.importlib"),
+        ]
+
+    def _start(self, patches):
+        mocks = [p.start() for p in patches]
+        pcp_group = MagicMock()
+        pcp_group.world_size = 1
+        mocks[2].return_value = pcp_group  # get_pcp_group -> pcp_group
+        mocks[5].import_module.return_value = MagicMock()  # importlib.import_module
+        return mocks
+
+    def _make_worker(
+        self,
+        *,
+        tp_size=2,
+        tp_rank=0,
+        kv_role="kv_consumer",
+        extra_config=None,
+        num_kv_heads=8,
+        use_sparse=False,
+        use_layerwise=False,
+    ):
+        patches = self._patches(tp_rank=tp_rank, tp_size=tp_size)
+        self._start(patches)
+        try:
+            cfg = self._make_vllm_config(
+                kv_role=kv_role, extra_config=extra_config, num_kv_heads=num_kv_heads, use_sparse=use_sparse
+            )
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+            return KVPoolWorker(cfg, use_layerwise=use_layerwise)
+        finally:
+            for p in patches:
+                p.stop()
+
+    def test_tp_mismatch_detected_decode_tp2_prefill_tp4(self):
+        worker = self._make_worker(
+            tp_size=2, kv_role="kv_consumer", extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8
+        )
+        self.assertTrue(worker.tp_mismatch)
+        self.assertEqual(worker.peer_tp_size, 4)
+        self.assertEqual(worker.effective_tp_size, 4)
+        self.assertEqual(worker.local_heads_per_rank, 4)
+        self.assertEqual(worker.effective_heads_per_rank, 2)
+        self.assertEqual(worker.num_sub_keys, 2)
+
+    def test_register_kv_caches_initializes_tp_mismatch_strides(self):
+        worker = self._make_worker(
+            tp_size=2, kv_role="kv_consumer", extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8
+        )
+        fake_cache = MagicMock()
+        fake_cache.shape = [100, 16, 4, 64]
+        fake_cache.__getitem__.return_value.numel.return_value = 16 * 4 * 64
+        fake_cache.element_size.return_value = 2
+        fake_cache.stride.return_value = 16 * 4 * 64
+        fake_cache.data_ptr.return_value = 10000
+        fake_cache.untyped_storage.return_value.data_ptr.return_value = 10000
+        worker._transfer_threads_started = True
+
+        worker.register_kv_caches({"layers.0": (fake_cache, fake_cache)})
+
+        self.assertEqual(worker.per_token_bytes, 512)
+        self.assertEqual(worker.sub_size_bytes, 256)
+
+    def test_tp_mismatch_disabled_when_no_config(self):
+        # No prefill_tp_size/decode_tp_size -> tp_mismatch False (original behavior)
+        worker = self._make_worker(
+            tp_size=2, kv_role="kv_consumer", extra_config={"backend": "mooncake"}, num_kv_heads=8
+        )
+        self.assertFalse(worker.tp_mismatch)
+        self.assertEqual(worker.num_sub_keys, 1)
+        self.assertEqual(worker.effective_tp_size, 2)
+
+    def test_tp_mismatch_disabled_when_peer_equal(self):
+        worker = self._make_worker(
+            tp_size=2, kv_role="kv_consumer", extra_config={"backend": "mooncake", "prefill_tp_size": 2}, num_kv_heads=8
+        )
+        self.assertFalse(worker.tp_mismatch)
+
+    def test_tp_mismatch_disabled_when_use_mla(self):
+        patches = self._patches(tp_rank=0, tp_size=2)
+        self._start(patches)
+        try:
+            cfg = self._make_vllm_config(
+                kv_role="kv_consumer", extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8
+            )
+            cfg.model_config.use_mla = True
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+            worker = KVPoolWorker(cfg, use_layerwise=False)
+        finally:
+            for p in patches:
+                p.stop()
+        # use_mla -> num_kv_head forced to 1, can't satisfy >= effective_tp_size
+        self.assertFalse(worker.tp_mismatch)
+
+    def test_tp_mismatch_rejects_use_sparse(self):
+        patches = self._patches(tp_rank=0, tp_size=2)
+        self._start(patches)
+        try:
+            cfg = self._make_vllm_config(
+                kv_role="kv_consumer",
+                extra_config={"backend": "mooncake", "prefill_tp_size": 4},
+                num_kv_heads=8,
+                use_sparse=True,
+            )
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+            with self.assertRaises(ValueError):
+                KVPoolWorker(cfg, use_layerwise=False)
+        finally:
+            for p in patches:
+                p.stop()
+
+    def test_tp_mismatch_rejects_layerwise(self):
+        patches = self._patches(tp_rank=0, tp_size=2)
+        self._start(patches)
+        try:
+            cfg = self._make_vllm_config(
+                kv_role="kv_consumer", extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8
+            )
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+            with self.assertRaises(ValueError):
+                KVPoolWorker(cfg, use_layerwise=True)
+        finally:
+            for p in patches:
+                p.stop()
+
+    def test_make_sub_key_str_rewrites_rank(self):
+        worker = self._make_worker(
+            tp_rank=1, tp_size=2, extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8
+        )
+        rank = worker.metadata[0].head_or_tp_rank  # = 1 for tp_rank=1
+
+        class FakeKey:
+            def to_string(self):
+                return f"model@head_or_tp_rank:{rank}@pp_rank:0@k0"
+
+        out = worker._make_sub_key_str(FakeKey(), effective_rank=3)
+        self.assertIn("@head_or_tp_rank:3", out)
+        self.assertNotIn(f"@head_or_tp_rank:{rank}", out)
+
+    def test_build_strided_addrs_uses_stride(self):
+        worker = self._make_worker(extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8)
+        # Simulate register_kv_caches outputs (group-0 dict structure).
+        worker.block_size = 4
+        worker.group_kv_caches_base_addr = {0: [1000]}
+        worker.group_block_len = {0: [64]}  # bytes per block
+        worker.group_block_stride = {0: [128]}  # padded stride (> block_len)
+        worker.sub_size_bytes = 8
+        addrs, sizes = worker._build_strided_addrs(block_id=2, token_count=3, sub_idx=1)
+        # per_token_bytes = 64 // 4 = 16; block_base = 1000 + 2*128 = 1256
+        # sub_idx=1 -> head_offset = 8
+        # addrs = [1256+0*16+8, 1256+1*16+8, 1256+2*16+8] = [1264, 1280, 1296]
+        self.assertEqual(addrs, [1264, 1280, 1296])
+        self.assertEqual(sizes, [8, 8, 8])
+
+    def test_build_tp_mismatch_keys_and_addrs_counts_and_ranks(self):
+        worker = self._make_worker(
+            tp_rank=1, tp_size=2, extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8
+        )
+        worker.block_size = 4
+        worker.group_kv_caches_base_addr = {0: [0]}
+        worker.group_block_len = {0: [16]}
+        worker.group_block_stride = {0: [16]}
+        worker.sub_size_bytes = 2
+
+        class FakeKey:
+            def __init__(self, i):
+                self.i = i
+
+            def to_string(self):
+                return f"m@head_or_tp_rank:{worker.metadata[0].head_or_tp_rank}@pp_rank:0@k{self.i}"
+
+        def fake_process_tokens_with_block_ids(token_len, block_hashes, block_ids, mask_num=0):
+            yield 0, 4, FakeKey(0), block_ids[0]
+            yield 4, 8, FakeKey(1), block_ids[1]
+
+        worker.token_database = MagicMock()
+        worker.token_database.process_tokens_with_block_ids.side_effect = fake_process_tokens_with_block_ids
+
+        keys, addrs, sizes, block_ids = worker._build_tp_mismatch_keys_and_addrs(
+            block_hashes=[b"h0", b"h1"], block_ids=[10, 11], token_len=8, mask_num=0
+        )
+        # 2 chunks * num_sub_keys=2 = 4 keys
+        self.assertEqual(len(keys), 4)
+        self.assertEqual(len(addrs), 4)
+        self.assertEqual(len(sizes), 4)
+        self.assertEqual(len(block_ids), 4)
+        # tp_rank=1, num_sub_keys=2 -> effective_rank = 1*2 + {0,1} = {2,3}
+        self.assertIn("@head_or_tp_rank:2", keys[0])
+        self.assertIn("@head_or_tp_rank:3", keys[1])
+
+    def test_build_tp_mismatch_keys_and_addrs_skips_missing_block_ids(self):
+        worker = self._make_worker(extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8)
+        worker.block_size = 4
+        worker.group_kv_caches_base_addr = {0: [0]}
+        worker.group_block_len = {0: [16]}
+        worker.group_block_stride = {0: [16]}
+        worker.sub_size_bytes = 2
+
+        class FakeKey:
+            def __init__(self, i):
+                self.i = i
+
+            def to_string(self):
+                return f"m@head_or_tp_rank:{worker.metadata[0].head_or_tp_rank}@pp_rank:0@k{self.i}"
+
+        worker.token_database = MagicMock()
+        worker.token_database.process_tokens_with_block_ids.return_value = [
+            (4, 8, FakeKey(1), 10),
+        ]
+
+        keys, addrs, sizes, block_ids = worker._build_tp_mismatch_keys_and_addrs(
+            block_hashes=[b"h0", b"h1"], block_ids=[10], token_len=8, mask_num=0
+        )
+
+        self.assertEqual(len(keys), 2)
+        self.assertEqual(len(addrs), 2)
+        self.assertEqual(len(sizes), 2)
+        self.assertEqual(block_ids, [10, 10])
+        self.assertIn("@k1", keys[0])
+
+    def test_load_kv_tp_mismatch_calls_backend_get(self):
+        worker = self._make_worker(extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8)
+        worker.block_size = 4
+        worker.group_kv_caches_base_addr = {0: [0]}
+        worker.group_block_len = {0: [16]}
+        worker.group_block_stride = {0: [16]}
+        worker.sub_size_bytes = 2
+        worker.m_store = MagicMock()
+        worker.m_store.get.return_value = [0]  # success
+
+        class FakeKey:
+            def to_string(self):
+                return f"m@head_or_tp_rank:{worker.metadata[0].head_or_tp_rank}@pp_rank:0@k0"
+
+        worker.token_database = MagicMock()
+        worker.token_database.process_tokens_with_block_ids.side_effect = lambda *a, **kw: iter([(0, 4, FakeKey(), 5)])
+
+        worker._load_kv_tp_mismatch(block_hashes=[b"h0"], block_ids=[5], token_len=4, mask_num=0)
+        worker.m_store.get.assert_called_once()
+
+    def test_store_kv_tp_mismatch_skips_when_not_stored(self):
+        worker = self._make_worker(extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8)
+        worker.kv_send_thread = MagicMock()
+        worker.kv_send_thread.is_stored_request.return_value = False
+        req = ReqMeta(
+            req_id="r1", token_len_chunk=4, block_ids_by_group=[[5]], block_hashes=[b"h0"], current_event=None
+        )
+        worker._store_kv_tp_mismatch(req)
+        worker.kv_send_thread.dec_stored_request.assert_not_called()
+
+    def test_store_kv_tp_mismatch_puts_missing_and_decrements(self):
+        worker = self._make_worker(extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8)
+        worker.block_size = 4
+        worker.group_kv_caches_base_addr = {0: [0]}
+        worker.group_block_len = {0: [16]}
+        worker.group_block_stride = {0: [16]}
+        worker.sub_size_bytes = 2
+        worker.m_store = MagicMock()
+        worker.enable_kv_events = False
+
+        class FakeKey:
+            def to_string(self):
+                return f"m@head_or_tp_rank:{worker.metadata[0].head_or_tp_rank}@pp_rank:0@k0"
+
+        worker.token_database = MagicMock()
+        worker.token_database.process_tokens_with_block_ids.side_effect = lambda *a, **kw: iter([(0, 4, FakeKey(), 5)])
+
+        send_thread = MagicMock()
+        send_thread.is_stored_request.return_value = True
+        # 2 sub-keys: first missing, second present -> only the first is put.
+        send_thread.lookup.return_value = [False, True]
+        worker.kv_send_thread = send_thread
+
+        req = ReqMeta(
+            req_id="r1", token_len_chunk=4, block_ids_by_group=[[5]], block_hashes=[b"h0"], current_event=None
+        )
+        worker._store_kv_tp_mismatch(req)
+        worker.m_store.put.assert_called_once()
+        put_keys = worker.m_store.put.call_args.args[0]
+        self.assertEqual(len(put_keys), 1)
+        send_thread.dec_stored_request.assert_called_once_with("r1")
+
+    def test_store_kv_tp_mismatch_decrements_on_put_exception(self):
+        worker = self._make_worker(extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8)
+        worker.block_size = 4
+        worker.group_kv_caches_base_addr = {0: [0]}
+        worker.group_block_len = {0: [16]}
+        worker.group_block_stride = {0: [16]}
+        worker.sub_size_bytes = 2
+        worker.m_store = MagicMock()
+        worker.m_store.put.side_effect = RuntimeError("put failed")
+        worker.enable_kv_events = False
+
+        class FakeKey:
+            def to_string(self):
+                return f"m@head_or_tp_rank:{worker.metadata[0].head_or_tp_rank}@pp_rank:0@k0"
+
+        worker.token_database = MagicMock()
+        worker.token_database.process_tokens_with_block_ids.side_effect = lambda *a, **kw: iter([(0, 4, FakeKey(), 5)])
+
+        send_thread = MagicMock()
+        send_thread.is_stored_request.return_value = True
+        send_thread.lookup.return_value = [False, False]
+        worker.kv_send_thread = send_thread
+
+        req = ReqMeta(
+            req_id="r1", token_len_chunk=4, block_ids_by_group=[[5]], block_hashes=[b"h0"], current_event=None
+        )
+        with self.assertRaises(RuntimeError):
+            worker._store_kv_tp_mismatch(req)
+        send_thread.dec_stored_request.assert_called_once_with("r1")
+
+    def test_get_group_tp_size_uses_effective_tp(self):
+        worker = self._make_worker(
+            tp_size=2, extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8
+        )
+        self.assertEqual(worker.get_group_tp_size(0), 4)  # effective_tp_size under tp_mismatch
 
 
 if __name__ == "__main__":

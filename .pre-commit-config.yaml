@@ -1,6 +1,6 @@
 default_install_hook_types:
   - pre-commit
-  - commit-msg
+  - prepare-commit-msg
 
 default_stages:
   - pre-commit # Run locally
@@ -22,7 +22,7 @@ repos:
       args: [
         --toml, pyproject.toml,
         '--skip', 'tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,./vllm_ascend.egg-info/**,typos.toml',
-        '-L', 'CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn,ArchType,AND,ND,tbe,copyin,alog,outter,mata'
+        '-L', 'CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn,ArchType,AND,ND,tbe,copyin,alog,outter,mata,PARD'
       ]
       additional_dependencies:
         - tomli
@@ -56,7 +56,7 @@ repos:
   rev: v1.7.7
   hooks:
   - id: actionlint
-    exclude: '.*\.github/workflows/scripts/.*\.ya?ml$'
+    exclude: '.*\.github/workflows/(scripts|configs)/.*\.ya?ml$'
 
 - repo: local
   hooks:
@@ -76,12 +76,13 @@ repos:
     args:
       - -c
       - |
-        if ! grep -q "^Signed-off-by: $(git config user.name) <$(git config user.email)>" "$(git rev-parse --git-path COMMIT_EDITMSG)"; then
-          printf "\nSigned-off-by: $(git config user.name) <$(git config user.email)>\n" >> "$(git rev-parse --git-path COMMIT_EDITMSG)"
+        if ! grep -q "^Signed-off-by: $(git config user.name) <$(git config user.email)>" "$1"; then
+          printf "\nSigned-off-by: $(git config user.name) <$(git config user.email)>\n" >> "$1"
         fi
+      - --
     language: system
     verbose: true
-    stages: [commit-msg]
+    stages: [prepare-commit-msg]
   - id: check-filenames
     name: Check for spaces in all filenames
     entry: bash
@@ -119,6 +120,11 @@ repos:
     entry: python tools/check_long_functions.py
     language: system
     types: [python]
+  - id: check-symbolic-meta
+    name: Check symbolic shapes in meta kernels
+    entry: python tools/check_symbolic_meta.py
+    language: system
+    pass_filenames: false
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion

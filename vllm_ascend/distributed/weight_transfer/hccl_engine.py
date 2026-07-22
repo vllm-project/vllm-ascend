@@ -11,7 +11,7 @@ import torch
 if TYPE_CHECKING:
     from vllm_ascend.distributed.device_communicators.pyhccl import PyHcclCommunicator
 
-from vllm.config.parallel import ParallelConfig
+from vllm.config import VllmConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
@@ -114,22 +114,29 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
     init_info_cls = HCCLWeightTransferInitInfo
     update_info_cls = HCCLWeightTransferUpdateInfo
 
-    def __init__(
+    def __init__(  # type: ignore[misc]
         self,
         config: WeightTransferConfig,
-        parallel_config: ParallelConfig,
-        model: torch.nn.Module | None = None,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        model: torch.nn.Module,
     ) -> None:
-        """
-        Initialize the HCCL weight transfer engine.
+        super().__init__(config, vllm_config, device, model)
+        self.model_update_group: PyHcclCommunicator | None = None  # type: ignore[no-redef]
 
-        Args:
-            config: The configuration for the weight transfer engine
-            parallel_config: The configuration for the parallel setup
-            model: The local model instance which will receive the weights.
-        """
-        super().__init__(config, parallel_config, model)
-        self.model_update_group: PyHcclCommunicator | None = None
+    def start_weight_update(self) -> None:
+        from vllm.model_executor.model_loader.reload import (
+            initialize_layerwise_reload,
+        )
+
+        initialize_layerwise_reload(self.model)
+
+    def finish_weight_update(self) -> None:
+        from vllm.model_executor.model_loader.reload import (
+            finalize_layerwise_reload,
+        )
+
+        finalize_layerwise_reload(self.model, self.model_config)
 
     def init_transfer_engine(self, init_info: HCCLWeightTransferInitInfo) -> None:
         """

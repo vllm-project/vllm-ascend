@@ -18,21 +18,22 @@
 import torch
 import torch_npu
 from torch.nn.functional import pad
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.mxfp_compat import (
+    FLOAT8_E8M0FNU_DTYPE,
     ensure_mxfp8_moe_available,
 )
-from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, swiglustep_and_mul
+from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     dispose_tensor,
     enable_custom_op,
     get_ascend_device_type,
-    get_weight_prefetch_method,
 )
 
 ASCEND_DEVICE_TYPE = get_ascend_device_type()
@@ -106,11 +107,15 @@ def quant_apply_mlp(
     scale_type: torch.dtype | None = None,
     per_token_scale_type: torch.dtype | None = None,
     use_bf16: bool = True,
+    activation: str | None = None,
     swiglu_limit: float = 0.0,
     use_w4a8_per_channel_gmm_swiglu: bool = False,
 ) -> torch.Tensor:
     input_hidden_dtype = hidden_states.dtype
     use_gmm_swiglu_quant_fusion = use_mxfp_quant or (fusion and not dynamic_eplb)
+    # GELU can't use the fused SwiGLU+quant ops below; fall back to the
+    # non-fused GMM -> GELU -> (re)quant -> GMM2 path for GELU activations.
+    is_gelu_activation = activation in (MoEActivation.GELU, MoEActivation.GELU_TANH)
 
     if use_mxfp_quant:
         ensure_mxfp8_moe_available("MXFP MoE MLP path")
@@ -123,6 +128,9 @@ def quant_apply_mlp(
     if w1_offset is not None:
         unquantized_hidden_states = hidden_states
         quantized_hidden_states = None
+    elif mxfp_quant_dtype == QuantType.W4A16MXFP:
+        quantized_hidden_states = None
+        pertoken_scale = None
     elif dynamic_scale is None:
         unquantized_hidden_states = hidden_states
         hidden_states, pertoken_scale = DeviceOperator.npu_dynamic_quant(
@@ -143,11 +151,8 @@ def quant_apply_mlp(
     bias1, bias2 = None, None
     _output_dtype = w2_scale[0].dtype if isinstance(w2_scale, list) else w2_scale.dtype
 
-    weight_prefetch_method = get_weight_prefetch_method()
-    if weight_prefetch_method:
-        weight_prefetch_method.maybe_prefetch_moe_weight_postprocess(hidden_states)
     is_mc2 = _EXTRA_CTX.moe_comm_type == MoECommType.MC2
-    if w1_scale_bias is None and w1_offset is None and is_mc2:
+    if w1_scale_bias is None and w1_offset is None and is_mc2 and not is_gelu_activation:
         if _custom_gmm_swiglu_enabled(fusion, dynamic_eplb) and not use_mxfp_quant:
             # gmm1: gate_up_proj & act_fn: swiglu
             hidden_states, swiglu_out_scale, _ = torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz_tensor_list(
@@ -158,7 +163,7 @@ def quant_apply_mlp(
                 group_list=cumsum_group_list(group_list, group_list_type, 0),
                 swiglu_limit=swiglu_limit,
             )
-        elif use_gmm_swiglu_quant_fusion:
+        elif use_gmm_swiglu_quant_fusion and activation != MoEActivation.SWIGLUSTEP:
             # gmm1: gate_up_proj & act_fn: swiglu
             hidden_states, swiglu_out_scale, _ = DeviceOperator.npu_grouped_matmul_swiglu_quant(
                 x=hidden_states,
@@ -175,6 +180,31 @@ def quant_apply_mlp(
             )
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
+        elif activation == MoEActivation.SWIGLUSTEP:
+            # Step3.5/3.7 needs to clamp in swiglu: out = silu(gate).clamp(max=limit) * up.clamp(-limit, limit)
+            gmm1_kwargs = {
+                "x": [hidden_states],
+                "weight": w1 if isinstance(w1, list) else [w1],
+                "scale": [w1_scale[0].to(w2_scale[0].dtype)] if isinstance(w1_scale, list) else [w1_scale],
+                "bias": None,
+                "per_token_scale": [pertoken_scale],
+                "split_item": 2,
+                "group_type": 0,
+                "group_list": group_list,
+                "output_dtype": torch.bfloat16,
+            }
+            if use_mxfp_quant:
+                gmm1_kwargs.update(
+                    {
+                        "scale_dtype": FLOAT8_E8M0FNU_DTYPE,
+                        "per_token_scale_dtype": FLOAT8_E8M0FNU_DTYPE,
+                    }
+                )
+            hidden_states = torch_npu.npu_grouped_matmul(**gmm1_kwargs)[0]
+            hidden_states = AscendSwigluStepAndMul.swiglustep_forward(hidden_states, limit=7.0)
+            hidden_states, swiglu_out_scale = DeviceOperator.npu_dynamic_quant(
+                hidden_states, act_quant_type=act_quant_type, use_mxfp_quant=use_mxfp_quant
+            )
         else:
             if w1_scale[0].dtype != torch.float32:
                 w1_scale[0] = w1_scale[0].to(torch.float32)
@@ -237,7 +267,14 @@ def quant_apply_mlp(
         )[0]
         dispose_tensor(unquantized_hidden_states)
         # act_fn: swiglu
-        hidden_states = torch_npu.npu_swiglu(hidden_states)
+        if activation == MoEActivation.SWIGLUSTEP:
+            hidden_states = AscendSwigluStepAndMul.swiglustep_forward(hidden_states, limit=swiglu_limit or 7.0)
+        elif is_gelu_activation:
+            gate, up = hidden_states.chunk(2, dim=-1)
+            approximate = "tanh" if activation == MoEActivation.GELU_TANH else "none"
+            hidden_states = torch.nn.functional.gelu(gate, approximate=approximate) * up
+        else:
+            hidden_states = torch_npu.npu_swiglu(hidden_states)
         before_gmm2_evt = torch.npu.current_stream().record_event()
         # gmm2: down_proj
         hidden_states = torch_npu.npu_grouped_matmul(
@@ -261,7 +298,12 @@ def quant_apply_mlp(
             # TODO w4a8 scene: dynamic acquisition of dtype in the future
             _output_dtype = torch.bfloat16
 
-        if use_w4a8_per_channel_gmm_swiglu and enable_custom_op():
+        if (
+            use_w4a8_per_channel_gmm_swiglu
+            and enable_custom_op()
+            and activation != MoEActivation.SWIGLUSTEP
+            and not is_gelu_activation
+        ):
             hidden_states, swiglu_out_scale = torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2(
                 x=hidden_states,
                 weight=w1,
@@ -273,7 +315,7 @@ def quant_apply_mlp(
                 group_list_type=group_list_type,
                 swiglu_limit=swiglu_limit,
             )
-        elif _custom_gmm_swiglu_enabled(fusion, dynamic_eplb) and not use_mxfp_quant:
+        elif _custom_gmm_swiglu_enabled(fusion, dynamic_eplb) and not use_mxfp_quant and not is_gelu_activation:
             # gmm1: gate_up_proj & act_fn: swiglu
             hidden_states, swiglu_out_scale, _ = torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz_tensor_list(
                 x=hidden_states,
@@ -284,7 +326,7 @@ def quant_apply_mlp(
                 bias=bias1,
                 swiglu_limit=swiglu_limit,
             )
-        elif use_gmm_swiglu_quant_fusion:
+        elif use_gmm_swiglu_quant_fusion and activation != MoEActivation.SWIGLUSTEP and not is_gelu_activation:
             hidden_states, swiglu_out_scale, _ = DeviceOperator.npu_grouped_matmul_swiglu_quant(
                 x=hidden_states,
                 weight=_require_single_tensor_for_swiglu_quant(w1, name="w1"),
@@ -301,24 +343,42 @@ def quant_apply_mlp(
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
         else:
-            w1_scale[0] = w1_scale[0].to(w2_scale[0].dtype)
             # gmm1: gate_up_proj
-            hidden_states = torch_npu.npu_grouped_matmul(
-                x=[hidden_states],
-                weight=w1,
-                scale=w1_scale,
-                bias=bias1,
-                per_token_scale=[pertoken_scale],
-                split_item=2,
-                group_list_type=group_list_type,
-                group_type=0,
-                group_list=group_list,
-                output_dtype=_output_dtype,
-            )[0]
+            gmm1_kwargs = {
+                "x": [hidden_states],
+                "weight": w1 if isinstance(w1, list) else [w1],
+                "scale": [w1_scale[0].to(w2_scale[0].dtype)] if isinstance(w1_scale, list) else [w1_scale],
+                "bias": bias1,
+                "per_token_scale": [pertoken_scale],
+                "split_item": 2,
+                "group_type": 0,
+                "group_list": group_list,
+                "group_list_type": group_list_type,
+                "output_dtype": _output_dtype,
+            }
+            if use_mxfp_quant:
+                gmm1_kwargs.update(
+                    {
+                        "scale_dtype": FLOAT8_E8M0FNU_DTYPE,
+                        "per_token_scale_dtype": FLOAT8_E8M0FNU_DTYPE,
+                        "output_dtype": torch.bfloat16,
+                    }
+                )
+            hidden_states = torch_npu.npu_grouped_matmul(**gmm1_kwargs)[0]
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
             # act_fn: swiglu
-            if HAS_TRITON:
+            if activation == MoEActivation.SWIGLUSTEP:
+                hidden_states = AscendSwigluStepAndMul.swiglustep_forward(hidden_states, limit=swiglu_limit or 7.0)
+                hidden_states, swiglu_out_scale = DeviceOperator.npu_dynamic_quant(
+                    hidden_states, act_quant_type=act_quant_type, use_mxfp_quant=use_mxfp_quant
+                )
+            elif is_gelu_activation:
+                gate, up = hidden_states.chunk(2, dim=-1)
+                approximate = "tanh" if activation == MoEActivation.GELU_TANH else "none"
+                hidden_states = torch.nn.functional.gelu(gate, approximate=approximate) * up
+                hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
+            elif HAS_TRITON:
                 from vllm_ascend.ops.triton.activation.swiglu_quant import swiglu_quant
 
                 hidden_states, swiglu_out_scale = swiglu_quant(
@@ -362,12 +422,13 @@ def unquant_apply_mlp(
     topk_scales: torch.Tensor | None = None,
     need_trans: bool = True,
     swiglu_limit: float = 0.0,
+    lora_context=None,
+    expanded_row_idx: torch.Tensor | None = None,
+    topk_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if need_trans:
         w1 = w1.transpose(1, 2)
         w2 = w2.transpose(1, 2)
-
-    act_name = getattr(activation, "value", activation)
 
     gate_up_out = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
@@ -379,13 +440,60 @@ def unquant_apply_mlp(
         group_list=group_list,
     )[0]
 
-    if act_name == "swigluoai":
+    # MoE LoRA: only attempt injection when an adapter wraps this layer and
+    # the comm method provided routing metadata in lora_context.
+    # Two paths are supported:
+    #   - AllGather: expanded_row_idx + topk_ids from npu_moe_init_routing
+    #   - AlltoAll:  lora_context.exchanged_lora_indices + group_list after all_to_all
+    lora_routing = None
+    if lora_context is not None:  # LoRA applied
+        from vllm_ascend.lora.fused_moe import (
+            _recover_moe_lora_routing_all2all,
+            _recover_moe_lora_routing_allgather,
+            moe_lora_apply_w2,
+            moe_lora_apply_w13,
+        )
+
+        if expanded_row_idx is not None and topk_ids is not None:
+            # AllGather path: use npu_moe_init_routing's expanded_row_idx.
+            lora_routing = _recover_moe_lora_routing_allgather(lora_context, expanded_row_idx, topk_ids)
+        elif getattr(lora_context, "exchanged_lora_indices", None) is not None:
+            # AlltoAll path: tokens already sorted by expert after exchange.
+            # Build per-row (expert_id, lora_id) directly from group_list.
+            lora_routing = _recover_moe_lora_routing_all2all(
+                lora_context,
+                group_list=group_list,
+            )
+        else:
+            raise AssertionError(
+                "MoE LoRA requires either expanded_row_idx+topk_ids "
+                "(AllGather) or lora_context.exchanged_lora_indices "
+                "(AlltoAll). Neither was provided."
+            )
+
+        moe_lora_apply_w13(
+            lora_context,
+            gate_up_out=gate_up_out,
+            hidden_states=hidden_states,
+            lora_routing=lora_routing,
+        )
+
+    if activation == MoEActivation.SWIGLUOAI:
         num_experts, _, hidden_size = w1.shape
         gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size))
-    elif act_name == "swiglustep":
-        limit = swiglu_limit if swiglu_limit > 0 else 7.0
-        gate_up_out = swiglustep_and_mul(gate_up_out, limit=limit)
+    elif activation == MoEActivation.SWIGLUSTEP:
+        gate_up_out = AscendSwigluStepAndMul.swiglustep_forward(gate_up_out, limit=swiglu_limit or 7.0)
+    elif activation == MoEActivation.GELU:
+        gate, up = gate_up_out.chunk(2, dim=-1)
+        gate_up_out = torch.nn.functional.gelu(gate) * up
+    elif activation == MoEActivation.GELU_TANH:
+        gate, up = gate_up_out.chunk(2, dim=-1)
+        gate_up_out = torch.nn.functional.gelu(gate, approximate="tanh") * up
     else:
+        if swiglu_limit > 0:
+            gate, up = gate_up_out.chunk(2, dim=-1)
+            gate.clamp_(max=swiglu_limit)
+            up.clamp_(min=-swiglu_limit, max=swiglu_limit)
         gate_up_out = torch_npu.npu_swiglu(gate_up_out)
 
     if topk_scales is not None:
@@ -400,6 +508,16 @@ def unquant_apply_mlp(
         group_type=0,
         group_list=group_list,
     )[0]
+
+    # LoRA w2 delta: applied to the down-proj output, with the activation output
+    # as the lora_a input. Reuses the per-row routing computed for w13.
+    if lora_routing is not None:
+        moe_lora_apply_w2(
+            lora_context,
+            down_out=hidden_states,
+            silu_out=gate_up_out,
+            lora_routing=lora_routing,
+        )
     return hidden_states, None
 
 
@@ -442,6 +560,9 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
             topk_scales=topk_scales,
             need_trans=need_trans,
             swiglu_limit=swiglu_limit,
+            lora_context=mlp_compute_input.lora_context,
+            expanded_row_idx=mlp_compute_input.expanded_row_idx,
+            topk_ids=mlp_compute_input.topk_ids,
         )
 
     assert w1_scale is not None and w2_scale is not None
@@ -455,10 +576,12 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
 
     if use_mxfp_quant:
         mxfp = mlp_compute_input.quant.mxfp
-        assert mxfp is not None, "mlp_compute_input.quant.mxfp is required when quant_type is MXFP8."
+        assert mxfp is not None, "mlp_compute_input.quant.mxfp is required when quant_type is W8A8MXFP."
         act_quant_type = mxfp.act_quant_type or act_quant_type
+        if mxfp_quant_dtype == QuantType.W4A16MXFP:
+            act_quant_type = mxfp.act_quant_type
         weight_quant_type = mxfp.weight_quant_type or weight_quant_type
-        if mxfp_quant_dtype == QuantType.W4A8MXFP:
+        if mxfp_quant_dtype in [QuantType.W4A8MXFP, QuantType.W4A16MXFP]:
             weight_quant_type = mxfp.weight_quant_type
         scale_type = mxfp.scale_dtype
         per_token_scale_type = mxfp.per_token_scale_dtype
@@ -486,6 +609,7 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
         scale_type=scale_type,
         per_token_scale_type=per_token_scale_type,
         use_bf16=use_bf16,
+        activation=activation,
         swiglu_limit=swiglu_limit,
         use_w4a8_per_channel_gmm_swiglu=mlp_compute_input.quant.use_w4a8_per_channel_gmm_swiglu,
     )

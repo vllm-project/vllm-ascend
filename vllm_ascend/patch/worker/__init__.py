@@ -24,12 +24,14 @@ if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
 
 
+import vllm_ascend.patch.worker.patch_process_weights_after_loading  # noqa
 import vllm_ascend.patch.worker.patch_weight_utils  # noqa
 import vllm_ascend.patch.worker.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2_linear_attn  # noqa
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
+import vllm_ascend.patch.worker.patch_step3p5  # noqa
 
 if not is_310p():
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
@@ -51,11 +53,24 @@ import vllm_ascend.patch.worker.patch_draft_quarot  # noqa
 import vllm_ascend.patch.worker.patch_eagle3_init  # noqa
 import vllm_ascend.patch.worker.patch_cudagraph  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_mtp  # noqa
+import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
 import vllm_ascend.patch.worker.patch_gqa_c8  # noqa
+
+# vLLM's use_v2_model_runner may enable the v2 runner without the
+# VLLM_USE_V2_MODEL_RUNNER env var (e.g. based on model architecture).
+# We always patch it so that on Ascend the v2 runner is enabled only
+# when the env var is explicitly set.
+import vllm_ascend.patch.worker.patch_v2.patch_use_v2_model_runner  # noqa
+
+import vllm_ascend.patch.worker.patch_fused_moe  # noqa
 
 import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_input_batch  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
+import vllm_ascend.patch.worker.patch_v2.patch_eagle_speculator  # noqa
+import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa
+
+# only patch routed experts capture in main2main.
 import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa

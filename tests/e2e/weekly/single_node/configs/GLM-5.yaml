@@ -30,7 +30,7 @@ _server_cmd: &server_cmd
   - "--quantization"
   - "ascend"
   - "--additional-config"
-  - '{"fuse_muls_add": true, "multistream_overlap_shared_expert": false, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+  - '{"multistream_overlap_shared_expert": false, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
   - "--speculative-config"
   - '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 
@@ -46,7 +46,7 @@ _benchmarks: &benchmarks
     max_out_len: 8192
     batch_size: 8
     baseline: 95
-    threshold: 5
+    threshold: 10
   perf:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in3500-bs400

@@ -19,7 +19,10 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
     KVCacheBlock,
 )
-from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
+from vllm.v1.core.single_type_kv_cache_manager import (
+    SingleTypeKVCacheManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -28,10 +31,20 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
+from vllm_ascend.utils import vllm_version_is
 
 USE_MULTI_GROUPS_KV_CACHE = True
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
+
+
+def _select_kv_token_budget(
+    max_model_len: int,
+    max_in_flight_tokens: int | None,
+    max_num_batched_tokens: int | None,
+) -> int:
+    token_budget = max_num_batched_tokens if vllm_version_is("0.25.1") else max_in_flight_tokens
+    return token_budget if token_budget is not None else max_model_len
 
 
 def _is_deepseek_v4_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
@@ -75,6 +88,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         hash_block_size: int,
         eagle_attn_layer_names: list[str] | None = None,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        max_in_flight_tokens: int | None = None,
         max_num_batched_tokens: int | None = None,
         scheduler_block_size: int | None = None,
     ):
@@ -87,9 +101,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # Fall back to `max_model_len` when unset so the recycling-aware
         # admission cap (vLLM PR #40946) collapses to the prior uncapped
         # behavior. The scheduler always supplies the real value at runtime.
-        if max_num_batched_tokens is None:
-            max_num_batched_tokens = max_model_len
-        self.max_num_batched_tokens = max_num_batched_tokens
+        token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
+        self.max_in_flight_tokens = token_budget
+        self.max_num_batched_tokens = token_budget
         self.retention_interval = getattr(envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
         validate_retention_interval = getattr(
             vllm_kv_cache_coordinator,
@@ -102,13 +116,12 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 self.scheduler_block_size,
                 kv_cache_config,
             )
-
         self.block_pool = BlockPool(
-            kv_cache_config.num_blocks,
-            enable_caching,
-            hash_block_size,
-            enable_kv_cache_events,
-            metrics_collector,
+            num_gpu_blocks=kv_cache_config.num_blocks,
+            enable_caching=enable_caching,
+            hash_block_size=hash_block_size,
+            enable_kv_cache_events=enable_kv_cache_events,
+            metrics_collector=metrics_collector,
         )
 
         # KV cache group indices that get the EAGLE last-block drop.
@@ -118,6 +131,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
 
         extra_mgr_kwargs: dict = {"scheduler_block_size": scheduler_block_size}
+        if not vllm_version_is("0.25.1"):
+            extra_mgr_kwargs["needs_kv_cache_zeroing"] = kv_cache_config.needs_kv_cache_zeroing
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
                 kv_cache_spec=kv_cache_group.kv_cache_spec,
@@ -126,7 +141,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 kv_cache_group_id=i,
                 dcp_world_size=dcp_world_size,
                 pcp_world_size=pcp_world_size,
-                max_num_batched_tokens=max_num_batched_tokens,
+                max_in_flight_tokens=token_budget,
+                max_num_batched_tokens=token_budget,
                 max_model_len=max_model_len,
                 **extra_mgr_kwargs,
             )
@@ -144,6 +160,15 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 for g in kv_cache_config.kv_cache_groups
             ), "block_size must be divisible by hash_block_size"
         self.verify_and_split_kv_cache_groups()
+
+        # Align the WRITE-path mask granularity (reachable_block_mask) with the
+        # READ-path hit granularity (find_longest_cache_hit) so SlidingWindowManager
+        # only caches blocks that land on a boundary where future cache hits can
+        # actually be matched.
+        # TODO (Csrayz): Consider unified all single_type_managers to simplify logic.
+        for mgr in self.single_type_managers:
+            if isinstance(mgr, SlidingWindowManager):
+                mgr.scheduler_block_size = self.lcm_block_size
 
         self.use_eagle = use_eagle
 
@@ -195,6 +220,28 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             for i, (_, group_ids, _) in enumerate(self.attention_groups)
             if any(gid in self.eagle_group_ids for gid in group_ids)
         }
+
+        # Propagate the eagle bit to every manager in an eagle-containing
+        # attention group, mirroring upstream
+        # HybridKVCacheCoordinator.verify_and_split_kv_cache_groups. Managers
+        # default to ``use_eagle=False`` ("initialized lazily by the
+        # coordinator", see SingleTypeKVCacheManager.__init__).
+        #
+        # Required for prefix-cache correctness on DeepSeek-V4 + MTP/EAGLE: the
+        # SWA write path (``cache_blocks`` -> ``reachable_block_mask``) keys the
+        # retained checkpoint tail on ``manager.use_eagle``, while the read path
+        # (``find_longest_cache_hit``) applies ``drop_eagle_block`` to every gid
+        # merged into the eagle attention group (and ``get_cached_block``
+        # requires the block cached for *all* of them). If any such manager
+        # keeps the default False, its retained tail ends one block short of the
+        # eagle "peek" boundary the read looks at, the SWA group never hits, and
+        # the min-over-groups hybrid hit collapses to 0%. Note the upstream
+        # ``_annotate_eagle_groups_deepseek_v4`` flags only the single group
+        # holding the MTP layer, so iterating ``eagle_group_ids`` alone would
+        # miss its same-spec siblings.
+        for idx in self.eagle_attn_group_indices:
+            for gid in self.attention_groups[idx][1]:
+                self.single_type_managers[gid].use_eagle = True
 
         # The LCM of the block sizes of all attention types.
         # The cache hit length must be a multiple of the LCM of the block sizes
@@ -421,17 +468,19 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 def get_kv_cache_coordinator(
     kv_cache_config: KVCacheConfig,
     max_model_len: int,
-    max_num_batched_tokens: int,
-    use_eagle: bool,
-    enable_caching: bool,
-    enable_kv_cache_events: bool,
-    dcp_world_size: int,
-    pcp_world_size: int,
-    hash_block_size: int,
+    max_in_flight_tokens: int | None = None,
+    use_eagle: bool = False,
+    enable_caching: bool = True,
+    enable_kv_cache_events: bool = False,
+    dcp_world_size: int = 1,
+    pcp_world_size: int = 1,
+    hash_block_size: int = 0,
     scheduler_block_size: int | None = None,
     eagle_attn_layer_names: list[str] | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
+    max_num_batched_tokens: int | None = None,
 ) -> KVCacheCoordinator:
+    token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
     if _is_deepseek_v4_kv_cache_config(kv_cache_config):
         return AscendHybridKVCacheCoordinator(
             kv_cache_config,
@@ -444,7 +493,8 @@ def get_kv_cache_coordinator(
             hash_block_size=hash_block_size,
             eagle_attn_layer_names=eagle_attn_layer_names,
             metrics_collector=metrics_collector,
-            max_num_batched_tokens=max_num_batched_tokens,
+            max_in_flight_tokens=token_budget,
+            max_num_batched_tokens=token_budget,
             scheduler_block_size=scheduler_block_size,
         )
 
@@ -452,7 +502,6 @@ def get_kv_cache_coordinator(
         orig_kwargs = dict(
             kv_cache_config=kv_cache_config,
             max_model_len=max_model_len,
-            max_num_batched_tokens=max_num_batched_tokens,
             use_eagle=use_eagle,
             enable_caching=enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
@@ -461,6 +510,10 @@ def get_kv_cache_coordinator(
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
         )
+        if vllm_version_is("0.25.1"):
+            orig_kwargs["max_num_batched_tokens"] = token_budget
+        else:
+            orig_kwargs["max_in_flight_tokens"] = token_budget
         orig_kwargs["scheduler_block_size"] = scheduler_block_size
         return _orig_get_kv_cache_coordinator(**orig_kwargs)
 
@@ -475,7 +528,8 @@ def get_kv_cache_coordinator(
         hash_block_size=hash_block_size,
         eagle_attn_layer_names=eagle_attn_layer_names,
         metrics_collector=metrics_collector,
-        max_num_batched_tokens=max_num_batched_tokens,
+        max_in_flight_tokens=token_budget,
+        max_num_batched_tokens=token_budget,
         scheduler_block_size=scheduler_block_size,
     )
 

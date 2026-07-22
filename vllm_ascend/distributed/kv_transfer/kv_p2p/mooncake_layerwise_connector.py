@@ -37,7 +37,6 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
     get_world_group,
 )
-from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.utils.math_utils import round_down
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
@@ -298,9 +297,10 @@ class KVCacheSendingLayerThread(threading.Thread):
         if isinstance(layer_kv_cache_spec, MambaSpec):
             # only support one block transfer for mamba
             if self.mamba_cache_mode == "align":
-                transfer_block_idx = len(local_block_ids) - self.num_speculative_tokens - 1
+                local_transfer_idx = len(local_block_ids) - self.num_speculative_tokens - 1
             else:
-                transfer_block_idx = 0
+                local_transfer_idx = 0
+            remote_transfer_idx = len(remote_block_ids) - self.num_speculative_tokens - 1
             local_conv_addr, local_ssm_addr = local_layer_metadata.kv_caches_base_addr
             remote_conv_addr, remote_ssm_addr = remote_layer_metadata.kv_caches_base_addr
             local_conv_len, local_ssm_len = local_layer_metadata.block_len
@@ -308,14 +308,14 @@ class KVCacheSendingLayerThread(threading.Thread):
             if tp_ratio == 1:
                 src_list.extend(
                     [
-                        local_conv_addr + local_block_ids[transfer_block_idx] * local_conv_len,
-                        local_ssm_addr + local_block_ids[transfer_block_idx] * local_ssm_len,
+                        local_conv_addr + local_block_ids[local_transfer_idx] * local_conv_len,
+                        local_ssm_addr + local_block_ids[local_transfer_idx] * local_ssm_len,
                     ]
                 )
                 dst_list.extend(
                     [
-                        remote_conv_addr + remote_block_ids[-1] * local_conv_len,
-                        remote_ssm_addr + remote_block_ids[-1] * local_ssm_len,
+                        remote_conv_addr + remote_block_ids[remote_transfer_idx] * local_conv_len,
+                        remote_ssm_addr + remote_block_ids[remote_transfer_idx] * local_ssm_len,
                     ]
                 )
                 length_list.extend([local_conv_len, local_ssm_len])
@@ -348,14 +348,20 @@ class KVCacheSendingLayerThread(threading.Thread):
                             + (self.tp_rank % tp_ratio) * local_conv_size
                         ) * get_dtype_size(conv_dtype)
                         src_list.append(
-                            local_conv_addr + local_block_ids[transfer_block_idx] * local_conv_len + local_addr_offset
+                            local_conv_addr + local_block_ids[local_transfer_idx] * local_conv_len + local_addr_offset
                         )
-                        dst_list.append(remote_conv_addr + remote_block_ids[-1] * remote_conv_len + remote_addr_offset)
+                        dst_list.append(
+                            remote_conv_addr
+                            + remote_block_ids[remote_transfer_idx] * remote_conv_len
+                            + remote_addr_offset
+                        )
                         length_list.append(local_conv_size * get_dtype_size(conv_dtype))
                 # ssm
                 remote_addr_offset = (self.tp_rank % tp_ratio) * math.prod(ssm_shape) * get_dtype_size(ssm_dtype)
-                src_list.append(local_ssm_addr + local_block_ids[transfer_block_idx] * local_ssm_len)
-                dst_list.append(remote_ssm_addr + remote_block_ids[-1] * remote_ssm_len + remote_addr_offset)
+                src_list.append(local_ssm_addr + local_block_ids[local_transfer_idx] * local_ssm_len)
+                dst_list.append(
+                    remote_ssm_addr + remote_block_ids[remote_transfer_idx] * remote_ssm_len + remote_addr_offset
+                )
                 length_list.append(local_ssm_len)
         else:
             if self.pd_head_ratio == 1:
@@ -775,24 +781,6 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, MooncakeLayerwiseConnectorMetadata)
         self.connector_worker.save_kv_layer(layer_name, kv_layer, attn_metadata, self._connector_metadata)
-
-    def on_kv_cache_written(self, layer_name: str) -> None:
-        """Record a compute-stream event once the paged KV cache is written.
-
-        ``save_kv_layer`` later waits on this event from the resharding stream so
-        the outgoing KV copy never reads stale cache. Only producers transfer KV
-        out, so consumers skip it. The attention layer reaches this through
-        ``notify_kv_cache_written`` and stays free of any role/sync knowledge.
-        """
-        if not self._is_kv_producer:
-            return
-        forward_context = get_forward_context()
-        attn_metadata = forward_context.attn_metadata
-        if attn_metadata is None:
-            return
-        reshape_cache_event = torch.npu.Event()
-        reshape_cache_event.record()
-        attn_metadata.reshape_cache_event = reshape_cache_event
 
     def wait_for_save(self):
         """MooncakeLayerwiseConnector does not save explicitly."""
@@ -1348,7 +1336,8 @@ class MooncakeLayerwiseConnectorWorker:
         if use_kv_buffer:
             self.create_kv_buffer(kv_buffer)
 
-        num_attn_module = 2 if self.vllm_config.model_config.hf_text_config.model_type == "longcat_flash" else 1
+        model_type = self.vllm_config.model_config.hf_text_config.model_type
+        num_attn_module = 2 if model_type in ("longcat_flash", "longcat_flash_ngram") else 1
         mtp_layer_name = ""
         for layer_name in kv_caches:
             if "mtp" in layer_name:
@@ -1715,16 +1704,21 @@ class MooncakeLayerwiseConnectorWorker:
             # get reshape and cache event
             if layer_name == "":
                 layer_name = self.index_to_name[self.current_layer][0]
-            if (self.use_mla and not hasattr(attn_metadata[layer_name], "reshape_cache_event")) or (
-                not self.use_mla and not hasattr(attn_metadata, "reshape_cache_event")
+            if (
+                isinstance(attn_metadata, dict)
+                and hasattr(attn_metadata[layer_name], "reshape_cache_event")
+                and attn_metadata[layer_name].reshape_cache_event is not None
             ):
+                reshape_cache_event = attn_metadata[layer_name].reshape_cache_event
+            elif (
+                attn_metadata
+                and hasattr(attn_metadata, "reshape_cache_event")
+                and attn_metadata.reshape_cache_event is not None
+            ):
+                reshape_cache_event = attn_metadata.reshape_cache_event
+            else:
                 reshape_cache_event = torch.npu.Event()
                 reshape_cache_event.record()
-            elif self.use_mla:
-                reshape_cache_event = attn_metadata[layer_name].reshape_cache_event
-            else:
-                reshape_cache_event = attn_metadata.reshape_cache_event
-
             send_task = connector_metadata.send_task
             layer_group_idx = self.layer_metadata[layer_name].tensor_group_idx[0]
             keys = None
@@ -1757,12 +1751,12 @@ class MooncakeLayerwiseConnectorWorker:
                     )
 
                     # Load cache data into buffers
-                    torch_npu.atb.npu_paged_cache_load(
+                    torch_npu.npu_gather_pa_kv_cache(
                         kv_layer[0],
                         kv_layer[1],
                         send_task.group_block_table[layer_group_idx],
                         send_task.group_block_len_tensor[layer_group_idx],
-                        seq_starts=send_task.group_seq_start_tensor[layer_group_idx],
+                        seq_offset=send_task.group_seq_start_tensor[layer_group_idx],
                         key=keys,
                         value=values,
                     )

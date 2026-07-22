@@ -38,6 +38,12 @@ class Backend(ABC):
     def batch_alloc(self, keys: list[str], sizes: list[int]) -> list[int]:
         raise NotImplementedError(f"{type(self).__name__} does not support batch_alloc")
 
+    def batch_add_lease(self, keys: list[str], lease_ttl_ms: int = 0) -> list[int]:
+        raise NotImplementedError(f"{type(self).__name__} does not support batch_add_lease")
+
+    def batch_remove_lease(self, keys: list[str]) -> int:
+        raise NotImplementedError(f"{type(self).__name__} does not support batch_remove_lease")
+
     @abstractmethod
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         pass

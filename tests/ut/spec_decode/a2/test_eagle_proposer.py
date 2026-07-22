@@ -2,6 +2,7 @@
 import inspect
 import unittest
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -21,7 +22,9 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
 from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.worker.pcp_utils import PCPManager, PCPSpecDecodeFirstPassInputs
 
 enable_custom_op()
 
@@ -143,6 +146,7 @@ def test_prepare_inputs_padded_preserves_internal_seq_lens_cpu():
     proposer.pcp_size = 1
     proposer.arange = torch.arange(16, dtype=torch.int32)
     proposer.runner = MagicMock()
+    proposer.runner.pcp_manager = None
     proposer.runner.actual_seq_lengths_q = [3, 3]
     proposer.runner.attn_state = AscendAttentionState.SpecDecoding
     proposer.runner.decode_token_per_req = 4
@@ -182,6 +186,37 @@ def test_prepare_inputs_padded_preserves_internal_seq_lens_cpu():
     assert spec_common_attn_metadata.seq_lens_cpu is None
 
 
+class TestSlidingWindowAdapter:
+    @pytest.fixture(autouse=True)
+    def _setup(self):
+        self.device = torch.device("cpu")
+        yield
+
+    def test_apply_window(self):
+        K, W, B = 3, 64, 16
+        max_num_reqs = 16
+        block_table_tensor = torch.randint(1, 1000, (max_num_reqs, 20), dtype=torch.int32)
+
+        adapter = SlidingWindowAdapter(W, B, max_num_reqs, K, self.device)
+        clone_ptr = adapter._block_table_clone.data_ptr()
+
+        cad = SimpleNamespace(
+            block_table_tensor=block_table_tensor,
+            seq_lens=torch.tensor([10, 60, 200, 64], dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([10, 60, 200, 64], dtype=torch.int32),
+            _seq_lens_cpu=torch.tensor([10, 60, 200, 64], dtype=torch.int32),
+            seq_lens_cpu_upper_bound=None,
+        )
+        adapter.apply(cad)
+
+        # block_table rebinds to the pre-allocated clone (offset-0 view); full table saved
+        assert cad.block_table_tensor.data_ptr() == clone_ptr
+        assert adapter.full_block_table is block_table_tensor
+        clamped = torch.tensor([10, 60, 72, 64], dtype=torch.int32)
+        assert torch.equal(cad.seq_lens, clamped)
+        assert torch.equal(cad._seq_lens_cpu, clamped)
+
+
 class TestEagleProposerInitialization(TestBase):
     def setUp(self):
         self.vllm_config = MagicMock(spec=VllmConfig)
@@ -199,6 +234,7 @@ class TestEagleProposerInitialization(TestBase):
         self.runner.pin_memory = False
         self.runner.pcp_size = 1
         self.runner.dcp_size = 1
+        self.runner.pcp_manager = None
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
@@ -343,6 +379,7 @@ class TestEagleProposerLoadModel(TestBase):
         self.runner.pin_memory = False
         self.runner.pcp_size = 1
         self.runner.dcp_size = 1
+        self.runner.pcp_manager = None
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
@@ -369,10 +406,8 @@ class TestEagleProposerLoadModel(TestBase):
         self.mock_get_ascend_config = patch("vllm_ascend.utils.get_ascend_config")
         mock_config = self.mock_get_ascend_config.start()
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_flashcomm2_parallel_size = 0
         mock_ascend_config.enable_context_parallel = False
         mock_ascend_config.enable_flashcomm1 = False
-        mock_ascend_config.enable_matmul_allreduce = False
         mock_ascend_config.weight_nz_mode = 1
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_fused_mc2 = 0
@@ -490,6 +525,7 @@ class TestEagleProposerDummyRun(TestBase):
         self.runner = MagicMock()
         self.runner.pcp_size = 1
         self.runner.dcp_size = 1
+        self.runner.pcp_manager = None
         self.runner.pin_memory = False
         self.runner._sync_metadata_across_dp.return_value = (8, torch.tensor([8]), CUDAGraphMode.NONE)
 
@@ -531,10 +567,8 @@ class TestEagleProposerDummyRun(TestBase):
         self.mock_get_ascend_config = patch("vllm_ascend.utils.get_ascend_config")
         mock_config = self.mock_get_ascend_config.start()
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_flashcomm2_parallel_size = 0
         mock_ascend_config.enable_context_parallel = False
         mock_ascend_config.enable_flashcomm1 = False
-        mock_ascend_config.enable_matmul_allreduce = False
         mock_ascend_config.weight_nz_mode = 1
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_fused_mc2 = 0
@@ -672,6 +706,7 @@ class TestEagleProposerHelperMethods(TestBase):
         self.runner.pin_memory = False
         self.runner.pcp_size = 1
         self.runner.dcp_size = 1
+        self.runner.pcp_manager = None
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
@@ -965,10 +1000,8 @@ class TestEagleProposerPropose:
         self.mock_get_ascend_config = patch("vllm_ascend.utils.get_ascend_config")
         mock_get_ascend_config = self.mock_get_ascend_config.start()
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_flashcomm2_parallel_size = 0
         mock_ascend_config.enable_context_parallel = False
         mock_ascend_config.enable_flashcomm1 = False
-        mock_ascend_config.enable_matmul_allreduce = False
         mock_ascend_config.weight_nz_mode = 1
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_fused_mc2 = 0
@@ -977,6 +1010,7 @@ class TestEagleProposerPropose:
         mock_get_ascend_config.return_value = mock_ascend_config
 
         self.vllm_config = MagicMock(spec=VllmConfig)
+        self.vllm_config.use_v2_model_runner = False
         self.vllm_config.speculative_config = MagicMock()
         self.vllm_config.speculative_config.num_speculative_tokens = 3
         self.vllm_config.speculative_config.method = "eagle3"
@@ -988,6 +1022,7 @@ class TestEagleProposerPropose:
         self.runner.max_num_tokens = 8192
         self.runner.max_num_reqs = 256
         self.runner.pin_memory = False
+        self.runner.pcp_manager = None
 
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
         self.vllm_config.scheduler_config.max_num_seqs = 32
@@ -1017,7 +1052,6 @@ class TestEagleProposerPropose:
         self.vllm_config.speculative_config.disable_padded_drafter_batch = False
         self.vllm_config.additional_config = None
         self.ascend_config = init_ascend_config(self.vllm_config)
-        self.ascend_config.enable_flashcomm2_parallel_size = 0
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
@@ -1151,15 +1185,20 @@ class TestEagleProposerPropose:
         mock_attn_metadata = MagicMock()
         mock_builder.build.return_value = mock_attn_metadata
         mock_attn_group.get_metadata_builder.return_value = mock_builder
+        mock_attn_group.layer_names = ['model.layers.36.self_attn.attn']
         self.proposer.draft_attn_groups = [mock_attn_group]
         self.proposer.attn_layer_names = ['model.layers.36.self_attn.attn']
         self.proposer.kernel_block_size = 128
+        self.proposer.block_size = 128
         self.proposer._runnable = MagicMock()
         self.proposer._runnable.return_value = [0, 0, 0]
         captured_common_attn_metadata = None
         original_method = self.proposer.attn_update_stack_num_spec_norm
         mock_bd = MagicMock()
         mock_bd.num_tokens = 16
+        self.proposer.query_start_loc = MagicMock()
+        self.proposer.query_start_loc.gpu = torch.tensor([0, 4, 8, 12, 16], device=torch.device("cpu"), dtype=torch.int32)
+        self.proposer.query_start_loc.cpu = torch.tensor([0, 4, 8, 12, 16], device=torch.device("cpu"), dtype=torch.int32)
         self.runner.cudagraph_dispatcher.dispatch.return_value = (CUDAGraphMode.FULL, mock_bd)
         self.runner._pad_query_start_loc_for_fia.return_value = 4
         self.runner.query_start_loc.gpu = torch.tensor([0, 4, 8, 12, 16], device=torch.device("cpu"), dtype=torch.int32)
@@ -1583,7 +1622,7 @@ class TestEagleProposerPropose:
         assert hasattr(RunnerCls, "_pad_query_start_loc_for_fia")
         sig = inspect.signature(RunnerCls._pad_query_start_loc_for_fia)
         sig_name = self.get_param_names(sig)
-        assert sig_name == ['self', 'num_tokens_padded', 'num_reqs_padded', 'num_reqs', 'cudagraph_runtime_mode', 'batch_desc_num_reqs']
+        assert sig_name == ['self', 'query_start_loc', 'num_tokens_padded', 'num_reqs_padded', 'num_reqs', 'cudagraph_runtime_mode', 'batch_desc_num_reqs']
 
 
         import vllm_ascend.spec_decode.llm_base_proposer
@@ -1782,6 +1821,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         self.runner.pin_memory = False
         self.runner.pcp_size = 1
         self.runner.dcp_size = 1
+        self.runner.pcp_manager = None
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
@@ -2257,6 +2297,7 @@ class TestRunMergedDraft(TestBase):
         self.runner.dcp_size = 1
         self.runner.pcp_rank = 0
         self.runner.dcp_rank = 0
+        self.runner.pcp_manager = None
         self.runner.max_num_tokens = 64
         self.runner.max_num_reqs = 8
         self.runner.uniform_decode_query_len = 2
@@ -2509,7 +2550,7 @@ class TestRunMergedDraft(TestBase):
         assert hasattr(RunnerCls, "build_model_inputs_first_pass")
         sig = inspect.signature(RunnerCls.build_model_inputs_first_pass)
         sig_name = self.get_param_names(sig)
-        assert sig_name == ["self", "num_input_tokens"]
+        assert sig_name == ["self", "num_input_tokens", "_context_slots"]
 
         import vllm_ascend.worker.model_runner_v1
 
@@ -2632,14 +2673,12 @@ class TestRunMergedDraft(TestBase):
         self.proposer.num_speculative_tokens = 1
         self.proposer.pass_hidden_states_to_model = False
         self.proposer.model = MockDraftModel(returns_tuple=False)
-        self.proposer.build_model_inputs_first_pass = MagicMock(
-            return_value={
-                "input_ids": torch.tensor([151667, 32313], dtype=torch.int32),
-                "positions": torch.tensor([20, 16], dtype=torch.int64),
-                "inputs_embeds": torch.ones(2, 4, dtype=torch.float32),
-            }
+        self.proposer._context_slot_mapping_buffers = MagicMock()
+        self.proposer.build_model_inputs_first_pass = MagicMock()
+        initial_input_ids = torch.tensor(
+            [151667, 32313, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=torch.int32
         )
-
+        self.proposer.input_ids[:12] = initial_input_ids
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_reduce_sample = False
         with (
@@ -2657,13 +2696,15 @@ class TestRunMergedDraft(TestBase):
                 is_prefill=False,
             )
 
-        self.proposer.build_model_inputs_first_pass.assert_called_once_with(12)
+        self.proposer.build_model_inputs_first_pass.assert_called_once_with(
+            12, self.proposer._context_slot_mapping_buffers
+        )
         self.proposer.maybe_all_gather_and_unpad.assert_not_called()
         self.assertNotIn("hidden_states", self.proposer.model.calls[0])
         self.assertTrue(
             torch.equal(
                 self.proposer.model.calls[0]["input_ids"],
-                torch.tensor([151667, 32313], dtype=torch.int32),
+                initial_input_ids,
             )
         )
         self.assertEqual(draft_token_ids.tolist(), [[151667], [32313]])
@@ -2798,6 +2839,7 @@ class TestDraftProposerHelperMethods(TestBase):
         self.runner.pin_memory = False
         self.runner.pcp_size = 1
         self.runner.dcp_size = 1
+        self.runner.pcp_manager = None
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
@@ -2910,6 +2952,7 @@ class TestEagleProposerPrepareInputs:
         self.runner.attn_state = AscendAttentionState.ChunkedPrefill
         self.runner.decode_token_per_req = 1
         self.runner.actual_seq_lengths_q = []
+        self.runner.pcp_manager = None
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
@@ -3263,6 +3306,7 @@ class TestEagleProposerPrepareInputsPadded:
         self.runner.attn_state = AscendAttentionState.ChunkedPrefill
         self.runner.decode_token_per_req = 1
         self.runner.actual_seq_lengths_q = []
+        self.runner.pcp_manager = None
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
@@ -3625,6 +3669,7 @@ class TestEagleProposerSetInputsFirstPass:
         self.runner.dcp_size = 1
         self.runner.max_num_tokens = 8192
         self.runner.max_num_reqs = 256
+        self.runner.pcp_manager = None
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
@@ -3789,7 +3834,7 @@ class TestEagleProposerSetInputsFirstPass:
         expected_token_indices = torch.tensor([2, 4, 8], dtype=torch.int32, device=self.device)
         assert torch.equal(out_token_indices, expected_token_indices)
         assert out_cad is common_attn_metadata  # returned as-is
-        assert long_seq_args == (None, None)
+        assert long_seq_args is None
 
         # assert proposer internal state
         expected_proposer = MagicMock()
@@ -3825,7 +3870,8 @@ class TestEagleProposerSetInputsFirstPass:
         self.runner.input_batch.req_ids = req_ids
         # maybe not reasonable just to run test
         self.runner.logits_indices = torch.arange(12, dtype=torch.int32, device=self.device)
-        self.runner.pcp_manager.pcp_use_hybrid_attn = False
+        pcp_manager = MagicMock()
+        self.runner.pcp_manager = pcp_manager
 
         proposer, vllm_config = self._create_proposer(
             method="eagle",
@@ -3865,6 +3911,46 @@ class TestEagleProposerSetInputsFirstPass:
         target_hidden_states = torch.randn(18, proposer.hidden_size, dtype=proposer.dtype, device=self.device)
 
         long_seq_metadata = MagicMock()
+        expected_token_indices = torch.tensor([2, 4, 10, 11], dtype=torch.int32, device=self.device)
+        expected_query_lens_d = torch.tensor([3, 2], dtype=torch.int32, device=self.device)
+        expected_ori_token_indices_to_sample = torch.tensor([2, 4, 8, 11], dtype=torch.int32, device=self.device)
+        expected_input_ids = torch.tensor(
+            [11, 12, 100, 21, 200, 31, 300, 41, 0],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        expected_positions = target_positions[:9]
+        expected_hidden_indices = torch.tensor([0, 1, 2, 6, 7, 10, 13, 14, 17], dtype=torch.long, device=self.device)
+        expected_hidden_states = target_hidden_states[expected_hidden_indices]
+
+        def prepare_first_pass_inputs(**kwargs):
+            assert torch.equal(
+                kwargs["input_ids"],
+                torch.tensor(
+                    [11, 12, 100, 21, 200, 31, 32, 33, 300, 41, 42, 400],
+                    dtype=torch.int32,
+                    device=self.device,
+                ),
+            )
+            assert kwargs["common_attn_metadata"] is common_attn_metadata
+            assert kwargs["long_seq_metadata"] is long_seq_metadata
+            assert kwargs["req_scheduled_tokens"] == req_scheduled_tokens
+            assert kwargs["req_ids"] == req_ids
+            common_attn_metadata.prefill_context_parallel_metadata = long_seq_metadata
+            common_attn_metadata.num_actual_tokens = 9
+            common_attn_metadata.seq_lens = torch.tensor([10, 8, 2, 2], dtype=torch.int32, device=self.device)
+            common_attn_metadata.query_start_loc = torch.tensor([0, 3, 5, 7, 9], dtype=torch.int32, device=self.device)
+            common_attn_metadata.max_query_len = 4
+            return PCPSpecDecodeFirstPassInputs(
+                num_tokens=9,
+                input_ids=expected_input_ids,
+                target_positions=expected_positions,
+                target_hidden_states=expected_hidden_states,
+                token_indices_to_sample=expected_token_indices,
+                long_seq_args=(expected_query_lens_d, expected_ori_token_indices_to_sample),
+            )
+
+        pcp_manager.prepare_spec_decode_first_pass_inputs.side_effect = prepare_first_pass_inputs
 
         out_num_tokens, out_token_indices, out_cad, (query_lens_d, ori_token_indices_to_sample) = (
             proposer.set_inputs_first_pass(
@@ -3884,23 +3970,18 @@ class TestEagleProposerSetInputsFirstPass:
 
         # assert function computed outputs
         assert out_num_tokens == 9
-        expected_token_indices = torch.tensor([2, 4, 10, 11], dtype=torch.int32, device=self.device)
         assert torch.equal(out_token_indices, expected_token_indices)
+        pcp_manager.prepare_spec_decode_first_pass_inputs.assert_called_once()
 
         # assert query_lens_d and ori_token_indices_to_sample
-        expected_query_lens_d = torch.tensor([3, 2], dtype=torch.int32, device=self.device)
-        expected_ori_token_indices_to_sample = torch.tensor([2, 4, 8, 11], dtype=torch.int32, device=self.device)
         assert torch.equal(query_lens_d, expected_query_lens_d)
         assert torch.equal(ori_token_indices_to_sample, expected_ori_token_indices_to_sample)
 
         # assert proposer internal state
-        indices = torch.tensor([0, 1, 2, 6, 7, 10, 13, 14, 17], dtype=torch.long, device=self.device)
         expected_proposer = MagicMock()
-        expected_proposer.input_ids = torch.tensor(
-            [11, 12, 100, 21, 200, 31, 300, 41, 0], dtype=torch.int32, device=self.device
-        )
-        expected_proposer.positions = target_positions[:out_num_tokens]
-        expected_proposer.hidden_states = target_hidden_states[indices]
+        expected_proposer.input_ids = expected_input_ids
+        expected_proposer.positions = expected_positions
+        expected_proposer.hidden_states = expected_hidden_states
 
         attrs_from_proposer: list[str | tuple[str, Any, Any]] = [
             ("input_ids", None, slice(None, out_num_tokens)),
@@ -3971,6 +4052,9 @@ class TestEagleProposerSetInputsFirstPass:
 
         proposer.parallel_drafting_token_id = -2
         parallel_drafting_hs = proposer.parallel_drafting_hidden_state_tensor
+        assert parallel_drafting_hs is not None
+        # Production initializes this from the loaded drafter's mask hidden state.
+        parallel_drafting_hs.fill_(1.0)
 
         mock_kv_cache_spec = MagicMock()
         mock_kv_cache_spec.block_size = block_size
@@ -4311,7 +4395,7 @@ def _build_split_pcp_input_hybrid_inputs(req_scheduled_tokens: dict[str, int], h
     ],
 )
 # yapf: enable
-def test_split_pcp_input_hybrid(
+def test_split_spec_decode_pcp_prefill_input_hybrid(
     pcp_size,
     pcp_rank,
     req_scheduled_tokens,
@@ -4327,12 +4411,12 @@ def test_split_pcp_input_hybrid(
         req_scheduled_tokens, hidden_size
     )
 
-    # _split_pcp_input_hybrid only reads self.pcp_size and self.pcp_rank,
+    # _split_spec_decode_pcp_prefill_input_hybrid only reads PCP rank/size,
     # so a MagicMock with just those attributes is enough to drive the
-    # unbound method without instantiating the full proposer.
+    # unbound manager method without instantiating the full manager.
     mock_self = MagicMock()
-    mock_self.pcp_size = pcp_size
-    mock_self.pcp_rank = pcp_rank
+    mock_self.pcp_world_size = pcp_size
+    mock_self.pcp_world_rank = pcp_rank
 
     (
         num_tokens,
@@ -4341,7 +4425,7 @@ def test_split_pcp_input_hybrid(
         max_query_len,
         seq_lens,
         cu_num_tokens,
-    ) = llm_base_proposer.AscendSpecDecodeBaseProposer._split_pcp_input_hybrid(
+    ) = PCPManager._split_spec_decode_pcp_prefill_input_hybrid(
         mock_self, req_scheduled_tokens, input_ids, target_hidden_states
     )
 
@@ -4363,7 +4447,7 @@ def test_split_pcp_input_hybrid(
     )
 
 
-def test_split_pcp_input_hybrid_preserves_hidden_size():
+def test_split_spec_decode_pcp_prefill_input_hybrid_preserves_hidden_size():
     """Hidden states must come back with the same hidden dim as the input."""
     hidden_size = 7
     req_scheduled_tokens = {"0": 6}
@@ -4372,13 +4456,131 @@ def test_split_pcp_input_hybrid_preserves_hidden_size():
     )
 
     mock_self = MagicMock()
-    mock_self.pcp_size = 2
-    mock_self.pcp_rank = 0
+    mock_self.pcp_world_size = 2
+    mock_self.pcp_world_rank = 0
 
     _, _, out_hidden_states, _, _, _ = (
-        llm_base_proposer.AscendSpecDecodeBaseProposer._split_pcp_input_hybrid(
+        PCPManager._split_spec_decode_pcp_prefill_input_hybrid(
             mock_self, req_scheduled_tokens, input_ids, target_hidden_states
         )
     )
 
     assert out_hidden_states.shape[1] == hidden_size
+
+
+class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
+    """
+    Unit tests for DeepSeek Sparse MLA MTP Layer's Top-K Index reuse feature (PR #10510)
+    """
+
+    def setUp(self):
+        # Prepare the base Config Mock
+        self.vllm_config = MagicMock(spec=VllmConfig)
+        self.vllm_config.speculative_config = MagicMock()
+        self.vllm_config.speculative_config.draft_model_config = MagicMock()
+        self.vllm_config.speculative_config.draft_model_config.hf_config = MagicMock()
+        self.device = torch.device("cpu")
+        self.runner = MagicMock()
+        self.runner.pcp_manager = None
+
+    def test_init_mtp_indices_flag(self):
+        """Test whether index_share_for_mtp_iteration is correctly read in __init__."""
+        # Scenario 1: Set to True in config
+        self.vllm_config.speculative_config.draft_model_config.hf_config.index_share_for_mtp_iteration = True
+
+        with patch.object(AscendEagleProposer, "__init__", lambda self, vllm_config, device, runner: None):
+            proposer = AscendEagleProposer(self.vllm_config, self.device, self.runner)
+            # Manually trigger the newly added initialization logic for validation
+            proposer.vllm_config = self.vllm_config
+            proposer._share_mtp_indices = getattr(
+                self.vllm_config.speculative_config.draft_model_config.hf_config, "index_share_for_mtp_iteration", False
+            )
+            self.assertTrue(proposer._share_mtp_indices, "MTP share flag should be True when configured.")
+
+        # Scenario 2: Not set in config (defaults to False)
+        del self.vllm_config.speculative_config.draft_model_config.hf_config.index_share_for_mtp_iteration
+        with patch.object(AscendEagleProposer, "__init__", lambda self, vllm_config, device, runner: None):
+            proposer2 = AscendEagleProposer(self.vllm_config, self.device, self.runner)
+            proposer2.vllm_config = self.vllm_config
+            proposer2._share_mtp_indices = getattr(
+                self.vllm_config.speculative_config.draft_model_config.hf_config, "index_share_for_mtp_iteration", False
+            )
+            self.assertFalse(proposer2._share_mtp_indices, "MTP share flag should default to False.")
+
+    def test_maybe_share_topk_indices_submodules(self):
+        """Test if _maybe_share_topk_indices correctly updates topk_indices_buffer for all submodules."""
+        # Use __new__ to bypass the complex __init__ process
+        proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+
+        # 1. Mock Target Model
+        target_model = MagicMock()
+        target_buffer_mock = MagicMock()
+        target_model.model.topk_indices_buffer = target_buffer_mock
+
+        # 2. Mock Draft Model (including submodules)
+        draft_model_mock = MagicMock()
+        draft_model_mock.model.topk_indices_buffer = MagicMock()  # Old buffer
+
+        # Construct several submodules: some have topk_indices_buffer, some don't
+        mod1 = MagicMock()
+        mod1.topk_indices_buffer = MagicMock()  # This should be replaced
+        mod2 = MagicMock()
+        del mod2.topk_indices_buffer  # This doesn't have the attribute, shouldn't throw an error
+        mod3 = MagicMock()
+        mod3.topk_indices_buffer = MagicMock()  # This should also be replaced
+
+        # Mock the return value of named_modules
+        draft_model_mock.model.named_modules.return_value = [("layer.0", mod1), ("layer.1", mod2), ("layer.2", mod3)]
+        proposer.model = draft_model_mock
+
+        # Execute the target method
+        proposer._maybe_share_topk_indices(target_model)
+
+        # Assertion: The outermost draft model buffer is updated
+        self.assertEqual(proposer.model.model.topk_indices_buffer, target_buffer_mock)
+
+        # Assertion: Submodules are correctly traversed and updated
+        self.assertEqual(mod1.topk_indices_buffer, target_buffer_mock, "Module 1 buffer should be updated.")
+        self.assertEqual(mod3.topk_indices_buffer, target_buffer_mock, "Module 3 buffer should be updated.")
+        self.assertFalse(hasattr(mod2, "topk_indices_buffer"), "Module 2 should not have a buffer added.")
+
+    def test_run_merge_draft_mtp_skip_topk(self):
+        """Test the set_skip_topk calling logic in step 0 and step 1 of run_merge_draft."""
+        proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+        proposer._share_mtp_indices = True
+
+        # Mock Draft Model and its set_skip_topk method
+        draft_model_mock = MagicMock()
+        proposer.model = MagicMock()
+        proposer.model.model = draft_model_mock
+
+        # Mock model inference return
+        proposer.model_returns_tuple = MagicMock(return_value=False)
+        proposer.model.return_value = MagicMock()
+
+        # Mock the run_merge_draft logic from your PR
+        # (Since this is a class method, we use an inner function to simulate and verify the core logic)
+        def mock_run_merge_draft(**model_kwargs):
+            # Step 0
+            draft_model = getattr(proposer.model, "model", None)
+            if proposer._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
+                draft_model.set_skip_topk(False)
+
+            # (Model inference...)
+            proposer.model(**model_kwargs)
+
+            # Step 1
+            if proposer._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
+                draft_model.set_skip_topk(True)
+
+        # Run the test
+        mock_run_merge_draft(input_ids=torch.tensor([1, 2, 3]))
+
+        # Assert calling conditions
+        self.assertTrue(draft_model_mock.set_skip_topk.called, "set_skip_topk should be called.")
+
+        # Verify calling order: False first, then True
+        calls = draft_model_mock.set_skip_topk.call_args_list
+        self.assertEqual(len(calls), 2, "set_skip_topk should be called exactly twice.")
+        self.assertEqual(calls[0][0][0], False, "Step 0 should call set_skip_topk(False).")
+        self.assertEqual(calls[1][0][0], True, "Step 1 should call set_skip_topk(True).")

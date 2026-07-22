@@ -71,10 +71,11 @@ class NPUDmaCopyBackend:
         is_store: bool,
         event_idx: int,
         events_list: list[tuple[int, torch.npu.Event]],
+        wait_event: torch.npu.Event | None = None,
     ) -> None:
         params = self._store_params if is_store else self._load_params
         assert params is not None and self._queue is not None
-        self._queue.put((src_blocks, dst_blocks, params, is_store, event_idx, events_list))
+        self._queue.put((src_blocks, dst_blocks, params, is_store, event_idx, events_list, wait_event))
 
     def shutdown(self) -> None:
         if self._shutdown:
@@ -114,10 +115,13 @@ class NPUDmaCopyBackend:
                 is_store,
                 event_idx,
                 events_list,
+                wait_event,
             ) = item
 
             stream = self._store_stream if is_store else self._load_stream
             with torch.npu.stream(stream):
+                if wait_event is not None:
+                    stream.wait_event(wait_event)
                 copy_blocks(src_blocks, dst_blocks, params)
                 event = torch.npu.Event()
                 event.record(stream)
