@@ -10,13 +10,30 @@ from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cudagraph_utils import AttentionStatePair, BatchExecutionDescriptor, prepare_inputs_to_capture
+from vllm.v1.worker.gpu.cudagraph_utils import (
+    BatchExecutionDescriptor,
+    prepare_inputs_to_capture,
+)
+
+try:
+    from vllm.v1.worker.gpu.cudagraph_utils import (  # type: ignore[import-not-found]
+        AttentionStatePair,
+    )
+except ImportError:
+    AttentionStatePair = Any  # type: ignore[assignment,misc]
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
-    DecodeSpeculatorCudaGraphManager,
-    PrefillSpeculatorCudaGraphManager,
-)
+try:
+    from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (  # type: ignore[import-not-found]
+        DecodeSpeculatorCudaGraphManager,
+        PrefillSpeculatorCudaGraphManager,
+    )
+except ImportError:
+    from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (  # type: ignore[import-not-found]
+        SpeculatorCudaGraphManager,
+    )
+    PrefillSpeculatorCudaGraphManager = SpeculatorCudaGraphManager  # type: ignore[assignment,misc]
+    DecodeSpeculatorCudaGraphManager = SpeculatorCudaGraphManager  # type: ignore[assignment,misc]
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
