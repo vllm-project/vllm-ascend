@@ -20,6 +20,7 @@ constexpr uint32_t ATTEN_ELEMS = FIXED_CHUNK_SIZE * FIXED_CHUNK_SIZE;
 constexpr uint32_t BLOCK_BYTES = 32;
 constexpr uint32_t HALF_PER_BLOCK = BLOCK_BYTES / sizeof(half);
 constexpr uint32_t MAX_SAFE_HEAD_DIM = 128;
+constexpr uint32_t DOUBLING_ROUNDS = 6;  // log2(64)
 
 __aicore__ inline uint32_t AlignUp(uint32_t value, uint32_t align) { return (value + align - 1) / align * align; }
 __aicore__ inline uint16_t BytesToBlocks(uint32_t bytes) { return static_cast<uint16_t>(AlignUp(bytes, BLOCK_BYTES) / BLOCK_BYTES); }
@@ -78,12 +79,10 @@ class KernelComputeWy {
     uKernelGm_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(uKernel));
     gKernelGm_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(gKernel));
 
-    // Allocate Matmul UB scratch + init Cube before other VECCALC buffers so L1/UB
-    // budgeting inside Matmul::Init sees free pipe capacity.
     const uint32_t localWsBytes = localWorkspaceSize_ == 0 ? (32 * 1024) : localWorkspaceSize_;
     pipe_->InitBuffer(mmLocalWsBuf_, localWsBytes);
-    cubeGemm_.Init(&tiling->mmAttn, &tiling->mmU, &tiling->mmW, pipe_, mmLocalWsBuf_.Get<uint8_t>(), localWsBytes,
-                   workspace, perCoreWorkspaceBytes_, usedCoreNum_);
+    cubeGemm_.Init(&tiling->mmAttn, &tiling->mmSquare, &tiling->mmApplyU, &tiling->mmApplyW, pipe_,
+                   mmLocalWsBuf_.Get<uint8_t>(), localWsBytes, workspace, perCoreWorkspaceBytes_, usedCoreNum_);
 
     pipe_->InitBuffer(kHalfBuf_, chunkKElems_ * sizeof(half));
     pipe_->InitBuffer(qHalfBuf_, chunkKElems_ * sizeof(half));
@@ -91,7 +90,6 @@ class KernelComputeWy {
     pipe_->InitBuffer(kFloatBuf_, chunkKElems_ * sizeof(float));
     pipe_->InitBuffer(vFloatBuf_, chunkVElems_ * sizeof(float));
     pipe_->InitBuffer(kBetaBuf_, chunkKElems_ * sizeof(float));
-    pipe_->InitBuffer(uAccBuf_, chunkVElems_ * sizeof(float));
     pipe_->InitBuffer(attnBuf_, ATTEN_ELEMS * sizeof(float));
     pipe_->InitBuffer(gBuf_, FIXED_CHUNK_SIZE * sizeof(float));
     pipe_->InitBuffer(expGBuf_, FIXED_CHUNK_SIZE * sizeof(float));
@@ -241,41 +239,28 @@ class KernelComputeWy {
     DataCopy(gKernelGm_[dstOffset], gLocal, dstCopyParams);
   }
 
-  __aicore__ inline void ApplyDecayStrictLower(LocalTensor<float> attnLocal, const LocalTensor<float> expGLocal) {
+  // In-place: gramLocal = A = −strictlower(G ⊙ Λ) with Λ_ij = exp(a_i − a_j) for j < i.
+  // Never forms γ_i/γ_j (overflow-safe). One outer-sub + Exp + Mul + Neg per row.
+  __aicore__ inline void ApplyLambdaNegStrictLower(LocalTensor<float> gramLocal, const LocalTensor<float> aLocal,
+                                                   LocalTensor<float> rowTmp) {
     for (uint32_t i = 0; i < FIXED_CHUNK_SIZE; ++i) {
-      const uint32_t rowOffset = i * FIXED_CHUNK_SIZE;
-      const float expGi = expGLocal.GetValue(i);
-      for (uint32_t j = 0; j < i; ++j) {
-        const float dot = attnLocal.GetValue(rowOffset + j);
-        const float decay = expGi / expGLocal.GetValue(j);
-        attnLocal.SetValue(rowOffset + j, -dot * decay);
-      }
-      attnLocal.SetValue(rowOffset + i, 0.0f);
-      for (uint32_t j = i + 1; j < FIXED_CHUNK_SIZE; ++j) {
-        attnLocal.SetValue(rowOffset + j, 0.0f);
-      }
+      const float ai = aLocal.GetValue(i);
+      Duplicate(rowTmp, ai, FIXED_CHUNK_SIZE);
+      PipeBarrier<PIPE_V>();
+      Sub(rowTmp, rowTmp, aLocal, FIXED_CHUNK_SIZE);  // a_i − a_j
+      PipeBarrier<PIPE_V>();
+      Exp(rowTmp, rowTmp, FIXED_CHUNK_SIZE);
+      PipeBarrier<PIPE_V>();
+      // Zero Λ on diag+upper so those entries of A become 0.
+      Duplicate(rowTmp[i], 0.0f, FIXED_CHUNK_SIZE - i);
+      PipeBarrier<PIPE_V>();
+      Mul(gramLocal[i * FIXED_CHUNK_SIZE], gramLocal[i * FIXED_CHUNK_SIZE], rowTmp, FIXED_CHUNK_SIZE);
+      PipeBarrier<PIPE_V>();
+      Muls(gramLocal[i * FIXED_CHUNK_SIZE], gramLocal[i * FIXED_CHUNK_SIZE], -1.0f, FIXED_CHUNK_SIZE);
+      PipeBarrier<PIPE_V>();
     }
-    PipeBarrier<PIPE_V>();
   }
 
-  __aicore__ inline void ApplyAttnCorrection(LocalTensor<float> attnLocal, LocalTensor<float> tmp) const {
-    for (uint32_t i = 1; i < FIXED_CHUNK_SIZE; ++i) {
-      LocalTensor<float> rowI = attnLocal[i * FIXED_CHUNK_SIZE];
-      for (uint32_t p = 0; p < i; ++p) {
-        const float alpha = rowI.GetValue(p);
-        if (alpha == 0.0f) continue;
-        LocalTensor<float> rowP = attnLocal[p * FIXED_CHUNK_SIZE];
-        Muls(tmp, rowP, alpha, FIXED_CHUNK_SIZE);
-        Add(rowI, rowI, tmp, FIXED_CHUNK_SIZE);
-        PipeBarrier<PIPE_V>();
-      }
-    }
-    PipeBarrier<PIPE_V>();
-    for (uint32_t i = 0; i < FIXED_CHUNK_SIZE; ++i) {
-      attnLocal.SetValue(i * FIXED_CHUNK_SIZE + i, 1.0f);
-    }
-    PipeBarrier<PIPE_V>();
-  }
   __aicore__ inline void BroadcastMulRowsFloat(LocalTensor<float> dst, const LocalTensor<float> rows,
                                                const LocalTensor<float> scalePerRow, uint32_t rowsCount,
                                                uint32_t cols, uint32_t lda) const {
@@ -319,7 +304,6 @@ class KernelComputeWy {
     LocalTensor<float> kFloat = kFloatBuf_.Get<float>();
     LocalTensor<float> vFloat = vFloatBuf_.Get<float>();
     LocalTensor<float> kBeta = kBetaBuf_.Get<float>();
-    LocalTensor<float> uAcc = uAccBuf_.Get<float>();
     LocalTensor<float> gLocal = gBuf_.Get<float>();
     LocalTensor<float> expGLocal = expGBuf_.Get<float>();
     LocalTensor<float> betaLocal = rowBuf_.Get<float>();
@@ -335,37 +319,35 @@ class KernelComputeWy {
     SyncEvent<HardEvent::V_MTE2>(HardEvent::V_MTE2);
     LoadBetaChunk(betaLocal, kHalf, chunkKElems_, b, tokenStart, vHeadIdx);
     BroadcastMulRowsFloat(kBeta, kFloat, betaLocal, FIXED_CHUNK_SIZE, kHeadDim_, alignK_);
-    LocalTensor<float> gLoadScratch = attnLocal;
-    uint32_t gLoadScratchElems = ATTEN_ELEMS;
-    if (FIXED_CHUNK_SIZE * vNumHead_ > gLoadScratchElems) {
-      gLoadScratch = uAcc;
-      gLoadScratchElems = chunkVElems_;
-    }
-    BuildCumulativeG(b, vHeadIdx, tokenStart, gLocal, expGLocal, scratch, gLoadScratch, gLoadScratchElems);
+    // Hv<=64 ⇒ FIXED_CHUNK*Hv <= ATTEN_ELEMS, so attnLocal is always a safe g-load scratch.
+    BuildCumulativeG(b, vHeadIdx, tokenStart, gLocal, expGLocal, scratch, attnLocal, ATTEN_ELEMS);
 
-    // Cube: attn = kBeta @ K^T  (stage A/B into qHalf/kHalf)
+    // Cube: G = Kβ @ K^T → attnLocal; then A = −strictlower(G ⊙ Λ).
     CastFloatRowsToHalf(qHalf, kBeta, FIXED_CHUNK_SIZE, kHeadDim_, alignK_);
     CastFloatRowsToHalf(kHalf, kFloat, FIXED_CHUNK_SIZE, kHeadDim_, alignK_);
     cubeGemm_.GemmATransB(attnLocal, qHalf, kHalf, kHeadDim_, kHeadDim_, kHeadDim_);
     SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
-    ApplyDecayStrictLower(attnLocal, expGLocal);
-    ApplyAttnCorrection(attnLocal, scratch);
+    ApplyLambdaNegStrictLower(attnLocal, gLocal, scratch);
 
+    // RHS halves: βV in vFloat, γ·Kβ in kBeta (in-place doubling targets).
     BroadcastMulRowsFloat(vFloat, vFloat, betaLocal, FIXED_CHUNK_SIZE, vHeadDim_, alignV_);
     BuildKBetaExpFloat(kBeta, kFloat, betaLocal, expGLocal, scratch, kHeadDim_, alignK_);
 
-    // Cube: u = attn @ Vbeta ; w = attn @ kBetaExp
-    CastFloatRowsToHalf(qHalf, attnLocal, FIXED_CHUNK_SIZE, FIXED_CHUNK_SIZE, FIXED_CHUNK_SIZE);
-    CastFloatRowsToHalf(vHalf, vFloat, FIXED_CHUNK_SIZE, vHeadDim_, alignV_);
-    cubeGemm_.GemmAB(uAcc, qHalf, vHalf, vHeadDim_, FIXED_CHUNK_SIZE, vHeadDim_, alignV_, /*useUMatmul=*/true);
-    SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+    // Nilpotent doubling: R ← (I−A)⁻¹ R without forming T.
+    // Apply to U and W separately to keep N≤128 and UB within 310P budget.
+    LocalTensor<half> halfRow = kHalf;
+    for (uint32_t round = 0; round < DOUBLING_ROUNDS; ++round) {
+      cubeGemm_.GemmApplyAdd(vFloat, attnLocal, qHalf, halfRow, scratch, vHeadDim_, alignV_, /*useU=*/true);
+      cubeGemm_.GemmApplyAdd(kBeta, attnLocal, qHalf, halfRow, scratch, kHeadDim_, alignK_, /*useU=*/false);
+      if (round + 1 < DOUBLING_ROUNDS) {
+        cubeGemm_.GemmSquare(attnLocal, qHalf);
+        SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+      }
+    }
 
+    Cast(vHalf, vFloat, RoundMode::CAST_NONE, chunkVElems_);
     CastFloatRowsToHalf(kHalf, kBeta, FIXED_CHUNK_SIZE, kHeadDim_, alignK_);
-    cubeGemm_.GemmAB(kFloat, qHalf, kHalf, kHeadDim_, FIXED_CHUNK_SIZE, kHeadDim_, alignK_, /*useUMatmul=*/false);
-    SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
-
-    Cast(vHalf, uAcc, RoundMode::CAST_NONE, chunkVElems_);
-    Cast(kHalf, kFloat, RoundMode::CAST_NONE, chunkKElems_);
+    SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
     StoreBhtdChunk(uKernelGm_, vHalf, b, vHeadIdx, tokenStart, vNumHead_, vHeadDim_, alignV_);
     StoreBhtdChunk(wKernelGm_, kHalf, b, vHeadIdx, tokenStart, vNumHead_, kHeadDim_, alignK_);
     SyncEvent<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
@@ -384,8 +366,8 @@ class KernelComputeWy {
   GlobalTensor<half> qGm_, kGm_, vGm_, betaGm_, qKernelGm_, kKernelGm_, wKernelGm_, uKernelGm_;
   GlobalTensor<float> gGm_, gKernelGm_;
   WyCubeGemm cubeGemm_;
-  TBuf<TPosition::VECCALC> kHalfBuf_, qHalfBuf_, vHalfBuf_, kFloatBuf_, vFloatBuf_, kBetaBuf_, uAccBuf_, attnBuf_,
-      gBuf_, expGBuf_, tmpBuf_, rowBuf_, mmLocalWsBuf_;
+  TBuf<TPosition::VECCALC> kHalfBuf_, qHalfBuf_, vHalfBuf_, kFloatBuf_, vFloatBuf_, kBetaBuf_, attnBuf_, gBuf_,
+      expGBuf_, tmpBuf_, rowBuf_, mmLocalWsBuf_;
 };
 
 }  // namespace ChunkGatedDeltaRuleComputeWy

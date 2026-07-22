@@ -17,7 +17,6 @@ static constexpr size_t DIM_D = 3;
 
 static constexpr int64_t FIXED_CHUNK = 64;
 static constexpr uint32_t SYS_WORKSPACE_SIZE = 16 * 1024 * 1024;
-// Atlas inference Matmul needs a UB scratch region for internal temps.
 static constexpr uint32_t LOCAL_WORKSPACE_BYTES = 32 * 1024;
 // Per-core GM staging: A_half(64*128) + B_half(64*128) + C_float(64*128)
 static constexpr uint32_t STAGING_A_BYTES = FIXED_CHUNK * 128 * sizeof(uint16_t);
@@ -102,13 +101,18 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleComputeWy(gert::TilingContext *context
         ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
-    // mmU: attn[64,64] @ V[64,V] -> [64,V]
-    if (FillCubeTiling(context, FIXED_CHUNK, vdim, FIXED_CHUNK, /*bTranspose=*/false, tiling.mmU) !=
+    // mmSquare: P[64,64] @ P[64,64] -> [64,64]
+    if (FillCubeTiling(context, FIXED_CHUNK, FIXED_CHUNK, FIXED_CHUNK, /*bTranspose=*/false, tiling.mmSquare) !=
         ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
-    // mmW: attn[64,64] @ kBetaExp[64,K] -> [64,K]
-    if (FillCubeTiling(context, FIXED_CHUNK, kdim, FIXED_CHUNK, /*bTranspose=*/false, tiling.mmW) !=
+    // mmApplyU: P[64,64] @ (βV)[64,V] -> [64,V]
+    if (FillCubeTiling(context, FIXED_CHUNK, vdim, FIXED_CHUNK, /*bTranspose=*/false, tiling.mmApplyU) !=
+        ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+    // mmApplyW: P[64,64] @ (γ·Kβ)[64,K] -> [64,K]
+    if (FillCubeTiling(context, FIXED_CHUNK, kdim, FIXED_CHUNK, /*bTranspose=*/false, tiling.mmApplyW) !=
         ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
