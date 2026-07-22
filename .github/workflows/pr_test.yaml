@@ -249,6 +249,104 @@ jobs:
       HITEST_KEY: ${{ secrets.HITEST_KEY }}
       HITEST_SECRET: ${{ secrets.HITEST_SECRET }}
 
+  recommend-tests-from-coverage:
+    name: Recommend tests from coverage
+    runs-on: linux-amd64-cpu-8-hk
+    continue-on-error: true
+    env:
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Git safe directory config
+        run: git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+
+      - name: Download coverage package from OBS
+        run: |
+          set -euo pipefail
+          pip install esdk-obs-python --quiet
+          python3 - <<'EOF'
+          import os
+          from obs import ObsClient
+
+          OBS_BUCKET = 'vllm-ascend'
+          OBS_PREFIX = 'ci/precision-test'
+          client = ObsClient(
+              access_key_id=os.environ['OBS_ACCESS_KEY'],
+              secret_access_key=os.environ['OBS_SECRET_KEY'],
+              server='https://obs.cn-north-4.myhuaweicloud.com'
+          )
+
+          obs_path = f'{OBS_PREFIX}/coverage.tar'
+          local_path = 'coverage.tar'
+          resp = client.getObject(OBS_BUCKET, obs_path, downloadPath=local_path)
+          if resp.status < 300:
+              print(f'Downloaded: {obs_path} -> {local_path}')
+          else:
+              raise Exception(f'Failed to download {obs_path}: {resp.errorMessage}')
+          EOF
+
+      - name: Extract coverage and resolve task name
+        id: coverage
+        run: |
+          set -euo pipefail
+          tar xf coverage.tar
+          if [ ! -d "vllm-ascend/covstub" ]; then
+            echo "::error::covstub directory not found under extracted coverage package"
+            ls -la vllm-ascend || true
+            exit 1
+          fi
+          # Task dirs look like VLLM-ASCEND@task_YYYYMMDDHH inside the package.
+          mapfile -t TASK_DIRS < <(find vllm-ascend -mindepth 1 -maxdepth 1 -type d -name 'VLLM-ASCEND@task_*' | sort)
+          if [ "${#TASK_DIRS[@]}" -eq 0 ]; then
+            echo "::error::No VLLM-ASCEND@task_* directory found after extracting coverage.tar"
+            ls -la vllm-ascend || true
+            exit 1
+          fi
+          # Prefer the newest task directory if multiple exist.
+          TASK_PATH="${TASK_DIRS[-1]}"
+          TASK_NAME="$(basename "${TASK_PATH}")"
+          echo "TASK_NAME=${TASK_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Using coverage task: ${TASK_NAME}"
+          echo "=== package layout (sample) ==="
+          find "${TASK_PATH}" -maxdepth 2 -type d | head -20 || true
+
+      - name: Build test case map from coverage
+        working-directory: vllm-ascend
+        run: |
+          set -euo pipefail
+          python3 ../.github/workflows/scripts/test_selector.py \
+            --build-map \
+            --coverage-dir "${{ steps.coverage.outputs.TASK_NAME }}" \
+            --source-dir ./covstub \
+            --map-file test_case_map.json
+
+      - name: Recommend tests for current PR
+        working-directory: vllm-ascend
+        run: |
+          set -euo pipefail
+          PR_SPEC="${{ github.repository }}#${{ github.event.pull_request.number }}"
+          echo "Selecting tests for PR: ${PR_SPEC}"
+          python3 ../.github/workflows/scripts/test_selector.py \
+            --github-pr "${PR_SPEC}" \
+            --source-dir ./covstub \
+            --map-file test_case_map.json
+
+      - name: Upload recommended pytest paths artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-recommended-pytest-paths
+          path: vllm-ascend/recommended_pytest_paths.txt
+          if-no-files-found: warn
+          retention-days: 14
+
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
