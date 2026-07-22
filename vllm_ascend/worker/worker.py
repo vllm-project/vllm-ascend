@@ -61,6 +61,7 @@ from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
+from vllm_ascend.ops.fused_moe.moe_comm_method import refresh_all2all_expert_ids_after_l2_discard
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
@@ -143,6 +144,7 @@ class NPUWorker(WorkerBase):
         if vllm_config.model_config and vllm_config.model_config.enable_sleep_mode:
             # Buffers saved before sleep
             self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+            self._needs_all2all_expert_ids_refresh = False
         self.sleep_wakeup_manager = SleepWakeupManager(vllm_config, self, lambda: getattr(self, "model_runner", None))
 
         # Weight transfer engine is created in `load_model` once the model
@@ -214,6 +216,7 @@ class NPUWorker(WorkerBase):
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Save the buffers before level 2 sleep
         if level == 2:
+            self._needs_all2all_expert_ids_refresh = True
             model = self.model_runner.model
             self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
 
@@ -275,6 +278,10 @@ class NPUWorker(WorkerBase):
         cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", False)
         if cleanup_enabled:
             self.sleep_wakeup_manager.wakeup(tags)
+            
+        if getattr(self, "_needs_all2all_expert_ids_refresh", False):
+            self._needs_all2all_expert_ids_refresh = False
+            refresh_all2all_expert_ids_after_l2_discard()
 
     def _check_weight_transfer_engine(self) -> None:
         if self.weight_transfer_engine is None:
