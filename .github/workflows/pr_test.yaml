@@ -291,7 +291,12 @@ jobs:
       - name: Recommend tests for current PR
         run: |
           set -euo pipefail
-          python3 -m pip install regex --quiet
+          if ! python3 -m pip --version >/dev/null 2>&1; then
+            curl -fsSL https://bootstrap.pypa.io/get-pip.py -o get-pip.py
+            python3 get-pip.py --user
+            export PATH="${HOME}/.local/bin:${PATH}"
+          fi
+          python3 -m pip install --user regex --quiet
           PR_SPEC="vllm-project/vllm-ascend#${{ github.event.pull_request.number }}"
           echo "Selecting tests for PR: ${PR_SPEC}"
           python3 .github/workflows/scripts/test_selector.py \
