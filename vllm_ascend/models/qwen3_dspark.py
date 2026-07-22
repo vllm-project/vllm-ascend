@@ -7,6 +7,7 @@ from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
 from vllm_ascend.patch.worker.patch_draft_quarot import get_rotataion_matrix, get_rotation_path
 
 
+# Process the first linear weight with rotation matrix, if the target model uses rotary quantization
 def process_weight(linear_weight: torch.Tensor, rotation_weight: torch.Tensor):
     assert linear_weight.shape[1] % rotation_weight.shape[0] == 0, (
         f"Linear weight shape[1] must be a multiple of rotation weight shape[0],"
