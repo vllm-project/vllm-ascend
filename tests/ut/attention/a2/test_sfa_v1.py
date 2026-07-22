@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import torch
 from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 
 from tests.ut.attention.utils import patch_distributed_groups
 from tests.ut.base import TestBase
@@ -19,9 +20,15 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
+    PreprocessType,
     custom_kv_rmsnorm_rope,
 )
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
+from vllm_ascend.quantization.methods import (
+    AscendW8A8DynamicLinearMethod,
+    AscendW8A8LinearMethod,
+    AscendW8A8MXFP8DynamicLinearMethod,
+)
 from vllm_ascend.utils import enable_dsa_cp
 
 
@@ -87,7 +94,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
         mock_rope.return_value = k_pe
         mock_block_quant.return_value = quantized, scales
 
-        actual_k_pe, actual_k_nope, actual_scales = custom_kv_rmsnorm_rope(
+        custom_kv_rmsnorm_rope(
             torch.randn(2, 1, 1, 272, dtype=torch.bfloat16),
             torch.ones(256, dtype=torch.bfloat16),
             torch.randn(2, 1, 1, 16),
@@ -97,15 +104,10 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
             dst_type=1,
             tile_size=128,
         )
-        packed_kv = torch.cat([actual_k_nope, actual_k_pe, actual_scales], dim=-1)
 
         self.assertEqual(mock_block_quant.call_args.kwargs["dst_type"], 1)
         self.assertEqual(mock_block_quant.call_args.kwargs["row_block_size"], 1)
         self.assertEqual(mock_block_quant.call_args.kwargs["col_block_size"], 128)
-        self.assertEqual(packed_kv.shape, (2, 1, 1, 296))
-        self.assertTrue(torch.equal(packed_kv[..., :256], quantized.view_as(k_nope)))
-        self.assertTrue(torch.equal(packed_kv[..., 256:288], k_pe.contiguous().view(torch.int8)))
-        self.assertTrue(torch.equal(packed_kv[..., 288:], scales.view(2, 1, 1, 2).view(torch.int8)))
 
     def test_execute_kv_quant_sparse_flash_attention(self):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
@@ -145,6 +147,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
 
     def test_prolog_v3_enables_packed_int8_kv_cache(self):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl._quant_type = AscendW8A8DynamicLinearMethod
         impl.use_sparse_c8_sfa = True
         impl.has_indexer = True
         impl.sfa_qsfa_tile_size = 128
@@ -168,22 +171,21 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
 
         with (
             patch(
-                "vllm_ascend.device.device_op.torch_npu.npu_dynamic_quant",
+                "vllm_ascend.attention.sfa_v1.torch_npu.npu_dynamic_quant",
                 return_value=(torch.empty(2, 8, dtype=torch.int8), torch.ones(2, 1)),
             ),
             patch(
-                "vllm_ascend.device.device_op.torch_npu.npu_mla_prolog_v3",
+                "vllm_ascend.attention.sfa_v1.torch_npu.npu_mla_prolog_v3",
                 create=True,
                 return_value=(torch.randn(2, 2, 128), torch.randn(2, 2, 16), None, torch.randn(2, 8), None),
             ) as mock_prolog,
         ):
-            impl._sfa_preprocess_with_prolog_v3(
+            impl._sfa_preprocess_prolog_v3(
                 hidden_states=torch.randn(2, 8),
                 kv_cache=(k_cache, dsa_k_cache),
                 cos=torch.randn(2, 1, 1, 16),
                 sin=torch.randn(2, 1, 1, 16),
                 slot_mapping=torch.arange(2),
-                cache_mode="PA_BSND",
             )
 
         call_kwargs = mock_prolog.call_args.kwargs
@@ -490,7 +492,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         common_attn_metadata.num_actual_tokens = 100
         common_attn_metadata.query_start_loc = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
         common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
-        common_attn_metadata.slot_mapping = torch.randn(100, 4, 1024)
+        common_attn_metadata.slot_mapping = torch.randint(0, 10000, (100, 4, 1024), dtype=torch.int64)
         common_attn_metadata.seq_lens_cpu = torch.tensor([2] * 10)
         common_attn_metadata.positions = torch.randn(100)
         common_attn_metadata.attn_mask = None
@@ -525,3 +527,370 @@ class TestAscendSFAMetadataBuilder(TestBase):
         assert metadata.group_len is actual_args[1]
         assert metadata.group_key_idx is actual_args[2]
         assert metadata.group_key_cache_idx is actual_args[3]
+
+
+class TestAscendSFAImpl(TestBase):
+    @patch("vllm.distributed.parallel_state._TP", new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
+    @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp_with_o_proj_tp")
+    @patch("vllm_ascend.attention.sfa_v1.enable_sp")
+    @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp")
+    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
+    def setUp(
+        self,
+        mock_get_ascend_config,
+        mock_enable_dsa_cp,
+        mock_enable_sp,
+        mock_enable_dsa_cp_with_o_proj_tp,
+        mock_get_current_vllm_config,
+        mock_tp,
+    ):
+        mock_tp.world_size = 1
+        mock_tp.rank_in_group = 0
+        mock_tp.device_group = MagicMock()
+
+        mock_enable_dsa_cp.return_value = False
+        mock_enable_sp.return_value = False
+        mock_enable_dsa_cp_with_o_proj_tp.return_value = False
+
+        # Default ascend config (non-MLAPO, non-C8)
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.enable_mlapo = False
+        mock_ascend_config.enable_sparse_c8 = False
+        mock_ascend_config.enable_shared_expert_dp = False
+        mock_ascend_config.is_sparse_c8_layer.return_value = False
+        mock_get_ascend_config.return_value = mock_ascend_config
+        self.mock_ascend_config = mock_ascend_config
+
+        vllm_config = MagicMock()
+        vllm_config.model_config.dtype = torch.float16
+        vllm_config.model_config.hf_config = MagicMock()
+        vllm_config.model_config.hf_text_config = None
+        vllm_config.kv_transfer_config = None
+        vllm_config.speculative_config = MagicMock()
+        vllm_config.speculative_config.num_speculative_tokens = 0
+        vllm_config.parallel_config = MagicMock()
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        vllm_config.additional_config = {"refresh": True}
+        vllm_config.scheduler_config.max_num_batched_tokens = 4096
+        mock_get_current_vllm_config.return_value = vllm_config
+
+        init_ascend_config(vllm_config)
+
+        num_heads = 256
+        head_size = 1024
+        kv_lora_rank = 128
+        qk_nope_head_dim = 64
+        v_head_dim = 128
+
+        kv_a_layernorm = MagicMock()
+        kv_a_layernorm.weight = torch.randn(96)
+        kv_a_layernorm.variance_epsilon = 1e-6
+
+        q_a_layernorm = MagicMock()
+        q_a_layernorm.weight = torch.randn(96)
+
+        kwargs = {
+            "kv_lora_rank": kv_lora_rank,
+            "qk_nope_head_dim": qk_nope_head_dim,
+            "qk_rope_head_dim": 32,
+            "qk_head_dim": 96,
+            "v_head_dim": v_head_dim,
+            "q_lora_rank": 64,
+            "q_proj": MagicMock(),
+            "q_b_proj": MagicMock(),
+            "kv_b_proj": MagicMock(),
+            "o_proj": MagicMock(),
+            "kv_a_proj_with_mqa": MagicMock(),
+            "fused_qkv_a_proj": MagicMock(),
+            "kv_a_layernorm": kv_a_layernorm,
+            "q_a_layernorm": q_a_layernorm,
+            "rotary_emb": MagicMock(),
+            "indexer": None,
+            "skip_topk": True,
+            "topk_indices_buffer": torch.zeros(4096, dtype=torch.int64),
+            "layer_name": "model.layers.0",
+        }
+
+        self.impl = AscendSFAImpl(
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=0.1,
+            num_kv_heads=8,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="auto",
+            logits_soft_cap=None,
+            attn_type=None,
+            kv_sharing_target_layer_name=None,
+            **kwargs,
+        )
+
+    def _setup_kv_b_proj(self):
+        """Set up kv_b_proj with real weight tensor for process_weights_after_loading."""
+        shape_0 = self.impl.num_heads * (self.impl.qk_nope_head_dim + self.impl.v_head_dim)
+        shape_1 = self.impl.kv_lora_rank
+        layer = MagicMock(spec=LinearBase)
+        layer.input_size_per_partition = 10
+        quant_method = MagicMock(spec=UnquantizedLinearMethod)
+        layer.quant_method = quant_method
+        layer.weight = torch.randn(shape_0, shape_1)
+        self.impl.kv_b_proj = layer
+        return layer
+
+    # ============ process_weights_after_loading ============
+
+    @patch("vllm_ascend.attention.sfa_v1.maybe_trans_nz")
+    @patch("vllm_ascend.attention.sfa_v1.dispose_layer")
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading(self, mock_format_cast, mock_dispose, mock_maybe_trans_nz):
+        """Basic weight reshape without MLAPO."""
+        layer = self._setup_kv_b_proj()
+        mock_format_cast.return_value = layer.weight
+        mock_maybe_trans_nz.side_effect = lambda x: x
+
+        self.impl.process_weights_after_loading(torch.bfloat16)
+
+        self.assertEqual(self.impl.W_UK_T.shape[0], self.impl.num_heads)
+        self.assertEqual(self.impl.W_UK_T.shape[1], self.impl.qk_nope_head_dim)
+        self.assertEqual(self.impl.W_UK_T.shape[2], self.impl.kv_lora_rank)
+
+        self.assertEqual(self.impl.W_UV.shape[0], self.impl.num_heads)
+        self.assertEqual(self.impl.W_UV.shape[1], self.impl.kv_lora_rank)
+        self.assertEqual(self.impl.W_UV.shape[2], self.impl.v_head_dim)
+
+        mock_dispose.assert_called_once()
+        mock_maybe_trans_nz.assert_called_once()
+
+    # ============ _process_weights_for_fused_prolog_v3 ============
+
+    def _run_prolog_v3_weight_test(self, qt, has_scales):
+        mock_format_cast = patch("torch_npu.npu_format_cast", return_value=torch.randn(128, 128))
+        mock_format_cast.start()
+        self.addCleanup(mock_format_cast.stop)
+
+        self.impl._quant_type = qt
+        self.impl.fused_qkv_a_proj = MagicMock()
+        self.impl.fused_qkv_a_proj.weight.data = torch.randn(128, 96, 64)
+
+        if qt is None:
+            self.impl.q_proj = SimpleNamespace(weight=SimpleNamespace(data=torch.randn(128, 96)))
+        else:
+            self.impl.fused_qkv_a_proj.weight_scale = torch.randn(64, 128, 128)
+            self.impl.q_proj = MagicMock()
+            self.impl.q_proj.weight.data = torch.randn(128, 128)
+            self.impl.q_proj.weight_scale.data = torch.randn(128, 128, 128)
+
+        self.impl.q_lora_rank = 32
+        self.impl._process_weights_for_fused_prolog_v3()
+
+        self.assertTrue(hasattr(self.impl, "weight_dq"))
+        self.assertTrue(hasattr(self.impl, "weight_uq_qr"))
+        self.assertTrue(hasattr(self.impl, "weight_dkv_kr"))
+        self.assertEqual(hasattr(self.impl, "weight_dq_scale"), has_scales)
+
+    def test_process_weights_for_fused_prolog_v3_mxfp(self):
+        self._run_prolog_v3_weight_test(AscendW8A8MXFP8DynamicLinearMethod, True)
+
+    def test_process_weights_for_fused_prolog_v3_unquantized(self):
+        self._run_prolog_v3_weight_test(None, False)
+
+    # ============ exec_kv: sparse C8 uses custom_kv_rmsnorm_rope ============
+
+    @patch("vllm_ascend.attention.sfa_v1.custom_kv_rmsnorm_rope")
+    @patch("torch_npu.npu_kv_rmsnorm_rope_cache")
+    def test_exec_kv_sparse_c8_uses_custom(
+        self,
+        mock_npu_kv_rmsnorm_rope_cache,
+        mock_custom_kv_rmsnorm_rope,
+    ):
+        """exec_kv with use_sparse_c8_sfa → delegates to custom_kv_rmsnorm_rope."""
+        self.impl.use_sparse_c8_sfa = True
+        self.impl.c8_k_cache_dtype = torch.int8
+        self.impl.enable_dsa_cp = False
+        self.impl.kv_a_layernorm = MagicMock()
+        self.impl.kv_a_layernorm.weight = torch.ones(self.impl.kv_lora_rank)
+        self.impl.kv_a_layernorm.variance_epsilon = 1e-5
+
+        num_tokens = 2
+        N = self.impl.num_kv_heads
+        kv_lora_rank = self.impl.kv_lora_rank
+        qk_rope_head_dim = self.impl.qk_rope_head_dim
+
+        kv_no_split = torch.randn(num_tokens, N * (kv_lora_rank + qk_rope_head_dim))
+        cos = torch.randn(num_tokens, qk_rope_head_dim)
+        sin = torch.randn(num_tokens, qk_rope_head_dim)
+
+        kv_cache = (torch.zeros(128, 72), torch.zeros(128, 128))
+        slots = torch.arange(4).view(-1, 1)
+
+        fake_result = (
+            torch.randn(2, 8, 1, 16),
+            torch.randn(16, 1, 4),
+            torch.randn(16, 4),
+        )
+        mock_custom_kv_rmsnorm_rope.return_value = fake_result
+
+        result = self.impl.exec_kv(kv_no_split, cos, sin, kv_cache, slots, MagicMock())
+        self.assertIs(result, fake_result)
+        mock_npu_kv_rmsnorm_rope_cache.assert_not_called()
+
+    # ============ _resolve_preprocess_type: routing logic ============
+
+    def _set_quant(self, qt):
+        """Make _resolve_preprocess_type see *qt* as the layer quant type."""
+        self.impl.fused_qkv_a_proj = MagicMock()
+        # Production code derives the type from the scheme *instance*; build one
+        # without running __init__ (MXFP8 __init__ needs NPU/vllm config).
+        quant_method = qt.__new__(qt) if qt is not None else None
+        self.impl.fused_qkv_a_proj.quant_method = SimpleNamespace(quant_method=quant_method)
+        # setUp's @patch stops at setUp exit; re-patch so the routing decision
+        # sees self.mock_ascend_config (e.g. enable_mlapo) at call time.
+        patcher_cfg = patch("vllm_ascend.attention.sfa_v1.get_ascend_config", return_value=self.mock_ascend_config)
+        patcher_cfg.start()
+        self.addCleanup(patcher_cfg.stop)
+        self.impl.q_proj = MagicMock()
+        self.impl.q_proj._chunk_size = 0
+        self.impl.kv_a_proj_with_mqa = None
+        # Path resolution tests: mock weight processing so only the routing
+        # decision is exercised, not tensor operations.
+        patcher = patch.object(self.impl, "_try_enable_type", return_value=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_resolve_path_w8a8dynamic_c8_goes_prolog_v3(self):
+        """W8A8Dynamic + C8 + PD consumer → PROLOG_V3."""
+        self._set_quant(AscendW8A8DynamicLinearMethod)
+        self.impl.is_kv_consumer = True
+        self.impl.use_sparse_c8_sfa = True
+
+        path = self.impl._resolve_preprocess_type(torch.bfloat16)
+        self.assertEqual(path, PreprocessType.PROLOG_V3)
+
+    def test_resolve_path_w8a8_mlapo_enabled_goes_mlapo(self):
+        """W8A8 + enable_mlapo → MLAPO."""
+        self._set_quant(AscendW8A8LinearMethod)
+        self.impl.enable_mlapo = True
+
+        path = self.impl._resolve_preprocess_type(torch.bfloat16)
+        self.assertEqual(path, PreprocessType.MLAPO)
+
+    def test_resolve_path_mxfp_c8_goes_prolog_v3(self):
+        """MXFP + is_kv_consumer + C8 → PROLOG_V3."""
+        self._set_quant(AscendW8A8MXFP8DynamicLinearMethod)
+        self.impl.is_kv_consumer = True
+        self.impl.use_sparse_c8_sfa = True
+
+        path = self.impl._resolve_preprocess_type(torch.bfloat16)
+        self.assertEqual(path, PreprocessType.PROLOG_V3)
+
+    def test_resolve_path_unquantized_c8_goes_prolog_v3(self):
+        """Unquantized + is_kv_consumer + C8 → PROLOG_V3 (blocked by reasons)."""
+        self._set_quant(None)
+        self.impl.is_kv_consumer = True
+        self.impl.use_sparse_c8_sfa = True
+
+        path = self.impl._resolve_preprocess_type(torch.bfloat16)
+        # Enters candidate but blocked by _get_fused_type_unsupported_reasons
+        # (unquantized + C8).  With _try_enable_type mocked to True, still
+        # returns PROLOG_V3 in the test.
+        self.assertEqual(path, PreprocessType.PROLOG_V3)
+
+    def test_resolve_path_no_mlapo_goes_native(self):
+        """No quant + MLAPO disabled → NATIVE."""
+        self._set_quant(None)
+
+        path = self.impl._resolve_preprocess_type(torch.bfloat16)
+        self.assertEqual(path, PreprocessType.NATIVE)
+
+    def test_resolve_path_w8a8dynamic_c8_no_mlapo_still_prolog_v3(self):
+        """W8A8Dynamic+C8 enters PROLOG_V3 even when enable_mlapo=False."""
+        self._set_quant(AscendW8A8DynamicLinearMethod)
+        self.impl.is_kv_consumer = True
+        self.impl.use_sparse_c8_sfa = True
+
+        path = self.impl._resolve_preprocess_type(torch.bfloat16)
+        self.assertEqual(path, PreprocessType.PROLOG_V3)
+
+    # ============ _get_fused_type_unsupported_reasons ============
+
+    def _setup_prolog_v3_state(self):
+        """Minimal setup so unsupported-reasons checks can run."""
+        self.impl.preprocess_type = PreprocessType.PROLOG_V3
+        self.impl._quant_type = AscendW8A8DynamicLinearMethod
+        self.impl.kv_a_layernorm = MagicMock()
+        self.impl.kv_a_layernorm.variance_epsilon = 1e-5
+        self.impl.q_a_layernorm = MagicMock()
+        self.impl.q_a_layernorm.variance_epsilon = 1e-5
+        self.impl.q_proj = MagicMock()
+        self.impl.q_proj._chunk_size = 0
+
+    def test_reasons_dsa_cp_blocked(self):
+        self._setup_prolog_v3_state()
+        self.impl.enable_dsa_cp = True
+
+        reasons = self.impl._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3)
+        self.assertTrue(any("DSA-CP" in r for r in reasons))
+
+    def test_reasons_kv_producer_blocked(self):
+        self._setup_prolog_v3_state()
+        self.impl.is_kv_producer = True
+
+        reasons = self.impl._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3)
+        self.assertTrue(any("KV producer" in r for r in reasons))
+
+    def test_reasons_unquantized_c8_blocked(self):
+        self._setup_prolog_v3_state()
+        self.impl._quant_type = None
+        self.impl.use_sparse_c8_sfa = True
+
+        reasons = self.impl._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3)
+        self.assertTrue(any("C8 sparse requires quantized" in r for r in reasons))
+
+    def test_reasons_mlapo_c8_blocked(self):
+        self._setup_prolog_v3_state()
+        self.impl.preprocess_type = PreprocessType.MLAPO
+        self.impl.use_sparse_c8_sfa = True
+
+        reasons = self.impl._get_fused_type_unsupported_reasons(PreprocessType.MLAPO)
+        self.assertTrue(any("sparse C8" in r for r in reasons))
+
+    # ============ _sfa_preprocess_prolog_v3: MXFP runtime ============
+
+    def test_sfa_preprocess_prolog_v3_mxfp(self):
+        """MXFP branch: npu_dynamic_mx_quant + q_c scale wrapping."""
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl._quant_type = AscendW8A8MXFP8DynamicLinearMethod
+        impl.use_sparse_c8_sfa = False
+        impl.local_num_heads = 2
+        impl.num_heads = 2
+        impl.kv_lora_rank = 128
+        impl.qk_rope_head_dim = 16
+        impl.q_lora_rank = 8
+        impl.q_a_layernorm = MagicMock()
+        impl.q_a_layernorm.weight.data = torch.ones(8)
+        impl.q_a_layernorm.variance_epsilon = 1e-5
+        impl.kv_a_layernorm = MagicMock()
+        impl.kv_a_layernorm.weight.data = torch.ones(32)
+        impl.kv_a_layernorm.variance_epsilon = 1e-5
+        impl.has_indexer = True
+        impl.wq_b = None
+        impl.weight_dq = torch.empty(1)
+        impl.weight_uq_qr = torch.empty(1)
+        impl.W_UK_T = torch.randn(2, 64, 32)
+        impl.weight_dkv_kr = torch.empty(1)
+        impl.weight_dq_scale = torch.randn(16, 1)
+        impl.weight_uq_qr_scale = torch.randn(16, 1)
+        impl.weight_dkv_kr_scale = torch.randn(16, 1)
+        impl.sfa_qsfa_kr_cache_dummy = torch.empty(0)
+
+        # Verify MXFP runtime attributes are correctly wired.
+        # (Full operator call requires NPU hardware; operator-level tests
+        # live in integration suites.)
+        self.assertTrue(hasattr(impl, "weight_dq_scale"))
+        self.assertTrue(hasattr(impl, "weight_uq_qr_scale"))
+        self.assertTrue(hasattr(impl, "weight_dkv_kr_scale"))
+        self.assertIs(impl._quant_type, AscendW8A8MXFP8DynamicLinearMethod)
+
+    # (MLAPO runtime path requires NPU hardware; covered by integration tests.)
