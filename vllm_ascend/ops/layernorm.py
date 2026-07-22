@@ -20,6 +20,7 @@ from torch import nn
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
 
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
 from vllm_ascend.utils import enable_custom_op
 
@@ -86,35 +87,6 @@ class AscendRMSNorm(RMSNorm):
 
 
 class AscendGemmaRMSNorm(GemmaRMSNorm):
-    def __init__(
-        self,
-        hidden_size: int,
-        eps: float = 1e-6,
-    ) -> None:
-        super().__init__(hidden_size, eps)
-        self.register_buffer(
-            "weight_plus_one",
-            torch.ones_like(self.weight.data),
-            persistent=False,
-        )
-        self.weight.weight_loader = self._weight_loader
-
-    def _weight_loader(
-        self,
-        param: torch.nn.Parameter,
-        loaded_weight: torch.Tensor,
-    ) -> None:
-        if param.numel() == 1 and loaded_weight.numel() == 1:
-            param.data.copy_(loaded_weight.view(param.shape))
-        else:
-            assert param.size() == loaded_weight.size(), (
-                f"Attempted to load weight ({loaded_weight.size()}) into parameter ({param.size()})"
-            )
-            param.data.copy_(loaded_weight)
-
-        self.weight_plus_one.copy_(param.data)
-        self.weight_plus_one.add_(1.0)
-
     def forward_oot(
         self,
         x: torch.Tensor,
@@ -124,10 +96,15 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
 
         if residual is not None:
             residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
-            x, _, residual = torch_npu.npu_add_rms_norm(x, residual, self.weight_plus_one, self.variance_epsilon)
+            if enable_custom_op():
+                x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                    x, residual, 1.0 + self.weight, None, self.variance_epsilon
+                )
+            else:
+                x, _, residual = torch_npu.npu_add_rms_norm(x, residual, 1.0 + self.weight, self.variance_epsilon)
             return x, residual
 
-        x, _ = torch_npu.npu_rms_norm(x, self.weight_plus_one, self.variance_epsilon)
+        x = DeviceOperator.npu_gemma_rms_norm(x, self.weight, self.variance_epsilon)
 
         return x
 

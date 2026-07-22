@@ -339,8 +339,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         else:
             q, k, v = torch.ops.vllm.qkv_rmsnorm_rope(
                 input=main_qkv.contiguous(),
-                q_weight=self.q_norm.weight_plus_one,
-                k_weight=self.k_norm.weight_plus_one,
+                q_weight=1.0 + self.q_norm.weight,
+                k_weight=1.0 + self.k_norm.weight,
                 q_hidden_size=self.q_size,
                 kv_hidden_size=self.kv_size,
                 head_dim=self.head_dim,

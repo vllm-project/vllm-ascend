@@ -374,7 +374,7 @@ def test_sparse_prepare_keeps_npu_fused_qkv_norm_rope_path() -> None:
 
     assert "qkv_rmsnorm_rope" in source
     assert 'main_qkv.device.type != "npu"' in source
-    assert "self.q_norm.weight_plus_one" in source
+    assert "1.0 + self.q_norm.weight" in source
 
 
 @patch("vllm_ascend.models.minimax_m3.minimax_m3.logger.warning")
@@ -408,7 +408,7 @@ def test_sparse_attention_uses_split_indexer_projection_when_quant_types_differ(
     mock_row_linear.return_value = SimpleNamespace(name="o_proj")
     mock_get_rope.return_value = SimpleNamespace(is_neox_style=True)
     mock_rms_norm.side_effect = lambda *args, **kwargs: SimpleNamespace(
-        weight_plus_one=torch.ones(1),
+        weight=torch.zeros(1),
         variance_epsilon=kwargs.get("eps", 1e-6),
     )
     mock_get_vllm_config.return_value = SimpleNamespace(

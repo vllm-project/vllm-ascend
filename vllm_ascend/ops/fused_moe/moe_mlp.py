@@ -39,8 +39,19 @@ from vllm_ascend.utils import (
 ASCEND_DEVICE_TYPE = get_ascend_device_type()
 
 
-def _custom_gmm_swiglu_enabled(fusion, dynamic_eplb):
-    return fusion and dynamic_eplb and enable_custom_op()
+def _custom_gmm_swiglu_enabled(fusion, dynamic_eplb, activation=None):
+    return (
+        fusion
+        and dynamic_eplb
+        and getattr(activation, "value", activation) != "swigluoai_uninterleave"
+        and enable_custom_op()
+    )
+
+
+def _gmm_swiglu_quant_fusion_enabled(use_mxfp_quant, fusion, dynamic_eplb, activation=None):
+    return (use_mxfp_quant or (fusion and not dynamic_eplb)) and (
+        getattr(activation, "value", activation) != "swigluoai_uninterleave"
+    )
 
 
 def cumsum_group_list(
@@ -114,8 +125,13 @@ def quant_apply_mlp(
     use_w4a8_per_channel_gmm_swiglu: bool = False,
 ) -> torch.Tensor:
     input_hidden_dtype = hidden_states.dtype
-    use_gmm_swiglu_quant_fusion = use_mxfp_quant or (fusion and not dynamic_eplb)
     act_name = getattr(activation, "value", activation)
+    use_gmm_swiglu_quant_fusion = _gmm_swiglu_quant_fusion_enabled(
+        use_mxfp_quant,
+        fusion,
+        dynamic_eplb,
+        activation,
+    )
     # GELU can't use the fused SwiGLU+quant ops below; fall back to the
     # non-fused GMM -> GELU -> (re)quant -> GMM2 path for GELU activations.
     is_gelu_activation = activation in (MoEActivation.GELU, MoEActivation.GELU_TANH)
@@ -157,7 +173,7 @@ def quant_apply_mlp(
 
     is_mc2 = _EXTRA_CTX.moe_comm_type == MoECommType.MC2
     if w1_scale_bias is None and w1_offset is None and is_mc2 and not is_gelu_activation:
-        if _custom_gmm_swiglu_enabled(fusion, dynamic_eplb) and not use_mxfp_quant and not is_swigluoai_uninterleave:
+        if _custom_gmm_swiglu_enabled(fusion, dynamic_eplb, activation) and not use_mxfp_quant:
             # gmm1: gate_up_proj & act_fn: swiglu
             hidden_states, swiglu_out_scale, _ = torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz_tensor_list(
                 x=hidden_states,
@@ -167,7 +183,7 @@ def quant_apply_mlp(
                 group_list=cumsum_group_list(group_list, group_list_type, 0),
                 swiglu_limit=swiglu_limit,
             )
-        elif use_gmm_swiglu_quant_fusion and activation != MoEActivation.SWIGLUSTEP and not is_swigluoai_uninterleave:
+        elif use_gmm_swiglu_quant_fusion and activation != MoEActivation.SWIGLUSTEP:
             # gmm1: gate_up_proj & act_fn: swiglu
             hidden_states, swiglu_out_scale, _ = DeviceOperator.npu_grouped_matmul_swiglu_quant(
                 x=hidden_states,
@@ -339,10 +355,9 @@ def quant_apply_mlp(
                 swiglu_limit=swiglu_limit,
             )
         elif (
-            _custom_gmm_swiglu_enabled(fusion, dynamic_eplb)
+            _custom_gmm_swiglu_enabled(fusion, dynamic_eplb, activation)
             and not use_mxfp_quant
             and not is_gelu_activation
-            and not is_swigluoai_uninterleave
         ):
             # gmm1: gate_up_proj & act_fn: swiglu
             hidden_states, swiglu_out_scale, _ = torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz_tensor_list(
@@ -358,7 +373,6 @@ def quant_apply_mlp(
             use_gmm_swiglu_quant_fusion
             and activation != MoEActivation.SWIGLUSTEP
             and not is_gelu_activation
-            and not is_swigluoai_uninterleave
         ):
             hidden_states, swiglu_out_scale, _ = DeviceOperator.npu_grouped_matmul_swiglu_quant(
                 x=hidden_states,

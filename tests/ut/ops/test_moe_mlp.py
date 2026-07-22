@@ -12,6 +12,8 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.fused_moe.moe_mlp import (
+    _custom_gmm_swiglu_enabled,
+    _gmm_swiglu_quant_fusion_enabled,
     cumsum_group_list,
     quant_apply_mlp,
     unified_apply_mlp,
@@ -74,6 +76,44 @@ class TestW4A8RuntimeFlags(unittest.TestCase):
         )
         self.assertFalse(
             MoEQuantParams(quant_type=QuantType.W8A8, is_per_channel_weight=True).use_w4a8_per_channel_gmm_swiglu
+        )
+
+
+class TestGmmSwigluFusionFlags(unittest.TestCase):
+    @patch(f"{MOE_MLP}.enable_custom_op", return_value=True)
+    def test_custom_gmm_swiglu_excludes_swigluoai_uninterleave(self, mock_enable_custom_op):
+        self.assertTrue(_custom_gmm_swiglu_enabled(fusion=True, dynamic_eplb=True))
+        self.assertFalse(
+            _custom_gmm_swiglu_enabled(
+                fusion=True,
+                dynamic_eplb=True,
+                activation="swigluoai_uninterleave",
+            )
+        )
+        mock_enable_custom_op.assert_called_once()
+
+    def test_gmm_swiglu_quant_fusion_excludes_swigluoai_uninterleave(self):
+        self.assertTrue(
+            _gmm_swiglu_quant_fusion_enabled(
+                use_mxfp_quant=False,
+                fusion=True,
+                dynamic_eplb=False,
+            )
+        )
+        self.assertTrue(
+            _gmm_swiglu_quant_fusion_enabled(
+                use_mxfp_quant=True,
+                fusion=False,
+                dynamic_eplb=True,
+            )
+        )
+        self.assertFalse(
+            _gmm_swiglu_quant_fusion_enabled(
+                use_mxfp_quant=True,
+                fusion=False,
+                dynamic_eplb=True,
+                activation="swigluoai_uninterleave",
+            )
         )
 
 
