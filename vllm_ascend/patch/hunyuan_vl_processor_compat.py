@@ -210,6 +210,9 @@ def install_hunyuan_vl_processor_compat() -> None:
 
     if not _remove_stale_registry_entries():
         return
-    from vllm.model_executor.models import hunyuan_vision as main_hunyuan_vision
+    try:
+        from vllm.model_executor.models import hunyuan_vision as main_hunyuan_vision
+    except Exception:
+        return
 
     _patch_hunyuan_processor_loader(main_hunyuan_vision)
