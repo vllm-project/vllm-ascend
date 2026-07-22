@@ -12,7 +12,7 @@ import ast
 import hashlib
 import json
 import os
-import re
+import regex as re
 import sqlite3
 import ssl
 import subprocess
@@ -206,7 +206,8 @@ class CodeChangeDetector:
             with open(filepath, 'rb') as f:
                 hasher.update(f.read())
             return hasher.hexdigest()
-        except:
+        except Exception as e:
+            print(f"  Warning: Error computing file hash: {filepath}: {e}")
             return ""
 
     def scan_source_files(self) -> Dict[str, str]:
@@ -270,7 +271,6 @@ class CodeChangeDetector:
             line = raw_line.rstrip('\r')
             # 新文件开始
             if line.startswith('diff --git'):
-                in_hunk = False
                 continue
 
             # 文件路径
@@ -312,7 +312,7 @@ class CodeChangeDetector:
                             break
                         hunk_lines.append(hunk_line)
                     # 如果没有 + 开头的新增行，说明变更只有删除，区间向内缩一行
-                    has_addition = any(l.lstrip().startswith('+') for l in hunk_lines)
+                    has_addition = any(hline.lstrip().startswith('+') for hline in hunk_lines)
                     if not has_addition:
                         start_line += 1
                         end_line -= 1
@@ -958,7 +958,8 @@ def main():
                         match = re.search(r'github\.com[/:]([^/]+/[^/]+?)(?:\.git)?$', url)
                         if match:
                             repo = match.group(1)
-            except:
+            except Exception as e:
+                print(e)
                 pass
 
         if not repo or not pr_num:
