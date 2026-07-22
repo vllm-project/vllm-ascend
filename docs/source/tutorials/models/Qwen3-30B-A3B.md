@@ -71,7 +71,7 @@ Start the docker image on your each node.
 ```{code-block} bash
    :substitutions:
 
-export IMAGE=quay.io/ascend/vllm-ascend:| vllm_ascend_version |-a3
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
 
 docker run \
         --name vllm-ascend-env \
