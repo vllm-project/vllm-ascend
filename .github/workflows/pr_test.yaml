@@ -264,60 +264,23 @@ jobs:
             .github/workflows/scripts
           sparse-checkout-cone-mode: false
 
-      - name: Download coverage package
+      - name: Download test case map
         run: |
           set -euo pipefail
           curl -fsSL \
-            "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/coverage.tar" \
-            -o coverage.tar
-          test -s coverage.tar
-          echo "Downloaded coverage.tar"
-          du -h coverage.tar
-
-      - name: Extract coverage and resolve task name
-        id: coverage
-        run: |
-          set -euo pipefail
-          tar xf coverage.tar
-          if [ ! -d "vllm-ascend/covstub" ]; then
-            echo "::error::covstub directory not found under extracted coverage package"
-            ls -la vllm-ascend || true
-            exit 1
-          fi
-          # Task dirs look like VLLM-ASCEND@task_YYYYMMDDHH inside the package.
-          mapfile -t TASK_DIRS < <(find vllm-ascend -mindepth 1 -maxdepth 1 -type d -name 'VLLM-ASCEND@task_*' | sort)
-          if [ "${#TASK_DIRS[@]}" -eq 0 ]; then
-            echo "::error::No VLLM-ASCEND@task_* directory found after extracting coverage.tar"
-            ls -la vllm-ascend || true
-            exit 1
-          fi
-          # Prefer the newest task directory if multiple exist.
-          TASK_PATH="${TASK_DIRS[-1]}"
-          TASK_NAME="$(basename "${TASK_PATH}")"
-          echo "TASK_NAME=${TASK_NAME}" >> "$GITHUB_OUTPUT"
-          echo "Using coverage task: ${TASK_NAME}"
-          echo "=== package layout (sample) ==="
-          find "${TASK_PATH}" -maxdepth 2 -type d | head -20 || true
-
-      - name: Build test case map from coverage
-        working-directory: vllm-ascend
-        run: |
-          set -euo pipefail
-          python3 ../.github/workflows/scripts/test_selector.py \
-            --build-map \
-            --coverage-dir "${{ steps.coverage.outputs.TASK_NAME }}" \
-            --source-dir ./covstub \
-            --map-file test_case_map.json
+            "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/test_case_map.json" \
+            -o test_case_map.json
+          test -s test_case_map.json
+          echo "Downloaded test_case_map.json"
+          du -h test_case_map.json
 
       - name: Recommend tests for current PR
-        working-directory: vllm-ascend
         run: |
           set -euo pipefail
           PR_SPEC="vllm-project/vllm-ascend#${{ github.event.pull_request.number }}"
           echo "Selecting tests for PR: ${PR_SPEC}"
-          python3 ../.github/workflows/scripts/test_selector.py \
+          python3 .github/workflows/scripts/test_selector.py \
             --github-pr "${PR_SPEC}" \
-            --source-dir ./covstub \
             --map-file test_case_map.json
 
       - name: Upload recommended pytest paths artifact
@@ -325,7 +288,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: coverage-recommended-pytest-paths
-          path: vllm-ascend/recommended_pytest_paths.txt
+          path: recommended_pytest_paths.txt
           if-no-files-found: warn
           retention-days: 14
 
