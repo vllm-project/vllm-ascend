@@ -14,8 +14,6 @@ env_common: &env_common
   VLLM_RPC_TIMEOUT: "600"
   SERVER_PORT: 8080
 
-special_dependencies:
-  transformers: "5.12.0"
 # TODO: need to identify why TP and mtp+1 divisibility rules break on dual-node case
 
 deployment:
