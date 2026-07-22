@@ -221,6 +221,16 @@ class TestRecordFailedBlocksEdgeCases(unittest.TestCase):
         self.assertEqual(result, {100, 101, 102})
         mock_logger.error.assert_called_once()
 
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer.logger")
+    def test_hybrid_peer_blocks_fail_together(self, mock_logger: MagicMock):
+        """Test hybrid peer block sets are marked invalid together."""
+        block_ids: list[set[int]] = [{10, 20}, {11, 21}, {12, 22}]
+        ret_codes: list[int] = [0, 1, 0]
+
+        result = record_failed_blocks(block_ids, ret_codes)
+
+        self.assertEqual(result, {11, 21})
+        mock_logger.error.assert_called_once()
 
 class TestAscendStoreConnector(unittest.TestCase):
     """Regression tests for connector-level load failure reporting."""

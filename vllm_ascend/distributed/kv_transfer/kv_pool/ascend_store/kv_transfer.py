@@ -620,6 +620,31 @@ class KVTransferThread(threading.Thread):
             return True
         return mask_allows_chunk(masks, group_id, start)
 
+    def _collect_peer_block_ids(
+            self,
+            start: int,
+            block_ids_by_group: list[list[int]],
+            group_ids: list[int],
+            skip_null_blocks_by_group: list[bool] | None = None,
+    ) -> set[int]:
+        peer_block_ids: set[int] = set()
+        for group_id in group_ids:
+            if group_id >= len(block_ids_by_group):
+                continue
+            group_block_ids = block_ids_by_group[group_id]
+            block_idx = start // self._get_block_size(group_id)
+            if block_idx >= len(group_block_ids):
+                continue
+            block_id = group_block_ids[block_idx]
+            skip_null = (
+                    skip_null_blocks_by_group is not None
+                    and group_id < len(skip_null_blocks_by_group)
+                    and skip_null_blocks_by_group[group_id]
+            )
+            if skip_null and block_id <= 0:
+                continue
+            peer_block_ids.add(block_id)
+        return peer_block_ids
 
 class KVCacheStoreSendingThread(KVTransferThread):
     def __init__(
@@ -895,7 +920,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             addr_list = []
             size_list = []
             key_list = []
-            block_id_list: list[int] = []
+            block_id_list: list[set[int]] = []
             group_ids = req_meta.kv_cache_group_ids or [0]
             load_masks = self._load_mask(req_meta, token_len)
             for group_id in group_ids:
@@ -922,7 +947,15 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     key_list.append(key.to_string())
                     addr_list.append(addr)
                     size_list.append(size)
-                    block_id_list.append(block_id)
+                    block_id_list.append(
+                        self._collect_peer_block_ids(
+                            start,
+                            req_meta.block_ids_by_group,
+                            group_ids,
+                            req_meta.skip_null_blocks_by_group,
+                        )
+                        or {block_id}
+                    )
             if not key_list:
                 self.set_finished_request(req_id)
                 return
@@ -946,33 +979,15 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     block_id_list_c,
                     ret,
                 )
-                if len(req_meta.block_ids_by_group) == 1:
-                    with self._invalid_block_ids_lock:
-                        self._invalid_block_ids.update(missing_block_ids)
-                elif missing_block_ids:
-                    logger.error(
-                        "KV load failed for hybrid request %s. "
-                        "Skip invalid-block fallback to avoid scheduler crash. "
-                        "failed_blocks=%s",
-                        req_id,
-                        missing_block_ids,
-                    )
+                with self._invalid_block_ids_lock:
+                    self._invalid_block_ids.update(missing_block_ids)
             elif ret is None:
                 missing_block_ids = record_failed_blocks(
                     block_id_list_c,
                     [1] * len(block_id_list_c),
                 )
-                if len(req_meta.block_ids_by_group) == 1:
-                    with self._invalid_block_ids_lock:
-                        self._invalid_block_ids.update(missing_block_ids)
-                elif missing_block_ids:
-                    logger.error(
-                        "KV load failed for hybrid request %s. "
-                        "Skip invalid-block fallback to avoid scheduler crash. "
-                        "failed_blocks=%s",
-                        req_id,
-                        missing_block_ids,
-                    )
+                with self._invalid_block_ids_lock:
+                    self._invalid_block_ids.update(missing_block_ids)
             logger.debug(
                 "KV pool async recv backend get returned request=%s token_len=%d groups=%s keys=%d",
                 req_id,
@@ -1586,13 +1601,17 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
 
 
 def record_failed_blocks(
-    block_ids: list[int],
+    block_ids: list[int] | list[set[int]],
     ret_codes: list[int],
 ) -> set[int]:
     failed_blocks: set[int] = set()
-    for block_id, code in zip(block_ids, ret_codes):
-        if code != 0:
-            failed_blocks.add(block_id)
+    for block_id_or_group, code in zip(block_ids, ret_codes):
+        if code == 0:
+            continue
+        if isinstance(block_id_or_group, set):
+            failed_blocks.update(block_id_or_group)
+        else:
+            failed_blocks.add(block_id_or_group)
     if failed_blocks:
         logger.error(
             "Failed to load blocks. failed_count=%d, failed_blocks=%s. Check block availability and memory state.",
