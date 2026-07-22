@@ -1124,6 +1124,11 @@ void kv_compress_epilog_meta(
     return;
 }
 
+at::Tensor run_frequency_regulator_meta(int64_t freq, const at::Tensor& tensor)
+{
+    return tensor;
+}
+
 std::tuple<at::Tensor, at::Tensor> npu_kv_quant_sparse_attn_sharedkv_meta(
     const at::Tensor& q,
     int64_t kv_quant_mode,
@@ -1623,6 +1628,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
      // store_kv_block
     ops.impl("store_kv_block_pre", &vllm_ascend::meta::store_kv_block_metadata);
     ops.impl("store_kv_block", &vllm_ascend::meta::store_kv_block);
+    // run_frequency_regulator
+    ops.impl("run_frequency_regulator", &vllm_ascend::meta::run_frequency_regulator_meta);
 }
 }
 #endif
