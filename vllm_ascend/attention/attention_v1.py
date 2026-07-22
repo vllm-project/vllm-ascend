@@ -1393,7 +1393,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output[:num_tokens]
         return output
-      
+
     def _forward_fia_chunked_prefill_split(
         self,
         query: torch.Tensor,
