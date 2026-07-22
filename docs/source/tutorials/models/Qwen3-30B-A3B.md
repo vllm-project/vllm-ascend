@@ -46,6 +46,7 @@ If the W8A8 quantized weights are not available for direct download, you can obt
     - **MoE routing gate** (mlp.gate): BF16
     - **MoE expert projections** (gate/up/down_proj): Dynamic W8A8 where input scales are computed on-the-fly during inference
 :::
+
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
@@ -97,6 +98,7 @@ docker run \
 :::
 
 ::::
+
 ::::{tab-item} Atlas A2 inference products
 :sync: A2
   ```{code-block} bash
@@ -151,6 +153,7 @@ docker run --rm \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
 ```
+
 ::::
 :::::
 
@@ -326,6 +329,7 @@ curl http://localhost:8000/v1/chat/completions \
         "max_completion_tokens": 4096
     }'
 ```
+
 :::{note}
     Adjust the following fields based on your deployment:
 
