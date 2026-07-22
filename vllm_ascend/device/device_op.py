@@ -1025,12 +1025,6 @@ class BaseDeviceAdaptor:
         return results
 
     @staticmethod
-    def npu_moe_token_unpermute(permuted_tokens, sorted_indices, probs):
-        return torch_npu.npu_moe_token_unpermute(
-            permuted_tokens=permuted_tokens, sorted_indices=torch.abs(sorted_indices), probs=probs
-        )
-
-    @staticmethod
     def index_fill(
         tensor: torch.Tensor,
         dim: int,
@@ -1914,12 +1908,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             positions=positions,
         )
         return results
-
-    @staticmethod
-    def npu_moe_token_unpermute(permuted_tokens, sorted_indices, probs):
-        return torch_npu.npu_moe_token_unpermute(
-            permuted_tokens=permuted_tokens, sorted_indices=sorted_indices, probs=probs
-        )
 
 
 class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):
