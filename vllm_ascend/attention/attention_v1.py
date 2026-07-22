@@ -1365,7 +1365,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     and attn_metadata.num_prefills > 0
                 ):
                     return self._forward_fia_chunked_prefill_split(
-                        query, key, value, passed_key, passed_value, block_size, block_table, attn_metadata, output
+                        query, key, value, key, passed_value, block_size, block_table, attn_metadata, output
                     )
                 attn_output, _ = DeviceOperator.npu_fused_infer_attention_score(
                     query=query,
