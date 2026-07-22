@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, call, patch
 
 import numpy as np
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.v1.kv_cache_interface import (
@@ -395,6 +396,74 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(indexer_k_cache.dtype, torch.int8)
         self.assertEqual(indexer_scale_cache.shape, (2, 16, 1, 1))
         self.assertEqual(indexer_scale_cache.dtype, torch.float16)
+
+
+class TestNPUModelRunnerDPSyncBuffers(unittest.TestCase):
+    def _build_runner(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.dp_size = 2
+        runner.dp_rank = 1
+        runner.vllm_config = MagicMock()
+        runner.ascend_config = SimpleNamespace(dp_allreduce_on_npu=False)
+        return runner
+
+    @patch("vllm_ascend.worker.model_runner_v1.should_skip_allreduce_across_dp_group")
+    def test_sync_metadata_reuses_padding_buffer_when_allreduce_skipped(self, mock_should_skip_allreduce):
+        mock_should_skip_allreduce.return_value = True
+        runner = self._build_runner()
+
+        _, first_tokens_after_padding, _ = runner._sync_metadata_across_dp(7)
+        _, second_tokens_after_padding, _ = runner._sync_metadata_across_dp(9)
+
+        self.assertIsNotNone(first_tokens_after_padding)
+        self.assertIsNotNone(second_tokens_after_padding)
+        self.assertEqual(
+            first_tokens_after_padding.data_ptr(),
+            second_tokens_after_padding.data_ptr(),
+        )
+        self.assertEqual(second_tokens_after_padding.tolist(), [9, 9])
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_dp_group")
+    @patch("vllm_ascend.worker.model_runner_v1.dist.all_reduce")
+    @patch("vllm_ascend.worker.model_runner_v1.should_skip_allreduce_across_dp_group")
+    def test_sync_metadata_reuses_buffers_for_allreduce_path(
+        self,
+        mock_should_skip_allreduce,
+        mock_all_reduce,
+        mock_get_dp_group,
+    ):
+        mock_should_skip_allreduce.return_value = False
+        mock_get_dp_group.return_value = SimpleNamespace(cpu_group=object())
+        all_reduce_buffer_ptrs = []
+
+        def fake_all_reduce(packed_tensor, group):
+            del group
+            all_reduce_buffer_ptrs.append(packed_tensor.data_ptr())
+            if len(all_reduce_buffer_ptrs) == 1:
+                packed_tensor[0].copy_(torch.tensor([5, 11], dtype=torch.int32))
+                packed_tensor[1].fill_(CUDAGraphMode.FULL.value)
+            else:
+                packed_tensor[0].copy_(torch.tensor([13, 3], dtype=torch.int32))
+                packed_tensor[1].fill_(CUDAGraphMode.PIECEWISE.value)
+
+        mock_all_reduce.side_effect = fake_all_reduce
+        runner = self._build_runner()
+
+        first_max_tokens, first_tokens_after_padding, first_mode = runner._sync_metadata_across_dp(7)
+        second_max_tokens, second_tokens_after_padding, second_mode = runner._sync_metadata_across_dp(2)
+
+        self.assertEqual(first_max_tokens, 11)
+        self.assertEqual(second_max_tokens, 13)
+        self.assertEqual(first_mode, CUDAGraphMode.FULL)
+        self.assertEqual(second_mode, CUDAGraphMode.PIECEWISE)
+        self.assertEqual(all_reduce_buffer_ptrs[0], all_reduce_buffer_ptrs[1])
+        self.assertIsNotNone(first_tokens_after_padding)
+        self.assertIsNotNone(second_tokens_after_padding)
+        self.assertEqual(
+            first_tokens_after_padding.data_ptr(),
+            second_tokens_after_padding.data_ptr(),
+        )
+        self.assertEqual(second_tokens_after_padding.tolist(), [13, 3])
 
 
 class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):

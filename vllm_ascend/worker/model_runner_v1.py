@@ -326,6 +326,7 @@ class NPUModelRunner(GPUModelRunner):
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+        self._init_dp_metadata_buffers()
 
         self.sampler = AscendSampler()
         self.attn_state: AscendAttentionState | None = None
@@ -584,6 +585,62 @@ class NPUModelRunner(GPUModelRunner):
     def _sync_device(self) -> None:
         torch.npu.synchronize()
 
+
+    def _init_dp_metadata_buffers(self) -> None:
+        if self.dp_size <= 1:
+            self._dp_metadata_tensor = None
+            self._dp_metadata_tensor_npu = None
+            self._dp_num_tokens_after_padding = None
+            return
+
+        self._dp_metadata_tensor = torch.empty(
+            (2, self.dp_size),
+            device="cpu",
+            dtype=torch.int32,
+        )
+        self._dp_metadata_tensor_npu = None
+        self._dp_num_tokens_after_padding = torch.empty(
+            self.dp_size,
+            device="cpu",
+            dtype=torch.int32,
+        )
+
+    def _get_dp_metadata_buffers(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        metadata_tensor = getattr(self, "_dp_metadata_tensor", None)
+        num_tokens_after_padding = getattr(
+            self, "_dp_num_tokens_after_padding", None
+        )
+        if (
+            metadata_tensor is None
+            or num_tokens_after_padding is None
+            or metadata_tensor.shape != (2, self.dp_size)
+            or num_tokens_after_padding.shape != (self.dp_size,)
+        ):
+            self._init_dp_metadata_buffers()
+            metadata_tensor = self._dp_metadata_tensor
+            num_tokens_after_padding = self._dp_num_tokens_after_padding
+
+        assert metadata_tensor is not None
+        assert num_tokens_after_padding is not None
+        return metadata_tensor, num_tokens_after_padding
+
+    def _get_dp_metadata_tensor_npu(self) -> torch.Tensor:
+        metadata_tensor_npu = getattr(self, "_dp_metadata_tensor_npu", None)
+        if (
+            metadata_tensor_npu is None
+            or metadata_tensor_npu.shape != (2, self.dp_size)
+        ):
+            metadata_tensor_npu = torch.empty(
+                (2, self.dp_size),
+                device="npu",
+                dtype=torch.int32,
+            )
+            self._dp_metadata_tensor_npu = metadata_tensor_npu
+
+        return metadata_tensor_npu
+
     def _set_up_drafter(self):
         # Set up speculative decoding.
         self.drafter: (
@@ -675,24 +732,28 @@ class NPUModelRunner(GPUModelRunner):
         if self.dp_size == 1:
             return num_tokens, None, cudagraph_mode
 
+        packed_tensor, num_tokens_after_padding = self._get_dp_metadata_buffers()
+
         if should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model):
-            num_tokens_after_padding = torch.tensor([num_tokens] * self.dp_size, device="cpu", dtype=torch.int32)
+            num_tokens_after_padding.fill_(num_tokens)
             return num_tokens, num_tokens_after_padding, cudagraph_mode
 
-        # On certain devices, CPU-side all_reduce may return dirty data. 
+        dp_group = get_dp_group()
         # When dp_allreduce_on_npu is True, route DP metadata
         # synchronization through the NPU device group to avoid data corruption.
-        device_str, group = (
-            ("npu", get_dp_group().device_group)
-            if self.ascend_config.dp_allreduce_on_npu
-            else ("cpu", get_dp_group().cpu_group)
-        )
-        packed_tensor = torch.zeros(2, self.dp_size, device=device_str, dtype=torch.int32)
-        packed_tensor[0][self.dp_rank] = num_tokens
-        packed_tensor[1][self.dp_rank] = cudagraph_mode.value
-        dist.all_reduce(packed_tensor, group=group)
-        if device_str == "npu":
-            packed_tensor = packed_tensor.cpu()
+        if self.ascend_config.dp_allreduce_on_npu:
+            packed_tensor.zero_()
+            packed_tensor[0, self.dp_rank] = num_tokens
+            packed_tensor[1, self.dp_rank] = cudagraph_mode.value
+            reduce_tensor = self._get_dp_metadata_tensor_npu()
+            reduce_tensor.copy_(packed_tensor)
+            dist.all_reduce(reduce_tensor, group=dp_group.device_group)
+            packed_tensor.copy_(reduce_tensor)
+        else:
+            packed_tensor.zero_()
+            packed_tensor[0, self.dp_rank] = num_tokens
+            packed_tensor[1, self.dp_rank] = cudagraph_mode.value
+            dist.all_reduce(packed_tensor, group=dp_group.cpu_group)
 
         # Unpack the results
         num_tokens_across_dp = packed_tensor[0, :]
@@ -701,11 +762,9 @@ class NPUModelRunner(GPUModelRunner):
 
         # Create a tensor for num_tokens_after_padding
         if allow_dp_padding or is_draft_model:
-            num_tokens_after_padding = torch.tensor(
-                [max_tokens_across_dp] * self.dp_size, device="cpu", dtype=torch.int32
-            )
+            num_tokens_after_padding.fill_(max_tokens_across_dp)
         else:
-            num_tokens_after_padding = num_tokens_across_dp.cpu()
+            num_tokens_after_padding.copy_(num_tokens_across_dp)
 
         return max_tokens_across_dp, num_tokens_after_padding, synced_cudagraph_mode
 
