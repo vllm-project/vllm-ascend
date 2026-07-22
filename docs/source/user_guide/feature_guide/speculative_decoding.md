@@ -190,7 +190,7 @@ Suffix Decoding can achieve better performance for tasks with high repetition, s
 > Suffix Decoding requires Arctic Inference. You can install it with `pip install arctic-inference`.
 
 - Offline inference
-  
+
   ```python
     from vllm import LLM, SamplingParams
 
@@ -340,3 +340,56 @@ This entropy-aware threshold is controlled by two parameters:
     ```
 
 Both features can be enabled independently or together. When used together, the cumulative acceptance from Block Verify is combined with the entropy-adjusted threshold from Entropy Verify.
+
+## Synthetic Rejection Sampling
+
+In addition to the default `standard` rejection sampling (which accepts a draft token when `target_prob / draft_prob >= uniform`), vLLM Ascend supports **synthetic** rejection sampling. In this mode each draft token at position `i` is accepted with a configured probability `rates[i]`, compared against a uniform random draw — **independent of the target/draft probability match**. The first rejected position stops the request and emits a recovered token; if every draft token is accepted, the bonus token is appended.
+
+### Why use it
+
+Synthetic mode **decouples the verifier's acceptance logic from draft-model quality**, letting you drive the speculative-decoding pipeline at a controlled, fixed acceptance rate. It is useful for:
+
+- **Benchmarking** the verify path (kernel + sampler + token assembly) throughput/latency at a known acceptance rate, without depending on a well-trained drafter.
+- **Kernel validation** — because acceptance reduces to `uniform < rate`, the result is fully determined by the inputs. The e2e test compares the Ascend Triton kernel (`SYNTHETIC_MODE=True`) against the PyTorch reference under identical inputs, so the two must agree bit-for-bit.
+- **Stress-testing** the high-acceptance regime of the speculative pipeline.
+
+> [!WARNING]
+> Synthetic mode accepts draft tokens regardless of whether they match the target distribution, so the generated output is **not semantically correct**. Use it for benchmarking and validation only, **never for production serving**.
+
+### How to use
+
+Synthetic mode is configured through `speculative_config`, alongside the proposer settings:
+
+- **`rejection_sample_method`** (str, default: `"standard"`): set to `"synthetic"` to enable.
+- **`synthetic_acceptance_rates`** (list[float], optional): per-position acceptance rates. Must have length `num_speculative_tokens`, each entry in `[0, 1]`, and be monotonically non-increasing.
+- **`synthetic_acceptance_length`** (float, optional): target mean acceptance length in `[1, num_speculative_tokens + 1]`, resolved internally to an equivalent `synthetic_acceptance_rates` schedule. Mutually exclusive with `synthetic_acceptance_rates`; exactly one must be provided when `rejection_sample_method == "synthetic"`.
+
+**Offline inference**:
+
+```python
+from vllm import LLM
+
+llm = LLM(
+    model="path/to/target/model",
+    speculative_config={
+        "method": "eagle3",
+        "model": "path/to/draft/model",
+        "num_speculative_tokens": 3,
+        "rejection_sample_method": "synthetic",
+        "synthetic_acceptance_rates": [0.9, 0.6, 0.3],
+    },
+)
+```
+
+**Online serving**:
+
+```shell
+vllm serve path/to/target/model \
+  --speculative-config '{"method": "eagle3", "model": "path/to/draft/model", \
+    "num_speculative_tokens": 3, "rejection_sample_method": "synthetic", \
+    "synthetic_acceptance_rates": [0.9, 0.6, 0.3]}'
+```
+
+### Ascend-specific notes
+
+Upstream vLLM's synthetic path draws the per-token uniform numbers with `tl_rand64` (fp64) directly inside the Triton kernel. NPU Triton does **not** support `tl_rand64`/fp64, so vLLM Ascend reimplements synthetic mode in `vllm_ascend/sample/rejection_sampler.py` and `vllm_ascend/ops/triton/reject_sample.py`: the kernels receive the uniform probabilities as an explicit pointer argument instead of generating them internally. The probabilities are produced by `generate_uniform_probs` in fp64 (matching upstream, so the draw never samples exactly `0.0`) and cast to fp32 for the greedy kernels, which the fp32-only Ascend Triton kernels then compare against `rates[pos]`. This is why synthetic mode is available on the Ascend `v1/sample` rejection-sampler path.

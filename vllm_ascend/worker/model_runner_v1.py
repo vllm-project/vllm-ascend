@@ -616,7 +616,9 @@ class NPUModelRunner(GPUModelRunner):
                 elif self.speculative_config.use_dspark():
                     assert isinstance(self.drafter, AscendDSparkProposer)
                     self.use_aux_hidden_state_outputs = True
-                self.rejection_sampler = AscendRejectionSampler(self.sampler)
+                self.rejection_sampler = AscendRejectionSampler(
+                    self.sampler, self.speculative_config, self.device
+                )
         self.discard_request_indices = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
         self.num_discarded_requests = 0
 
