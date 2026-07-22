@@ -79,7 +79,7 @@ def _get_test_files_from_pr_diff(diff_file: str, test_case_map: dict) -> list[st
     # Match changed test files to test cases in test_case_map
     # Test case names format: tests/e2e/.../test_xxx.py or tests/e2e/.../test_xxx.py::test_func
     found_in_map = False
-    for test_case_name in test_case_map.keys():
+    for test_case_name in test_case_map:
         for changed_file in changed_test_files:
             # Match both full file tests and function-level tests
             if changed_file in test_case_name:
