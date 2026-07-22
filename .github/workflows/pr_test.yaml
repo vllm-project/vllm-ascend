@@ -161,6 +161,8 @@ jobs:
 
       - name: Run Gitleaks Secret Scan
         run: |
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          chmod +x .github/workflows/scripts/gitleaks.sh
           .github/workflows/scripts/gitleaks.sh
           
       - name: Run pre-commit
