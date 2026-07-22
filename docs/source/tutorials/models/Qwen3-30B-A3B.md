@@ -90,11 +90,11 @@ docker run \
     -it -d $IMAGE bash
 ```
 
-    :::{note}
+:::{note}
 
-        A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
-        If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
-    :::
+    A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
+    If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
+:::
 
 ::::
 ::::{tab-item} Atlas A2 inference products
@@ -221,6 +221,7 @@ For more details, please refer to the [Installation Guide](../../installation.md
 Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and small-to-medium scale inference scenarios. For the Qwen3-30B-A3B MoE model, Expert Parallelism (EP) is required to distribute experts across NPUs.
 
 > The following command is an example configuration. Adjust the parameters based on your actual scenario.
+
 :::::{tab-set}
 ::::{tab-item} Atlas A2 inference products / Atlas A3 inference products
 
@@ -271,7 +272,9 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --no-enable-prefix-caching
     ```
 
-    **Key parameters:**
+::::
+:::::
+    Key parameters:
 
     - `--tensor-parallel-size 2` maps the model across two Atlas inference devices. Adjust it together with `ASCEND_RT_VISIBLE_DEVICES` according to the available devices and memory.
     - `--dtype float16` is used for Atlas inference products to match the Atlas inference execution path.
@@ -283,8 +286,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     - `--no-enable-prefix-caching` is the default recommendation for this Atlas inference products example to reduce memory pressure.
     - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
     
-::::
-:::::
+
 
 :::{note}
 
@@ -628,6 +630,7 @@ vllm serve your_model_path \
     - `batch_size`: 32
     - Input/Output length: 65536/1024 or 131072/1024
 :::
+
 ### 9.2 Tuning Guidelines
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
