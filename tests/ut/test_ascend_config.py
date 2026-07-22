@@ -49,8 +49,10 @@ class TestAscendConfig(TestBase):
         total_num_attention_heads: int = 32,
         total_num_kv_heads: int = 8,
         is_deepseek_mla: bool = False,
+        architectures: list[str] | None = None,
     ):
         return SimpleNamespace(
+            architectures=architectures,
             is_deepseek_mla=is_deepseek_mla,
             use_mla=is_deepseek_mla,
             enforce_eager=True,
@@ -113,6 +115,18 @@ class TestAscendConfig(TestBase):
         ascend_compilation_config = init_ascend_config(test_vllm_config).ascend_compilation_config
         self.assertTrue(ascend_compilation_config.enable_npugraph_ex)
         self.assertTrue(ascend_compilation_config.enable_static_kernel)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_rejects_minimax_m3_with_fused_mc2(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"enable_fused_mc2": True}
+        test_vllm_config.model_config = self._make_model_config(
+            architectures=["MiniMaxM3SparseForCausalLM"],
+        )
+
+        with self.assertRaisesRegex(AssertionError, "MiniMax M3 does not support enable_fused_mc2=1"):
+            init_ascend_config(test_vllm_config)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
