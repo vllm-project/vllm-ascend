@@ -250,23 +250,23 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         export MODEL_PATH=Eco-Tech/Qwen3.5-27B-w8a8-mtp
 
         vllm serve $MODEL_PATH \
-        --host 0.0.0.0 \
-        --port 8000 \
-        --data-parallel-size 1 \
-        --tensor-parallel-size 2 \
-        --seed 1024 \
-        --quantization ascend \
-        --served-model-name qwen3.5 \
-        --max-num-seqs 32 \
-        --max-model-len 133000 \
-        --max-num-batched-tokens 8096 \
-        --trust-remote-code \
-        --gpu-memory-utilization 0.90 \
-        --no-enable-prefix-caching \
-        --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_cpu_binding":true}' \
-        --async-scheduling
+            --host 0.0.0.0 \
+            --port 8000 \
+            --data-parallel-size 1 \
+            --tensor-parallel-size 2 \
+            --seed 1024 \
+            --quantization ascend \
+            --served-model-name qwen3.5 \
+            --max-num-seqs 32 \
+            --max-model-len 133000 \
+            --max-num-batched-tokens 8096 \
+            --trust-remote-code \
+            --gpu-memory-utilization 0.90 \
+            --no-enable-prefix-caching \
+            --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --additional-config '{"enable_cpu_binding":true}' \
+            --async-scheduling
         ```
 
     === "Qwen3.6-27B-w8a8"
@@ -292,23 +292,23 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         export MODEL_PATH=Eco-Tech/Qwen3.6-27B-w8a8
 
         vllm serve $MODEL_PATH \
-        --host 0.0.0.0 \
-        --port 8000 \
-        --data-parallel-size 1 \
-        --tensor-parallel-size 2 \
-        --seed 1024 \
-        --quantization ascend \
-        --served-model-name qwen3.6 \
-        --max-num-seqs 32 \
-        --max-model-len 262144 \
-        --max-num-batched-tokens 8096 \
-        --trust-remote-code \
-        --gpu-memory-utilization 0.90 \
-        --no-enable-prefix-caching \
-        --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_cpu_binding":true}' \
-        --async-scheduling
+            --host 0.0.0.0 \
+            --port 8000 \
+            --data-parallel-size 1 \
+            --tensor-parallel-size 2 \
+            --seed 1024 \
+            --quantization ascend \
+            --served-model-name qwen3.6 \
+            --max-num-seqs 32 \
+            --max-model-len 262144 \
+            --max-num-batched-tokens 8096 \
+            --trust-remote-code \
+            --gpu-memory-utilization 0.90 \
+            --no-enable-prefix-caching \
+            --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --additional-config '{"enable_cpu_binding":true}' \
+            --async-scheduling
         ```
 
     Key Parameter Descriptions:
@@ -345,19 +345,19 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         export MODEL_PATH=Eco-Tech/Qwen3.5-27B-w8a8-mtp
 
         vllm serve $MODEL_PATH \
-        --host 127.0.0.1 \
-        --port 1025 \
-        --tensor-parallel-size 4 \
-        --served-model-name qwen3.5 \
-        --max-num-seqs 128 \
-        --max-model-len 16384 \
-        --trust-remote-code \
-        --gpu-memory-utilization 0.90 \
-        --mamba-ssm-cache-dtype float16 \
-        --dtype float16 \
-        --speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
-        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}' \
-        --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
+            --host 127.0.0.1 \
+            --port 1025 \
+            --tensor-parallel-size 4 \
+            --served-model-name qwen3.5 \
+            --max-num-seqs 128 \
+            --max-model-len 16384 \
+            --trust-remote-code \
+            --gpu-memory-utilization 0.90 \
+            --mamba-ssm-cache-dtype float16 \
+            --dtype float16 \
+            --speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
+            --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}' \
+            --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
         ```
 
     === "Qwen3.6-27B-w8a8"
@@ -373,19 +373,19 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         export MODEL_PATH=Eco-Tech/Qwen3.6-27B-w8a8
 
         vllm serve $MODEL_PATH \
-        --host 127.0.0.1 \
-        --port 1025 \
-        --tensor-parallel-size 4 \
-        --served-model-name qwen3.6 \
-        --max-num-seqs 128 \
-        --max-model-len 16384 \
-        --trust-remote-code \
-        --gpu-memory-utilization 0.90 \
-        --mamba-ssm-cache-dtype float16 \
-        --dtype float16 \
-        --speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
-        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}' \
-        --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
+            --host 127.0.0.1 \
+            --port 1025 \
+            --tensor-parallel-size 4 \
+            --served-model-name qwen3.6 \
+            --max-num-seqs 128 \
+            --max-model-len 16384 \
+            --trust-remote-code \
+            --gpu-memory-utilization 0.90 \
+            --mamba-ssm-cache-dtype float16 \
+            --dtype float16 \
+            --speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
+            --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}' \
+            --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
         ```
 
     Key Parameter Descriptions:
@@ -406,7 +406,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
 
     The following examples are for Ascend950DT series. Quantized versions need `--quantization ascend`.
 
-    === "Qwen3.5-27B-w8a8"
+    === "Qwen3.5-27B-w8a8-MXFP8"
 
         Startup Command:
 
@@ -448,7 +448,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
             --async-scheduling
         ```
 
-    === "Qwen3.6-27B-w8a8"
+    === "Qwen3.6-27B-w8a8-MXFP8"
 
         Startup Command (supports up to 262144 context length):
 
