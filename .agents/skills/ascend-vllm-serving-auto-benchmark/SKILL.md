@@ -122,6 +122,14 @@ The final output directory should contain at least:
 
 ## Quick start
 
+This skill starts a serving process, occupies NPU resources, and may run a long
+benchmark campaign, so it must be invoked explicitly. Use the form for your
+agent and never let the model invoke it implicitly (`disable-model-invocation`
+is already set in the frontmatter above).
+
+- Codex: `$ascend-vllm-serving-auto-benchmark`
+- Claude Code: `/ascend-vllm-serving-auto-benchmark`
+
 ```text
 /ascend-vllm-serving-auto-benchmark
 config_file=.agents/skills/ascend-vllm-serving-auto-benchmark/configs/qwen3-32b.yaml

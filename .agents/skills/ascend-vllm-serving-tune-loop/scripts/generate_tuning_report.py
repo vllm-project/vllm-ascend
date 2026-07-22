@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-
 LOW_CONC_THRESHOLD = 10
 LOWER_IS_BETTER = {
     "ttft_avg",
@@ -68,79 +67,88 @@ def _safe_float(val, default: float = 0.0) -> float:
         return default
 
 
-def _normalize_records(data) -> list[dict]:
-    if isinstance(data, list):
-        return [item for item in data if isinstance(item, dict)]
-    if isinstance(data, dict):
-        for key in ("results", "records", "data"):
-            nested = data.get(key)
-            if isinstance(nested, list):
-                return [item for item in nested if isinstance(item, dict)]
-        return [data]
-    return []
+def _percentile_row(percentile: list, pct: str) -> dict:
+    """Find the row for a given percentile string (e.g. '99%') in evalscope
+    benchmark_percentile.json, which is a list of flat dicts."""
+    for row in percentile or []:
+        if isinstance(row, dict) and str(row.get("Percentiles", "")).strip() == pct:
+            return row
+    return {}
 
 
-def _parse_records(records: list[dict]) -> dict[int, dict[str, float]]:
-    metrics: dict[int, dict[str, float]] = {}
-    for record in records:
-        stats = record.get("stats", record)
-        concurrency = int(record.get("concurrency", record.get("parallel", 0)))
-        if concurrency == 0:
-            continue
+def _metrics_from_summary(summary: dict, percentile: list) -> dict[str, float]:
+    """Build the metric-keyed dict for one concurrency level from a paired
+    evalscope v1.8.1 benchmark_summary.json (flat dict) +
+    benchmark_percentile.json (list).
 
-        def ms(key: str) -> float:
-            value = stats.get(key, {})
-            if isinstance(value, dict):
-                return _safe_float(value.get("mean", value.get("avg", 0))) * 1000
-            return _safe_float(value) * 1000
+    Units: 'Avg Latency (s)' / 'Latency (s)' are seconds -> *1000 to ms;
+    'TTFT (ms)' / 'TPOT (ms)' are already ms.
+    """
+    p99 = _percentile_row(percentile, "99%")
+    return {
+        "ttft_avg": _safe_float(summary.get("TTFT (ms)")),
+        "ttft_p99": _safe_float(p99.get("TTFT (ms)")),
+        "tpot_avg": _safe_float(summary.get("TPOT (ms)")),
+        "tpot_p99": _safe_float(p99.get("TPOT (ms)")),
+        "latency_avg": _safe_float(summary.get("Avg Latency (s)")) * 1000.0,
+        "latency_p99": _safe_float(p99.get("Latency (s)")) * 1000.0,
+        "output_token_throughput": _safe_float(summary.get("Output Throughput (tok/s)")),
+    }
 
-        def ms_pct(key: str, pct: str) -> float:
-            value = stats.get(key, {})
-            if isinstance(value, dict):
-                return _safe_float(value.get(pct, 0)) * 1000
-            return 0.0
 
-        metrics[concurrency] = {
-            "ttft_avg": ms("ttft"),
-            "ttft_p99": ms_pct("ttft", "p99"),
-            "tpot_avg": ms("tpot"),
-            "tpot_p99": ms_pct("tpot", "p99"),
-            "latency_avg": ms("latency"),
-            "latency_p99": ms_pct("latency", "p99"),
-            "output_token_throughput": _safe_float(
-                stats.get(
-                    "output_token_throughput",
-                    stats.get("token_throughput", 0),
-                )),
-        }
-    return metrics
+def _load_json(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 def _load_json_metrics(results_dir: Path) -> dict[int, dict[str, float]]:
+    """Parse evalscope perf v1.8.1 output.
+
+    Layout: <results_dir>/<timestamp>/<name>/parallel_<P>_number_<N>/
+            {benchmark_summary.json, benchmark_percentile.json}
+    Each parallel_* subdir holds one concurrency level. Returns a map
+    concurrency -> metric-keyed dict.
+    """
     if not results_dir.exists():
         return {}
 
+    metrics: dict[int, dict[str, float]] = {}
+    for sub in sorted(results_dir.rglob("parallel_*_number_*")):
+        if not sub.is_dir():
+            continue
+        summary = _load_json(sub / "benchmark_summary.json")
+        percentile = _load_json(sub / "benchmark_percentile.json")
+        if not isinstance(summary, dict):
+            continue
+        if not isinstance(percentile, list):
+            percentile = []
+        concurrency = int(_safe_float(summary.get("Concurrency"), -1))
+        if concurrency < 0:
+            continue
+        metrics[concurrency] = _metrics_from_summary(summary, percentile)
+
+    if metrics:
+        return metrics
+
+    # Fallback: JSONL of flat summary dicts (no paired percentile file).
     for path in sorted(results_dir.rglob("*.jsonl")):
-        records: list[dict] = []
         try:
             with open(path, encoding="utf-8") as fh:
                 for line in fh:
                     line = line.strip()
                     if not line:
                         continue
-                    records.append(json.loads(line))
+                    summary = json.loads(line)
+                    if not isinstance(summary, dict):
+                        continue
+                    concurrency = int(_safe_float(summary.get("Concurrency"), -1))
+                    if concurrency < 0:
+                        continue
+                    metrics[concurrency] = _metrics_from_summary(summary, [])
         except (json.JSONDecodeError, OSError):
             continue
-        metrics = _parse_records(records)
-        if metrics:
-            return metrics
-
-    for path in sorted(results_dir.rglob("*.json")):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-        metrics = _parse_records(_normalize_records(data))
         if metrics:
             return metrics
 
@@ -193,7 +201,7 @@ def _parse_metrics_table(block: str) -> dict[int, dict[str, float]]:
             if idx + 1 >= len(lines):
                 return {}
             metrics: dict[int, dict[str, float]] = {}
-            for row in lines[idx + 2:]:
+            for row in lines[idx + 2 :]:
                 if not row.strip().startswith("|"):
                     break
                 cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
@@ -260,20 +268,22 @@ def _parse_ledger(ledger_path: Path) -> list[IterResult]:
         if carry_field:
             carry_forward = carry_field.upper() == "YES"
 
-        results.append(IterResult(
-            iteration=iteration,
-            phase=title,
-            lever_name=title,
-            hypothesis=_extract_field(block, "Hypothesis"),
-            change_desc=_extract_field(block, "Change").strip("`"),
-            verdict=verdict,
-            carry_forward=carry_forward,
-            metrics=_parse_metrics_table(block),
-            notes=_extract_field(block, "Notes"),
-            failure_stage=_extract_field(block, "Failure stage"),
-            reason=_extract_field(block, "Reason"),
-            evidence=_extract_evidence(block),
-        ))
+        results.append(
+            IterResult(
+                iteration=iteration,
+                phase=title,
+                lever_name=title,
+                hypothesis=_extract_field(block, "Hypothesis"),
+                change_desc=_extract_field(block, "Change").strip("`"),
+                verdict=verdict,
+                carry_forward=carry_forward,
+                metrics=_parse_metrics_table(block),
+                notes=_extract_field(block, "Notes"),
+                failure_stage=_extract_field(block, "Failure stage"),
+                reason=_extract_field(block, "Reason"),
+                evidence=_extract_evidence(block),
+            )
+        )
 
     return results
 
@@ -327,10 +337,12 @@ def render_report(run: TuningRun) -> str:
 
     append("## Baseline vs Best Configuration")
     append("")
-    conc_levels = sorted({
-        *[c for c in run.baseline_metrics.keys() if c < LOW_CONC_THRESHOLD],
-        *[c for c in run.best_metrics.keys() if c < LOW_CONC_THRESHOLD],
-    }) or [1, 4, 8]
+    conc_levels = sorted(
+        {
+            *[c for c in run.baseline_metrics if c < LOW_CONC_THRESHOLD],
+            *[c for c in run.best_metrics if c < LOW_CONC_THRESHOLD],
+        }
+    ) or [1, 4, 8]
     metrics = [run.target_metric, "ttft_avg", "tpot_avg", "latency_avg", "output_token_throughput"]
     deduped_metrics = list(dict.fromkeys(metrics))
     append("| Concurrency | Metric | Baseline | Best | Improvement |")
@@ -362,15 +374,10 @@ def render_report(run: TuningRun) -> str:
     append("|---|---------------|---------|-----------------------|-------|")
     for iteration in run.iterations:
         current = iteration.metrics.get(1, {}).get(run.target_metric, 0.0)
-        improvement = (
-            _fmt_improvement(baseline_c1, current, run.target_metric)
-            if current
-            else "—"
-        )
+        improvement = _fmt_improvement(baseline_c1, current, run.target_metric) if current else "—"
         note = iteration.reason or iteration.notes or "—"
         append(
-            f"| {iteration.iteration} | {iteration.lever_name} | `{iteration.verdict}` "
-            f"| {improvement} | {note[:80]} |"
+            f"| {iteration.iteration} | {iteration.lever_name} | `{iteration.verdict}` | {improvement} | {note[:80]} |"
         )
     append("")
 

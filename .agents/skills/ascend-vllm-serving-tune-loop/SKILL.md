@@ -109,6 +109,14 @@ Each run should end with:
 
 ## Quick start
 
+This skill starts a serving process, occupies NPU resources, and may run a long
+tuning campaign, so it must be invoked explicitly. Use the form for your
+agent and never let the model invoke it implicitly (`disable-model-invocation`
+is already set in the frontmatter above).
+
+- Codex: `$ascend-vllm-serving-tune-loop`
+- Claude Code: `/ascend-vllm-serving-tune-loop`
+
 ```text
 /ascend-vllm-serving-tune-loop
 model_path=/data/models/Qwen3-32B

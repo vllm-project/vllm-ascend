@@ -25,7 +25,39 @@ def dump_json_line(payload: dict) -> str:
     return json.dumps(payload, separators=(",", ":"))
 
 
-def test_generate_report_parses_json_results(tmp_path: Path) -> None:
+def test_generate_report_parses_real_evalscope_v181_output() -> None:
+    """Parse a real-shaped evalscope perf v1.8.1 output tree: nested under
+    <timestamp>/<name>/parallel_<P>_number_<N>/ with paired
+    benchmark_summary.json (flat dict) + benchmark_percentile.json (list)."""
+    module = load_module(
+        "generate_report_module",
+        ".agents/skills/ascend-vllm-serving-auto-benchmark/scripts/generate_report.py",
+    )
+
+    fixture_dir = REPO_ROOT / "tests/ut/agents/fixtures/evalscope_v181/outputs/20250423_002442/TestModel"
+
+    parsed = module._parse_evalscope_output_dir(fixture_dir)
+    assert len(parsed) == 3
+    assert [r.concurrency for r in parsed] == [1, 4, 8]
+
+    c1 = parsed[0]
+    # TTFT/TPOT are already ms in v1.8.1; read straight from summary.
+    assert c1.ttft_avg_ms == 64.2
+    assert c1.tpot_avg_ms == 10.27
+    assert c1.output_token_throughput == 96.38
+    # Avg Latency is in SECONDS in v1.8.1; parser must convert to ms.
+    assert c1.latency_avg_ms == 5312.0
+    # Percentiles come from benchmark_percentile.json (p99 row).
+    assert c1.ttft_p99_ms == 68.5
+    assert c1.tpot_p99_ms == 10.44
+    assert c1.latency_p99_ms == 5400.0
+    assert c1.success_requests == 20
+    assert c1.failed_requests == 0
+
+
+def test_generate_report_jsonl_fallback_uses_real_fields(tmp_path: Path) -> None:
+    """When no parallel_* subdirs exist, fall back to JSONL where each line is
+    a flat v1.8.1 summary dict (no paired percentile file)."""
     module = load_module(
         "generate_report_module",
         ".agents/skills/ascend-vllm-serving-auto-benchmark/scripts/generate_report.py",
@@ -33,25 +65,21 @@ def test_generate_report_parses_json_results(tmp_path: Path) -> None:
 
     results_dir = tmp_path / "results"
     results_dir.mkdir()
-    (results_dir / "results.json").write_text(
-        """
+    write_jsonl(
+        results_dir / "results.jsonl",
         [
-          {
-            "concurrency": 1,
-            "stats": {
-              "total_requests": 10,
-              "success_requests": 10,
-              "success_rate": 1.0,
-              "request_throughput": 2.0,
-              "output_token_throughput": 128.0,
-              "latency": {"mean": 0.5, "p50": 0.4, "p90": 0.6, "p99": 0.8},
-              "ttft": {"mean": 0.1, "p50": 0.09, "p90": 0.12, "p99": 0.15},
-              "tpot": {"mean": 0.02, "p50": 0.02, "p90": 0.03, "p99": 0.04}
-            }
-          }
-        ]
-        """,
-        encoding="utf-8",
+            dump_json_line(
+                {
+                    "Concurrency": 1,
+                    "Total Requests": 10,
+                    "Success Requests": 10,
+                    "Output Throughput (tok/s)": 128.0,
+                    "Avg Latency (s)": 0.5,
+                    "TTFT (ms)": 100.0,
+                    "TPOT (ms)": 20.0,
+                }
+            )
+        ],
     )
 
     parsed = module._parse_evalscope_output_dir(results_dir)
@@ -60,6 +88,7 @@ def test_generate_report_parses_json_results(tmp_path: Path) -> None:
     assert parsed[0].ttft_avg_ms == 100.0
     assert parsed[0].tpot_avg_ms == 20.0
     assert parsed[0].output_token_throughput == 128.0
+    assert parsed[0].latency_avg_ms == 500.0  # 0.5 s -> 500 ms
 
 
 def test_generate_tuning_report_preserves_failure_verdicts_and_metric_direction(
@@ -81,24 +110,20 @@ def test_generate_tuning_report_preserves_failure_verdicts_and_metric_direction(
         [
             dump_json_line(
                 {
-                    "concurrency": 1,
-                    "stats": {
-                        "ttft": {"mean": 0.10},
-                        "tpot": {"mean": 0.03},
-                        "latency": {"mean": 0.50},
-                        "output_token_throughput": 100.0,
-                    },
+                    "Concurrency": 1,
+                    "TTFT (ms)": 100.0,
+                    "TPOT (ms)": 30.0,
+                    "Avg Latency (s)": 0.50,
+                    "Output Throughput (tok/s)": 100.0,
                 }
             ),
             dump_json_line(
                 {
-                    "concurrency": 4,
-                    "stats": {
-                        "ttft": {"mean": 0.20},
-                        "tpot": {"mean": 0.04},
-                        "latency": {"mean": 0.80},
-                        "output_token_throughput": 250.0,
-                    },
+                    "Concurrency": 4,
+                    "TTFT (ms)": 200.0,
+                    "TPOT (ms)": 40.0,
+                    "Avg Latency (s)": 0.80,
+                    "Output Throughput (tok/s)": 250.0,
                 }
             ),
         ],
@@ -108,24 +133,20 @@ def test_generate_tuning_report_preserves_failure_verdicts_and_metric_direction(
         [
             dump_json_line(
                 {
-                    "concurrency": 1,
-                    "stats": {
-                        "ttft": {"mean": 0.08},
-                        "tpot": {"mean": 0.03},
-                        "latency": {"mean": 0.45},
-                        "output_token_throughput": 110.0,
-                    },
+                    "Concurrency": 1,
+                    "TTFT (ms)": 80.0,
+                    "TPOT (ms)": 30.0,
+                    "Avg Latency (s)": 0.45,
+                    "Output Throughput (tok/s)": 110.0,
                 }
             ),
             dump_json_line(
                 {
-                    "concurrency": 4,
-                    "stats": {
-                        "ttft": {"mean": 0.18},
-                        "tpot": {"mean": 0.04},
-                        "latency": {"mean": 0.75},
-                        "output_token_throughput": 260.0,
-                    },
+                    "Concurrency": 4,
+                    "TTFT (ms)": 180.0,
+                    "TPOT (ms)": 40.0,
+                    "Avg Latency (s)": 0.75,
+                    "Output Throughput (tok/s)": 260.0,
                 }
             ),
         ],
@@ -209,3 +230,39 @@ def test_auto_resume_wrapper_exits_on_sigint_code(tmp_path: Path) -> None:
 
     assert result.returncode == 130
     assert "Wrapper exits without retry" in result.stdout
+
+
+def _run_benchmark_dry_run(tmp_path: Path, *extra_args: str) -> str:
+    """Run run_benchmark.sh in dry-run and return the generated server_cmd.txt."""
+    output_dir = tmp_path / "out"
+    result = subprocess.run(
+        [
+            "bash",
+            str(REPO_ROOT / ".agents/skills/ascend-vllm-serving-auto-benchmark/scripts/run_benchmark.sh"),
+            "--dry-run",
+            "--model-path",
+            "/tmp/fake-model",
+            "--model-name",
+            "FakeModel",
+            "--output-dir",
+            str(output_dir),
+            *extra_args,
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    return (output_dir / "server_cmd.txt").read_text(encoding="utf-8")
+
+
+def test_no_aclgraph_maps_to_enforce_eager(tmp_path: Path) -> None:
+    """--no-aclgraph must disable ACLGraph via the supported vLLM flag
+    --enforce-eager (the legacy VLLM_ASCEND_ENABLE_ACLGRAPH env was a no-op:
+    never defined in vllm_ascend/envs.py, never read by runtime)."""
+    server_cmd = _run_benchmark_dry_run(tmp_path, "--no-aclgraph")
+    assert "--enforce-eager" in server_cmd
+
+    # Without --no-aclgraph the graph stays enabled (no --enforce-eager).
+    baseline_cmd = _run_benchmark_dry_run(tmp_path)
+    assert "--enforce-eager" not in baseline_cmd

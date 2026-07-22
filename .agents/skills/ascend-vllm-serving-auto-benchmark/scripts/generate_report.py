@@ -23,7 +23,6 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 try:
     import yaml
@@ -32,6 +31,7 @@ except ImportError:
 
 
 # ── Data model ────────────────────────────────────────────────────────────────
+
 
 @dataclass
 class ConcurrencyResult:
@@ -67,7 +67,7 @@ class BenchmarkReport:
     model_name: str
     model_path: str
     dtype: str
-    quantization: Optional[str]
+    quantization: str | None
     max_model_len: int
     tensor_parallel_size: int
     pipeline_parallel_size: int
@@ -87,6 +87,7 @@ class BenchmarkReport:
 
 # ── Parsers ───────────────────────────────────────────────────────────────────
 
+
 def _safe_float(val, default: float = 0.0) -> float:
     try:
         return float(val)
@@ -94,127 +95,142 @@ def _safe_float(val, default: float = 0.0) -> float:
         return default
 
 
-def _parse_evalscope_summary_txt(summary_path: Path) -> list[ConcurrencyResult]:
-    """Parse evalscope performance_summary.txt into ConcurrencyResult list."""
-    if not summary_path.exists():
-        return []
+def _percentile_row(percentile: list, pct: str) -> dict:
+    """Find the row for a given percentile string (e.g. '99%') in evalscope
+    benchmark_percentile.json, which is a list of flat dicts."""
+    for row in percentile or []:
+        if isinstance(row, dict) and str(row.get("Percentiles", "")).strip() == pct:
+            return row
+    return {}
 
+
+def _parse_summary_and_percentile(summary: dict, percentile: list) -> ConcurrencyResult | None:
+    """Build one ConcurrencyResult from a paired evalscope v1.8.1
+    benchmark_summary.json (flat dict) + benchmark_percentile.json (list).
+
+    Field names are human-readable and carry units in the key:
+      - 'Avg Latency (s)' / 'Latency (s)' are in SECONDS -> *1000 to ms
+      - 'TTFT (ms)' / 'TPOT (ms)' / 'ITL (ms)' are already in ms
+    """
+    concurrency = _safe_float(summary.get("Concurrency"), -1)
+    if concurrency < 0:
+        return None
+    concurrency = int(concurrency)
+
+    total = int(_safe_float(summary.get("Total Requests")))
+    success = int(_safe_float(summary.get("Success Requests"), total))
+    failed = int(_safe_float(summary.get("Failed Requests"), max(total - success, 0)))
+
+    p50 = _percentile_row(percentile, "50%")
+    p90 = _percentile_row(percentile, "90%")
+    p99 = _percentile_row(percentile, "99%")
+
+    # Latency is recorded in seconds in evalscope; convert to ms.
+    latency_avg_ms = _safe_float(summary.get("Avg Latency (s)")) * 1000.0
+    latency_p50_ms = _safe_float(p50.get("Latency (s)")) * 1000.0
+    latency_p90_ms = _safe_float(p90.get("Latency (s)")) * 1000.0
+    latency_p99_ms = _safe_float(p99.get("Latency (s)")) * 1000.0
+
+    return ConcurrencyResult(
+        concurrency=concurrency,
+        total_requests=total,
+        success_requests=success,
+        failed_requests=failed,
+        success_rate=_safe_float(success) / max(total, 1),
+        request_throughput_rps=_safe_float(summary.get("Req Throughput (req/s)")),
+        input_token_throughput=_safe_float(summary.get("Input Throughput (tok/s)")),
+        output_token_throughput=_safe_float(summary.get("Output Throughput (tok/s)")),
+        total_token_throughput=_safe_float(summary.get("Total Throughput (tok/s)")),
+        latency_avg_ms=latency_avg_ms,
+        latency_p50_ms=latency_p50_ms,
+        latency_p90_ms=latency_p90_ms,
+        latency_p99_ms=latency_p99_ms,
+        ttft_avg_ms=_safe_float(summary.get("TTFT (ms)")),
+        ttft_p50_ms=_safe_float(p50.get("TTFT (ms)")),
+        ttft_p90_ms=_safe_float(p90.get("TTFT (ms)")),
+        ttft_p99_ms=_safe_float(p99.get("TTFT (ms)")),
+        tpot_avg_ms=_safe_float(summary.get("TPOT (ms)")),
+        tpot_p50_ms=_safe_float(p50.get("TPOT (ms)")),
+        tpot_p90_ms=_safe_float(p90.get("TPOT (ms)")),
+        tpot_p99_ms=_safe_float(p99.get("TPOT (ms)")),
+    )
+
+
+def _load_json(path: Path) -> object:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _parse_evalscope_v181_dir(results_dir: Path) -> list[ConcurrencyResult]:
+    """Parse real evalscope perf v1.8.1 output.
+
+    Layout: <results_dir>/<timestamp>/<name>/parallel_<P>_number_<N>/
+            {benchmark_summary.json, benchmark_percentile.json}
+    Each parallel_* subdir holds one concurrency level as a paired
+    summary (flat dict) + percentile (list) file set.
+    """
     results: list[ConcurrencyResult] = []
-    text = summary_path.read_text()
-
-    # evalscope outputs per-concurrency blocks; try to parse tables
-    # Format varies by version — we parse the JSON result file when available
-    return results
-
-
-def _parse_records(records: list[dict]) -> list[ConcurrencyResult]:
-    """Normalize evalscope records into ConcurrencyResult entries."""
-    results: list[ConcurrencyResult] = []
-    for rec in records:
-        stats = rec.get("stats", rec)
-        concurrency = int(rec.get("concurrency", rec.get("parallel", 0)))
-        if concurrency == 0:
+    # parallel_*_number_* may live at varying depths (timestamp/name/parallel
+    # when a timestamp is used, or directly name/parallel for single runs);
+    # rglob finds them regardless of nesting.
+    for sub in sorted(results_dir.rglob("parallel_*_number_*")):
+        if not sub.is_dir():
             continue
-
-        def ms(key: str, sub: str = "") -> float:
-            base = stats.get(key, stats.get(sub, {}))
-            if isinstance(base, dict):
-                return _safe_float(base.get("mean", base.get("avg", 0))) * 1000
-            return _safe_float(base) * 1000
-
-        def ms_pct(key: str, pct: str) -> float:
-            base = stats.get(key, {})
-            if isinstance(base, dict):
-                return _safe_float(base.get(pct, 0)) * 1000
-            return 0.0
-
-        total = int(stats.get("total_requests", stats.get("num_requests", 0)))
-        success = int(stats.get("success_requests", stats.get("num_completed", total)))
-
-        results.append(ConcurrencyResult(
-            concurrency=concurrency,
-            total_requests=total,
-            success_requests=success,
-            failed_requests=total - success,
-            success_rate=_safe_float(stats.get("success_rate", success / max(total, 1))),
-            request_throughput_rps=_safe_float(stats.get("request_throughput", stats.get("throughput_rps", 0))),
-            input_token_throughput=_safe_float(stats.get("input_token_throughput", 0)),
-            output_token_throughput=_safe_float(stats.get("output_token_throughput", stats.get("token_throughput", 0))),
-            total_token_throughput=_safe_float(stats.get("total_token_throughput", 0)),
-            latency_avg_ms=ms("latency", "e2e_latency"),
-            latency_p50_ms=ms_pct("latency", "p50"),
-            latency_p90_ms=ms_pct("latency", "p90"),
-            latency_p99_ms=ms_pct("latency", "p99"),
-            ttft_avg_ms=ms("ttft"),
-            ttft_p50_ms=ms_pct("ttft", "p50"),
-            ttft_p90_ms=ms_pct("ttft", "p90"),
-            ttft_p99_ms=ms_pct("ttft", "p99"),
-            tpot_avg_ms=ms("tpot"),
-            tpot_p50_ms=ms_pct("tpot", "p50"),
-            tpot_p90_ms=ms_pct("tpot", "p90"),
-            tpot_p99_ms=ms_pct("tpot", "p99"),
-        ))
+        summary_path = sub / "benchmark_summary.json"
+        percentile_path = sub / "benchmark_percentile.json"
+        summary = _load_json(summary_path)
+        percentile = _load_json(percentile_path)
+        if not isinstance(summary, dict):
+            continue
+        if not isinstance(percentile, list):
+            percentile = []
+        res = _parse_summary_and_percentile(summary, percentile)
+        if res is not None:
+            results.append(res)
 
     results.sort(key=lambda r: r.concurrency)
     return results
 
 
 def _parse_evalscope_jsonl(jsonl_path: Path) -> list[ConcurrencyResult]:
-    """Parse evalscope result JSONL into ConcurrencyResult list."""
+    """Fallback: parse evalscope JSONL where each line is a flat summary dict
+    using the v1.8.1 human-readable field names (no percentile file paired)."""
     if not jsonl_path.exists():
         return []
 
-    records: list[dict] = []
+    results: list[ConcurrencyResult] = []
     with open(jsonl_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             try:
-                records.append(json.loads(line))
+                summary = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(summary, dict):
+                continue
+            res = _parse_summary_and_percentile(summary, [])
+            if res is not None:
+                results.append(res)
 
-    return _parse_records(records)
-
-
-def _parse_evalscope_json(json_path: Path) -> list[ConcurrencyResult]:
-    """Parse evalscope JSON output into ConcurrencyResult list."""
-    if not json_path.exists():
-        return []
-
-    try:
-        data = json.loads(json_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return []
-
-    records: list[dict] = []
-    if isinstance(data, list):
-        records = [item for item in data if isinstance(item, dict)]
-    elif isinstance(data, dict):
-        for key in ("results", "records", "data"):
-            nested = data.get(key)
-            if isinstance(nested, list):
-                records = [item for item in nested if isinstance(item, dict)]
-                break
-        else:
-            records = [data]
-
-    return _parse_records(records)
+    results.sort(key=lambda r: r.concurrency)
+    return results
 
 
 def _parse_evalscope_output_dir(results_dir: Path) -> list[ConcurrencyResult]:
-    """Try multiple evalscope output formats."""
-    # Try JSONL first
+    """Parse evalscope perf output. Prefers the real v1.8.1 paired
+    benchmark_summary.json / benchmark_percentile.json layout (nested under
+    timestamp/name/parallel_* subdirs); falls back to JSONL summaries."""
+    results = _parse_evalscope_v181_dir(results_dir)
+    if results:
+        return results
+
     for pattern in ("*.jsonl", "results.jsonl", "benchmark_results.jsonl"):
         for p in results_dir.glob(pattern):
             results = _parse_evalscope_jsonl(p)
-            if results:
-                return results
-    # Try JSON
-    for pattern in ("*.json",):
-        for p in results_dir.glob(pattern):
-            results = _parse_evalscope_json(p)
             if results:
                 return results
     return []
@@ -222,11 +238,10 @@ def _parse_evalscope_output_dir(results_dir: Path) -> list[ConcurrencyResult]:
 
 # ── Environment detection ──────────────────────────────────────────────────────
 
+
 def _get_npu_info() -> str:
     try:
-        result = subprocess.run(
-            ["npu-smi", "info"], capture_output=True, text=True, timeout=10
-        )
+        result = subprocess.run(["npu-smi", "info"], capture_output=True, text=True, timeout=10)
         return result.stdout.strip() if result.returncode == 0 else "npu-smi not available"
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return "npu-smi not available"
@@ -242,7 +257,9 @@ def _get_cann_version() -> str:
     try:
         r = subprocess.run(
             ["python3", "-c", "import torch_npu; print(torch_npu.version.cann)"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if r.returncode == 0:
             return r.stdout.strip()
@@ -255,7 +272,9 @@ def _get_vllm_ascend_version() -> str:
     try:
         r = subprocess.run(
             ["python3", "-c", "import vllm_ascend; print(getattr(vllm_ascend, '__version__', 'unknown'))"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         return r.stdout.strip() if r.returncode == 0 else "unknown"
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -266,7 +285,9 @@ def _get_evalscope_version() -> str:
     try:
         r = subprocess.run(
             ["python3", "-c", "import evalscope; print(evalscope.__version__)"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         return r.stdout.strip() if r.returncode == 0 else "unknown"
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -275,27 +296,23 @@ def _get_evalscope_version() -> str:
 
 # ── SLA check ─────────────────────────────────────────────────────────────────
 
+
 def _check_sla(result: ConcurrencyResult, sla: dict) -> list[str]:
     violations: list[str] = []
     max_ttft = sla.get("max_p99_ttft_ms")
     if max_ttft and result.ttft_p99_ms > max_ttft:
-        violations.append(
-            f"P99 TTFT {result.ttft_p99_ms:.0f}ms > SLA {max_ttft}ms"
-        )
+        violations.append(f"P99 TTFT {result.ttft_p99_ms:.0f}ms > SLA {max_ttft}ms")
     min_sr = sla.get("min_success_rate")
     if min_sr and result.success_rate < min_sr:
-        violations.append(
-            f"success rate {result.success_rate:.3f} < SLA {min_sr}"
-        )
+        violations.append(f"success rate {result.success_rate:.3f} < SLA {min_sr}")
     min_tput = sla.get("min_output_token_throughput")
     if min_tput and result.output_token_throughput < min_tput:
-        violations.append(
-            f"output token throughput {result.output_token_throughput:.0f} tok/s < SLA {min_tput} tok/s"
-        )
+        violations.append(f"output token throughput {result.output_token_throughput:.0f} tok/s < SLA {min_tput} tok/s")
     return violations
 
 
 # ── Markdown rendering ─────────────────────────────────────────────────────────
+
 
 def _fmt(val: float, decimals: int = 2) -> str:
     return f"{val:.{decimals}f}"
@@ -305,17 +322,17 @@ def render_markdown(report: BenchmarkReport) -> str:
     lines: list[str] = []
     a = lines.append
 
-    a(f"# Ascend 910C vLLM Serving Benchmark Report")
-    a(f"")
+    a("# Ascend 910C vLLM Serving Benchmark Report")
+    a("")
     a(f"> Generated: {report.timestamp}")
-    a(f"")
+    a("")
 
     # ── 1. Environment ────────────────────────────────────────────────────────
     a("## 1. Environment")
     a("")
     a("| Item | Value |")
     a("|------|-------|")
-    a(f"| Hardware | Ascend 910C |")
+    a("| Hardware | Ascend 910C |")
     a(f"| CANN Version | `{report.cann_version}` |")
     a(f"| vllm-ascend Version | `{report.vllm_ascend_version}` |")
     a(f"| vllm-ascend Git Commit | `{report.vllm_ascend_commit}` |")
@@ -353,8 +370,8 @@ def render_markdown(report: BenchmarkReport) -> str:
     a("|------|-------|")
     a(f"| Input Tokens | `{report.input_tokens}` |")
     a(f"| Output Tokens | `{report.output_tokens}` |")
-    a(f"| Dataset | `random` |")
-    a(f"| Stream Mode | `true` (SSE) |")
+    a("| Dataset | `random` |")
+    a("| Stream Mode | `true` (SSE) |")
     a("")
 
     if not report.results:
@@ -456,14 +473,18 @@ def render_markdown(report: BenchmarkReport) -> str:
     # ── 6. Full Latency Distribution ──────────────────────────────────────────
     a("## 6. Full Latency Distribution (ms)")
     a("")
-    a("| Concurrency | Latency avg | Lat P50 | Lat P90 | Lat P99 | TTFT avg | TTFT P50 | TTFT P90 | TTFT P99 | TPOT avg | TPOT P50 | TPOT P99 |")
-    a("|-------------|-------------|---------|---------|---------|----------|----------|----------|----------|----------|----------|----------|")
+    a(
+        "| Concurrency | Latency avg | Lat P50 | Lat P90 | Lat P99 | TTFT avg | TTFT P50 | TTFT P90 | TTFT P99 | TPOT avg | TPOT P50 | TPOT P99 |"  # noqa: E501
+    )
+    a(
+        "|-------------|-------------|---------|---------|---------|----------|----------|----------|----------|----------|----------|----------|"
+    )
     for r in report.results:
         low_marker = " 🔹" if r.concurrency < 10 else ""
         a(
             f"| {r.concurrency}{low_marker} "
-            f"| {_fmt(r.latency_avg_ms, 1)} | {_fmt(r.latency_p50_ms, 1)} | {_fmt(r.latency_p90_ms, 1)} | {_fmt(r.latency_p99_ms, 1)} "
-            f"| {_fmt(r.ttft_avg_ms, 1)} | {_fmt(r.ttft_p50_ms, 1)} | {_fmt(r.ttft_p90_ms, 1)} | {_fmt(r.ttft_p99_ms, 1)} "
+            f"| {_fmt(r.latency_avg_ms, 1)} | {_fmt(r.latency_p50_ms, 1)} | {_fmt(r.latency_p90_ms, 1)} | {_fmt(r.latency_p99_ms, 1)} "  # noqa: E501
+            f"| {_fmt(r.ttft_avg_ms, 1)} | {_fmt(r.ttft_p50_ms, 1)} | {_fmt(r.ttft_p90_ms, 1)} | {_fmt(r.ttft_p99_ms, 1)} "  # noqa: E501
             f"| {_fmt(r.tpot_avg_ms, 1)} | {_fmt(r.tpot_p50_ms, 1)} | {_fmt(r.tpot_p99_ms, 1)} |"
         )
     a("")
@@ -475,18 +496,26 @@ def render_markdown(report: BenchmarkReport) -> str:
     if valid:
         peak_tput = max(valid, key=lambda r: r.output_token_throughput)
         best_ttft = min(valid, key=lambda r: r.ttft_p99_ms)
-        a(f"| Metric | Concurrency | Value |")
-        a(f"|--------|-------------|-------|")
-        a(f"| Peak Output Token Throughput | `{peak_tput.concurrency}` | `{_fmt(peak_tput.output_token_throughput, 0)} tok/s` |")
+        a("| Metric | Concurrency | Value |")
+        a("|--------|-------------|-------|")
+        a(
+            f"| Peak Output Token Throughput | `{peak_tput.concurrency}` | `{_fmt(peak_tput.output_token_throughput, 0)} tok/s` |"  # noqa: E501
+        )
         a(f"| Best P99 TTFT | `{best_ttft.concurrency}` | `{_fmt(best_ttft.ttft_p99_ms, 1)} ms` |")
-        a(f"| Best P99 Latency | `{min(valid, key=lambda r: r.latency_p99_ms).concurrency}` | `{_fmt(min(valid, key=lambda r: r.latency_p99_ms).latency_p99_ms, 1)} ms` |")
+        a(
+            f"| Best P99 Latency | `{min(valid, key=lambda r: r.latency_p99_ms).concurrency}` | `{_fmt(min(valid, key=lambda r: r.latency_p99_ms).latency_p99_ms, 1)} ms` |"  # noqa: E501
+        )
         if single:
             a(f"| Single-Request (c=1) TTFT avg | `1` | `{_fmt(single.ttft_avg_ms, 1)} ms` |")
             a(f"| Single-Request (c=1) TPOT avg | `1` | `{_fmt(single.tpot_avg_ms, 1)} ms/token` |")
         a("")
-        a(f"**Recommended concurrency for throughput**: `{peak_tput.concurrency}` (highest output tok/s with ≥99% success rate)")
+        a(
+            f"**Recommended concurrency for throughput**: `{peak_tput.concurrency}` (highest output tok/s with ≥99% success rate)"  # noqa: E501
+        )
         if single:
-            a(f"**Single-request latency baseline**: TTFT `{_fmt(single.ttft_avg_ms, 1)} ms`, E2E `{_fmt(single.latency_avg_ms, 1)} ms`")
+            a(
+                f"**Single-request latency baseline**: TTFT `{_fmt(single.ttft_avg_ms, 1)} ms`, E2E `{_fmt(single.latency_avg_ms, 1)} ms`"  # noqa: E501
+            )
     else:
         a("> No concurrency level achieved ≥99% success rate. Review server logs for errors.")
     a("")
@@ -522,9 +551,11 @@ def render_markdown(report: BenchmarkReport) -> str:
     a("### Key Ascend Environment Variables")
     a("```bash")
     ascend_env_keys = [
-        "ASCEND_RT_VISIBLE_DEVICES", "VLLM_ASCEND_ENABLE_ACLGRAPH",
-        "VLLM_ASCEND_ENABLE_NZ", "HCCL_BUFFSIZE",
-        "ASCEND_LAUNCH_BLOCKING", "LD_LIBRARY_PATH",
+        "ASCEND_RT_VISIBLE_DEVICES",
+        "VLLM_ASCEND_ENABLE_NZ",
+        "HCCL_BUFFSIZE",
+        "ASCEND_LAUNCH_BLOCKING",
+        "LD_LIBRARY_PATH",
     ]
     for k in ascend_env_keys:
         val = os.environ.get(k)
@@ -539,12 +570,27 @@ def render_markdown(report: BenchmarkReport) -> str:
 # ── CSV export ─────────────────────────────────────────────────────────────────
 
 CSV_FIELDS = [
-    "concurrency", "total_requests", "success_requests", "failed_requests",
-    "success_rate", "request_throughput_rps", "input_token_throughput",
-    "output_token_throughput", "total_token_throughput",
-    "latency_avg_ms", "latency_p50_ms", "latency_p90_ms", "latency_p99_ms",
-    "ttft_avg_ms", "ttft_p50_ms", "ttft_p90_ms", "ttft_p99_ms",
-    "tpot_avg_ms", "tpot_p50_ms", "tpot_p90_ms", "tpot_p99_ms",
+    "concurrency",
+    "total_requests",
+    "success_requests",
+    "failed_requests",
+    "success_rate",
+    "request_throughput_rps",
+    "input_token_throughput",
+    "output_token_throughput",
+    "total_token_throughput",
+    "latency_avg_ms",
+    "latency_p50_ms",
+    "latency_p90_ms",
+    "latency_p99_ms",
+    "ttft_avg_ms",
+    "ttft_p50_ms",
+    "ttft_p90_ms",
+    "ttft_p99_ms",
+    "tpot_avg_ms",
+    "tpot_p50_ms",
+    "tpot_p90_ms",
+    "tpot_p99_ms",
 ]
 
 
@@ -558,12 +604,13 @@ def write_csv(report: BenchmarkReport, output_path: Path) -> None:
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate benchmark report from evalscope output")
-    parser.add_argument("--results-dir", type=Path, required=True,
-                        help="Directory containing evalscope perf output")
-    parser.add_argument("--output-dir", type=Path, default=Path("./benchmark_output"),
-                        help="Output directory for report files")
+    parser.add_argument("--results-dir", type=Path, required=True, help="Directory containing evalscope perf output")
+    parser.add_argument(
+        "--output-dir", type=Path, default=Path("./benchmark_output"), help="Output directory for report files"
+    )
     parser.add_argument("--model-name", default="unknown", help="Model name for report header")
     parser.add_argument("--model-path", default="", help="Model path or ID")
     parser.add_argument("--config", type=Path, help="YAML config file to read model settings from")

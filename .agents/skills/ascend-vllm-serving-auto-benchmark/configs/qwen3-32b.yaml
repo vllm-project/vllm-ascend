@@ -15,7 +15,6 @@ server:
   pipeline_parallel_size: 1
   env:
     ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
-    VLLM_ASCEND_ENABLE_ACLGRAPH: "1"
     VLLM_ASCEND_ENABLE_NZ: "1"
 
 workload:

@@ -21,7 +21,7 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 OUTPUT_DIR=""
 NPU_DEVICES=""
 SKIP_WARMUP=0
-ACLGRAPH_OVERRIDE=""
+NO_ACLGRAPH=0
 NZ_OVERRIDE=""
 TRUST_REMOTE_CODE=1
 STREAM_MODE=1
@@ -223,7 +223,7 @@ while [[ $# -gt 0 ]]; do
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
         --npu-devices) NPU_DEVICES="$2"; shift 2 ;;
         --skip-warmup) SKIP_WARMUP=1; shift ;;
-        --no-aclgraph) ACLGRAPH_OVERRIDE="0"; shift ;;
+        --no-aclgraph) NO_ACLGRAPH=1; shift ;;
         --no-nz) NZ_OVERRIDE="0"; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         *)
@@ -314,11 +314,6 @@ SERVER_LOG="${OUTPUT_DIR}/server.log"
 NPU_INFO_FILE="${OUTPUT_DIR}/npu_info.txt"
 
 upsert_env_value "ASCEND_RT_VISIBLE_DEVICES" "${NPU_DEVICES}"
-if [[ -n "${ACLGRAPH_OVERRIDE}" ]]; then
-    upsert_env_value "VLLM_ASCEND_ENABLE_ACLGRAPH" "${ACLGRAPH_OVERRIDE}"
-elif ! get_env_value "VLLM_ASCEND_ENABLE_ACLGRAPH" >/dev/null 2>&1; then
-    upsert_env_value "VLLM_ASCEND_ENABLE_ACLGRAPH" "1"
-fi
 
 if [[ -n "${NZ_OVERRIDE}" ]]; then
     upsert_env_value "VLLM_ASCEND_ENABLE_NZ" "${NZ_OVERRIDE}"
@@ -394,6 +389,14 @@ fi
 
 if [[ "${TRUST_REMOTE_CODE}" -eq 1 ]]; then
     SERVER_ARGS+=(--trust-remote-code)
+fi
+
+# --no-aclgraph disables ACLGraph capture/replay via the supported vLLM flag
+# --enforce-eager (vLLM-Ascend honors it: _use_aclgraph() returns False and
+# capture_model() is skipped). The legacy VLLM_ASCEND_ENABLE_ACLGRAPH env var
+# was a no-op (never defined in vllm_ascend/envs.py, never read by runtime).
+if [[ "${NO_ACLGRAPH}" -eq 1 ]]; then
+    SERVER_ARGS+=(--enforce-eager)
 fi
 
 SERVER_CMD_PARTS=(env)
