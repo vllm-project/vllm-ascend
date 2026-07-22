@@ -262,9 +262,6 @@ jobs:
         with:
           sparse-checkout: |
             .github/workflows/scripts
-            requirements-dev.txt
-            requirements-lint.txt
-            requirements.txt
           sparse-checkout-cone-mode: false
 
       - name: Download test case map
@@ -292,20 +289,11 @@ jobs:
           find vllm-ascend/covstub -maxdepth 2 -type d | head -20 || true
 
       - name: Recommend tests for current PR
-        env:
-          UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
-          UV_INDEX_STRATEGY: unsafe-best-match
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y python3-venv python3-pip
-          python3 -m venv .recommend-venv
-          .recommend-venv/bin/pip install --upgrade pip uv --quiet
-          .recommend-venv/bin/uv pip install -r requirements-dev.txt \
-            --extra-index-url https://download.pytorch.org/whl/cpu
           PR_SPEC="vllm-project/vllm-ascend#${{ github.event.pull_request.number }}"
           echo "Selecting tests for PR: ${PR_SPEC}"
-          .recommend-venv/bin/python .github/workflows/scripts/test_selector.py \
+          python3 .github/workflows/scripts/test_selector.py \
             --github-pr "${PR_SPEC}" \
             --source-dir ./vllm-ascend/covstub \
             --map-file test_case_map.json
