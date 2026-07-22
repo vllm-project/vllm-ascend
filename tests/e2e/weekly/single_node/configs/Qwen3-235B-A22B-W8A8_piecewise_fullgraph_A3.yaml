@@ -54,8 +54,8 @@ _benchmarks: &benchmarks
     max_out_len: 38912
     num_prompts: 32
     batch_size: 32
-    baseline: 90
-    threshold: 0
+    baseline: 100
+    threshold: 10
 
 # ==========================================
 # ACTUAL TEST CASES
