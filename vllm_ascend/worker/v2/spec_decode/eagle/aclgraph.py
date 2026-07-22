@@ -23,6 +23,7 @@ except ImportError:
     AttentionStatePair = Any  # type: ignore[assignment,misc]
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+
 try:
     from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (  # type: ignore[import-not-found]
         DecodeSpeculatorCudaGraphManager,
@@ -32,6 +33,7 @@ except ImportError:
     from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (  # type: ignore[import-not-found]
         SpeculatorCudaGraphManager,
     )
+
     PrefillSpeculatorCudaGraphManager = SpeculatorCudaGraphManager  # type: ignore[assignment,misc]
     DecodeSpeculatorCudaGraphManager = SpeculatorCudaGraphManager  # type: ignore[assignment,misc]
 from vllm.v1.worker.utils import AttentionGroup
