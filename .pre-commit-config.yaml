@@ -65,6 +65,7 @@ repos:
     entry: gitleaks
     language: system
     pass_filenames: false
+    always_run: true
     args:
       - protect
       - --staged
