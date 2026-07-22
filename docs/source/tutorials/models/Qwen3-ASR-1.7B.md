@@ -74,7 +74,7 @@ docker run --rm \
 
 **Docker Run:**
 
-export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p
 
 docker run --rm \
         --name vllm-ascend \
