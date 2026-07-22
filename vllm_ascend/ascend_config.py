@@ -145,6 +145,9 @@ class AscendConfig:
                 "only guaranteed when the recompute scheduler is enabled."
             )
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
+        # Whether to use the fused torch_npu.npu_chunk_gated_delta_rule op in the
+        # GDN prefill stage instead of the default Triton chunk_gated_delta_rule pipeline.
+        self.enable_gdn_fused_chunk = additional_config.get("enable_gdn_fused_chunk", False)
         self.enable_sleep_mode_extra_cleanup = additional_config.get("enable_sleep_mode_extra_cleanup", False)
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
         self.enable_prefill_mc2 = bool(additional_config.get("enable_prefill_mc2", False))
