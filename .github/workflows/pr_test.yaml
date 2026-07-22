@@ -274,6 +274,20 @@ jobs:
           echo "Downloaded test_case_map.json"
           du -h test_case_map.json
 
+      - name: Download coverage package and extract covstub
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/coverage.tar" \
+            -o coverage.tar
+          test -s coverage.tar
+          echo "Downloaded coverage.tar"
+          du -h coverage.tar
+          tar xf coverage.tar vllm-ascend/covstub
+          test -d vllm-ascend/covstub
+          echo "Extracted vllm-ascend/covstub"
+          find vllm-ascend/covstub -maxdepth 2 -type d | head -20 || true
+
       - name: Recommend tests for current PR
         run: |
           set -euo pipefail
@@ -281,6 +295,7 @@ jobs:
           echo "Selecting tests for PR: ${PR_SPEC}"
           python3 .github/workflows/scripts/test_selector.py \
             --github-pr "${PR_SPEC}" \
+            --source-dir ./vllm-ascend/covstub \
             --map-file test_case_map.json
 
   # Summary gate job — use this single, stable name as the required status check
