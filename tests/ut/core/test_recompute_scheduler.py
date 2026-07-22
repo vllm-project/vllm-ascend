@@ -3,10 +3,11 @@
 
 from collections import defaultdict
 from types import MethodType, SimpleNamespace
+from unittest.mock import MagicMock
 
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import EngineCoreOutput, FinishReason
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 
 from vllm_ascend.core.recompute_scheduler import (
     RecomputeReqInfo,
@@ -67,3 +68,44 @@ def test_recompute_notification_precedes_regular_output():
     assert output.finish_reason == FinishReason.STOP
     assert output.stop_reason == "recomputed"
     assert outputs[0][1].request_id == "regular-request"
+
+
+def test_finish_recomputed_request_uses_normal_abort_cleanup():
+    scheduler = RecomputeScheduler.__new__(RecomputeScheduler)
+    request = Request(
+        request_id="fallback-recomputed-request",
+        prompt_token_ids=[1, 2, 3, 4],
+        sampling_params=SamplingParams(max_tokens=8),
+        pooling_params=None,
+    )
+    request.status = RequestStatus.RUNNING
+
+    # The fallback victim has already been popped from the running queue.
+    scheduler.requests = {request.request_id: request}
+    scheduler.running = []
+    scheduler.waiting = MagicMock()
+    scheduler.skipped_waiting = MagicMock()
+    scheduler._inflight_prefills = {request}
+    scheduler._connector_finished = MagicMock(return_value=(False, None))
+    scheduler.encoder_cache_manager = MagicMock()
+    scheduler.finished_req_ids = set()
+    scheduler.finished_req_ids_dict = None
+    scheduler._free_request_blocks = MagicMock()
+
+    recomputed_reqs = []
+    scheduler._finish_recomputed_request(request, recomputed_reqs)
+
+    assert request.status == RequestStatus.FINISHED_ABORTED
+    assert request not in scheduler._inflight_prefills
+    assert request.request_id not in scheduler.requests
+    assert request.request_id in scheduler.finished_req_ids
+    scheduler._connector_finished.assert_called_once_with(request)
+    scheduler.encoder_cache_manager.free.assert_called_once_with(request)
+    scheduler._free_request_blocks.assert_called_once_with(request)
+    assert recomputed_reqs == [
+        RecomputeReqInfo(
+            request_id=request.request_id,
+            output_token_ids=request.output_token_ids,
+            client_index=request.client_index,
+        )
+    ]

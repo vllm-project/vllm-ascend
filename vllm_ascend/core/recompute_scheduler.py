@@ -123,6 +123,25 @@ class RecomputeScheduler(Scheduler):
 
         self.finished_recving_kv_req_ids.remove(request.request_id)
 
+    def _finish_recomputed_request(
+        self,
+        request: Request,
+        recomputed_reqs: list[RecomputeReqInfo],
+    ) -> None:
+        """Finish a fallback-recomputed request through the normal abort path."""
+        recomputed_reqs.append(
+            RecomputeReqInfo(
+                request.request_id,
+                request.output_token_ids,
+                request.client_index,
+            )
+        )
+        finished_reqs = self.finish_requests(
+            request.request_id,
+            RequestStatus.FINISHED_ABORTED,
+        )
+        assert finished_reqs == [(request.request_id, request.client_index)]
+
     def schedule(self, throttle_prefills: bool = False) -> RecomputeSchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -295,7 +314,8 @@ class RecomputeScheduler(Scheduler):
                             )
                         if offloaded:
                             logger.info(
-                                "[RecomputeScheduler] Recompute preemption offload enabled for request %s, computed_tokens=%d.",
+                                "[RecomputeScheduler] Recompute preemption offload "
+                                "enabled for request %s, computed_tokens=%d.",
                                 recomputed_req_id,
                                 recomputed_num_computed_tokens,
                             )
@@ -309,19 +329,15 @@ class RecomputeScheduler(Scheduler):
                             self._preempt_request(recomputed_req, scheduled_timestamp)
                             preempted_reqs.append(recomputed_req)
                         else:
-                            self._free_request_blocks(recomputed_req)
-                            self._inflight_prefills.discard(recomputed_req)
                             logger.info(
-                                "[RecomputeScheduler] Recompute preemption falls back without offload for request %s, computed_tokens=%d.",
+                                "[RecomputeScheduler] Recompute preemption falls back "
+                                "without offload for request %s, computed_tokens=%d.",
                                 recomputed_req_id,
                                 recomputed_num_computed_tokens,
                             )
-                            recomputed_reqs.append(
-                                RecomputeReqInfo(
-                                    recomputed_req_id,
-                                    recomputed_req.output_token_ids,
-                                    recomputed_req.client_index,
-                                )
+                            self._finish_recomputed_request(
+                                recomputed_req,
+                                recomputed_reqs,
                             )
                         if recomputed_req == request:
                             break
