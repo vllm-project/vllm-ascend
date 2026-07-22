@@ -11,6 +11,36 @@ from vllm_ascend.utils import enable_custom_op
 CHUNK_SIZE = 64
 
 
+def _make_inputs_cpu(batch=1, tokens=128, q_heads=2, v_heads=4, k_dim=128, v_dim=128, g_scale=0.01):
+    torch.manual_seed(123)
+    q = (torch.randn(batch, tokens, q_heads, k_dim) * 0.01).half()
+    k = (torch.randn(batch, tokens, q_heads, k_dim) * 0.01).half()
+    v = (torch.randn(batch, tokens, v_heads, v_dim) * 0.01).half()
+    g = (-torch.rand(batch, tokens, v_heads, dtype=torch.float32) * g_scale)
+    beta = (0.1 + 0.2 * torch.rand(batch, tokens, v_heads)).half()
+    return q, k, v, g, beta
+
+
+def test_doubling_wy_matches_torch_reference_cpu():
+    """Phase-0 gate: nilpotent doubling matches the scalar-loop torch WY reference."""
+    for tokens, g_scale in ((128, 0.01), (512, 0.01), (128, 1.0)):
+        q, k, v, g, beta = _make_inputs_cpu(
+            tokens=tokens, q_heads=16, v_heads=32, g_scale=g_scale
+        )
+        ref = chunk_mod._compute_kernel_inputs_from_torch_wy(q, k, v, g, beta, CHUNK_SIZE)
+        out = chunk_mod._compute_kernel_inputs_from_doubling_wy(q, k, v, g, beta, CHUNK_SIZE)
+        torch.testing.assert_close(out[0], ref[0], rtol=0, atol=0)
+        torch.testing.assert_close(out[1], ref[1], rtol=0, atol=0)
+        torch.testing.assert_close(out[4], ref[4], rtol=1e-5, atol=1e-5)
+        assert _cosine(out[2].float(), ref[2].float()) > 0.99
+        assert _cosine(out[3].float(), ref[3].float()) > 0.99
+
+        a_mat, rhs, _, _ = chunk_mod._wy_build_A_and_R(k, v, g, beta, CHUNK_SIZE)
+        blocked = chunk_mod._wy_blocked_fs_apply(a_mat, rhs)
+        doubled = chunk_mod._wy_doubling_apply(a_mat, rhs)
+        assert _cosine(doubled, blocked) > 0.99
+
+
 def _cosine(a: torch.Tensor, b: torch.Tensor) -> float:
     a = a.flatten().double()
     b = b.flatten().double()

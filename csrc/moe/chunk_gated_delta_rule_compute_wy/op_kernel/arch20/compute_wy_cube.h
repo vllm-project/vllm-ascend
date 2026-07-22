@@ -23,7 +23,8 @@ using WyMmBiasType = MatmulType<TPosition::GM, CubeFormat::ND, float>;
 using WyMatmulNoTrans = matmul::MatmulImpl<WyMmAType, WyMmBType, WyMmCType, WyMmBiasType>;
 using WyMatmulBTrans = matmul::MatmulImpl<WyMmAType, WyMmBTransType, WyMmCType, WyMmBiasType>;
 
-// GM staging layout inside each core's workspace slice (bytes).
+// GM staging: A_half(64*128) + B_half(64*128) + C_float(64*128).
+// Doubling applies U/W separately so N <= 128 (no stacked 256-wide staging).
 constexpr uint32_t WY_CUBE_MAX_HEAD = 128;
 constexpr uint32_t WY_CUBE_CHUNK = 64;
 constexpr uint32_t WY_CUBE_STAGING_A_BYTES = WY_CUBE_CHUNK * WY_CUBE_MAX_HEAD * sizeof(half);
@@ -35,8 +36,9 @@ constexpr uint32_t WY_CUBE_STAGING_C_OFF = WY_CUBE_STAGING_A_BYTES + WY_CUBE_STA
 
 class WyCubeGemm {
  public:
-  __aicore__ inline void Init(const TCubeTiling *attnTiling, const TCubeTiling *uTiling, const TCubeTiling *wTiling,
-                              TPipe *pipe, LocalTensor<uint8_t> localWs, uint32_t localWsBytes, GM_ADDR workspace,
+  __aicore__ inline void Init(const TCubeTiling *attnTiling, const TCubeTiling *squareTiling,
+                              const TCubeTiling *applyUTiling, const TCubeTiling *applyWTiling, TPipe *pipe,
+                              LocalTensor<uint8_t> localWs, uint32_t localWsBytes, GM_ADDR workspace,
                               uint32_t perCoreBytes, uint32_t usedCoreNum)
   {
     pipe_ = pipe;
@@ -45,15 +47,16 @@ class WyCubeGemm {
 
     mmAttn_.SetSubBlockIdx(0);
     mmAttn_.Init(attnTiling, pipe_);
-    mmU_.SetSubBlockIdx(0);
-    mmU_.Init(uTiling, pipe_);
-    mmW_.SetSubBlockIdx(0);
-    mmW_.Init(wTiling, pipe_);
+    mmSquare_.SetSubBlockIdx(0);
+    mmSquare_.Init(squareTiling, pipe_);
+    mmApplyU_.SetSubBlockIdx(0);
+    mmApplyU_.Init(applyUTiling, pipe_);
+    mmApplyW_.SetSubBlockIdx(0);
+    mmApplyW_.Init(applyWTiling, pipe_);
 
     localWs_ = localWs;
     (void)localWsBytes;
 
-    // User staging sits after the reserved system workspace region.
     constexpr uint64_t kSysWorkspace = 16ULL * 1024ULL * 1024ULL;
     const uint32_t blockIdx = GetBlockIdx() % usedCoreNum_;
     const uint64_t coreBase =
@@ -63,7 +66,7 @@ class WyCubeGemm {
     cGm_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(workspace + coreBase + WY_CUBE_STAGING_C_OFF));
   }
 
-  // C[64,64] = A[64,K] @ B[64,K]^T  (B stored as [64,K], transpose on Cube)
+  // C[64,64] = A[64,K] @ B[64,K]^T
   __aicore__ inline void GemmATransB(LocalTensor<float> cUb, const LocalTensor<half> aUb, const LocalTensor<half> bUb,
                                      uint32_t kDim, uint32_t aLda, uint32_t bLda)
   {
@@ -82,33 +85,75 @@ class WyCubeGemm {
     CopyFloatRowsFromGm(cUb, cGm_, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
   }
 
-  // C[64,N] = A[64,64] @ B[64,N]
-  // dstLda is the row stride of cUb (may be alignN > nDim).
-  __aicore__ inline void GemmAB(LocalTensor<float> cUb, const LocalTensor<half> aUb, const LocalTensor<half> bUb,
-                                uint32_t nDim, uint32_t aLda, uint32_t bLda, uint32_t dstLda, bool useUMatmul)
+  // P = P @ P (64x64). halfScratch >= 64*64 halfs.
+  __aicore__ inline void GemmSquare(LocalTensor<float> pUb, LocalTensor<half> halfScratch)
   {
-    CopyHalfRowsToGm(aGm_, aUb, WY_CUBE_CHUNK, WY_CUBE_CHUNK, aLda);
-    CopyHalfRowsToGm(bGm_, bUb, WY_CUBE_CHUNK, nDim, bLda);
+    Cast(halfScratch, pUb, RoundMode::CAST_NONE, WY_CUBE_CHUNK * WY_CUBE_CHUNK);
+    PipeBarrier<PIPE_V>();
+    CopyHalfRowsToGm(aGm_, halfScratch, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
+    CopyHalfRowsToGm(bGm_, halfScratch, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     PipeBarrier<PIPE_ALL>();
 
-    if (useUMatmul) {
-      mmU_.SetLocalWorkspace(localWs_);
-      mmU_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
-      mmU_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
-      mmU_.SetTensorA(aGm_, false);
-      mmU_.SetTensorB(bGm_, false);
-      mmU_.IterateAll(cGm_);
-    } else {
-      mmW_.SetLocalWorkspace(localWs_);
-      mmW_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
-      mmW_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
-      mmW_.SetTensorA(aGm_, false);
-      mmW_.SetTensorB(bGm_, false);
-      mmW_.IterateAll(cGm_);
+    mmSquare_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
+    mmSquare_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
+    mmSquare_.SetLocalWorkspace(localWs_);
+    mmSquare_.SetTensorA(aGm_, false);
+    mmSquare_.SetTensorB(bGm_, false);
+    mmSquare_.IterateAll(cGm_);
+    PipeBarrier<PIPE_ALL>();
+
+    CopyFloatRowsFromGm(pUb, cGm_, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
+  }
+
+  // R = R + P @ R for one RHS block (U or W). rLda may be alignN > nDim.
+  __aicore__ inline void GemmApplyAdd(LocalTensor<float> rUb, const LocalTensor<float> pUb,
+                                      LocalTensor<half> halfScratch, LocalTensor<half> halfRow,
+                                      LocalTensor<float> rowScratch, uint32_t nDim, uint32_t rLda, bool useU)
+  {
+    Cast(halfScratch, pUb, RoundMode::CAST_NONE, WY_CUBE_CHUNK * WY_CUBE_CHUNK);
+    PipeBarrier<PIPE_V>();
+    CopyHalfRowsToGm(aGm_, halfScratch, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
+
+    for (uint32_t row = 0; row < WY_CUBE_CHUNK; ++row) {
+      Cast(halfRow, rUb[row * rLda], RoundMode::CAST_NONE, nDim);
+      PipeBarrier<PIPE_V>();
+      event_t evtV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
+      SetFlag<HardEvent::V_MTE3>(evtV);
+      WaitFlag<HardEvent::V_MTE3>(evtV);
+      DataCopyParams params{1, static_cast<uint16_t>((nDim * sizeof(half) + 31) / 32), 0, 0};
+      DataCopy(bGm_[static_cast<uint64_t>(row) * nDim], halfRow, params);
+      event_t evtM = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
+      SetFlag<HardEvent::MTE3_V>(evtM);
+      WaitFlag<HardEvent::MTE3_V>(evtM);
     }
     PipeBarrier<PIPE_ALL>();
 
-    CopyFloatRowsFromGm(cUb, cGm_, WY_CUBE_CHUNK, nDim, dstLda);
+    if (useU) {
+      mmApplyU_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
+      mmApplyU_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
+      mmApplyU_.SetLocalWorkspace(localWs_);
+      mmApplyU_.SetTensorA(aGm_, false);
+      mmApplyU_.SetTensorB(bGm_, false);
+      mmApplyU_.IterateAll(cGm_);
+    } else {
+      mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
+      mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
+      mmApplyW_.SetLocalWorkspace(localWs_);
+      mmApplyW_.SetTensorA(aGm_, false);
+      mmApplyW_.SetTensorB(bGm_, false);
+      mmApplyW_.IterateAll(cGm_);
+    }
+    PipeBarrier<PIPE_ALL>();
+
+    for (uint32_t row = 0; row < WY_CUBE_CHUNK; ++row) {
+      DataCopyParams params{1, static_cast<uint16_t>((nDim * sizeof(float) + 31) / 32), 0, 0};
+      DataCopy(rowScratch, cGm_[static_cast<uint64_t>(row) * nDim], params);
+      event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+      SetFlag<HardEvent::MTE2_V>(evt);
+      WaitFlag<HardEvent::MTE2_V>(evt);
+      Add(rUb[row * rLda], rUb[row * rLda], rowScratch, nDim);
+      PipeBarrier<PIPE_V>();
+    }
   }
 
  private:
@@ -145,8 +190,9 @@ class WyCubeGemm {
   uint32_t usedCoreNum_{1};
   LocalTensor<uint8_t> localWs_;
   WyMatmulBTrans mmAttn_;
-  WyMatmulNoTrans mmU_;
-  WyMatmulNoTrans mmW_;
+  WyMatmulNoTrans mmSquare_;
+  WyMatmulNoTrans mmApplyU_;
+  WyMatmulNoTrans mmApplyW_;
   GlobalTensor<half> aGm_;
   GlobalTensor<half> bGm_;
   GlobalTensor<float> cGm_;
