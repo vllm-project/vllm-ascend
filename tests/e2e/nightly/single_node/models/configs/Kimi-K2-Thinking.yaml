@@ -24,7 +24,7 @@ test_cases:
       - "--max-num-seqs"
       - "12"
       - "--gpu-memory-utilization"
-      - "0.9"
+      - "0.85"
       - "--trust-remote-code"
       - "--enable-expert-parallel"
       - "--no-enable-prefix-caching"
