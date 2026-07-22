@@ -676,6 +676,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         q_pe: torch.Tensor,
         attn_metadata: M,
     ) -> None:
+        assert isinstance(attn_metadata, AscendSFADCPMetadata)
         # Prefill/mixed batches gather compact KV after its cache write instead.
         # Keeping Q local avoids a full query all-gather and the subsequent LSE
         # output merge in the all-KV attention path.
@@ -688,6 +689,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         self,
         attn_metadata: M,
     ) -> torch.Tensor:
+        assert isinstance(attn_metadata, AscendSFADCPMetadata)
         assert attn_metadata.dcp_context is not None
         return attn_metadata.dcp_context.slot_mapping
 

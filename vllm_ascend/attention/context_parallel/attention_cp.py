@@ -529,10 +529,10 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: tuple[torch.Tensor],
-        attn_metadata: AscendAttentionDCPMetadata,
+        attn_metadata: AscendMetadata,
         output: torch.Tensor,
     ) -> torch.Tensor:
-        assert attn_metadata is not None
+        assert isinstance(attn_metadata, AscendAttentionDCPMetadata)
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
