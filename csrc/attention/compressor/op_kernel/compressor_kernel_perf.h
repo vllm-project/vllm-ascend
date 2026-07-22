@@ -88,6 +88,8 @@ public:
         __gm__ uint8_t *cuSeqlens,
         __gm__ uint8_t *seqUsed,
         __gm__ uint8_t *startPos,
+        __gm__ uint8_t *slotMapping,
+        __gm__ uint8_t *pagedKvCache,
         __gm__ uint8_t *cmpKvOut,
         __gm__ uint8_t *workspace);
     __aicore__ inline void Process();
@@ -177,6 +179,8 @@ __aicore__ inline void CompressorKernelPerf<COMP>::Init(
         __gm__ uint8_t *cuSeqlens,
         __gm__ uint8_t *seqUsed,
         __gm__ uint8_t *startPos,
+        __gm__ uint8_t *slotMapping,
+        __gm__ uint8_t *pagedKvCache,
         __gm__ uint8_t *cmpKvOut,
         __gm__ uint8_t *workspace)
 {
@@ -221,7 +225,7 @@ __aicore__ inline void CompressorKernelPerf<COMP>::Init(
         blockCube_.InitParams(constInfo, tools_);
 #endif
         blockCube_.Init(x, wKv, wGate, stateCache, ape, normWeight, ropeSin, ropeCos,
-            stateBlockTable, cuSeqlens, seqUsed, startPos, cmpKvOut);
+            stateBlockTable, cuSeqlens, seqUsed, startPos, slotMapping, pagedKvCache, cmpKvOut);
         blockCube_.InitBuffers(pipe_);
 #if __CCE_AICORE__ == 310
         blockCube_.InitGlobalBuffers(mm1KvResGm, mm1ScoreResGm);
@@ -231,7 +235,7 @@ __aicore__ inline void CompressorKernelPerf<COMP>::Init(
     } else {
         blockVec_.InitParams(constInfo, tools_);
         blockVec_.Init(x, wKv, wGate, stateCache, ape, normWeight, ropeSin, ropeCos, stateBlockTable,
-                        cuSeqlens, seqUsed, startPos, cmpKvOut);
+                        cuSeqlens, seqUsed, startPos, slotMapping, pagedKvCache, cmpKvOut);
         blockVec_.InitBuffers(pipe_);
 #if __CCE_AICORE__ == 310
         blockVec_.InitVec1GlobalTensor(Vec1InputKvGm, Vec1InputScoreGm, vec1KvCacheGm, vec1ScoreCacheGm, vec1ResGm, vec2InputGm);
@@ -249,6 +253,8 @@ __aicore__ inline void CompressorKernelPerf<COMP>::InitTilingData() {
     constInfo.headDim = tilingData_->baseParams.headDim;
     constInfo.hSize = tilingData_->baseParams.hiddenSize;
     constInfo.sSize = tilingData_->baseParams.seqSize;
+    constInfo.expectedRows = tilingData_->baseParams.expectedRows;
+    constInfo.validRows = tilingData_->baseParams.validRows;
     constInfo.ropeHeadDim = tilingData_->baseParams.ropeHeadDim;
     constInfo.normEps = tilingData_->baseParams.normEps;
     constInfo.reciprocalD = tilingData_->baseParams.reciprocalD;
@@ -257,6 +263,7 @@ __aicore__ inline void CompressorKernelPerf<COMP>::InitTilingData() {
     constInfo.blockNum = tilingData_->pageAttentionParams.blockNum;
     constInfo.blockSize = tilingData_->pageAttentionParams.blockSize;
     constInfo.maxBlockNumPerBatch = tilingData_->pageAttentionParams.maxBlockNumPerBatch;
+    constInfo.scatterBlockSize = tilingData_->pageAttentionParams.scatterBlockSize;
 
     constInfo.nSize =  tilingData_->baseParams.nSize;
     constInfo.vec1TailCacheSize = tilingData_->workspaceParams.vec1TailCacheSize;
