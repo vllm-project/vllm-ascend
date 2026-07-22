@@ -41,15 +41,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint-and-select-tests:
+  pre-commit:
     if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
-      has_tests: ${{ steps.scope.outputs.has_tests || steps.noop.outputs.has_tests }}
-      test_groups: ${{ steps.scope.outputs.test_groups || steps.noop.outputs.test_groups }}
-      matched_modules: ${{ steps.scope.outputs.matched_modules || steps.noop.outputs.matched_modules }}
       main_commit: ${{ steps.vllm.outputs.main_commit }}
       release_tag: ${{ steps.vllm.outputs.release_tag }}
     steps:
@@ -128,22 +125,6 @@ jobs:
               - 'requirements.txt'
               - 'requirements-dev.txt'
               - 'requirements-lint.txt'
-            src:
-              - 'vllm_ascend/**'
-              - 'setup.py'
-              - 'csrc/**'
-              - 'requirements.txt'
-              - 'pyproject.toml'
-              - 'cmake/**'
-              - '.github/workflows/pr_test.yaml'
-              - '.github/workflows/_selected_tests.yaml'
-              - '.github/workflows/scripts/select_tests.py'
-              - '.github/workflows/scripts/run_selected_tests.sh'
-              - '.github/workflows/scripts/test_config.yaml'
-              - '.github/workflows/scripts/runner_label.json'
-              - 'tests/**'
-              - 'tools/**'
-              - 'CMakeLists.txt'
 
       - name: Install vllm-ascend dev (conditional)
         if: steps.filter.outputs.lint_tracker == 'true'
@@ -184,6 +165,42 @@ jobs:
             echo "============================"
           done
 
+  select-tests:
+    needs: pre-commit
+    runs-on: linux-amd64-cpu-8-hk
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:lint
+    outputs:
+      has_tests: ${{ steps.scope.outputs.has_tests || steps.noop.outputs.has_tests }}
+      test_groups: ${{ steps.scope.outputs.test_groups || steps.noop.outputs.test_groups }}
+      matched_modules: ${{ steps.scope.outputs.matched_modules || steps.noop.outputs.matched_modules }}
+    steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            src:
+              - 'vllm_ascend/**'
+              - 'setup.py'
+              - 'csrc/**'
+              - 'requirements.txt'
+              - 'pyproject.toml'
+              - 'cmake/**'
+              - '.github/workflows/pr_test.yaml'
+              - '.github/workflows/_selected_tests.yaml'
+              - '.github/workflows/scripts/select_tests.py'
+              - '.github/workflows/scripts/run_selected_tests.sh'
+              - '.github/workflows/scripts/test_config.yaml'
+              - '.github/workflows/scripts/runner_label.json'
+              - 'tests/**'
+              - 'tools/**'
+              - 'CMakeLists.txt'
+
       - name: Validate test coverage config
         run: |
           pip install pyyaml
@@ -210,24 +227,39 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   run-selected-tests:
-    needs: lint-and-select-tests
-    if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' && contains(github.event.pull_request.labels.*.name, 'ready') }}
+    needs: [pre-commit, select-tests]
+    if: ${{ needs.select-tests.outputs.has_tests == 'true' && contains(github.event.pull_request.labels.*.name, 'ready') }}
     strategy:
       matrix:
         vllm_version:
-          - ${{ needs.lint-and-select-tests.outputs.main_commit }}
-          - ${{ needs.lint-and-select-tests.outputs.release_tag }}
+          - ${{ needs.pre-commit.outputs.main_commit }}
+          - ${{ needs.pre-commit.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
-      test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
+      test_groups: ${{ needs.select-tests.outputs.test_groups }}
+  
+  run-selected-tests-upstream:
+    needs: [pre-commit, select-tests]
+    if: ${{ contains(github.event.pull_request.labels.*.name, 'ready') }}
+    strategy:
+      matrix:
+        vllm_version:
+          - ${{ needs.pre-commit.outputs.main_commit }}
+          - ${{ needs.pre-commit.outputs.release_tag }}
+    uses: ./.github/workflows/_selected_tests_upstream.yaml
+    with:
+      vllm: ${{ matrix.vllm_version }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      test_groups: ${{ needs.select-tests.outputs.test_groups }}
 
   generate-hitest:
     name: Generate hitest recommendations
-    needs: lint-and-select-tests
-    if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' }}
+    needs: select-tests
+    if: ${{ needs.select-tests.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/_manual-hitest.yaml
     secrets:
       HITEST_APIG_APPCODE: ${{ secrets.HITEST_APIG_APPCODE }}
@@ -237,7 +269,7 @@ jobs:
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
-    needs: [lint-and-select-tests, run-selected-tests]
+    needs: [pre-commit, select-tests, run-selected-tests]
     if: ${{ always() && contains(github.event.pull_request.labels.*.name, 'ready') }}
     runs-on: linux-amd64-cpu-2-hk
     steps:
@@ -245,15 +277,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          LINT_RESULT="${{ needs.lint-and-select-tests.result }}"
-          HAS_TESTS="${{ needs.lint-and-select-tests.outputs.has_tests }}"
+          PRE_COMMIT_RESULT="${{ needs.pre-commit.result }}"
+          SELECT_TESTS_RESULT="${{ needs.select-tests.result }}"
+          HAS_TESTS="${{ needs.select-tests.outputs.has_tests }}"
 
           echo "=== CI Gate Summary ==="
-          echo "lint-and-select-tests: ${LINT_RESULT}"
+          echo "pre-commit: ${PRE_COMMIT_RESULT}"
+          echo "select-tests: ${SELECT_TESTS_RESULT}"
           echo "has_tests: ${HAS_TESTS}"
 
-          if [ "${LINT_RESULT}" != "success" ] && [ "${LINT_RESULT}" != "skipped" ]; then
-            echo "::error::lint-and-select-tests did not succeed (result: ${LINT_RESULT})"
+          if [ "${PRE_COMMIT_RESULT}" != "success" ] && [ "${PRE_COMMIT_RESULT}" != "skipped" ]; then
+            echo "::error::pre-commit did not succeed (result: ${PRE_COMMIT_RESULT})"
+            exit 1
+          fi
+
+          if [ "${SELECT_TESTS_RESULT}" != "success" ] && [ "${SELECT_TESTS_RESULT}" != "skipped" ]; then
+            echo "::error::select-tests did not succeed (result: ${SELECT_TESTS_RESULT})"
             exit 1
           fi
 
