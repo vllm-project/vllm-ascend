@@ -55,46 +55,46 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
 :::::{tab-set}
 ::::{tab-item} Atlas A3 inference products
 :sync: A3
-    ```{code-block} bash
-        :substitutions:
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+```{code-block} bash
+   :substitutions:
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
 
-    docker run \
-        --name vllm-ascend-env \
-        --ipc host \
-        --net host \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci8 \
-        --device /dev/davinci9 \
-        --device /dev/davinci10 \
-        --device /dev/davinci11 \
-        --device /dev/davinci12 \
-        --device /dev/davinci13 \
-        --device /dev/davinci14 \
-        --device /dev/davinci15 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
-        -v /usr/local/sbin:/usr/local/sbin \
-        -it -d $IMAGE bash
-    ```
+docker run \
+    --name vllm-ascend-env \
+    --ipc host \
+    --net host \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci8 \
+    --device /dev/davinci9 \
+    --device /dev/davinci10 \
+    --device /dev/davinci11 \
+    --device /dev/davinci12 \
+    --device /dev/davinci13 \
+    --device /dev/davinci14 \
+    --device /dev/davinci15 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /usr/local/sbin:/usr/local/sbin \
+    -it -d $IMAGE bash
+```
 
     :::{note}
 
         A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
         If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
-:::
+    :::
 
 ::::
 ::::{tab-item} Atlas A2 inference products
