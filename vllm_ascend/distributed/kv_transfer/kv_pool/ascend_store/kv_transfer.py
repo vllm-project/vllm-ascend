@@ -5,6 +5,7 @@ import queue
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -1602,8 +1603,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
 
 
 def record_failed_blocks(
-    block_ids: list[int] | list[set[int]],
-    ret_codes: list[int],
+    block_ids: Sequence[int | set[int]],
+    ret_codes: Sequence[int],
 ) -> set[int]:
     failed_blocks: set[int] = set()
     for block_id_or_group, code in zip(block_ids, ret_codes):
