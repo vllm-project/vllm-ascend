@@ -15,10 +15,17 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from vllm_ascend.utils import vllm_version_is
 
-from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as vllm_speculator_module
+if not vllm_version_is("0.25.1"):
+    from vllm.v1.worker.gpu.spec_decode.autoregressive import (  # type: ignore[import-not-found]
+        speculator as vllm_speculator_module,  # type: ignore[import-not-found]  # noqa: E501
+    )
 
-from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import DecodeEagleAclGraphManager, PrefillEagleAclGraphManager
+    from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import (
+        DecodeEagleAclGraphManager,
+        PrefillEagleAclGraphManager,
+    )
 
-vllm_speculator_module.PrefillSpeculatorCudaGraphManager = PrefillEagleAclGraphManager
-vllm_speculator_module.DecodeSpeculatorCudaGraphManager = DecodeEagleAclGraphManager
+    vllm_speculator_module.PrefillSpeculatorCudaGraphManager = PrefillEagleAclGraphManager
+    vllm_speculator_module.DecodeSpeculatorCudaGraphManager = DecodeEagleAclGraphManager
