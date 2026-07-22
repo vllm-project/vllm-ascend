@@ -40,6 +40,102 @@ MIN_AFFECTED_LINES = 1
 # ==================== Configuration ====================
 
 
+def _get_test_files_from_pr_diff(diff_file: str, test_case_map: Dict) -> List[str]:
+    """
+    Extract new/modified test files from PR diff and match to test cases.
+    Test files are in vllm_ascend/tests/ directory with test_*.py pattern.
+    
+    Args:
+        diff_file: Path to the PR diff file
+        test_case_map: Mapping of test case names to their coverage info
+        
+    Returns:
+        List of test case names that correspond to new/modified test files
+    """
+    test_files_found = []
+    
+    try:
+        with open(diff_file, 'r', encoding='utf-8') as f:
+            diff_content = f.read()
+    except Exception as e:
+        print(f"  Warning: Failed to read diff file for test file detection: {e}")
+        return test_files_found
+    
+    # Pattern to match test file paths: tests/[subdirs/]test_*.py
+    # In diff output: +++ b/tests/ut/core/test_xxx.py
+    # Capture full relative path (without leading +++)
+    test_file_pattern = re.compile(r'^\+\+\+ [ab]/(tests/.+/\w+\.py)', re.MULTILINE)
+    
+    changed_test_files = set()
+    for match in test_file_pattern.finditer(diff_content):
+        test_file_path = match.group(1)
+        changed_test_files.add(test_file_path)
+    
+    if not changed_test_files:
+        return test_files_found
+    
+    print(f"  Found {len(changed_test_files)} changed test file(s): {changed_test_files}")
+    
+    # Match changed test files to test cases in test_case_map
+    # Test case names format: tests/e2e/.../test_xxx.py or tests/e2e/.../test_xxx.py::test_func
+    found_in_map = False
+    for test_case_name in test_case_map.keys():
+        for changed_file in changed_test_files:
+            # Match both full file tests and function-level tests
+            if changed_file in test_case_name:
+                if test_case_name not in test_files_found:
+                    test_files_found.append(test_case_name)
+                    found_in_map = True
+                    break
+    
+    # If no exact match in test_case_map, add the file path directly as a new test case
+    if not found_in_map:
+        for changed_file in changed_test_files:
+            # Normalize path to test case name format: tests/ut/core/test_xxx.py -> tests/ut/core/test_xxx
+            test_case_name = changed_file.rsplit('.py', 1)[0]
+            if test_case_name not in test_files_found:
+                test_files_found.append(test_case_name)
+    
+    return test_files_found
+
+
+def _get_deleted_test_files_from_pr(diff_file: str, test_case_map: Dict) -> List[str]:
+    """
+    Extract deleted test files from PR diff.
+    Test files are in vllm_ascend/tests/ directory with test_*.py pattern.
+    
+    Args:
+        diff_file: Path to the PR diff file
+        test_case_map: Mapping of test case names to their coverage info
+        
+    Returns:
+        List of test case names that correspond to deleted test files
+    """
+    deleted_test_files = []
+    
+    try:
+        with open(diff_file, 'r', encoding='utf-8') as f:
+            diff_content = f.read()
+    except Exception as e:
+        print(f"  Warning: Failed to read diff file for deleted test detection: {e}")
+        return deleted_test_files
+    
+    # Pattern to match --- a/tests/... lines (deleted files start with --- a/)
+    # and verify the file is followed by +++ /dev/null (or +++ b/dev/null)
+    deleted_pattern = re.compile(r'^--- a/(tests/.+/\w+\.py)\s*\n\s*\+\+\+ [ab]?/dev/null', re.MULTILINE)
+    
+    for match in deleted_pattern.finditer(diff_content):
+        test_file_path = match.group(1)
+        # Normalize: tests/ut/core/test_xxx.py -> tests/ut/core/test_xxx
+        test_case_name = test_file_path.rsplit('.py', 1)[0]
+        deleted_test_files.append(test_case_name)
+    
+    if deleted_test_files:
+        print(f"  Found {len(deleted_test_files)} deleted test file(s): {deleted_test_files}")
+    
+    return deleted_test_files
+
+
 class CoverageSelector:
     """Coverage-based test selector"""
 
@@ -935,6 +1031,7 @@ def main():
     print("\n=== Parsing Code Changes ===")
     change_detector = CodeChangeDetector(args.source_dir)
 
+    diff_file = None
     if args.github_pr:
         # 从 GitHub PR 获取变更
         pr_spec = args.github_pr
@@ -1020,7 +1117,7 @@ def main():
     # 3. Select test cases
     print("\n=== Selecting Affected Test Cases ===")
     test_selector = TestSelector(selector.test_case_map)
-    selected, expand_reason = test_selector.select_tests(changed_files_with_lines,
+    selected, expand_reason = test_selector.select_tests(changed_files_with_lines, 
                                                          min_affected_lines=args.min_affected,
                                                          source_dir=args.source_dir,
                                                          enable_line_match=args.enable_line_match,
@@ -1028,11 +1125,34 @@ def main():
                                                          enable_file_match=args.enable_file_match,
                                                          enable_skip_imports=args.skip_imports,
                                                          enable_dedup=args.dedup)
-    test_selector.print_selection(selected, changed_files_with_lines,
+    test_selector.print_selection(selected, changed_files_with_lines, 
                                   min_affected_lines=args.min_affected,
                                   expand_reason=expand_reason)
+    
+    # 4. Add new/modified test files from PR (vllm_ascend/tests/test_*.py)
+    test_file_tests = []
+    if args.github_pr and diff_file:
+        test_file_tests = _get_test_files_from_pr_diff(diff_file, selector.test_case_map)
+        if test_file_tests:
+            print(f"\n=== New/Modified Test Files in PR ===")
+            print(f"Adding {len(test_file_tests)} test file(s): {test_file_tests}")
+            # Merge with existing selected tests (deduplicate)
+            existing_test_names = set(s[0] for s in selected)
+            for test_name in test_file_tests:
+                if test_name not in existing_test_names:
+                    # Add to selected (can be new test files not in test_case_map)
+                    selected.append((test_name, {}, 0))
 
-    # 4. Output executable pytest command
+    # 5. Remove deleted test files from PR
+    if args.github_pr and diff_file:
+        deleted_tests = _get_deleted_test_files_from_pr(diff_file, selector.test_case_map)
+        if deleted_tests:
+            print(f"\n=== Deleted Test Files in PR ===")
+            print(f"Removing {len(deleted_tests)} deleted test file(s): {deleted_tests}")
+            deleted_set = set(deleted_tests)
+            selected = [(name, detail, count) for name, detail, count in selected if name not in deleted_set]
+
+    # 6. Output executable pytest command
     test_names = [s[0] for s in selected]
     if test_names:
         print("\n=== Recommended Test Cases ===")
