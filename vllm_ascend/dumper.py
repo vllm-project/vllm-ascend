@@ -44,7 +44,8 @@ class Dumper:
 
     def __init__(self, runner: NPUModelRunner | NPUModelRunnerV2, dynamic_dump_config: Any):
         self.runner = runner
-        self.current_step_debug_log_full_requests: dict[str, bool] = {}
+        self.full_log_requests_this_step: dict[str, bool] = {}
+        self._debugger: Any | None = None
 
         self._mtp_acceptance_history: dict[str, deque[tuple[int, int]]] = defaultdict(deque)
         self._mtp_acceptance_window = dynamic_dump_config.mtp_acceptance_window
@@ -61,6 +62,8 @@ class Dumper:
         self._msprobe_dump_disable_delay_rounds = 0
         self._msprobe_dump_active = False
         self._debugger_started = False
+        # Keep an internal alias so all debug-log-full writes are centralized.
+        self._debug_log_full_by_req_id: dict[str, bool] = self.full_log_requests_this_step
 
         logger.info_once(
             "Dynamic dump config applied: mtp_acceptance_window=%d "
@@ -78,17 +81,19 @@ class Dumper:
             self._msprobe_dump_max_times,
         )
 
-    def reset_current_step_debug_log_full_requests(self) -> None:
-        self.current_step_debug_log_full_requests.clear()
+        # Keep debugger lifecycle fully encapsulated in Dumper.
+        self._init_debugger(self.runner.compilation_config.cudagraph_mode)
 
-    def init_debugger(self, cudagraph_mode: CUDAGraphMode):
+    def _init_debugger(self, cudagraph_mode: CUDAGraphMode):
         dump_cfg = self.runner.ascend_config.dump_config_path
         if dump_cfg is None:
+            self._debugger = None
             return None
         if cudagraph_mode == CUDAGraphMode.NONE:
             from msprobe.pytorch import PrecisionDebugger
 
-            return PrecisionDebugger(dump_cfg)
+            self._debugger = PrecisionDebugger(dump_cfg)
+            return self._debugger
 
         try:
             from msprobe.pytorch import AclGraphDumper
@@ -97,31 +102,33 @@ class Dumper:
                 "Failed to import AclGraphDumper from msprobe. "
                 "Please install/rebuild msprobe with aclgraph_dump enabled."
             ) from exc
-        return AclGraphDumper(dump_cfg)
+        self._debugger = AclGraphDumper(dump_cfg)
+        return self._debugger
 
     def start_dump_data(self) -> None:
-        if self.runner.debugger is None or self._debugger_started:
+        # Always clear per-step flags, even when debugger is inactive.
+        self.full_log_requests_this_step.clear()
+        if self._debugger is None or self._debugger_started:
             return
-        self.runner.debugger.start(self.runner.model)
+        self._debugger.start(self.runner.model)
         self._debugger_started = True
 
     def finalize_dump_data(self, **kwargs) -> None:
-        if self.runner.debugger is None or not self._debugger_started:
+        if self._debugger is None or not self._debugger_started:
             return
-        if hasattr(self.runner.debugger, "stop"):
-            self.runner.debugger.stop()
+        if hasattr(self._debugger, "stop"):
+            self._debugger.stop()
             self._debugger_started = False
 
-        self.runner.debugger.step(**kwargs)
+        self._debugger.step(**kwargs)
         self.disable_msprobe_dump_if_needed()
 
-    def record_mtp_acceptance_rate(
+    def check_acceptance_anomaly(
         self,
         req_idx: int,
         req_id: str,
         req_state: Any,
         sampled_ids: list[int] | torch.Tensor | None = None,
-        debug_log_full_by_req_id: dict[str, bool] | None = None,
     ) -> None:
         if self._msprobe_dump_max_times == 0:
             return
@@ -138,8 +145,7 @@ class Dumper:
             if log_leader:
                 logger.warning("[Anomaly MTP] req_id=%s draft_len=%d", req_id, draft_len)
             return
-        if debug_log_full_by_req_id is not None:
-            debug_log_full_by_req_id.pop(req_id, None)
+        self._debug_log_full_by_req_id.pop(req_id, None)
 
         sampled_token_ids = self._normalize_token_ids(sampled_ids)
         accepted_tokens = 0
@@ -204,8 +210,8 @@ class Dumper:
         if not self.enable_msprobe_dump_if_needed(req_id, req_idx=req_idx):
             return
 
-        if log_leader and debug_log_full_by_req_id is not None:
-            debug_log_full_by_req_id[req_id] = True
+        if log_leader:
+            self._debug_log_full_by_req_id[req_id] = True
         if log_leader:
             self.log_mtp_token_details(
                 req_id=req_id,
@@ -260,7 +266,7 @@ class Dumper:
     def disable_msprobe_dump_if_needed(self) -> None:
         if not self._msprobe_dump_active:
             return
-        if self.runner.debugger is None:
+        if self._debugger is None:
             return
         if self._msprobe_dump_disable_delay_rounds > 0:
             self._msprobe_dump_disable_delay_rounds -= 1
@@ -275,7 +281,7 @@ class Dumper:
         self._msprobe_dump_active = False
         self._msprobe_dump_disable_delay_rounds = 0
         logger.info("[Anomaly msprobe] disable msprobe dump succeeded.")
-        self.runner.debugger._maybe_reload_config(force=True)
+        self._debugger._maybe_reload_config(force=True)
 
     def set_msprobe_dump_state(self, dump_state: bool) -> bool:
         dump_cfg = self.runner.ascend_config.dump_config_path
@@ -368,7 +374,7 @@ class Dumper:
         return True
 
     def enable_msprobe_dump_if_needed(self, req_id: str, req_idx: int | None = None) -> bool:
-        if self.runner.debugger is None:
+        if self._debugger is None:
             return False
         if not get_pp_group().is_last_rank:
             return False
@@ -418,7 +424,7 @@ class Dumper:
             self._msprobe_dump_total_count,
             self._msprobe_dump_max_times,
         )
-        self.runner.debugger._maybe_reload_config(force=True)
+        self._debugger._maybe_reload_config(force=True)
         return True
 
     def save_sample_param(self, target_req_id: str) -> None:

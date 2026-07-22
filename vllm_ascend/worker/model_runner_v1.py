@@ -346,12 +346,6 @@ class NPUModelRunner(GPUModelRunner):
         self.need_accepted_tokens: bool = False
         dynamic_dump_config = self.ascend_config.dynamic_dump_config
         self.dumper = Dumper(self, dynamic_dump_config)
-        self.debugger = self.dumper.init_debugger(
-            self.compilation_config.cudagraph_mode
-        )
-        self._current_step_debug_log_full_requests = (
-            self.dumper.current_step_debug_log_full_requests
-        )
 
         self.is_multimodal_model = self.model_config.is_multimodal_model
         self.block_size = vllm_config.cache_config.block_size
@@ -2594,12 +2588,11 @@ class NPUModelRunner(GPUModelRunner):
             draft_token_ids = None
             if self.input_batch.sampling_metadata.spec_token_ids:
                 draft_token_ids = self.input_batch.sampling_metadata.spec_token_ids[req_idx]
-            self.dumper.record_mtp_acceptance_rate(
+            self.dumper.check_acceptance_anomaly(
                 req_idx=req_idx,
                 req_id=req_id,
                 req_state=req_state,
                 sampled_ids=sampled_ids,
-                debug_log_full_by_req_id=self._current_step_debug_log_full_requests,
             )
 
         model_runner_output_kwargs = {
@@ -2617,7 +2610,7 @@ class NPUModelRunner(GPUModelRunner):
         }
         model_runner_output_fields = getattr(ModelRunnerOutput, "__dataclass_fields__", {})
         if "debug_log_full" in model_runner_output_fields:
-            model_runner_output_kwargs["debug_log_full"] = self._current_step_debug_log_full_requests
+            model_runner_output_kwargs["debug_log_full"] = self.dumper.full_log_requests_this_step
         model_runner_output = ModelRunnerOutput(**model_runner_output_kwargs)
         if self.ascend_config.profiling_chunk_config.need_timing and hasattr(self, '_execution_start_time'):
             self._sync_device()
@@ -2805,8 +2798,6 @@ class NPUModelRunner(GPUModelRunner):
             self.input_batch.prev_req_id_to_index = {
                 req_id: i for i, req_id in enumerate(self.input_batch.req_ids) if i not in invalid_req_indices_set
             }
-
-        self.dumper.reset_current_step_debug_log_full_requests()
 
         # Cache the sampled tokens in the model runner, so that the scheduler
         # doesn't need to send them back.
