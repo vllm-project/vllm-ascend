@@ -114,6 +114,8 @@ struct COMPType {
 };
 
 struct ConstInfo {
+    uint32_t expectedRows = 0;
+    uint32_t validRows = 0;
     // 整个AICORE的任务信息, 左闭右开区间[ (bStart, s2Start), (bEnd, s2End) )
     uint32_t bStart = 0U;
     uint32_t sStart = 0U;

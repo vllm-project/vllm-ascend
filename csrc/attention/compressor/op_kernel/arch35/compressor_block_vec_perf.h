@@ -314,7 +314,8 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::Init(
     cmpKvOutGm_.SetGlobalBuffer((__gm__ X_T *)cmpKvOut);
     scatterBlockSize_ = constInfo_.scatterBlockSize;
     scatterSlotStride_ = scatterBlockSize_ * constInfo_.headDim;
-    fusedScatter_ = (slotMapping != nullptr && pagedKvCache != nullptr && scatterBlockSize_ > 0);
+    fusedScatter_ = (slotMapping != nullptr && pagedKvCache != nullptr && scatterBlockSize_ > 0 &&
+                     constInfo_.validRows > 0);
     if (fusedScatter_) {
         slotMappingGm_.SetGlobalBuffer((__gm__ int32_t *)slotMapping);
         pagedKvCacheGm_.SetGlobalBuffer((__gm__ X_T *)pagedKvCache);
@@ -1529,30 +1530,34 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::CopyFinalResultOut(const
     uint32_t copySize = dealRowCount * constInfo_.headDim;
 
     if (fusedScatter_) {
+        uint32_t scatterStart = static_cast<uint32_t>(globalScStart);
+        uint32_t scatterRowCount = 0;
+        if (scatterStart < constInfo_.validRows) {
+            scatterRowCount = min(dealRowCount, constInfo_.validRows - scatterStart);
+        }
+        if (scatterRowCount > 0) {
         LocalTensor<int32_t> slotLocal = slotMappingBuf_.Get<int32_t>();
-        DataCopyExtParams slotCopyParams{1, static_cast<uint32_t>(dealRowCount * 2 * sizeof(int32_t)), 0, 0, 0};
+        DataCopyExtParams slotCopyParams{1, static_cast<uint32_t>(scatterRowCount * 2 * sizeof(int32_t)), 0, 0, 0};
         DataCopyPadExtParams<int32_t> slotPadParams{true, 0, 0, 0};
-        DataCopyPad(slotLocal, slotMappingGm_[globalScStart * 2], slotCopyParams, slotPadParams);
+        DataCopyPad(slotLocal, slotMappingGm_[scatterStart * 2], slotCopyParams, slotPadParams);
         {
             event_t eventIdMte2ToS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_S));
             SetFlag<HardEvent::MTE2_S>(eventIdMte2ToS);
             WaitFlag<HardEvent::MTE2_S>(eventIdMte2ToS);
         }
 
-        for (uint32_t i = 0; i < dealRowCount; ++i) {
+        for (uint32_t i = 0; i < scatterRowCount; ++i) {
             int32_t blockIdx = slotLocal.GetValue(i * 2);
             int32_t offsetInBlock = slotLocal.GetValue(i * 2 + 1);
-            uint64_t pagedOffset = (uint64_t)blockIdx * scatterSlotStride_ + (uint64_t)offsetInBlock * constInfo_.headDim;
-            DataCopyExtParams scatterParams{1, static_cast<uint32_t>(constInfo_.headDim * sizeof(X_T)), 0, 0, 0};
-            DataCopyPad(pagedKvCacheGm_[pagedOffset], cmpKvOutUb[i * constInfo_.headDim], scatterParams);
+            if (blockIdx >= 0 && static_cast<uint32_t>(blockIdx) < constInfo_.blockNum && offsetInBlock >= 0 &&
+                static_cast<uint32_t>(offsetInBlock) < scatterBlockSize_) {
+                uint64_t pagedOffset = (uint64_t)blockIdx * scatterSlotStride_ +
+                    (uint64_t)offsetInBlock * constInfo_.headDim;
+                DataCopyExtParams scatterParams{1, static_cast<uint32_t>(constInfo_.headDim * sizeof(X_T)), 0, 0, 0};
+                DataCopyPad(pagedKvCacheGm_[pagedOffset], cmpKvOutUb[i * constInfo_.headDim], scatterParams);
+            }
         }
-
-        uint32_t dealScSize = dealRowCount;
-        uint32_t curDealScSize = 0;
-        while (dealScSize > 0) {
-            UpdateOutputIdx(OutputBStartIdx, OutputSStartIdx, dealScSize, curDealScSize);
         }
-        return;
     }
 
     uint32_t dealScSize = dealRowCount;

@@ -1,3 +1,4 @@
+import logging
 import math
 from dataclasses import dataclass
 from typing import ClassVar, TypeVar
@@ -12,10 +13,14 @@ from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
+from vllm_ascend.attention.context_parallel.fused_compressor_utils import (
+    get_fused_compressor_row_info,
+)
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
@@ -26,6 +31,9 @@ from vllm_ascend.utils import (
     npu_stream_switch,
     olora_tp_enable,
 )
+
+
+logger = logging.getLogger(__name__)
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
@@ -965,6 +973,66 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 f"got {self.attn_sink.numel()} heads, expected {self.num_heads}."
             )
 
+    def _should_use_fused_compressor(
+        self,
+        inputs: dict[str, torch.Tensor],
+        cmp_ratio: int,
+        coff: int,
+        scatter_block_size: int,
+    ) -> bool:
+        x = inputs["x"]
+        rope_sin = inputs["rope_sin"]
+        rope_cos = inputs["rope_cos"]
+        slot_mapping = inputs["slot_mapping"]
+        paged_kv_cache = inputs["paged_kv_cache"]
+        norm_weight = inputs["norm_weight"]
+
+        tensor_summary = ", ".join(
+            f"{name}=shape{tuple(tensor.shape)},dtype={tensor.dtype},device={tensor.device}"
+            for name, tensor in inputs.items()
+        )
+        row_info = get_fused_compressor_row_info(
+            tuple(x.shape), tuple(rope_sin.shape), tuple(slot_mapping.shape), cmp_ratio
+        )
+        logger.debug(
+            "DSV4 fused compressor inputs: %s ratio=%d coff=%d expected_rows=%d "
+            "valid_rows=%d scatter_block_size=%d row_safe=%s reason=%s",
+            tensor_summary,
+            cmp_ratio,
+            coff,
+            row_info.expected_rows,
+            row_info.valid_rows,
+            scatter_block_size,
+            row_info.safe,
+            row_info.reason,
+        )
+
+        if not row_info.safe:
+            return False
+        if cmp_ratio not in (4, 128) or coff not in (1, 2):
+            return False
+        if rope_cos.shape != rope_sin.shape:
+            return False
+        if any(tensor.device != x.device for tensor in inputs.values()):
+            return False
+        if slot_mapping.dtype != torch.int32:
+            return False
+        # Compressed KV cache uses the standard paged layout
+        # [num_blocks, block_size, num_kv_heads, head_dim].  The fused
+        # kernel currently supports the single compressed KV head used by
+        # DSA; its address calculation therefore assumes num_kv_heads == 1.
+        if paged_kv_cache.dtype != x.dtype or paged_kv_cache.dim() != 4:
+            return False
+        if paged_kv_cache.shape[2] != 1:
+            return False
+        if paged_kv_cache.shape[1] != scatter_block_size:
+            return False
+        if paged_kv_cache.shape[3] != norm_weight.shape[0]:
+            return False
+        if scatter_block_size <= 0:
+            return False
+        return True
+
     def forward(  # type: ignore[override]
         self,
         layer_name,
@@ -1149,32 +1217,76 @@ class AscendDSACPImpl(DSAAttentionImpl):
                     actual_seq_lengths_query=local_seq_lengths_query,
                     actual_seq_lengths_key=local_seq_lengths_key,
                     qr_pertoken_scale=qr_pertoken_scale_local,
-                )
+            )
 
             coff = 2 if self.compressor_overlap else 1
-            torch.ops._C_ascend.compressor(
-                hidden_states,
-                self.compressor_wkv.weight,
-                self.compressor_wgate.weight,
-                state_cache.squeeze(-2),
-                self.compressor_ape,
-                self.compressor_norm.weight,
-                compress_sin.view(-1, compress_sin.shape[-1]),
-                compress_cos.view(-1, compress_cos.shape[-1]),
-                state_block_table=compressor_kv_state_metadata.req_metadata.block_table,
-                cu_seqlens=actual_seq_lengths_query,
-                seqused=None,
-                start_pos=req_metadata.start_pos,
-                slot_mapping=compressor_attn_metadata.req_metadata.slot_mapping,
-                paged_kv_cache=compress_kv_cache,
-                rope_head_dim=self.rope_head_dim,
-                cmp_ratio=self.compress_ratio,
-                coff=coff,
-                norm_eps=self.compressor_norm_eps,
-                rotary_mode=2,
-                cache_mode=1,
-                block_size=compress_kv_cache.shape[1],
+            fused_inputs = {
+                "x": hidden_states,
+                "wkv": self.compressor_wkv.weight,
+                "wgate": self.compressor_wgate.weight,
+                "state_cache": state_cache.squeeze(-2),
+                "ape": self.compressor_ape,
+                "norm_weight": self.compressor_norm.weight,
+                "rope_sin": compress_sin.view(-1, compress_sin.shape[-1]),
+                "rope_cos": compress_cos.view(-1, compress_cos.shape[-1]),
+                "slot_mapping": compressor_attn_metadata.req_metadata.slot_mapping,
+                "paged_kv_cache": compress_kv_cache,
+            }
+            scatter_block_size = compress_kv_cache.shape[1]
+            use_fused_compressor = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_COMPRESSOR_SCATTER and self._should_use_fused_compressor(
+                fused_inputs, self.compress_ratio, coff, scatter_block_size
             )
+            if use_fused_compressor:
+                torch.ops._C_ascend.fused_CompressorAndScatterNdUpdateV2(
+                    fused_inputs["x"],
+                    fused_inputs["wkv"],
+                    fused_inputs["wgate"],
+                    fused_inputs["state_cache"],
+                    fused_inputs["ape"],
+                    fused_inputs["norm_weight"],
+                    fused_inputs["rope_sin"],
+                    fused_inputs["rope_cos"],
+                    fused_inputs["slot_mapping"],
+                    fused_inputs["paged_kv_cache"],
+                    state_block_table=compressor_kv_state_metadata.req_metadata.block_table,
+                    cu_seqlens=actual_seq_lengths_query,
+                    seqused=None,
+                    start_pos=req_metadata.start_pos,
+                    rope_head_dim=self.rope_head_dim,
+                    cmp_ratio=self.compress_ratio,
+                    coff=coff,
+                    norm_eps=self.compressor_norm_eps,
+                    rotary_mode=2,
+                    cache_mode=1,
+                    scatter_block_size=scatter_block_size,
+                )
+            else:
+                compressed_kv = torch.ops._C_ascend.compressor(
+                    hidden_states,
+                    self.compressor_wkv.weight,
+                    self.compressor_wgate.weight,
+                    state_cache.squeeze(-2),
+                    self.compressor_ape,
+                    self.compressor_norm.weight,
+                    compress_sin.view(-1, compress_sin.shape[-1]),
+                    compress_cos.view(-1, compress_cos.shape[-1]),
+                    state_block_table=compressor_kv_state_metadata.req_metadata.block_table,
+                    cu_seqlens=actual_seq_lengths_query,
+                    seqused=None,
+                    start_pos=req_metadata.start_pos,
+                    rope_head_dim=self.rope_head_dim,
+                    cmp_ratio=self.compress_ratio,
+                    coff=coff,
+                    norm_eps=self.compressor_norm_eps,
+                    rotary_mode=2,
+                    cache_mode=1,
+                )
+
+                if compressed_kv.numel() == 0:
+                    compressed_kv = None
+                torch.ops._C_ascend.npu_scatter_nd_update_v2(
+                    compress_kv_cache, compressor_attn_metadata.req_metadata.slot_mapping, compressed_kv
+                )
 
         common_attn_kwargs = dict(
             cu_seqlens_q=local_seq_lengths_query,

@@ -253,6 +253,8 @@ __aicore__ inline void CompressorKernelPerf<COMP>::InitTilingData() {
     constInfo.headDim = tilingData_->baseParams.headDim;
     constInfo.hSize = tilingData_->baseParams.hiddenSize;
     constInfo.sSize = tilingData_->baseParams.seqSize;
+    constInfo.expectedRows = tilingData_->baseParams.expectedRows;
+    constInfo.validRows = tilingData_->baseParams.validRows;
     constInfo.ropeHeadDim = tilingData_->baseParams.ropeHeadDim;
     constInfo.normEps = tilingData_->baseParams.normEps;
     constInfo.reciprocalD = tilingData_->baseParams.reciprocalD;

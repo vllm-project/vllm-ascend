@@ -1149,12 +1149,8 @@ std::tuple<at::Tensor> compressor(const at::Tensor &x, const at::Tensor &wkv, co
                                   const at::Tensor &rope_sin, const at::Tensor &rope_cos,
                                   const c10::optional<at::Tensor> &state_block_table,
                                   const c10::optional<at::Tensor> &cu_seqlens, const c10::optional<at::Tensor> &seqused,
-                                  const c10::optional<at::Tensor> &start_pos,
-                                  const c10::optional<at::Tensor> &slot_mapping,
-                                  const c10::optional<at::Tensor> &paged_kv_cache,
-                                  int64_t rope_head_dim, int64_t cmp_ratio,
-                                  int64_t coff, double norm_eps, int64_t rotary_mode, int64_t cache_mode,
-                                  int64_t block_size)
+                                  const c10::optional<at::Tensor> &start_pos, int64_t rope_head_dim, int64_t cmp_ratio,
+                                  int64_t coff, double norm_eps, int64_t rotary_mode, int64_t cache_mode)
 {
     constexpr int CONTINUOUS = 1;
     constexpr int32_t DIM_1 = 1;
@@ -1188,9 +1184,81 @@ std::tuple<at::Tensor> compressor(const at::Tensor &x, const at::Tensor &wkv, co
     int64_t state_cache_stride_dim0 = state_cache.stride(0);
 
     EXEC_NPU_CMD(aclnnCompressor, x, wkv, wgate, state_cache, ape, norm_weight, rope_sin, rope_cos,
-                    state_block_table, cu_seqlens, seqused, start_pos, slot_mapping, paged_kv_cache,
-                    rope_head_dim, cmp_ratio, coff, norm_eps,
-                    rotary_mode, cache_mode, state_cache_stride_dim0, block_size, cmp_kv);
+                 state_block_table, cu_seqlens, seqused, start_pos, rope_head_dim, cmp_ratio, coff, norm_eps,
+                 rotary_mode, cache_mode, state_cache_stride_dim0, cmp_kv);
+
+    return std::tuple<at::Tensor>(cmp_kv);
+}
+
+std::tuple<at::Tensor> fused_CompressorAndScatterNdUpdateV2(
+    const at::Tensor &x, const at::Tensor &wkv, const at::Tensor &wgate, at::Tensor &state_cache,
+    const at::Tensor &ape, const at::Tensor &norm_weight, const at::Tensor &rope_sin, const at::Tensor &rope_cos,
+    const at::Tensor &slot_mapping, at::Tensor &paged_kv_cache, const c10::optional<at::Tensor> &state_block_table,
+    const c10::optional<at::Tensor> &cu_seqlens, const c10::optional<at::Tensor> &seqused,
+    const c10::optional<at::Tensor> &start_pos, int64_t rope_head_dim, int64_t cmp_ratio, int64_t coff,
+    double norm_eps, int64_t rotary_mode, int64_t cache_mode, int64_t scatter_block_size)
+{
+    constexpr int CONTINUOUS = 1;
+    constexpr int32_t DIM_1 = 1;
+    constexpr int32_t DIM_2 = 2;
+    constexpr int32_t DIM_3 = 3;
+    constexpr int32_t DIM_4 = 4;
+    constexpr int32_t VALUE_0 = 0;
+    auto x_dim = x.dim();
+    TORCH_CHECK(x_dim == DIM_2 || x_dim == DIM_3, "x dim num[", x_dim, "] should be 2 or 3");
+
+    TORCH_CHECK(norm_weight.defined(), "Check norm_weight != nullptr failed");
+    auto norm_weight_dim = norm_weight.dim();
+    TORCH_CHECK(norm_weight_dim == DIM_1, "norm_weight dim num[", norm_weight_dim, "] should be 1");
+
+    TORCH_CHECK(rope_sin.defined(), "Check rope_sin != nullptr failed");
+    auto rope_sin_dim = rope_sin.dim();
+    TORCH_CHECK(rope_sin_dim == x_dim, "rope_sin dim num[", rope_sin_dim, "] should be equal to x dim num[", x_dim,
+                "]");
+
+    TORCH_CHECK(cmp_ratio > VALUE_0, "cmp_ratio should be greater than 0");
+    TORCH_CHECK(slot_mapping.defined(), "slot_mapping must be defined");
+    TORCH_CHECK(slot_mapping.dim() == DIM_2 && slot_mapping.size(1) == 2,
+                "slot_mapping must have shape [valid_rows, 2], but got ", slot_mapping.sizes());
+    TORCH_CHECK(slot_mapping.size(0) > 0, "slot_mapping must contain at least one valid row");
+    TORCH_CHECK(slot_mapping.dtype() == at::kInt, "slot_mapping must be INT32, but got ", slot_mapping.dtype());
+    TORCH_CHECK(slot_mapping.device() == x.device(), "slot_mapping and x must be on the same device");
+    TORCH_CHECK(paged_kv_cache.defined() && paged_kv_cache.dim() == DIM_4,
+                "paged_kv_cache must be a rank-4 tensor [num_blocks, block_size, num_kv_heads, head_dim]");
+    TORCH_CHECK(paged_kv_cache.device() == x.device(), "paged_kv_cache and x must be on the same device");
+    TORCH_CHECK(paged_kv_cache.dtype() == x.dtype(), "paged_kv_cache dtype must match x");
+    TORCH_CHECK(scatter_block_size > VALUE_0, "scatter_block_size must be greater than 0");
+    const int64_t expected_rows = x_dim == DIM_3
+        ? x.size(0) * ((x.size(1) + cmp_ratio - 1) / cmp_ratio)
+        : rope_sin.size(0);
+    TORCH_CHECK(slot_mapping.size(0) <= expected_rows,
+                "slot_mapping rows must not exceed compressor output rows: valid_rows=", slot_mapping.size(0),
+                ", expected_rows=", expected_rows);
+    TORCH_CHECK(paged_kv_cache.size(1) == scatter_block_size,
+                "scatter_block_size must match paged_kv_cache dim 1: block_size=", paged_kv_cache.size(1),
+                ", attr=", scatter_block_size);
+    TORCH_CHECK(paged_kv_cache.size(2) == 1,
+                "fused compressor currently requires one compressed KV head, but got ", paged_kv_cache.size(2));
+    TORCH_CHECK(paged_kv_cache.size(3) == norm_weight.size(0),
+                "paged_kv_cache head dim must match norm_weight: cache_dim=", paged_kv_cache.size(3),
+                ", head_dim=", norm_weight.size(0));
+
+    std::tuple<at::Tensor> output = construct_compressor_output_tensor(x, norm_weight, rope_sin, cmp_ratio, coff);
+    at::Tensor cmp_kv = std::get<0>(output);
+
+    auto state_cache_dim = state_cache.dim();
+    TORCH_CHECK(state_cache_dim == DIM_3, "state_cache dim num[", state_cache_dim, "] should be 3");
+    auto contiguous_axes_result = is_contiguous_axes(state_cache);
+    // if (cache_mode == CONTINUOUS) {
+    //     TORCH_CHECK(contiguous_axes_result[0] && contiguous_axes_result[1] && contiguous_axes_result[2],
+    //                 "when cache_mode == ", cache_mode, ", state_cache must be contiguous on all axes");
+    // }
+    int64_t state_cache_stride_dim0 = state_cache.stride(0);
+
+    EXEC_NPU_CMD(aclnnFusedCompressorAndScatterNdUpdateV2, x, wkv, wgate, state_cache, ape, norm_weight, rope_sin,
+                 rope_cos, slot_mapping, paged_kv_cache, state_block_table, cu_seqlens, seqused, start_pos,
+                 rope_head_dim, cmp_ratio, coff, norm_eps, rotary_mode, cache_mode, state_cache_stride_dim0,
+                 scatter_block_size, cmp_kv);
 
     return std::tuple<at::Tensor>(cmp_kv);
 }
@@ -2614,13 +2682,28 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             "Tensor rope_sin, Tensor rope_cos, "
             "Tensor? state_block_table=None, Tensor? cu_seqlens=None, "
             "Tensor? seqused=None, Tensor? start_pos=None, "
-            "Tensor? slot_mapping=None, Tensor(a!)? paged_kv_cache=None, "
             "int rope_head_dim=64, int cmp_ratio=4, int coff=1, "
-            "float norm_eps=1e-6, int rotary_mode=1, int cache_mode=1, "
-            "int block_size=0"
+            "float norm_eps=1e-6, int rotary_mode=1, int cache_mode=1"
         ") -> Tensor"
         );
     ops.impl("compressor", torch::kPrivateUse1, &vllm_ascend::compressor);
+
+    ops.def(
+        "fused_CompressorAndScatterNdUpdateV2("
+            "Tensor x, Tensor wkv, Tensor wgate, "
+            "Tensor(a!) state_cache, Tensor ape, Tensor norm_weight, "
+            "Tensor rope_sin, Tensor rope_cos, "
+            "Tensor slot_mapping, Tensor(a!) paged_kv_cache, "
+            "Tensor? state_block_table=None, Tensor? cu_seqlens=None, "
+            "Tensor? seqused=None, Tensor? start_pos=None, "
+            "int rope_head_dim=64, int cmp_ratio=4, int coff=1, "
+            "float norm_eps=1e-6, int rotary_mode=1, int cache_mode=1, "
+            "int scatter_block_size=0"
+        ") -> Tensor"
+        );
+    ops.impl("fused_CompressorAndScatterNdUpdateV2",
+             torch::kPrivateUse1,
+             &vllm_ascend::fused_CompressorAndScatterNdUpdateV2);
 
     ops.def(
         "npu_quant_lightning_indexer("

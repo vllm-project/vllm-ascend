@@ -62,18 +62,35 @@ void CompressorTiling::ConvertRequiredParams(gert::TilingContext &context, Compr
 
 void CompressorTiling::ConvertOptionalParams(gert::TilingContext &context, CompressorContext &compressorContext)
 {
-    compressorContext.stateBlockTable.desc = context.GetOptionalInputDesc(STATE_BLOCK_TABLE_INPUT_INDEX);
-    compressorContext.stateBlockTable.shape = context.GetOptionalInputShape(STATE_BLOCK_TABLE_INPUT_INDEX);
-    compressorContext.cuSeqlens.desc = context.GetOptionalInputDesc(CU_SEQ_LEN_INPUT_INDEX);
-    compressorContext.cuSeqlens.shape = context.GetOptionalInputShape(CU_SEQ_LEN_INPUT_INDEX);
-    compressorContext.seqUsed.desc = context.GetOptionalInputDesc(SEQ_USED_INPUT_INDEX);
-    compressorContext.seqUsed.shape = context.GetOptionalInputShape(SEQ_USED_INPUT_INDEX);
-    compressorContext.startPos.desc = context.GetOptionalInputDesc(START_POS_INPUT_INDEX);
-    compressorContext.startPos.shape = context.GetOptionalInputShape(START_POS_INPUT_INDEX);
-    compressorContext.slotMapping.desc = context.GetOptionalInputDesc(SLOT_MAPPING_INPUT_INDEX);
-    compressorContext.slotMapping.shape = context.GetOptionalInputShape(SLOT_MAPPING_INPUT_INDEX);
-    compressorContext.pagedKvCache.desc = context.GetOptionalInputDesc(PAGED_KV_CACHE_INPUT_INDEX);
-    compressorContext.pagedKvCache.shape = context.GetOptionalInputShape(PAGED_KV_CACHE_INPUT_INDEX);
+    const bool isFusedOp = compressorContext.opType != nullptr &&
+        std::string(compressorContext.opType) == "FusedCompressorAndScatterNdUpdateV2";
+    if (isFusedOp) {
+        compressorContext.slotMapping.desc = context.GetRequiredInputDesc(FUSED_SLOT_MAPPING_INPUT_INDEX);
+        compressorContext.slotMapping.shape = context.GetRequiredInputShape(FUSED_SLOT_MAPPING_INPUT_INDEX);
+        compressorContext.pagedKvCache.desc = context.GetRequiredInputDesc(FUSED_PAGED_KV_CACHE_INPUT_INDEX);
+        compressorContext.pagedKvCache.shape = context.GetRequiredInputShape(FUSED_PAGED_KV_CACHE_INPUT_INDEX);
+        compressorContext.stateBlockTable.desc = context.GetOptionalInputDesc(FUSED_STATE_BLOCK_TABLE_INPUT_INDEX);
+        compressorContext.stateBlockTable.shape = context.GetOptionalInputShape(FUSED_STATE_BLOCK_TABLE_INPUT_INDEX);
+        compressorContext.cuSeqlens.desc = context.GetOptionalInputDesc(FUSED_CU_SEQ_LEN_INPUT_INDEX);
+        compressorContext.cuSeqlens.shape = context.GetOptionalInputShape(FUSED_CU_SEQ_LEN_INPUT_INDEX);
+        compressorContext.seqUsed.desc = context.GetOptionalInputDesc(FUSED_SEQ_USED_INPUT_INDEX);
+        compressorContext.seqUsed.shape = context.GetOptionalInputShape(FUSED_SEQ_USED_INPUT_INDEX);
+        compressorContext.startPos.desc = context.GetOptionalInputDesc(FUSED_START_POS_INPUT_INDEX);
+        compressorContext.startPos.shape = context.GetOptionalInputShape(FUSED_START_POS_INPUT_INDEX);
+    } else {
+        compressorContext.stateBlockTable.desc = context.GetOptionalInputDesc(STATE_BLOCK_TABLE_INPUT_INDEX);
+        compressorContext.stateBlockTable.shape = context.GetOptionalInputShape(STATE_BLOCK_TABLE_INPUT_INDEX);
+        compressorContext.cuSeqlens.desc = context.GetOptionalInputDesc(CU_SEQ_LEN_INPUT_INDEX);
+        compressorContext.cuSeqlens.shape = context.GetOptionalInputShape(CU_SEQ_LEN_INPUT_INDEX);
+        compressorContext.seqUsed.desc = context.GetOptionalInputDesc(SEQ_USED_INPUT_INDEX);
+        compressorContext.seqUsed.shape = context.GetOptionalInputShape(SEQ_USED_INPUT_INDEX);
+        compressorContext.startPos.desc = context.GetOptionalInputDesc(START_POS_INPUT_INDEX);
+        compressorContext.startPos.shape = context.GetOptionalInputShape(START_POS_INPUT_INDEX);
+        compressorContext.slotMapping.desc = nullptr;
+        compressorContext.slotMapping.shape = nullptr;
+        compressorContext.pagedKvCache.desc = nullptr;
+        compressorContext.pagedKvCache.shape = nullptr;
+    }
 }
 
 ge::graphStatus CompressorTiling::ConvertContext(gert::TilingContext &context, CompressorContext &compressorContext)
@@ -101,7 +118,9 @@ ge::graphStatus CompressorTiling::ConvertContext(gert::TilingContext &context, C
     compressorContext.rotaryMode = attrs->GetAttrPointer<int>(ROTARY_MODE_ATTR_INDEX);
     compressorContext.cacheMode = attrs->GetAttrPointer<int>(CACHE_MODE_ATTR_INDEX);
     compressorContext.stride = attrs->GetAttrPointer<int>(STATE_CACHE_STRIDE_DIM0_ATTR_INDEX);
-    compressorContext.scatterBlockSize = attrs->GetAttrPointer<int>(SCATTER_BLOCK_SIZE_ATTR_INDEX);
+    const bool isFusedOp = compressorContext.opType != nullptr &&
+        std::string(compressorContext.opType) == "FusedCompressorAndScatterNdUpdateV2";
+    compressorContext.scatterBlockSize = isFusedOp ? attrs->GetAttrPointer<int>(SCATTER_BLOCK_SIZE_ATTR_INDEX) : nullptr;
 
     OP_CHECK_IF(context.GetWorkspaceSizes(1) == nullptr,
                OPS_REPORT_VECTOR_INNER_ERR(context.GetNodeName(), "workSpaceSize got from ge is nullptr"),
@@ -157,11 +176,27 @@ ge::graphStatus CompressorTiling::SetBaseInfo()
     baseParams_->reciprocalD = 1.0 / baseParams_->headDim;
     baseParams_->cgSize =
         (baseParams_->seqSize + baseParams_->cmpRatio - 1) / baseParams_->cmpRatio; // number of token after compress
+    const auto cmpKvDimNum = context_->cmpKv.shape->GetStorageShape().GetDimNum();
+    if (cmpKvDimNum == COMPRESSOR_DIM_NUM_3) {
+        baseParams_->expectedRows = context_->cmpKv.shape->GetStorageShape().GetDim(COMPRESSOR_DIM_INDEX_0) *
+            context_->cmpKv.shape->GetStorageShape().GetDim(COMPRESSOR_DIM_INDEX_1);
+    } else if (cmpKvDimNum == COMPRESSOR_DIM_NUM_2) {
+        baseParams_->expectedRows = context_->cmpKv.shape->GetStorageShape().GetDim(COMPRESSOR_DIM_INDEX_0);
+    } else {
+        OP_LOGE(context_->opName, "cmpKv must be rank 2 or 3, but got rank %u", cmpKvDimNum);
+        return ge::GRAPH_FAILED;
+    }
+    baseParams_->validRows = baseParams_->expectedRows;
+    if (context_->slotMapping.shape != nullptr) {
+        baseParams_->validRows = context_->slotMapping.shape->GetStorageShape().GetDim(COMPRESSOR_DIM_INDEX_0);
+    }
     coff = static_cast<uint8_t>(*context_->coff);
     baseParams_->nSize = 2; // 2:每个核处理两个基本块后做全核同步
     baseParams_->stride = static_cast<uint32_t>(*context_->stride);
 
-    OP_LOGI(context_->opName, "[TILING] bSize:%u  tSize:%u cmpRatio:%u coff:%u", baseParams_->batchSize, baseParams_->tokenSize, baseParams_->cmpRatio, coff);
+    OP_LOGI(context_->opName, "[TILING] bSize:%u tSize:%u cmpRatio:%u coff:%u expectedRows:%u validRows:%u",
+            baseParams_->batchSize, baseParams_->tokenSize, baseParams_->cmpRatio, coff,
+            baseParams_->expectedRows, baseParams_->validRows);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -769,6 +804,14 @@ ge::graphStatus CompressorTiling::CheckRequiredInOutExistence() const
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(context_->cmpKv.desc == nullptr, OP_LOGE(context_->opName, "tensor cmpKv is nullptr"),
                 return ge::GRAPH_FAILED);
+    const bool isFusedOp = context_->opType != nullptr &&
+        std::string(context_->opType) == "FusedCompressorAndScatterNdUpdateV2";
+    if (isFusedOp) {
+        OP_CHECK_IF(context_->slotMapping.shape == nullptr || context_->slotMapping.desc == nullptr,
+                    OP_LOGE(context_->opName, "fused op requires slotMapping"), return ge::GRAPH_FAILED);
+        OP_CHECK_IF(context_->pagedKvCache.shape == nullptr || context_->pagedKvCache.desc == nullptr,
+                    OP_LOGE(context_->opName, "fused op requires pagedKvCache"), return ge::GRAPH_FAILED);
+    }
     if (context_->layout == LayoutType::LAYOUT_TH) {
         OP_CHECK_IF(context_->cuSeqlens.desc == nullptr,
         OP_LOGE(context_->opName, "In TH layout, tensor cuSeqlens should not be nullptr"), return ge::GRAPH_FAILED);
@@ -790,6 +833,13 @@ ge::graphStatus CompressorTiling::CheckRequiredAttrExistence() const
 
     OP_CHECK_IF(context_->cmpRatio == nullptr, OP_LOGE(context_->opName, "attr cmpRatio is nullptr"),
                return ge::GRAPH_FAILED);
+    const bool isFusedOp = context_->opType != nullptr &&
+        std::string(context_->opType) == "FusedCompressorAndScatterNdUpdateV2";
+    if (isFusedOp) {
+        OP_CHECK_IF(context_->scatterBlockSize == nullptr || *context_->scatterBlockSize <= 0,
+                    OP_LOGE(context_->opName, "fused op requires a positive scatterBlockSize"),
+                    return ge::GRAPH_FAILED);
+    }
     return ge::GRAPH_SUCCESS;
 }
 
@@ -865,6 +915,30 @@ ge::graphStatus CompressorTiling::CheckShapeConsistency() const
                                                        "blockSize", pageAttentionParams_->blockSize))) {
         return ge::GRAPH_FAILED;
     }
+    const bool isFusedOp = context_->opType != nullptr &&
+        std::string(context_->opType) == "FusedCompressorAndScatterNdUpdateV2";
+    if (isFusedOp) {
+        const auto slotDimNum = context_->slotMapping.shape->GetStorageShape().GetDimNum();
+        OP_CHECK_IF(slotDimNum != COMPRESSOR_DIM_NUM_2 ||
+                        context_->slotMapping.shape->GetStorageShape().GetDim(COMPRESSOR_DIM_INDEX_1) != 2,
+                    OP_LOGE(context_->opName, "slotMapping must have shape [validRows, 2], but got rank %u",
+                            slotDimNum), return ge::GRAPH_FAILED);
+        OP_CHECK_IF(baseParams_->validRows > baseParams_->expectedRows,
+                    OP_LOGE(context_->opName, "validRows %u exceeds expectedRows %u", baseParams_->validRows,
+                            baseParams_->expectedRows), return ge::GRAPH_FAILED);
+        const auto pagedDimNum = context_->pagedKvCache.shape->GetStorageShape().GetDimNum();
+        OP_CHECK_IF(pagedDimNum != COMPRESSOR_DIM_NUM_4 ||
+                        context_->pagedKvCache.shape->GetStorageShape().GetDim(COMPRESSOR_DIM_INDEX_0) !=
+                            pageAttentionParams_->blockNum ||
+                        context_->pagedKvCache.shape->GetStorageShape().GetDim(COMPRESSOR_DIM_INDEX_1) !=
+                            pageAttentionParams_->scatterBlockSize ||
+                        context_->pagedKvCache.shape->GetStorageShape().GetDim(COMPRESSOR_DIM_INDEX_2) !=
+                            1 ||
+                        context_->pagedKvCache.shape->GetStorageShape().GetDim(COMPRESSOR_DIM_INDEX_3) !=
+                            baseParams_->headDim,
+                    OP_LOGE(context_->opName, "pagedKvCache shape must be [blockNum, scatterBlockSize, 1, headDim]"),
+                    return ge::GRAPH_FAILED);
+    }
     return ge::GRAPH_SUCCESS;
 }
 
@@ -935,6 +1009,14 @@ ge::graphStatus CompressorTiling::CheckDtypeConsistency() const
         CheckDtypeConsistencyRope() != ge::GRAPH_SUCCESS ||
         CheckDtypeConsistencyX(context_->cmpKv.desc, CMP_KV_NAME) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
+    }
+    const bool isFusedOp = context_->opType != nullptr &&
+        std::string(context_->opType) == "FusedCompressorAndScatterNdUpdateV2";
+    if (isFusedOp) {
+        OP_CHECK_IF(context_->slotMapping.desc->GetDataType() != ge::DT_INT32,
+                    OP_LOGE(context_->opName, "slotMapping must be INT32"), return ge::GRAPH_FAILED);
+        OP_CHECK_IF(context_->pagedKvCache.desc->GetDataType() != context_->dtype,
+                    OP_LOGE(context_->opName, "pagedKvCache dtype must match x"), return ge::GRAPH_FAILED);
     }
     return ge::GRAPH_SUCCESS;
 }
@@ -1028,6 +1110,10 @@ ge::graphStatus TilingPrepareForCompressor(gert::TilingParseContext *context)
 }
 
 IMPL_OP_OPTILING(Compressor)
+    .Tiling(TilingCompressor)
+    .TilingParse<CompressorCompileInfo>(TilingPrepareForCompressor);
+
+IMPL_OP_OPTILING(FusedCompressorAndScatterNdUpdateV2)
     .Tiling(TilingCompressor)
     .TilingParse<CompressorCompileInfo>(TilingPrepareForCompressor);
 } // namespace optiling

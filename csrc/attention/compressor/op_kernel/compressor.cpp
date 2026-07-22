@@ -20,16 +20,9 @@
 
 using namespace Compressor;
 
-#define INVOKE_COMPRESSOR_GENERAL_OP_IMPL(templateClass, ...)                                                          \
-    do {                                                                                                               \
-        templateClass<COMPType<__VA_ARGS__>> op(&pipe, tilingData);                                                    \
-        op.Init(x, wKv, wGate, stateCache, ape, normWeight, ropeSin, ropeCos, stateBlockTable,  \
-                cuSeqlens, seqUsed, startPos, slotMapping, pagedKvCache, cmpKvOut, workspace);                          \
-        op.Process();                                                                                                  \
-    } while (0)
-
-template<uint8_t XLayout, uint8_t XDType, uint8_t Coff, uint8_t RotaryMode, uint8_t CacheMode, uint8_t TemplateId, uint8_t RopeDType>
-__global__ __aicore__ void compressor(
+template<uint8_t XLayout, uint8_t XDType, uint8_t Coff, uint8_t RotaryMode, uint8_t CacheMode, uint8_t TemplateId,
+         uint8_t RopeDType>
+__aicore__ inline void RunCompressorKernel(
     __gm__ uint8_t *x,
     __gm__ uint8_t *wKv,
     __gm__ uint8_t *wGate,
@@ -45,35 +38,81 @@ __global__ __aicore__ void compressor(
     __gm__ uint8_t *slotMapping,
     __gm__ uint8_t *pagedKvCache,
     __gm__ uint8_t *cmpKvOut,
-    __gm__ uint8_t *stateCacheOut,
     __gm__ uint8_t *workspace,
-    __gm__ uint8_t *tiling) {
+    __gm__ uint8_t *tiling)
+{
     REGISTER_TILING_DEFAULT(optiling::CompressorTilingData);
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
     GET_TILING_DATA_WITH_STRUCT(optiling::CompressorTilingData, tilingDataIn, tiling);
     if constexpr (static_cast<TEMPLATE_ID>(TemplateId) == TEMPLATE_ID::EMPTY_X) {
         return;
     }
+
     const optiling::CompressorTilingData *__restrict tilingData = &tilingDataIn;
     TPipe pipe;
-    constexpr auto xLayout = static_cast<X_LAYOUT>(XLayout);
-    constexpr auto xDtype = static_cast<X_DTYPE>(XDType);
-    constexpr auto ropeDtype = static_cast<ROPE_DTYPE>(RopeDType);
-    constexpr auto coff = static_cast<COFF>(Coff);
-    constexpr auto rotaryMode = static_cast<ROTARY_MODE>(RotaryMode);
-    constexpr auto cacheMode = static_cast<CACHE_MODE>(CacheMode);
-// #if (__CCE_AICORE__ == 220)
-//     if constexpr (static_cast<TEMPLATE_ID>(TemplateId) == TEMPLATE_ID::PERF) {
-//         INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernelPerf, xLayout, xDtype, coff, rotaryMode);
-//     } else {
-//         INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernel, xLayout, xDtype, coff, rotaryMode);
-//     }
-// #else
-//     INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernel, xLayout, xDtype, coff, rotaryMode);
-// #endif
+
     if constexpr (static_cast<TEMPLATE_ID>(TemplateId) == TEMPLATE_ID::PERF) {
-        INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernelPerf, xLayout, xDtype, ropeDtype, coff, rotaryMode);
+        CompressorKernelPerf<COMPType<static_cast<X_LAYOUT>(XLayout), static_cast<X_DTYPE>(XDType),
+            static_cast<ROPE_DTYPE>(RopeDType), static_cast<COFF>(Coff), static_cast<ROTARY_MODE>(RotaryMode)>> op(
+            &pipe, tilingData);
+        op.Init(x, wKv, wGate, stateCache, ape, normWeight, ropeSin, ropeCos, stateBlockTable, cuSeqlens,
+                seqUsed, startPos, slotMapping, pagedKvCache, cmpKvOut, workspace);
+        op.Process();
     } else {
-        INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernel, xLayout, xDtype, ropeDtype, coff, rotaryMode);
+        CompressorKernel<COMPType<static_cast<X_LAYOUT>(XLayout), static_cast<X_DTYPE>(XDType),
+            static_cast<ROPE_DTYPE>(RopeDType), static_cast<COFF>(Coff), static_cast<ROTARY_MODE>(RotaryMode)>> op(
+            &pipe, tilingData);
+        op.Init(x, wKv, wGate, stateCache, ape, normWeight, ropeSin, ropeCos, stateBlockTable, cuSeqlens,
+                seqUsed, startPos, slotMapping, pagedKvCache, cmpKvOut, workspace);
+        op.Process();
     }
+}
+
+template<uint8_t XLayout, uint8_t XDType, uint8_t Coff, uint8_t RotaryMode, uint8_t CacheMode, uint8_t TemplateId, uint8_t RopeDType>
+__global__ __aicore__ void compressor(
+    __gm__ uint8_t *x,
+    __gm__ uint8_t *wKv,
+    __gm__ uint8_t *wGate,
+    __gm__ uint8_t *stateCache,
+    __gm__ uint8_t *ape,
+    __gm__ uint8_t *normWeight,
+    __gm__ uint8_t *ropeSin,
+    __gm__ uint8_t *ropeCos,
+    __gm__ uint8_t *stateBlockTable,
+    __gm__ uint8_t *cuSeqlens,
+    __gm__ uint8_t *seqUsed,
+    __gm__ uint8_t *startPos,
+    __gm__ uint8_t *cmpKvOut,
+    __gm__ uint8_t *stateCacheOut,
+    __gm__ uint8_t *workspace,
+    __gm__ uint8_t *tiling) {
+    RunCompressorKernel<XLayout, XDType, Coff, RotaryMode, CacheMode, TemplateId, RopeDType>(
+        x, wKv, wGate, stateCache, ape, normWeight, ropeSin, ropeCos, stateBlockTable, cuSeqlens, seqUsed,
+        startPos, nullptr, nullptr, cmpKvOut, workspace, tiling);
+}
+
+template<uint8_t XLayout, uint8_t XDType, uint8_t Coff, uint8_t RotaryMode, uint8_t CacheMode, uint8_t TemplateId, uint8_t RopeDType>
+__global__ __aicore__ void fused_compressor_and_scatter_nd_update_v2(
+    __gm__ uint8_t *x,
+    __gm__ uint8_t *wKv,
+    __gm__ uint8_t *wGate,
+    __gm__ uint8_t *stateCache,
+    __gm__ uint8_t *ape,
+    __gm__ uint8_t *normWeight,
+    __gm__ uint8_t *ropeSin,
+    __gm__ uint8_t *ropeCos,
+    __gm__ uint8_t *slotMapping,
+    __gm__ uint8_t *pagedKvCache,
+    __gm__ uint8_t *stateBlockTable,
+    __gm__ uint8_t *cuSeqlens,
+    __gm__ uint8_t *seqUsed,
+    __gm__ uint8_t *startPos,
+    __gm__ uint8_t *cmpKvOut,
+    __gm__ uint8_t *stateCacheOut,
+    __gm__ uint8_t *pagedKvCacheOut,
+    __gm__ uint8_t *workspace,
+    __gm__ uint8_t *tiling) {
+    RunCompressorKernel<XLayout, XDType, Coff, RotaryMode, CacheMode, TemplateId, RopeDType>(
+        x, wKv, wGate, stateCache, ape, normWeight, ropeSin, ropeCos, stateBlockTable, cuSeqlens, seqUsed,
+        startPos, slotMapping, pagedKvCache, cmpKvOut, workspace, tiling);
 }
