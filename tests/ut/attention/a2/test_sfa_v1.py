@@ -24,12 +24,12 @@ from vllm_ascend.attention.sfa_v1 import (
     custom_kv_rmsnorm_rope,
 )
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8LinearMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
-from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import enable_dsa_cp
 
 
