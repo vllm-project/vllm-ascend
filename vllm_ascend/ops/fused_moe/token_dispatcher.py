@@ -651,7 +651,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             "global_input_tokens_local_experts_indices must be provided"
         )
 
-        if scale_type == torch.float8_e8m0fnu:
+        if with_quant and scale_type == torch.float8_e8m0fnu:
             experts_indices_2d_copy = global_input_tokens_local_experts_indices.reshape(
                 global_input_tokens_local_experts_indices.shape[0], 1
             )
