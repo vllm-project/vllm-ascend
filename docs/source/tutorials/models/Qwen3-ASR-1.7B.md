@@ -108,6 +108,7 @@ To verify the source installation:
 ```bash
 pip show vllm-ascend
 ```
+
 :::
 
 ## 5 Online Service Deployment
@@ -142,15 +143,15 @@ Single-node deployment runs both audio prefill and decoding on one NPU, making i
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,4]}' \
       --port 8000
     ```
-    
-::::
-:::::
+
      Key parameters:
 
         - `--tensor-parallel-size 1` uses one NPU. Increase it only after confirming that the hardware and deployment topology support the chosen parallel configuration.
         - `--max-model-len 4096` limits the maximum sequence length. On Atlas 300I DUO, always specify a conservative value explicitly; automatic detection can allocate an oversized attention mask and cause an out-of-memory error.
         - `--gpu-memory-utilization 0.9` sets the fraction of device memory available to the vLLM executor. Lower this value if other workloads share the NPU.
         - `--enforce-eager` disables graph execution. It is used in the Atlas 300I A2 2UP example for compatibility.
+::::
+:::::
 
 When the service starts successfully, the log contains `Application startup complete`. If startup fails, see the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
 
