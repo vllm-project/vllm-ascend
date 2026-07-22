@@ -191,13 +191,24 @@ def test_dflash_spec_decoding(
 @pytest.mark.parametrize("model", DSPARK_MAIN_MODEL)
 @pytest.mark.parametrize("dspark_model", DSPARK_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("enforce_eager", [True])
+@pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize(
+    "compilation_config",
+    [
+        pytest.param(
+            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8]},
+            id="full_decode_only",
+        ),
+        pytest.param({}, id="default_full_and_piecewise"),
+    ],
+)
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 def test_dspark_spec_decoding(
     model: str,
     dspark_model: str,
     max_tokens: int,
     enforce_eager: bool,
+    compilation_config: dict,
 ) -> None:
     prompts = [
         "Hello, my name is",
@@ -219,6 +230,7 @@ def test_dspark_spec_decoding(
             "method": "dspark",
             "num_speculative_tokens": num_speculative_tokens,
         },
+        compilation_config=compilation_config,
     ) as runner:
         runner.model.generate(prompts, sampling_params)
         metrics = runner.model.get_metrics()

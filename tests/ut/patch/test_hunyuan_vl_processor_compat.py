@@ -42,8 +42,8 @@ def test_installer_runs_release_backports_in_order(monkeypatch):
         "_patch_image_token_wrapping",
         patch_wrapping,
     )
-    # On v0.25.0 the image-token wrapping backport runs after the loader patch.
-    monkeypatch.setattr(compat, "vllm_version_is", lambda version: version == "0.25.0")
+    # On v0.25.1 the image-token wrapping backport runs after the loader patch.
+    monkeypatch.setattr(compat, "vllm_version_is", lambda version: version == "0.25.1")
     compat.install_hunyuan_vl_processor_compat()
 
     assert calls == [

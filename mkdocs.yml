@@ -232,7 +232,8 @@ nav:
     - faqs.md
   - User Guide:
     - user_guide/index.md
-    - Support Matrix:
+    - Features and Models:
+        - user_guide/support_matrix/index.md
         - user_guide/support_matrix/supported_models.md
         - user_guide/support_matrix/supported_features.md
         - user_guide/support_matrix/feature_matrix.md

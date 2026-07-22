@@ -112,6 +112,7 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
+    using_paged_attention,
 )
 
 # yapf conflicts with isort for this block
@@ -134,7 +135,7 @@ from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
-from vllm_ascend.spec_decode.dspark_proposer import AscendDsparkProposer
+from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
@@ -204,6 +205,9 @@ torch.npu.config.allow_internal_format = True
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
+
+SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
+
 
 @dataclass
 class GraphCaptureContext:
@@ -448,9 +452,6 @@ class NPUModelRunner(GPUModelRunner):
             if vllm_config.speculative_config
             else None
         )
-
-        if vllm_config.speculative_config and vllm_config.speculative_config.use_dspark():
-            self.use_aux_hidden_state_outputs = True
         # When True, run update_full_graph_params before self.model (ENPU / graph capture order).
         # Internal / non-public toggle: read C getenv ``ENPU_ENABLE`` from enpu code (not in envs.py).
         _enpu = get_c_env("ENPU_ENABLE")
@@ -592,7 +593,7 @@ class NPUModelRunner(GPUModelRunner):
             | AscendStep3p5MTPProposer
             | AscendDraftModelProposer
             | AscendDflashProposer
-            | AscendDsparkProposer
+            | AscendDSparkProposer
             | AscendSuffixDecodingProposer
             | AscendMedusaProposer
             | AscendExtractHiddenStatesProposer
@@ -611,6 +612,9 @@ class NPUModelRunner(GPUModelRunner):
                     self.use_aux_hidden_state_outputs = self.drafter.eagle3_use_aux_hidden_state
                 elif self.speculative_config.method == "extract_hidden_states":
                     assert isinstance(self.drafter, AscendExtractHiddenStatesProposer)
+                    self.use_aux_hidden_state_outputs = True
+                elif self.speculative_config.use_dspark():
+                    assert isinstance(self.drafter, AscendDSparkProposer)
                     self.use_aux_hidden_state_outputs = True
                 self.rejection_sampler = AscendRejectionSampler(self.sampler)
         self.discard_request_indices = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
@@ -631,6 +635,22 @@ class NPUModelRunner(GPUModelRunner):
         if eagle_config is None:
             return True
         return eagle_config.get("use_aux_hidden_state", True)
+
+    def _get_eagle3_aux_layers_from_config(self) -> tuple[int, ...] | None:
+        layer_ids = super()._get_eagle3_aux_layers_from_config()
+        if layer_ids:
+            return layer_ids
+        if self.speculative_config.use_dspark():
+            hf_config = self.speculative_config.draft_model_config.hf_config
+            # deepseek v4 dspark
+            dspark_layer_ids = getattr(hf_config, "dspark_target_layer_ids", None)
+            if dspark_layer_ids:
+                return tuple(i + 1 for i in dspark_layer_ids)
+            # gqa backend dspark
+            dspark_layer_ids = getattr(hf_config, "target_layer_ids", None)
+            if dspark_layer_ids:
+                return tuple(i + 1 for i in dspark_layer_ids)
+        return None
 
     def _use_aclgraph(self) -> bool:
         return (
@@ -1811,7 +1831,7 @@ class NPUModelRunner(GPUModelRunner):
             mtp_hidden_states = getattr(
                 self.get_model(), "get_mtp_target_hidden_states", lambda: None
             )()
-            if mtp_hidden_states is not None:
+            if self.speculative_config.method == "mtp" and mtp_hidden_states is not None:
                 hidden_states = mtp_hidden_states
 
             num_rejected_tokens_gpu = None
@@ -3332,7 +3352,7 @@ class NPUModelRunner(GPUModelRunner):
                 cm.block_table_tensor, cm.slot_mapping = _get_block_table_and_slot_mapping(
                     kv_cache_gid
                 )
-            if self.speculative_config and isinstance(self.drafter, AscendStep3p5MTPProposer):
+            if self.speculative_config and isinstance(self.drafter, (AscendStep3p5MTPProposer, AscendDSparkProposer)):
                 # step3p5 MTP draft layers span multiple KV cache groups; capture
                 # each group's block table / slot mapping so the proposer can
                 # build per-step attention metadata for the active MTP layer.
@@ -3340,7 +3360,7 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_gid, cm.block_table_tensor, cm.slot_mapping)
             if self.speculative_config and spec_decode_common_attn_metadata is None:
                 if isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer | AscendDflashProposer 
-                    | AscendDsparkProposer):
+                    | AscendDSparkProposer):
                     if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
                         spec_decode_common_attn_metadata = cm
                 else:
@@ -3523,10 +3543,19 @@ class NPUModelRunner(GPUModelRunner):
                     self.attn_state = AscendAttentionState.SpecDecoding
                 else:
                     self.attn_state = AscendAttentionState.ChunkedPrefill
+            # The reason why we use a fixed seq_len rather than max_query_len is that
+            # _npu_paged_attention_get_workspace only returns max workspace with specific
+            # seq_lens. We use this seq_len only when capturing graph, and still use max_query_len
+            # in inference. This will be removed once npu_fused_infer_attention_score
+            # outperforms _npu_paged_attention on all cases.
             if profile_seq_lens is not None:
                 seq_lens = profile_seq_lens
             else:
-                seq_lens = max_query_len
+                seq_lens = (
+                    SEQ_LEN_WITH_MAX_PA_WORKSPACE
+                    if is_graph_capturing and using_paged_attention(num_tokens, self.vllm_config)
+                    else max_query_len
+                )  # type: ignore[assignment]
 
             self.optimistic_seq_lens_cpu[:num_reqs] = seq_lens
             self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
@@ -3847,19 +3876,6 @@ class NPUModelRunner(GPUModelRunner):
             load_model_total_time,
         )
 
-    def _get_eagle3_aux_layers_from_config(self) -> tuple[int, ...] | None:
-        # add additional logic for dspark-config
-        if not (self.speculative_config and self.speculative_config.draft_model_config):
-            return None
-        hf_config = self.speculative_config.draft_model_config.hf_config
-        if hasattr(hf_config, 'target_layer_ids'):
-            layer_ids = [
-                i for i in (hf_config.target_layer_ids or [])
-            ]
-            if layer_ids and isinstance(layer_ids, (list, tuple)):
-                return tuple(layer_ids)
-        return super()._get_eagle3_aux_layers_from_config()
-
     def _start_dump_data(self) -> None:
         if self.debugger is None or self._debugger_started:
             return
@@ -3909,7 +3925,7 @@ class NPUModelRunner(GPUModelRunner):
         ):
             assert isinstance(
                 self.drafter,
-                AscendEagleProposer | AscendDflashProposer | AscendDsparkProposer | AscendDraftModelProposer,
+                AscendEagleProposer | AscendDflashProposer | AscendDSparkProposer | AscendDraftModelProposer,
             )
             block_size = (self.kernel_block_sizes[0] if isinstance(
                 self.kernel_block_sizes, list) else self.kernel_block_sizes)
@@ -3971,7 +3987,8 @@ class NPUModelRunner(GPUModelRunner):
         else:
             from vllm.v1.worker.utils import bind_kv_cache
 
-            num_attn_module = 2 if self.model_config.hf_text_config.model_type == "longcat_flash" else 1
+            model_type = self.model_config.hf_text_config.model_type
+            num_attn_module = 2 if model_type in ("longcat_flash", "longcat_flash_ngram") else 1
             bind_kv_cache(
                 kv_caches,
                 self.compilation_config.static_forward_context,
