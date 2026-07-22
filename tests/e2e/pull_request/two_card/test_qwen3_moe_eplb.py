@@ -23,12 +23,6 @@ import pytest
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
-from vllm_ascend.utils import vllm_version_is
-
-pytestmark = pytest.mark.skipif(
-    not vllm_version_is("0.23.0"),
-    reason="broken on main, fix me.",
-)
 
 
 @pytest.mark.asyncio

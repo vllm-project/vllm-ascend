@@ -26,6 +26,7 @@ vLLM Ascend Plugin
 ---
 *Latest News* 🔥
 
+- [2026/07] We released the first release candidate [v0.23.0rc1](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.23.0rc1)! Please follow the [official guide](https://docs.vllm.ai/projects/ascend/en/v0.23.0rc1/) to start using vLLM Ascend Plugin on Ascend.
 - [2026/05] We released the new official version [v0.18.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.18.0)! Please follow the [official guide](https://docs.vllm.ai/projects/ascend/en/v0.18.0/) to start using vLLM Ascend Plugin on Ascend.
 - [2026/02] We released the new official version [v0.13.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.13.0)! Please follow the [official guide](https://docs.vllm.ai/projects/ascend/en/v0.13.0/) to start using vLLM Ascend Plugin on Ascend.
 
@@ -62,7 +63,7 @@ For detailed information on supported models and features, please refer to the [
 - OS: Linux
 - Software:
     - Python >= 3.10, < 3.13
-    - CANN == 9.0.0 (For Ascend HDK version, please refer to the [Release Notes](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html))
+    - CANN == 9.0.1 (For Ascend HDK version, please refer to the [Release Notes](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html))
     - PyTorch == 2.10.0, torch-npu == 2.10.0.post2
     - vLLM (the same version as vllm-ascend)
 
@@ -76,7 +77,7 @@ Please use the following recommended versions to get started quickly:
 
 | Version    | Release type | Doc                                  |
 |------------|--------------|--------------------------------------|
-| v0.22.1rc1 | Latest release candidate | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/latest/installation.html) for more details |
+| v0.23.0rc1 | Latest release candidate | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/v0.23.0rc1/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/v0.23.0rc1/installation.html) for more details |
 | v0.18.0 | Latest stable version | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/v0.18.0/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/v0.18.0/installation.html) for more details |
 
 ## Branch
@@ -90,16 +91,12 @@ Below are the maintained branches:
 
 | Branch           | Status       | Note                                 |
 |------------------|--------------|--------------------------------------|
-| main             | Maintained   | CI commitment for vLLM main branch and vLLM v0.23.0 tag |
-| v0.7.1-dev       | Unmaintained | Outdated, no longer maintained. |
-| v0.7.3-dev       | Unmaintained | Only bug fixes are allowed, and no new release tags anymore. |
-| v0.9.1-dev       | Unmaintained | Only bug fixes are allowed, and no new release tags anymore. |
-| v0.11.0-dev      | Unmaintained | Only bug fixes are allowed, and no new release tags anymore. |
-| releases/v0.13.0 | Maintained   | CI commitment for vLLM 0.13.0 version |
+| main             | Maintained   | CI commitment for vLLM main branch and vLLM v0.25.1 tag |
+| releases/v0.13.0 | Maintained   | Only bug fixes are allowed, and no new release tags anymore. |
 | releases/v0.18.0 | Maintained   | CI commitment for vLLM 0.18.0 version |
-| releases/v0.20.2rc | Maintained | CI commitment for vLLM 0.20.2 version |
-| rfc/feature-name | Maintained   | [Feature branches](https://docs.vllm.ai/projects/ascend/en/latest/community/versioning_policy.html#feature-branches) for collaboration |
-  
+| releases/v0.23.0 | Maintained   | CI commitment for vLLM 0.23.0 version |
+| rfc/<feature-name> | Maintained   | [Feature branches](https://docs.vllm.ai/projects/ascend/en/latest/community/versioning_policy.html#feature-branches) for collaboration |
+
 Please refer to [Versioning policy](https://docs.vllm.ai/projects/ascend/en/latest/community/versioning_policy.html) for more details.
 
 ## Contributing

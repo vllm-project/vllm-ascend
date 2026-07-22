@@ -141,6 +141,10 @@ markdown_extensions:
 extra_css:
   - stylesheets/extra.css
 
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+
 extra:
   # Toggle via DOCS_IS_RELEASE env var (set by .readthedocs.yaml for tag builds).
   is_release: !ENV [DOCS_IS_RELEASE, false]
@@ -153,9 +157,9 @@ extra:
   vllm_ascend_version: v0.22.1rc1
   pip_vllm_ascend_version: 0.22.1rc1
   pip_vllm_version: 0.22.1
-  cann_image_tag: 9.0.0-910b-ubuntu22.04-py3.12
+  cann_image_tag: 9.0.1-910b-ubuntu22.04-py3.12
   main_python_version: ">= 3.10, < 3.13"
-  main_cann_version: "9.0.0"
+  main_cann_version: "9.0.1"
   main_pytorch_torch_npu_version: "2.10.0 / 2.10.0.post2"
   main_triton_ascend_version: "3.2.1"
   social:
@@ -189,6 +193,7 @@ nav:
         - tutorials/models/Qwen3-Next.md
         - tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md
         - tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md
+        - tutorials/models/Qwen3.5-Dense.md
         - tutorials/models/Qwen3.5-397B-A17B.md
         - tutorials/models/Qwen3.6-35B-A3B.md
         - tutorials/models/DeepSeek-V3.1.md
@@ -224,16 +229,14 @@ nav:
         - tutorials/features/dynamic_chunked_pipeline_parallel.md
         - tutorials/features/suffix_speculative_decoding.md
         - tutorials/features/ray.md
-    - Hardware Tutorials:
-        - tutorials/hardwares/index.md
-        - tutorials/hardwares/310p.md
     - faqs.md
   - User Guide:
     - user_guide/index.md
-    - user_guide/support_matrix/index.md
-    - user_guide/support_matrix/supported_models.md
-    - user_guide/support_matrix/supported_features.md
-    - user_guide/support_matrix/feature_matrix.md
+    - Features and Models:
+        - user_guide/support_matrix/index.md
+        - user_guide/support_matrix/supported_models.md
+        - user_guide/support_matrix/supported_features.md
+        - user_guide/support_matrix/feature_matrix.md
     - Configuration:
         - user_guide/configuration/index.md
         - user_guide/configuration/env_vars.md
@@ -251,22 +254,21 @@ nav:
         - user_guide/feature_guide/netloader.md
         - user_guide/feature_guide/rfork.md
         - user_guide/feature_guide/epd_disaggregation.md
-        - user_guide/feature_guide/short_request_first.md
         - user_guide/feature_guide/kv_pool.md
         - user_guide/feature_guide/kv_cache_cpu_offload.md
         - user_guide/feature_guide/recompute_cpu_offload.md
-        - user_guide/feature_guide/external_dp.md
         - user_guide/feature_guide/large_scale_ep.md
         - user_guide/feature_guide/ucm_deployment.md
         - user_guide/feature_guide/Fine_grained_TP.md
         - user_guide/feature_guide/speculative_decoding.md
         - user_guide/feature_guide/context_parallel.md
-        - user_guide/feature_guide/weight_prefetch.md
         - user_guide/feature_guide/sequence_parallelism.md
         - user_guide/feature_guide/batch_invariance.md
         - user_guide/feature_guide/lmcache_ascend_deployment.md
         - user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md
+        - user_guide/feature_guide/short_request_first.md
         - user_guide/feature_guide/flash_attention.md
+        - user_guide/feature_guide/batch_job_aware_scheduler.md
     - Deployment Guide:
         - user_guide/deployment_guide/index.md
         - user_guide/deployment_guide/using_volcano_kthena.md

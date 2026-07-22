@@ -1,9 +1,8 @@
 import torch
 from vllm.config import ParallelConfig, get_current_vllm_config
-from vllm.distributed.parallel_state import GroupCoordinator, get_tp_group, get_world_group, init_model_parallel_group
+from vllm.distributed.parallel_state import GroupCoordinator, get_world_group, init_model_parallel_group
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import flashcomm2_enable
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: GroupCoordinator | None = None
@@ -13,11 +12,6 @@ _MLP_TP: GroupCoordinator | None = None
 _OTP: GroupCoordinator | None = None
 _LMTP: GroupCoordinator | None = None
 _EMBED_TP: GroupCoordinator | None = None
-
-# flashcomm specific groups
-_FLASHCOMM2_OTP: GroupCoordinator | None = None
-_FLASHCOMM2_ODP: GroupCoordinator | None = None
-_FC3_QUANT_X: GroupCoordinator | None = None
 
 _P_TP: GroupCoordinator | None = None
 
@@ -98,12 +92,6 @@ def init_ascend_model_parallel(
             group_ranks, get_world_group().local_rank, backend, group_name="dynamic_eplb"
         )
 
-    if get_ascend_config().multistream_overlap_gate:
-        global _FC3_QUANT_X
-        _FC3_QUANT_X = init_model_parallel_group(
-            group_ranks, get_world_group().local_rank, backend, group_name="fc3_quant_x"
-        )
-
     # Initialize fine-grained TP process groups on Ascend for four components:
     # 1. LM Head: output logits projection (`lmhead_tensor_parallel_size`)
     # 2. O Proj: attention output projection (`oproj_tensor_parallel_size`)
@@ -145,46 +133,6 @@ def init_ascend_model_parallel(
     if mlp_tp_size > 0:
         _MLP_TP = _create_or_get_group(mlp_tp_size, "mlptp")
 
-    # TODO: Extract and unify the logic across different communication group.
-    flashcomm2_otp_group_ranks = []
-    if flashcomm2_enable():
-        flashcomm2_otp_size = get_ascend_config().flashcomm2_oproj_tensor_parallel_size
-        num_fc2_oproj_tensor_parallel_groups: int = global_tp_size // flashcomm2_otp_size
-        global _FLASHCOMM2_OTP
-        global _FLASHCOMM2_ODP
-
-        _FLASHCOMM2_OTP = None
-        _FLASHCOMM2_ODP = get_tp_group()
-
-        if flashcomm2_otp_size > 1:
-            odp_group_ranks: list[list[int]] = [
-                [] for _ in range(flashcomm2_otp_size * global_dp_size * global_pp_size)
-            ]
-            for dp_group_index in range(global_dp_size):
-                for pp_group_index in range(global_pp_size):
-                    dp_pp_serial_index = dp_group_index * global_pp_size + pp_group_index
-                    tp_base_rank = dp_pp_serial_index * global_tp_size
-                    odp_base_index = dp_pp_serial_index * flashcomm2_otp_size
-
-                    for i in range(num_fc2_oproj_tensor_parallel_groups):
-                        ranks = []
-                        for j in range(flashcomm2_otp_size):
-                            tp_local_rank = i + j * num_fc2_oproj_tensor_parallel_groups
-                            assert tp_local_rank < global_tp_size
-                            global_rank = tp_base_rank + tp_local_rank
-                            ranks.append(global_rank)
-
-                            odp_group_index = odp_base_index + j
-                            odp_group_ranks[odp_group_index].append(global_rank)
-                        flashcomm2_otp_group_ranks.append(ranks)
-
-            _FLASHCOMM2_OTP = init_model_parallel_group(
-                flashcomm2_otp_group_ranks, get_world_group().local_rank, backend, group_name="flashcomm2_otp"
-            )
-            _FLASHCOMM2_ODP = init_model_parallel_group(
-                odp_group_ranks, get_world_group().local_rank, backend, group_name="flashcomm2_odp"
-            )
-
 
 def model_parallel_initialized():
     return _MC2 is not None
@@ -215,23 +163,9 @@ def get_embed_tp_group() -> GroupCoordinator:
     return _EMBED_TP
 
 
-def get_flashcomm2_otp_group() -> GroupCoordinator:
-    return _FLASHCOMM2_OTP
-
-
-def get_flashcomm2_odp_group() -> GroupCoordinator:
-    assert _FLASHCOMM2_ODP is not None, "output data parallel group for flashcomm2 is not initialized"
-    return _FLASHCOMM2_ODP
-
-
 def get_p_tp_group() -> GroupCoordinator:
     assert _P_TP is not None, "distributed prefill tensor parallel group is not initialized"
     return _P_TP
-
-
-def get_fc3_quant_x_group() -> GroupCoordinator:
-    assert _FC3_QUANT_X is not None, "fc3 quant x group is not initialized"
-    return _FC3_QUANT_X
 
 
 def get_dynamic_eplb_group() -> GroupCoordinator:
@@ -269,21 +203,6 @@ def destroy_ascend_model_parallel():
     if _P_TP:
         _P_TP.destroy()
     _P_TP = None
-
-    global _FLASHCOMM2_OTP
-    if _FLASHCOMM2_OTP and get_ascend_config().flashcomm2_oproj_tensor_parallel_size != 1:
-        _FLASHCOMM2_OTP.destroy()
-        _FLASHCOMM2_OTP = None
-
-    global _FLASHCOMM2_ODP
-    if _FLASHCOMM2_ODP and get_ascend_config().flashcomm2_oproj_tensor_parallel_size != 1:
-        _FLASHCOMM2_ODP.destroy()
-        _FLASHCOMM2_ODP = None
-
-    global _FC3_QUANT_X
-    if _FC3_QUANT_X:
-        _FC3_QUANT_X.destroy()
-    _FC3_QUANT_X = None
 
     global _DYNAMIC_EPLB
     if _DYNAMIC_EPLB:

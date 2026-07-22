@@ -307,7 +307,6 @@ def test_select_experts(
 
     with (
         patch("vllm_ascend.ops.fused_moe.experts_selector._native_grouped_topk") as mock_native_grouped_topk,
-        patch("vllm_ascend.ops.fused_moe.experts_selector.get_weight_prefetch_method", return_value=MagicMock()),
     ):
         mock_native_grouped_topk.side_effect = lambda x, num_groups, k: torch.randn_like(x)
 
@@ -344,10 +343,7 @@ def test_select_experts(
 @pytest.mark.skip("Probabilistic failure, need zengiant after fix")
 @pytest.mark.parametrize("device", DEVICE)
 def test_select_experts_invalid_scoring_func(device: str):
-    with (
-        patch("vllm_ascend.ops.fused_moe.experts_selector.get_weight_prefetch_method", return_value=MagicMock()),
-        pytest.raises(ValueError, match="Unsupported scoring function: invalid"),
-    ):
+    with pytest.raises(ValueError, match="Unsupported scoring function: invalid"):
         select_experts(
             hidden_states=torch.randn(1, 128, device=device),
             router_logits=torch.randn(1, 8, device=device),

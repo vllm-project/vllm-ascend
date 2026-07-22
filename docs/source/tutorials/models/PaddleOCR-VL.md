@@ -76,15 +76,11 @@ Select an image based on your machine type and start the docker image on your no
 
 After a successful docker run, you can verify the running container service by executing the `docker ps` command.
 
-### 4.2 Source Code Installation
+### 4.2 Source Code Installation {: #42-source-code-installation }
 
 If you don't want to use the docker image as above, you can also build all from source:
 
 - Install `vllm-ascend` from source, refer to [installation](../../installation.md).
-
-!!! note
-
-    If you are using Atlas inference products, you may need to uninstall `triton-ascend` to avoid dependency conflicts.
 
 ## 5 Online Service Deployment
 
@@ -378,4 +374,4 @@ For common environment, installation, and general parameter issues, please refer
 
 - **Q: What should I do if I encounter dependency conflicts during installation on Atlas inference products?**
 
-  A: You may need to uninstall `triton-ascend` to avoid dependency conflicts. See [Section 4.2](#42-source-code-installation) for details.
+  A: You may need to uninstall `triton-ascend` and `triton` to avoid dependency conflicts. See [Section 4.2](#42-source-code-installation) for details.
