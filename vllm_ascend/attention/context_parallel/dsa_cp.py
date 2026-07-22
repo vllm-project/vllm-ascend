@@ -388,6 +388,12 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.num_decode_tokens = num_decode_tokens
         self.num_actual_tokens = common_attn_metadata.num_actual_tokens
         self.seq_lens = common_attn_metadata.seq_lens[:num_reqs]
+        if common_attn_metadata._seq_lens_cpu is not None:
+            self.seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
+        elif common_attn_metadata.seq_lens_cpu is not None:
+            self.seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
+        else:
+            self.seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].cpu()
         self.block_size = kwargs.get("block_size", 128)
 
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
