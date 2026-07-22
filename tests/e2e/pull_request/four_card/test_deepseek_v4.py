@@ -137,3 +137,63 @@ def test_deepseek_v4_w4a8_tp4_index_cache_freq4():
         for output_ids, output_str in outputs:
             assert len(output_str) > 0
             assert len(output_ids) > 0
+
+
+@pytest.mark.e2e_model("gdydems/DeepSeek-V4-Flash-w4a8-mtp")
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="dsa_cp,mtp",
+    parallel="TP,EP",
+    deploy="pd_mix",
+    hardware="A3",
+    quantization="W4A8",
+    graph_mode="full_decode_only",
+)
+@patch.dict(
+    os.environ,
+    {
+        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
+    },
+)
+@wait_until_npu_memory_free()
+def test_deepseek_v4_dsa_cp_mtp3_graph():
+    """Verify DSA-CP with MTP=3 in full graph mode produces non-empty outputs."""
+    example_prompts = [
+        "Hello, my name is",
+        "What is the meaning of life?",
+    ]
+    max_tokens = 5
+
+    with VllmRunner(
+        "gdydems/DeepSeek-V4-Flash-w4a8-mtp",
+        max_model_len=8192,
+        max_num_seqs=16,
+        max_num_batched_tokens=4096,
+        dtype="auto",
+        tensor_parallel_size=4,
+        enable_expert_parallel=True,
+        gpu_memory_utilization=0.9,
+        quantization="ascend",
+        tokenizer_mode="deepseek_v4",
+        block_size=128,
+        compilation_config={
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+        },
+        additional_config={
+            "enable_flashcomm1": True,
+            "enable_dsa_cp": True,
+        },
+        speculative_config={
+            "num_speculative_tokens": 3,
+            "method": "mtp",
+        },
+    ) as vllm_model:
+        outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
+
+        token_ids_list = [output_ids for output_ids, _ in outputs]
+        print(f"\n[test_deepseek_v4_dsa_cp_mtp3_graph] token_ids: {token_ids_list}")
+
+        assert len(outputs) == len(example_prompts)
+        for output_ids, output_str in outputs:
+            assert len(output_str) > 0
+            assert len(output_ids) > 0
