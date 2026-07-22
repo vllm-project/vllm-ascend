@@ -19,6 +19,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     _block_hash_to_bytes,
     get_block_hashes,
 )
+from vllm_ascend.utils import vllm_version_is
 
 _CACHE_MISSING = object()
 _MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
@@ -365,12 +366,15 @@ def _find_longest_cache_hit(
     **kwargs: Any,
 ) -> tuple[list[KVCacheBlock], ...]:
     try:
-        return manager_cls.find_longest_cache_hit(**kwargs)
+        result = manager_cls.find_longest_cache_hit(**kwargs)
     except TypeError as exc:
         if "drop_eagle_block" not in str(exc):
             raise
         kwargs["use_eagle"] = kwargs.pop("drop_eagle_block")
-        return manager_cls.find_longest_cache_hit(**kwargs)
+        result = manager_cls.find_longest_cache_hit(**kwargs)
+    if vllm_version_is("0.25.1"):
+        return result
+    return result[0]
 
 
 def _reachable_block_mask(

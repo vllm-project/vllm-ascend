@@ -52,6 +52,7 @@ from vllm.v1.utils import ConstantList, record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.core.short_request_first_scheduler import ShortRequestFirstSchedulerMixin
+from vllm_ascend.utils import vllm_version_is
 
 
 @dataclass
@@ -1059,7 +1060,10 @@ class RecomputeScheduler(ShortRequestFirstSchedulerMixin, Scheduler):
                 finish_reason = request.get_finished_reason()
                 finished = self._handle_stopped_request(request)
                 if finished:
-                    kv_transfer_params = self._free_request(request)
+                    if vllm_version_is("0.25.1"):
+                        kv_transfer_params = self._free_request(request)
+                    else:
+                        kv_transfer_params, _ = self._free_request(request)
 
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
