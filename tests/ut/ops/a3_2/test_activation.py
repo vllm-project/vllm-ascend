@@ -66,11 +66,9 @@ def test_AscendQuickGELU_forward_oot(mock_gelu, dummy_tensor, default_vllm_confi
     mock_gelu.assert_called_once_with(dummy_tensor)
 
 
-@patch("vllm_ascend.ops.activation.get_weight_prefetch_method", return_value=MagicMock())
 @patch("torch_npu.npu_swiglu", side_effect=lambda x: x + 1)
 def test_SiluAndMul_forward(
     mock_swiglu,
-    mock_get_weight_prefetch_method,
     dummy_tensor,
     default_vllm_config,
 ):
@@ -88,25 +86,15 @@ def test_SiluAndMul_forward(
     assert torch.allclose(out, expected_out)
 
 
-@patch("vllm_ascend.ops.activation.get_weight_prefetch_method")
 @patch("torch_npu.npu_swiglu", side_effect=lambda x: x + 1)
-def test_AscendSiluAndMul_forward_oot_prefetch(
+def test_AscendSiluAndMul_forward_oot(
     mock_swiglu,
-    mock_get_weight_prefetch_method,
     dummy_tensor,
     default_vllm_config,
 ):
-    weight_prefetch_method = MagicMock()
-    weight_prefetch_method.MLP_DOWN = "mlp_down"
-    mock_get_weight_prefetch_method.return_value = weight_prefetch_method
-
     layer = AscendSiluAndMul()
     out = layer.forward_oot(dummy_tensor)
 
-    weight_prefetch_method.maybe_prefetch_mlp_weight_preprocess.assert_called_once_with(
-        weight_prefetch_method.MLP_DOWN, dummy_tensor
-    )
-    weight_prefetch_method.maybe_prefetch_mlp_weight_postprocess.assert_called_once_with(out)
     mock_swiglu.assert_called_once_with(dummy_tensor)
     assert torch.allclose(out, dummy_tensor + 1)
 
@@ -300,18 +288,13 @@ class TestActivationNPUPrecision:
             (torch.bfloat16, 2e-2, 2e-2),
         ],
     )
-    @patch("vllm_ascend.ops.activation.get_weight_prefetch_method")
     def test_ascend_silu_and_mul_matches_cpu_reference_on_npu(
         self,
-        mock_get_weight_prefetch_method,
         dtype,
         atol,
         rtol,
         default_vllm_config,
     ):
-        weight_prefetch_method = MagicMock()
-        weight_prefetch_method.MLP_DOWN = "mlp_down"
-        mock_get_weight_prefetch_method.return_value = weight_prefetch_method
         x_cpu = torch.randn(16, 16, dtype=torch.float32)
         x_npu = x_cpu.to(dtype=dtype, device="npu")
 

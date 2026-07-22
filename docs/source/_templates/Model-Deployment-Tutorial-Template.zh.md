@@ -37,11 +37,11 @@ DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 
 
 **示例1：特性支持列表**  
 
-| 模型名称 | 支持状态 | 备注 | BF16 | 支持的硬件 | W8A8 | 分块预填充 | 自动前缀缓存 | LoRA | 推测解码 | 异步调度 | 张量并行 | 流水线并行 | 专家并行 | 数据并行 | Prefill-Decode分离 | 分段式ACL图执行 | 整图ACL图执行 | 最大模型长度 | MLP权重预取 | 文档 |
-| ------ | ---------- | ------ | ------ | ---------- | ------ | ------------ | -------------- | ------ | ---------- | ---------- | ---------- | ------------ | ---------- | ---------- | ------------------- |----------- | ----------- | ------------- | ------------- | ---------- |
-| DeepSeek V3/3.1 | ✅ | | ✅ | Atlas 800I A2:<br>最低卡数要求为xx | ✅ | ✅ | ✅ | | ✅ | | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 240k | | [DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md) |
-| DeepSeek V3.2 | ✅ | | ✅ | Atlas 800I A2:<br>最低卡数要求为xx | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 160k | ✅ | [DeepSeek-V3.2](../../tutorials/models/DeepSeek-V3.2.md)|
-| Qwen3 | ✅ | | ✅ | Atlas 800I A2:<br>最低卡数要求为xx | ✅ | ✅ | ✅ | | | ✅ | ✅ | | | ✅ | | ✅ | ✅ | 128k | ✅ | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
+| 模型名称 | 支持状态 | 备注 | BF16 | 支持的硬件 | W8A8 | 分块预填充 | 自动前缀缓存 | LoRA | 推测解码 | 异步调度 | 张量并行 | 流水线并行 | 专家并行 | 数据并行 | Prefill-Decode分离 | 分段式ACL图执行 | 整图ACL图执行 | 最大模型长度 | 文档 |
+| ------ | ---------- | ------ | ------ | ---------- | ------ | ------------ | -------------- | ------ | ---------- | ---------- | ---------- | ------------ | ---------- | ---------- | ------------------- | ----------- | ----------- | ------------- | ---------- |
+| DeepSeek V3/3.1 | ✅ |  | ✅ | Atlas 800I A2:<br>最低卡数要求为xx | ✅ | ✅ | ✅ |  | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 240k | [DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md) |
+| DeepSeek V3.2 | ✅ |  | ✅ | Atlas 800I A2:<br>最低卡数要求为xx | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 160k | [DeepSeek-V3.2](../../tutorials/models/DeepSeek-V3.2.md) |
+| Qwen3 | ✅ |  | ✅ | Atlas 800I A2:<br>最低卡数要求为xx | ✅ | ✅ | ✅ |  |  | ✅ | ✅ |  |  | ✅ |  | ✅ | ✅ | 128k | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
 
 >**注意**：此为简化示例，完整表格请参考完整特性矩阵。
 
@@ -77,23 +77,23 @@ DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 
 - 提供具体的安装步骤与命令（参数需解释含义、取值范围、单位等）。
 - 版本号书写规范：优先使用占位符（值统一配置）；若使用固定值且该值与文档验证版本不一致，须加注释“请按实际版本替换”。
 - 提供验证命令及预期状态：指导用户通过执行命令（如 docker ps）检查安装结果，说明成功时的状态码或输出特征。
-- 当涉及多硬件系列（如 A3/A2 系列）时，须采用 MkDocs 的标签页语法`=== "标签名"`进行分标签呈现,标签顺序按新机型优先排列。
-
+- 当涉及多硬件系列（如 A3/A2 系列）时，须使用标签页语法将它们分开展示，并按新机型优先的顺序排列。
+  
 ### 4.1 Docker镜像安装
 
-**示例：**
+**示例：（适用于 v0.24.0rc 及更高版本（MkDocs 语法），如维护 v0.23.0 及更早版本（Sphinx 框架），请参考 [Sphinx 官方文档](https://www.sphinx-doc.org/) 了解更多语法细节。）**
 
 === "A3 series"
 
     ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     docker run ...
     ```
 
 === "A2 series"
 
     ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     docker run ...
     ```
 
@@ -111,7 +111,7 @@ DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 
 - 提供启动命令模板和关键参数说明
 - 提供服务验证方法（如 curl 命令）及预期结果，说明成功特征（如 200 OK）。
 - 在启动命令下方提供常见问题指引，如公共FAQ中已有描述可直接链接呈现。
-- 当涉及多硬件系列（如 A3/A2 系列）时，须采用 MkDocs 的标签页语法`=== "标签名"`进行分标签呈现,标签顺序按新机型优先排列。
+- 当涉及多硬件系列（如 A3/A2 系列）时，须使用标签页语法将它们分开展示，并按新机型优先的顺序排列。
 
 **示例：**
 
@@ -140,7 +140,7 @@ DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 
 - 说明PD分离架构的原理与适用场景。
 - 提供启动流程、关键配置及**部署验证说明**，并注明性能指标。
 - 在启动命令下方提供常见问题指引，如公共FAQ中已有描述可直接链接呈现。
-- 当涉及多硬件系列（如 A3/A2 系列）时，须使用`tab-set`标记语法进行分标签呈现,标签顺序按新机型优先排列。
+- 当涉及多硬件系列（如 A3/A2 系列）时，须使用标签页语法将它们分开展示，并按新机型优先的顺序排列。
 
 **示例：** 略
 
@@ -243,11 +243,11 @@ lm_eval \
 
 **资料写作要求：**
 
-若不涉及特殊调优可直接给出特性叠加表和公共性能调优文档链接供参考。
+若不涉及特殊调优可直接给出特性叠加表和优化与调优链接供参考。
 
 **示例：**
 
-请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)获得调优方法。
+请参考[优化与调优](../../developer_guide/performance_and_debug/optimization_and_tuning.md)获得调优方法。
 请参考[特性指南](../../user_guide/support_matrix/feature_matrix.md)获得详细特性说明。
 
 #### 9.2.2  模型特有优化（可选）
@@ -275,7 +275,6 @@ lm_eval \
 | --------- | --------- | --------- | --------- | --------- |
 | FlashComm_v1 | 大并发、张量并行(TP)场景 | `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` | 将传统Allreduce分解为Reduce-Scatter和All-Gather，减少RMSNorm计算维度 | 阈值保护：仅当实际token数超过阈值时生效，避免小并发场景性能倒退|
 | Matmul-ReduceScatter融合 | 大型分布式环境 | 启用FlashComm_v1后自动开启 | 将矩阵乘法与Reduce-Scatter操作融合，实现流水线并行处理 | 同FlashComm_v1，有阈值保护 |
-| 权重预取 | MLP密集型场景（Dense模型）| `export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1` | 利用向量计算时间，提前将MLP权重加载到L2 Cache | 需配合预取缓冲区大小调整 |
 | 异步调度 | 大规模模型、高并发场景 | `--async-scheduling` | 非阻塞任务调度，提升并发处理能力 | 与FullGraph优化协同使用 |
 
 ## 10 FAQ

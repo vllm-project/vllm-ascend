@@ -43,6 +43,8 @@ jobs:
       is_authorized: ${{ steps.auth.outputs.is_authorized }}
       dispatch_a2: ${{ steps.resolve.outputs.dispatch_a2 }}
       dispatch_a3: ${{ steps.resolve.outputs.dispatch_a3 }}
+      dispatch_a3_560t: ${{ steps.resolve.outputs.dispatch_a3_560t }}
+      dispatch_310p: ${{ steps.resolve.outputs.dispatch_310p }}
       vllm_ascend_ref: ${{ steps.resolve.outputs.vllm_ascend_ref }}
       aop_enabled: ${{ steps.resolve.outputs.aop_enabled }}
       command: ${{ steps.resolve.outputs.command }}
@@ -128,6 +130,7 @@ jobs:
           BRANCH="main"
           TEST_CASES=""
           AOP_ENABLED="false"
+          IS_A3_560T="false"
           NEXT_IS_BRANCH=0
           for WORD in $ALL_ARGS; do
             if [ "$NEXT_IS_BRANCH" = "1" ]; then
@@ -137,6 +140,8 @@ jobs:
               NEXT_IS_BRANCH=1
             elif [ "$WORD" = "--aop_enabled" ]; then
               AOP_ENABLED="true"
+            elif [ "$WORD" = "--a3-560t" ]; then
+              IS_A3_560T="true"
             else
               if [ -z "$TEST_CASES" ]; then
                 TEST_CASES="$WORD"
@@ -165,10 +170,17 @@ jobs:
           echo "vllm_ascend_ref=$PR_SHA" >> "$GITHUB_OUTPUT"
 
           if [ "$TEST_CASES" = "all" ]; then
-            {
-              echo "dispatch_a2=true"
-              echo "dispatch_a3=true"
-            } >> "$GITHUB_OUTPUT"
+            if [ "$IS_A3_560T" = "true" ]; then
+              {
+                echo "dispatch_a3_560t=true"
+              } >> "$GITHUB_OUTPUT"
+            else
+              {
+                echo "dispatch_a2=true"
+                echo "dispatch_a3=true"
+                echo "dispatch_310p=true"
+              } >> "$GITHUB_OUTPUT"
+            fi
             exit 0
           fi
 
@@ -188,6 +200,7 @@ jobs:
           export NIGHTLY_MATRIX
           export WEEKLY_MATRIX
           export TEST_CASES
+          export IS_A3_560T
 
           python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=dispatch
 
@@ -273,6 +286,47 @@ jobs:
           echo "a3_run_id=$A3_RUN_ID" >> "$GITHUB_OUTPUT"
           echo "Dispatched Nightly-A3 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
 
+  dispatch-a3-560t:
+    name: Trigger Nightly-A3-560T
+    needs: [authorize]
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_a3_560t == 'true'
+    runs-on: linux-amd64-cpu-4-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+    outputs:
+      a3_560t_run_id: ${{ steps.dispatch_a3_560t.outputs.a3_560t_run_id }}
+    steps:
+      - name: Install system dependencies
+        run: |
+          sudo mkdir -p -m 755 /etc/apt/keyrings
+          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt-get update -y
+          sudo apt-get install gh -y
+
+      - name: Dispatch nightly-a3-560t workflow
+        id: dispatch_a3_560t
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+          REQUEST_ID='${{ github.run_id }}'
+          gh workflow run schedule_nightly_test_a3_560t.yaml \
+            --repo "$REPO" \
+            --ref main \
+            -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
+            -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
+            -f request_id="$REQUEST_ID" \
+            -f skip_build_image=true \
+            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
+            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}'
+          sleep 8
+          A3_560T_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a3_560t.yaml/runs?per_page=1" \
+            --jq '.workflow_runs[0].id')
+          echo "a3_560t_run_id=$A3_560T_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Dispatched Nightly-A3-560T with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
+
   dispatch-weekly-a2:
     name: Trigger Weekly-A2
     needs: [authorize]
@@ -355,9 +409,49 @@ jobs:
           echo "weekly_a3_run_id=$A3_RUN_ID" >> "$GITHUB_OUTPUT"
           echo "Dispatched Weekly-A3 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
 
+  dispatch-weekly-310p:
+    name: Trigger Weekly-310P
+    needs: [authorize]
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.command == 'weekly' && needs.authorize.outputs.dispatch_310p == 'true'
+    runs-on: linux-amd64-cpu-4-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+    outputs:
+      weekly_310p_run_id: ${{ steps.dispatch_weekly_310p.outputs.weekly_310p_run_id }}
+    steps:
+      - name: Install system dependencies
+        run: |
+          sudo mkdir -p -m 755 /etc/apt/keyrings
+          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt-get update -y
+          sudo apt-get install gh -y
+
+      - name: Dispatch weekly-310p workflow
+        id: dispatch_weekly_310p
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+          REQUEST_ID='${{ github.run_id }}'
+          gh workflow run schedule_weekly_test_310p.yaml \
+            --repo "$REPO" \
+            --ref main \
+            -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
+            -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
+            -f request_id="$REQUEST_ID" \
+            -f skip_build_image=true \
+            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}'
+          sleep 8
+          _310P_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_weekly_test_310p.yaml/runs?per_page=1" \
+            --jq '.workflow_runs[0].id')
+          echo "weekly_310p_run_id=$_310P_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Dispatched Weekly-310P with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
+
   post-links:
     name: Post workflow links
-    needs: [authorize, dispatch-a2, dispatch-a3, dispatch-weekly-a2, dispatch-weekly-a3]
+    needs: [authorize, dispatch-a2, dispatch-a3, dispatch-a3-560t, dispatch-weekly-a2, dispatch-weekly-a3, dispatch-weekly-310p]
     if: always() && needs.authorize.outputs.is_authorized == 'true'
     runs-on: linux-amd64-cpu-2-hk
     steps:
@@ -373,6 +467,10 @@ jobs:
             BODY="$BODY
           - Nightly-A3: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-a3.outputs.a3_run_id }})"
           fi
+          if [[ "${{ needs.dispatch-a3-560t.result }}" == "success" ]]; then
+            BODY="$BODY
+          - Nightly-A3-560T: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-a3-560t.outputs.a3_560t_run_id }})"
+          fi
           if [[ "${{ needs.dispatch-weekly-a2.result }}" == "success" ]]; then
             BODY="$BODY
           - Weekly-A2: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-weekly-a2.outputs.weekly_a2_run_id }})"
@@ -380,6 +478,10 @@ jobs:
           if [[ "${{ needs.dispatch-weekly-a3.result }}" == "success" ]]; then
             BODY="$BODY
           - Weekly-A3: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-weekly-a3.outputs.weekly_a3_run_id }})"
+          fi
+          if [[ "${{ needs.dispatch-weekly-310p.result }}" == "success" ]]; then
+            BODY="$BODY
+          - Weekly-310P: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-weekly-310p.outputs.weekly_310p_run_id }})"
           fi
           {
             echo "body<<EOF"

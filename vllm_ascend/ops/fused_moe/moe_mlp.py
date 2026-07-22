@@ -34,7 +34,6 @@ from vllm_ascend.utils import (
     dispose_tensor,
     enable_custom_op,
     get_ascend_device_type,
-    get_weight_prefetch_method,
 )
 
 ASCEND_DEVICE_TYPE = get_ascend_device_type()
@@ -152,9 +151,6 @@ def quant_apply_mlp(
     bias1, bias2 = None, None
     _output_dtype = w2_scale[0].dtype if isinstance(w2_scale, list) else w2_scale.dtype
 
-    weight_prefetch_method = get_weight_prefetch_method()
-    if weight_prefetch_method:
-        weight_prefetch_method.maybe_prefetch_moe_weight_postprocess(hidden_states)
     is_mc2 = _EXTRA_CTX.moe_comm_type == MoECommType.MC2
     if w1_scale_bias is None and w1_offset is None and is_mc2 and not is_gelu_activation:
         if _custom_gmm_swiglu_enabled(fusion, dynamic_eplb) and not use_mxfp_quant:
@@ -444,28 +440,42 @@ def unquant_apply_mlp(
         group_list=group_list,
     )[0]
 
-    # MoE LoRA: only attempt injection when an adapter wraps this layer and the
-    # comm method provided AllGather routing metadata (expanded_row_idx). Lazy
-    # import keeps the core MLP free of any LoRA dependency on the common path.
+    # MoE LoRA: only attempt injection when an adapter wraps this layer and
+    # the comm method provided routing metadata in lora_context.
+    # Two paths are supported:
+    #   - AllGather: expanded_row_idx + topk_ids from npu_moe_init_routing
+    #   - AlltoAll:  lora_context.exchanged_lora_indices + group_list after all_to_all
     lora_routing = None
     if lora_context is not None:  # LoRA applied
-        if expanded_row_idx is None or topk_ids is None:
+        from vllm_ascend.lora.fused_moe import (
+            _recover_moe_lora_routing_all2all,
+            _recover_moe_lora_routing_allgather,
+            moe_lora_apply_w2,
+            moe_lora_apply_w13,
+        )
+
+        if expanded_row_idx is not None and topk_ids is not None:
+            # AllGather path: use npu_moe_init_routing's expanded_row_idx.
+            lora_routing = _recover_moe_lora_routing_allgather(lora_context, expanded_row_idx, topk_ids)
+        elif getattr(lora_context, "exchanged_lora_indices", None) is not None:
+            # AlltoAll path: tokens already sorted by expert after exchange.
+            # Build per-row (expert_id, lora_id) directly from group_list.
+            lora_routing = _recover_moe_lora_routing_all2all(
+                lora_context,
+                group_list=group_list,
+            )
+        else:
             raise AssertionError(
-                "MoE LoRA requires expanded_row_idx and topk_ids metadata, "
-                "which are only available in AllGather communication mode. "
-                "Please ensure you are running in a supported configuration."
+                "MoE LoRA requires either expanded_row_idx+topk_ids "
+                "(AllGather) or lora_context.exchanged_lora_indices "
+                "(AlltoAll). Neither was provided."
             )
 
-        from vllm_ascend.lora.fused_moe import moe_lora_apply_w2, moe_lora_apply_w13
-
-        # LoRA w13 delta: applied to gate_up_out before activation, with the MLP
-        # input as the lora_a input (mirrors the base gate_up GMM above).
-        lora_routing = moe_lora_apply_w13(
+        moe_lora_apply_w13(
             lora_context,
             gate_up_out=gate_up_out,
             hidden_states=hidden_states,
-            expanded_row_idx=expanded_row_idx,
-            topk_ids=topk_ids,
+            lora_routing=lora_routing,
         )
 
     if activation == MoEActivation.SWIGLUOAI:
