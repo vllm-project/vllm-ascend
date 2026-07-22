@@ -70,6 +70,7 @@ def set_ascend_forward_context(
     has_sinks=False,
     input_ids=None,
     eplb_heat_collection_status: bool = False,
+    token_top_ks: torch.Tensor | None = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -86,6 +87,7 @@ def set_ascend_forward_context(
     }
     with set_forward_context(**forward_context_kwargs):
         forward_context = get_forward_context()
+        _EXTRA_CTX.token_top_ks = token_top_ks
         forward_context.draft_attn_metadatas = draft_attn_metadatas
 
         forward_context.input_ids = input_ids
@@ -286,7 +288,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     device generation, and token count.
 
     1. Non-MoE models return `None`.
-    2. Without expert parallel, fall back to all-gather.
+    2. Spec-K and configurations without expert parallel use all-gather.
     3. On A2 with expert parallel, pick MC2 when tokens fit the MC2 capacity
        and the DP size is large enough; otherwise use all-gather.
     4. On A3 with expert parallel, prefer fused MC2 when enabled and the EP
@@ -311,9 +313,14 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     if not is_moe_model(vllm_config):
         return None
 
+    ascend_config = get_ascend_config()
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     soc_version = get_ascend_device_type()
-    if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
+    if (
+        ascend_config.spec_k_config.enabled
+        or not vllm_config.parallel_config.enable_expert_parallel
+        or get_ep_group().world_size == 1
+    ):
         moe_comm_type = MoECommType.ALLGATHER
     elif soc_version == AscendDeviceType.A2:
         moe_comm_type = _select_a2_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
@@ -321,7 +328,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
         moe_comm_type = _select_a3_moe_comm_method(
             num_tokens,
             mc2_tokens_capacity,
-            get_ascend_config().enable_fused_mc2,
+            ascend_config.enable_fused_mc2,
         )
     elif soc_version == AscendDeviceType.A5:
         moe_comm_type = _select_a5_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
@@ -367,6 +374,7 @@ class _ExtraForwardContextProxy:
         "padded_num_tokens",
         "sinks",
         "eplb_heat_collection_status",
+        "token_top_ks",
     )
 
     def check_extra_attr(self, name: str):

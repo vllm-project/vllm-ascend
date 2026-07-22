@@ -302,10 +302,11 @@ class TestEagleProposerInitialization(TestBase):
         self.vllm_config.speculative_config.method = "eagle3"
         self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 2048
         self.vllm_config.speculative_config.draft_model_config.get_inputs_embeds_size.return_value = 2048
-        self.vllm_config.compilation_config.mode = CompilationMode.NONE
+        self.vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
         self.vllm_config.compilation_config.pass_config = MagicMock()
         self.vllm_config.compilation_config.pass_config.enable_sp = False
-        self.vllm_config.model_config.enforce_eager = True
+        self.vllm_config.model_config.enforce_eager = False
+        self.vllm_config.speculative_config.enforce_eager = True
         init_ascend_config(self.vllm_config)
 
         with set_current_vllm_config(self.vllm_config):
@@ -313,6 +314,9 @@ class TestEagleProposerInitialization(TestBase):
 
             self.assertEqual(proposer.hidden_size, 2048)
             self.assertFalse(proposer.use_cuda_graph)
+            with proposer.maybe_eager_context:
+                self.assertEqual(self.vllm_config.compilation_config.mode, CompilationMode.NONE)
+            self.assertEqual(self.vllm_config.compilation_config.mode, CompilationMode.VLLM_COMPILE)
             expected_max_num_tokens = proposer.max_num_tokens
             self.assertEqual(proposer.hidden_states.shape, (expected_max_num_tokens, 2048))
 
@@ -1191,7 +1195,17 @@ class TestEagleProposerPropose:
         self.proposer.kernel_block_size = 128
         self.proposer.block_size = 128
         self.proposer._runnable = MagicMock()
-        self.proposer._runnable.return_value = [0, 0, 0]
+        padded_draft_token_ids = torch.zeros(4, 3, dtype=torch.int32)
+        return_draft_logits = graphmode == "full"
+        if return_draft_logits:
+            self.ascend_config.spec_k_config.enabled = True
+            padded_draft_token_logits = torch.zeros(4, 3, 5)
+            self.proposer._runnable.return_value = (
+                padded_draft_token_ids,
+                padded_draft_token_logits,
+            )
+        else:
+            self.proposer._runnable.return_value = padded_draft_token_ids
         captured_common_attn_metadata = None
         original_method = self.proposer.attn_update_stack_num_spec_norm
         mock_bd = MagicMock()
@@ -1339,12 +1353,20 @@ class TestEagleProposerPropose:
             patch.object(self.proposer, 'attn_update_stack_num_spec_norm', side_effect=side_effect),
             set_current_vllm_config(self.vllm_config),
         ):
-            self.proposer._propose(target_token_ids, target_positions, target_hidden_states, next_token_ids,
-                                token_indices_to_sample, mock_common_attn_metadata, target_model_batch_desc, mock_sampling_metadata,
-                                mm_embed_inputs, req_scheduled_tokens, long_seq_metadata, num_prefill_reqs, num_decode_reqs,
-                                scheduler_output, num_scheduled_tokens, num_rejected_tokens_gpu,
-                                )
+            draft_output = self.proposer._propose(
+                target_token_ids, target_positions, target_hidden_states, next_token_ids,
+                token_indices_to_sample, mock_common_attn_metadata, target_model_batch_desc, mock_sampling_metadata,
+                mm_embed_inputs, req_scheduled_tokens, long_seq_metadata, num_prefill_reqs, num_decode_reqs,
+                scheduler_output, num_scheduled_tokens, num_rejected_tokens_gpu,
+            )
             self.assert_value_common_attn_metadata(captured_common_attn_metadata, flag_prefill_decode, model_type, graphmode)
+            batch_size = mock_common_attn_metadata.batch_size.return_value
+            if return_draft_logits:
+                draft_token_ids, draft_token_logits = draft_output
+                assert draft_token_ids.shape == (batch_size, 3)
+                assert draft_token_logits.shape == (batch_size, 3, 5)
+            else:
+                assert draft_output.shape == (batch_size, 3)
 
     # give common_attn_metadata value
     def value_mock_common_attn_metadata(self, mock_common_attn_metadata, query_start_loc, query_start_loc_cpu, seq_lens, num_reqs,
@@ -2709,6 +2731,41 @@ class TestRunMergedDraft(TestBase):
         )
         self.assertEqual(draft_token_ids.tolist(), [[151667], [32313]])
 
+    def test_run_merged_draft_returns_logits_for_draft_model_spec_k(self):
+        self.proposer.method = "draft_model"
+        self.proposer.num_speculative_tokens = 1
+        self.proposer.pass_hidden_states_to_model = False
+        self.proposer.model = MockDraftModel(returns_tuple=False, vocab_size=32)
+        self.proposer.input_ids[:2] = torch.tensor([5, 7], dtype=torch.int32)
+
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.enable_reduce_sample = False
+        mock_ascend_config.spec_k_config.enabled = True
+        with (
+            patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
+            patch.object(
+                llm_base_proposer,
+                "get_ascend_config",
+                return_value=mock_ascend_config,
+            ),
+        ):
+            draft_token_ids, draft_token_logits = self.proposer._run_merged_draft(
+                num_input_tokens=2,
+                batch_size=2,
+                token_indices_to_sample=torch.tensor([0, 1], dtype=torch.int64),
+                target_positions=torch.tensor([0, 0], dtype=torch.int64),
+                inputs_embeds=None,
+                multi_steps_attn_metadata=None,
+                num_tokens=2,
+                is_prefill=False,
+            )
+
+        self.assertEqual(draft_token_ids.tolist(), [[5], [7]])
+        self.assertEqual(draft_token_logits.shape, (2, 1, 32))
+        self.assertTrue(
+            torch.equal(draft_token_ids, draft_token_logits.argmax(dim=-1))
+        )
+
     def test_run_merged_draft_mtp_mrope_graph_and_lmhead_tp_preparation(self):
         self.proposer.method = "mtp"
         self.proposer.uses_mrope = True
@@ -2904,7 +2961,9 @@ class TestDraftProposerHelperMethods(TestBase):
             max_query_len=5,
             max_seq_len=5,
             num_reqs=1,
-            block_table_tensor=torch.zeros([1,320], dtype=torch.int32),
+            # FULL-graph unpadding retains padded block-table rows while the
+            # other metadata tensors describe only the active request.
+            block_table_tensor=torch.zeros([3,320], dtype=torch.int32),
             slot_mapping=torch.tensor([128,129,130,131], dtype=torch.int32),
         )
         common_attn_metadata.batch_size = lambda: batch_size
@@ -2929,6 +2988,9 @@ class TestDraftProposerHelperMethods(TestBase):
                 num_rejected_tokens_gpu
             )
         )
+        slot_mapping_cad = mock_slot.call_args.kwargs["cad"]
+        assert slot_mapping_cad.block_table_tensor.shape == (batch_size, 320)
+        assert common_attn_metadata.block_table_tensor.shape == (3, 320)
         assert common_attn_metadata.seq_lens.to("cpu") == common_attn_metadata.seq_lens_cpu
 # fmt: on
 

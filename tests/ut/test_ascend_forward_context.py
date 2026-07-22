@@ -12,7 +12,11 @@ def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=0),
+        lambda: SimpleNamespace(
+            enable_prefill_mc2=False,
+            enable_fused_mc2=0,
+            spec_k_config=SimpleNamespace(enabled=False),
+        ),
     )
 
 
@@ -66,13 +70,21 @@ def _patch_select_moe_comm_method_deps(
     capacity: int = 128,
     ep_world_size: int = 8,
     enable_fused_mc2: int = 0,
+    spec_k_enabled: bool = False,
     is_moe: bool = True,
 ):
     monkeypatch.setattr(afc, "is_moe_model", lambda _: is_moe)
     monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: capacity)
     monkeypatch.setattr(afc, "get_ascend_device_type", lambda: device_type)
     monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=ep_world_size))
-    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2))
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            enable_fused_mc2=enable_fused_mc2,
+            spec_k_config=SimpleNamespace(enabled=spec_k_enabled),
+        ),
+    )
 
 
 def test_set_mc2_tokens_capacity_without_cudagraph_aligns_per_tp_rank():
@@ -99,7 +111,11 @@ def test_set_mc2_tokens_capacity_prefill_mc2_uses_max_num_batched_tokens(monkeyp
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_prefill_mc2=True, enable_fused_mc2=0),
+        lambda: SimpleNamespace(
+            enable_prefill_mc2=True,
+            enable_fused_mc2=0,
+            spec_k_config=SimpleNamespace(enabled=False),
+        ),
     )
     vllm_config = _make_vllm_config(tensor_parallel_size=8, max_num_batched_tokens=513)
 
@@ -137,6 +153,23 @@ def test_select_moe_comm_method_uses_allgather_without_effective_expert_parallel
     )
     vllm_config = _make_vllm_config(enable_expert_parallel=enable_expert_parallel)
 
+    assert afc.select_moe_comm_method(16, vllm_config) == MoECommType.ALLGATHER
+
+
+@pytest.mark.parametrize(
+    "device_type",
+    [afc.AscendDeviceType.A2, afc.AscendDeviceType.A3, afc.AscendDeviceType.A5],
+)
+def test_select_moe_comm_method_uses_allgather_for_spec_k(monkeypatch, device_type):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=device_type,
+        ep_world_size=16,
+        enable_fused_mc2=1,
+        spec_k_enabled=True,
+    )
+
+    vllm_config = _make_vllm_config(world_size=16)
     assert afc.select_moe_comm_method(16, vllm_config) == MoECommType.ALLGATHER
 
 
