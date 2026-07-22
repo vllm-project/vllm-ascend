@@ -39,6 +39,8 @@ from vllm_ascend.utils import (
     olora_tp_enable,
 )
 
+SAS_METADATA_SIZE = 1024
+
 
 def hadamard_transform_ref(
     x: torch.Tensor,
@@ -216,8 +218,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                         hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
                     ).to(torch.bfloat16)
         self.start_pos_prefill = torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
-        self.req_sas_metadata = torch.zeros(1024, dtype=torch.int32, device=self.device)
-        self.req_qli_metadata = torch.zeros(1024, dtype=torch.int32, device=self.device)
+        self.req_sas_metadata = torch.zeros(SAS_METADATA_SIZE, dtype=torch.int32, device=self.device)
+        self.req_qli_metadata = torch.zeros(SAS_METADATA_SIZE, dtype=torch.int32, device=self.device)
         self.cu_seqlens_ori_kv = torch.tensor([], device=self.device)
         self.cu_seqlens_cmp_kv = torch.tensor([], device=self.device)
         self.seqused_q = torch.tensor([], device=self.device)
@@ -247,6 +249,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.spec_local_seq_lens = [
                 torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
                 for _ in range(spec_token_num)
+            ]
+            self.spec_sas_metadata = [
+                torch.zeros(SAS_METADATA_SIZE, dtype=torch.int32, device=self.device) for _ in range(spec_token_num)
             ]
             self.decode_threshold += spec_token_num
             assert self.decode_threshold <= 16, (
@@ -372,6 +377,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         **kwargs,
     ) -> AscendDSAMetadata:
         assert self.compressor_ratio <= 1, "vLLM-Ascend only support SWA-layer for Deepseek-V4 now."
+        # NOTE(Csrayz): num_reqs here is the padded token count from graph dispatch
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
         num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
@@ -386,11 +392,16 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.num_actual_tokens = common_attn_metadata.num_actual_tokens
         self.seq_lens = common_attn_metadata.seq_lens[:num_reqs]
         if common_attn_metadata._seq_lens_cpu is not None:
-            self.seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
+            self.seq_lens_cpu = common_attn_metadata._seq_lens_cpu
         elif common_attn_metadata.seq_lens_cpu is not None:
-            self.seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
+            self.seq_lens_cpu = common_attn_metadata.seq_lens_cpu
         else:
-            self.seq_lens_cpu = self.seq_lens.cpu()
+            self.seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+        num_real_reqs = self.seq_lens_cpu.shape[0]
+        if num_real_reqs < num_reqs:
+            self.seq_lens_cpu = F.pad(self.seq_lens_cpu, (0, num_reqs - num_real_reqs))
+        else:
+            self.seq_lens_cpu = self.seq_lens_cpu[:num_reqs]
         self.block_size = kwargs.get("block_size", 128)
 
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
@@ -466,8 +477,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             local_seq_lens=self.spec_local_seq_lens[draft_index - 1],
             is_noncausal=is_noncausal,
         )
-        local_query_start_loc = local_query_start_loc.clone()
-        local_seq_lens = local_seq_lens.clone()
+
         local_cos = cos.pad_to(num_tokens_pad)[local_start:local_end_with_pad]
         local_sin = sin.pad_to(num_tokens_pad)[local_start:local_end_with_pad]
 
@@ -552,6 +562,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             has_ori_kv=True,
             has_cmp_kv=False,
         )
+        # Cache sas_metadata in per-step buffer for address stability.
+        self.spec_sas_metadata[draft_index - 1][:SAS_METADATA_SIZE].copy_(sas_metadata[:SAS_METADATA_SIZE])
+        sas_metadata = self.spec_sas_metadata[draft_index - 1]
 
         cp_metadata = DSACPMetadata(
             local_query_start_loc=local_query_start_loc,
@@ -982,8 +995,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
             metadata = metadata_op(**kw)
         self.common_ratio_to_sas_metadata[cache_key] = metadata
-        self.req_sas_metadata[:1024] = metadata
-        return self.req_sas_metadata[:1024]
+        self.req_sas_metadata[:SAS_METADATA_SIZE] = metadata
+        return self.req_sas_metadata[:SAS_METADATA_SIZE]
 
     def _build_qli_metadata(self, query_start_loc, seq_lens, seq_lens_q, num_reqs):
         if self.compressor_ratio != 4:
@@ -1016,8 +1029,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 device=str(self.seqused_q.device),
             )
         self.common_ratio_to_sas_metadata[cache_key] = metadata
-        self.req_qli_metadata[:1024] = metadata
-        return self.req_qli_metadata[:1024]
+        self.req_qli_metadata[:SAS_METADATA_SIZE] = metadata
+        return self.req_qli_metadata[:SAS_METADATA_SIZE]
 
     def build_for_graph_capture(
         self,
@@ -1170,6 +1183,19 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             )
         if self.enable_dsa_cp_with_o_proj_tp:
             self._enable_o_proj_tp_full_weight_switch()
+
+    @staticmethod
+    def update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config=None,
+        speculative_config=None,
+        num_dcp_pcp_tokens=None,
+        draft_attn_metadatas=None,
+    ):
+        # DSA-CP does not need to update graph params.
+        pass
 
     @staticmethod
     def _get_tp_weight_switch_method(layer: torch.nn.Module) -> TPWeightSwitchMixin:
