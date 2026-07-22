@@ -254,43 +254,31 @@ jobs:
     runs-on: linux-amd64-cpu-8-hk
     continue-on-error: true
     env:
-      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
-      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - name: Git safe directory config
-        run: git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
-
-      - name: Download coverage package from OBS
+      - name: Download test_selector.py
         run: |
           set -euo pipefail
-          pip install esdk-obs-python --quiet
-          python3 - <<'EOF'
-          import os
-          from obs import ObsClient
+          SCRIPT_REPO="${{ github.event.pull_request.head.repo.full_name }}"
+          SCRIPT_REF="${{ github.event.pull_request.head.sha }}"
+          curl -fsSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.raw" \
+            "https://api.github.com/repos/${SCRIPT_REPO}/contents/.github/workflows/scripts/test_selector.py?ref=${SCRIPT_REF}" \
+            -o test_selector.py
+          test -s test_selector.py
+          echo "Downloaded test_selector.py from ${SCRIPT_REPO}@${SCRIPT_REF}"
 
-          OBS_BUCKET = 'vllm-ascend'
-          OBS_PREFIX = 'ci/precision-test'
-          client = ObsClient(
-              access_key_id=os.environ['OBS_ACCESS_KEY'],
-              secret_access_key=os.environ['OBS_SECRET_KEY'],
-              server='https://obs.cn-north-4.myhuaweicloud.com'
-          )
-
-          obs_path = f'{OBS_PREFIX}/coverage.tar'
-          local_path = 'coverage.tar'
-          resp = client.getObject(OBS_BUCKET, obs_path, downloadPath=local_path)
-          if resp.status < 300:
-              print(f'Downloaded: {obs_path} -> {local_path}')
-          else:
-              raise Exception(f'Failed to download {obs_path}: {resp.errorMessage}')
-          EOF
+      - name: Download coverage package
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/coverage.tar" \
+            -o coverage.tar
+          test -s coverage.tar
+          echo "Downloaded coverage.tar"
+          du -h coverage.tar
 
       - name: Extract coverage and resolve task name
         id: coverage
@@ -321,7 +309,7 @@ jobs:
         working-directory: vllm-ascend
         run: |
           set -euo pipefail
-          python3 ../.github/workflows/scripts/test_selector.py \
+          python3 ../test_selector.py \
             --build-map \
             --coverage-dir "${{ steps.coverage.outputs.TASK_NAME }}" \
             --source-dir ./covstub \
@@ -333,7 +321,7 @@ jobs:
           set -euo pipefail
           PR_SPEC="vllm-project/vllm-ascend#${{ github.event.pull_request.number }}"
           echo "Selecting tests for PR: ${PR_SPEC}"
-          python3 ../.github/workflows/scripts/test_selector.py \
+          python3 ../test_selector.py \
             --github-pr "${PR_SPEC}" \
             --source-dir ./covstub \
             --map-file test_case_map.json
