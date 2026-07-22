@@ -217,9 +217,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
     )
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_world_size")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_rank")
-    def test_init_kv_head_less_than_tp(
-        self, mock_tp_rank, mock_tp_size, mock_dcp_ws, mock_dcp_rank, mock_importlib
-    ):
+    def test_init_kv_head_less_than_tp(self, mock_tp_rank, mock_tp_size, mock_dcp_ws, mock_dcp_rank, mock_importlib):
         mock_tp_rank.return_value = 2
         mock_tp_size.return_value = 8
         mock_dcp_ws.return_value = 1
@@ -243,9 +241,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
     )
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_world_size")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_rank")
-    def test_get_kv_events_empty(
-        self, mock_tp_rank, mock_tp_size, mock_dcp_ws, mock_dcp_rank, mock_importlib
-    ):
+    def test_get_kv_events_empty(self, mock_tp_rank, mock_tp_size, mock_dcp_ws, mock_dcp_rank, mock_importlib):
         mock_tp_rank.return_value = 0
         mock_tp_size.return_value = 1
         mock_dcp_ws.return_value = 1
@@ -297,9 +293,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
     )
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_world_size")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_rank")
-    def test_lookup_all_cached(
-        self, mock_tp_rank, mock_tp_size, mock_dcp_ws, mock_dcp_rank, mock_importlib
-    ):
+    def test_lookup_all_cached(self, mock_tp_rank, mock_tp_size, mock_dcp_ws, mock_dcp_rank, mock_importlib):
         mock_tp_rank.return_value = 0
         mock_tp_size.return_value = 1
         mock_dcp_ws.return_value = 1
@@ -323,9 +317,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
     )
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_world_size")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_rank")
-    def test_lookup_partial(
-        self, mock_tp_rank, mock_tp_size, mock_dcp_ws, mock_dcp_rank, mock_importlib
-    ):
+    def test_lookup_partial(self, mock_tp_rank, mock_tp_size, mock_dcp_ws, mock_dcp_rank, mock_importlib):
         mock_tp_rank.return_value = 0
         mock_tp_size.return_value = 1
         mock_dcp_ws.return_value = 1
@@ -349,9 +341,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
     )
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_world_size")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_rank")
-    def test_lookup_exception(
-        self, mock_tp_rank, mock_tp_size, mock_dcp_ws, mock_dcp_rank, mock_importlib
-    ):
+    def test_lookup_exception(self, mock_tp_rank, mock_tp_size, mock_dcp_ws, mock_dcp_rank, mock_importlib):
         mock_tp_rank.return_value = 0
         mock_tp_size.return_value = 1
         mock_dcp_ws.return_value = 1
@@ -375,9 +365,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
     )
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_world_size")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_rank")
-    def test_consumer_partition_config(
-        self, mock_tp_rank, mock_tp_size, mock_dcp_ws, mock_dcp_rank, mock_importlib
-    ):
+    def test_consumer_partition_config(self, mock_tp_rank, mock_tp_size, mock_dcp_ws, mock_dcp_rank, mock_importlib):
         mock_tp_rank.return_value = 0
         mock_tp_size.return_value = 1
         mock_dcp_ws.return_value = 1

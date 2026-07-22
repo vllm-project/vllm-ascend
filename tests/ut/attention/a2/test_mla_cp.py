@@ -26,9 +26,7 @@ def test_mla_dcp_extends_v1_backend() -> None:
         AscendMlaDCPMetadataBuilder,
         AscendMLAMetadataBuilder,
     )
-    assert AscendMlaDCPMetadataBuilder.decode_metadata_cls is (
-        AscendMLADCPDecodeMetadata
-    )
+    assert AscendMlaDCPMetadataBuilder.decode_metadata_cls is (AscendMLADCPDecodeMetadata)
     base_fields = {field.name for field in fields(AscendMLADecodeMetadata)}
     dcp_fields = {field.name for field in fields(AscendMLADCPDecodeMetadata)}
     assert {"cp_seq_len", "dcp_mtp_attn_mask"}.isdisjoint(base_fields)
@@ -43,9 +41,7 @@ def test_mla_dcp_reorg_decode_query_gathers_fused_query() -> None:
     q_nope = torch.arange(6, dtype=torch.float32).reshape(1, 2, 3)
     q_pe = torch.arange(4, dtype=torch.float32).reshape(1, 2, 2)
 
-    group = SimpleNamespace(
-        all_gather=lambda tensor, dim: torch.cat([tensor, tensor + 100], dim=dim)
-    )
+    group = SimpleNamespace(all_gather=lambda tensor, dim: torch.cat([tensor, tensor + 100], dim=dim))
     impl.dcp_group = group
     gathered_nope, gathered_pe = impl.reorg_decode_q(q_nope, q_pe)
 

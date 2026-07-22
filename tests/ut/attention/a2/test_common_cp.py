@@ -59,9 +59,7 @@ class TestCommonCP(unittest.TestCase):
             ),
         )
 
-    @patch(
-        "vllm_ascend.attention.context_parallel.common_cp.get_dcp_group"
-    )
+    @patch("vllm_ascend.attention.context_parallel.common_cp.get_dcp_group")
     def test_metadata_builder_mixin_reads_dcp_group_once(
         self,
         mock_get_dcp_group,
@@ -82,9 +80,7 @@ class TestCommonCP(unittest.TestCase):
         self.assertEqual(builder.dcp_rank, 2)
         mock_get_dcp_group.assert_called_once_with()
 
-    @patch(
-        "vllm_ascend.attention.context_parallel.common_cp.get_dcp_group"
-    )
+    @patch("vllm_ascend.attention.context_parallel.common_cp.get_dcp_group")
     def test_impl_mixin_reuses_the_initialized_dcp_group(
         self,
         mock_get_dcp_group,

@@ -165,8 +165,8 @@ from vllm_ascend.utils import (
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
 )
-from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.dcp_utils import DCPAsyncSpecDecodeRebuildResult, DCPManager
+from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip

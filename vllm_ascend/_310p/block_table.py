@@ -29,10 +29,7 @@ class BlockTable(AscendBlockTable):
             block_numbers = self.block_table.np.ravel()[block_table_indices]
             virtual_block_offsets = positions % virtual_block_size
             current_rank = self.dcp_rank
-            mask = (
-                virtual_block_offsets // self.cp_kv_cache_interleave_size % self.dcp_world_size
-                == current_rank
-            )
+            mask = virtual_block_offsets // self.cp_kv_cache_interleave_size % self.dcp_world_size == current_rank
             block_offsets = (
                 virtual_block_offsets
                 // (self.dcp_world_size * self.cp_kv_cache_interleave_size)

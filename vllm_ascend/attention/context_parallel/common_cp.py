@@ -46,10 +46,7 @@ class DCPMetadataBuilderMixin:
         common_attn_metadata: Any,
     ) -> Any:
         dcp_metadata = common_attn_metadata.context_parallel_metadata
-        if (
-            dcp_metadata is None
-            or dcp_metadata.num_computed_tokens_of_dcp is None
-        ):
+        if dcp_metadata is None or dcp_metadata.num_computed_tokens_of_dcp is None:
             raise AssertionError("DCP metadata must be populated.")
         return dcp_metadata
 
@@ -96,9 +93,7 @@ class DCPImplMixin:
         self.dcp_group = get_dcp_group()
         self.dcp_size = self.dcp_group.world_size
         self.dcp_rank = self.dcp_group.rank_in_group
-        self.dcp_device_group = (
-            self.dcp_group.device_group if self.dcp_size > 1 else None
-        )
+        self.dcp_device_group = self.dcp_group.device_group if self.dcp_size > 1 else None
 
     def _dcp_all_gather(
         self,

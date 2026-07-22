@@ -592,12 +592,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             aclgraph_runtime_mode = CUDAGraphMode.NONE
 
         # init block table tensor clone is only available after profile run and is only used for graph mode
-        if (
-            self.dcp_size > 1
-            and self.use_cuda_graph
-            and not is_profile
-            and self.block_table_tensor_clone is None
-        ):
+        if self.dcp_size > 1 and self.use_cuda_graph and not is_profile and self.block_table_tensor_clone is None:
             self.block_table_tensor_clone = torch.zeros(
                 (
                     self.runner.max_num_tokens,
@@ -870,9 +865,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.num_reqs = num_reqs_padded
             common_attn_metadata.query_start_loc = self.query_start_loc.gpu[: num_reqs_padded + 1]
             common_attn_metadata.query_start_loc_cpu = self.query_start_loc.cpu[: num_reqs_padded + 1]
-            slicing_length = (
-                num_reqs_padded * self.decode_threshold if self.dcp_size > 1 else num_reqs_padded
-            )
+            slicing_length = num_reqs_padded * self.decode_threshold if self.dcp_size > 1 else num_reqs_padded
             common_attn_metadata.block_table_tensor = self._adjust_tensor(
                 common_attn_metadata.block_table_tensor, slicing_length
             )
@@ -989,9 +982,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     mtp_slot_mapping=dcp_mtp_inputs.slot_mapping,
                 )
 
-        should_update_next_steps = not self.parallel_drafting and (
-            self.dcp_size == 1 or dcp_mtp_inputs is not None
-        )
+        should_update_next_steps = not self.parallel_drafting and (self.dcp_size == 1 or dcp_mtp_inputs is not None)
         if should_update_next_steps:
             # Copy the old attn_metadata and update
             for draft_index in range(1, self.num_speculative_tokens):

@@ -298,8 +298,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
 
-        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-            self._split_decodes_and_prefills(common_attn_metadata)
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = self._split_decodes_and_prefills(
+            common_attn_metadata
         )
 
         block_table = common_attn_metadata.block_table_tensor

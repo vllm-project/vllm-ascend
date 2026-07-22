@@ -224,9 +224,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
     understand this class
     """
 
-    decode_metadata_cls: type[AscendMLADecodeMetadata] = (
-        AscendMLADecodeMetadata
-    )
+    decode_metadata_cls: type[AscendMLADecodeMetadata] = AscendMLADecodeMetadata
 
     def __init__(
         self,

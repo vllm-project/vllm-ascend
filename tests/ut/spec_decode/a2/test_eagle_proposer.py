@@ -4234,7 +4234,6 @@ class TestEagleProposerSetInputsFirstPass:
             assert_attr_equal(attrition, expected_cad, out_cad)
 
 
-
 class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
     """
     Unit tests for DeepSeek Sparse MLA MTP Layer's Top-K Index reuse feature (PR #10510)

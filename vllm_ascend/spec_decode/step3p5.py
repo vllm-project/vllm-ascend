@@ -230,12 +230,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
 
-        if (
-            self.dcp_size > 1
-            and self.use_cuda_graph
-            and not is_profile
-            and self.block_table_tensor_clone is None
-        ):
+        if self.dcp_size > 1 and self.use_cuda_graph and not is_profile and self.block_table_tensor_clone is None:
             self.block_table_tensor_clone = torch.zeros(
                 (
                     self.runner.max_num_tokens + 2 * self.runner.max_num_reqs,
@@ -410,9 +405,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             common_attn_metadata.num_reqs = num_reqs_padded
             common_attn_metadata.query_start_loc = self.runner.query_start_loc.gpu[: num_reqs_padded + 1]
             common_attn_metadata.query_start_loc_cpu = self.runner.query_start_loc.cpu[: num_reqs_padded + 1]
-            slicing_length = (
-                num_reqs_padded * self.decode_threshold if self.dcp_size > 1 else num_reqs_padded
-            )
+            slicing_length = num_reqs_padded * self.decode_threshold if self.dcp_size > 1 else num_reqs_padded
             common_attn_metadata.block_table_tensor = self._adjust_tensor(
                 common_attn_metadata.block_table_tensor, slicing_length
             )
