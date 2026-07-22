@@ -47,6 +47,7 @@
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
+#include "attention/chunk_gated_delta_rule/chunk_gated_delta_rule_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include <c10/core/Device.h>
@@ -2124,6 +2125,17 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                               Tensor? g=None, "
         "                               Tensor? gk=None) -> Tensor");
     ops.impl("npu_recurrent_gated_delta_rule", torch::kPrivateUse1, &vllm_ascend::npu_recurrent_gated_delta_rule);
+
+    ops.def(
+        "npu_chunk_gated_delta_rule(Tensor query, "
+        "                          Tensor key, "
+        "                          Tensor value, "
+        "                          Tensor beta, "
+        "                          Tensor initial_state, "
+        "                          Tensor actual_seq_lengths, "
+        "                          Tensor? g=None, "
+        "                          float scale_value=1.0) -> (Tensor out, Tensor final_state)");
+    ops.impl("npu_chunk_gated_delta_rule", torch::kPrivateUse1, &vllm_ascend::npu_chunk_gated_delta_rule);
 
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
     // Direct kernel custom ops
