@@ -401,7 +401,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     def _index_qk_norm(self, idx_q: torch.Tensor, idx_k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         idx_q_shape = idx_q.shape
         idx_k_shape = idx_k.shape
-        idx_q = idx_q.reshape(-1, self.index_q_size)
+        idx_q = idx_q.reshape(-1, self.idx_head_dim)
         idx_k = idx_k.reshape(-1, self.idx_head_dim)
         idx_q = self.index_q_norm(idx_q).reshape(idx_q_shape)
         idx_k = self.index_k_norm(idx_k).reshape(idx_k_shape)
@@ -801,7 +801,14 @@ class MiniMaxM3DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-@support_torch_compile
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": 0,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+    },
+)
 class MiniMaxM3Model(nn.Module, EagleModelMixin):
     fall_back_to_pt_during_load = False
 
@@ -1112,9 +1119,9 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEa
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
-            self.logits_processor = LogitsProcessor(config.vocab_size)
         else:
             self.lm_head = PPMissingLayer()
+        self.logits_processor = LogitsProcessor(config.vocab_size)
 
         self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
 
