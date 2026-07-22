@@ -292,6 +292,8 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
                 targets=self.target_scheme_map.keys(),
                 fused_mapping=self.packed_modules_mapping,
             )
+            if matched_target is None:
+                return None
             scheme_dict = self.target_scheme_map[matched_target]
             if scheme_dict.get("format") is None:
                 scheme_dict["format"] = self.quant_format
