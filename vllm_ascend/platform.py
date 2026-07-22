@@ -633,7 +633,6 @@ class NPUPlatform(Platform):
                     "PD-disaggregated mode (kv_role='kv_producer'/'kv_consumer')."
                 )
 
-
         short_request_first_config = scheduler_extension_config.short_request_first_config
         enable_short_request_first = short_request_first_config.enabled
         short_request_first_supported_policy = vllm_config.scheduler_config.policy == "fcfs"
