@@ -149,7 +149,7 @@ Run the following script to execute online inference.
     ```
 === "A3 series"
 
-Run the following script to execute online inference.
+    Run the following script to execute online inference.
 
     ```shell
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -181,7 +181,7 @@ Run the following script to execute online inference.
     --additional-config '{"enable_dsa_cp": true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true,"enable_balance_scheduling": true,"multistream_overlap_shared_expert":true}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 
-```
+    ```
 
 **Notice:**
 The parameters are explained as follows:
