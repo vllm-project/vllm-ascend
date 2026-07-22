@@ -294,12 +294,10 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         assert topk_weights is not None
         topk_weights = topk_weights.to(self.in_dtype)
 
-        act_name = getattr(activation, "value", activation)
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         fused_scale_flag = (
             _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2
             and get_ascend_config().enable_fused_mc2 == 1
-            and act_name != "swigluoai_uninterleave"
         )
         if self.dynamic_eplb:
             w1 = layer.w13_weight_list
