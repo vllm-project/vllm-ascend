@@ -184,7 +184,7 @@ class RecomputeScheduler(Scheduler):
 
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
         # all prefill compute unless saturated.
-        defer_prefills = (throttle_prefills and not self.prefill_capacity_bound) and any(
+        defer_prefills = (throttle_prefills and not self.prefill_capacity_bound) and any(  # type: ignore
             not r.is_prefill_chunk for r in self.running
         )
 
