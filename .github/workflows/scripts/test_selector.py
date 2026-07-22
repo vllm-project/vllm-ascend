@@ -1,10 +1,10 @@
 """
-Test Selector - 基于已有覆盖率数据的精准测试选择器（支持行、函数、文件粒度）
+Test Selector - Precision test selector based on coverage data (line, function, file granularity)
 
-工作流程：
-1. 从现有 coverage SQLite 数据构建"用例 → 覆盖代码行"映射
-2. 解析代码变更（支持 GitHub PR 或本地文件哈希比对）
-3. 选择受影响的测试用例（按行、函数、文件粒度匹配）
+Workflow:
+1. Build 'test case -> covered lines' mapping from coverage SQLite data
+2. Parse code changes (supports GitHub PR or local file hash comparison)
+3. Select affected test cases (by line, function, file granularity)
 """
 
 import sqlite3
@@ -23,36 +23,36 @@ from collections import defaultdict
 from typing import Set, Dict, List, Tuple, Optional
 import argparse
 
-# ==================== 配置参数 ====================
-# 仓库名称：用于过滤和路径标准化
+# ==================== Configuration ====================
+# Repository name: used for filtering and path normalization
 REPO_NAME = 'vllm_ascend'
 
-# 覆盖率密度阈值：变更行被覆盖的比例达到此值才推荐该测试
-# 范围：0.0 ~ 1.0，值越大筛选越严格
-# 例如：0.05 表示变更行中至少 5% 被该测试覆盖才推荐
-# 建议：从 0.05 开始调，如果推荐太多则调高到 0.10、0.15、0.20...
+# Coverage density threshold: proportion of changed lines covered
+# Range: 0.0 ~ 1.0, higher value = stricter filtering
+# Example: 0.05 means at least 5% of changed lines must be covered
+# Recommendation: start at 0.05, increase to 0.10/0.15/0.20 if too many results
 COVERAGE_DENSITY_THRESHOLD = 0.0
 
-# 最少受影响的行数阈值
+# Minimum affected lines threshold
 MIN_AFFECTED_LINES = 1
-# ==================== 配置参数 ====================
+# ==================== Configuration ====================
 
 
 class CoverageSelector:
-    """基于覆盖率数据的测试选择器"""
+    """Coverage-based test selector"""
     
     def __init__(self, coverage_data_dir: str = None, source_dir: str = None):
         """
         Args:
-            coverage_data_dir: 覆盖率数据目录（仅构建 map 时需要）
-            source_dir: 源码目录（仅函数级匹配时需要）
+            coverage_data_dir: Coverage data directory (only needed for building map)
+            source_dir: Source code directory (only needed for function-level matching)
         """
         self.coverage_data_dir = Path(coverage_data_dir) if coverage_data_dir else None
         self.source_dir = Path(source_dir) if source_dir else None
         self.test_case_map = {}  # test_case_name -> {files: {filepath: {lines}}}
         
     def scan_test_cases(self) -> List[str]:
-        """扫描所有测试用例目录"""
+        """Scan all test case directories"""
         test_cases = []
         for item in self.coverage_data_dir.iterdir():
             if item.is_dir() and item.name.startswith('tests__') or item.name == 'cpu-ut':
@@ -64,22 +64,22 @@ class CoverageSelector:
     @staticmethod
     def normalize_test_name(test_name: str) -> str:
         """
-        将测试用例目录名转换为标准脚本名称格式：
+        Convert test case directory name to standard script name format:
         - tests__e2e__... -> tests/e2e/...
         - tests__e2e__...--test_foo -> tests/e2e/...::test_foo
-        - cpu-ut -> cpu-ut (保持不变)
+        - cpu-ut -> cpu-ut (unchanged)
         """
         if test_name == 'cpu-ut':
             return test_name
-        # 先处理 -- 转为 ::
+        # First convert -- to ::
         result = test_name.replace('--', '::')
-        # 再处理 __ 转为 /
+        # Then convert __ to /
         result = result.replace('__', '/')
         return result
     
     def get_covered_lines_from_file(self, cov_file: str, filename: str) -> Set[int]:
         """
-        从单个 coverage SQLite 文件获取某文件被覆盖的行号
+        Get covered line numbers for a file from a single coverage SQLite file
         """
         lines = set()
         try:
@@ -114,7 +114,7 @@ class CoverageSelector:
         return lines
     
     def get_covered_files_from_file(self, cov_file: str) -> Set[str]:
-        """从单个 coverage 文件获取所有被覆盖的文件"""
+        """Get all covered files from a single coverage file"""
         files = set()
         try:
             conn = sqlite3.connect(cov_file)
@@ -130,13 +130,13 @@ class CoverageSelector:
         return files
     
     def build_test_case_map(self) -> Dict:
-        """构建测试用例 → 覆盖文件的映射（包含行号）"""
-        print("正在扫描测试用例...")
+        """Build test case -> covered files mapping (with line numbers)"""
+        print("Scanning test cases...")
         test_cases = self.scan_test_cases()
-        print(f"  找到 {len(test_cases)} 个测试用例")
+        print(f"  Found {len(test_cases)} test cases")
         
         for i, test_case in enumerate(test_cases):
-            print(f"  [{i+1}/{len(test_cases)}] 处理 {test_case}...")
+            print(f"  [{i+1}/{len(test_cases)}] Processing {test_case}...")
             covdata_dir = self.coverage_data_dir / test_case / 'covdata'
             
             file_lines_map = defaultdict(set)  # filepath -> set of lines
@@ -156,12 +156,12 @@ class CoverageSelector:
                 "line_count": sum(len(v) for v in file_lines_map.values())
             }
             
-            print(f"    -> {len(file_lines_map)} 个文件, {sum(len(v) for v in file_lines_map.values())} 行")
+            print(f"    -> {len(file_lines_map)} files, {sum(len(v) for v in file_lines_map.values())} lines")
         
         return self.test_case_map
     
     def save_map(self, output_path: str = "test_case_map.json"):
-        """保存测试用例映射到文件"""
+        """Save test case mapping to file"""
         serializable_map = {}
         for test_case, data in self.test_case_map.items():
             serializable_map[test_case] = {
@@ -172,10 +172,10 @@ class CoverageSelector:
         
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(serializable_map, f, indent=2, ensure_ascii=False)
-        print(f"\n测试用例映射已保存到: {output_path}")
+        print(f"\nTest case mapping saved to: {output_path}")
     
     def load_map(self, input_path: str = "test_case_map.json"):
-        """从文件加载测试用例映射"""
+        """Load test case mapping from file"""
         with open(input_path, 'r', encoding='utf-8') as f:
             serializable_map = json.load(f)
         
@@ -186,19 +186,19 @@ class CoverageSelector:
                 "file_count": data["file_count"],
                 "line_count": data["line_count"]
             }
-        print(f"已从 {input_path} 加载 {len(self.test_case_map)} 个测试用例映射")
+        print(f"Loaded {len(self.test_case_map)} test case mappings from {input_path}")
         return self.test_case_map
 
 
 class CodeChangeDetector:
-    """代码变更检测器"""
+    """Code change detector"""
     
     def __init__(self, source_dir: str):
         self.source_dir = Path(source_dir)
         self.file_hashes = {}
     
     def compute_file_hash(self, filepath: str) -> str:
-        """计算文件的 MD5 哈希"""
+        """Calculate MD5 hash of file"""
         hasher = hashlib.md5()
         try:
             with open(filepath, 'rb') as f:
@@ -334,7 +334,7 @@ class CodeChangeDetector:
                 diff_content = f.read()
             return self.parse_git_diff(diff_content)
         except Exception as e:
-            print(f"Warning: 读取 diff 文件失败: {e}")
+            print(f"Warning: Failed to read diff file: {e}")
             return {}
 
 
@@ -356,7 +356,7 @@ class FunctionParser:
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     function_ranges[node.name].append((node.lineno, node.end_lineno or node.lineno))
         except Exception as e:
-            print(f"  Warning: 解析函数定义失败 {filepath}: {e}")
+            print(f"  Warning: Failed to parse function definition {filepath}: {e}")
         
         return function_ranges
     
@@ -636,7 +636,7 @@ class TestSelector:
                 return selected, 'line+function'
         
         # ===== 第三阶段：文件级匹配（仅当前两级都为空时） =====
-            print("  行级匹配为空，尝试函数级匹配...")
+            print("  Line-level matching empty, trying function-level matching...")
             expand_reason = 'function'
             
             # 收集所有变更行所属的函数
@@ -753,7 +753,7 @@ class TestSelector:
         
         # ===== 第四阶段：文件级匹配 =====
         if not selected and enable_file_match:
-            print("  函数级匹配为空，尝试文件级匹配...")
+            print("  Function-level matching empty, trying file-level matching...")
             expand_reason = 'file'
             
             # 文件级匹配：任何覆盖了变更文件的测试都被选中
@@ -789,36 +789,36 @@ class TestSelector:
         total_changed_lines = sum(len(v) for v in changed_files.values())
         
         print("\n" + "=" * 70)
-        print(f"代码变更: {len(changed_files)} 个文件, {total_changed_lines} 行")
+        print(f"Code changes: {len(changed_files)} files, {total_changed_lines} lines")
         
         # 显示扩展原因
-        gran_names = {'line': '行级匹配', 'function': '函数级匹配', 'file': '文件级匹配', 'line+function': '行级+函数级匹配'}
-        gran_detail_titles = {'line': '详细影响（行级匹配）', 'function': '详细影响（函数级匹配）', 'file': '详细影响（文件级匹配）', 'line+function': '详细影响（行级+函数级匹配）'}
+        gran_names = {'line': 'Line match', 'function': 'Function match', 'file': 'File match', 'line+function': 'Line+Function match'}
+        gran_detail_titles = {'line': 'Details (Line match)', 'function': 'Details (Function match)', 'file': 'Details (File match)', 'line+function': 'Details (Line+Function match)'}
         if expand_reason and expand_reason in gran_names:
-            print(f"选择测试: {len(selected)} 个用例 ({gran_names[expand_reason]})")
+            print(f"Selected: {len(selected)} test cases ({gran_names[expand_reason]})")
         else:
-            print(f"选择测试: {len(selected)} 个用例 (最少影响 {min_affected_lines} 行)")
+            print(f"Selected: {len(selected)} test cases (min affected: {min_affected_lines} lines)")
         print("=" * 70)
         
         if not selected:
-            print("\n没有测试用例覆盖变更的代码行！")
-            print(f"变更详情: {self._format_changed_files(changed_files)}")
+            print("\nNo test cases cover the changed code lines!")
+            print(f"Change details: {self._format_changed_files(changed_files)}")
             return
         
-        print(f"\n{'排名':<4} {'测试用例':<50} {'影响行数'}")
+        print(f"\n{'#':<4} {'Test Case':<50} {'Affected Lines'}")
         print("-" * 70)
         
         for i, (test_case, affected_detail, total_lines) in enumerate(selected, 1):
-            # 构建覆盖行号显示
+            # Build coverage line display
             line_parts = []
             for filepath, lines in sorted(affected_detail.items()):
                 line_parts.append(self._format_line_range(sorted(lines)))
             line_display = f" ({', '.join(line_parts)})" if line_parts else ""
             print(f"{i:<4} {test_case:<50} {total_lines}{line_display}")
         
-        print(f"\n{gran_detail_titles.get(expand_reason, '详细影响')}:")
+        print(f"\n{gran_detail_titles.get(expand_reason, 'Details')}:")
         for test_case, affected_detail, total_lines in selected[:10]:
-            print(f"\n  {test_case} ({total_lines} 行):")
+            print(f"\n  {test_case} ({total_lines} lines):")
             for filepath, lines in sorted(changed_files.items()):
                 line_str = self._format_line_range(sorted(lines))
                 print(f"    - {filepath}: {line_str}")
@@ -862,48 +862,48 @@ class TestSelector:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='基于覆盖率数据的精准测试选择器（行、函数、文件粒度）')
+    parser = argparse.ArgumentParser(description='Coverage-based precision test selector (line, function, file granularity)')
     parser.add_argument('--github-pr', '-pr',
-                        help='GitHub PR，格式: owner/repo#pr_number')
+                        help='GitHub PR, format: owner/repo#pr_number')
     parser.add_argument('--source-dir', '-s',
                         default='covstub',
-                        help='源码目录 (默认: covstub)')
+                        help='Source code directory (default: covstub)')
     parser.add_argument('--map-file', '-m',
                         default='test_case_map.json',
-                        help='测试用例映射文件 (默认: test_case_map.json)')
+                        help='Test case map file (default: test_case_map.json)')
     parser.add_argument('--coverage-dir', '-c',
                         default='coverage',
-                        help='覆盖率数据目录 (默认: ./coverage)')
+                        help='Coverage data directory (default: ./coverage)')
     parser.add_argument('--build-map', '-b',
                         action='store_true',
-                        help='重新构建测试用例映射')
+                        help='Rebuild test case mapping')
     parser.add_argument('--min-affected', '-a',
                         type=int, default=1,
-                        help='最少受影响的行数阈值 (默认: 1)')
+                        help='Minimum affected lines threshold (default: 1)')
     parser.add_argument('--dedup',
                         action='store_true',
-                        help='启用去重（相同覆盖行的测试只保留一个，默认关闭）')
+                        help='Enable deduplication (keep only one test for same covered lines, default off)')
     parser.add_argument('--enable-line-match',
                         action='store_true', default=False,
-                        help='启用行级匹配（默认关闭）')
+                        help='Enable line-level matching (default off)')
     parser.add_argument('--disable-line-match',
                         action='store_true',
-                        help='禁用行级匹配')
+                        help='Disable line-level matching')
     parser.add_argument('--enable-function-match',
                         action='store_true', default=True,
-                        help='启用函数级匹配（默认开启）')
+                        help='Enable function-level matching (default on)')
     parser.add_argument('--disable-function-match',
                         action='store_true',
-                        help='禁用函数级匹配')
+                        help='Disable function-level matching')
     parser.add_argument('--enable-file-match',
                         action='store_true', default=True,
-                        help='启用文件级匹配（默认开启）')
+                        help='Enable file-level matching (default on)')
     parser.add_argument('--disable-file-match',
                         action='store_true',
-                        help='禁用文件级匹配')
+                        help='Disable file-level matching')
     parser.add_argument('--skip-imports',
                         action='store_true',
-                        help='跳过 import 语句行（仅在函数级匹配时生效，默认关闭）')
+                        help='Skip import statement lines (only effective for function-level matching, default off)')
     
     args = parser.parse_args()
     
@@ -912,24 +912,24 @@ def main():
     args.enable_function_match = not args.disable_function_match
     args.enable_file_match = not args.disable_file_match
     
-    # 1. 构建或加载测试用例映射
+    # 1. Build or load test case mapping
     selector = CoverageSelector(args.coverage_dir, args.source_dir)
     
     if args.build_map or not Path(args.map_file).exists():
-        print("\n=== 构建测试用例映射 ===")
+        print("\n=== Building Test Case Mapping ===")
         selector.build_test_case_map()
         selector.save_map(args.map_file)
     else:
-        print("\n=== 加载测试用例映射 ===")
+        print("\n=== Loading Test Case Mapping ===")
         selector.load_map(args.map_file)
     
-    # 如果只需要生成 map 文件，则直接退出
+    # If only need to generate map file, exit directly
     if args.build_map and not args.github_pr:
-        print("\n=== 仅生成 map 文件，已完成 ===")
+        print("\n=== Map file generated, done ===")
         return
     
-    # 2. 解析代码变更
-    print("\n=== 解析代码变更 ===")
+    # 2. Parse code changes
+    print("\n=== Parsing Code Changes ===")
     change_detector = CodeChangeDetector(args.source_dir)
     
     if args.github_pr:
@@ -959,10 +959,10 @@ def main():
                 pass
         
         if not repo or not pr_num:
-            print("Error: 无法解析 PR 信息，请使用 owner/repo#pr_number 格式")
+            print("Error: Cannot parse PR info, please use owner/repo#pr_number format")
             exit(1)
         
-        print(f"从 GitHub PR 获取变更: {repo}#{pr_num}")
+        print(f"Fetching changes from GitHub PR: {repo}#{pr_num}")
         
         # 创建不验证 SSL 证书的 context
         ssl_context = ssl.create_default_context()
@@ -978,10 +978,10 @@ def main():
                 raise FileNotFoundError()
             with open(diff_file, 'w', encoding='utf-8') as f:
                 f.write(result.stdout)
-            print("  使用 gh cli 获取 diff")
+            print("  Using gh cli to get diff")
         except FileNotFoundError:
-            # gh 不可用，尝试使用 urllib 通过 GitHub API
-            print("  gh cli 不可用，尝试通过 GitHub API 获取...")
+            # gh not available, try urllib via GitHub API
+            print("  gh cli not available, trying via GitHub API...")
             try:
                 pr_url = f"https://api.github.com/repos/{repo}/pulls/{pr_num}"
                 req = urllib.request.Request(pr_url, headers={'Accept': 'application/vnd.github.v3+json'})
@@ -990,31 +990,31 @@ def main():
                     diff_url = pr_data.get('diff_url')
                 
                 if not diff_url:
-                    print("Error: 无法获取 diff URL")
+                    print("Error: Cannot get diff URL")
                     exit(1)
                 
-                # 下载 diff (使用二进制模式避免行尾转换)
+                # Download diff (use binary mode to avoid line ending conversion)
                 req = urllib.request.Request(diff_url)
                 with urllib.request.urlopen(req, timeout=60, context=ssl_context) as response:
                     diff_bytes = response.read()
                     with open(diff_file, 'wb') as f:
                         f.write(diff_bytes)
-                print("  使用 GitHub API 获取 diff")
+                print("  Using GitHub API to get diff")
             except Exception as e:
-                print(f"Error: 获取 PR diff 失败: {e}")
+                print(f"Error: Failed to get PR diff: {e}")
                 exit(1)
         
-        print(f"  PR diff 已保存到: {diff_file}")
+        print(f"  PR diff saved to: {diff_file}")
         changed_files_with_lines = change_detector.parse_pr_diff_file(diff_file)
-        print(f"解析到 {len(changed_files_with_lines)} 个变更文件")
+        print(f"Parsed {len(changed_files_with_lines)} changed files")
     else:
-        # 从文件比对获取（默认）
+        # Get from file comparison (default)
         change_detector.scan_source_files()
         changed_files_with_lines = change_detector.detect_changes_by_comparison()
-        print(f"检测到 {len(changed_files_with_lines)} 个变更文件")
+        print(f"Detected {len(changed_files_with_lines)} changed files")
     
-    # 3. 选择测试用例
-    print("\n=== 选择受影响的测试用例 ===")
+    # 3. Select test cases
+    print("\n=== Selecting Affected Test Cases ===")
     test_selector = TestSelector(selector.test_case_map)
     selected, expand_reason = test_selector.select_tests(changed_files_with_lines, 
                                           min_affected_lines=args.min_affected,
@@ -1028,30 +1028,19 @@ def main():
                                   min_affected_lines=args.min_affected,
                                   expand_reason=expand_reason)
     
-    # 4. 输出可执行的 pytest 命令
-    if selected:
-        print("\n=== 建议执行的测试用例 ===")
-        test_names = [s[0] for s in selected]
+    # 4. Output executable pytest command
+    test_names = [s[0] for s in selected]
+    if test_names:
+        print("\n=== Recommended Test Cases ===")
         print(test_names)
-        
-        # 输出详细的 JSON 格式
-        output = {
-            "changed_files": {f: list(lines) for f, lines in changed_files_with_lines.items()},
-            "selected_tests": [
-                {
-                    "name": s[0],
-                    "affected_files": {f: list(lines) for f, lines in s[1].items()},
-                    "total_affected_lines": s[2]
-                }
-                for s in selected
-            ],
-            "total_selected": len(test_names),
-            "expand_reason": expand_reason
-        }
-        with open('recommended_pytest_paths.txt', 'w', encoding='utf-8') as f:
-            for test_name in test_names:
-                f.write(test_name + '\n')
-        print(f"\n详细结果已保存到: recommended_pytest_paths.txt")
+    else:
+        print("\n=== No Test Cases Recommended ===")
+    
+    # Always write output file (even if empty)
+    with open('recommended_pytest_paths.txt', 'w', encoding='utf-8') as f:
+        for test_name in test_names:
+            f.write(test_name + '\n')
+    print(f"\nResults saved to: recommended_pytest_paths.txt")
 
 
 if __name__ == '__main__':
