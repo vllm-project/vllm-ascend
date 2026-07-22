@@ -117,7 +117,7 @@ class BaseDeviceAdaptor:
         quant_mode: int = -1,
         act_quant_type: torch.dtype | None = None,
     ):
-        return torch_npu.npu_moe_init_routing_v2(
+        return torch.ops._C_ascend.npu_moe_init_routing_custom(
             hidden_states,
             topk_ids,
             scale=scale,
