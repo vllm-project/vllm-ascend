@@ -16,7 +16,6 @@
 #
 # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove eplb utils.
 import json
-from collections import defaultdict
 
 import numpy as np
 import torch
@@ -108,29 +107,23 @@ def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num
 
 
 def generate_log2phy_map(global_expert_map, ep_rank, tp_size: int | None = None):
-    log2phy_map = defaultdict(list)
-    valid_count = torch.sum(global_expert_map[0] != -1)
-    for rankid, map_per_rank in enumerate(global_expert_map):
-        for idx, val in enumerate(map_per_rank):
-            val = val.item()
-            if val != -1:
-                log2phy_map[idx].append(val + rankid * valid_count)
+    if not torch.is_tensor(global_expert_map):
+        global_expert_map = torch.stack(global_expert_map)
 
-    for key in log2phy_map:
-        num_of_duplications = len(log2phy_map[key])
-        if tp_size is not None and tp_size > 1:
-            tp_rank = ep_rank % tp_size
-            dp_like_rank = ep_rank // tp_size
-            replica_index = (tp_rank + dp_like_rank + key) % num_of_duplications
-        else:
-            replica_index = ep_rank % num_of_duplications
-        log2phy_map[key] = log2phy_map[key][replica_index]
+    valid = global_expert_map != -1
+    valid_count = valid[0].sum()
+    replica_counts = valid.sum(dim=0)
+    expert_ids = torch.arange(global_expert_map.shape[1], device=global_expert_map.device)
 
-    log2phy_map = torch.scatter(
-        torch.zeros(len(log2phy_map), dtype=torch.int32),
-        0,
-        torch.tensor(list(log2phy_map), dtype=torch.int64),
-        torch.tensor(list(log2phy_map.values()), dtype=torch.int32),
-    )
+    if tp_size is not None and tp_size > 1:
+        tp_rank = ep_rank % tp_size
+        dp_like_rank = ep_rank // tp_size
+        replica_indices = (tp_rank + dp_like_rank + expert_ids) % replica_counts
+    else:
+        replica_indices = ep_rank % replica_counts
 
-    return log2phy_map
+    replica_ordinals = valid.cumsum(dim=0) - 1
+    selected = valid & (replica_ordinals == replica_indices.unsqueeze(0))
+    rank_offsets = torch.arange(global_expert_map.shape[0], device=global_expert_map.device).unsqueeze(1)
+    physical_ids = global_expert_map + rank_offsets * valid_count
+    return torch.where(selected, physical_ids, 0).sum(dim=0).to(torch.int32)
