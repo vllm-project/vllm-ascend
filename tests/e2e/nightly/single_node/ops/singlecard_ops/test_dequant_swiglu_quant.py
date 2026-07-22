@@ -1,7 +1,4 @@
 import gc
-import math
-import os
-from pathlib import Path
 
 import pytest
 import torch
@@ -10,20 +7,10 @@ import torch_npu
 
 from vllm_ascend.utils import enable_custom_op
 
-# Default data dump location; override with DATA_DUMP_TP16_TENSOR env var
-_DEFAULT_DATA_DIR = "/home/z00893411/glm5/script/data_dump_tp16_tensor"
-DATA_DIR = Path(os.environ.get("DATA_DUMP_TP16_TENSOR", _DEFAULT_DATA_DIR))
-
 # enable internal format
 torch_npu.npu.config.allow_internal_format = True
 # enable vllm-ascend custom ops
 enable_custom_op()
-
-
-def _has_effective_swiglu_limit(swiglu_limit: int | float) -> bool:
-    limit = float(swiglu_limit)
-    # 0.0 is treated as "no clamp" but still uses the manual reference path.
-    return math.isfinite(limit) and 0.0 <= limit < 1_000_000.0
 
 
 def _shared_dequant_swiglu_quant(
@@ -33,21 +20,6 @@ def _shared_dequant_swiglu_quant(
     swiglu_limit: int | float,
     output_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if not _has_effective_swiglu_limit(swiglu_limit):
-        return torch.ops._C_ascend.npu_dequant_swiglu_quant(
-            x=hidden_states,
-            weight_scale=weight_scale,
-            activation_scale=activation_scale,
-            bias=None,
-            quant_scale=None,
-            quant_offset=None,
-            group_index=None,
-            activate_left=True,
-            quant_mode=1,
-            swiglu_mode=1,
-            clamp_limit=swiglu_limit,
-        )
-
     if hidden_states.shape[0] == 0:
         output_shape = hidden_states.shape[:-1] + (hidden_states.shape[-1] // 2,)
         return (
@@ -114,20 +86,14 @@ _REPRO_CASES = [
 @torch.inference_mode()
 @pytest.mark.parametrize("x_shape,clamp_limit,desc", _REPRO_CASES, ids=[c[2] for c in _REPRO_CASES])
 def test_npu_dequant_swiglu_quant_with_limit(x_shape, clamp_limit, desc):
-    swiglu_mode = 1
     # Use values with non-trivial abs() so reduce-max is meaningful
     x = torch.randint(-100, 100, x_shape, dtype=torch.int32)
     weight_scale = torch.randn(x_shape[1], dtype=torch.float32) * 0.1
     activate_scale = torch.randn((x_shape[0], 1), dtype=torch.float32) * 0.5
-    quant_mode = 1
 
     x = x.npu()
     weight_scale = weight_scale.npu()
     activate_scale = activate_scale.npu()
-
-    out_dimy = x_shape[1] // 2
-    print(f"\n=== Case: {desc} ===")
-    print(f"x_shape={x_shape}, outDimy={out_dimy}, outDimy%64={out_dimy % 64}, clamp_limit={clamp_limit}")
 
     # 1. Golden reference (pure PyTorch + npu_dynamic_quant)
     output_golden, output_scale_golden = _shared_dequant_swiglu_quant(
@@ -150,8 +116,8 @@ def test_npu_dequant_swiglu_quant_with_limit(x_shape, clamp_limit, desc):
             quant_offset=None,
             group_index=None,
             activate_left=True,
-            quant_mode=quant_mode,
-            swiglu_mode=swiglu_mode,
+            quant_mode=1,
+            swiglu_mode=1,
             clamp_limit=clamp_limit,
             glu_alpha=1.0,
             glu_bias=0.0,
@@ -161,21 +127,17 @@ def test_npu_dequant_swiglu_quant_with_limit(x_shape, clamp_limit, desc):
     # 3. Small ops workaround (manual dequant + npu_swiglu + npu_dynamic_quant)
     workaround_output, workaround_scale = _small_ops_dequant_swiglu_quant(x, weight_scale, activate_scale)
 
-    def _diff(a, b):
-        d = (a.float().cpu() - b.float().cpu()).abs()
-        return f"max_abs={d.max().item():.4f}, mean_abs={d.mean().item():.4f}"
-
-    print("\n--- Output diff ---")
-    print(f"Golden vs Fused      : {_diff(output_golden, output)}")
-    print(f"Golden vs Workaround : {_diff(output_golden, workaround_output)}")
-    print("--- Scale diff ---")
-    print(f"Golden vs Fused      : {_diff(output_scale_golden, output_scale)}")
-    print(f"Golden vs Workaround : {_diff(output_scale_golden, workaround_scale)}")
-
-    # int8 quantization output: atol=1 covers the rounding error (max_abs=1 in all cases)
-    torch.testing.assert_close(output.cpu(), output_golden.cpu(), atol=1, rtol=0.1)
-    # Dynamic quant scale: relax tolerance to cover both aligned and non-64-aligned outDimy
-    torch.testing.assert_close(output_scale.cpu(), output_scale_golden.cpu(), atol=0.05, rtol=0.1)
+    # Compare all three results pairwise with strict tolerance
+    atol, rtol = 1e-4, 5e-3
+    # Golden vs Fused
+    torch.testing.assert_close(output.cpu(), output_golden.cpu(), atol=atol, rtol=rtol)
+    torch.testing.assert_close(output_scale.cpu(), output_scale_golden.cpu(), atol=atol, rtol=rtol)
+    # Golden vs Workaround
+    torch.testing.assert_close(workaround_output.cpu(), output_golden.cpu(), atol=atol, rtol=rtol)
+    torch.testing.assert_close(workaround_scale.cpu(), output_scale_golden.cpu(), atol=atol, rtol=rtol)
+    # Fused vs Workaround
+    torch.testing.assert_close(workaround_output.cpu(), output.cpu(), atol=atol, rtol=rtol)
+    torch.testing.assert_close(workaround_scale.cpu(), output_scale.cpu(), atol=atol, rtol=rtol)
 
     gc.collect()
     torch.npu.empty_cache()
