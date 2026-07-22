@@ -889,6 +889,11 @@ class KVPoolScheduler:
         """
         if not self.use_hybrid or len(self.mamba_group_ids) == 0 or not req_meta.can_save:
             return
+        # Layerwise transfer frees mamba blocks layer by layer on its own
+        # completion path (see KVCacheStoreSendingThread); bulk-touching them
+        # here would double-reference the block pool and leak blocks.
+        if self.use_layerwise:
+            return
         using_event_id = self.get_sending_event_id()
         req_meta.event_id = using_event_id
         current_step_sending: list[int] = []
