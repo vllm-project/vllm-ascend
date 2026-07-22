@@ -6,8 +6,8 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.block_table import _compute_slot_mapping_kernel
-from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
+from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -356,8 +356,8 @@ class MultiGroupBlockTable:
             # (max_model_len//dcp_world_size) tokens in kvcache,
             # so the block_size which used for calc max_num_blocks_per_req
             # must be multiplied by dcp_world_size.
-            total_cp_world_size = get_total_cp_world_size()
-            max_num_blocks = [cdiv(max_model_len, block_size * total_cp_world_size) for block_size in block_sizes]
+            dcp_world_size = get_decode_context_model_parallel_world_size()
+            max_num_blocks = [cdiv(max_model_len, block_size * dcp_world_size) for block_size in block_sizes]
 
         if len(max_num_blocks) != len(block_sizes):
             raise ValueError(
