@@ -930,7 +930,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         multi_steps_attn_metadata, attn_metadata_i = self.build_draft_attn_metadata(
             common_attn_metadata, num_input_tokens, num_tokens
         )
-        self._pad_draft_buffers(num_tokens, num_input_tokens)
+        if self.method != "dspark":
+            self._pad_draft_buffers(num_tokens, num_input_tokens)
 
         if self.uses_mrope:
             used_update_positions = self.mrope_positions[:, token_indices_to_sample]
@@ -2136,6 +2137,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     ):
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         assert len(self.draft_attn_groups) > 0
+        if self.method == "dspark":
+            self._pad_draft_buffers(num_actual_tokens, num_input_tokens)
         per_layer_attn_metadata: dict[str, Any] = {}
         for attn_group in self.draft_attn_groups:
             builder = attn_group.get_metadata_builder()
@@ -2150,6 +2153,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if self.method == "dspark":
                 gid = attn_group.kv_cache_group_id
                 common_attn_metadata = copy.copy(common_attn_metadata)
+                common_attn_metadata.positions = self.positions[:num_input_tokens]
                 block_table = getattr(self, "_per_group_block_table_buffers", {}).get(gid)
                 if block_table is not None:
                     common_attn_metadata.block_table_tensor = block_table[: common_attn_metadata.num_reqs]

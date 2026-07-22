@@ -19,8 +19,10 @@ import vllm_ascend.spec_decode.llm_base_proposer as llm_base_proposer
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder, build_dspark_swa_indices
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
+from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
 from vllm_ascend.utils import enable_custom_op
@@ -184,6 +186,98 @@ def test_prepare_inputs_padded_preserves_internal_seq_lens_cpu():
 
     assert spec_common_attn_metadata._seq_lens_cpu is internal_seq_lens_cpu
     assert spec_common_attn_metadata.seq_lens_cpu is None
+
+
+def test_dspark_draft_metadata_uses_dp_padded_positions_and_slots():
+    proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+    proposer.method = "dspark"
+    proposer.use_compress = False
+    proposer.parallel_drafting_token_id = 99
+    proposer.input_ids = torch.arange(10, dtype=torch.int64)
+    proposer.positions = torch.arange(10, dtype=torch.int32)
+    proposer._slot_mapping_buffer = torch.arange(10, dtype=torch.int32)
+    proposer._per_group_block_table_buffers = {0: torch.zeros((1, 1), dtype=torch.int32)}
+    proposer._per_group_query_slot_mapping_buffers = {0: torch.arange(10, dtype=torch.int32)}
+
+    builder = MagicMock()
+    builder.build_for_drafting.return_value = SimpleNamespace(causal=False)
+    proposer.draft_attn_groups = [
+        SimpleNamespace(
+            kv_cache_group_id=0,
+            layer_names=["draft_layer"],
+            get_metadata_builder=lambda: builder,
+        )
+    ]
+    metadata = SimpleNamespace(
+        num_reqs=1,
+        num_actual_tokens=5,
+        num_input_tokens=5,
+        block_table_tensor=torch.zeros((1, 1), dtype=torch.int32),
+        slot_mapping=proposer._slot_mapping_buffer[:5],
+        positions=proposer.positions[:5],
+    )
+
+    proposer.build_draft_attn_metadata(metadata, 10, 5)
+
+    draft_metadata = builder.build_for_drafting.call_args.args[0]
+    assert draft_metadata.positions.shape[0] == 10
+    assert torch.equal(draft_metadata.positions[5:], torch.zeros(5, dtype=torch.int32))
+    assert torch.equal(draft_metadata.slot_mapping[5:], torch.full((5,), -1, dtype=torch.int32))
+
+
+def test_dspark_drafting_uses_dp_padded_decode_token_count():
+    builder = AscendDSAMetadataBuilder.__new__(AscendDSAMetadataBuilder)
+    builder.compressor_ratio = 1
+    builder.block_size = 16
+    builder.decode_threshold = 6
+    builder.spec_slot_mapping = [torch.empty(15, dtype=torch.int32)]
+    builder.metadata_cls = SimpleNamespace
+    builder.model_config = SimpleNamespace(get_head_size=lambda: 128)
+    builder.build_decode_metadata_for_drafting = MagicMock(return_value=SimpleNamespace())
+
+    common_metadata = SimpleNamespace(
+        causal=False,
+        num_reqs=3,
+        num_actual_tokens=5,
+        num_input_tokens=15,
+        max_query_len=5,
+        query_start_loc=torch.tensor([0, 5, 10, 15], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 5, 10, 15], dtype=torch.int32),
+        positions=torch.zeros(15, dtype=torch.int32),
+        slot_mapping=torch.full((15,), -1, dtype=torch.int32),
+        attn_state=AscendAttentionState.ChunkedPrefill,
+        prefill_context_parallel_metadata=None,
+    )
+    rope = torch.zeros((15, 1), dtype=torch.float32)
+
+    with (
+        patch("vllm_ascend.attention.dsa_v1.get_cos_and_sin_dsa", return_value=(rope, rope)),
+        patch(
+            "vllm_ascend.attention.dsa_v1.DeviceOperator.format_dsa_slot_mapping",
+            return_value=common_metadata.slot_mapping,
+        ),
+    ):
+        metadata = builder.build_for_drafting(common_metadata, draft_index=1)
+
+    assert metadata.num_actual_tokens == 5
+    assert builder.build_decode_metadata_for_drafting.call_args.kwargs["num_decode_tokens"] == 15
+
+
+def test_dspark_swa_indices_mask_dp_padded_tokens():
+    indices, lens = build_dspark_swa_indices(
+        block_table=torch.tensor([[10]], dtype=torch.int32),
+        num_speculative_tokens=5,
+        window_size=7,
+        block_size=16,
+        query_start_loc=torch.tensor([0, 5], dtype=torch.int32),
+        seq_lens=torch.tensor([12], dtype=torch.int32),
+        num_decode_tokens=15,
+        index_width=16,
+    )
+
+    torch.testing.assert_close(lens[:5], torch.full((5,), 12, dtype=torch.int32))
+    assert torch.all(lens[5:] == 0)
+    assert torch.all(indices[5:] == -1)
 
 
 class TestSlidingWindowAdapter:

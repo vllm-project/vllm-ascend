@@ -420,8 +420,16 @@ def build_dspark_swa_indices(
     slot_ids = (block_ids * block_size + block_offsets).to(torch.int32)
     slot_ids = slot_ids.where(col_mask, torch.full_like(slot_ids, -1))
 
-    per_token_slots = torch.repeat_interleave(slot_ids, query_lens, dim=0, output_size=num_decode_tokens).unsqueeze(1)
-    per_token_lens = torch.repeat_interleave(visible_lens, query_lens, dim=0, output_size=num_decode_tokens)
+    if num_decode_tokens is None:
+        num_decode_tokens = query_start_loc[-1]
+    token_rows = torch.arange(num_decode_tokens, dtype=torch.long, device=query_start_loc.device)
+    token_to_req = torch.bucketize(token_rows, query_start_loc[1:].long(), right=True)
+    inactive_tokens = token_to_req >= slot_ids.shape[0]
+    safe_token_to_req = token_to_req.clamp(max=slot_ids.shape[0] - 1)
+    per_token_slots = slot_ids.index_select(0, safe_token_to_req).unsqueeze(1)
+    per_token_slots.masked_fill_(inactive_tokens[:, None, None], -1)
+    per_token_lens = visible_lens.index_select(0, safe_token_to_req)
+    per_token_lens.masked_fill_(inactive_tokens, 0)
 
     return per_token_slots, per_token_lens
 
@@ -1188,6 +1196,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
             common_attn_metadata, decode_threshold=self.decode_threshold
         )
+        if not common_attn_metadata.causal and num_prefills == 0:
+            num_decode_tokens = common_attn_metadata.num_input_tokens
         num_input_tokens = common_attn_metadata.num_input_tokens
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
         if num_prefills:
