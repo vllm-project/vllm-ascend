@@ -1,0 +1,62 @@
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "MiniMax-M3-bf16"
+    model: "MiniMax/MiniMax-M3"
+    envs:
+      HCCL_BUFFSIZE: "512"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      VLLM_USE_MODELSCOPE: "true"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--tensor-parallel-size"
+      - "16"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--trust-remote-code"
+      - "--gpu-memory-utilization"
+      - "0.92"
+      - "--max-model-len"
+      - "43008"
+      - "--enable-expert-parallel"
+      - "--max-num-seqs"
+      - "16"
+      - "--distributed-executor-backend"
+      - "mp"
+      - "--reasoning-parser"
+      - "minimax_m3"
+      - "--limit-mm-per-prompt"
+      - '{"image":1}'
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":true,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2}'
+    benchmarks:
+      acc:
+        case_type: accuracy
+        dataset_path: vllm-ascend/gsm8k-lite
+        request_conf: vllm_api_general_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+        max_out_len: 9500
+        batch_size: 8
+        baseline: 95
+        threshold: 5
+        temperature: 1.0
+        top_p: 0.95
+        ignore_eos: false
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in256-bs1-Minimax
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 1
+        max_out_len: 128
+        batch_size: 1
+        request_rate: 0
+        baseline: 20.83
+        threshold: 0.97

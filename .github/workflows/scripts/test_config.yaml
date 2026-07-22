@@ -113,6 +113,19 @@
   tests:
     - tests/e2e/pull_request/four_card/test_deepseek_v4.py
 
+- name: attention_msa_m3
+  optional: false
+  base: attention_common
+  source_file_dependencies:
+    - vllm_ascend/attention/msa_m3.py
+    - vllm_ascend/attention/msa_m3_npu.py
+    - vllm_ascend/attention/msa_m3_triton.py
+    - vllm_ascend/patch_minimax_m3_model.py
+  tests:
+    - tests/ut/attention/test_msa_m3.py
+    - tests/ut/attention/test_mas_m3_triton_indexer.py
+    - tests/ut/attention/test_minimax_m3_sparse_attn.py
+
 - name: attention_cp
   optional: false
   base: attention_common
@@ -839,4 +852,3 @@ partition:
   a3_x2: 3
   a3_x4: 3
   cpu_x0: 1
-
