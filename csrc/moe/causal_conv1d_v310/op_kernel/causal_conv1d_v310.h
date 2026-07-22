@@ -262,6 +262,7 @@ __aicore__ inline void CausalConv1dV310<T>::LoadWeightAndBias(int32_t c0, int32_
     LocalTensor<float> calc = calcBuf.Get<float>();
     LocalTensor<float> weightF = calc;
     LocalTensor<float> biasF = weightF[MAX_WIDTH * MAX_BLOCK_DIM];
+    LocalTensor<T> stagingT = inBuf.Get<T>();
     const bool hasBias = (tilingData_->hasBias != 0);
 
     for (int32_t j = 0; j < width; ++j) {
@@ -271,8 +272,15 @@ __aicore__ inline void CausalConv1dV310<T>::LoadWeightAndBias(int32_t c0, int32_
         if constexpr (std::is_same<T, float>::value) {
             DataCopy(weightF[jDst * MAX_BLOCK_DIM], weightGm[weightOffset], dimTileSize);
         } else {
-            DataCopy(weightF.ReinterpretCast<T>()[jDst * MAX_BLOCK_DIM * 2 + MAX_BLOCK_DIM], weightGm[weightOffset],
-                     dimTileSize);
+            // Stage fp16 weights outside calcBuf. The previous scratch offset
+            // overlapped the fp32 destination of Cast for a 4096-element tile,
+            // corrupting weights before short-prefill convolution used them.
+            DataCopy(stagingT, weightGm[weightOffset], dimTileSize);
+            SetFlag<HardEvent::MTE2_V>(weightBiasMte2ToVEvent_);
+            WaitFlag<HardEvent::MTE2_V>(weightBiasMte2ToVEvent_);
+            Cast(weightF[jDst * MAX_BLOCK_DIM], stagingT, RoundMode::CAST_NONE, dimTileSize);
+            SetFlag<HardEvent::V_MTE2>(inputVToMte2Event_);
+            WaitFlag<HardEvent::V_MTE2>(inputVToMte2Event_);
         }
     }
 
@@ -280,22 +288,18 @@ __aicore__ inline void CausalConv1dV310<T>::LoadWeightAndBias(int32_t c0, int32_
         if constexpr (std::is_same<T, float>::value) {
             DataCopy(biasF, biasGm[c0], dimTileSize);
         } else {
-            DataCopy(biasF.ReinterpretCast<T>()[MAX_BLOCK_DIM], biasGm[c0], dimTileSize);
+            DataCopy(stagingT, biasGm[c0], dimTileSize);
+            SetFlag<HardEvent::MTE2_V>(weightBiasMte2ToVEvent_);
+            WaitFlag<HardEvent::MTE2_V>(weightBiasMte2ToVEvent_);
+            Cast(biasF, stagingT, RoundMode::CAST_NONE, dimTileSize);
+            SetFlag<HardEvent::V_MTE2>(inputVToMte2Event_);
+            WaitFlag<HardEvent::V_MTE2>(inputVToMte2Event_);
         }
     }
 
-    SetFlag<HardEvent::MTE2_V>(weightBiasMte2ToVEvent_);
-    WaitFlag<HardEvent::MTE2_V>(weightBiasMte2ToVEvent_);
-
-    if constexpr (!std::is_same<T, float>::value) {
-        for (int32_t j = 0; j < width; ++j) {
-            const int32_t jDst = jStart + j;
-            Cast(weightF[jDst * MAX_BLOCK_DIM], weightF.ReinterpretCast<T>()[jDst * MAX_BLOCK_DIM * 2 + MAX_BLOCK_DIM],
-                 RoundMode::CAST_NONE, dimTileSize);
-        }
-        if (hasBias) {
-            Cast(biasF, biasF.ReinterpretCast<T>()[MAX_BLOCK_DIM], RoundMode::CAST_NONE, dimTileSize);
-        }
+    if constexpr (std::is_same<T, float>::value) {
+        SetFlag<HardEvent::MTE2_V>(weightBiasMte2ToVEvent_);
+        WaitFlag<HardEvent::MTE2_V>(weightBiasMte2ToVEvent_);
     }
 
     if (!hasBias) {

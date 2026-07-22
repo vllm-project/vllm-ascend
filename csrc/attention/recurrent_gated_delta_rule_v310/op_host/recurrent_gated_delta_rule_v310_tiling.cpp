@@ -46,7 +46,10 @@ const size_t DIM_1 = 1;
 const size_t DIM_2 = 2;
 const size_t DIM_3 = 3;
 
-const size_t MAX_MTP = 8;
+// DFlash target verification prepends one bonus token to the speculative
+// tokens. Supporting up to fifteen speculative tokens therefore requires
+// room for a sixteen-token recurrent sequence.
+const size_t MAX_MTP = 16;
 
 void RecurrentGatedDeltaRuleV310Tiling::InitCompileInfo()
 {

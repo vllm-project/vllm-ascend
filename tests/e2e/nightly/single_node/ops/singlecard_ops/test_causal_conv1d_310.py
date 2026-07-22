@@ -21,10 +21,17 @@ def validate_cmp(y_cal, y_ref, device="npu"):
 @pytest.mark.parametrize("has_initial_state", [False, True])
 @pytest.mark.parametrize("silu_activation", [True])
 @pytest.mark.parametrize("has_bias", [True])
-@pytest.mark.parametrize("seq_len", [[128, 1024, 2048, 4096]])
 @pytest.mark.parametrize("extra_state_len", [0, 2])
 @pytest.mark.parametrize("width", [4])
-@pytest.mark.parametrize("dim", [2048])
+@pytest.mark.parametrize(
+    ("seq_len", "dim"),
+    [
+        ([128, 1024, 2048, 4096], 2048),
+        # Qwen3.5 GDN short-prefill shape. This catches overlap between the
+        # float32 cast destination and float16 weight staging buffers.
+        ([28], 8192),
+    ],
+)
 def test_ascend_causal_conv1d_310_fn(
     dim, width, extra_state_len, seq_len, has_bias, silu_activation, has_initial_state
 ):

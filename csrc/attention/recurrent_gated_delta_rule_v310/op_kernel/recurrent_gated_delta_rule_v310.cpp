@@ -17,6 +17,9 @@
 using namespace AscendC;
 using namespace RecurrentGatedDeltaRuleV310;
 
+static_assert(MAX_MTP >= 16,
+              "DFlash K=15 requires a fully committed sixteen-token verification window");
+
 
 extern "C" __global__ __aicore__ void
 recurrent_gated_delta_rule_v310(GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_ADDR beta, GM_ADDR state, GM_ADDR cuSeqlens,

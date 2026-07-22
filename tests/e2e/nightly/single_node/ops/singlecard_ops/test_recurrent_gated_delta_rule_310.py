@@ -1,3 +1,5 @@
+from itertools import product
+
 import pytest
 import torch
 import torch_npu
@@ -83,13 +85,19 @@ def golden_recurrent_gated_delta_rule(
 
 
 @pytest.mark.skipif(not is_310p_hw(), reason="Tested separately on a 310P machine.")
-@pytest.mark.parametrize("batch_size", [1, 4, 8])
-@pytest.mark.parametrize("mtp", [1, 2])
-@pytest.mark.parametrize("headnum", [(4, 8), (8, 16), (16, 32)])
+@pytest.mark.parametrize(
+    ("batch_size", "mtp", "headnum"),
+    [
+        *product([1, 4, 8], [1, 2], [(4, 8), (8, 16), (16, 32)]),
+        # DFlash K=8..15 verifies the sampled token plus the draft tokens.
+        *[(1, mtp, (16, 32)) for mtp in range(9, 17)],
+    ],
+)
 @pytest.mark.parametrize("headdim_k", [128])
 @pytest.mark.parametrize("headdim_v", [128])
 def test_fused_recurrent_gated_delta_rule_310(batch_size, mtp, headnum, headdim_k, headdim_v):
     enable_custom_op()
+    torch.manual_seed(20260722 + mtp)
     dtype = torch.float16
     headnum_k, headnum_v = headnum
     actual_seq_lengths = torch.ones(batch_size, dtype=torch.int32) * mtp
@@ -98,7 +106,11 @@ def test_fused_recurrent_gated_delta_rule_310(batch_size, mtp, headnum, headdim_
     query = torch.nn.functional.normalize(torch.rand((T, headnum_k, headdim_k)), p=2, dim=-1).to(dtype)
     key = torch.nn.functional.normalize(torch.rand((T, headnum_k, headdim_k)), p=2, dim=-1).to(dtype)
     value = torch.rand((T, headnum_v, headdim_v)).to(dtype)
+    # Preserve the original short-window coverage, and use a decaying gate for
+    # long DFlash verification windows to avoid exponential amplification.
     g = torch.rand((T, headnum_v), dtype=torch.float32)
+    if mtp > 2:
+        g.neg_()
     beta = torch.rand((T, headnum_v)).to(dtype)
     ssm_state_indices = torch.arange(T, dtype=torch.int32)
     num_accepted_tokens = torch.randint(1, mtp + 1, (batch_size,), dtype=torch.int32)
@@ -124,18 +136,19 @@ def test_fused_recurrent_gated_delta_rule_310(batch_size, mtp, headnum, headdim_
         scale=scale,
     )
     out = out.to(torch.float32).cpu()
+    atol = 2.5e-2 if mtp > 2 else 1e-2
 
     torch.testing.assert_close(
         out.to(torch.float32).cpu(),
         out_golden.to(torch.float32).cpu(),
         rtol=3e-3,
-        atol=1e-2,
+        atol=atol,
         equal_nan=True,
     )
     torch.testing.assert_close(
         state_npu.to(torch.float32).cpu(),
         state_golden.to(torch.float32).cpu(),
         rtol=3e-3,
-        atol=1e-2,
+        atol=atol,
         equal_nan=True,
     )

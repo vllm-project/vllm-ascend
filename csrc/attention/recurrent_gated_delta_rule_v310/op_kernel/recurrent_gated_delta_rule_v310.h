@@ -23,7 +23,10 @@ namespace RecurrentGatedDeltaRuleV310 {
 using namespace AscendC;
 constexpr uint64_t BUFFER_NUM = 1;
 constexpr uint32_t MAX_OUT_BUFFER_NUM = 2;
-constexpr uint64_t MAX_MTP = 8;
+// DFlash target verification prepends one bonus token to the speculative
+// tokens. Supporting up to fifteen speculative tokens therefore requires
+// room for a sixteen-token recurrent sequence.
+constexpr uint64_t MAX_MTP = 16;
 constexpr uint64_t BF16_NUM_PER_BLOCK = 16;
 constexpr uint64_t FP32_NUM_PER_BLOCK = 8;
 constexpr uint32_t REPEAT_LENTH = 64; // 256Byte for float
@@ -528,6 +531,7 @@ private:
 #else
         DataCopyPad(finalStateGm_[stateOffset], stateOutLocal, stateOutParams);
 #endif
+        PipeBarrier<PIPE_MTE3>();
         SetFlag<HardEvent::MTE3_V>(evtMte3V_);
     }
 
@@ -557,6 +561,10 @@ private:
             Exp(gamaInUb, gamaInUb, seqLen * NV_);
             AscendC::PipeBarrier<PIPE_V>();
         }
+        // gamma and beta are produced on the vector pipe but consumed through
+        // scalar GetValue below. Wait for the vector writes to complete, not
+        // merely for their commands to be issued.
+        SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
     }
 
     __aicore__ inline void ProcessHead(int32_t seq0, int32_t seq1, uint64_t head_i, uint64_t stateOffset)
@@ -567,19 +575,11 @@ private:
         if (realV_ == 0) {
             return;
         }
-        uint64_t nextVOffset = 0;
-        uint32_t nextSingleV = realV_ > vStep_ ? vStep_ : realV_;
-        uint64_t nextStateOffset = ((stateOffset * NV_ + head_i) * realV_) * realK_;
-        PrefetchState(nextStateOffset, nextSingleV);
         for (uint64_t v_i = 0; v_i < realV_; v_i += vStep_) {
             uint32_t curSingleV = v_i + vStep_ > realV_ ? realV_ - v_i : vStep_;
+            uint64_t curStateOffset = ((stateOffset * NV_ + head_i) * realV_ + v_i) * realK_;
+            PrefetchState(curStateOffset, curSingleV);
             LoadPrefetchedState(curSingleV);
-            nextVOffset = v_i + vStep_;
-            if (nextVOffset < realV_) {
-                nextSingleV = nextVOffset + vStep_ > realV_ ? realV_ - nextVOffset : vStep_;
-                nextStateOffset = ((stateOffset * NV_ + head_i) * realV_ + nextVOffset) * realK_;
-                PrefetchState(nextStateOffset, nextSingleV);
-            }
             evtMte3V_ = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
             evtVMte3_ = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
             SetFlag<HardEvent::MTE3_V>(evtMte3V_);
@@ -597,6 +597,10 @@ private:
                 CopyOutState(curStateOutOffset, curSingleV);
             }
             WaitFlag<HardEvent::MTE3_V>(evtMte3V_);
+            // The MTE3_V event protects UB reuse, but on 310P it does not make
+            // the final GM write observable before the kernel returns. Drain
+            // MTE3 once per V tile so the last recurrent state is committed.
+            SetWaitFlag<HardEvent::MTE3_S>(HardEvent::MTE3_S);
         }
     }
 
