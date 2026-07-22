@@ -239,5 +239,5 @@ def make_qwen3_dspark_load_weights(rotation_path, original_load_weights):
             )
         return result
 
-    load_weights._vllm_ascend_quarot_wrapper = True
+    load_weights._vllm_ascend_quarot_wrapper = True  # type: ignore[attr-defined]
     return load_weights
