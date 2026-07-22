@@ -572,19 +572,23 @@ class KVPoolScheduler:
             else:
                 if self.client is None:
                     self.client = LookupKeyClient(self.vllm_config)
-                num_external_hit_tokens = self.client.lookup(
+                # ``lookup`` returns ``int | None``; keep it in a local so
+                # ``num_external_hit_tokens`` stays a plain ``int`` (as produced
+                # by the layerwise paths above) after the None check below.
+                async_hit_tokens = self.client.lookup(
                     request.request_id,
                     token_len,
                     request.block_hashes,
                     self.kv_cache_group_ids,
                     non_block=self.lookup_async,
                 )
-                if num_external_hit_tokens is None:
+                if async_hit_tokens is None:
                     # Async lookup still in flight; ask the scheduler to retry
                     # this request on a later step. All vllm-ascend scheduler
                     # paths (base / recompute / profiling-chunk / balance) treat
                     # a None hit count as "not ready yet".
                     return None, False
+                num_external_hit_tokens = async_hit_tokens
 
         if num_external_hit_tokens == 0:
             return 0, False
