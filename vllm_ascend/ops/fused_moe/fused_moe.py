@@ -69,6 +69,8 @@ class FusedMoEResult:
     before_gmm2_evt: torch.npu.Event | None = None
     before_combine_evt: torch.npu.Event | None = None
     swiglu_limit: float = 0.0
+    swiglu_alpha: float = 1.0
+    swiglu_beta: float = 0.0
 
 
 @dataclass
@@ -79,6 +81,8 @@ class FusedMoEEvents:
     before_gmm2: torch.npu.Event | None = field(default=None)
     before_combine: torch.npu.Event | None = field(default=None)
     swiglu_limit: float = 0.0
+    swiglu_alpha: float = 1.0
+    swiglu_beta: float = 0.0
 
 
 def mock_false():
@@ -221,6 +225,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
+        if getattr(layer, "swigluoai_uninterleave", False):
+            activation = "swigluoai_uninterleave"
+
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         # NOTE: In the MoECommType.FUSED_MC2 branch, we wrap weights (w1, w2) into lists
         # and provide dummy scales (w1_scale, w2_scale). This is required because:
@@ -278,6 +285,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
                 swiglu_limit=layer.swiglu_limit,
+                swiglu_alpha=getattr(layer, "swiglu_alpha", 1.0),
+                swiglu_beta=getattr(layer, "swiglu_beta", 0.0),
                 # Per-layer MoE LoRA state, set once by AscendFusedMoEWithLoRA
                 # when an adapter wraps this layer; None for non-LoRA layers.
                 lora_context=getattr(layer, "_ascend_moe_lora_context", None),
@@ -630,6 +639,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 before_gmm2_evt=fused_experts_results.before_gmm2_evt,
                 before_combine_evt=fused_experts_results.before_combine_evt,
                 swiglu_limit=fused_experts_results.swiglu_limit,
+                swiglu_alpha=fused_experts_results.swiglu_alpha,
+                swiglu_beta=fused_experts_results.swiglu_beta,
             )
         else:
             # The vLLM FusedMoE forward_impl does not return events.
@@ -679,6 +690,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     quant_mode=1,
                     swiglu_mode=1,
                     clamp_limit=fused_moe_evts.swiglu_limit,
+                    glu_alpha=fused_moe_evts.swiglu_alpha,
+                    glu_bias=fused_moe_evts.swiglu_beta,
                 )
                 # Execute the down projection concurrently with the combine
                 # communication.
@@ -711,6 +724,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     dst_type=torch.float8_e4m3fn,
                     quant_mode=2,
                     clamp_value=fused_moe_evts.swiglu_limit,
+                    glu_alpha=fused_moe_evts.swiglu_alpha,
+                    glu_bias=fused_moe_evts.swiglu_beta,
                 )
                 # Execute the down projection concurrently with the combine
                 # communication.
@@ -780,6 +795,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 before_gmm2=fused_moe_results.before_gmm2_evt,
                 before_combine=fused_moe_results.before_combine_evt,
                 swiglu_limit=fused_moe_results.swiglu_limit,
+                swiglu_alpha=fused_moe_results.swiglu_alpha,
+                swiglu_beta=fused_moe_results.swiglu_beta,
             ),
         )
         return shared_out, routed_out

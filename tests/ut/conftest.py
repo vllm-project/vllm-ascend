@@ -31,6 +31,7 @@ Conventions for UT directories:
 """
 
 import importlib.util
+import os
 import subprocess
 import sys
 import types
@@ -81,6 +82,7 @@ if not _npu_available:
     except RuntimeError:
         pass
     torch.npu = MagicMock()
+    torch.npu.is_available = MagicMock(return_value=False)
     torch.npu.Stream = MagicMock
     torch.version.cann = None
     torch.distributed.is_hccl_available = MagicMock(return_value=True)
@@ -129,6 +131,19 @@ _stale_modules = [
 ]
 for _m in _stale_modules:
     del sys.modules[_m]
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--msa-m3-sparse-backend",
+        action="store",
+        default=os.environ.get("MINIMAX_M3_SPARSE_BACKEND", "triton"),
+        choices=("triton", "torch_npu"),
+        help=(
+            "MiniMax M3 sparse-attention kernel backend for "
+            "test_minimax_m3_sparse_attn.py: triton reference or msa_m3_npu (torch_npu)."
+        ),
+    )
 
 
 @pytest.fixture(autouse=True)
