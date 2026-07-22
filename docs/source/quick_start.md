@@ -19,6 +19,9 @@ This section guides you through container-based environment setup and large mode
 
 ## Requirements
 
+:::::{tab-set}
+::::{tab-item} Atlas A2 inference products / Atlas A3 inference products
+
 - OS: Linux
 - Python: >= 3.10, < 3.13
 - Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series.
@@ -39,6 +42,20 @@ Atlas inference products and Atlas 200I Pro do not support `enable_npugraph_ex`.
 
 Atlas 200I Pro requires additional device nodes and driver mounts. See [Set up using Docker](installation.md#set-up-using-docker) for the complete container commands.
 ```
+::::
+::::{tab-item} Atlas inference products
+
+ | Software      | Supported version                | Note                                      |
+ |---------------|----------------------------------|-------------------------------------------|
+ | Ascend HDK    | Refer to the documentation [CANN 9.1.0-beta.1](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910beta1/releasenote/9.1.0-beta.1/release-note.md) | Required for CANN |
+ | CANN          | == 9.1.0-beta.1                 | Required for vllm-ascend and torch-npu    |
+ | torch-npu     | == 2.10.0.post2                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+ | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
+ | NNAL          | == 9.1.0-beta.1                 | Required for libatb.so, enables advanced tensor operations |
+ | triton / triton-ascend | Not supported          | Uninstalled in `Dockerfile.310p` |
+
+::::
+:::::
 
 ## Setup environment using container
 
