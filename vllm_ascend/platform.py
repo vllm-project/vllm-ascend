@@ -336,8 +336,7 @@ class NPUPlatform(Platform):
     @classmethod
     def _validate_parallel_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
-        # TODO(qcs): only check mrv1
-        if parallel_config.prefill_context_parallel_size > 1:
+        if not vllm_config.use_v2_model_runner and parallel_config.prefill_context_parallel_size > 1:
             raise ValueError(
                 "PCP (Prefill Context Parallelism) is not supported by vLLM Ascend. "
                 "Please set --prefill-context-parallel-size to 1. "
