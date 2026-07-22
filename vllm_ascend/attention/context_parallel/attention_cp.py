@@ -126,19 +126,13 @@ class AscendAttentionDCPMetadataBuilder(
             prefill_query_lens = query_lens[num_decodes:]
             context_lens_cpu = (seq_lens - query_lens)[num_decodes:]
             chunked_context_metadata = None
-            if (
-                self.chunked_prefill_enabled
-                and context_lens_cpu.numel() > 0
-                and context_lens_cpu.max().item() > 0
-            ):
+            if self.chunked_prefill_enabled and context_lens_cpu.numel() > 0 and context_lens_cpu.max().item() > 0:
                 local_context_lens_allranks = self._get_dcp_context_lens(
                     common_attn_metadata,
                     start=num_decodes,
                     device=self.device,
                 )
-                local_chunked_kv_lens = local_context_lens_allranks[
-                    :, self.dcp_rank
-                ]
+                local_chunked_kv_lens = local_context_lens_allranks[:, self.dcp_rank]
                 chunked_req_mask = self._get_chunked_req_mask(local_context_lens_allranks)
                 chunked_context_metadata = AscendMetadataForPrefill.ChunkedContextMetadata(
                     actual_chunk_seq_lengths=torch.cumsum(prefill_query_lens, dim=0),
@@ -165,9 +159,7 @@ class AscendAttentionDCPMetadataBuilder(
         decode_metadata = None
         if num_decodes > 0:
             decode_metadata = AscendMetadataForDecode(
-                num_computed_tokens_of_dcp=np.asarray(
-                    dcp_metadata.num_computed_tokens_of_dcp
-                )[:num_decodes],
+                num_computed_tokens_of_dcp=np.asarray(dcp_metadata.num_computed_tokens_of_dcp)[:num_decodes],
                 block_tables=block_table[:num_decodes],
                 dcp_mtp_attn_mask=dcp_metadata.dcp_mtp_attn_mask,
             )
@@ -179,7 +171,6 @@ class AscendAttentionDCPMetadataBuilder(
 
 
 class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
-
     @staticmethod
     def update_graph_params(
         update_stream,

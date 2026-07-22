@@ -27,7 +27,6 @@ import torch
 import torch.nn as nn
 import torch_npu
 from vllm.config import CUDAGraphMode
-from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors

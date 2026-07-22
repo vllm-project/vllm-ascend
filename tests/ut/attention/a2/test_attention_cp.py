@@ -25,9 +25,7 @@ def test_gqa_dcp_extends_v1_backend_without_polluting_base_metadata() -> None:
         AscendAttentionDCPMetadataBuilder,
         AscendAttentionMetadataBuilder,
     )
-    assert AscendAttentionDCPMetadataBuilder.metadata_cls is (
-        AscendAttentionDCPMetadata
-    )
+    assert AscendAttentionDCPMetadataBuilder.metadata_cls is (AscendAttentionDCPMetadata)
     assert not hasattr(AscendMetadata(), "decode_meta")
     assert not hasattr(AscendMetadata(), "prefill")
 

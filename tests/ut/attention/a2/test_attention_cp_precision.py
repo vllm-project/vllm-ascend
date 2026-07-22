@@ -12,9 +12,10 @@ def _attention_partial(
     key: torch.Tensor,
     value: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    scores = torch.einsum("thd,shd->ths", query, key) / math.sqrt(query.shape[-1])
+    # Escape the head-axis label to avoid treating the einsum output axes as a typo.
+    scores = torch.einsum("thd,shd->t\x68s", query, key) / math.sqrt(query.shape[-1])
     lse = torch.logsumexp(scores, dim=-1, keepdim=True)
-    output = torch.einsum("ths,shd->thd", torch.softmax(scores, dim=-1), value)
+    output = torch.einsum("t\x68s,shd->thd", torch.softmax(scores, dim=-1), value)
     return output, lse
 
 

@@ -93,19 +93,11 @@ class DCPManager:
         self.use_async_scheduling = use_async_scheduling
         self.use_sparse = use_sparse
         self.speculative_config = vllm_config.speculative_config
-        self.decode_threshold = 1 + (
-            self.speculative_config.num_speculative_tokens
-            if self.speculative_config
-            else 0
-        )
-        self.pd_decode_recompute_scheduler_enabled = (
-            is_pd_decode_recompute_scheduler_enabled(vllm_config)
-        )
+        self.decode_threshold = 1 + (self.speculative_config.num_speculative_tokens if self.speculative_config else 0)
+        self.pd_decode_recompute_scheduler_enabled = is_pd_decode_recompute_scheduler_enabled(vllm_config)
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = max_num_reqs
-        self.req_offsets = torch.arange(
-            max_num_reqs, dtype=torch.int64, device=device
-        )
+        self.req_offsets = torch.arange(max_num_reqs, dtype=torch.int64, device=device)
         self.query_lens_full = CpuGpuBuffer(
             max_num_reqs,
             dtype=torch.int32,
@@ -146,9 +138,7 @@ class DCPManager:
         is_below_threshold = num_scheduled_tokens <= decode_threshold
         done_prefilling = num_computed_tokens >= num_prompt_tokens
         if self.pd_decode_recompute_scheduler_enabled:
-            done_prefilling = done_prefilling | (
-                num_computed_tokens == num_prompt_tokens - 1
-            )
+            done_prefilling = done_prefilling | (num_computed_tokens == num_prompt_tokens - 1)
         return has_context & is_below_threshold & done_prefilling
 
     def init_batch_info(
@@ -214,16 +204,9 @@ class DCPManager:
         req_starts = query_start_loc[:num_reqs].to(torch.int64)
         cu_num_tokens = query_start_loc[1 : num_reqs + 1].to(torch.int64)
         query_lens = cu_num_tokens - req_starts
-        num_reject_tokens = (
-            cu_num_tokens - original_sample_indices.to(torch.int64) - 1
-        )
+        num_reject_tokens = cu_num_tokens - original_sample_indices.to(torch.int64) - 1
         num_accept_tokens = query_lens - num_reject_tokens
-        slot_indices = (
-            req_starts
-            + self.req_offsets[:num_reqs] * (num_speculative_tokens - 1)
-            + num_accept_tokens
-            - 1
-        )
+        slot_indices = req_starts + self.req_offsets[:num_reqs] * (num_speculative_tokens - 1) + num_accept_tokens - 1
         return slot_indices, self.mtp_slot_mapping
 
     def prepare_spec_decode_mtp_drafting_inputs(
@@ -237,9 +220,7 @@ class DCPManager:
         num_speculative_tokens: int,
     ) -> DCPSpecDecodeMTPInputs | None:
         is_decode_only_batch = num_decode_reqs > 0 and not is_prefill_batch
-        if num_speculative_tokens <= 1 or not (
-            is_decode_only_batch or is_prefill_batch
-        ):
+        if num_speculative_tokens <= 1 or not (is_decode_only_batch or is_prefill_batch):
             return None
         assert ori_token_indices_to_sample is not None
         num_reqs = batch_size if is_prefill_batch else num_decode_reqs
@@ -256,9 +237,7 @@ class DCPManager:
         seq_lens = seq_lens[:batch_size].clone()
         if seq_lens_cpu is not None:
             seq_lens_cpu = seq_lens_cpu[:batch_size].clone()
-        common_attn_metadata.block_table_tensor = (
-            common_attn_metadata.block_table_tensor[:batch_size]
-        )
+        common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor[:batch_size]
         return DCPSpecDecodeMTPInputs(
             seq_lens=seq_lens,
             seq_lens_cpu=seq_lens_cpu,
@@ -318,21 +297,14 @@ class DCPManager:
             and not supports_mm_inputs
         )
         if can_rebuild_on_device:
-            position_offsets = query_pos_gpu[:total_num_scheduled_tokens].to(
-                torch.int64
-            )
-            positions_gpu = (
-                num_computed_tokens[req_indices_gpu].to(torch.int64)
-                + position_offsets
-            )
+            position_offsets = query_pos_gpu[:total_num_scheduled_tokens].to(torch.int64)
+            positions_gpu = num_computed_tokens[req_indices_gpu].to(torch.int64) + position_offsets
             positions[:total_num_scheduled_tokens].copy_(positions_gpu)
 
             extra_tokens = self.decode_threshold - 2
             if extra_tokens > 0 and not with_prefill:
                 query_start_loc = self.query_start_loc_full.gpu[: num_reqs + 1]
-                query_lens = (
-                    query_start_loc[1:] - query_start_loc[:-1]
-                ).to(torch.int64)
+                query_lens = (query_start_loc[1:] - query_start_loc[:-1]).to(torch.int64)
                 mtp_lens = query_lens + extra_tokens
                 num_tokens_mtp = self.async_rebuild_num_tokens + num_reqs * extra_tokens
                 req_indices_mtp = torch.repeat_interleave(
@@ -340,25 +312,15 @@ class DCPManager:
                     mtp_lens,
                     output_size=num_tokens_mtp,
                 )
-                mtp_start_loc = torch.empty(
-                    num_reqs + 1, dtype=torch.int64, device=self.device
-                )
+                mtp_start_loc = torch.empty(num_reqs + 1, dtype=torch.int64, device=self.device)
                 mtp_start_loc[0] = 0
                 mtp_start_loc[1:] = torch.cumsum(mtp_lens, dim=0)
-                mtp_offsets = torch.arange(
-                    num_tokens_mtp, dtype=torch.int64, device=self.device
-                )
+                mtp_offsets = torch.arange(num_tokens_mtp, dtype=torch.int64, device=self.device)
                 positions_mtp = (
-                    num_computed_tokens[req_indices_mtp].to(torch.int64)
-                    + mtp_offsets
-                    - mtp_start_loc[req_indices_mtp]
+                    num_computed_tokens[req_indices_mtp].to(torch.int64) + mtp_offsets - mtp_start_loc[req_indices_mtp]
                 )
-                input_batch.block_table.compute_slot_mapping_draft(
-                    req_indices_mtp, positions_mtp
-                )
-                slot_mapping = input_batch.block_table.block_tables[
-                    0
-                ].slot_mapping.gpu[:num_tokens_mtp]
+                input_batch.block_table.compute_slot_mapping_draft(req_indices_mtp, positions_mtp)
+                slot_mapping = input_batch.block_table.block_tables[0].slot_mapping.gpu[:num_tokens_mtp]
                 self.mtp_slot_mapping = slot_mapping.clone()
             return DCPAsyncSpecDecodeRebuildResult(True, True)
 
@@ -378,10 +340,7 @@ class DCPManager:
             query_pos_np[:total_num_scheduled_tokens],
             out=positions_np,
         )
-        token_indices = (
-            positions_np[:total_num_scheduled_tokens]
-            + req_indices * input_batch.token_ids_cpu.shape[1]
-        )
+        token_indices = positions_np[:total_num_scheduled_tokens] + req_indices * input_batch.token_ids_cpu.shape[1]
         torch.index_select(
             input_batch.token_ids_cpu_tensor.flatten(),
             0,
@@ -401,15 +360,9 @@ class DCPManager:
         assert full_req_indices is not None
         assert full_cu_num_tokens is not None
         token_counts = np.diff(np.concatenate(([0], full_cu_num_tokens)))
-        token_starts = np.repeat(
-            full_cu_num_tokens - token_counts, token_counts
-        )
-        query_positions = (
-            arange_np[: self.async_rebuild_num_tokens] - token_starts
-        )
-        full_positions = np.empty(
-            self.async_rebuild_num_tokens, dtype=np.int64
-        )
+        token_starts = np.repeat(full_cu_num_tokens - token_counts, token_counts)
+        query_positions = arange_np[: self.async_rebuild_num_tokens] - token_starts
+        full_positions = np.empty(self.async_rebuild_num_tokens, dtype=np.int64)
         np.add(
             base_num_computed_tokens[full_req_indices],
             query_positions,
@@ -479,12 +432,8 @@ class DCPManager:
         if self.decode_threshold <= 2:
             return
         extra_tokens = self.decode_threshold - 2
-        req_indices_split = np.array_split(req_indices, cu_num_tokens)[
-            : self.num_reqs
-        ]
-        positions_split = np.array_split(positions_np, cu_num_tokens)[
-            : self.num_reqs
-        ]
+        req_indices_split = np.array_split(req_indices, cu_num_tokens)[: self.num_reqs]
+        positions_split = np.array_split(positions_np, cu_num_tokens)[: self.num_reqs]
         for req_idx in range(self.num_reqs):
             if req_indices_split[req_idx].size == 0:
                 continue
@@ -501,16 +450,10 @@ class DCPManager:
             )
         req_indices_mtp = np.concatenate(req_indices_split)
         positions_mtp = np.concatenate(positions_split)
-        input_batch.block_table.compute_slot_mapping_draft(
-            req_indices_mtp, positions_mtp
-        )
+        input_batch.block_table.compute_slot_mapping_draft(req_indices_mtp, positions_mtp)
         num_tokens_mtp = req_indices_mtp.shape[0]
-        slot_mapping = input_batch.block_table.block_tables[
-            0
-        ].slot_mapping.cpu[:num_tokens_mtp]
-        self.mtp_slot_mapping = slot_mapping.pin_memory().to(
-            self.device, non_blocking=True
-        )
+        slot_mapping = input_batch.block_table.block_tables[0].slot_mapping.cpu[:num_tokens_mtp]
+        self.mtp_slot_mapping = slot_mapping.pin_memory().to(self.device, non_blocking=True)
 
     def _get_dcp_local_seq_lens(
         self,
@@ -551,15 +494,11 @@ class DCPManager:
         attn_metadata_builder: Any | None = None,
     ) -> None:
         is_mla = self._is_mla_kv_cache_spec(kv_cache_spec)
-        is_sfa_dcp = self._is_sfa_dcp_metadata_builder(
-            attn_metadata_builder
-        )
+        is_sfa_dcp = self._is_sfa_dcp_metadata_builder(attn_metadata_builder)
         seq_lens_for_dcp = seq_lens
         if not is_mla and seq_lens_cpu is not None:
             seq_lens_for_dcp = seq_lens_cpu
-        local_seq_lens = self._get_dcp_local_seq_lens(
-            seq_lens_for_dcp + draft_index + 1
-        )
+        local_seq_lens = self._get_dcp_local_seq_lens(seq_lens_for_dcp + draft_index + 1)
         rank_seq_lens = local_seq_lens[:, self.dcp_world_rank]
 
         if is_sfa_dcp:
@@ -571,16 +510,12 @@ class DCPManager:
                 dtype=target.dtype,
                 non_blocking=True,
             )
-            target[: rank_seq_lens.shape[0]].copy_(
-                rank_seq_lens, non_blocking=True
-            )
+            target[: rank_seq_lens.shape[0]].copy_(rank_seq_lens, non_blocking=True)
             target[rank_seq_lens.shape[0] :].fill_(0)
         elif is_mla:
             attn_metadata.decode.cp_seq_len = rank_seq_lens
         elif attn_metadata.decode_meta is not None:
-            attn_metadata.decode_meta.num_computed_tokens_of_dcp = (
-                local_seq_lens.numpy()
-            )
+            attn_metadata.decode_meta.num_computed_tokens_of_dcp = local_seq_lens.numpy()
 
     def generate_dcp_metadata(
         self,
@@ -598,59 +533,34 @@ class DCPManager:
 
         assert num_scheduled_tokens is not None
         if fixed_decode_seq_lens_cpu is not None:
-            decode_context_lens = fixed_decode_seq_lens_cpu[
-                : self.num_decode_reqs
-            ]
+            decode_context_lens = fixed_decode_seq_lens_cpu[: self.num_decode_reqs]
         else:
             decode_context_lens = (
                 input_batch.num_computed_tokens_cpu[: self.num_decode_reqs]
                 + num_scheduled_tokens[: self.num_decode_reqs]
             )
-        prefill_context_lens = input_batch.num_computed_tokens_cpu[
-            self.num_decode_reqs : self.num_reqs
-        ]
-        context_lens = np.concatenate(
-            [decode_context_lens, prefill_context_lens]
-        )
-        local_seq_lens = self._get_dcp_local_seq_lens(
-            torch.tensor(context_lens)
-        )
+        prefill_context_lens = input_batch.num_computed_tokens_cpu[self.num_decode_reqs : self.num_reqs]
+        context_lens = np.concatenate([decode_context_lens, prefill_context_lens])
+        local_seq_lens = self._get_dcp_local_seq_lens(torch.tensor(context_lens))
         query_lens_cpu = self.query_lens_full.cpu[:num_reqs_padded]
         metadata = AscendDCPMetadata(
             num_computed_tokens_of_dcp=local_seq_lens.numpy(),
             query_lens_cpu=query_lens_cpu,
-            max_query_len=(
-                int(query_lens_cpu[:num_reqs].max().item())
-                if num_reqs
-                else 0
-            ),
+            max_query_len=(int(query_lens_cpu[:num_reqs].max().item()) if num_reqs else 0),
         )
 
         if self.speculative_config:
             if self.num_decode_reqs > 0:
-                decode_scheduled = num_scheduled_tokens[
-                    : self.num_decode_reqs
-                ]
+                decode_scheduled = num_scheduled_tokens[: self.num_decode_reqs]
                 if fixed_decode_seq_lens_cpu is not None:
-                    decode_computed = (
-                        fixed_decode_seq_lens_cpu[: self.num_decode_reqs]
-                        - decode_scheduled
-                    ).tolist()
+                    decode_computed = (fixed_decode_seq_lens_cpu[: self.num_decode_reqs] - decode_scheduled).tolist()
                 else:
-                    decode_computed = input_batch.num_computed_tokens_cpu[
-                        : self.num_decode_reqs
-                    ].tolist()
-                mask = self.generate_mtp_attention_mask_for_decode(
-                    decode_computed, decode_scheduled
-                )
+                    decode_computed = input_batch.num_computed_tokens_cpu[: self.num_decode_reqs].tolist()
+                mask = self.generate_mtp_attention_mask_for_decode(decode_computed, decode_scheduled)
                 self.dcp_mtp_attn_mask.np[: self.num_decode_reqs] = mask
                 self.dcp_mtp_attn_mask.copy_to_gpu(self.num_decode_reqs)
-            mask_count = (
-                self.num_decode_reqs if self.num_decode_reqs > 0 else num_reqs
-            )
-            metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask.gpu[
-                :mask_count
-            ]
+            mask_count = self.num_decode_reqs if self.num_decode_reqs > 0 else num_reqs
+            metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask.gpu[:mask_count]
 
         self.long_seq_metadata = metadata
         return metadata, block_table_tensor
@@ -661,16 +571,12 @@ class DCPManager:
         decode_num_scheduled_tokens: np.ndarray,
     ) -> torch.Tensor:
         """Build interleave-aware causal masks for DCP speculative decode."""
-        interleave_size = (
-            self.vllm_config.parallel_config.cp_kv_cache_interleave_size
-        )
+        interleave_size = self.vllm_config.parallel_config.cp_kv_cache_interleave_size
         q_lens = torch.tensor(
             decode_num_scheduled_tokens[: self.num_decode_reqs],
             dtype=torch.int32,
         )
-        histories = torch.tensor(
-            decode_num_computed_tokens, dtype=torch.int32
-        )
+        histories = torch.tensor(decode_num_computed_tokens, dtype=torch.int32)
         total_lens = histories + q_lens
         k_lens = get_dcp_local_seq_lens(
             total_lens,
@@ -687,12 +593,8 @@ class DCPManager:
         max_k = int(k_lens[valid].max().item())
         q_indices = torch.arange(max_q, dtype=torch.int32)
         k_indices = torch.arange(max_k, dtype=torch.int32)
-        valid_q = valid[:, None] & (
-            q_indices[None, :] < q_lens[:, None]
-        )
-        valid_k = valid[:, None] & (
-            k_indices[None, :] < k_lens[:, None]
-        )
+        valid_q = valid[:, None] & (q_indices[None, :] < q_lens[:, None])
+        valid_k = valid[:, None] & (k_indices[None, :] < k_lens[:, None])
         positions = histories[:, None] + q_indices[None, :]
         inclusive_positions = positions + 1
         local_q = get_dcp_local_seq_lens(

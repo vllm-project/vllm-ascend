@@ -31,13 +31,9 @@ def _make_dcp_manager(
     manager.dcp_world_rank = dcp_rank
     manager.num_decode_reqs = 1
     manager.vllm_config = MagicMock()
-    manager.vllm_config.parallel_config.cp_kv_cache_interleave_size = (
-        interleave_size
-    )
+    manager.vllm_config.parallel_config.cp_kv_cache_interleave_size = interleave_size
     manager.dcp_mtp_attn_mask = MagicMock()
-    manager.dcp_mtp_attn_mask.cpu = torch.zeros(
-        (1, max_query_len, max_model_len), dtype=torch.bool
-    )
+    manager.dcp_mtp_attn_mask.cpu = torch.zeros((1, max_query_len, max_model_len), dtype=torch.bool)
     return manager
 
 
@@ -111,16 +107,12 @@ def test_generate_mtp_attention_mask_for_decode(dcp_rank: int) -> None:
 
     actual = manager.generate_mtp_attention_mask_for_decode(
         decode_num_computed_tokens=[history_len],
-        decode_num_scheduled_tokens=np.array(
-            [num_scheduled], dtype=np.int32
-        ),
+        decode_num_scheduled_tokens=np.array([num_scheduled], dtype=np.int32),
     )
 
     total_len = history_len + num_scheduled
     local_k_len = (total_len + 1 - dcp_rank) // 2
-    positions = torch.arange(
-        history_len, history_len + num_scheduled
-    )
+    positions = torch.arange(history_len, history_len + num_scheduled)
     local_visible = (positions + 1 + 1 - dcp_rank) // 2
     expected = torch.arange(local_k_len)[None, :] >= local_visible[:, None]
 
@@ -159,9 +151,7 @@ def test_generate_dcp_mtp_input_fills_query_start_loc_tail() -> None:
 def test_update_spec_decode_drafting_metadata_skips_prefill() -> None:
     manager = object.__new__(DCPManager)
     manager.dcp_world_rank = 0
-    manager._get_dcp_local_seq_lens = MagicMock(
-        return_value=torch.tensor([[4, 3]], dtype=torch.int32)
-    )
+    manager._get_dcp_local_seq_lens = MagicMock(return_value=torch.tensor([[4, 3]], dtype=torch.int32))
     attn_metadata = MagicMock()
     attn_metadata.decode_meta = None
 

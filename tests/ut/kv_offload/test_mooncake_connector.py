@@ -2304,6 +2304,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             get_kv_split_metadata(False, 1, 8, 1, 8, 8, 30000, [1], [1], 0, 16),
             get_kv_split_metadata(False, 1, 8, 1, 16, 8, 30000, [1], [1], 0),
         )
+
     def test_get_kv_split_metadata_unequal_block_size_with_decode_cp(self):
         """Bd=2*Bp with D-side DCP: P ranks 0,1 -> D rank0; ranks 2,3 -> D rank1."""
         for dcp_rank in (0, 1):
@@ -2713,9 +2714,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 )
 
                 ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_hybrid", cast(ReqMeta, meta))
-                group_pulls = worker._get_group_pulls_metadata(
-                    "req_hybrid", ports, 4, 31000, meta.remote_dcp_size
-                )
+                group_pulls = worker._get_group_pulls_metadata("req_hybrid", ports, 4, 31000, meta.remote_dcp_size)
 
                 # Attention (group 0) is now expanded + min-trimmed in metadata: D holds 2
                 # external blocks [70,71], so the 3 remote blocks are trimmed to [50,51].
@@ -2787,9 +2786,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     remote_block_size=16,
                 )
                 ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_hybrid_dcp", cast(ReqMeta, meta))
-                group_pulls = worker._get_group_pulls_metadata(
-                    "req_hybrid_dcp", ports, 4, 31000, meta.remote_dcp_size
-                )
+                group_pulls = worker._get_group_pulls_metadata("req_hybrid_dcp", ports, 4, 31000, meta.remote_dcp_size)
 
                 self.assertEqual(len(ports), 2)
                 # Attention (group 0) is expanded in metadata (scale 1): the 4 external

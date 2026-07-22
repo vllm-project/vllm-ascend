@@ -156,9 +156,7 @@ class TestBlockTableComputeSlotMapping(TestBase):
                 np.testing.assert_array_equal(
                     actual_result,
                     expected_result,
-                    f"DCP={dcp_world_size}, "
-                    f"interleave={cp_kv_cache_interleave_size}, "
-                    f"dcp_rank={dcp_rank}",
+                    f"DCP={dcp_world_size}, interleave={cp_kv_cache_interleave_size}, dcp_rank={dcp_rank}",
                 )
 
     def test_compute_slot_mapping_dcp1_interleave1(self):
@@ -186,9 +184,7 @@ class TestBlockTableComputeSlotMapping(TestBase):
             (0, req_indices, positions, expected_result),
         ]
 
-        self._test_slot_mapping_for_ranks(
-            dcp_world_size=1, cp_kv_cache_interleave_size=1, test_configs=test_configs
-        )
+        self._test_slot_mapping_for_ranks(dcp_world_size=1, cp_kv_cache_interleave_size=1, test_configs=test_configs)
 
     def test_compute_slot_mapping_dcp8_interleave1(self):
         """Test compute_slot_mapping with DCP=8, interleave_size=1
@@ -231,9 +227,7 @@ class TestBlockTableComputeSlotMapping(TestBase):
             expected_result = np.array(rank_expectations[dcp_rank], dtype=np.int32)
             test_configs.append((dcp_rank, req_indices, positions, expected_result))
 
-        self._test_slot_mapping_for_ranks(
-            dcp_world_size=8, cp_kv_cache_interleave_size=1, test_configs=test_configs
-        )
+        self._test_slot_mapping_for_ranks(dcp_world_size=8, cp_kv_cache_interleave_size=1, test_configs=test_configs)
 
     def test_compute_slot_mapping_dcp8_interleave128(self):
         """Test compute_slot_mapping with DCP=8, interleave_size=128
@@ -287,9 +281,7 @@ class TestBlockTableComputeSlotMapping(TestBase):
 
             test_configs.append((dcp_rank, req_indices, positions, np.array(expected_result, dtype=np.int32)))
 
-        self._test_slot_mapping_for_ranks(
-            dcp_world_size=8, cp_kv_cache_interleave_size=128, test_configs=test_configs
-        )
+        self._test_slot_mapping_for_ranks(dcp_world_size=8, cp_kv_cache_interleave_size=128, test_configs=test_configs)
 
 
 if __name__ == "__main__":

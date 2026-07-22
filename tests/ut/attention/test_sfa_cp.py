@@ -23,12 +23,8 @@ def test_sfa_dcp_extends_v1_backend() -> None:
         AscendSFADCPMetadataBuilder,
         AscendSFAMetadataBuilder,
     )
-    assert "dcp_context" not in {
-        field.name for field in fields(AscendSFAMetadata)
-    }
-    assert "dcp_context" in {
-        field.name for field in fields(AscendSFADCPMetadata)
-    }
+    assert "dcp_context" not in {field.name for field in fields(AscendSFAMetadata)}
+    assert "dcp_context" in {field.name for field in fields(AscendSFADCPMetadata)}
 
 
 def _make_builder(rank: int = 0) -> AscendSFADCPMetadataBuilder:
