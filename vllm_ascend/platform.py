@@ -946,8 +946,7 @@ class NPUPlatform(Platform):
         # when v1's forward context is refactored, we can remove this branch.
         # Currently, model runner v2 use the new forward context.
         # compared to v1, v2's forward context lacks some fields, such as:
-        # is_first_layer, prefetch_mlp_gate_up_proj, prefetch_mlp_gate_down_proj,
-        # prefetch_mlp_enabled, model_instance, is_draft_model.
+        # model_instance, is_draft_model.
         if not vllm_config.use_v2_model_runner:
             return {}
 
