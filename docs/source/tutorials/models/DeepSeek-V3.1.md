@@ -949,8 +949,8 @@ After about several minutes, you can get the performance evaluation result.
 |High Throughput (16K)|Server-D Node|16|4|8|36K|1|
 |Low Latency (16K)|Server-P Node|16|8|2|36K|3|
 |Low Latency (16K)|Server-D Node|16|4|8|36K|3|
-|Long Context (64K)|Server-P Node|16|16|1|36K|3|
-|Long Context (64K)|Server-D Node|16|4|8|36K|3|
+|Long Context (64K)|Server-P Node|16|16|1|132K|3|
+|Long Context (64K)|Server-D Node|16|4|8|132K|3|
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
 
