@@ -129,7 +129,6 @@ def _get_deleted_test_files_from_pr(diff_file: str, test_case_map: dict) -> list
         # Normalize: tests/ut/core/test_xxx.py -> tests/ut/core/test_xxx
         test_case_name = test_file_path.rsplit(".py", 1)[0]
         deleted_test_files.append(test_case_name)
-        deleted_test_files.append(test_case_name)
 
     if deleted_test_files:
         print(f"  Found {len(deleted_test_files)} deleted test file(s): {deleted_test_files}")
@@ -1082,16 +1081,10 @@ def main():
 
         # 使用跨平台临时目录
         diff_file = os.path.join(tempfile.gettempdir(), "pr.diff")
-        try:
-            result = subprocess.run(["gh", "pr", "diff", str(pr_num), "-R", repo], capture_output=True, text=True)
-            if result.returncode != 0:
-                raise FileNotFoundError()
-            with open(diff_file, "w", encoding="utf-8") as f:
-                f.write(result.stdout)
-            print("  Using gh cli to get diff")
-        except FileNotFoundError:
-            # gh not available, try urllib via GitHub API
-            print("  gh cli not available, trying via GitHub API...")
+        max_retries = 3
+
+        for attempt in range(1, max_retries + 1):
+            print(f"  Attempt {attempt}/{max_retries} to get PR diff via GitHub API...")
             try:
                 pr_url = f"https://api.github.com/repos/{repo}/pulls/{pr_num}"
                 req = urllib.request.Request(pr_url, headers={"Accept": "application/vnd.github.v3+json"})
@@ -1100,8 +1093,7 @@ def main():
                     diff_url = pr_data.get("diff_url")
 
                 if not diff_url:
-                    print("Error: Cannot get diff URL")
-                    exit(1)
+                    raise Exception("Cannot get diff URL")
 
                 # Download diff (use binary mode to avoid line ending conversion)
                 req = urllib.request.Request(diff_url)
@@ -1110,9 +1102,12 @@ def main():
                     with open(diff_file, "wb") as f:
                         f.write(diff_bytes)
                 print("  Using GitHub API to get diff")
+                break
             except Exception as e:
-                print(f"Error: Failed to get PR diff: {e}")
-                exit(1)
+                print(f"  Attempt {attempt} failed: {e}")
+                if attempt == max_retries:
+                    print(f"  All {max_retries} attempts failed, exiting")
+                    exit(1)
 
         print(f"  PR diff saved to: {diff_file}")
         changed_files_with_lines = change_detector.parse_pr_diff_file(diff_file)
