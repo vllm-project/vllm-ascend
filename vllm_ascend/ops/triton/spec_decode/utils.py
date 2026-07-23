@@ -94,10 +94,9 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid(
     batch_size,  # tl.int32
     HAS_NUM_REJECTED: tl.constexpr = False,
     SAMPLE_FROM_ANCHOR: tl.constexpr = False,
-    total_cp_world_size: tl.constexpr = 1,   # = pcp_size * dcp_size
-    current_cp_rank: tl.constexpr = 0,       # = dcp_size * pcp_rank + dcp_rank
+    total_cp_world_size: tl.constexpr = 1,   # = dcp_size
+    current_cp_rank: tl.constexpr = 0,       # = dcp_rank
     cp_kv_cache_interleave_size: tl.constexpr = 1,
-    cp_slot_stride: tl.constexpr = 1,
     PAD_ID: tl.constexpr = -1,
 ):
     for req_idx in range(0, batch_size):
@@ -156,7 +155,7 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid(
                 block_num_q = query_cache_pos // block_size
                 block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q).to(tl.int64)
                 slot_q = block_id_q * block_size + (query_cache_pos % block_size)
-            tl.store(out_query_slot_mapping_ptr + query_out_idx * cp_slot_stride, slot_q)
+            tl.store(out_query_slot_mapping_ptr + query_out_idx, slot_q)
 
             if q_idx == 0:
                 bonus_token = tl.load(next_token_ids_ptr + req_idx)

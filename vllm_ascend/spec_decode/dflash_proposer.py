@@ -82,54 +82,6 @@ class AscendDflashProposer(AscendEagleProposer):
         num_query_per_req = 1 + self.num_speculative_tokens
         num_query_total = batch_size * num_query_per_req
 
-        if self.pcp_size > 1:
-            mgr = self.runner.pcp_manager
-            cad.seq_lens = (
-                self.runner.num_computed_tokens[:batch_size] + 
-                mgr.query_lens_pcp_full.gpu[:batch_size]
-            ).to(cad.seq_lens.dtype)
-
-            query_lens_d = self.runner.query_lens[:num_decode_reqs]
-            num_tokens_d = int(query_lens_d.sum().item())
-            num_tokens_d_padded = num_tokens_d * self.pcp_size
-            if num_tokens_d:
-                pick: list[int] = []
-                start = 0
-                for r in range(num_decode_reqs):
-                    qlen = int(query_lens_d[r])
-                    pick += list(range(start, start + qlen))
-                    start += qlen * self.pcp_size
-                hs_d = target_hidden_states[:num_tokens_d_padded][pick]
-            else:
-                hs_d = target_hidden_states[:0]
-            #
-            padded_len = int(mgr.pcp_padded_tokens_length)
-            hs_p = target_hidden_states[num_tokens_d_padded:padded_len]
-            if hs_p.shape[0] != num_context - num_tokens_d:
-                unpad_p = mgr.pcp_unpad_mask_cpu_tensor[num_tokens_d_padded:padded_len].to(
-                    self.device, non_blocking=True
-                )
-                hs_p = hs_p[unpad_p]
-            target_hidden_states = torch.cat([hs_d, hs_p], dim=0)   # → num_context 行，与 token_ids 对齐
-
-            # 入参 target_positions 是本 rank 局部 chunk；用与 input_ids_pcp_full 对齐的全序列
-            #     positions 覆盖（pcp_utils.py 同源构建）。positions_pcp_full 为 CPU 张量。
-            target_positions = mgr.positions_pcp_full[:num_context].to(
-                device=self.device, dtype=target_positions.dtype, non_blocking=True
-            )
-
-            #  prefill(-含)步的 cad.query_start_loc / cad.seq_lens 是 per-rank 局部口径
-            #     （runner 只在 decode 分支换成 pcp_full，model_runner_v1.py；
-            #     seq_lens 用已重切的局部 num_scheduled_tokens 构建）。
-            #     否则核内 last_pos 读 target_positions[局部len-1]→ query
-            #     positions 错，context 循环
-            #     只写前一半、query slot 错位、核后 seq_lens 少一半 。
-            #     换成与 target_token_ids / positions_pcp_full 同口径的全序列量（decode 步幂等）：
-            qsl_full = mgr.query_start_loc_pcp_full.gpu[: batch_size + 1]
-            cad.query_start_loc = qsl_full
-            cad.query_start_loc_cpu = mgr.query_start_loc_pcp_full.cpu[: batch_size + 1]
-            cad.seq_lens = self.runner.num_computed_tokens[:batch_size] + torch.diff(qsl_full)
-
         self._dflash_num_context = num_context
         self._dflash_hidden_states[:num_context] = target_hidden_states
 
@@ -140,8 +92,8 @@ class AscendDflashProposer(AscendEagleProposer):
         )
 
         has_num_rejected = num_rejected_tokens_gpu is not None
-        total_cp_world_size = self.pcp_size * self.dcp_size
-        current_cp_rank = self.dcp_size * self.pcp_rank + self.dcp_rank
+        total_cp_world_size = self.dcp_size
+        current_cp_rank = self.dcp_rank
         cp_kv_cache_interleave_size = self.runner.parallel_config.cp_kv_cache_interleave_size
 
         copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid[1,](
@@ -174,11 +126,10 @@ class AscendDflashProposer(AscendEagleProposer):
             total_cp_world_size=total_cp_world_size,
             current_cp_rank=current_cp_rank,
             cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
-            cp_slot_stride=self.pcp_size,
             PAD_ID=PADDING_SLOT_ID,
         )
 
-        query_slot_mapping = self._slot_mapping_buffer[:num_query_total * self.pcp_size]
+        query_slot_mapping = self._slot_mapping_buffer[:num_query_total]
         new_query_start_loc = self.arange_dflash[: batch_size + 1] * num_query_per_req
 
         effective_seq_lens = cad.seq_lens
@@ -205,7 +156,7 @@ class AscendDflashProposer(AscendEagleProposer):
         cad.attn_state = AscendAttentionState.ChunkedPrefill
 
         long_seq_args = None
-        if self.pcp_size * self.dcp_size > 1:
+        if self.dcp_size > 1:
             from vllm_ascend.attention.utils import AscendPrefillContextParallelMetadata
             seq_lens_cpu = cad.seq_lens.cpu()
             cad.seq_lens_cpu = seq_lens_cpu
@@ -214,12 +165,12 @@ class AscendDflashProposer(AscendEagleProposer):
             cad.max_seq_len = int(seq_lens_cpu.max())
             local = self.runner.pcp_manager._get_cp_local_seq_lens(
                 cad.seq_lens.cpu(),
-                self.pcp_size, self.dcp_size,
+                1, self.dcp_size,
                 self.runner.parallel_config.cp_kv_cache_interleave_size,
             )                                              # [num_reqs, pcp, dcp]
             cad.prefill_context_parallel_metadata = AscendPrefillContextParallelMetadata(
                 num_computed_tokens_of_pcp_dcp=local.numpy(),      # builder 必读，含 1+N query
-                num_actual_tokens_pcp_padded=num_query_total * self.pcp_size,
+                num_actual_tokens_pcp_padded=num_query_total,
                 dcp_mtp_attn_mask=None,                            # 置 None → 全注意力（不复用 MTP 因果 mask）
             )
             long_seq_args = (None, None)  
@@ -249,14 +200,14 @@ class AscendDflashProposer(AscendEagleProposer):
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
         if (
-            self.pcp_size * self.dcp_size > 1
+            self.dcp_size > 1
             and self.use_cuda_graph
             and not is_profile
             and self.block_table_tensor_clone is None
         ):
             self.block_table_tensor_clone = torch.zeros(
                 (
-                    self.runner.max_num_tokens + 2 * self.pcp_size * self.runner.max_num_reqs,
+                    self.runner.max_num_tokens + 2 * self.runner.max_num_reqs,
                     self.runner.input_batch.block_table[0].get_device_tensor().shape[1],
                 ),
                 dtype=torch.int32,
@@ -273,16 +224,16 @@ class AscendDflashProposer(AscendEagleProposer):
         if aclgraph_runtime_mode == CUDAGraphMode.FULL and len(self.runner.attn_groups) > 0:
             builder = self.draft_attn_groups[0].get_metadata_builder()
             cp_meta = None
-            if self.pcp_size * self.dcp_size > 1:
+            if self.dcp_size > 1:
                 from vllm_ascend.attention.utils import AscendPrefillContextParallelMetadata
                 local = self.runner.pcp_manager._get_cp_local_seq_lens(
                     self.runner.optimistic_seq_lens_cpu[:num_reqs],
-                    self.pcp_size, self.dcp_size,
+                    1, self.dcp_size,
                     self.runner.parallel_config.cp_kv_cache_interleave_size,
                 )                                              # [num_reqs, pcp, dcp]
                 cp_meta = AscendPrefillContextParallelMetadata(
                     num_computed_tokens_of_pcp_dcp=local.numpy(),      # builder 必读，含 1+N query
-                    num_actual_tokens_pcp_padded=num_query_total * self.pcp_size,
+                    num_actual_tokens_pcp_padded=num_query_total,
                     dcp_mtp_attn_mask=None,                            # 置 None → 全注意力（不复用 MTP 因果 mask）
                 )
             common_attn_metadata = AscendCommonAttentionMetadata(
@@ -295,7 +246,7 @@ class AscendDflashProposer(AscendEagleProposer):
                 num_actual_tokens=num_query_tokens,
                 max_query_len=num_query_per_req,
                 max_seq_len=0,
-                slot_mapping=self._slot_mapping_buffer[:num_query_total * self.pcp_size],
+                slot_mapping=self._slot_mapping_buffer[:num_query_total],
                 attn_state=AscendAttentionState.ChunkedPrefill,
                 causal=False,
                 is_prefilling=torch.zeros(num_reqs, dtype=torch.bool),
