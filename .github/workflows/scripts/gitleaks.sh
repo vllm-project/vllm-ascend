@@ -5,7 +5,6 @@ set -x
 BIN_LOCAL="./gitleaks"
 CONFIG_FILE="./.gitleaks.toml"
 
-# 1. 优先使用系统PATH中的gitleaks
 if command -v gitleaks &> /dev/null; then
     echo "Found gitleaks in system PATH, use system binary"
     BIN_CMD="gitleaks"
@@ -18,14 +17,11 @@ else
     BIN_CMD="${BIN_LOCAL}"
 fi
 
-# 校验配置文件
 if [ ! -f "${CONFIG_FILE}" ]; then
     echo "::error::Missing config file: ${CONFIG_FILE}"
     exit 1
 fi
 
-# 区分运行环境
-# GITHUB_BASE_REF 仅CI存在，用来判定是否CI环境
 if [[ -n "${GITHUB_BASE_REF}" ]]; then
     echo "==== CI Mode: scan changed files ===="
     BASE_BRANCH="${GITHUB_BASE_REF}"
