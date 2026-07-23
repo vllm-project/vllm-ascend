@@ -34,6 +34,7 @@ from vllm_ascend.device.mxfp_compat import (
 )
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
+from vllm_ascend.utils import maybe_trans_nz
 
 from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
 from .registry import register_scheme
@@ -139,6 +140,11 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
         layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
         layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1).contiguous()
+        # Skip NZ conversion for weights that will be further processed by
+        # mlapo (_process_weights_for_fused_mlapo), which does its own
+        # transpose + reshape + NZ conversion on these weights.
+        if not getattr(layer, "_mlapo_managed", False):
+            layer.weight.data = maybe_trans_nz(layer.weight.data, customize_dtype=torch.float8_e4m3fn)
 
         # Mark as transformed
         layer._mxfp8_transformed = True
