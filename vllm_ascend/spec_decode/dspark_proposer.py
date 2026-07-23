@@ -70,13 +70,13 @@ class AscendDSparkProposer(AscendDflashProposer):
         self.positions = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
         self._slot_mapping_buffer = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
         self._request_slots_buffer = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
-        self._dspark_window_offsets = torch.arange(self._dspark_window_size, dtype=torch.long, device=self.device).view(
+        self._dspark_window_offsets = torch.arange(self._dspark_window_size, dtype=torch.int64, device=self.device).view(
             1, -1
         )
         window_shape = (self.max_graph_batch_size, self._dspark_window_size)
-        self._dspark_context_cache_indices_buffer = torch.zeros(window_shape, dtype=torch.long, device=self.device)
+        self._dspark_context_cache_indices_buffer = torch.zeros(window_shape, dtype=torch.int64, device=self.device)
         self._dspark_context_cache_valid_buffer = torch.zeros(window_shape, dtype=torch.bool, device=self.device)
-        self._dspark_context_request_slots_buffer = torch.zeros(window_shape, dtype=torch.long, device=self.device)
+        self._dspark_context_request_slots_buffer = torch.zeros(window_shape, dtype=torch.int64, device=self.device)
         self._dspark_sampling_seed_buffer = torch.zeros(
             self.max_graph_batch_size, dtype=torch.int64, device=self.device
         )
@@ -449,7 +449,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             block_table_buffer[:num_rows, :num_cols].copy_(block_table[:num_rows, :num_cols])
             if seq_lens is not None and num_rows > 0:
                 valid_block_counts = torch.div(
-                    seq_lens[:num_rows].to(device=block_table_buffer.device, dtype=torch.long)
+                    seq_lens[:num_rows].to(device=block_table_buffer.device, dtype=torch.int64)
                     + self.kernel_block_size
                     - 1,
                     self.kernel_block_size,
@@ -496,7 +496,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._dflash_num_context = num_context
         if num_context > 0:
             context_token_indices = self.arange_dflash[:num_context]
-            context_req_indices = torch.searchsorted(query_end, context_token_indices, right=True).to(torch.long)
+            context_req_indices = torch.searchsorted(query_end, context_token_indices, right=True).to(torch.int64)
             context_req_indices = torch.clamp(context_req_indices, max=batch_size - 1)
             valid_context_end = valid_query_end.index_select(0, context_req_indices)
             valid_context_mask = context_token_indices < valid_context_end
@@ -524,7 +524,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             return num_query_total, None, cad, None
         model_config = getattr(getattr(self, "vllm_config", None), "model_config", None)
         max_model_len = int(getattr(model_config, "max_model_len", 0) or 0)
-        last_token_indices = torch.clamp(valid_query_end - 1, min=0, max=target_positions.shape[0] - 1).to(torch.long)
+        last_token_indices = torch.clamp(valid_query_end - 1, min=0, max=target_positions.shape[0] - 1).to(torch.int64)
         last_positions = target_positions.index_select(0, last_token_indices).to(self.positions.dtype)
         # The target metadata is optimistic and can still include rejected
         # draft tokens. Use the last valid target position for paged-cache
@@ -551,7 +551,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         if getattr(cad, "block_table_tensor", None) is not None:
             block_nums = draft_positions // self.kernel_block_size
             block_offsets = draft_positions % self.kernel_block_size
-            block_ids = torch.gather(cad.block_table_tensor[:batch_size], 1, block_nums.long())
+            block_ids = torch.gather(cad.block_table_tensor[:batch_size], 1, block_nums.to(torch.int64))
             slot_mapping = block_ids.to(torch.int32) * self.kernel_block_size + block_offsets
         else:
             slot_mapping = draft_positions.to(torch.int32)
@@ -596,7 +596,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             )
         batch_size = num_input_tokens // block_size
         draft_positions = self.positions[:num_input_tokens].view(batch_size, block_size)
-        context_end = draft_positions[:, :1].to(torch.long) - 1
+        context_end = draft_positions[:, :1].to(torch.int64) - 1
         context_start = torch.clamp(context_end + 1 - self._dspark_window_size, min=0)
         context_positions = context_start + self._dspark_window_offsets
         cache_indices = context_positions.remainder(self._dspark_window_size)
@@ -604,7 +604,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         request_slots = (
             self._request_slots_buffer[:num_input_tokens]
             .view(batch_size, block_size)[:, :1]
-            .to(torch.long)
+            .to(torch.int64)
             .expand(-1, self._dspark_window_size)
         )
 
@@ -676,7 +676,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         input_batch = getattr(getattr(self, "runner", None), "input_batch", None)
         runner_idx_mapping = getattr(input_batch, "idx_mapping", None)
         if isinstance(runner_idx_mapping, torch.Tensor):
-            return runner_idx_mapping[:num_reqs].to(device=device, dtype=torch.long).contiguous()
+            return runner_idx_mapping[:num_reqs].to(device=device, dtype=torch.int64).contiguous()
         return None
 
     def _get_draft_sampling_temperature(
@@ -747,7 +747,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._dspark_last_draft_probs = None
         self._dspark_last_confidence = None
         self._dspark_last_req_ids = None
-        prev_ids = self.input_ids[:num_sample].view(num_reqs, block_size)[:, 0].long()
+        prev_ids = self.input_ids[:num_sample].view(num_reqs, block_size)[:, 0].to(torch.int64)
         collect_confidence = self._dspark_confidence_threshold > 0.0
         markov_embeds: list[torch.Tensor] | None = [] if collect_confidence else None
         if use_probabilistic:
@@ -932,11 +932,15 @@ class AscendDSparkProposer(AscendDflashProposer):
             self._prepare_dspark_context_cache()
             self._register_pd_handoff_warmup(scheduler_output, actual_num_reqs)
             if is_prefill:
-                return common_attn_metadata.num_reqs.new_zeros(common_attn_metadata.num_reqs, 0, dtype=torch.long)
+                return common_attn_metadata.num_reqs.new_zeros(
+                    common_attn_metadata.num_reqs,
+                    0,
+                    dtype=torch.int64,
+                )
             if self._consume_pd_handoff_warmup(actual_num_reqs):
                 return torch.empty(
                     (actual_num_reqs, 0),
-                    dtype=torch.long,
+                    dtype=torch.int64,
                     device=self.device,
                 )
             else:

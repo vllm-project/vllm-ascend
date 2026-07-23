@@ -28,7 +28,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.rope_dsv4 import RopeDataProxy, get_cos_and_sin_dsa
-from vllm_ascend.utils import enable_dsa_cp
+from vllm_ascend.utils import AscendDeviceType, enable_dsa_cp, get_ascend_device_type
 
 from .deepseek_v4 import (
     DSV4_STACKED_PARAMS_MAPPING,
@@ -282,14 +282,14 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         )
         self.register_buffer(
             "_dspark_window_offsets",
-            torch.arange(self.window_size, device=self.attn_sink.device, dtype=torch.long).view(1, -1),
+            torch.arange(self.window_size, device=self.attn_sink.device, dtype=torch.int64).view(1, -1),
             persistent=False,
         )
 
     def reset_request_slots(self, request_slots: torch.Tensor | None) -> None:
         if request_slots is None or request_slots.numel() == 0:
             return
-        slots = torch.unique(request_slots.to(device=self._dspark_cache_positions.device, dtype=torch.long))
+        slots = torch.unique(request_slots.to(device=self._dspark_cache_positions.device, dtype=torch.int64))
         self._dspark_kv_cache[slots] = 0
         self._dspark_cache_positions[slots] = -1
 
@@ -338,9 +338,9 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
 
         cache_tokens = kv_cache.flatten(start_dim=2)
         cache_block_size = kv_cache.shape[1]
-        slots_long = slot_mapping.to(device=shared_kv.device, dtype=torch.long)
-        block_ids = torch.div(slots_long, cache_block_size, rounding_mode="floor")
-        block_offsets = slots_long.remainder(cache_block_size)
+        slots_int64 = slot_mapping.to(device=shared_kv.device, dtype=torch.int64)
+        block_ids = torch.div(slots_int64, cache_block_size, rounding_mode="floor")
+        block_offsets = slots_int64.remainder(cache_block_size)
         valid &= block_ids < kv_cache.shape[0]
         flat_valid = valid.reshape(-1)
         flat_block_ids = block_ids.reshape(-1)[flat_valid]
@@ -362,8 +362,8 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         batch_size = min(block_table.shape[0], context_lens.numel(), request_slots.numel())
         if batch_size == 0:
             return
-        context_lens = context_lens[:batch_size].to(device=kv_cache.device, dtype=torch.long)
-        request_slots = request_slots[:batch_size].to(device=kv_cache.device, dtype=torch.long)
+        context_lens = context_lens[:batch_size].to(device=kv_cache.device, dtype=torch.int64)
+        request_slots = request_slots[:batch_size].to(device=kv_cache.device, dtype=torch.int64)
         context_end = context_lens.view(-1, 1) - 1
         context_positions = context_end + 1 - self.window_size + self._dspark_window_offsets
         position_valid = (context_positions >= 0) & (context_positions <= context_end)
@@ -376,7 +376,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         )
         table_valid = block_numbers < block_table.shape[1]
         safe_block_numbers = block_numbers.clamp(max=block_table.shape[1] - 1)
-        block_ids = block_table[:batch_size].gather(1, safe_block_numbers).to(torch.long)
+        block_ids = block_table[:batch_size].gather(1, safe_block_numbers).to(torch.int64)
         cache_valid = position_valid & table_valid & (block_ids >= 0) & (block_ids < kv_cache.shape[0])
         safe_block_ids = block_ids.clamp(min=0, max=kv_cache.shape[0] - 1)
         block_offsets = context_positions.clamp_min(0).remainder(cache_block_size)
@@ -461,14 +461,14 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         batch_size, draft_len = q.shape[:2]
 
         if context_cache_indices is None or context_cache_valid is None or context_request_slots is None:
-            block_start = draft_positions[:, :1].to(torch.long)
+            block_start = draft_positions[:, :1].to(torch.int64)
             context_end = block_start - 1
             context_start = torch.clamp(context_end + 1 - self.window_size, min=0)
             ctx_positions = context_start + self._dspark_window_offsets
             context_cache_valid = ctx_positions <= context_end
             context_cache_indices = ctx_positions.remainder(self.window_size)
             context_request_slots = (
-                request_slots[:, :1].to(device=draft_kv.device, dtype=torch.long).expand(-1, self.window_size)
+                request_slots[:, :1].to(device=draft_kv.device, dtype=torch.int64).expand(-1, self.window_size)
             )
         ctx_kv = self._dspark_kv_cache[context_request_slots, context_cache_indices]
         ctx_kv = torch.where(context_cache_valid.unsqueeze(-1), ctx_kv, torch.zeros_like(ctx_kv))
@@ -652,7 +652,14 @@ class DeepseekV4DSparkModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
+        ascend_device_type = get_ascend_device_type()
+        if ascend_device_type != AscendDeviceType.A5:
+            raise RuntimeError(
+                "DeepSeek V4 DSpark is only supported on Ascend A5, "
+                f"but detected Ascend {ascend_device_type.name}."
+            )
         config = vllm_config.speculative_config.draft_model_config.hf_config
+        logger.info_once("Initializing the DeepSeek V4 DSpark draft model.")
         self.config = config
         self.hc_mult = config.hc_mult
         self.target_layer_ids = list(getattr(config, "dspark_target_layer_ids", []) or [])

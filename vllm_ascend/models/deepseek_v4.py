@@ -1201,6 +1201,7 @@ class DeepseekV4Model(nn.Module):
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
             if layer.layer_idx in self._dspark_target_layer_id_set:
+                # Average over the HC branch dimension, preserving [num_tokens, hidden_size].
                 dspark_hiddens.append(hidden_states.mean(dim=1))
 
         # Stash pre-hc_head residual for the MTP draft (captured copy_).
