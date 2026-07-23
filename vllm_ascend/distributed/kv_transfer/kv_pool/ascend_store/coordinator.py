@@ -19,6 +19,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     _block_hash_to_bytes,
     get_block_hashes,
 )
+from vllm_ascend.utils import vllm_version_is
 
 _CACHE_MISSING = object()
 _MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
@@ -27,10 +28,15 @@ _MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
 class ExternalCachedBlockPool:
     """Duck-typed BlockPool backed by external AscendStore key existence."""
 
-    def __init__(self, exists: set[tuple[int, bytes]] | None = None) -> None:
+    def __init__(
+        self,
+        hash_block_size: int = 1,
+        exists: set[tuple[int, bytes]] | None = None,
+    ) -> None:
         # exists=None is used for load/store masks where hit length has already
         # been decided and each manager only needs to apply its own reachability.
         self._exists = exists
+        self.hash_block_size = hash_block_size
         self.null_block = KVCacheBlock(block_id=0)
         self._present_block = KVCacheBlock(block_id=1)
 
@@ -161,7 +167,7 @@ class AscendStoreCoordinator:
         masks, _ = self.find_longest_cache_hit(
             block_hashes,
             token_len,
-            ExternalCachedBlockPool(),
+            ExternalCachedBlockPool(self.hash_block_size),
             apply_eagle=False,
         )
         return tuple(
@@ -226,10 +232,17 @@ class AscendStoreCoordinator:
                 drop_eagle_block=0 in eagle_indices,
                 alignment_tokens=spec.block_size,
             )
-            blocks_by_group: list[list[KVCacheBlock]] = [[] for _ in range(len(self.kv_cache_groups))]
-            for group_id, blocks in zip(group_ids, hit_blocks, strict=True):
-                blocks_by_group[group_id] = blocks
-            return tuple(blocks_by_group), len(hit_blocks[0]) * spec.block_size
+            if not vllm_version_is("0.25.1"):
+                hit_blocks, _new_hit_length = hit_blocks
+                blocks_by_group: list[list[KVCacheBlock]] = [[] for _ in range(len(self.kv_cache_groups))]
+                for group_id, blocks in zip(group_ids, hit_blocks, strict=True):
+                    blocks_by_group[group_id] = blocks
+                return tuple(blocks_by_group), _new_hit_length
+            else:
+                blocks_by_group: list[list[KVCacheBlock]] = [[] for _ in range(len(self.kv_cache_groups))]
+                for group_id, blocks in zip(group_ids, hit_blocks, strict=True):
+                    blocks_by_group[group_id] = blocks
+                return tuple(blocks_by_group), len(hit_blocks[0]) * spec.block_size
 
         hit_length = max_length
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * len(self.kv_cache_groups)
@@ -262,7 +275,10 @@ class AscendStoreCoordinator:
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self.lcm_block_size,
                 )
-                new_hit_length = len(hit_blocks[0]) * spec.block_size
+                if not vllm_version_is("0.25.1"):
+                    hit_blocks, new_hit_length = hit_blocks
+                else:
+                    new_hit_length = len(hit_blocks[0]) * spec.block_size
                 if drop_eagle_block:
                     eagle_verified.add(index)
                 elif new_hit_length < curr_hit_length:
