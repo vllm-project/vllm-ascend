@@ -345,7 +345,8 @@ class CodeChangeDetector:
 
         Args:
             diff_output: diff content
-            filter_prefix: only keep files with this prefix (e.g., '{REPO_NAME}/' filters product code, defaults to REPO_NAME)
+            filter_prefix: only keep files with this prefix
+                (e.g., '{REPO_NAME}/' filters product code, defaults to REPO_NAME)
 
         Returns:
             {filepath: {lineno, ...}} - set of changed line numbers in the new file
@@ -538,7 +539,8 @@ class TestSelector:
         Returns:
             (selected_tests, expand_reason)
             - selected_tests: [(test_case_name, {filepath: {covered_lines}}, total_affected_lines), ...]
-            - expand_reason: expansion reason ('' means no expansion, 'line'/'function'/'file' indicates the granularity used)
+            - expand_reason: expansion reason
+                ('' means no expansion, 'line'/'function'/'file' indicates the granularity used)
         """
         selected = []
         expand_reason = ""
