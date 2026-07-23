@@ -532,21 +532,36 @@ class Dumper:
         if not self._enable_token_logprob_check:
             return
         if self._dynamic_dump_max_times == 0:
+            logger.warning_once(
+                "[Anomaly token_logprob] skip: dynamic_dump_max_times=0 (set >0 to enable detection/dump)"
+            )
             return
         if not get_pp_group().is_last_rank:
             return
+        log_leader = self.runner.tp_rank == 0
         if sampled_token_ids is None or logprobs_lists is None:
+            if log_leader:
+                logger.warning_once(
+                    "[Anomaly token_logprob] skip: no logprobs on this step "
+                    "(sampled_token_ids=%s logprobs_lists=%s). "
+                    "Request must set logprobs=true and top_logprobs>=1 "
+                    "(recommend >= token_logprob_topk=%d).",
+                    "None" if sampled_token_ids is None else f"len={len(sampled_token_ids)}",
+                    type(logprobs_lists).__name__ if logprobs_lists is not None else "None",
+                    self._token_logprob_topk,
+                )
             return
 
         input_batch = getattr(self.runner, "input_batch", None)
         if input_batch is None or not getattr(input_batch, "req_ids", None):
+            if log_leader:
+                logger.warning_once("[Anomaly token_logprob] skip: empty input_batch.req_ids")
             return
 
         detector = self._get_ill_detector()
         if detector is None:
             return
 
-        log_leader = self.runner.tp_rank == 0
         model_config = self._model_config_for_detector()
         for batch_idx, req_id in enumerate(input_batch.req_ids):
             if batch_idx >= len(sampled_token_ids):
@@ -558,6 +573,12 @@ class Dumper:
                 continue
             topk_rows = self._extract_req_topk_logprobs(logprobs_lists, batch_idx, len(token_ids))
             if topk_rows is None:
+                if log_leader:
+                    logger.warning_once(
+                        "[Anomaly token_logprob] skip extract: req_id=%s num_tokens=%d (logprobs row slice empty)",
+                        req_id,
+                        len(token_ids),
+                    )
                 continue
             self.check_token_logprob_anomaly(
                 req_idx=batch_idx,
@@ -592,6 +613,13 @@ class Dumper:
         self._token_logprob_since_check[req_id] += n
 
         if len(buf) < self._token_logprob_window:
+            if log_leader:
+                logger.info_once(
+                    "[Anomaly token_logprob] buffering req_id=%s buf=%d/%d (detect starts after window is full)",
+                    req_id,
+                    len(buf),
+                    self._token_logprob_window,
+                )
             return
         already_checked = req_id in self._token_logprob_checked
         if already_checked and self._token_logprob_since_check[req_id] < self._token_logprob_stride:
