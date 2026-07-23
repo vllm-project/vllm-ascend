@@ -32,7 +32,7 @@ class Backend(ABC):
     def batch_is_exist(self, keys: list[str]) -> list[int]:
         return self.exists(keys)
 
-    def batch_get_key_info(self, keys: list[str]):
+    def batch_get_key_info(self, keys: list[str], flag: int = 0):
         raise NotImplementedError(f"{type(self).__name__} does not support batch_get_key_info")
 
     def batch_alloc(self, keys: list[str], sizes: list[int]) -> list[int]:
