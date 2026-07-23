@@ -97,9 +97,13 @@ import uuid
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from vllm.logger import init_logger
+
+from vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.protocol import (
+    BATCH_KV_TRANSFER_PARAMS,
+)
 
 logger = init_logger(__name__)
 
@@ -153,6 +157,11 @@ class ProxyState:
         heapq.heapify(self.decoder_heap)
         self.req_id_future = {}
         self.req_data_dict = {}
+        self.metaserver_expected_ids = {}
+        self.metaserver_params = {}
+        self.metaserver_ready_events = {}
+        self.metaserver_dispatch_tasks = {}
+        self.metaserver_lock = asyncio.Lock()
 
     def _update_prefiller_priority(self, server_idx: int):
         """Update the priority of a prefiller server in the heap."""
@@ -192,6 +201,23 @@ class ProxyState:
     async def next_req_id(self):
         async with self.req_id_lock:
             return str(uuid.uuid4())
+
+    def register_request_batch(self, parent_request_id, request_ids, req_data, request_length, api):
+        request_record = (copy.deepcopy(req_data), request_length, api, parent_request_id)
+        for request_id in request_ids:
+            self.req_data_dict[request_id] = request_record
+        self.metaserver_expected_ids[parent_request_id] = tuple(request_ids)
+        self.metaserver_params[parent_request_id] = {}
+        self.metaserver_ready_events[parent_request_id] = asyncio.Event()
+
+    async def cleanup_request_batch(self, parent_request_id):
+        async with self.metaserver_lock:
+            request_ids = self.metaserver_expected_ids.pop(parent_request_id, ())
+            for request_id in request_ids:
+                self.req_data_dict.pop(request_id, None)
+            self.metaserver_params.pop(parent_request_id, None)
+            self.metaserver_ready_events.pop(parent_request_id, None)
+            self.metaserver_dispatch_tasks.pop(parent_request_id, None)
 
     def select_prefiller(self, token_count):  # Changed to synchronous
         # No lock needed - entire function is atomic
@@ -406,18 +432,23 @@ async def stream_service_response_with_retry(
                     raise e
 
 
-def get_api_request_id(api, req_id):
+def get_api_request_id(api, req_id, prompt_idx=0):
     if api == "/completions":
-        return "cmpl-" + req_id + "-0"
+        return f"cmpl-{req_id}-{prompt_idx}"
     elif api == "/chat/completions":
         return "chatcmpl-" + req_id
 
 
-def get_origin_request_id(api, req_id):
-    if api == "/completions":
-        return req_id.replace("cmpl-", "")[:-2]
-    elif api == "/chat/completions":
-        return req_id.replace("chatcmpl-", "")
+def get_api_request_ids(api, req_id, req_data):
+    if api != "/completions":
+        return [get_api_request_id(api, req_id)]
+
+    prompt = req_data.get("prompt")
+    # A list[int] is one tokenized prompt. A list[str] or list[list[int]] is
+    # expanded by vLLM into one child request per entry.
+    is_token_ids = isinstance(prompt, list) and all(isinstance(token, int) for token in prompt)
+    prompt_count = len(prompt) if isinstance(prompt, list) and prompt and not is_token_ids else 1
+    return [get_api_request_id(api, req_id, prompt_idx) for prompt_idx in range(prompt_count)]
 
 
 async def _handle_completions(api: str, request: Request):
@@ -426,8 +457,8 @@ async def _handle_completions(api: str, request: Request):
         req_body = await request.body()
         request_length = len(req_body)
         request_id = await proxy_state.next_req_id()
-        request_id_api = get_api_request_id(api, request_id)
-        proxy_state.req_data_dict[request_id_api] = (copy.deepcopy(req_data), request_length, api)
+        request_ids_api = get_api_request_ids(api, request_id, req_data)
+        proxy_state.register_request_batch(request_id, request_ids_api, req_data, request_length, api)
         req_data["kv_transfer_params"] = {
             "do_remote_decode": False,
             "do_remote_prefill": True,
@@ -539,6 +570,7 @@ async def _handle_completions(api: str, request: Request):
             finally:
                 # After streaming done, release tokens
                 proxy_state.release_decoder(decoder_idx, decoder_score)
+                await proxy_state.cleanup_request_batch(request_id)
 
         if stream_flag:
             return StreamingResponse(generate_stream(), media_type="text/event-stream")
@@ -597,39 +629,91 @@ async def reset_prefix_cache(request: Request):
     return FastAPIResponse(status_code=200)
 
 
-@app.post("/v1/metaserver")
-async def metaserver(request: Request):
+async def dispatch_prefill_batch(
+    req_data,
+    request_length,
+    api,
+    parent_request_id,
+    expected_request_ids,
+    params_by_request_id,
+):
+    prefiller_score = proxy_state.calculate_prefill_scores(request_length)
+    logger.debug("Request length: %s, Prefiller score: %s", request_length, prefiller_score)
+    prefiller_idx = proxy_state.select_prefiller(prefiller_score)
     try:
-        kv_transfer_params = await request.json()
-
-        request_id = kv_transfer_params["request_id"]
-        assert request_id in proxy_state.req_data_dict
-        req_data, request_length, api = proxy_state.req_data_dict[request_id]
-        request_id = get_origin_request_id(api, request_id)
-        req_data["kv_transfer_params"] = kv_transfer_params
-        prefiller_score = proxy_state.calculate_prefill_scores(request_length)
-        logger.debug("Request length: %s, Prefiller score: %s", request_length, prefiller_score)
-
-        # Select prefiller
-        prefiller_idx = proxy_state.select_prefiller(prefiller_score)
         prefiller = proxy_state.prefillers[prefiller_idx]
+        req_data = copy.deepcopy(req_data)
+        if len(expected_request_ids) == 1:
+            req_data["kv_transfer_params"] = params_by_request_id[expected_request_ids[0]]
+        else:
+            # vLLM expands a completion prompt list into cmpl-<parent>-N child
+            # requests. Preserve the per-child D endpoint/cache metadata while
+            # issuing the original prompt list to P exactly once.
+            kv_transfer_params = copy.deepcopy(params_by_request_id[expected_request_ids[0]])
+            kv_transfer_params[BATCH_KV_TRANSFER_PARAMS] = {
+                request_id: params_by_request_id[request_id] for request_id in expected_request_ids
+            }
+            req_data["kv_transfer_params"] = kv_transfer_params
         logger.debug("Using prefill prefiller.url=%r req_data=%r", prefiller.url, req_data)
-        # Send request to prefiller
         await send_request_to_service(
             prefiller.client,
             prefiller_idx,
             api,
             req_data,
-            request_id,
+            parent_request_id,
             max_retries=global_args.max_retries,
             base_delay=global_args.retry_delay,
         )
-
-    except Exception as e:
-        logger.error("Post metaserver failed with: %s", e)
     finally:
         proxy_state.release_prefiller(prefiller_idx, prefiller_score)
         proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
+
+
+@app.post("/v1/metaserver")
+async def metaserver(request: Request):
+    kv_transfer_params = await request.json()
+    request_id = kv_transfer_params.get("request_id")
+    request_record = proxy_state.req_data_dict.get(request_id)
+    if request_record is None:
+        raise HTTPException(status_code=404, detail=f"Unknown metaserver request_id: {request_id!r}")
+
+    req_data, request_length, api, parent_request_id = request_record
+    async with proxy_state.metaserver_lock:
+        params_by_request_id = proxy_state.metaserver_params[parent_request_id]
+        params_by_request_id[request_id] = kv_transfer_params
+        expected_request_ids = proxy_state.metaserver_expected_ids[parent_request_id]
+        dispatch_task = proxy_state.metaserver_dispatch_tasks.get(parent_request_id)
+        if dispatch_task is not None and dispatch_task.done():
+            if dispatch_task.cancelled() or dispatch_task.exception() is not None:
+                dispatch_task = None
+        if dispatch_task is None and all(
+            expected_request_id in params_by_request_id for expected_request_id in expected_request_ids
+        ):
+            dispatch_task = asyncio.create_task(
+                dispatch_prefill_batch(
+                    req_data,
+                    request_length,
+                    api,
+                    parent_request_id,
+                    expected_request_ids,
+                    copy.deepcopy(params_by_request_id),
+                )
+            )
+            proxy_state.metaserver_dispatch_tasks[parent_request_id] = dispatch_task
+            proxy_state.metaserver_ready_events[parent_request_id].set()
+        ready_event = proxy_state.metaserver_ready_events[parent_request_id]
+
+    if dispatch_task is None:
+        await ready_event.wait()
+        async with proxy_state.metaserver_lock:
+            dispatch_task = proxy_state.metaserver_dispatch_tasks[parent_request_id]
+
+    try:
+        await asyncio.shield(dispatch_task)
+    except Exception as error:
+        logger.exception("Post metaserver failed for parent request %s", parent_request_id)
+        raise HTTPException(status_code=502, detail=str(error)) from error
+    return {"status": "ok"}
 
 
 if __name__ == "__main__":

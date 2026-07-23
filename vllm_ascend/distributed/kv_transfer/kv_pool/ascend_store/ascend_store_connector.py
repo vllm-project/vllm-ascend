@@ -1,5 +1,5 @@
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import torch
@@ -196,6 +196,13 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
+
+    def set_layerwise_pd_transfer_waiter(self, waiter: Callable[[int], None]) -> None:
+        """Make layerwise save completion include co-located PD reads."""
+        worker = getattr(self, "connector_worker", None)
+        if not self.use_gva_layerwise or worker is None:
+            return
+        worker.set_layerwise_pd_transfer_waiter(waiter)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None

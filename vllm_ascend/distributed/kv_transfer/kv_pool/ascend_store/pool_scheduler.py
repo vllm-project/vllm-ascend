@@ -198,12 +198,6 @@ class KVPoolScheduler:
                 layerwise_num_layers,
                 vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
-            if (
-                layerwise_config.has_layer_reuse
-                and kv_cache_config is not None
-                and len(kv_cache_config.kv_cache_groups) != 1
-            ):
-                raise NotImplementedError("GVA layerwise KV cache reuse does not support multiple KV cache groups.")
             self.layerwise_offload = layerwise_config.has_layer_reuse
         self.model_name = model_config.model.split("/")[-1]
 

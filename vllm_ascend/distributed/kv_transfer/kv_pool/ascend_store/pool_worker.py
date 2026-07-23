@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import math
 import threading
+from collections.abc import Callable
 
 import torch
 import vllm.envs as envs
@@ -315,6 +316,7 @@ class KVPoolWorker:
         self.kv_send_thread: KVTransferThread | None = None
         self.kv_recv_thread: KVTransferThread | None = None
         self._transfer_threads_started = False
+        self._layerwise_pd_transfer_waiter: Callable[[int], None] | None = None
         self.group_num_layers: dict[int, int] = {}
         self.group_block_len: dict[int, list[int]] = {}
         self.page_size_bytes = 0
@@ -429,6 +431,7 @@ class KVPoolWorker:
                     self.layerwise_max_transfer_blocks,
                     self.layerwise_max_transfer_bytes,
                     group_array_builders=self._build_group_transfer_array_builders(),
+                    pd_transfer_waiter=self._layerwise_pd_transfer_waiter,
                 )
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
@@ -516,6 +519,18 @@ class KVPoolWorker:
                 self.kv_recv_thread.start()
                 ready_event.wait()
         self._transfer_threads_started = True
+
+    def set_layerwise_pd_transfer_waiter(self, waiter: Callable[[int], None]) -> None:
+        if not self.layerwise_offload:
+            return
+        self._layerwise_pd_transfer_waiter = waiter
+        if isinstance(self.kv_send_thread, KVCacheStoreLayerSendingThread):
+            self.kv_send_thread.pd_transfer_waiter = waiter
+
+    def _wait_for_layerwise_pd_transfer(self, layer_idx: int) -> None:
+        waiter = self._layerwise_pd_transfer_waiter
+        if self.layerwise_offload and waiter is not None:
+            waiter(layer_idx)
 
     def _build_cache_coordinator(self, vllm_config: VllmConfig) -> AscendStoreCoordinator | None:
         if self.kv_cache_config is None or not self.use_hybrid:
@@ -1174,6 +1189,7 @@ class KVPoolWorker:
                     send_thread.add_stored_request(block_range.request.req_id)
             send_thread.add_request(self.layer_save_tasks[self.current_layer])  # type: ignore[arg-type]
         else:
+            self._wait_for_layerwise_pd_transfer(self.current_layer)
             self.layer_save_finished_events[self.current_layer].set()
         if self.current_layer == self.num_layers - 1:
             while not self.layer_save_finished_events[self.num_layers - 1].wait(timeout=10):

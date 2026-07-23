@@ -3998,15 +3998,11 @@ class NPUModelRunner(GPUModelRunner):
         if len(storage_slots) >= actual_layers:
             return
 
-        indexer_specs = [
-            spec for spec in layer_specs.values() if isinstance(spec, AscendSFAIndexerCacheSpec)
-        ]
-        has_sparse_c8_indexer = any(spec.cache_sparse_c8 for spec in indexer_specs)
-        if len(kv_cache_config.kv_cache_groups) != 1 and not has_sparse_c8_indexer:
-            raise NotImplementedError(
-                "GVA layerwise KV cache reuse only supports multiple KV cache groups "
-                "for separated sparse-C8 SFA indexer caches."
-            )
+        self._validate_layerwise_reuse_layout(
+            kv_cache_config,
+            layer_specs,
+            layer_layout,
+        )
 
         base_layers = self.model_config.get_num_layers(self.parallel_config)
         if actual_layers < base_layers:
@@ -4060,6 +4056,59 @@ class NPUModelRunner(GPUModelRunner):
             len(new_tensors),
             len(storage_slots),
         )
+
+    def _validate_layerwise_reuse_layout(
+        self,
+        kv_cache_config: KVCacheConfig,
+        layer_specs: dict[str, KVCacheSpec],
+        layer_layout: dict[int, dict[str, str]],
+    ) -> None:
+        """Validate topologies supported by physical layer buffer reuse."""
+        if len(kv_cache_config.kv_cache_groups) == 1:
+            return
+
+        indexer_layer_names = {
+            layer_name
+            for layer_name, layer_spec in layer_specs.items()
+            if isinstance(layer_spec, AscendSFAIndexerCacheSpec)
+        }
+        if not indexer_layer_names:
+            raise NotImplementedError(
+                "GVA layerwise KV cache reuse supports multiple KV cache groups "
+                "only for separated SFA main/indexer caches."
+            )
+
+        unsupported_specs = {
+            layer_name: type(layer_spec).__name__
+            for layer_name, layer_spec in layer_specs.items()
+            if not isinstance(
+                layer_spec,
+                (AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec),
+            )
+        }
+        if unsupported_specs:
+            details = ", ".join(
+                f"{layer_name}={spec_name}"
+                for layer_name, spec_name in sorted(unsupported_specs.items())
+            )
+            raise NotImplementedError(
+                "GVA layerwise multi-group buffer reuse only supports SFA "
+                f"main/indexer cache specs; unsupported cache specs: {details}."
+            )
+
+        for physical_layer, components in layer_layout.items():
+            indexer_layer_name = components.get("indexer")
+            if indexer_layer_name is None:
+                continue
+            main_layer_name = components.get("main")
+            if main_layer_name is None or not isinstance(
+                layer_specs[main_layer_name],
+                AscendMLAAttentionSpec,
+            ):
+                raise RuntimeError(
+                    "SFA indexer cache requires an Ascend MLA main cache at "
+                    f"physical layer {physical_layer}."
+                )
 
     def _build_layerwise_reuse_layout(
         self,
@@ -4139,10 +4188,12 @@ class NPUModelRunner(GPUModelRunner):
                 self.kernel_block_sizes, list) else self.kernel_block_sizes)
             self.drafter.initialize_attn_backend(kv_cache_config, block_size)
 
-        if has_kv_transfer_group():
-            get_kv_transfer_group().register_kv_caches(kv_caches)
         if self.kv_offload_decode_enabled:
             self.kv_offload_decode_manager.register_kv_caches(kv_caches)
+        if has_kv_transfer_group():
+            # Decode-side PD connectors bind their destinations to the CPU KV
+            # pool allocated and registered by KVOffloadDecodeManager.
+            get_kv_transfer_group().register_kv_caches(kv_caches)
 
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()

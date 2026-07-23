@@ -6,6 +6,7 @@ import queue
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -1093,6 +1094,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         max_transfer_blocks: int = 0,
         max_transfer_bytes: int = 0,
         group_array_builders: list[LayerTransferArrayBuilder] | None = None,
+        pd_transfer_waiter: Callable[[int], None] | None = None,
     ):
         super().__init__(
             m_store,
@@ -1113,6 +1115,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self.max_transfer_blocks = max_transfer_blocks
         self.max_transfer_bytes = max_transfer_bytes
         self.group_array_builders = group_array_builders
+        self.pd_transfer_waiter = pd_transfer_waiter
         if group_array_builders is not None:
             self.transfer_array_builder = group_array_builders[0]
         else:
@@ -1207,12 +1210,16 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 )
             if res != 0:
                 raise RuntimeError(f"Layerwise {physical_layer} save batch_copy failed with return code {res}")
+            if self.pd_transfer_waiter is not None:
+                self.pd_transfer_waiter(physical_layer)
             for req_id in all_req_ids:
                 self.dec_stored_request(req_id)
             for req_id in finished_req_ids:
                 if self.try_finish_and_delete_stored_request(req_id):
                     self.set_finished_request(req_id)
         if not has_any_save:
+            if self.pd_transfer_waiter is not None:
+                self.pd_transfer_waiter(physical_layer)
             assert not self.layer_save_finished_events[physical_layer].is_set(), (
                 f"thread: {physical_layer} save failed "
             )
