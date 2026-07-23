@@ -527,6 +527,8 @@ class TestEagleProposerDummyRun(TestBase):
         self.runner.dcp_size = 1
         self.runner.pcp_manager = None
         self.runner.pin_memory = False
+        self.runner.dynamic_eplb = True
+        self.runner.eplb_heat_collection_status = True
         self.runner._sync_metadata_across_dp.return_value = (8, torch.tensor([8]), CUDAGraphMode.NONE)
 
         self.vllm_config.cache_config.block_size = 16
@@ -626,6 +628,7 @@ class TestEagleProposerDummyRun(TestBase):
             self.proposer.dummy_run(num_tokens=num_tokens, with_prefill=with_prefill)
 
             self.assertTrue(self.proposer._runnable.call_count == 1)
+            self.assertTrue(mock_context.call_args.kwargs["eplb_heat_collection_status"])
 
     # cpu does not support parallel-group, let alone `sp`
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
