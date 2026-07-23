@@ -12,7 +12,7 @@ DeepSeek-V3.1 is a hybrid model that supports both thinking mode and non-thinkin
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-This document is validated and written based on **vLLM-Ascend v0.9.1rc3**. The current model (DeepSeek-V3.1) is first supported in this version.
+This document is validated and written based on **vLLM-Ascend v0.9.1rc3**. The current model (DeepSeek-V3.1) is first supported in this version(for Ascend950DT, the model is supported from **vllm-ascend:v0.23.0rc1**).
 
 ## 2 Supported Features
 
@@ -42,6 +42,43 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 You can use our official docker image to run `DeepSeek-V3.1` directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+
+=== "Ascend950DT series"
+
+    Start the docker image on your each node.
+
+    ```shell
+    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-#TODO
+    export NAME=vllm-ascend
+
+    docker run --rm \
+    --name $NAME \
+    --net=host \
+    --shm-size=1g \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci_manager \
+    --device /dev/hisi_hdc \
+    --device /dev/ummu \
+    --device /dev/uburma \
+    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
+    -v /etc/hixlep/:/etc/hixlep/ \
+    -v /root/.cache:/root/.cache \
+    -v /usr/local/sbin:/usr/local/sbin \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
+    -v /usr/lib64:/usr/lib64 \
+    -itd $IMAGE bash
+    ```
 
 === "A3 series"
 
@@ -131,47 +168,51 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 Single-node deployment completes both Prefill and Decode within the same node. The quantized model `DeepSeek-V3.1-w8a8-mtp-QuaRot` can be deployed on 1 Atlas 800 A3 (64G × 16).
 
-Startup Command:
+=== "Ascend950DT series"
 
-```shell
-#!/bin/sh
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxxx"
-local_ip="xxxx"
+=== "A3 series"
 
-# [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-# export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    Startup Command:
 
-# AIV
-export HCCL_OP_EXPANSION_MODE="AIV"
+    ```shell
+    #!/bin/sh
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxxx"
+    local_ip="xxxx"
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    # [Optional] jemalloc
+    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
+    # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
-vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
---host 0.0.0.0 \
---port 8015 \
---data-parallel-size 4 \
---tensor-parallel-size 4 \
---quantization ascend \
---seed 1024 \
---served-model-name deepseek_v3 \
---enable-expert-parallel \
---max-num-seqs 16 \
---max-model-len 16384 \
---max-num-batched-tokens 4096 \
---trust-remote-code \
---no-enable-prefix-caching \
---gpu-memory-utilization 0.92 \
---speculative-config '{"num_speculative_tokens": 3, "method": "mtp"}' \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-```
+    # AIV
+    export HCCL_OP_EXPANSION_MODE="AIV"
+
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export VLLM_ASCEND_BALANCE_SCHEDULING=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
+    --host 0.0.0.0 \
+    --port 8015 \
+    --data-parallel-size 4 \
+    --tensor-parallel-size 4 \
+    --quantization ascend \
+    --seed 1024 \
+    --served-model-name deepseek_v3 \
+    --enable-expert-parallel \
+    --max-num-seqs 16 \
+    --max-model-len 16384 \
+    --max-num-batched-tokens 4096 \
+    --trust-remote-code \
+    --no-enable-prefix-caching \
+    --gpu-memory-utilization 0.92 \
+    --speculative-config '{"num_speculative_tokens": 3, "method": "mtp"}' \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    ```
 
 Key Parameter Descriptions:
 
@@ -413,7 +454,7 @@ Parameter descriptions:
 |`--dp-rpc-port`|str|No|12345|RPC port for data parallel master communication.|
 |`--vllm-start-port`|int|No|9000|Starting port for each vLLM engine instance on this node. Each DP rank's engine port = `vllm_start_port` + local rank index.|
 
-1. `run_dp_template.sh` script
+1. `run_dp_template.sh` script(A3)
 
 === "Node 0(Prefill)"
 
@@ -715,6 +756,8 @@ Parameter descriptions:
         }'
     ```
 
+2. `run_dp_template.sh` script(A5)
+
 Key Parameter Descriptions:
 
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
@@ -723,7 +766,7 @@ Key Parameter Descriptions:
 - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
 - `lmhead_tensor_parallel_size: 16`: When the Tensor Parallelism (TP) size of the decode node is 1, this parameter allows the TP size of the LMHead embedding layer to be greater than 1, which is used to reduce the computational load of each card on the LMHead embedding layer.
 
-2. run server for each node:
+3. run server for each node:
 
     ```shell
     # p0
@@ -736,7 +779,7 @@ Key Parameter Descriptions:
     python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
     ```
 
-3. Run the `proxy.sh` script on the prefill master node
+4. Run the `proxy.sh` script on the prefill master node
 
     Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
