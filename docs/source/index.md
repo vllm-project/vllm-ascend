@@ -25,6 +25,7 @@ vLLM Ascend plugin (vllm-ascend) is a community-maintained hardware plugin for r
 
 This plugin is the recommended approach for supporting the Ascend backend within the vLLM community. It adheres to the principles outlined in the [[RFC]: Hardware pluggable](https://github.com/vllm-project/vllm/issues/11162), providing a hardware-pluggable interface that decouples the integration of the Ascend NPU with vLLM.
 
+<<<<<<< HEAD
 By using vLLM Ascend plugin, popular open-source models, including Transformer-like, Mixture-of-Experts, Embedding, Multi-modal LLMs can run seamlessly on the Ascend NPU.
 
 ## Documentation
@@ -72,3 +73,6 @@ community/slash-commands
 community/versioning_policy
 community/user_stories/index
 :::
+=======
+By using vLLM Ascend plugin, popular open-source models, including Transformer-like, Mixture-of-Experts, Embedding, and Multi-modal LLMs can run seamlessly on the Ascend NPU.
+>>>>>>> 1e5c79e1f... aidd low error mod
