@@ -98,6 +98,10 @@ def model_runner():
     with (
         set_current_vllm_config(vllm_config),
         patch("vllm_ascend.worker.block_table.get_dcp_group") as mock_get_dcp_group,
+        patch(
+            "vllm_ascend.worker.block_table.get_decode_context_model_parallel_world_size",
+            return_value=1,
+        ),
     ):
         mock_dcp_group = MagicMock(spec=GroupCoordinator)
         mock_dcp_group.world_size = 1

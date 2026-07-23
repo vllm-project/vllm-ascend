@@ -72,4 +72,4 @@ def test_dcp_partial_attention_merge_matches_weighted_reference() -> None:
     output, merged_lse = _update_out_and_lse(outputs, lse)
 
     torch.testing.assert_close(output, torch.tensor([[[4.0, 6.0]]]))
-    torch.testing.assert_close(merged_lse, torch.tensor([[[np.log(4.0)]]]))
+    torch.testing.assert_close(merged_lse, torch.tensor([[[np.log(4.0)]]], dtype=torch.float32))

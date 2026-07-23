@@ -27,8 +27,11 @@ from vllm_ascend.attention.context_parallel.attention_cp import (
     AscendAttentionDCPMetadata,
     AscendMetadataForDecode,
 )
-from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
-from vllm_ascend.attention.mla_v1 import AscendMLADecodeMetadata, AscendMLAMetadata
+from vllm_ascend.attention.context_parallel.mla_cp import (
+    AscendMLADCPDecodeMetadata,
+    AscendMlaDCPImpl,
+)
+from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
 from vllm_ascend.compilation import acl_graph
 from vllm_ascend.compilation.acl_graph import (
     ACLGraphEntry,
@@ -903,7 +906,7 @@ class TestDCPGraphParams(TestBase):
         query_start_loc = torch.tensor([0, 4])
         block_tables = torch.zeros(2, 5, dtype=torch.long)
 
-        decode = AscendMLADecodeMetadata(
+        decode = AscendMLADCPDecodeMetadata(
             input_positions, block_table, seq_lens, max_seq_lens, seq_lens_list, cp_seq_len=cp_seq_len
         )
         metadata = AscendMLAMetadata(

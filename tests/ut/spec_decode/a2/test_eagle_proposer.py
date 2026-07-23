@@ -245,6 +245,7 @@ class TestEagleProposerInitialization(TestBase):
         self.vllm_config.parallel_config.tensor_parallel_size = 1
         self.vllm_config.parallel_config.data_parallel_rank = 0
         self.vllm_config.parallel_config.data_parallel_size = 1
+        self.vllm_config.parallel_config.prefill_context_parallel_size = 1
         self.vllm_config.parallel_config.enable_expert_parallel = False
         self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.num_speculative_tokens = 2
@@ -388,6 +389,7 @@ class TestEagleProposerLoadModel(TestBase):
         self.vllm_config.parallel_config.tensor_parallel_size = 1
         self.vllm_config.parallel_config.data_parallel_rank = 0
         self.vllm_config.parallel_config.data_parallel_size = 1
+        self.vllm_config.parallel_config.prefill_context_parallel_size = 1
         self.vllm_config.parallel_config.enable_expert_parallel = False
         self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.num_speculative_tokens = 2
@@ -541,6 +543,7 @@ class TestEagleProposerDummyRun(TestBase):
         self.vllm_config.parallel_config.tensor_parallel_size = 1
         self.vllm_config.parallel_config.data_parallel_rank = 0
         self.vllm_config.parallel_config.data_parallel_size = 1
+        self.vllm_config.parallel_config.prefill_context_parallel_size = 1
         self.vllm_config.parallel_config.enable_expert_parallel = False
         self.vllm_config.parallel_config.pipeline_parallel_size = 1
         self.vllm_config.model_config.enforce_eager = True
@@ -714,6 +717,7 @@ class TestEagleProposerHelperMethods(TestBase):
         self.vllm_config.parallel_config.tensor_parallel_size = 1
         self.vllm_config.parallel_config.data_parallel_rank = 0
         self.vllm_config.parallel_config.data_parallel_size = 1
+        self.vllm_config.parallel_config.prefill_context_parallel_size = 1
         self.vllm_config.parallel_config.enable_expert_parallel = False
         self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.num_speculative_tokens = 2
@@ -1028,6 +1032,7 @@ class TestEagleProposerPropose:
         self.vllm_config.parallel_config.tensor_parallel_size = 1
         self.vllm_config.parallel_config.data_parallel_rank = 0
         self.vllm_config.parallel_config.data_parallel_size = 1
+        self.vllm_config.parallel_config.prefill_context_parallel_size = 1
         self.vllm_config.parallel_config.enable_expert_parallel = False
         self.vllm_config.parallel_config.pipeline_parallel_size = 1
         self.vllm_config.model_config.enforce_eager = True
@@ -1824,6 +1829,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         self.vllm_config.parallel_config.tensor_parallel_size = 1
         self.vllm_config.parallel_config.data_parallel_rank = 0
         self.vllm_config.parallel_config.data_parallel_size = 1
+        self.vllm_config.parallel_config.prefill_context_parallel_size = 1
         self.vllm_config.parallel_config.enable_expert_parallel = False
         self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.num_speculative_tokens = 4
@@ -2308,6 +2314,7 @@ class TestRunMergedDraft(TestBase):
         self.vllm_config.parallel_config.tensor_parallel_size = 1
         self.vllm_config.parallel_config.data_parallel_rank = 0
         self.vllm_config.parallel_config.data_parallel_size = 1
+        self.vllm_config.parallel_config.prefill_context_parallel_size = 1
         self.vllm_config.parallel_config.enable_expert_parallel = False
         self.vllm_config.speculative_config.method = "eagle3"
         self.vllm_config.speculative_config.num_speculative_tokens = 3
@@ -2835,6 +2842,7 @@ class TestDraftProposerHelperMethods(TestBase):
         self.vllm_config.parallel_config.tensor_parallel_size = 1
         self.vllm_config.parallel_config.data_parallel_rank = 0
         self.vllm_config.parallel_config.data_parallel_size = 1
+        self.vllm_config.parallel_config.prefill_context_parallel_size = 1
         self.vllm_config.parallel_config.enable_expert_parallel = False
         self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.num_speculative_tokens = 2
@@ -2968,6 +2976,7 @@ class TestEagleProposerPrepareInputs:
         vllm_config.parallel_config.tensor_parallel_size = 1
         vllm_config.parallel_config.data_parallel_rank = 0
         vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
         vllm_config.parallel_config.enable_expert_parallel = False
         vllm_config.additional_config = {}
         return vllm_config
@@ -3320,6 +3329,7 @@ class TestEagleProposerPrepareInputsPadded:
         vllm_config.parallel_config.tensor_parallel_size = 1
         vllm_config.parallel_config.data_parallel_rank = 0
         vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
         vllm_config.parallel_config.enable_expert_parallel = False
         vllm_config.additional_config = {}
         return vllm_config
@@ -3674,6 +3684,7 @@ class TestEagleProposerSetInputsFirstPass:
         vllm_config.parallel_config.tensor_parallel_size = 1
         vllm_config.parallel_config.data_parallel_rank = 0
         vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
         vllm_config.parallel_config.enable_expert_parallel = False
         vllm_config.additional_config = {}
         return vllm_config
