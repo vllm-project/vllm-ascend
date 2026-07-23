@@ -162,6 +162,7 @@ def _make_vllm_config(
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
             tensor_parallel_size=1,
         ),
         model_config=model_config,

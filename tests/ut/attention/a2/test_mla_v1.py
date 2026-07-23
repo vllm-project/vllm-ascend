@@ -215,7 +215,6 @@ class TestAscendMLADecodeMetadata(TestBase):
         max_seq_lens = 4
         seq_lens_list = [2, 3]
         attn_mask = None
-        cp_seq_len = torch.tensor([2, 3])
 
         metadata = AscendMLADecodeMetadata(
             input_positions=input_positions,
@@ -224,7 +223,6 @@ class TestAscendMLADecodeMetadata(TestBase):
             max_seq_lens=max_seq_lens,
             seq_lens_list=seq_lens_list,
             attn_mask=attn_mask,
-            cp_seq_len=cp_seq_len,
         )
 
         self.assertIs(metadata.input_positions, input_positions)
@@ -233,7 +231,6 @@ class TestAscendMLADecodeMetadata(TestBase):
         self.assertEqual(metadata.max_seq_lens, max_seq_lens)
         self.assertEqual(metadata.seq_lens_list, seq_lens_list)
         self.assertIsNone(attn_mask)
-        self.assertIs(metadata.cp_seq_len, cp_seq_len)
 
 
 class TestAscendMLAMetadata(TestBase):
@@ -388,6 +385,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         common_metadata.num_reqs = 4
         common_metadata.num_actual_tokens = 5
         common_metadata.max_query_len = 5
+        common_metadata.context_parallel_metadata = None
         common_metadata.seq_lens_cpu = torch.Tensor([9, 10, 8, 8]).int()
         common_metadata.query_start_loc = torch.Tensor([0, 1, 2, 4, 5]).int()
         common_metadata.query_start_loc_cpu = torch.Tensor([0, 1, 2, 4, 5]).int()
