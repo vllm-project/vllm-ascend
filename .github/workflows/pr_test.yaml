@@ -381,3 +381,14 @@ jobs:
           fi
 
           echo "=== CI Gate: PASSED ==="
+
+  #this job collects failure from uploaded logs
+  analyze-failure-report:
+    name: Analyze failure report
+    needs: [run-selected-tests, recommend-tests-from-coverage]
+    if: always()
+    uses: ./.github/workflows/_analyze_failure.yaml
+    with:
+      log_artifact_pattern: selected-test-logs-*
+      recommendations_file: .github/workflows/scripts/recommended_pytest_paths.txt
+      recommendations_content: ${{ needs.recommend-tests-from-coverage.outputs.coverage_paths || '' }}
