@@ -360,7 +360,12 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 )
                 if vllm_version_is("0.25.1"):
                     hit_blocks = hit_result
-                    _new_hit_length = len(hit_blocks[0]) * effective_block_size
+                    # hit_blocks[0] holds physical blocks; effective_block_size
+                    # includes compress_ratio and over-counts for compressed specs.
+                    block_size = spec.block_size
+                    if self.dcp_world_size * self.pcp_world_size > 1:
+                        block_size *= self.dcp_world_size * self.pcp_world_size
+                    _new_hit_length = len(hit_blocks[0]) * block_size
                 else:
                     hit_blocks, _new_hit_length = hit_result
                 if use_eagle:
