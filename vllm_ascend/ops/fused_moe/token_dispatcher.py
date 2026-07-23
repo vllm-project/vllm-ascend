@@ -51,7 +51,6 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
     is_hierarchical_communication_enabled,
-    should_skip_allreduce_across_dp_group,
 )
 
 EXPERT_TOKEN_NUMS_TYPE_CUMSUM = 0
@@ -135,11 +134,11 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         num_tokens_per_tp_rank = mc2_tokens_capacity // tp_size
         _max_global_bs = num_tokens_per_tp_rank * self.ep_world_size
 
-        # When allreduce across DP is not skipped, tokens are uniform across ranks:
+        # When hierarchical communication case, tokens are uniform across ranks:
         # use global_bs=0 (uniform mode) and pass mc2_mask.
-        # When allreduce is skipped, tokens may differ per rank:
-        # use the real global_bs and do NOT pass mc2_mask.
-        self.global_bs = _max_global_bs if should_skip_allreduce_across_dp_group(vllm_config) else 0
+        # When it is not hierarchical communication case, we will not do padding across dp,
+        # tokens may differ per rank: use the real global_bs and do NOT pass mc2_mask.
+        self.global_bs = _max_global_bs if not is_hierarchical_communication_enabled() else 0
 
         # NOTE: When enable_mc2_hierarchy_comm is true, we need pass in `comm_alg` to mc2 op.
         self.need_comm_alg = get_ascend_config().enable_mc2_hierarchy_comm
