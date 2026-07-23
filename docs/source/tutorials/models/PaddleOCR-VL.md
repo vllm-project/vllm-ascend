@@ -30,7 +30,7 @@ You can use our official docker image to run `PaddleOCR-VL` directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-=== "Atlas A2 inference products"
+=== "A2 series"
 
     ```bash
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
@@ -86,7 +86,7 @@ If you don't want to use the docker image as above, you can also build all from 
 
 ### 5.1 Single-Node Online Deployment
 
-PaddleOCR-VL supports single-node single-card deployment on the Atlas A2 inference products and Atlas inference products platform. Single-node deployment completes both Prefill and Decode within the same node.
+PaddleOCR-VL supports single-node single-card deployment on the A2 series and Atlas inference products platform. Single-node deployment completes both Prefill and Decode within the same node.
 
 Follow these steps to start the inference service:
 
@@ -96,7 +96,7 @@ Follow these steps to start the inference service:
 
 Startup Command:
 
-=== "Atlas A2 inference products"
+=== "A2 series"
 
     ```bash
     #!/bin/sh
@@ -177,9 +177,9 @@ In the above example, we demonstrated how to use vLLM to infer the PaddleOCR-VL-
 
     Use separate virtual environments for VLLM and PP-DocLayoutV2 to prevent dependency conflicts.
 
-=== "Atlas A2 inference products"
+=== "A2 series"
 
-    The Atlas A2 inference products device supports inference using the PaddlePaddle framework.
+    The A2 series device supports inference using the PaddlePaddle framework.
 
     1. Pull the PaddlePaddle-compatible CANN image
 
@@ -342,7 +342,7 @@ PaddleOCR-VL is a lightweight model that runs on a single NPU. The key tuning pa
 
 | Scenario | Hardware | *Total NPUs | Weight Version | Key Considerations |
 |----------|----------|------------|---------------|-------------------|
-| High Throughput | Atlas A2 inference products | 1 | PaddleOCR-VL-0.9B | - |
+| High Throughput | A2 series | 1 | PaddleOCR-VL-0.9B | - |
 | High Throughput | Atlas inference products | 1 | PaddleOCR-VL-0.9B | Graph compilation requires **CANN >= 9.0.0** |
 
 > `*Total NPUs` indicates the total number of NPUs used across all nodes.
@@ -351,7 +351,7 @@ PaddleOCR-VL is a lightweight model that runs on a single NPU. The key tuning pa
 
 | Scenario | Configuration | NPUs | TP | DP | Max Model Len | Max Num Batched Tokens | Graph Compilation | dtype |
 |----------|-------------|------|----|----|---------------|------------------------|--------------------|-------|
-| High Throughput | Atlas A2 inference products / Single Machine | 1 | — | — | — | — | FULL_DECODE_ONLY | bfloat16 (default) |
+| High Throughput | A2 series / Single Machine | 1 | — | — | — | — | FULL_DECODE_ONLY | bfloat16 (default) |
 | High Throughput | Atlas inference products / Single Machine | 1 | — | — | — | — | FULL_DECODE_ONLY; otherwise enforce-eager | float16 |
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment).
