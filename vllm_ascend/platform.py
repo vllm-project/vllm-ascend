@@ -708,11 +708,9 @@ class NPUPlatform(Platform):
                     f"DCP for SFA is only supported when dcp_size({parallel_config.decode_context_parallel_size}) "
                     f"== tp_size({parallel_config.tensor_parallel_size})."
                 )
-            enable_sparse_c8 = vllm_config.additional_config.get("enable_sparse_c8", False) and use_sparse
-            if enable_sparse_c8 and get_ascend_device_type() == AscendDeviceType.A5:
+            if get_ascend_device_type() == AscendDeviceType.A5:
                 raise NotImplementedError(
-                    "SFA DCP with sparse C8 LightningIndexer cache is not supported on A5 yet. "
-                    "A5 uses the fused CKV quant sparse attention path, which needs a separate DCP LSE merge."
+                    "SFA DCP with replicated indexer is not supported on A5 yet. "
                 )
 
         if (
