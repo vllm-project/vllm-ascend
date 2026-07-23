@@ -298,7 +298,12 @@ class DFlashQwen3Attention(nn.Module):
         q = self.q_norm(q.view(*q_shape[:-1], q_shape[-1] // self.head_dim, self.head_dim)).view(q_shape)
         k = self.k_norm(k.view(*k_shape[:-1], k_shape[-1] // self.head_dim, self.head_dim)).view(k_shape)
 
-        q, k = self.rotary_emb(positions, q, k)
+        # Ascend: the platform-dispatched rotary path returns non-norm-preserving
+        # Q/K for this draft shape (bf16, NeoX-style, head_dim=rotary_dim=192),
+        # collapsing DSpark acceptance. Call the rotary object's native
+        # implementation (still executed on NPU) until the dispatched backend
+        # is fixed for this shape.
+        q, k = self.rotary_emb.forward_native(positions, q, k)
 
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
