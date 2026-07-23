@@ -199,6 +199,34 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
+        return self.apply_routed(
+            layer=layer,
+            x=x,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+            log2phy=log2phy,
+            global_redundant_expert_num=global_redundant_expert_num,
+            pertoken_scale=pertoken_scale,
+            activation=activation,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            mc2_mask=mc2_mask,
+        )
+
+    def apply_routed(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        expert_map: torch.Tensor | None = None,
+        log2phy: torch.Tensor | None = None,
+        global_redundant_expert_num: int = 0,
+        pertoken_scale: Any | None = None,
+        activation: str = "silu",
+        apply_router_weight_on_input: bool = False,
+        mc2_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         if x.dtype not in [torch.float8_e4m3fn]:
             topk_weights = topk_weights.to(x.dtype)
 

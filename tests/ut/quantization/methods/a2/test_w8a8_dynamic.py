@@ -218,6 +218,30 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         self.assertIs(fused_experts_input.topk_weights, topk_weights)
         self.assertIs(fused_experts_input.topk_ids, topk_ids)
 
+    @patch("vllm_ascend.quantization.methods.w8a8_dynamic._EXTRA_CTX")
+    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.select_experts")
+    def test_apply_routed_consumes_router_results_without_reselection(self, mock_select_experts, mock_extra_ctx):
+        layer = torch.nn.Module()
+        layer.w13_weight = torch.empty(self.num_experts, self.hidden_size, 2 * self.intermediate_size)
+        layer.w2_weight = torch.empty(self.num_experts, self.intermediate_size, self.hidden_size)
+        layer.w13_weight_scale_fp32 = torch.ones(self.num_experts, 2 * self.intermediate_size)
+        layer.w2_weight_scale = torch.ones(self.num_experts, self.hidden_size)
+        layer.swiglu_limit = 1000000
+        x = torch.randn(4, self.hidden_size)
+        topk_weights = torch.randn(4, 2)
+        topk_ids = torch.randint(0, self.num_experts, (4, 2), dtype=torch.int32)
+        routed_out = torch.randn_like(x)
+        mock_extra_ctx.moe_comm_type = MoECommType.ALLGATHER
+        mock_extra_ctx.moe_comm_method.fused_experts.return_value = routed_out
+        self.quant_method.dynamic_eplb = False
+
+        result = self.quant_method.apply_routed(layer, x, topk_weights, topk_ids)
+
+        self.assertIs(result, routed_out)
+        mock_select_experts.assert_not_called()
+        fused_input = mock_extra_ctx.moe_comm_method.fused_experts.call_args.kwargs["fused_experts_input"]
+        self.assertIs(fused_input.topk_ids, topk_ids)
+
     @patch("torch_npu.npu_format_cast")
     @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ascend_config")
     def test_process_weights_after_loading(self, mock_get_config, mock_format_cast):

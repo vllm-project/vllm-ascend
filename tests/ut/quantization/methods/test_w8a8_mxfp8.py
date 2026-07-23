@@ -127,6 +127,17 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         self.assertFalse(layer.w13_weight_scale.data.is_contiguous())
         self.assertFalse(layer.w2_weight_scale.data.is_contiguous())
 
+        weight_views = self.scheme.get_eplb_weight_views(layer)
+        self.assertTrue(self.scheme.supports_eplb)
+        self.assertEqual(len(weight_views), 4)
+        for source, weight_view in zip(
+            [layer.w13_weight, layer.w2_weight, layer.w13_weight_scale, layer.w2_weight_scale],
+            weight_views,
+        ):
+            self.assertTrue(weight_view.is_contiguous())
+            self.assertEqual(weight_view.shape[0], self.num_experts)
+            self.assertEqual(weight_view.untyped_storage().data_ptr(), source.untyped_storage().data_ptr())
+
     def test_restore_weights_for_rl_loading(self):
         layer = create_mxfp_moe_layer(
             num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size

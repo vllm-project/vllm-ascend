@@ -12,14 +12,15 @@ class AscendRoutedExperts(RoutedExperts):
     """RoutedExperts with layout-aware Ascend EPLB weight views."""
 
     def get_expert_weights(self) -> Iterable[torch.Tensor]:
-        get_weight_views = getattr(self.quant_method, "get_eplb_weight_views", None)
-        if get_weight_views is None:
-            return super().get_expert_weights()
+        try:
+            get_weight_views = self.quant_method.get_eplb_weight_views
+        except AttributeError as exc:
+            raise NotImplementedError(
+                f"{self.quant_method.__class__.__name__} must implement get_eplb_weight_views() for Ascend EPLB."
+            ) from exc
         weights = list(get_weight_views(self))
         if not weights:
-            raise NotImplementedError(
-                f"EPLB weight views are not defined for {self.quant_method.__class__.__name__}."
-            )
+            raise NotImplementedError(f"EPLB weight views are not defined for {self.quant_method.__class__.__name__}.")
         flattened_weights = []
         for weight in weights:
             if weight.shape[0] != self.local_num_experts:

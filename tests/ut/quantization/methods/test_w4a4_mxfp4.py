@@ -103,6 +103,17 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
         self.assertEqual(layer.w13_weight.shape, (8, 64, 256))
         self.assertEqual(layer.w13_weight_scale.shape, (8, 2, 256, 2))
 
+        weight_views = self.scheme.get_eplb_weight_views(layer)
+        self.assertTrue(self.scheme.supports_eplb)
+        self.assertEqual(len(weight_views), 4)
+        for source, weight_view in zip(
+            [layer.w13_weight, layer.w2_weight, layer.w13_weight_scale, layer.w2_weight_scale],
+            weight_views,
+        ):
+            self.assertTrue(weight_view.is_contiguous())
+            self.assertEqual(weight_view.shape[0], self.num_experts)
+            self.assertEqual(weight_view.untyped_storage().data_ptr(), source.untyped_storage().data_ptr())
+
     @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.torch_npu")
     @patch("vllm_ascend.quantization.methods.w4a4_mxfp4._EXTRA_CTX")
     @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.select_experts")

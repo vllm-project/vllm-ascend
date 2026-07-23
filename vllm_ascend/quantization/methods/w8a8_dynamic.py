@@ -383,6 +383,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         if (fused_w1_scale is None) != (fused_w2_scale is None):
             raise RuntimeError("FUSED_MC2 requires both fused_w1_scale and fused_w2_scale.")
         if fused_w1_scale is not None:
+            assert fused_w2_scale is not None
             num_local_experts = layer.w13_weight.shape[0]
             weights.extend(
                 [

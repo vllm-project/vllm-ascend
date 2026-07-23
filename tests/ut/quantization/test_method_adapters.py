@@ -189,3 +189,26 @@ class TestAscendFusedMoEMethod(TestBase):
         self.mock_scheme.apply.return_value = None
         self.method.apply(layer, x, router_logits, top_k, renormalize)
         self.mock_scheme.apply.assert_called_once()
+
+    def test_apply_routed_delegates_without_legacy_routing(self):
+        layer = torch.nn.Module()
+        x = torch.randn(8, 64)
+        topk_weights = torch.randn(8, 2)
+        topk_ids = torch.randint(0, 8, (8, 2), dtype=torch.int32)
+        self.mock_scheme.apply_routed.return_value = x
+
+        output = self.method.apply_routed(layer, x, topk_weights, topk_ids)
+
+        self.assertIs(output, x)
+        self.mock_scheme.apply_routed.assert_called_once()
+        self.mock_scheme.apply.assert_not_called()
+
+    def test_get_eplb_weight_views_delegates_to_moe_scheme(self):
+        layer = torch.nn.Module()
+        weight_views = [torch.randn(8, 16)]
+        self.mock_scheme.get_eplb_weight_views.return_value = weight_views
+
+        result = self.method.get_eplb_weight_views(layer)
+
+        self.assertIs(result, weight_views)
+        self.mock_scheme.get_eplb_weight_views.assert_called_once_with(layer)

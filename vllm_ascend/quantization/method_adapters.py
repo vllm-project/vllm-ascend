@@ -123,12 +123,6 @@ class AscendLinearMethod(LinearMethodBase):
         if hasattr(self.quant_method, "process_weights_after_loading"):
             self.quant_method.process_weights_after_loading(layer)
 
-    def get_eplb_weight_views(self, layer: torch.nn.Module):
-        get_weight_views = getattr(self.quant_method, "get_eplb_weight_views", None)
-        if get_weight_views is None:
-            return []
-        return get_weight_views(layer)
-
     def get_computed_params(self) -> set[str]:
         """Return parameter name patterns that are computed, not loaded.
 
@@ -317,12 +311,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         apply_router_weight_on_input: bool = False,
         mc2_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        apply_routed = getattr(self.quant_method, "apply_routed", None)
-        if apply_routed is None:
-            raise NotImplementedError(
-                f"Model Runner V2 routed MoE is not implemented for {self.quant_method.__class__.__name__}."
-            )
-        return apply_routed(
+        return self.quant_method.apply_routed(
             layer=layer,
             x=x,
             topk_weights=topk_weights,
@@ -335,6 +324,9 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             apply_router_weight_on_input=apply_router_weight_on_input,
             mc2_mask=mc2_mask,
         )
+
+    def get_eplb_weight_views(self, layer: torch.nn.Module) -> list[torch.Tensor]:
+        return self.quant_method.get_eplb_weight_views(layer)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):

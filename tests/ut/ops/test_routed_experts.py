@@ -32,6 +32,15 @@ def test_get_expert_weights_rejects_unsupported_quantization():
         list(_routed_experts([]).get_expert_weights())
 
 
+def test_get_expert_weights_rejects_missing_weight_view_contract():
+    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    routed_experts.local_num_experts = 2
+    routed_experts.quant_method = SimpleNamespace()
+
+    with pytest.raises(NotImplementedError, match="must implement get_eplb_weight_views"):
+        list(routed_experts.get_expert_weights())
+
+
 def test_get_expert_weights_rejects_non_expert_first_dimension():
     with pytest.raises(ValueError, match="first dimension"):
         list(_routed_experts([torch.randn(3, 4)]).get_expert_weights())

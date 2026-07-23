@@ -549,6 +549,34 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
+        return self.apply_routed(
+            layer=layer,
+            x=x,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+            log2phy=log2phy,
+            global_redundant_expert_num=global_redundant_expert_num,
+            pertoken_scale=pertoken_scale,
+            activation=activation,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            mc2_mask=mc2_mask,
+        )
+
+    def apply_routed(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        expert_map: torch.Tensor | None = None,
+        log2phy: torch.Tensor | None = None,
+        global_redundant_expert_num: int = 0,
+        pertoken_scale: torch.Tensor | None = None,
+        activation: str = "silu",
+        apply_router_weight_on_input: bool = False,
+        mc2_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         topk_weights = topk_weights.to(x.dtype)
 
         if self.dynamic_eplb:
@@ -591,6 +619,22 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 swiglu_limit=layer.swiglu_limit,
             )
         )
+
+    @staticmethod
+    def get_eplb_weight_views(layer: torch.nn.Module) -> list[torch.Tensor]:
+        weights = [
+            layer.w13_weight,
+            layer.w2_weight,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+        ]
+        w13_scale_bias = getattr(layer, "w13_scale_bias", None)
+        w2_scale_bias = getattr(layer, "w2_scale_bias", None)
+        if (w13_scale_bias is None) != (w2_scale_bias is None):
+            raise RuntimeError("W4A8 EPLB requires both w13_scale_bias and w2_scale_bias.")
+        if w13_scale_bias is not None:
+            weights.extend([w13_scale_bias, w2_scale_bias])
+        return weights
 
     def process_scale(self, weight: torch.Tensor, scale, per_group_scale):
         scale = scale.transpose(1, 2).contiguous()

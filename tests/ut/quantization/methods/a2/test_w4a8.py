@@ -280,6 +280,30 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
             )
         return layer
 
+    def test_get_eplb_weight_views_matches_routed_compute_inputs(self):
+        layer = self.build_layer(is_new_quant_version=True)
+
+        weight_views = self.quant_method.get_eplb_weight_views(layer)
+
+        expected = [
+            layer.w13_weight,
+            layer.w2_weight,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+            layer.w13_scale_bias,
+            layer.w2_scale_bias,
+        ]
+        self.assertEqual(len(weight_views), len(expected))
+        for actual, expected_view in zip(weight_views, expected):
+            self.assertIs(actual, expected_view)
+
+    def test_get_eplb_weight_views_rejects_incomplete_scale_bias(self):
+        layer = self.build_layer(is_new_quant_version=True)
+        del layer.w2_scale_bias
+
+        with self.assertRaisesRegex(RuntimeError, "requires both w13_scale_bias and w2_scale_bias"):
+            self.quant_method.get_eplb_weight_views(layer)
+
     @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz")
     @patch("torch_npu.npu_format_cast")
     @patch("torch_npu.npu_quantize")

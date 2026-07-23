@@ -128,6 +128,7 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
 
     model_dtype = None
     quant_type: QuantType = QuantType.W4A4MXFP
+    supports_eplb = True
 
     def __init__(self):
         ensure_mxfp4_moe_available("W4A4_MXFP4 MoE quantization")
@@ -225,6 +226,34 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
             random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
+        return self.apply_routed(
+            layer=layer,
+            x=x,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+            log2phy=log2phy,
+            global_redundant_expert_num=global_redundant_expert_num,
+            pertoken_scale=pertoken_scale,
+            activation=activation,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            mc2_mask=mc2_mask,
+        )
+
+    def apply_routed(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        expert_map: torch.Tensor | None = None,
+        log2phy: torch.Tensor | None = None,
+        global_redundant_expert_num: int = 0,
+        pertoken_scale: Any | None = None,
+        activation: str = "silu",
+        apply_router_weight_on_input: bool = False,
+        mc2_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         if x.dtype not in [torch.uint8]:
             topk_weights = topk_weights.to(x.dtype)
 
@@ -254,6 +283,18 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale=layer.w2_weight_scale,
             )
         )
+
+    @staticmethod
+    def get_eplb_weight_views(layer: torch.nn.Module) -> list[torch.Tensor]:
+        # Weight processing transposes dimensions 1 and 2 without copying.
+        # Transpose them back here to expose contiguous expert storage rows;
+        # EPLB moves bytes per expert and does not depend on the logical shape.
+        return [
+            layer.w13_weight.transpose(1, 2),
+            layer.w2_weight.transpose(1, 2),
+            layer.w13_weight_scale.transpose(1, 2),
+            layer.w2_weight_scale.transpose(1, 2),
+        ]
 
     def process_weights_after_loading(self, layer):
         g_num, n_size, k_size = layer.w13_weight_scale.shape
