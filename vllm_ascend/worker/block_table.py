@@ -149,6 +149,11 @@ class BlockTable:
         query_start_loc: torch.Tensor,
         positions: torch.Tensor,
     ) -> None:
+        # kernel_sizes[0]==0 marks non-attention groups (Mamba/compressor state cache)
+        # These groups don't participate in slot_mapping computation.
+        if self.kernel_sizes is not None and self.kernel_sizes[0] == 0:
+            return
+
         num_tokens = positions.shape[0]
         total_cp_world_size = self.pcp_world_size * self.dcp_world_size
         total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
@@ -198,6 +203,11 @@ class BlockTable:
         # NOTE(woosuk): We can't simply use `token_indices // block_size`
         # here because M (max_model_len) is not necessarily divisible by
         # block_size.
+
+        # kernel_sizes[0]==0 marks non-attention groups (Mamba/compressor state cache)
+        # These groups don't participate in slot_mapping computation.
+        if self.kernel_sizes is not None and self.kernel_sizes[0] == 0:
+            return
 
         if self.dcp_world_size * self.pcp_world_size > 1:
             if not isinstance(req_indices, torch.Tensor):
