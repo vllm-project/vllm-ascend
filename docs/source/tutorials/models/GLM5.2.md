@@ -335,7 +335,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     export VLLM_VERSION=0.21.0
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
-    --max_model_len 40000 \
+    --max_model_len 128000 \
     --max-num-batched-tokens 4096 \
     --served-model-name glm-52 \
     --seed 1024 \
@@ -391,7 +391,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     export VLLM_VERSION=0.21.0
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
-    --max_model_len 40000 \
+    --max_model_len 128000 \
     --max-num-batched-tokens 4096 \
     --served-model-name glm-52 \
     --seed 1024 \
