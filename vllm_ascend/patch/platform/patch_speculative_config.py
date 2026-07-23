@@ -3,6 +3,8 @@ from typing import TYPE_CHECKING, Any
 from vllm.config.speculative import SpeculativeConfig
 from vllm.utils.import_utils import LazyLoader
 
+from vllm_ascend.utils import is_dspark_config
+
 if TYPE_CHECKING:
     import vllm.model_executor.layers.quantization as me_quant
     from transformers import PretrainedConfig
@@ -12,13 +14,9 @@ else:
     me_quant = LazyLoader("model_executor", globals(), "vllm.model_executor.layers.quantization")
 
 
-def _is_dspark_config(hf_config: PretrainedConfig) -> bool:
-    return bool(getattr(hf_config, "dspark_block_size", 0))
-
-
 def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
     initial_architecture = hf_config.architectures[0]
-    if hf_config.model_type == "deepseek_v4" and _is_dspark_config(hf_config):
+    if hf_config.model_type == "deepseek_v4" and is_dspark_config(hf_config):
         hf_config.model_type = "deepseek_mtp"
         hf_config.update(
             {
@@ -156,8 +154,7 @@ _orig_post_init = SpeculativeConfig.__post_init__
 def _dspark_post_init(self):
     _orig_post_init(self)
     draft_model_config = getattr(self, "draft_model_config", None)
-    draft_hf_config = getattr(draft_model_config, "hf_config", None)
-    if draft_model_config is None or not _is_dspark_config(draft_hf_config):
+    if draft_model_config is None or not is_dspark_config(draft_model_config):
         return
     self.parallel_drafting = True
     if getattr(self, "enforce_eager", None) is not None:

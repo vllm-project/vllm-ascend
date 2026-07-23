@@ -68,7 +68,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import enable_custom_op, is_dspark_config
 
 # isort: off
 if TYPE_CHECKING:
@@ -518,10 +518,7 @@ class KVCacheRecvingThread(threading.Thread):
 
         self.num_draft_layers = 0
         if self.vllm_config.speculative_config is not None:
-            draft_model_config = getattr(self.vllm_config.speculative_config, "draft_model_config", None)
-            draft_hf_config = getattr(draft_model_config, "hf_config", None)
-            dspark_block_size = getattr(draft_hf_config, "dspark_block_size", 0)
-            if isinstance(dspark_block_size, int) and dspark_block_size > 0:
+            if is_dspark_config(self.vllm_config):
                 self.num_draft_layers = DSPARK_NUM_KV_CACHE_LAYERS
             elif self.vllm_config.speculative_config.method == "mtp":
                 # all MTP layer use the same kv cache layer, so only need to transfer once

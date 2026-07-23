@@ -79,6 +79,30 @@ _CUSTOM_OP_BASE_DIR = (
 )
 
 
+def is_dspark_config(config: Any) -> bool:
+    """Return whether a config object enables a DSpark draft model.
+
+    ``config`` may be an HF config, ModelConfig, SpeculativeConfig, or
+    VllmConfig. DSpark is identified by a truthy ``dspark_block_size``.
+    """
+    if config is None:
+        return False
+
+    speculative_config = getattr(config, "speculative_config", None)
+    if speculative_config is not None:
+        config = speculative_config
+
+    draft_model_config = getattr(config, "draft_model_config", None)
+    if draft_model_config is not None:
+        config = draft_model_config
+
+    hf_config = getattr(config, "hf_config", None)
+    if hf_config is not None:
+        config = hf_config
+
+    return bool(getattr(config, "dspark_block_size", 0))
+
+
 def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
     """Extract DSV4 index for config per-layer arrays.
 

@@ -30,10 +30,7 @@ from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.step3p5 import AscendStep3p5MTPProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
-
-
-def _uses_dspark_drafter(vllm_config):
-    return bool(getattr(vllm_config.speculative_config.draft_model_config.hf_config, "dspark_block_size", 0))
+from vllm_ascend.utils import is_dspark_config
 
 
 def get_spec_decode_method(method, vllm_config, device, runner):
@@ -45,7 +42,7 @@ def get_spec_decode_method(method, vllm_config, device, runner):
         return AscendSuffixDecodingProposer(vllm_config, runner)
     elif method == "medusa":
         return AscendMedusaProposer(vllm_config, device)
-    elif method == "mtp" and _uses_dspark_drafter(vllm_config):
+    elif method == "mtp" and is_dspark_config(vllm_config):
         return AscendDSparkProposer(vllm_config, device, runner)
     elif method in ("eagle", "eagle3", "mtp"):
         speculative_config = vllm_config.speculative_config
