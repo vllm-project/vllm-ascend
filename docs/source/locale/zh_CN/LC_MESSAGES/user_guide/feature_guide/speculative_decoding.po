@@ -92,18 +92,6 @@ msgstr ""
 " Language-model Efficiency）](https://arxiv.org/pdf/2401.15077) 的草稿模型生成。"
 
 msgid ""
-"In v0.12.0rc1 of vLLM Ascend, the async scheduler is more stable and ready "
-"to be enabled. We have adapted it to support EAGLE, and you can use it by "
-"setting `async_scheduling=True` as follows. If you encounter any issues, "
-"please feel free to open an issue on GitHub. As a workaround, you can "
-"disable this feature by unsetting `async_scheduling=True` when initializing "
-"the model."
-msgstr ""
-"在 vLLM Ascend 的 v0.12.0rc1 版本中，异步调度器更加稳定并已准备好启用。我们已对其进行适配以支持 EAGLE，您可以通过如下设置"
-" `async_scheduling=True` 来使用它。如果遇到任何问题，请随时在 GitHub 上提交 "
-"issue。作为临时解决方案，您可以在初始化模型时取消设置 `async_scheduling=True` 来禁用此功能。"
-
-msgid ""
 "A few important things to consider when using the EAGLE based draft models:"
 msgstr "使用基于 EAGLE 的草稿模型时需要考虑的几个重要事项："
 
