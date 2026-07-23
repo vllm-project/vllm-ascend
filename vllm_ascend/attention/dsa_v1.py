@@ -2052,7 +2052,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             if swa_prefill_metadata.dspark_swa_indices is not None:
                 extra_attn_kwargs["ori_sparse_indices"] = swa_prefill_metadata.dspark_swa_indices
             notify_kv_cache_written(layer_name)
-            record_attention_compute_start()
+            record_attention_compute_start(layer_name)
             return attn_op(
                 q,
                 ori_kv=swa_kv_cache,
@@ -2191,7 +2191,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 self._update_indexcache_topk_indices(compress_topk_idxs, offset=prefill_offset)
 
             notify_kv_cache_written(layer_name)
-            record_attention_compute_start()
+            record_attention_compute_start(layer_name)
 
             if self.compress_ratio == 4:
                 DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
@@ -2489,7 +2489,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 self._update_indexcache_topk_indices(compress_topk_idxs, offset=0)
 
         notify_kv_cache_written(layer_name)
-        record_attention_compute_start()
+        record_attention_compute_start(layer_name)
         attn_op = DeviceOperator.get_dsa_sparse_attn_op()
         extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()
 

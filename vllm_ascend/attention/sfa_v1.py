@@ -1945,6 +1945,11 @@ class AscendSFAImpl(MLAAttentionImpl):
                             slot_mapping.view(-1, 1),
                             k_li_scale.view(-1, k_li_scale.shape[-1]),
                         )
+
+        # Notify for every layer that wrote the cache, not just indexer layers:
+        # by this point all of the layer's KV (main + indexer) has been
+        # scattered, so the connector can dispatch save/PD pull immediately.
+        if kv_cache is not None:
             notify_kv_cache_written(self.layer_name or "")
 
         if self.enable_dsa_cp and attn_metadata.dsa_cp_context is not None:
@@ -1955,7 +1960,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Open the prefetch gate for every SFA layer. Some GLM-5.2 layers
         # reuse cached top-k indices and have no indexer, so recording this
         # inside indexer_select_post_process would leave their gate closed.
-        record_attention_compute_start()
+        record_attention_compute_start(self.layer_name or "")
 
         if self.skip_topk:
             topk_indices = self._get_indexcache_topk_indices(topk_num_tokens)

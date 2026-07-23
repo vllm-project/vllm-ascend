@@ -18,10 +18,14 @@ from __future__ import annotations
 
 import threading
 
+import regex as re
 import torch
 
 _lock = threading.RLock()
-_attention_compute_start_gate: AttentionComputeStartGate | None = None
+_gates: list[AttentionComputeStartGate] = []
+# Sequential cursor for backends that record without a layer_name (e.g. the
+# unified attention_v1 path). Reset to 0 at each step's gate reset.
+_record_cursor = 0
 
 
 class AttentionComputeStartGate:
@@ -61,31 +65,60 @@ class AttentionComputeStartGate:
         return True
 
 
-def reset_attention_compute_start_gate() -> AttentionComputeStartGate:
-    """Create a new per-layer gate for MemCache work.
+def _extract_layer_index(layer_name: str) -> int | None:
+    """Parse the physical layer index from a layer name.
 
-    Layerwise prefetch tasks keep a reference to the gate that was current when
-    they were submitted. The attention path opens that same gate when attention
-    compute is about to be launched.
+    Mirrors pool_worker._extract_physical_layer_index for base layers. MTP and
+    unparseable names return None so their record is ignored (they have no
+    per-layer load gate).
     """
-    global _attention_compute_start_gate
-    gate = AttentionComputeStartGate()
+    m = re.search(r"layers\.(\d+)", layer_name)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def reset_attention_compute_start_gates(num_layers: int) -> None:
+    """Recreate one gate per layer at the start of each forward step.
+
+    Each layerwise load task binds the gate of the layer it loads, so a load's
+    H2D copy waits for that layer's own attention boundary rather than whichever
+    gate happened to be current when the task was submitted.
+    """
+    global _gates, _record_cursor
     with _lock:
-        _attention_compute_start_gate = gate
-    return gate
+        _gates = [AttentionComputeStartGate() for _ in range(num_layers)]
+        _record_cursor = 0
 
 
-def get_attention_compute_start_gate() -> AttentionComputeStartGate:
+def get_attention_compute_start_gate(layer_idx: int) -> AttentionComputeStartGate | None:
+    """Return the gate for ``layer_idx``, or None if out of range."""
     with _lock:
-        gate = _attention_compute_start_gate
-    if gate is None:
-        gate = reset_attention_compute_start_gate()
-    return gate
+        if 0 <= layer_idx < len(_gates):
+            return _gates[layer_idx]
+    return None
 
 
-def record_attention_compute_start() -> None:
-    """Record the compute-stream boundary immediately before attention."""
+def record_attention_compute_start(layer_name: str = "") -> None:
+    """Record the compute-stream boundary immediately before attention.
+
+    The gate to open is resolved from ``layer_name``; when empty (backends that
+    do not thread a name through) a sequential cursor is used, matching the
+    per-layer order in which loads were submitted.
+    """
+    global _record_cursor
     with _lock:
-        gate = _attention_compute_start_gate
-    if gate is not None:
-        gate.record()
+        if not _gates:
+            return
+        if layer_name:
+            idx = _extract_layer_index(layer_name)
+            if idx is None:
+                return
+        else:
+            idx = _record_cursor
+            _record_cursor += 1
+        if 0 <= idx < len(_gates):
+            gate = _gates[idx]
+        else:
+            return
+    gate.record()

@@ -1435,7 +1435,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             DeviceOperator.dsa_kv_compress_scatter(compress_kv_cache, compressed_kv, compress_slot_mapping)
 
         notify_kv_cache_written(layer_name)
-        record_attention_compute_start()
+        record_attention_compute_start(layer_name)
         attn_op = DeviceOperator.get_dsa_sparse_attn_op()
         extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()
         if has_prefill:

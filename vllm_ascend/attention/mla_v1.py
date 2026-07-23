@@ -1264,7 +1264,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_lengths": actual_seq_lengths_q,
             "actual_seq_lengths_kv": actual_seq_lengths_kv,
         }
-        record_attention_compute_start()
+        record_attention_compute_start(self.layer_name or "")
 
         if self.head_padding > 0:
             query = torch.cat((q_nope, q_pe), dim=-1)

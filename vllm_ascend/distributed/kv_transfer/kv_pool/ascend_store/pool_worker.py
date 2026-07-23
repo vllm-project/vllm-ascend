@@ -34,6 +34,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     KeyMetadata,
     LayerBlockRange,
     LayerLoadTask,
+    LayerSaveTask,
     LayerTransferTask,
     LayerwisePreparation,
     ReqMeta,
@@ -70,7 +71,7 @@ from vllm_ascend.distributed.utils import (
 )
 from vllm_ascend.memcache_comm_fence import (
     get_attention_compute_start_gate,
-    reset_attention_compute_start_gate,
+    reset_attention_compute_start_gates,
 )
 
 
@@ -332,6 +333,10 @@ class KVPoolWorker:
             num_groups=self.num_kv_cache_groups,
         )
         self._layer_load_preparation: LayerwisePreparation | None = None
+        # Phase 2 early-dispatch state: per-step cursor for hook fallback and
+        # the set of layers already dispatched by on_kv_cache_written.
+        self._scatter_cursor = 0
+        self._early_dispatched: set[int] = set()
 
     def _init_layerwise_config(self) -> None:
         # Build mapping: physical_layer -> [(group_id, layer_idx_in_group), ...]
@@ -384,6 +389,8 @@ class KVPoolWorker:
         else:
             self.num_prefetch_layers = int(self._extra_config.get("layerwise_prefetch_layers", 1))
         self.sync_save_events: list[torch.npu.Event] | None = None
+        self.sync_attn_events: list[torch.npu.Event] | None = None
+        self.layer_attn_recorded_events: list[threading.Event] | None = None
 
         logger.info(
             "layerwise config: num_layers=%d num_groups=%d physical_layer_to_group_layers_sample=%s",
@@ -414,6 +421,8 @@ class KVPoolWorker:
             self.layer_load_finished_events = [threading.Event() for i in range(self.num_layers)]
             self.layer_save_finished_events = [threading.Event() for i in range(self.num_layers)]
             self.sync_save_events = [torch.npu.Event() for i in range(self.num_layers)]
+            self.sync_attn_events = [torch.npu.Event() for _ in range(self.num_layers)]
+            self.layer_attn_recorded_events = [threading.Event() for _ in range(self.num_layers)]
             if self.use_gva_layerwise and self.kv_role in ["kv_producer", "kv_both"]:
                 ready_event_sending = threading.Event()
                 self.kv_send_thread = KVCacheStoreLayerSendingThread(
@@ -432,6 +441,8 @@ class KVPoolWorker:
                     self.layerwise_max_transfer_bytes,
                     group_array_builders=self._build_group_transfer_array_builders(),
                     pd_transfer_waiter=self._layerwise_pd_transfer_waiter,
+                    sync_attn_events=self.sync_attn_events,
+                    layer_attn_recorded_events=self.layer_attn_recorded_events,
                 )
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
@@ -470,6 +481,7 @@ class KVPoolWorker:
                     self.layerwise_max_transfer_blocks,
                     self.layerwise_max_transfer_bytes,
                     group_array_builders=self._build_group_transfer_array_builders(),
+                    load_lease_releaser=self._layerwise_transfer_preparer.release_finished_load_leases,
                 )
             else:
                 self.kv_recv_thread = KVCacheStoreKeyLayerRecvingThread(
@@ -526,11 +538,6 @@ class KVPoolWorker:
         self._layerwise_pd_transfer_waiter = waiter
         if isinstance(self.kv_send_thread, KVCacheStoreLayerSendingThread):
             self.kv_send_thread.pd_transfer_waiter = waiter
-
-    def _wait_for_layerwise_pd_transfer(self, layer_idx: int) -> None:
-        waiter = self._layerwise_pd_transfer_waiter
-        if self.layerwise_offload and waiter is not None:
-            waiter(layer_idx)
 
     def _build_cache_coordinator(self, vllm_config: VllmConfig) -> AscendStoreCoordinator | None:
         if self.kv_cache_config is None or not self.use_hybrid:
@@ -863,7 +870,12 @@ class KVPoolWorker:
         self.current_layer = 0
         if self.use_layerwise:
             self.next_layer_to_submit = 0
-            reset_attention_compute_start_gate()
+            self._scatter_cursor = 0
+            self._early_dispatched = set()
+            reset_attention_compute_start_gates(self.num_layers)
+            if self.layer_attn_recorded_events is not None:
+                for event in self.layer_attn_recorded_events:
+                    event.clear()
         logger.debug("KV pool worker start_load_kv requests=%d", len(metadata.requests))
         if len(metadata.requests) == 0:
             return
@@ -1127,7 +1139,20 @@ class KVPoolWorker:
                 return False
             attention_start_gate = None
             if has_load and layer_id != self.current_layer:
-                attention_start_gate = get_attention_compute_start_gate()
+                if reuse_mate is None:
+                    # No reuse dependency: the slot is empty, so release the H2D
+                    # copy at the current layer's attention boundary to start the
+                    # transfer as early as possible (e.g. first occupants L1..L3
+                    # all ride the L0 gate).
+                    attention_start_gate = get_attention_compute_start_gate(self.current_layer)
+                else:
+                    # Reused slot: release the H2D copy at the layer right after the
+                    # reuse source. slot_free(reuse_mate) is guaranteed ready by then
+                    # (the source layer finished attention before its next layer
+                    # starts), and the layers between here and layer_id mask the
+                    # transfer. Binding layer_id's own gate would serialize the copy
+                    # against layer_id's attention and leave no overlap.
+                    attention_start_gate = get_attention_compute_start_gate(reuse_mate + 1)
             recv_thread.add_request(
                 LayerLoadTask(  # type: ignore[arg-type]
                     wait_for_save_layer=reuse_mate,
@@ -1153,7 +1178,6 @@ class KVPoolWorker:
         assert self.layer_load_finished_events is not None
         assert self.kv_recv_thread is not None
         self.kv_recv_thread.raise_if_failed()
-        reset_attention_compute_start_gate()
         self._submit_ready_layer_loads()
         should_wait = (
             bool(self.layer_load_tasks[self.current_layer])
@@ -1174,6 +1198,52 @@ class KVPoolWorker:
             self._invalid_block_ids.clear()
         return invalid_blocks
 
+    def on_kv_cache_written(self, layer_name: str = "") -> None:
+        """Dispatch a layer's save as soon as its KV is scattered (pre-attention).
+
+        Records the scatter-complete event and queues the L2G save immediately,
+        rather than waiting for save_kv_layer at layer end. Idempotent; the
+        layer-end callback dispatches any layer whose attention path skipped
+        this hook.
+        """
+        if not self.use_gva_layerwise or self.kv_send_thread is None:
+            return
+        if self.current_layer >= self.num_layers:
+            return
+        if layer_name:
+            idx = self._extract_physical_layer_index(layer_name)
+        else:
+            idx = self._scatter_cursor
+        self._scatter_cursor = idx + 1
+        if idx >= self.num_layers:  # MTP layer: no layerwise save
+            return
+        if idx in self._early_dispatched:
+            return
+        self._dispatch_layer_save(idx)
+
+    def _dispatch_layer_save(self, layer_idx: int) -> None:
+        """Queue copy or control-only work for one physical layer."""
+        assert self.sync_save_events is not None
+        assert self.kv_send_thread is not None
+        send_thread = self.kv_send_thread
+        send_thread.raise_if_failed()
+        self.sync_save_events[layer_idx].record()
+        transfer_tasks = self.layer_save_tasks[layer_idx]
+        for task in transfer_tasks:
+            for block_range in task.block_ranges:
+                send_thread.add_stored_request(block_range.request.req_id)
+        if self.use_gva_layerwise:
+            send_thread.add_request(LayerSaveTask(layer_id=layer_idx, transfer_tasks=transfer_tasks))
+        elif transfer_tasks:
+            send_thread.add_request(transfer_tasks)  # type: ignore[arg-type]
+        else:
+            # The key-based path has no shared-slot reuse or asynchronous PD
+            # completion to gate, so preserve its synchronous empty-layer
+            # completion behavior.
+            assert self.layer_save_finished_events is not None
+            self.layer_save_finished_events[layer_idx].set()
+        self._early_dispatched.add(layer_idx)
+
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:
         if self.current_layer >= self.num_layers:
             return
@@ -1182,15 +1252,14 @@ class KVPoolWorker:
         assert self.kv_send_thread is not None
         send_thread = self.kv_send_thread
         send_thread.raise_if_failed()
-        self.sync_save_events[self.current_layer].record()
-        if self.layer_save_tasks[self.current_layer]:
-            for task in self.layer_save_tasks[self.current_layer]:
-                for block_range in task.block_ranges:
-                    send_thread.add_stored_request(block_range.request.req_id)
-            send_thread.add_request(self.layer_save_tasks[self.current_layer])  # type: ignore[arg-type]
-        else:
-            self._wait_for_layerwise_pd_transfer(self.current_layer)
-            self.layer_save_finished_events[self.current_layer].set()
+        if self.current_layer not in self._early_dispatched:
+            self._dispatch_layer_save(self.current_layer)
+        # Attention for this layer is done (post o_proj); the slot's readers
+        # include the compute stream, so slot reuse must wait for it.
+        assert self.sync_attn_events is not None
+        assert self.layer_attn_recorded_events is not None
+        self.sync_attn_events[self.current_layer].record()
+        self.layer_attn_recorded_events[self.current_layer].set()
         if self.current_layer == self.num_layers - 1:
             while not self.layer_save_finished_events[self.num_layers - 1].wait(timeout=10):
                 send_thread.raise_if_failed()

@@ -1052,6 +1052,14 @@ class LayerTransferTask:
 
 
 @dataclass
+class LayerSaveTask:
+    """Layer-level save work, including control-only saves with no copies."""
+
+    layer_id: int
+    transfer_tasks: list[LayerTransferTask]
+
+
+@dataclass
 class LayerLoadTask:
     wait_for_save_layer: int | None
     transfer_tasks: list[LayerTransferTask]

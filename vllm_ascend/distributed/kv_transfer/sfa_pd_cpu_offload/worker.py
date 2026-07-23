@@ -424,6 +424,9 @@ class SFAPDCpuOffloadProducerWorker:
         self.layer_storage_slots: dict[int, tuple[int, ...]] = {}
         self.current_layer = 0
         self.kv_send_layer_thread: MembPullSendingThread | None = None
+        # Layers whose PD send was already dispatched at scatter time by
+        # on_kv_cache_written; save_kv_layer skips these at layer end.
+        self._pd_dispatched_layers: set[int] = set()
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         return set(), set()
@@ -457,6 +460,7 @@ class SFAPDCpuOffloadProducerWorker:
         ``build_connector_meta``; main and indexer group ids remain separate."""
         if self._backend == BACKEND_MEMFABRIC:
             self.current_layer = 0
+            self._pd_dispatched_layers = set()
             for req_id, req_meta in getattr(metadata, "requests", {}).items():
                 if req_meta.remote_port is None:
                     continue
@@ -652,6 +656,32 @@ class SFAPDCpuOffloadProducerWorker:
                 return True
         return False
 
+    def on_kv_cache_written(self, layer_name: str, connector_metadata: KVConnectorMetadata) -> None:
+        """Record scatter completion and dispatch the PD send pre-attention.
+
+        The slot reuse gate (`wait_for_layer_send`) is untouched; only the
+        D-notification is moved earlier so co-located pull overlaps attention.
+        Idempotent per layer — save_kv_layer skips layers dispatched here.
+        """
+        if self._backend != BACKEND_MEMFABRIC or self.kv_send_layer_thread is None:
+            return
+        resolved_layer_name = layer_name or self.index_to_name.get(self.current_layer)
+        if resolved_layer_name is None:
+            return
+        layer_idx = _layer_idx(resolved_layer_name)
+        if layer_idx >= self.total_layers or layer_idx in self._pd_dispatched_layers:
+            return
+        if not getattr(connector_metadata, "requests", None):
+            return
+        self._pd_dispatched_layers.add(layer_idx)
+        layer_group_indices = set(self.layer_metadata[resolved_layer_name].tensor_group_idx)
+        if self._has_memfabric_pull_target(connector_metadata, layer_idx, layer_group_indices):
+            self.kv_send_layer_thread.mark_layer_pending(layer_idx)
+        # Fresh compute-stream event right after the scatter; it supersedes the
+        # layer-end wait_event in the send thread.
+        self.kv_send_layer_thread.record_p_save_event(layer_idx)
+        self._enqueue_layer_send(resolved_layer_name, layer_idx, connector_metadata)
+
     def save_kv_layer(
         self,
         layer_name: str,
@@ -662,35 +692,35 @@ class SFAPDCpuOffloadProducerWorker:
     ) -> None:
         if self._backend != BACKEND_MEMFABRIC:
             raise RuntimeError("SFAPDCpuOffloadConnector P side supports memfabric pull only.")
+        send_thread = self.kv_send_layer_thread
+        if send_thread is None:
+            raise RuntimeError(
+                "SFAPD P-side send thread is unavailable; "
+                "register_kv_caches() must complete before save_kv_layer()"
+            )
         resolved_layer_name = layer_name or self.index_to_name.get(self.current_layer)
         if resolved_layer_name is None:
             return
         layer_idx = _layer_idx(resolved_layer_name)
-        if getattr(connector_metadata, "requests", None) and layer_idx < self.total_layers:
-            layer_group_indices = set(self.layer_metadata[resolved_layer_name].tensor_group_idx)
-            has_pd_target = self._has_memfabric_pull_target(
-                connector_metadata,
-                layer_idx,
-                layer_group_indices,
-            )
-            if has_pd_target and self.kv_send_layer_thread is not None:
-                self.kv_send_layer_thread.mark_layer_pending(layer_idx)
-        # Record a fresh compute-stream event after the scatter so the send
-        # thread waits for SFA's KV write before notifying D.
-        if self.kv_send_layer_thread is None:
-            return
-        if not getattr(connector_metadata, "requests", None):
-            return
         if layer_idx >= self.total_layers:
             self.current_layer += 1
             return
-        layer_name = resolved_layer_name
-
-        self.kv_send_layer_thread.record_p_save_event(layer_idx)
+        if layer_idx in self._pd_dispatched_layers:
+            self.current_layer += 1
+            return
+        if not getattr(connector_metadata, "requests", None):
+            return
+        self._pd_dispatched_layers.add(layer_idx)
+        layer_group_indices = set(self.layer_metadata[resolved_layer_name].tensor_group_idx)
+        if self._has_memfabric_pull_target(connector_metadata, layer_idx, layer_group_indices):
+            send_thread.mark_layer_pending(layer_idx)
+        # Fallback path (attention hook did not fire for this layer): record
+        # scatter completion now and pick the reshape/event to wait on.
+        send_thread.record_p_save_event(layer_idx)
         layer_attn_metadata = None
         if self.use_mla and hasattr(attn_metadata, "__getitem__"):
             try:
-                layer_attn_metadata = attn_metadata[layer_name]
+                layer_attn_metadata = attn_metadata[resolved_layer_name]
             except Exception:
                 layer_attn_metadata = None
         if layer_attn_metadata is not None and hasattr(layer_attn_metadata, "reshape_cache_event"):
@@ -700,7 +730,18 @@ class SFAPDCpuOffloadProducerWorker:
         else:
             wait_event = torch.npu.Event()
             wait_event.record()
+        self._enqueue_layer_send(resolved_layer_name, layer_idx, connector_metadata, wait_event=wait_event)
+        self.current_layer += 1
 
+    def _enqueue_layer_send(
+        self,
+        layer_name: str,
+        layer_idx: int,
+        connector_metadata: KVConnectorMetadata,
+        wait_event: torch.npu.Event | None = None,
+    ) -> None:
+        """Build and queue this layer's PD send task (READ_READY to D)."""
+        assert self.kv_send_layer_thread is not None
         layer_send_task = SendTask(
             send_request={},
             wait_event=wait_event,
@@ -721,7 +762,6 @@ class SFAPDCpuOffloadProducerWorker:
             self.kv_send_layer_thread.send_queue.put(layer_send_task)
         else:
             self.kv_send_layer_thread._signal_layer_done(layer_idx)
-        self.current_layer += 1
 
     def _wait_for_pd_read_completion(
         self,

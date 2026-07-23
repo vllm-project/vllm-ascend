@@ -239,6 +239,18 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             return
         self.connector_worker.save_kv_layer(self._get_connector_metadata())
 
+    def on_kv_cache_written(self, layer_name: str = "") -> None:
+        # Dispatch the layerwise save at scatter time; save_kv_layer covers any
+        # layer the attention hook skips (e.g. layers without an indexer).
+        if not self.use_gva_layerwise or self.kv_role == "kv_consumer":
+            return
+        if not self.has_connector_metadata():
+            return
+        worker = getattr(self, "connector_worker", None)
+        if worker is None:
+            return
+        worker.on_kv_cache_written(layer_name)
+
     def wait_for_save(self):
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
             # Don't do save if the role is kv_consumer

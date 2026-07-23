@@ -544,9 +544,10 @@ def notify_kv_cache_written(layer_name: str = ""):
     The attention layer calls this unconditionally; each connector decides whether
     it needs to record a synchronization primitive (e.g. a compute-stream event
     later waited on by the resharding stream to overlap the outgoing KV copy).
-    Connectors that don't need it -- such as the AscendStore pool connector, which
-    records its own sync event at save time -- simply do not implement
-    ``on_kv_cache_written`` and this becomes a no-op.
+    The AscendStore pool and SFA-PD connectors implement ``on_kv_cache_written``
+    to dispatch the layerwise save / PD-pull notification at scatter time;
+    connectors that don't need it simply do not implement the hook and this
+    becomes a no-op.
     """
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return
