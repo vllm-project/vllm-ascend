@@ -319,8 +319,7 @@ class AscendSampler(Sampler):
 
         Replaces the upstream [B,V] topk+gather+rank with O(k) operations:
           - topn(n): zero-cost slice (already sorted)
-          - gather(sampled): O(k) linear scan
-          - rank: O(k) position lookup
+          - gather + rank: single O(k) search, shared between logprob and rank
         """
         assert token_ids.dtype == torch.int64
         logger.warning(  # TODO: remove after debugging
@@ -330,18 +329,22 @@ class AscendSampler(Sampler):
         # top-n logprobs and token ids (already descending → slice)
         topk_logprobs, topk_indices = cdist.topn(num_logprobs)   # [B, n]
 
-        # Sampled token's logprob
-        token_logprobs = cdist.gather(token_ids)                 # [B]
-
-        # Rank: position of sampled token in token_index (0-based).
-        # Miss (not in top-k) → rank = k (approximate, design §4.5).
+        # Single search: find sampled token position in token_index.
+        # Reuse hit/pos/found for both logprob lookup and rank computation.
         hit = cdist.token_index == token_ids.long().unsqueeze(-1)  # [B, k]
-        token_ranks = hit.long().argmax(dim=-1)                   # [B]
+        pos = hit.long().argmax(dim=-1)                            # [B]
+        found = hit.any(dim=-1)                                    # [B]
+
+        # Logprob: hit → value at pos, miss → -inf
+        val = cdist.logprobs.gather(1, pos.unsqueeze(1)).squeeze(1)  # [B]
+        token_logprobs = torch.where(
+            found, val, torch.full_like(val, float("-inf"))
+        )
+
+        # Rank: hit → pos, miss → k (approximate, design §4.5)
         k = cdist.token_index.shape[1]
         token_ranks = torch.where(
-            hit.any(dim=-1),
-            token_ranks,
-            torch.full_like(token_ranks, k),
+            found, pos, torch.full_like(pos, k)
         )
 
         # Concatenate: sampled token (col 0) + top-k (cols 1..n)
