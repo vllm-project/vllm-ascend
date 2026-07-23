@@ -38,6 +38,13 @@ jobs:
           # Process issues with the 'resolved' label
           any-of-labels: 'resolved'
 
+          # Increase the operations budget so older (least-recently-updated)
+          # issues are still reached before the per-run quota is exhausted.
+          # The action processes issues newest-updated-first; with the default
+          # of 30, stale-eligible issues sitting at the tail of the list (e.g.
+          # ones that have had no activity for weeks) never get processed.
+          operations-per-run: 200
+
           # Mark as stale after a period of inactivity
           days-before-stale: 7
           stale-issue-label: 'stale'
@@ -64,6 +71,10 @@ jobs:
         with:
           # Process issues with the 'wait-feedback' label
           any-of-labels: 'wait-feedback'
+
+          # See note above: default operations-per-run (30) is too small and
+          # causes the oldest wait-feedback issues to starve at the queue tail.
+          operations-per-run: 200
 
           # Mark as stale after a period of inactivity
           days-before-stale: 7
