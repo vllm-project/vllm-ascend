@@ -1,59 +1,59 @@
 # ==============================================
-# Gitleaks 自定义配置文件
-# 路径：.gitleaks.toml（仓库根目录）
-# 当前状态：仅继承二进制内置官方全套默认规则，无新增/无屏蔽任何规则
-# 标准继承语法：[extend] useDefault = true（官方推荐，通用离线二进制兼容）
+# Gitleaks Custom Configuration
+# Path: .gitleaks.toml (repository root)
+# Status: Inherits all official built-in rules by default. No custom rules or global suppressions enabled.
+# Standard inheritance syntax: [extend] useDefault = true (officially recommended, compatible with offline binaries)
 # ==============================================
 title = "Mindie Motor pre-commit secret scan config"
 
-# 【标准继承内置默认规则】
-# useDefault=true：加载工具内置全部密钥检测规则（AWS/Git/SSH/OBS等）
-# 注意：useDefault 和 path 只能二选一，不可同时使用
+# Standard inheritance for built-in rules
+# useDefault = true: Load all built-in secret detection rules (AWS/Git/SSH/OBS, etc.)
+# Note: useDefault and path are mutually exclusive; cannot be used together
 [extend]
 useDefault = true
 # disabledRules = ["generic-api-key","generic-password"]
-# ↑ 取消注释可批量全局禁用指定内置规则，填写规则ID数组
+# Uncomment to globally disable specified built-in rule IDs in bulk
 
 # ==============================================================================
-# 1、全局屏蔽内置规则两种写法（注释示例，当前未启用）
+# 1. Two approaches to globally disable built-in rules (examples)
 # ==============================================================================
-# 写法A（新版推荐，数组批量禁用，写在[extend]内）
+# Approach A (new recommended, bulk disable within [extend])
 # [extend]
 # useDefault = true
 # disabledRules = ["generic-api-key","generic-password"]
 
-# 写法B（旧版兼容，单条逐条禁用）
+# Approach B (legacy compatible, disable one by one)
 # [[rules.disabled]]
 # id = "generic-api-key"
 # [[rules.disabled]]
 # id = "generic-password"
-# 查询所有内置规则ID命令：./gitleaks detect --list-rules --config=.gitleaks.toml
+# List all built-in rule IDs: ./gitleaks detect --list-rules --config=.gitleaks.toml
 
 # ==============================================================================
-# 2、新增自定义业务检测规则（注释示例，当前未启用）
-# 格式固定 [[rules]]，用于检测项目特有凭证
+# 2. Custom business detection rules (examples, disabled for now)
+# Fixed format [[rules]] for detecting project-specific hardcoded credentials
 # ==============================================================================
 # [[rules]]
 # id = "huawei-obs-plain-ak-sk"
-# description = "硬编码华为云OBS AK/SK明文密钥"
+# description = "Hardcoded Huawei OBS plaintext AK/SK"
 # regex = '''(access_key|secret_key|AK|SK)\s*[:=]\s*["']?[A-Z0-9]{20,}["']?'''
 # secretGroup = 1
 # entropy = 3.5
 # keywords = ["ak", "sk", "obs"]
-# # 单条规则局部白名单：ut测试目录跳过本条检测
+# # Local allowlist for a rule: skip ut test directories
 # [[rules.allowlist]]
 # paths = ["^ut/", "^test/"]
 
 # ==============================================================================
-# 3、全局白名单配置（新版必须 [[allowlists]]，不能 [allowlist]）
-# 语法要求：内部至少存在一个未注释数组，否则配置加载失败
+# 3. Global allowlist configuration (new syntax requires [[allowlists]], not [allowlist])
+# Syntax requirement: at least one non-commented array to avoid load failure
 # ==============================================================================
 
-# 白名单1：整个vllm外部依赖目录全部放行
+# Allow external vllm dependency directory
 [[allowlists]]
 paths = ["^vllm-empty/"]
 
-# 白名单2：业务内tilingKey产生generic-api-key误报文件放行
+# Allow tilingKey generic-api-key false positives in specified files
 [[allowlists]]
 paths = [
     "^csrc/notify_dispatch/op_host/notify_dispatch_tiling.cpp",
@@ -61,24 +61,23 @@ paths = [
 ]
 rules = ["generic-api-key"]
 
-# 占位白名单，保证语法校验通过（不可删除）
+# Placeholder allowlist for syntax validation; does not permit any files
 [[allowlists]]
 paths = ["^$"]
 stopwords = []
 commits = []
 
 # ==============================================================================
-# 4、代码单行/文件内局部屏蔽告警（无需修改本配置文件）
-# 两种行内注释方式，提交代码时写在代码末尾，gitleaks自动识别放行
+# 4. Inline single-line / full-file suppression comments (no config modification required)
 # ==============================================================================
-# 方式1：仅屏蔽当前单行密钥告警（推荐）
+# Option 1: Suppress secret alert only for current line (recommended)
 # access_key = "AKXXXXXXXXXXXXXXXXXXXX"  # gitleaks:allow
 #
-# 方式2：屏蔽整个文件全部告警，写在文件最顶部
+# Option 2: Suppress all alerts for the entire file, placed at file top
 # # gitleaks:skip-file
 
 # ==============================================================================
-# 全局扫描基础参数
+# Global scan parameters
 # ==============================================================================
 minEntropy = 3.0
 redact = true
