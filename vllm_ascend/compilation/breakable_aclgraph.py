@@ -44,6 +44,14 @@ from vllm.logger import logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.compilation.acl_graph import (
+    get_draft_graph_params,
+    get_draft_graph_prefill_params,
+    get_graph_params,
+    weak_ref_workspaces,
+)
+
 # from vllm.utils.torch_utils import weak_ref_tensor, weak_ref_tensors
 from ..utils import weak_ref_tensor, weak_ref_tensors
 
@@ -242,9 +250,10 @@ class BreakableACLGraphWrapper:
     Same dispatch contract as ``CUDAGraphWrapper``:
         * If no ``forward_context`` is available, run the underlying
           callable eagerly.
-        * If runtime mode mismatch / NONE, run eagerly.
-        * Otherwise, lazily capture per ``batch_descriptor`` and replay
-          on subsequent invocations with the same descriptor.
+        * If runtime mode is NONE, run eagerly.
+        * Otherwise, lazily capture per ``batch_descriptor`` and replay on
+          subsequent invocations with the same descriptor. PIECEWISE uses
+          eager breaks, while FULL captures the model as one graph.
     """
 
     _all_instances: ClassVar[weakref.WeakSet[BreakableACLGraphWrapper]] = weakref.WeakSet()
@@ -258,18 +267,18 @@ class BreakableACLGraphWrapper:
         self,
         runnable: Callable[..., Any],
         vllm_config: VllmConfig,
+        use_eagle: bool = False,
+        enable_enpu: bool = False,
     ) -> None:
-        # Unlike the original CUDAGraphWrapper which strictly matches a
-        # single runtime_mode, this wrapper captures whatever the
-        # dispatcher emits (any non-NONE runtime_mode) -- breakable's
-        # capture is identical for prefill and decode, so there's nothing
-        # to dispatch on at the runtime_mode level. Entries are keyed by
-        # BatchDescriptor which already encodes batch shape / uniformity.
+        # Match BreakableCUDAGraphWrapper: capture every non-NONE runtime mode.
+        # FULL additionally needs Ascend-specific graph parameter handling.
         self.runnable = runnable
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
         self.graph_pool = current_platform.get_global_graph_pool()
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+        self.use_eagle = use_eagle
+        self.enable_enpu = enable_enpu
 
         self.entries: dict[BatchDescriptor, _BreakableEntry] = {}
         BreakableACLGraphWrapper._all_instances.add(self)
@@ -304,10 +313,6 @@ class BreakableACLGraphWrapper:
         batch_descriptor = forward_context.batch_descriptor
         cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
 
-        # Capture whenever the dispatcher says "some cudagraph mode" --
-        # breakable produces the same artifact regardless of PIECEWISE
-        # vs FULL, so we match either. Entries are keyed by batch
-        # descriptor, which already encodes prefill/decode distinctions.
         if cudagraph_runtime_mode == CUDAGraphMode.NONE:
             return self.runnable(*args, **kwargs)
 
@@ -363,6 +368,15 @@ class BreakableACLGraphWrapper:
         # pre-capture prefetches are complete and don't leak into the graph.
         get_offloader().sync_prev_onload()
 
+        forward_context = get_forward_context()
+        is_full_capture = (
+            forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
+        )
+        if is_full_capture:
+            # Ascend FULL graph attention creates task groups and records the
+            # mutable graph parameters only while this flag is set.
+            forward_context.capturing = True
+
         capture = BreakableACLGraphCapture(pool=self.graph_pool)
         with capture:
             output = self.runnable(*args, **kwargs)
@@ -378,6 +392,12 @@ class BreakableACLGraphWrapper:
 
         entry.capture = capture
         entry.output = weak_ref_tensors(output)
+
+        if is_full_capture:
+            # Keep the same workspace lifetime contract as ACLGraphWrapper.
+            weak_ref_workspaces(get_graph_params())
+            weak_ref_workspaces(get_draft_graph_params())
+            weak_ref_workspaces(get_draft_graph_prefill_params())
 
         logger.debug(
             "Captured breakable aclgraph for %s: %r",
@@ -405,5 +425,12 @@ class BreakableACLGraphWrapper:
         # dependencies from pre-capture prefetches are satisfied.
         get_offloader().sync_prev_onload()
         assert entry.capture is not None
+        forward_context = get_forward_context()
+        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            # Match ACLGraphWrapper's ordering between async attention
+            # parameter updates and the previous/current FULL graph replay.
+            is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
+            if not self.enable_enpu and not is_draft_eagle:
+                torch.npu.current_stream().synchronize()
         entry.capture.replay()
         return entry.output

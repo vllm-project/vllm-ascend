@@ -3858,11 +3858,19 @@ class NPUModelRunner(GPUModelRunner):
             is_breakable_aclgraph_enabled()
             and cudagraph_mode != CUDAGraphMode.NONE
         ):
-            self.model = BreakableACLGraphWrapper(self.model, self.vllm_config)
+            self.model = BreakableACLGraphWrapper(
+                self.model,
+                self.vllm_config,
+                use_eagle=self.use_eagle,
+                enable_enpu=self.enable_enpu,
+            )
             drafter = getattr(self, "drafter", None)
             if drafter is not None and hasattr(drafter, "model"):
                 drafter.model = BreakableACLGraphWrapper(
-                    drafter.model, self.vllm_config
+                    drafter.model,
+                    self.vllm_config,
+                    use_eagle=self.use_eagle,
+                    enable_enpu=self.enable_enpu,
                 )
         elif cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
