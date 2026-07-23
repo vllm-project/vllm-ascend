@@ -33,6 +33,7 @@ import regex as re
 import torch
 import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
+from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
@@ -597,6 +598,20 @@ def vllm_version_is(target_vllm_version: str):
             "to control it by hand. And please make sure the value follows the "
             "format of x.y.z."
         )
+
+
+def get_total_cp_world_size() -> int:
+    try:
+        pcp_world_size = get_pcp_group().world_size
+    except AssertionError:
+        # PCP might not be initialized in testing
+        pcp_world_size = 1
+    try:
+        dcp_world_size = get_dcp_group().world_size
+    except AssertionError:
+        # DCP might not be initialized in testing
+        dcp_world_size = 1
+    return dcp_world_size * pcp_world_size
 
 
 def get_max_hidden_layers(hf_config) -> int:
