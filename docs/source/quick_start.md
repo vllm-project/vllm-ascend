@@ -20,7 +20,7 @@ This section guides you through container-based environment setup and large mode
 ## Requirements
 
 :::::{tab-set}
-::::{tab-item} Atlas A2/A3 inference products 
+::::{tab-item} Atlas A2/A3 inference products
 
 - OS: Linux
 - Python: >= 3.10, < 3.13
