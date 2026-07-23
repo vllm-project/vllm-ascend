@@ -587,13 +587,6 @@ class NPUModelRunner(GPUModelRunner):
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: Any | None = None
         self._mamba_copy_bufs: Any | None = None
-        self.enable_hamming_sparse = (self.ascend_config.enable_hamming_sparse is True)
-        self.enable_hamming_sparse = self.enable_hamming_sparse and not vllm_config.speculative_config
-        if self.enable_hamming_sparse is True:
-            from vllm_ascend.worker.kvcomp_utils import initialize_kvcomp_metadata
-            self.kvcomp_meta_data = initialize_kvcomp_metadata(max_num_reqs=self.max_num_reqs,
-                block_size=self.block_size, device=self.device, vllm_config=self.vllm_config,
-                parallel_config=self.parallel_config, dtype=self.dtype)
 
         # TODO remove KV_OFFLOAD_COLOCATE_DEBUG after PD disaggregate is done
         self.kv_offload_colocate_debug = envs_ascend.KV_OFFLOAD_COLOCATE_DEBUG
