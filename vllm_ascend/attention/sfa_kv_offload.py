@@ -167,8 +167,12 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         )
         if enable_cp() or self.enable_dsa_cp:
             raise NotImplementedError("KV offload decode currently requires TP without context parallelism")
-        if self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8:
-            raise NotImplementedError("KV offload decode does not support sparse C8 yet")
+        if self.enable_sparse_sfa_c8:
+            raise NotImplementedError(
+                "KV offload decode does not support the sparse SFA C8 main "
+                "cache; sparse LI C8 is supported for the device-resident "
+                "indexer cache."
+            )
         self._current_layer_name: str | None = None
 
     def _resolve_preprocess_type(self, act_dtype: torch.dtype) -> PreprocessType:

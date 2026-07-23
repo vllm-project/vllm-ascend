@@ -287,6 +287,15 @@ class AscendConfig:
             self.vllm_config,
             additional_config.get("kv_offload_decode_config", {}),
         )
+        self._validate_sparse_c8_kv_offload_compatibility()
+
+    def _validate_sparse_c8_kv_offload_compatibility(self) -> None:
+        if self.kv_offload_decode_config.enabled and self.enable_sparse_sfa_c8:
+            raise NotImplementedError(
+                "KV offload decode does not support the sparse SFA C8 main "
+                "cache. Disable enable_sparse_sfa_c8; enable_sparse_li_c8 is "
+                "supported because the indexer cache remains device-resident."
+            )
 
     @staticmethod
     def _get_config_value(additional_config: dict[str, Any], config_key: str, env_key: str, env_value: Any) -> Any:

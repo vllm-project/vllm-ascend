@@ -21,7 +21,12 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import KVOffloadDecodeConfig
 
 
-# non-c8 case, # [k_cache, v_cache, k_cache_cpu, v_cache_cpu, topk_buffer_k, topk_buffer_v]
+# Main BF16 cache: [k_cache, v_cache, k_cache_cpu, v_cache_cpu,
+# topk_buffer_k, topk_buffer_v]. Sparse LI C8 indexer caches are separate and
+# remain device-resident, so they are not registered with this manager.
+# TODO remove KV_OFFLOAD_COLOCATE_DEBUG after PD disaggregate is done:
+# the npu k_cache/v_cache entries only exist for colocate debug (prefill
+# staging) and are deleted together with the prefill path.
 OFFLOAD_KV_CACHE_TUPLE_LEN = 6
 OFFLOAD_K_CACHE_NPU_INDEX = 0
 OFFLOAD_V_CACHE_NPU_INDEX = 1
@@ -29,7 +34,6 @@ OFFLOAD_K_CACHE_CPU_INDEX = 2
 OFFLOAD_V_CACHE_CPU_INDEX = 3
 OFFLOAD_TOPK_BUFFER_K_INDEX = 4
 OFFLOAD_TOPK_BUFFER_V_INDEX = 5
-# c8 case, TODO
 
 
 _SUBSCRIBED_COMPUTE_STREAMS: set[object] = set()
@@ -207,22 +211,6 @@ class KVOffloadDecodeManager:
         if not self.offload_layer_names:
             raise ValueError("KV offload decode did not find SFA KV cache layers.")
 
-        # Under offload, the attention path (sfa_v1.py / device_op.py) gates the
-        # C8 indexer read on the global sparse LI C8 flag, not per-layer.
-        # Mixed five/six-tuple layers would therefore route a non-C8 layer through
-        # the quant indexer (or vice versa). Forbid it here so the global gate
-        # stays sound; C8 must be all-or-nothing across sparse offload layers.
-        tuple_lens = {
-            len(self._as_cache_tuple(kv_caches[name])) for name in self.offload_layer_names
-        }
-        if len(tuple_lens) > 1:
-            raise ValueError(
-                "KV offload decode does not support mixed C8 / non-C8 layers: "
-                f"found tuple lengths {sorted(tuple_lens)} "
-                f"(five-tuple and six-tuple coexist). Under offload, C8 must be "
-                f"enabled uniformly across all sparse layers."
-            )
-
         self.num_layers = len(self.offload_layer_names)
         self.layer_name_to_offload_id = {
             layer_name: layer_id
@@ -283,7 +271,11 @@ class KVOffloadDecodeManager:
         head_dim_v = self.topk_buffers_v[0].size(-1)
         dtype = self.topk_buffers_k[0].dtype
         assert kv_head_num == 1, "KV offload decode only support sfa(mla)"
-        assert dtype == torch.bfloat16, "c8 not supported now"
+        if dtype != torch.bfloat16:
+            raise ValueError(
+                "KV offload decode requires a BF16 main SFA cache; sparse LI "
+                "C8 is supported only for the device-resident indexer cache."
+            )
         self.token_size_bytes_k = kv_head_num * head_dim_k * dtype.itemsize
         self.token_size_bytes_v = kv_head_num * head_dim_v * dtype.itemsize
         if self.topk_buffer_size % self.block_size != 0:

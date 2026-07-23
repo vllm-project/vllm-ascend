@@ -5356,6 +5356,26 @@ class NPUModelRunner(GPUModelRunner):
                 if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:  # type: ignore[attr-defined]
                     object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
 
+        if (
+            self.kv_offload_decode_enabled
+            and self.enable_sparse_li_c8
+            and getattr(self, "tp_rank", 0) == 0
+        ):
+            indexer_specs = [
+                spec
+                for spec in kv_cache_spec.values()
+                if isinstance(spec, AscendSFAIndexerCacheSpec)
+            ]
+            li_c8_indexer_specs = [
+                spec for spec in indexer_specs if spec.cache_sparse_li_c8
+            ]
+            logger.info(
+                "KV offload decode keeps SFA indexer caches device-resident; "
+                "sparse LI C8 is active for %d/%d indexer cache layers.",
+                len(li_c8_indexer_specs),
+                len(indexer_specs),
+            )
+
         self.kv_cache_spec = kv_cache_spec # reserve for kv offload decode usage
         return kv_cache_spec
 
