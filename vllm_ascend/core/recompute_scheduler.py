@@ -499,6 +499,7 @@ class RecomputeScheduler(Scheduler):
                                 request.num_tokens - 1,
                             )
                         )
+                        num_new_local_computed_tokens = max(per_group_hits)
                         new_computed_blocks = self.kv_cache_manager.create_kv_cache_blocks(computed_blocks)
                         num_new_local_computed_tokens = max(per_group_hits)
                         if self.kv_cache_manager.log_stats:

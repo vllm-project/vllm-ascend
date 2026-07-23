@@ -366,7 +366,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], tuple[int, ...]]:
         def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
             target_block_size = kv_cache_spec.block_size
             if not isinstance(kv_cache_spec, MambaSpec) and self.dcp_world_size * self.pcp_world_size > 1:
@@ -462,7 +462,12 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 if (blks := hit_blocks_by_group[group_id]) is not None:
                     del blks[num_blocks:]
 
-        return tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group), hit_length
+        hit_lengths_by_group = tuple(
+            len(blocks or [])
+            * self._get_effective_block_size(self.kv_cache_config.kv_cache_groups[group_id].kv_cache_spec)
+            for group_id, blocks in enumerate(hit_blocks_by_group)
+        )
+        return tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group), hit_lengths_by_group
 
 
 def get_kv_cache_coordinator(
