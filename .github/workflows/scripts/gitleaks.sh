@@ -14,4 +14,4 @@ fi
 ./gitleaks detect \
     --verbose \
     --redact \
-    --config=pre-commit/.gitleaks.toml
+    --config=.github/workflows/scripts/.gitleaks.toml
