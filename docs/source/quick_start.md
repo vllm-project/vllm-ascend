@@ -49,8 +49,8 @@ Atlas 200I Pro requires additional device nodes and driver mounts. See [Set up u
  | Software      | Supported version                | Note                                      |
  |---------------|----------------------------------|-------------------------------------------|
  | Ascend HDK    | Refer to the documentation [CANN 9.1.0-beta.1](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910beta1/releasenote/9.1.0-beta.1/release-note.md) | Required for CANN |
- | CANN          | == 9.1.0-beta.1                 | Required for vllm-ascend and torch-npu    |
- | torch-npu     | == 2.10.0.post2                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+ | CANN          | == 9.1.0                | Required for vllm-ascend and torch-npu    |
+ | torch-npu     | == 2.10.0                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
  | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
  | NNAL          | == 9.1.0-beta.1                 | Required for libatb.so, enables advanced tensor operations |
  | triton / triton-ascend | Not supported          | Uninstalled in `Dockerfile.310p` |

@@ -30,7 +30,7 @@ The following model variants are available. It is recommended to download the mo
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
-| Qwen3-30B-A3B-w8a8-QuaRot-310  |W8A8 | Atlas inference products (TP2) | [Download](https://modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
+| Qwen3-30B-A3B-w8a8-QuaRot-310  |W8A8 | Atlas inference products (40G,2 cards) | [Download](https://modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -143,6 +143,7 @@ docker run --rm \
         --shm-size=1g \
         --net=host \
         --device /dev/davinci0 \
+        --device /dev/davinci1 \
         --device /dev/davinci_manager \
         --device /dev/devmm_svm \
         --device /dev/hisi_hdc \
@@ -201,9 +202,8 @@ If you prefer not to use the Docker image, you can build from source. Install vL
 
     For Atlas inference products, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas inference products:
 
-    ```bash
     pip uninstall -y triton-ascend triton
-    ```   
+     
 :::
 **Installation Verification:**
 
