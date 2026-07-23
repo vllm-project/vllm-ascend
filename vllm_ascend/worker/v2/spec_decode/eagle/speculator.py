@@ -28,14 +28,19 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cudagraph_utils import AttentionStatePair, BatchExecutionDescriptor
-from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
+from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
+
+if vllm_version_is("0.25.1"):
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -142,8 +147,13 @@ class AscendEagleSpeculator(EagleSpeculator):
         model_state: ModelState,
         kv_cache_config: KVCacheConfig,
         block_tables: BlockTables,
+        target_input_buffers: InputBuffers | None = None,
+        target_attn_groups: list[list[AttentionGroup]] | None = None,
     ) -> None:
-        super().set_attn(model_state, kv_cache_config, block_tables)
+        if vllm_version_is("0.25.1"):
+            super().set_attn(model_state, kv_cache_config, block_tables)
+        else:
+            super().set_attn(model_state, kv_cache_config, block_tables, target_input_buffers, target_attn_groups)
 
         # npu needs attn_backends to update graph params
         attn_backends: dict[str, type[AttentionBackend]] = {}
@@ -165,31 +175,34 @@ class AscendEagleSpeculator(EagleSpeculator):
 
     def capture(
         self,
-        attn_states: dict[BatchExecutionDescriptor, AttentionStatePair],
+        attn_states: Any = None,
     ) -> None:
         logger.info("Capturing model for speculator...")
-        # Reset indices to zeros to prevent stale values from prior
-        # dummy runs to cause out-of-bounds indexing during capture.
         self.last_token_indices.zero_()
 
-        # Capture the prefill routine (model forward + compute_logits +
-        # sample).
-        # For FULL graphs, the entire routine is recorded as one graph.
-        # For PIECEWISE, only the model's compiled regions are captured
-        # and the rest (compute_logits, gumbel_sample) runs eagerly.
         assert self.prefill_cudagraph_manager is not None
         if self.prefill_cudagraph_manager.use_breakable_cg:
             self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
-        self.prefill_cudagraph_manager.capture(
-            self._prefill,
-            attn_states,
-            progress_bar_desc="Capturing prefill CUDA graphs",
-        )
+        if vllm_version_is("0.25.1"):
+            self.prefill_cudagraph_manager.capture(
+                self._prefill,
+                attn_states,
+                progress_bar_desc="Capturing prefill CUDA graphs",
+            )
+        else:
+            self.prefill_cudagraph_manager.capture(
+                self._prefill,
+                self.model_state,
+                self.input_buffers,
+                self.block_tables,
+                self.attn_groups,
+                self.kv_cache_config,
+                progress_bar_desc="Capturing prefill CUDA graphs",
+            )
 
         if self.num_speculative_steps == 1:
             return
 
-        # Capture all decode draft generation steps as a single graph.
         assert self.decode_cudagraph_manager is not None
         with build_attn_metadata_wrapper():
             self.decode_cudagraph_manager.capture(
