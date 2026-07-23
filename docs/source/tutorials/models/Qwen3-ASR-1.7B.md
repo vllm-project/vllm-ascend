@@ -129,6 +129,7 @@ vllm serve your_model_path \
     --enforce-eager \
     --port 8000
 ```
+
 ::::
 ::::{tab-item} Atlas inference products
 
@@ -167,7 +168,7 @@ After the service is started, the model can be invoked by sending a prompt.
 
 ```{code-block} bash
    :substitutions:
-   
+
 curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
