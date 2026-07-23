@@ -2,7 +2,7 @@
 set -eo pipefail
 set -x
 
-BIN_NAME="./gitleaks"
+BIN_NAME="/gitleaks"
 
 if [ -x "${BIN_NAME}" ]; then
     echo "gitleaks binary exists, skip download"
