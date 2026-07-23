@@ -16,7 +16,7 @@ test_cases:
       VLLM_ENGINE_READY_TIMEOUT_S: "1800"
     server_cmd:
       - "--tensor-parallel-size"
-      - "8"
+      - "16"
       - "--port"
       - "$SERVER_PORT"
       - "--quantization"
