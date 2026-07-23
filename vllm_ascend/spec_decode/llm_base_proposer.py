@@ -591,13 +591,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             token_to_req_buffer.gpu[:num_tokens],
         )
 
-    def _freeze_draft_index_attn_metadata(self, attn_metadata):
-        decode_metadata = getattr(attn_metadata, "decode", None)
-        if decode_metadata is not None:
-            if decode_metadata.sas_metadata is not None:
-                decode_metadata.sas_metadata = decode_metadata.sas_metadata.clone()
-        return attn_metadata
-
     @torch.inference_mode()
     def dummy_run(
         self,

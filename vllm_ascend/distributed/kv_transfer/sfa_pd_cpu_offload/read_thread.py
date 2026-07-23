@@ -237,8 +237,10 @@ class MembPullReadThread(threading.Thread):
                             )
                             payload = encoder.encode((READ_FAILED, layer_idx, str(e)))
                             sock.send_multipart((identity, b"", payload))
+                            failed_ids = {entry[0] for entry in read_reqs}
+                            failed_ids.update(done_ext_ids)
                             with self._lock:
-                                self._failed_requests.update(entry[0] for entry in read_reqs)
+                                self._failed_requests.update(failed_ids)
                         if succeeded and done_ext_ids:
                             with self._lock:
                                 self._done_requests.update(done_ext_ids)

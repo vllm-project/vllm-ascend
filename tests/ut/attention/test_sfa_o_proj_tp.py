@@ -146,7 +146,6 @@ class TestAscendSFAOProjTPParams(TestBase):
             patch("vllm_ascend.attention.sfa_v1.wait_for_kv_layer_from_connector"),
             patch("vllm_ascend.attention.sfa_v1.record_attention_compute_start") as record_gate,
             patch("vllm_ascend.attention.sfa_v1.maybe_save_kv_layer_to_connector") as save_layer,
-            patch("vllm_ascend.attention.sfa_v1.get_weight_prefetch_method", return_value=MagicMock()),
         ):
             result = impl.forward(
                 layer_name=impl.layer_name,
@@ -157,6 +156,6 @@ class TestAscendSFAOProjTPParams(TestBase):
             )
 
         self.assertIs(result, output)
-        record_gate.assert_called_once_with()
+        record_gate.assert_called_once_with(impl.layer_name)
         save_layer.assert_called_once_with(impl.layer_name, list(kv_cache))
         impl.o_proj.assert_not_called()
