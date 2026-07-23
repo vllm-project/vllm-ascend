@@ -106,13 +106,13 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleComputeWy(gert::TilingContext *context
         ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
-    // mmApplyU: P[64,64] @ (βV)[64,V] -> [64,V]
-    if (FillCubeTiling(context, FIXED_CHUNK, vdim, FIXED_CHUNK, /*bTranspose=*/false, tiling.mmApplyU) !=
+    // mmApplyU / mmApplyW: both tiled for max(K,V) so either side can run at full width.
+    const int64_t applyN = std::max(kdim, vdim);
+    if (FillCubeTiling(context, FIXED_CHUNK, applyN, FIXED_CHUNK, /*bTranspose=*/false, tiling.mmApplyU) !=
         ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
-    // mmApplyW: P[64,64] @ (γ·Kβ)[64,K] -> [64,K]
-    if (FillCubeTiling(context, FIXED_CHUNK, kdim, FIXED_CHUNK, /*bTranspose=*/false, tiling.mmApplyW) !=
+    if (FillCubeTiling(context, FIXED_CHUNK, applyN, FIXED_CHUNK, /*bTranspose=*/false, tiling.mmApplyW) !=
         ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }

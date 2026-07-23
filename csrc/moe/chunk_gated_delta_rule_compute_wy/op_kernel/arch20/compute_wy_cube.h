@@ -80,9 +80,11 @@ class WyCubeGemm {
     mmAttn_.SetTensorA(aGm_, false);
     mmAttn_.SetTensorB(bGm_, true);
     mmAttn_.IterateAll(cGm_);
+    WaitFixpipeToMte2();
     PipeBarrier<PIPE_ALL>();
 
     CopyFloatRowsFromGm(cUb, cGm_, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
+    WaitMte2ToV();
   }
 
   // P = P @ P (64x64). halfScratch >= 64*64 halfs.
@@ -100,27 +102,31 @@ class WyCubeGemm {
     mmSquare_.SetTensorA(aGm_, false);
     mmSquare_.SetTensorB(bGm_, false);
     mmSquare_.IterateAll(cGm_);
+    WaitFixpipeToMte2();
     PipeBarrier<PIPE_ALL>();
 
     CopyFloatRowsFromGm(pUb, cGm_, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
+    WaitMte2ToV();
   }
 
-  // R = R + P @ R for one RHS block (U or W). rLda may be alignN > nDim.
-  // Bulk UB<->GM copies (no per-row sync). halfScratch holds P then R as contiguous half;
-  // floatScratch (>= 64*nDim floats, e.g. tmpBuf_ [64,max(K,V)]) holds C for Add.
-  __aicore__ inline void GemmApplyAdd(LocalTensor<float> rUb, const LocalTensor<float> pUb,
-                                      LocalTensor<half> halfScratch, LocalTensor<float> floatScratch, uint32_t nDim,
-                                      uint32_t rLda, bool useU)
+  // Cast P[64,64] → halfScratch and upload to aGm_. halfScratch must stay live until
+  // MTE3 finishes and must NOT alias the R half buffer used by GemmApplyAdd.
+  __aicore__ inline void UploadP(const LocalTensor<float> pUb, LocalTensor<half> halfScratch)
   {
-    // P[64,64] -> A on GM
     Cast(halfScratch, pUb, RoundMode::CAST_NONE, WY_CUBE_CHUNK * WY_CUBE_CHUNK);
     PipeBarrier<PIPE_V>();
     CopyHalfRowsToGm(aGm_, halfScratch, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
-    event_t pUploadDone = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
-    SetFlag<HardEvent::MTE3_V>(pUploadDone);
-    WaitFlag<HardEvent::MTE3_V>(pUploadDone);
+    event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
+    SetFlag<HardEvent::MTE3_V>(evt);
+    WaitFlag<HardEvent::MTE3_V>(evt);
+  }
 
-    // R[64,nDim] (possibly strided) -> contiguous half -> B on GM
+  // R = R + P @ R for one RHS block (U or W). Assumes P already on aGm_ (UploadP).
+  // halfScratch holds contiguous R half only (>= 64*nDim) — do not reuse UploadP buffer.
+  // floatScratch (>= 64*nDim floats, e.g. tmpBuf_ [64,max(K,V)]) holds C for Add.
+  __aicore__ inline void GemmApplyAdd(LocalTensor<float> rUb, LocalTensor<half> halfScratch,
+                                      LocalTensor<float> floatScratch, uint32_t nDim, uint32_t rLda, bool useU)
+  {
     CastFloatRowsToHalfContiguous(halfScratch, rUb, WY_CUBE_CHUNK, nDim, rLda);
     CopyHalfRowsToGm(bGm_, halfScratch, WY_CUBE_CHUNK, nDim, nDim);
     PipeBarrier<PIPE_ALL>();
@@ -140,13 +146,12 @@ class WyCubeGemm {
       mmApplyW_.SetTensorB(bGm_, false);
       mmApplyW_.IterateAll(cGm_);
     }
+    WaitFixpipeToMte2();
     PipeBarrier<PIPE_ALL>();
 
     // C[64,nDim] from GM -> floatScratch, then R += C
     CopyFloatRowsFromGm(floatScratch, cGm_, WY_CUBE_CHUNK, nDim, nDim);
-    event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
-    SetFlag<HardEvent::MTE2_V>(evt);
-    WaitFlag<HardEvent::MTE2_V>(evt);
+    WaitMte2ToV();
     if (rLda == nDim) {
       Add(rUb, rUb, floatScratch, WY_CUBE_CHUNK * nDim);
     } else {
@@ -158,6 +163,20 @@ class WyCubeGemm {
   }
 
  private:
+  __aicore__ inline void WaitFixpipeToMte2() const
+  {
+    event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::FIX_MTE2));
+    SetFlag<HardEvent::FIX_MTE2>(evt);
+    WaitFlag<HardEvent::FIX_MTE2>(evt);
+  }
+
+  __aicore__ inline void WaitMte2ToV() const
+  {
+    event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+    SetFlag<HardEvent::MTE2_V>(evt);
+    WaitFlag<HardEvent::MTE2_V>(evt);
+  }
+
   __aicore__ inline void CastFloatRowsToHalfContiguous(LocalTensor<half> dst, const LocalTensor<float> src,
                                                        uint32_t rows, uint32_t cols, uint32_t srcLda) const
   {
