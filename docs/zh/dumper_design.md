@@ -32,7 +32,7 @@
 
 4. dump 开关控制
 - `enable_msprobe_dump_if_needed()`：触发 dump（含冷却、最大次数、一次请求只触发一次）
-- `disable_msprobe_dump_if_needed()`：本轮 finalize 时回滚 `dump_enable=false`（异常 enable 发生在 finalize 之后，供下一步 forward dump 一次）
+- `disable_msprobe_dump_if_needed()`：`enable` 后置 `_dump_needs_forward`；仅当后续又经历一次 `start_dump_data`（`_dump_forward_seen`）后的 finalize 才回滚 `dump_enable=false`。`finalize(dump=False)`（dummy/capture）不消费该窗口；async 下 enable 常在 `get_output`，避免尚未 dump forward 就被关掉
 - `set_msprobe_dump_state()`：读写 msprobe 配置文件中的 `dump_enable`
 
 5. 本地请求过滤

@@ -2634,8 +2634,8 @@ class NPUModelRunner(GPUModelRunner):
         if self.dynamic_eplb:
             self.eplb_updator.forward_end(self.eplb_heat_collection_status)
 
-        # finalize before anomaly checks: enable arms dump_enable for the next
-        # forward; the following step's finalize turns it off (no delay rounds).
+        # finalize before anomaly checks: enable arms dump_enable for a later
+        # forward; disable waits until a start after enable (see Dumper flags).
         self.dumper.finalize_dump_data()
 
         finished_req_ids = getattr(scheduler_output, "finished_req_ids", None)

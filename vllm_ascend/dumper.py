@@ -80,6 +80,11 @@ class Dumper:
         self._msprobe_dumped_req_ids: set[str] = set()
         self._msprobe_last_dump_ts: float | None = None
         self._msprobe_dump_active = False
+        # After enable: require one start→finalize(dump) pair before disable.
+        # Avoids async check enabling dump mid-step then finalize turning it
+        # off before any dump-capable forward runs.
+        self._dump_needs_forward = False
+        self._dump_forward_seen = False
         self._debugger_started = False
         # Keep an internal alias so all debug-log-full writes are centralized.
         self._debug_log_full_by_req_id: dict[str, bool] = self.full_log_requests_this_step
@@ -143,6 +148,9 @@ class Dumper:
             return
         self._debugger.start(self.runner.model)
         self._debugger_started = True
+        # Mark that a dump-capable forward has begun after enable.
+        if self._msprobe_dump_active and self._dump_needs_forward:
+            self._dump_forward_seen = True
 
     def finalize_dump_data(self, **kwargs) -> None:
         if self._debugger is None or not self._debugger_started:
@@ -152,6 +160,11 @@ class Dumper:
             self._debugger_started = False
 
         self._debugger.step(**kwargs)
+        # capture/dummy (dump=False): must not consume the pending dump window.
+        if kwargs.get("dump", True) is False:
+            if self._dump_needs_forward:
+                self._dump_forward_seen = False
+            return
         self.disable_msprobe_dump_if_needed()
 
     def check_spec_acceptance_anomaly(
@@ -289,9 +302,19 @@ class Dumper:
             return
         if self._debugger is None:
             return
+        # Async check may enable dump after this step's start (or even after
+        # forward). Keep dump_enable until a later start→finalize pair runs.
+        if self._dump_needs_forward and not self._dump_forward_seen:
+            logger.info(
+                "[Anomaly msprobe] defer disable: waiting for a dump forward "
+                "(enable happened without a subsequent start)."
+            )
+            return
         if not self.set_msprobe_dump_state(False):
             return
         self._msprobe_dump_active = False
+        self._dump_needs_forward = False
+        self._dump_forward_seen = False
         logger.info("[Anomaly msprobe] disable msprobe dump succeeded.")
         self._debugger._maybe_reload_config(force=True)
 
@@ -459,6 +482,9 @@ class Dumper:
             )
             return False
         self._msprobe_dump_active = True
+        # Require one start after this enable before finalize may disable.
+        self._dump_needs_forward = True
+        self._dump_forward_seen = False
         self._msprobe_dumped_req_ids.add(req_id)
         self._msprobe_dump_total_count += 1
         self._msprobe_last_dump_ts = now_ts
