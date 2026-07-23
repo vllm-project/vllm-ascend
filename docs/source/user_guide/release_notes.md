@@ -282,7 +282,7 @@ We're excited to announce the release of v0.20.2rc1 for vLLM Ascend. This is the
 ### Features
 
 - Added Flash Attention 3 support for training-inference consistency. The backend is ready in vLLM Ascend and will become directly usable once the FA3 package is publicly available. [#9060](https://github.com/vllm-project/vllm-ascend/pull/9060)
-- Added DeepSeek PCP/DCP adaptation to improve support for disaggregated deployments. [#9058](https://github.com/vllm-project/vllm-ascend/pull/9058)
+- Added DeepSeek-V3.1 PCP/DCP adaptation to improve support for disaggregated deployments on Ascend 950 Products. [#9058](https://github.com/vllm-project/vllm-ascend/pull/9058)
 - Added a dedicated `additional_config.enable_dsa_cp` switch to decouple DSA-CP from FC1. DSA-CP now requires both FC1 and DSA-CP to be explicitly enabled, allowing FC1 to stay enabled while DSA-CP is disabled when needed. [#9878](https://github.com/vllm-project/vllm-ascend/pull/9878)
 - Added merged graph support for DFlash workloads. [#9074](https://github.com/vllm-project/vllm-ascend/pull/9074)
 - Added LoRA support for Qwen3.5 dense models. [#9023](https://github.com/vllm-project/vllm-ascend/pull/9023)
