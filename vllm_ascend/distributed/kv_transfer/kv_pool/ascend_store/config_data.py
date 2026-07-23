@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable, Mapping, Sequence
+import threading
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -660,19 +661,6 @@ class RequestTracker:
 
     # Full prompt length before chunk truncation, used by sparse retention masks.
     num_prompt_tokens: int | None = None
-    block_gvas: list[int] = field(default_factory=list)
-    block_gvas_by_group: list[list[int]] = field(default_factory=list)
-    gva_block_offset: int = 0
-    last_block_gva: int | None = None
-
-    block_keys: list[str] = field(default_factory=list)
-
-    starts: list[int] | None = None
-    ends: list[int] | None = None
-
-    sizes_per_chunk: list[list[int]] | None = None
-
-    last_block_key: str | None = None
 
     mamba_group_ids: list[int] | None = None
 
@@ -690,15 +678,6 @@ class RequestTracker:
         num_saved_tokens: int = 0,
         token_ids: list[int] | None = None,
         num_prompt_tokens: int | None = None,
-        block_gvas: list[int] | None = None,
-        block_gvas_by_group: list[list[int]] | None = None,
-        gva_block_offset: int = 0,
-        last_block_gva: int | None = None,
-        block_keys: list[str] | None = None,
-        starts: list[int] | None = None,
-        ends: list[int] | None = None,
-        sizes_per_chunk: list[list[int]] | None = None,
-        last_block_key: str | None = None,
         mamba_group_ids: list[int] | None = None,
         num_speculative_blocks: int = 0,
         block_sizes: list[int] | None = None,
@@ -714,15 +693,6 @@ class RequestTracker:
         self.num_saved_tokens = num_saved_tokens
         self.token_ids = token_ids
         self.num_prompt_tokens = num_prompt_tokens
-        self.block_gvas = [] if block_gvas is None else block_gvas
-        self.block_gvas_by_group = block_gvas_by_group if block_gvas_by_group is not None else []
-        self.gva_block_offset = gva_block_offset
-        self.last_block_gva = last_block_gva
-        self.block_keys = [] if block_keys is None else block_keys
-        self.starts = starts
-        self.ends = ends
-        self.sizes_per_chunk = sizes_per_chunk
-        self.last_block_key = last_block_key
         self.block_sizes = block_sizes
 
     @property
@@ -850,21 +820,7 @@ class ReqMeta:
         save_end_token: int | None = None,
         target_token_len: int | None = None,
         save_start_token: int = 0,
-        last_block_gva: int | None = None,
-        partial_block_index: int | None = None,
-        starts: list[int] | None = None,
-        ends: list[int] | None = None,
-        sizes_per_chunk: list[list[int]] | None = None,
-        block_ids_np: np.ndarray | None = None,
         block_ids_by_group_np: list[np.ndarray] | None = None,
-        block_gvas_np: np.ndarray | None = None,
-        block_gvas_by_group_np: list[np.ndarray] | None = None,
-        gva_block_offset: int = 0,
-        gva_block_offsets_by_group: list[int] | None = None,
-        load_block_gvas_np: np.ndarray | None = None,
-        load_block_gvas_by_group_np: list[np.ndarray] | None = None,
-        load_gva_block_offset: int = 0,
-        load_gva_block_offsets_by_group: list[int] | None = None,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
@@ -889,21 +845,9 @@ class ReqMeta:
         self.token_ids = token_ids
         self.original_block_size = original_block_size
         self.event_id = event_id
-        self.last_block_gva = last_block_gva
-        self.partial_block_index = partial_block_index
-        self.starts = starts
-        self.ends = ends
-        self.sizes_per_chunk = sizes_per_chunk
-        self.block_ids_np = block_ids_np
+        if block_ids_by_group_np is None:
+            block_ids_by_group_np = [np.asarray(ids, dtype=np.int64) for ids in block_ids_by_group]
         self.block_ids_by_group_np = block_ids_by_group_np
-        self.block_gvas_np = block_gvas_np
-        self.block_gvas_by_group_np = block_gvas_by_group_np
-        self.gva_block_offset = gva_block_offset
-        self.gva_block_offsets_by_group = gva_block_offsets_by_group
-        self.load_block_gvas_np = load_block_gvas_np
-        self.load_block_gvas_by_group_np = load_block_gvas_by_group_np
-        self.load_gva_block_offset = load_gva_block_offset
-        self.load_gva_block_offsets_by_group = load_gva_block_offsets_by_group
 
     @property
     def block_ids(self) -> list[int]:
@@ -913,25 +857,7 @@ class ReqMeta:
     def block_ids(self, block_ids: list[int] | list[list[int]]) -> None:
         self.block_ids_by_group = normalize_block_ids_by_group(block_ids)
 
-    last_block_gva: int | None = None
-    partial_block_index: int | None = None
-    load_keys: list[str] | None = None
-
-    starts: list[int] | None = None
-    ends: list[int] | None = None
-
-    sizes_per_chunk: list[list[int]] | None = None
-
-    block_ids_np: np.ndarray | None = None
-    block_ids_by_group_np: list[np.ndarray] | None = None
-    block_gvas_np: np.ndarray | None = None
-    block_gvas_by_group_np: list[np.ndarray] | None = None
-    gva_block_offset: int = 0
-    gva_block_offsets_by_group: list[int] | None = None
-    load_block_gvas_np: np.ndarray | None = None
-    load_block_gvas_by_group_np: list[np.ndarray] | None = None
-    load_gva_block_offset: int = 0
-    load_gva_block_offsets_by_group: list[int] | None = None
+    block_ids_by_group_np: list[np.ndarray]
 
     @staticmethod
     def from_request_tracker(
@@ -972,16 +898,7 @@ class ReqMeta:
         )
         if boundary_without_hash:
             num_tokens_to_save = len(block_hashes) * cache_transfer_granularity
-        if tracker.last_block_gva is not None and (
-            target_token_len % cache_transfer_granularity != 0 or boundary_without_hash
-        ):
-            partial_block_index = (
-                full_block_count if target_token_len % cache_transfer_granularity != 0 else full_block_count - 1
-            )
-        else:
-            partial_block_index = None
-
-        skip_save = skip_save or (num_tokens_to_save < chunk_boundary and partial_block_index is None)
+        skip_save = skip_save or num_tokens_to_save < chunk_boundary
         if skip_save and load_spec is None:
             return None
 
@@ -1018,17 +935,6 @@ class ReqMeta:
             token_ids=token_ids,
             num_prompt_tokens=tracker.num_prompt_tokens or target_token_len,
             original_block_size=original_block_size,
-            last_block_gva=tracker.last_block_gva,
-            partial_block_index=partial_block_index,
-            block_ids_np=np.asarray(tracker.allocated_block_ids, dtype=np.int64),
-            block_ids_by_group_np=[np.asarray(ids, dtype=np.int64) for ids in tracker.allocated_block_ids_by_group]
-            if tracker.allocated_block_ids_by_group
-            else None,
-            block_gvas_np=np.asarray(tracker.block_gvas, dtype=np.int64),
-            block_gvas_by_group_np=[np.asarray(gvas, dtype=np.int64) for gvas in tracker.block_gvas_by_group]
-            if hasattr(tracker, "block_gvas_by_group") and tracker.block_gvas_by_group
-            else None,
-            gva_block_offset=tracker.gva_block_offset,
             kv_cache_group_ids=list(range(len(tracker.allocated_block_ids_by_group))),
             kv_cache_families_by_group=kv_cache_group_families,
         )
@@ -1054,14 +960,12 @@ class AscendConnectorMetadata(KVConnectorMetadata):
 
 
 @dataclass
-class LayerBatchReqMeta:
-    req_ids: list[str]
-    layer_id: int
-    is_last_chunks: list[bool | None] = field(default_factory=list)
+class LayerTransferArrays:
+    """Per-layer arrays passed directly to the backend copy API."""
+
     addr_array: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
     size_array: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
     gvas_array: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
-    load_keys: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1069,27 +973,74 @@ class LayerBlockRange:
     request: ReqMeta
     start_block: int
     end_block: int
-    partial_block_index: int | None = None
 
 
 @dataclass
-class SharedBlockData:
-    """Pre-computed block data shared across all layers for the same request."""
+class GroupBatchPlan:
+    """Transfer ranges for every request in one KV cache group."""
+
+    group_id: int
+    block_size: int
+    save_ranges: list[LayerBlockRange] = field(default_factory=list)
+    full_load_ranges: list[LayerBlockRange] = field(default_factory=list)
+    hbm_tail_load_ranges: list[LayerBlockRange] = field(default_factory=list)
+
+
+@dataclass
+class GroupTransferData:
+    """Dynamic address inputs shared by every transferred layer in one group."""
 
     block_ids_arr: np.ndarray
-    block_gvas_arr: np.ndarray
+    base_gvas_arr: np.ndarray
+
+
+@dataclass
+class TransferCompletion:
+    """Request lifecycle metadata kept outside address calculation."""
+
     req_ids: list[str]
     is_last_chunks: list[bool | None]
-    load_keys: list[str] = field(default_factory=list)
+
+
+@dataclass
+class LayerwisePreparation:
+    """Run one transfer-batch preparation callback exactly once."""
+
+    callback: Callable[[], None] = field(repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _ready: bool = field(default=False, init=False, repr=False)
+    _error: BaseException | None = field(default=None, init=False, repr=False)
+
+    def ensure_ready(self) -> None:
+        if self._ready:
+            if self._error is not None:
+                raise self._error
+            return
+        with self._lock:
+            if not self._ready:
+                try:
+                    self.callback()
+                except BaseException as error:
+                    self._error = error
+                finally:
+                    self._ready = True
+            if self._error is not None:
+                raise self._error
 
 
 @dataclass
 class LayerTransferTask:
     layer_id: int
     block_ranges: list[LayerBlockRange]
-    shared_block_data: SharedBlockData | None = None
+    transfer_data: GroupTransferData | None = None
+    completion: TransferCompletion | None = None
+    # Requests whose final actual transfer is this task. Populated once during
+    # asynchronous preparation; usually empty for all but one task per request.
+    finished_req_ids: set[str] = field(default_factory=set)
     group_id: int = 0
     layer_idx_in_group: int = 0
+    uses_hbm_tail: bool = False
+    preparation: LayerwisePreparation | None = None
     # Cache for KVCacheStoreKeyLayerSendingThread:
     # maps block_range index -> list of (start, end, key_all_layers)
     cached_process_tokens: dict[int, list[tuple[int, int, list]]] | None = None
@@ -1101,6 +1052,7 @@ class LayerLoadTask:
     transfer_tasks: list[LayerTransferTask]
     layer_id: int
     attention_start_gate: AttentionComputeStartGate | None = None
+    preparation: LayerwisePreparation | None = None
 
 
 @dataclass(init=False)

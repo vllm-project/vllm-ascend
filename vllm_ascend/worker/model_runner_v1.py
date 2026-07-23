@@ -69,6 +69,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
+    KVCacheTensor,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -122,6 +123,11 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     set_graph_params,
     update_full_graph_params,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_config import (
+    get_gva_layerwise_config,
+    get_layerwise_kv_cache_reuse_layers,
+    get_layerwise_storage_indices,
 )
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
@@ -3881,6 +3887,69 @@ class NPUModelRunner(GPUModelRunner):
 
         self.debugger.step(**kwargs)
 
+    def _merge_kv_cache_tensors_for_layer_reuse(self, kv_cache_config: KVCacheConfig) -> None:
+        """Make transformer layers time-multiplex a smaller set of KV buffers."""
+        extra_config = get_gva_layerwise_config(self.vllm_config.kv_transfer_config)
+        if extra_config is None:
+            return
+        if len(kv_cache_config.kv_cache_groups) != 1:
+            num_layers = self.model_config.get_num_layers(self.parallel_config)
+            if get_layerwise_kv_cache_reuse_layers(num_layers, extra_config) is not None:
+                raise NotImplementedError(
+                    "GVA layerwise KV cache reuse does not support multiple KV cache groups."
+                )
+            return
+
+        old_tensors = kv_cache_config.kv_cache_tensors
+        if len(old_tensors) <= 1:
+            return
+        if any(len(tensor.shared_by) != 1 for tensor in old_tensors):
+            raise NotImplementedError(
+                "GVA layerwise KV cache reuse requires one KV cache tensor descriptor per layer."
+            )
+
+        layer_names = [tensor.shared_by[0] for tensor in old_tensors]
+        actual_layers = len(layer_names)
+        if get_layerwise_kv_cache_reuse_layers(actual_layers, extra_config) is None:
+            return
+
+        base_layers = self.model_config.get_num_layers(self.parallel_config)
+        if actual_layers < base_layers:
+            logger.warning(
+                "Layer reuse expected at least %d layers, got %d; skip tensor merge.",
+                base_layers,
+                actual_layers,
+            )
+            return
+        if actual_layers > base_layers:
+            logger.info(
+                "Layer reuse includes %d base and %d MTP/spec-decode layer(s).",
+                base_layers,
+                actual_layers - base_layers,
+            )
+
+        storage_indices = get_layerwise_storage_indices(actual_layers, extra_config)
+        new_tensors = []
+        for slot in storage_indices:
+            slot_sizes = {old_tensors[index].size for index in slot}
+            if len(slot_sizes) != 1:
+                raise ValueError(
+                    "Layers assigned to one layerwise reuse slot must have equal KV cache tensor sizes."
+                )
+            new_tensors.append(
+                KVCacheTensor(
+                    shared_by=[layer_names[index] for index in slot],
+                    size=old_tensors[slot[0]].size,
+                )
+            )
+
+        kv_cache_config.kv_cache_tensors = new_tensors
+        logger.info(
+            "Layerwise KV cache reuse merged %d tensor descriptors into %d shared slots.",
+            len(old_tensors),
+            len(new_tensors),
+        )
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -3893,6 +3962,7 @@ class NPUModelRunner(GPUModelRunner):
         self._mamba_bufs = None
         self._mamba_copy_bufs = None
         self.may_add_encoder_only_layers_to_kv_cache_config()
+        self._merge_kv_cache_tensors_for_layer_reuse(kv_cache_config)
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
         self.initialize_attn_backend(kv_cache_config)

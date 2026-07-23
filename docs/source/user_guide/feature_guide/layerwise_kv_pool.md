@@ -77,7 +77,9 @@ Change `"kv_role"` to `"kv_producer"` or `"kv_consumer"` for PD disaggregation.
 | `use_layerwise` | `false` | Enable layer-by-layer KV save/load. Requires `backend: "memcache"`. |
 | `backend` | `"mooncake"` | Storage backend. Layerwise currently supports `"memcache"` only. |
 | `mooncake_rpc_port` | `"0"` | RPC port for the scheduler↔worker lookup service. Use `"0"` to auto-assign, or a unique port per instance. |
-| `layerwise_prefetch_layers` | `1` | Number of layers to prefetch ahead of the compute frontier. Higher values improve overlap at the cost of memory. |
+| `layerwise_num_shared_buffers` | Number of model layers | Number of KV tensor slots shared round-robin by non-independent layers. Set this below the reusable layer count to enable layer reuse. |
+| `layerwise_independent_layers` | First and last layer | Comma-separated layer indices that retain dedicated KV buffers. Negative indices are accepted; use `all` to disable reuse explicitly. |
+| `layerwise_prefetch_layers` | `min(layerwise_num_shared_buffers, 8)` | Number of layer loads/gates to submit ahead of the compute frontier. |
 | `layerwise_max_transfer_blocks` | `0` (unlimited) | Maximum number of KV blocks per transfer batch. |
 | `layerwise_max_transfer_bytes` | `0` (unlimited) | Maximum bytes per transfer batch. |
 | `h2d_stagger_us` | `0` | Stagger delay (microseconds) between H2D copies across TP ranks to avoid bus contention. |
@@ -199,9 +201,31 @@ curl -s http://127.0.0.1:9000/v1/completions \
 
 ## Tuning
 
+### Layer Reuse
+
+Layer reuse reduces HBM consumption by time-multiplexing several transformer
+layers onto the same KV tensor slots. For example, the following configuration
+keeps the first and last layers independent and distributes all other layers
+over six shared slots:
+
+```json
+{
+    "backend": "memcache",
+    "use_layerwise": true,
+    "layerwise_num_shared_buffers": 6
+}
+```
+
+Shared layers reload their complete cached prefix before attention because a
+previous layer may have overwritten the slot. The load pipeline also waits for
+the previous slot owner to finish saving before reusing its memory. MTP or
+speculative-decoding cache layers are included in the layer count; with the
+default independent-layer policy, the last extra layer receives a dedicated
+slot.
+
 ### Prefetch Depth
 
-Increase `layerwise_prefetch_layers` (default `1`) to prefetch more layers
+Increase `layerwise_prefetch_layers` to prefetch more layers
 ahead of the compute frontier. This increases transfer/compute overlap but uses
 more temporary buffers. Typical values: `1–4`.
 
@@ -231,8 +255,8 @@ wait/save calls. Layerwise + CP is future work.
 * **Backend**: Only `memcache` is supported for layerwise mode (`mooncake` and
   `yuanrong` do not support `use_layerwise`).
 * **Hybrid KV cache**: Not supported — layerwise raises
-  `NotImplementedError` when the model has multiple KV cache group families
-  (hybrid MLA + sliding-window attention).
+  `NotImplementedError` only when layer reuse is enabled for multiple KV cache
+  groups. Layerwise transfer without buffer reuse retains multi-group support.
 * **Context parallel**: Layerwise is not yet integrated with CP attention
   backends.
 * **PD disaggregation proxy**: When using `kv_producer` / `kv_consumer`, the
