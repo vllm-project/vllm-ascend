@@ -8,7 +8,7 @@ KV-offload-related attention logic lives in this module and is selected by
 Data plane (see zsc-sfa-kv-offload-merge-plan.md):
 
 - prefill (debug intermediate state, only reachable with
-  ``KV_OFFLOAD_COLOCATE_DEBUG=1``): ``exec_kv`` writes the NPU paged main
+  ``keep_device_kv_cache=True``): ``exec_kv`` writes the NPU paged main
   cache as usual, then the layer's cache rows are committed D2H
   (``cache_cpu[slot] = cache_npu[slot]``) through the manager;
 - decode: no NPU main K/V cache at all (indexer K cache only). The current
@@ -29,6 +29,7 @@ from vllm.forward_context import (
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
@@ -50,14 +51,13 @@ from vllm_ascend.distributed.kv_transfer.kv_offload_decode.kv_offload_decode_man
 M = TypeVar("M", bound=AscendSFAMetadata)
 
 
-def _check_prefill_colocate_debug() -> None:
-    # TODO remove KV_OFFLOAD_COLOCATE_DEBUG after PD disaggregate is done:
+def _check_device_kv_cache_exist() -> None:
     # prefill/mixed handling only exists for single-node PD-colocate debug;
     # a PD-disaggregated decode node never receives prefill batches.
-    if not envs_ascend.KV_OFFLOAD_COLOCATE_DEBUG:
+    if not get_ascend_config().kv_offload_decode_config.keep_device_kv_cache:
         raise RuntimeError(
             "KV offload decode received a prefill/mixed batch without "
-            "KV_OFFLOAD_COLOCATE_DEBUG=1; a PD-disaggregated decode node "
+            "keep_device_kv_cache=True; a PD-disaggregated decode node "
             "only accepts decode requests"
         )
 
@@ -325,8 +325,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         # Prefill / mixed batch (colocate debug only): stage in the NPU paged
         # main cache as usual, then commit the written rows D2H into the
         # shared CPU pool.
-        # TODO remove KV_OFFLOAD_COLOCATE_DEBUG after PD disaggregate is done.
-        _check_prefill_colocate_debug()
+        _check_device_kv_cache_exist()
         result = super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
         manager = get_kv_offload_decode_manager()
         layer_name = self._offload_layer_name()
@@ -362,8 +361,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
 
         if num_decode_tokens == 0:
             # Pure prefill batch (colocate debug only).
-            # TODO remove KV_OFFLOAD_COLOCATE_DEBUG after PD disaggregate is done.
-            _check_prefill_colocate_debug()
+            _check_device_kv_cache_exist()
             return super()._execute_sparse_flash_attention_process(
                 ql_nope,
                 q_pe,
@@ -455,8 +453,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         # Mixed batch (colocate debug only): prefill rows still attend the NPU
         # paged cache. The cumulative query lengths are rebased to the first
         # prefill request.
-        # TODO remove KV_OFFLOAD_COLOCATE_DEBUG after PD disaggregate is done.
-        _check_prefill_colocate_debug()
+        _check_device_kv_cache_exist()
         prefill_query_offset = actual_seq_lengths_query[num_decodes - 1]
         prefill_query_lens = actual_seq_lengths_query[num_decodes:] - prefill_query_offset
         prefill_block_table = attn_metadata.block_table[num_decodes : num_decodes + num_prefills]

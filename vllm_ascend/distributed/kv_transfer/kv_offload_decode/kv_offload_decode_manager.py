@@ -22,10 +22,9 @@ from vllm_ascend.ascend_config import KVOffloadDecodeConfig
 
 
 # non-c8 case, # [k_cache, v_cache, k_cache_cpu, v_cache_cpu, topk_buffer_k, topk_buffer_v]
-# TODO remove KV_OFFLOAD_COLOCATE_DEBUG after PD disaggregate is done:
-# the npu k_cache/v_cache entries only exist for colocate debug (prefill
-# staging) and are deleted together with the prefill path.
 OFFLOAD_KV_CACHE_TUPLE_LEN = 6
+OFFLOAD_K_CACHE_NPU_INDEX = 0
+OFFLOAD_V_CACHE_NPU_INDEX = 1
 OFFLOAD_K_CACHE_CPU_INDEX = 2
 OFFLOAD_V_CACHE_CPU_INDEX = 3
 OFFLOAD_TOPK_BUFFER_K_INDEX = 4
@@ -294,7 +293,7 @@ class KVOffloadDecodeManager:
             )
 
         # D2H uses a separate descriptor set from the shared H2D buffers below.
-        # Both prefill (colocate debug only, gated by KV_OFFLOAD_COLOCATE_DEBUG)
+        # Both prefill (colocate debug only, gated by keep_device_kv_cache)
         # and decode can produce up to max_num_tokens rows.
         d2h_descriptor_rows = self.max_num_tokens * 2
         device = self.topk_buffers_k[0].device
@@ -522,7 +521,6 @@ class KVOffloadDecodeManager:
         has_prefill: bool = False,
         capturing: bool = False,
     ) -> None:
-        # TODO remove KV_OFFLOAD_COLOCATE_DEBUG after PD disaggregate is done:
         # the has_prefill path (NPU paged cache -> CPU pool D2H) only exists
         # for single-node PD-colocate debug.
         if self.tp_rank != 0:
@@ -532,10 +530,10 @@ class KVOffloadDecodeManager:
             return
         if k_cache_cpu is None or v_cache_cpu is None:
             raise RuntimeError("KV offload decode TP0 CPU cache is not registered")
-        if has_prefill and not envs_ascend.KV_OFFLOAD_COLOCATE_DEBUG:
+        if has_prefill and not self.kv_offload_decode_config.keep_device_kv_cache:
             raise RuntimeError(
                 "KV offload decode prefill offload requires "
-                "KV_OFFLOAD_COLOCATE_DEBUG=1; a PD-disaggregated decode node "
+                "keep_device_kv_cache=True; a PD-disaggregated decode node "
                 "never stages prefill KV in an NPU paged cache"
             )
 
