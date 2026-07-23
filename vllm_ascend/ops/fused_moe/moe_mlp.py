@@ -150,7 +150,7 @@ def _swiglu_mx_quant(
         group_mode=0,
         axis=-1,
         round_mode="rint",
-        scale_alg=0,
+        scale_alg=1,
         max_dtype_value=0.0,
     )
     return hidden_states, DeviceOperator.maybe_normalize_mxfp_scale_layout(swiglu_out_scale)
