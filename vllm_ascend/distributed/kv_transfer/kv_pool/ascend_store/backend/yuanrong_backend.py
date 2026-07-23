@@ -97,10 +97,12 @@ class YuanrongBackend(Backend):
         if self._registered_buffers is None or self._buffers_registered:
             return
         ptrs, lengths = self._registered_buffers
+        assert self.store is not None
         self.store.pre_register_device_memory(ptrs, lengths)
         self._buffers_registered = True
 
     def exists(self, keys: list[str]) -> list[int]:
+        assert self.store is not None
         try:
             return self.store.batch_is_exist(keys)
         except Exception as exc:
@@ -113,6 +115,7 @@ class YuanrongBackend(Backend):
             return [0] * len(keys)
 
     def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> list[int] | None:
+        assert self.store is not None
         failed_keys_for_log = keys
         try:
             failed_keys = self.store.mget_h2d_from_multi_buffers(keys, addrs, sizes, self.config.get_sub_timeout_ms)
@@ -140,6 +143,7 @@ class YuanrongBackend(Backend):
             return None
 
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+        assert self.store is not None
         failed_keys_for_log = keys
         try:
             self.store.mset_d2h_from_multi_buffers(keys, addrs, sizes, self._ds_set_param)
