@@ -4807,25 +4807,6 @@ class NPUModelRunner(GPUModelRunner):
         # Calculate reorder batch threshold (if needed)
         self.calculate_reorder_batch_threshold()
 
-    def calculate_reorder_batch_threshold(self) -> None:
-        """
-        Choose the minimum reorder batch threshold from all attention groups.
-        Backends should be able able to support lower threshold then what they request
-        just may have a performance penalty due to that backend treating decodes
-        as prefills
-        """
-        min_none_high = lambda a, b: a if b is None else b if a is None else min(a, b)
-
-        reorder_batch_thresholds: list[int | None] = [
-            group.get_metadata_builder().reorder_batch_threshold
-            for group in self._attn_group_iterator()
-            if hasattr(group.get_metadata_builder(), "reorder_batch_threshold")
-        ]
-        if len(reorder_batch_thresholds) == 0:
-            self.reorder_batch_threshold = None
-            return 
-        self.reorder_batch_threshold = reduce(min_none_high, reorder_batch_thresholds)  # type: ignore[assignment]
-
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
         Generates the KVCacheSpec by parsing the kv cache format from each
