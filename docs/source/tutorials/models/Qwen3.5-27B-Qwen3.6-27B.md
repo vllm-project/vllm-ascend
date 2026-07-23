@@ -290,7 +290,7 @@ vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
 
 ::::{tab-item} Qwen3.6-27B-w8a8
 
-Startup Command (supports up to 262144 context length):
+Startup Command:
 
 ```bash
 #!/bin/sh
@@ -482,7 +482,7 @@ vllm serve $MODEL_PATH \
 
 ::::{tab-item} Qwen3.6-27B-w8a8-MXFP8
 
-Startup Command (supports up to 262144 context length):
+Startup Command:
 
 ```bash
 #!/bin/sh
