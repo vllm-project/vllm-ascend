@@ -4,7 +4,7 @@
 # Status: Inherits all official built-in rules by default. No custom rules or global suppressions enabled.
 # Standard inheritance syntax: [extend] useDefault = true (officially recommended, compatible with offline binaries)
 # ==============================================
-title = "VLLM Ascend Motor pre-commit secret scan config"
+title = "VLLM Ascend pre-commit secret scan config"
 
 # Standard inheritance for built-in rules
 # useDefault = true: Load all built-in secret detection rules (AWS/Git/SSH/OBS, etc.)
