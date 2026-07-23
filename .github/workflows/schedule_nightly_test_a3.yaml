@@ -343,3 +343,23 @@ jobs:
           pattern: nightly-test-benchmark-results-*
           compression-level: 0
           delete-merged: true
+
+  remove-taints:
+    name: Remove node taints
+    needs: [multi-node-tests, double-node-tests, single-node-tests, multi-card-tests]
+    if: >-
+      always() &&
+      inputs.request_id == '' &&
+      (needs.multi-node-tests.result != 'skipped' || needs.double-node-tests.result != 'skipped')
+    runs-on: linux-aarch64-a3-0
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
+      env:
+        KUBECONFIG: /tmp/kubeconfig
+    steps:
+      - name: Decode kubeconfig
+        run: echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$KUBECONFIG"
+
+      - name: Remove dedicated taint from test nodes
+        run: |
+          kubectl taint nodes ${{ vars.A3_TAINT_NODES }} dedicated- || true
