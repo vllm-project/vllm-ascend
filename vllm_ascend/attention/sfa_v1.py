@@ -1789,7 +1789,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
         return (main_cache[0], main_cache[1], indexer_cache[0])
 
-
     def forward(
         self,
         layer_name,
