@@ -253,6 +253,8 @@ jobs:
     name: Recommend tests from coverage
     runs-on: linux-amd64-cpu-8-hk
     continue-on-error: true
+    outputs:
+      coverage_paths: ${{ steps.export-paths.outputs.coverage_paths }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -304,6 +306,23 @@ jobs:
             --github-pr "${PR_SPEC}" \
             --source-dir ./vllm-ascend/covstub \
             --map-file test_case_map.json
+
+      - name: Export coverage paths output
+        id: export-paths
+        if: always()
+        run: |
+          FILE="recommended_pytest_paths.txt"
+          if [ -f "$FILE" ]; then
+            {
+              echo "coverage_paths<<EOF"
+              cat "$FILE"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "Exported $(wc -l < "$FILE") recommended paths"
+          else
+            echo "coverage_paths=" >> "$GITHUB_OUTPUT"
+            echo "::notice::recommended_pytest_paths.txt not found"
+          fi 
 
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
