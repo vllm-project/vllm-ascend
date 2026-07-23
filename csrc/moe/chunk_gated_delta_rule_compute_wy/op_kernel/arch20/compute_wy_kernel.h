@@ -338,11 +338,12 @@ class KernelComputeWy {
     BuildKBetaExpFloat(kBeta, kFloat, betaLocal, expGLocal, scratch, kHeadDim_, alignK_);
 
     // Nilpotent doubling: R ← (I−A)⁻¹ R without forming T.
-    // Apply to U and W separately to keep N≤128 and UB within 310P budget.
+    // UploadP uses qHalf (>=64*64). U R-half uses vHalf (>=64*V); W R-half uses kHalf (>=64*K).
     // scratch (tmpBuf_) is [64, max(K,V)] — contiguous C staging for bulk ApplyAdd.
     for (uint32_t round = 0; round < DOUBLING_ROUNDS; ++round) {
-      cubeGemm_.GemmApplyAdd(vFloat, attnLocal, qHalf, scratch, vHeadDim_, alignV_, /*useU=*/true);
-      cubeGemm_.GemmApplyAdd(kBeta, attnLocal, qHalf, scratch, kHeadDim_, alignK_, /*useU=*/false);
+      cubeGemm_.UploadP(attnLocal, qHalf);
+      cubeGemm_.GemmApplyAdd(vFloat, vHalf, scratch, vHeadDim_, alignV_, /*useU=*/true);
+      cubeGemm_.GemmApplyAdd(kBeta, kHalf, scratch, kHeadDim_, alignK_, /*useU=*/false);
       if (round + 1 < DOUBLING_ROUNDS) {
         cubeGemm_.GemmSquare(attnLocal, qHalf);
         SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
