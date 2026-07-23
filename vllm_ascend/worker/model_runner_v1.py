@@ -965,8 +965,10 @@ class NPUModelRunner(GPUModelRunner):
                 # ``_copy_draft_token_ids_to_cpu``) rather than ``num_spec_tokens``.
                 # It is initialized in ``GPUModelRunner.__init__`` (to the
                 # configured max K, or 0 when spec decoding is off), so it is
-                # always present before the first draft is produced.
-                self.prev_num_spec_tokens,
+                # always present before the first draft is produced. The type
+                # is only assigned in the parent class, which mypy cannot
+                # resolve here (same reason as the assignment site below).
+                self.prev_num_spec_tokens,  # type: ignore[has-type]
                 prev_positions=prev_positions_gpu,
             )
 
@@ -1247,8 +1249,9 @@ class NPUModelRunner(GPUModelRunner):
                 # Previous step's draft width (see the note on the other
                 # generate_pcp_mtp_input call); matters when dynamic SD varies K.
                 # Initialized in ``GPUModelRunner.__init__`` (max K, or 0 when
-                # spec decoding is off), so it is always present here.
-                num_spec_tokens=self.prev_num_spec_tokens,
+                # spec decoding is off), so it is always present here. Type is
+                # only assigned in the parent class, unresolvable by mypy here.
+                num_spec_tokens=self.prev_num_spec_tokens,  # type: ignore[has-type]
                 prepare_input_ids=self._prepare_input_ids,
             )
         else:
