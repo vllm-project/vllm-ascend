@@ -338,17 +338,32 @@ class KVOffloadDecodeManager:
         self.addr_v_bases: list[int] = [t.data_ptr() for t in self.topk_buffers_v]
         self.gvas_k_bases: list[int] = []
         self.gvas_v_bases: list[int] = []
+        self.cpu_block_lens: list[tuple[int, int]] = []
         gvas_k_tensor = torch.zeros([self.num_layers], dtype=torch.int64, device='npu')
         gvas_v_tensor = torch.zeros([self.num_layers], dtype=torch.int64, device='npu')
+        cpu_block_lens_tensor = torch.zeros([self.num_layers, 2], dtype=torch.int64, device='npu')
         if self.tp_rank == 0:
             for layer_id in range(self.num_layers):
-                gvas_k_tensor[layer_id] = self.k_caches_cpu[layer_id].data_ptr()
-                gvas_v_tensor[layer_id] = self.v_caches_cpu[layer_id].data_ptr()
+                k_cpu = self.k_caches_cpu[layer_id]
+                v_cpu = self.v_caches_cpu[layer_id]
+                gvas_k_tensor[layer_id] = k_cpu.data_ptr()
+                gvas_v_tensor[layer_id] = v_cpu.data_ptr()
+                cpu_block_lens_tensor[layer_id, 0] = (
+                    k_cpu.numel() * k_cpu.element_size() // self.kv_cache_config.num_blocks
+                )
+                cpu_block_lens_tensor[layer_id, 1] = (
+                    v_cpu.numel() * v_cpu.element_size() // self.kv_cache_config.num_blocks
+                )
         self.tp_group.broadcast(gvas_k_tensor, src=0)
         self.tp_group.broadcast(gvas_v_tensor, src=0)
+        self.tp_group.broadcast(cpu_block_lens_tensor, src=0)
         for layer_id in range(self.num_layers):
             self.gvas_k_bases.append(gvas_k_tensor[layer_id].item())
             self.gvas_v_bases.append(gvas_v_tensor[layer_id].item())
+            self.cpu_block_lens.append((
+                cpu_block_lens_tensor[layer_id, 0].item(),
+                cpu_block_lens_tensor[layer_id, 1].item(),
+            ))
 
         gvas_buffer_offset = 0
         gvas_buffer_size_bytes = self.max_num_topk_rows * self.topk * 2 * 8 # 2: k+v, 8: int64
@@ -511,8 +526,9 @@ class KVOffloadDecodeManager:
         # the has_prefill path (NPU paged cache -> CPU pool D2H) only exists
         # for single-node PD-colocate debug.
         if self.tp_rank != 0:
-            # Main K/V is replicated across TP ranks; only TP0 owns and writes
-            # the shared CPU pool whose GVA was broadcast during registration.
+            # Decode-produced K/V is replicated across TP ranks, so TP0 alone
+            # writes new decode tokens. PD pull fills disjoint parts of this
+            # shared pool from all TP ranks through the broadcast GVA.
             return
         if k_cache_cpu is None or v_cache_cpu is None:
             raise RuntimeError("KV offload decode TP0 CPU cache is not registered")
