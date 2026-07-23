@@ -754,8 +754,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         seq_lens = metadata.seq_lens_list
                         actual_seq_lengths_q = metadata.actual_seq_lengths_q
                         block_tables = metadata.block_tables
-                        attn_state = metadata.attn_state
-                        max_query_len = metadata.max_query_len
                         attn_count = attn_count + 1
                         if not metadata.causal:
                             sparse_mode = 0
@@ -763,8 +761,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         metadata_key = layer_name if layer_name is not None and layer_name in attn_metadata else key
                         seq_lens = attn_metadata[metadata_key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[metadata_key].actual_seq_lengths_q
-                        attn_state = attn_metadata[metadata_key].attn_state
-                        max_query_len = attn_metadata[metadata_key].max_query_len
                         # NOTE:
                         # For models with sliding-window attention on the FIA full-graph replay path,
                         # rebinding `block_tables` to the latest metadata tensor causes corrupted /
@@ -790,16 +786,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         }
                         input_layout = "BNSD"
                         sparse_mode = 0
-                    is_single_token_decode = attn_state == AscendAttentionState.DecodeOnly and max_query_len == 1
-                    update_attn_mask, update_sparse_mode = (
-                        (None, 0) if is_single_token_decode else (attn_mask, sparse_mode)
-                    )
                     torch_npu.npu_fused_infer_attention_score.out(
                         query=query,
                         key=key_cache,
                         value=value,
                         block_table=block_tables,
-                        atten_mask=update_attn_mask,
+                        atten_mask=attn_mask,
                         input_layout=input_layout,
                         block_size=block_size,
                         actual_seq_lengths=actual_seq_lengths_q,
@@ -807,7 +799,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         num_key_value_heads=num_kv_heads,
                         num_heads=num_heads,
                         scale=scale,
-                        sparse_mode=update_sparse_mode,
+                        sparse_mode=sparse_mode,
                         pre_tokens=pre_tokens,
                         next_tokens=next_tokens,
                         **extra_args,
@@ -843,15 +835,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         input_layout = "TND"
-        is_single_token_decode = (
-            attn_metadata.attn_state == AscendAttentionState.DecodeOnly and attn_metadata.max_query_len == 1
-        )
-        if is_single_token_decode:
-            attn_mask = None
-            sparse_mode = 0
-        else:
-            attn_mask = attn_metadata.attn_mask
-            sparse_mode = 4 if self.sliding_window else 3 if attn_metadata.causal else 0
+        attn_mask = attn_metadata.attn_mask
+        sparse_mode = 4 if self.sliding_window else 3 if attn_metadata.causal else 0
         pre_tokens = self.sliding_window or SWA_INT_MAX
         next_tokens = 0 if self.sliding_window else SWA_INT_MAX
 
@@ -1328,15 +1313,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     sparse_mode=0,
                 )
             elif self.sliding_window is not None:
-                is_single_token_decode = (
-                    attn_metadata.attn_state == AscendAttentionState.DecodeOnly and attn_metadata.max_query_len == 1
-                )
-                attn_mask, sparse_mode = (None, 0) if is_single_token_decode else (attn_metadata.attn_mask, 4)
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
                     value=value,
-                    atten_mask=attn_mask,
+                    atten_mask=attn_metadata.attn_mask,
                     block_table=block_table,
                     input_layout="TND",
                     block_size=block_size,
@@ -1347,18 +1328,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     scale=self.scale,
                     pre_tokens=self.sliding_window,
                     next_tokens=0,
-                    sparse_mode=sparse_mode,
+                    sparse_mode=4,
                 )
             else:
-                is_single_token_decode = (
-                    attn_metadata.attn_state == AscendAttentionState.DecodeOnly and attn_metadata.max_query_len == 1
-                )
-                attn_mask, sparse_mode = (None, 0) if is_single_token_decode else (attn_metadata.attn_mask, 3)
                 attn_output, _ = DeviceOperator.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
                     value=value,
-                    atten_mask=attn_mask,
+                    atten_mask=attn_metadata.attn_mask,
                     block_table=block_table,
                     input_layout="TND",
                     block_size=block_size,
@@ -1374,7 +1351,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     current_value=passed_value,
                     attn_metadata=attn_metadata,
                     is_prefill_no_cache=attn_metadata.attn_state == AscendAttentionState.PrefillNoCache,
-                    sparse_mode=sparse_mode,
+                    sparse_mode=3,
                 )
 
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)

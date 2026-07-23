@@ -611,6 +611,18 @@
   tests:
     - tests/ut/
 # Single File
+- name: dependency_documentation
+  optional: true
+  cpu_only: true
+  source_file_dependencies:
+    - docs/source/community/versioning_policy.md
+    - docs/source/installation.md
+    - mkdocs.yml
+    - pyproject.toml
+    - requirements.txt
+  tests:
+    - tests/ut/test_dependency_documentation.py
+
 - name: misc
   optional: false
   source_file_dependencies:
