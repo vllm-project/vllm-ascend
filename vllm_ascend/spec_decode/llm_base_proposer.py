@@ -98,6 +98,18 @@ def _maybe_eager_context(vllm_config):
         vllm_config.compilation_config = target_compilation_config
 
 
+# `sp` should be disabled when running MarkovHead
+@contextmanager
+def _disable_flash_comm_v1_context():
+    forward_context = get_forward_context()
+    _raw_flash_comm_v1 = forward_context.flash_comm_v1_enabled
+    try:
+        forward_context.flash_comm_v1_enabled = False
+        yield
+    finally:
+        forward_context.flash_comm_v1_enabled = _raw_flash_comm_v1
+
+
 # split hidden states along dimension of sequence
 def split_inputs_tp_to_sp(hidden_states, out):
     # tp and sp share the same group
@@ -1191,16 +1203,21 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # Dspark speculation requires autoregressive applications of MarkovHead and ConfidenceHead.
                 # The MarkovHead performs bias correction on logits.
                 # The ConfidenceHead predicts the expected acceptance length of tokens(Not yet achieved).
-                raw_logits = self.model.compute_logits(sample_hidden_states)
-                logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
-                num_blk = logits.shape[0]
-                draft_token_ids = self._dspark_draft_buffer[:num_blk]
-                draft_token_ids[:, 0].copy_(self._dspark_seed_buffer[:num_blk])
-                for idx in range(self.num_speculative_tokens):
-                    markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
-                    logits_bias = self.model.markov_bias(markov_emb)
-                    logits[:, idx].add_(logits_bias)
-                    draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
+
+                # `sample_hidden_states` has been all-gathered to full.
+                # `markov_emb` should also be full to match it.
+                # We changed `flash_comm_v1_enabled` to avoid `markov_emb` from being split.
+                with _disable_flash_comm_v1_context():
+                    raw_logits = self.model.compute_logits(sample_hidden_states)
+                    logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
+                    num_blk = logits.shape[0]
+                    draft_token_ids = self._dspark_draft_buffer[:num_blk]
+                    draft_token_ids[:, 0].copy_(self._dspark_seed_buffer[:num_blk])
+                    for idx in range(self.num_speculative_tokens):
+                        markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
+                        logits_bias = self.model.markov_bias(markov_emb)
+                        logits[:, idx].add_(logits_bias)
+                        draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable():
