@@ -168,16 +168,9 @@ jobs:
       - name: Run pre-commit
         env:
           PRE_COMMIT_HOME: /tmp/pre-commit-cache
-          PRE_COMMIT_COLOR: always
-          FORCE_COLOR: "1"
-          TERM: xterm-256color
-          SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086"
-          # Keep golang-based pre-commit hooks on a domestic module proxy.
-          GOPROXY: https://repo.huaweicloud.com/repository/goproxy/
-          GONOSUMDB: '*'
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
-          pre-commit run --all-files --hook-stage manual --show-diff-on-failure
+          pre-commit run --all-files
 
       - name: Run mypy
         run: |
