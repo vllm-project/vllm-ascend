@@ -51,8 +51,6 @@ class AscendMambaManager(MambaManager):
                     computed.append(cached)
                 hit_length = (i + 1) * block_size
                 break
-        if vllm_version_is("0.25.1"):
-            return computed_blocks
         return computed_blocks, hit_length
 
     def get_num_blocks_to_allocate(

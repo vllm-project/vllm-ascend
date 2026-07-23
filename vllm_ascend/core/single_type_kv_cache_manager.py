@@ -252,8 +252,6 @@ class CompressAttentionManager(FullAttentionManager):
             for computed in computed_blocks:
                 computed.pop()
         hit_length = len(computed_blocks[0]) * logical_block_size
-        if vllm_version_is("0.25.1"):
-            return computed_blocks
         return computed_blocks, hit_length
 
 
