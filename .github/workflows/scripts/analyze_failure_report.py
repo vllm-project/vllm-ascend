@@ -205,13 +205,9 @@ def generate_report(failed, recommended, matched, log_dir, recommendations_sourc
 
     # Recommendation source indicator
     if recommendations_source == "output":
-        out.append(
-          "> **[Source: Workflow Output]** Recommended cases are passed from coverage recommendations outputs"
-        )
+        out.append("> **[Source: Workflow Output]** Recommended cases are passed from coverage recommendations outputs")
     elif recommendations_source == "committed":
-        out.append(
-          "> **[Source: Local File]** Recommended test cases come from a txt file in the repository"
-        )
+        out.append("> **[Source: Local File]** Recommended test cases come from a txt file in the repository")
     else:
         out.append("> **[Source: None]** No recommended test cases found")
     out.append("")
