@@ -94,16 +94,12 @@ class AscendSampler(Sampler):
         predict_bonus_token: bool,
     ) -> torch.Tensor:
         bad_words_token_ids = sampling_metadata.bad_words_token_ids
-        any_penalties_or_bad_words = (
-            bool(bad_words_token_ids) or not sampling_metadata.no_penalties
-        )
+        any_penalties_or_bad_words = bool(bad_words_token_ids) or not sampling_metadata.no_penalties
         holder = sampling_metadata.thinking_budget_state_holder
         needs_thinking_combine = holder is not None and holder.has_tracked_requests()
 
         output_token_ids = sampling_metadata.output_token_ids
-        if predict_bonus_token and (
-            any_penalties_or_bad_words or needs_thinking_combine
-        ):
+        if predict_bonus_token and (any_penalties_or_bad_words or needs_thinking_combine):
             output_token_ids = self._combine_outputs_with_spec_tokens(
                 output_token_ids,
                 sampling_metadata.spec_token_ids,
@@ -111,9 +107,7 @@ class AscendSampler(Sampler):
 
         # Apply allowed token ids.
         if sampling_metadata.allowed_token_ids_mask is not None:
-            logits.masked_fill_(
-                sampling_metadata.allowed_token_ids_mask, float("-inf")
-            )
+            logits.masked_fill_(sampling_metadata.allowed_token_ids_mask, float("-inf"))
 
         # Apply bad words exclusion.
         if bad_words_token_ids:
@@ -124,25 +118,15 @@ class AscendSampler(Sampler):
         # [B, V_local] but MinTokensLogitsProcessor and LogitBiasLogitsProcessor
         # store global token IDs in logits_slice. Convert to local indices first.
         for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
-            if get_ascend_config().enable_reduce_sample and isinstance(
-                processor, MinTokensLogitsProcessor
-            ):
+            if get_ascend_config().enable_reduce_sample and isinstance(processor, MinTokensLogitsProcessor):
                 if processor.min_toks:
                     V_local = logits.shape[-1]
-                    local_req, local_tok, _ = _convert_logits_slice_to_local(
-                        processor.logits_slice, V_local
-                    )
-                    logits.index_put_(
-                        (local_req, local_tok), processor.neg_inf_tensor
-                    )
-            elif get_ascend_config().enable_reduce_sample and isinstance(
-                processor, LogitBiasLogitsProcessor
-            ):
+                    local_req, local_tok, _ = _convert_logits_slice_to_local(processor.logits_slice, V_local)
+                    logits.index_put_((local_req, local_tok), processor.neg_inf_tensor)
+            elif get_ascend_config().enable_reduce_sample and isinstance(processor, LogitBiasLogitsProcessor):
                 if processor.biases:
                     V_local = logits.shape[-1]
-                    local_req, local_tok, in_shard = _convert_logits_slice_to_local(
-                        processor.logits_slice, V_local
-                    )
+                    local_req, local_tok, in_shard = _convert_logits_slice_to_local(processor.logits_slice, V_local)
                     logits[local_req, local_tok] += processor.bias_tensor[in_shard]
             else:
                 logits = processor.apply(logits)
@@ -372,5 +356,3 @@ def _convert_logits_slice_to_local(
     local_tok_ids = (tok_ids - vocab_start)[in_shard_mask]
     local_req_indices = req_indices[in_shard_mask]
     return (local_req_indices, local_tok_ids, in_shard_mask)
-
-
