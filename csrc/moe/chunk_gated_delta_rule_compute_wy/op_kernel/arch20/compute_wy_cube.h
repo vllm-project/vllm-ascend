@@ -87,7 +87,7 @@ class WyCubeGemm {
     WaitMte2ToV();
   }
 
-  // P = P @ P (64x64). halfScratch >= 64*64 halfs.
+  // P = P @ P (64x64). halfScratch >= 64*64 halves.
   __aicore__ inline void GemmSquare(LocalTensor<float> pUb, LocalTensor<half> halfScratch)
   {
     Cast(halfScratch, pUb, RoundMode::CAST_NONE, WY_CUBE_CHUNK * WY_CUBE_CHUNK);
