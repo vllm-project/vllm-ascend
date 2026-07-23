@@ -1,4 +1,4 @@
-# Qwen3.6-35B-A3B Deployment Tutorial
+# Qwen3.6-35B-A3B
 
 ## 1 Introduction
 
@@ -10,7 +10,7 @@ The `Qwen3.6-35B-A3B` model is first supported in `vllm-ascend:v0.18.0rc1`. Use 
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix, including BF16, W8A8 quantization, chunked prefill, automatic prefix caching, asynchronous scheduling, tensor parallelism, expert parallelism, and ACLGraph support.
+Refer to [supported features](../../user_guide/support_matrix/supported_features.md) to get the model's supported feature matrix, including BF16, W8A8 quantization, chunked prefill, automatic prefix caching, asynchronous scheduling, tensor parallelism, expert parallelism, and ACLGraph support.
 
 Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
@@ -234,9 +234,9 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
       --served-model-name qwen3.6 \
       --dtype float16 \
       --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
-      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}' \
       --quantization ascend \
-      --max-model-len 16384 \
+      --max-model-len 20480 \
       --no-enable-prefix-caching
     ```
 
@@ -244,7 +244,6 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
 
     - `--tensor-parallel-size 2` maps the model across two Atlas inference devices. Adjust it together with `ASCEND_RT_VISIBLE_DEVICES` according to the available devices and memory.
     - `--dtype float16` is used for Atlas inference products to match the Atlas inference execution path.
-    - `--max-model-len 16384` is intentionally conservative. On Atlas inference products, large context lengths allocate large attention masks, so do not rely on automatic max-model-len detection.
     - `--max-num-seqs 16` limits concurrent active requests to reduce KV cache and graph capture pressure on Atlas inference products.
     - `--gpu-memory-utilization` controls KV cache capacity. Reduce it if startup or runtime requests report OOM.
     - `--additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}'` disables norm-quant fusion for the Atlas inference products serving path.
@@ -279,6 +278,11 @@ Here are two accuracy evaluation methods.
 ### 7.1 Using AISBench
 
 Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details. After execution, you can get the accuracy result of `Qwen3.6-35B-A3B-w8a8`.
+
+| dataset | version | metric | mode | vllm-api-general-chat |
+| ------- | ------- | ------ | ---- | --------------------- |
+| mmmu | - | accuracy | gen | 83.3 |
+| gpqa | - | accuracy | gen | 83.3 |
 
 ### 7.2 Using Language Model Evaluation Harness
 
