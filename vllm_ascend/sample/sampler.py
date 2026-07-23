@@ -1,4 +1,5 @@
 import torch
+import torch_npu
 import vllm.envs as envs
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
@@ -232,7 +233,7 @@ def _apply_top_k_top_p_pytorch(
         return logits
 
 
-def _apply_top_k_top_p_ascendc(
+def _apply_top_k_top_p_cann(
     logits: torch.Tensor,
     k: torch.Tensor,
     p: torch.Tensor,
@@ -254,16 +255,33 @@ def _apply_top_k_top_p_ascendc(
         gathered_idx = tp_group.all_gather(local_global_idx, dim=-1)
 
         if not (p is None and k is None):
-            gathered_vals = torch.ops._C_ascend.npu_apply_top_k_top_p(gathered_vals, k=k, p=p)
+            # npu_top_k_top_p requires non-None p and k tensors. Fill defaults
+            # (p=1.0 keeps all, k=vocab keeps all) for the missing one.
+            if p is None:
+                p = torch.ones(gathered_vals.shape[0], dtype=gathered_vals.dtype, device=gathered_vals.device)
+            if k is None:
+                k = torch.full(
+                    (gathered_vals.shape[0],), gathered_vals.shape[-1], dtype=torch.int32, device=gathered_vals.device
+                )
+            # NOTE: npu_top_k_top_p's parameter order is (logits, p, k),
+            # not (logits, k, p).
+            gathered_vals = torch_npu.npu_top_k_top_p(gathered_vals, p, k)
         return gathered_vals, gathered_idx
 
     if p is None and k is None:
         return logits
-    return torch.ops._C_ascend.npu_apply_top_k_top_p(logits, k=k, p=p)
+    # npu_top_k_top_p requires non-None p and k tensors. Fill defaults
+    # (p=1.0 keeps all, k=vocab keeps all) for the missing one.
+    if p is None:
+        p = torch.ones(logits.shape[0], dtype=logits.dtype, device=logits.device)
+    if k is None:
+        k = torch.full((logits.shape[0],), logits.shape[-1], dtype=torch.int32, device=logits.device)
+    # NOTE: npu_top_k_top_p's parameter order is (logits, p, k), not (logits, k, p).
+    return torch_npu.npu_top_k_top_p(logits, p, k)
 
 
 apply_top_k_top_p = (
-    _apply_top_k_top_p_ascendc
+    _apply_top_k_top_p_cann
     if get_ascend_device_type() in [AscendDeviceType.A2, AscendDeviceType.A3]
     else _apply_top_k_top_p_pytorch
 )
