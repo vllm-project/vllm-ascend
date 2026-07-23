@@ -263,6 +263,40 @@ class ExecuteModelState(NamedTuple):
     batch_desc: BatchDescriptor
 
 
+class AscendAsyncGPUModelRunnerOutput(AsyncGPUModelRunnerOutput):
+    """Async output that runs token/logprob anomaly checks after D2H completes.
+
+    With ``--async-scheduling``, ``_bookkeeping_sync`` leaves sampled tokens /
+    logprobs on device. Detection must wait until ``get_output()`` materializes
+    them on CPU (same place RejectionSampler.parse_output runs).
+    """
+
+    def __init__(self, *args: Any, dumper: Any | None = None, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self._dumper = dumper
+
+    def get_output(self) -> ModelRunnerOutput:
+        output = super().get_output()
+        if self._dumper is None:
+            logger.info("[Anomaly token_logprob][dbg] get_output: dumper is None")
+            return output
+        logger.info(
+            "[Anomaly token_logprob][dbg] get_output: sampled=%s logprobs=%s",
+            "None"
+            if output.sampled_token_ids is None
+            else f"len={len(output.sampled_token_ids)}",
+            "None" if output.logprobs is None else type(output.logprobs).__name__,
+        )
+        self._dumper.check_all_token_logprobs(
+            sampled_token_ids=output.sampled_token_ids,
+            logprobs_lists=output.logprobs,
+        )
+        # Attach after check; start_dump_data() on a later step may have cleared
+        # the dumper's per-step dict already under async overlap.
+        output.debug_log_full = dict(self._dumper.full_log_requests_this_step)
+        return output
+
+
 class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # TODO(qcs): These manual pad and unpad for GPUModelRunner are
@@ -2622,13 +2656,28 @@ class NPUModelRunner(GPUModelRunner):
                 accepted_token_nums=self.input_batch.num_accepted_tokens_cpu,
             )
 
-        self.dumper.check_all_token_logprobs(
-            sampled_token_ids=valid_sampled_token_ids,
-            logprobs_lists=logprobs_lists,
-        )
-
-        # Snapshot after check so later start_dump_data().clear() cannot wipe this step's flags.
-        model_runner_output.debug_log_full = dict(self.dumper.full_log_requests_this_step)
+        if not self.use_async_scheduling:
+            logger.info(
+                "[Anomaly token_logprob][dbg] call-site sync async=%s "
+                "sampled=%s logprobs=%s need_accepted=%s",
+                self.use_async_scheduling,
+                "None"
+                if valid_sampled_token_ids is None
+                else f"len={len(valid_sampled_token_ids)}",
+                "None" if logprobs_lists is None else type(logprobs_lists).__name__,
+                self.need_accepted_tokens,
+            )
+            self.dumper.check_all_token_logprobs(
+                sampled_token_ids=valid_sampled_token_ids,
+                logprobs_lists=logprobs_lists,
+            )
+            # Snapshot after check so later start_dump_data().clear() cannot wipe
+            # this step's flags. Async: deferred to AscendAsyncGPUModelRunnerOutput.
+            model_runner_output.debug_log_full = dict(self.dumper.full_log_requests_this_step)
+        else:
+            logger.info(
+                "[Anomaly token_logprob][dbg] call-site defer-to-get_output async=True"
+            )
 
         if not self.use_async_scheduling:
             if self.routed_experts_initialized:
@@ -2664,7 +2713,7 @@ class NPUModelRunner(GPUModelRunner):
                     :total
                 ].clone(),
             )
-        async_output = AsyncGPUModelRunnerOutput(
+        async_output = AscendAsyncGPUModelRunnerOutput(
             model_runner_output=model_runner_output,
             sampled_token_ids=sampler_output.sampled_token_ids,
             logprobs_tensors=sampler_output.logprobs_tensors,
@@ -2672,6 +2721,7 @@ class NPUModelRunner(GPUModelRunner):
             async_output_copy_stream=self.async_output_copy_stream,
             vocab_size=self.input_batch.vocab_size,
             routed_experts=routed_experts_snapshot,
+            dumper=self.dumper,
         )
         self.input_batch.set_async_sampled_token_ids(
             async_output.sampled_token_ids_cpu,
