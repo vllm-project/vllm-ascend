@@ -20,6 +20,7 @@ This section guides you through container-based environment setup and large mode
 ## Requirements
 
 :::::{tab-set}
+
 ::::{tab-item} Atlas A2/A3 inference products
 
 - OS: Linux
@@ -44,6 +45,7 @@ Atlas 200I Pro requires additional device nodes and driver mounts. See [Set up u
 ```
 
 ::::
+
 ::::{tab-item} Atlas inference products
 
  | Software      | Supported version                | Note                                      |
