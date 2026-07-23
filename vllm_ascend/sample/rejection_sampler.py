@@ -6,7 +6,7 @@ import torch
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
-from vllm.v1.outputs import SamplerOutput
+from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words_with_drafts
@@ -188,7 +188,7 @@ class AscendRejectionSampler(RejectionSampler):
             logits=bonus_logits,
             sampling_metadata=replace(
                 sampling_metadata,
-                max_num_logprobs=-1,
+                max_num_logprobs=sampling_metadata.max_num_logprobs,
             ),
             predict_bonus_token=True,
             # Override the logprobs mode to return logits because they are
@@ -243,6 +243,39 @@ class AscendRejectionSampler(RejectionSampler):
         return SamplerOutput(
             sampled_token_ids=output_token_ids,
             logprobs_tensors=logprobs_tensors,
+        )
+
+    def _get_logprobs_tensors(
+        self,
+        max_num_logprobs: int,
+        metadata: SpecDecodeMetadata,
+        logits: torch.Tensor,
+        target_logits: torch.Tensor,
+        bonus_logits: torch.Tensor | None,
+        sampled_token_ids: torch.Tensor,
+    ) -> LogprobsTensors:
+        """Override to handle force_topk CompactDist in bonus path.
+
+        When force_topk is active, bonus_sampler_output.logprobs_tensors.logprobs
+        may be a [B, N] tensor (from gather_logprobs_compact) instead of [B, V]
+        raw logits. The upstream _get_logprobs_tensors expects [B, V] to fill
+        into final_logits. We detect the shape mismatch and recover the full
+        [B, V] logits from the original logits tensor.
+        """
+        if (
+            bonus_logits is not None
+            and bonus_logits.shape[-1] != logits.shape[-1]
+        ):
+            bonus_logits = logits[metadata.bonus_logits_indices].to(
+                torch.float32
+            )
+        return super()._get_logprobs_tensors(
+            max_num_logprobs,
+            metadata,
+            logits,
+            target_logits,
+            bonus_logits,
+            sampled_token_ids,
         )
 
 
