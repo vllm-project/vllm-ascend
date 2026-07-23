@@ -3,7 +3,12 @@ import vllm.envs as envs
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
+from vllm.v1.sample.logits_processor.builtin import (
+    LogitBiasLogitsProcessor,
+    MinTokensLogitsProcessor,
+)
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.ops.bad_words import apply_bad_words
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
 
@@ -81,6 +86,81 @@ class AscendSampler(Sampler):
 
     def prepare_sampling(self, top_k):
         self.topk_topp_sampler.prepare_sampling(top_k)
+
+    def apply_logits_processors(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        predict_bonus_token: bool,
+    ) -> torch.Tensor:
+        bad_words_token_ids = sampling_metadata.bad_words_token_ids
+        any_penalties_or_bad_words = (
+            bool(bad_words_token_ids) or not sampling_metadata.no_penalties
+        )
+        holder = sampling_metadata.thinking_budget_state_holder
+        needs_thinking_combine = holder is not None and holder.has_tracked_requests()
+
+        output_token_ids = sampling_metadata.output_token_ids
+        if predict_bonus_token and (
+            any_penalties_or_bad_words or needs_thinking_combine
+        ):
+            output_token_ids = self._combine_outputs_with_spec_tokens(
+                output_token_ids,
+                sampling_metadata.spec_token_ids,
+            )
+
+        # Apply allowed token ids.
+        if sampling_metadata.allowed_token_ids_mask is not None:
+            logits.masked_fill_(
+                sampling_metadata.allowed_token_ids_mask, float("-inf")
+            )
+
+        # Apply bad words exclusion.
+        if bad_words_token_ids:
+            apply_bad_words(logits, bad_words_token_ids, output_token_ids)
+
+        # Apply logits processors which can impact greedy sampling.
+        # When enable_reduce_sample is active, logits are TP-partitioned
+        # [B, V_local] but MinTokensLogitsProcessor and LogitBiasLogitsProcessor
+        # store global token IDs in logits_slice. Convert to local indices first.
+        for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
+            if get_ascend_config().enable_reduce_sample and isinstance(
+                processor, MinTokensLogitsProcessor
+            ):
+                if processor.min_toks:
+                    V_local = logits.shape[-1]
+                    local_req, local_tok, _ = _convert_logits_slice_to_local(
+                        processor.logits_slice, V_local
+                    )
+                    logits.index_put_(
+                        (local_req, local_tok), processor.neg_inf_tensor
+                    )
+            elif get_ascend_config().enable_reduce_sample and isinstance(
+                processor, LogitBiasLogitsProcessor
+            ):
+                if processor.biases:
+                    V_local = logits.shape[-1]
+                    local_req, local_tok, in_shard = _convert_logits_slice_to_local(
+                        processor.logits_slice, V_local
+                    )
+                    logits[local_req, local_tok] += processor.bias_tensor[in_shard]
+            else:
+                logits = processor.apply(logits)
+
+        # Apply penalties (e.g., freq_penalties).
+        logits = self.apply_penalties(logits, sampling_metadata, output_token_ids)
+        if holder is not None and holder.has_tracked_requests():
+            holder.update_state(
+                output_token_ids,
+                sampling_metadata.spec_token_ids,
+                repeat_indices=None,
+            )
+            logits = holder.apply_to_logits(
+                logits,
+                predict_bonus_token,
+                sampling_metadata.spec_token_ids,
+            )
+        return logits
 
     @staticmethod
     def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
@@ -267,3 +347,30 @@ apply_top_k_top_p = (
     if get_ascend_device_type() in [AscendDeviceType.A2, AscendDeviceType.A3]
     else _apply_top_k_top_p_pytorch
 )
+
+
+def _convert_logits_slice_to_local(
+    logits_slice: tuple[torch.Tensor, torch.Tensor],
+    V_local: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Convert global token IDs in logits_slice to local shard indices.
+
+    When enable_reduce_sample is active, logits are TP-partitioned
+    (shape [B, V_local]) but logits_slice contains global token IDs.
+    This method converts them to local shard indices on device without
+    CPU synchronization. Tokens outside this shard are filtered out
+    via boolean indexing.
+
+    Returns (req_indices, local_tok_ids, in_shard_mask).
+    """
+    tp_rank = get_tp_group().rank_in_group
+    vocab_start = tp_rank * V_local
+    vocab_end = vocab_start + V_local
+
+    req_indices, tok_ids = logits_slice
+    in_shard_mask = (tok_ids >= vocab_start) & (tok_ids < vocab_end)
+    local_tok_ids = (tok_ids - vocab_start)[in_shard_mask]
+    local_req_indices = req_indices[in_shard_mask]
+    return (local_req_indices, local_tok_ids, in_shard_mask)
+
+
