@@ -1,6 +1,6 @@
 # ==============================================
 # Gitleaks 自定义配置文件
-# 路径：.github/workflows/scripts/.gitleaks.toml
+# 路径：.gitleaks.toml（仓库根目录）
 # 当前状态：仅继承二进制内置官方全套默认规则，无新增/无屏蔽任何规则
 # 标准继承语法：[extend] useDefault = true（官方推荐，通用离线二进制兼容）
 # ==============================================
@@ -27,7 +27,7 @@ useDefault = true
 # id = "generic-api-key"
 # [[rules.disabled]]
 # id = "generic-password"
-# 查询所有内置规则ID命令：./gitleaks detect --list-rules --config=.github/workflows/scripts/.gitleaks.toml
+# 查询所有内置规则ID命令：./gitleaks detect --list-rules --config=.gitleaks.toml
 
 # ==============================================================================
 # 2、新增自定义业务检测规则（注释示例，当前未启用）
@@ -48,20 +48,23 @@ useDefault = true
 # 3、全局白名单配置（新版必须 [[allowlists]]，不能 [allowlist]）
 # 语法要求：内部至少存在一个未注释数组，否则配置加载失败
 # ==============================================================================
+
+# 白名单1：整个vllm外部依赖目录全部放行
 [[allowlists]]
-# 占位空正则，仅用于通过语法校验，不会放行任何文件
-paths = ["^$"]
-# 如需放行目录取消注释示例
-# paths = [
-#     "^dist/",
-#     "^build/",
-#     "\\.md$"
-# ]
-# 放行固定测试假密钥字符串
-stopwords = [
-    # "dummy-test-ak-123456",
-    # "fake-secret-000000"
+paths = ["^vllm-empty/"]
+
+# 白名单2：业务内tilingKey产生generic-api-key误报文件放行
+[[allowlists]]
+paths = [
+    "^csrc/notify_dispatch/op_host/notify_dispatch_tiling.cpp",
+    "^tests/ut/spec_decode/test_eagle_proposer.py"
 ]
+rules = ["generic-api-key"]
+
+# 占位白名单，保证语法校验通过（不可删除）
+[[allowlists]]
+paths = ["^$"]
+stopwords = []
 commits = []
 
 # ==============================================================================
