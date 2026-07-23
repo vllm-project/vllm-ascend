@@ -504,7 +504,6 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         block_table: torch.Tensor | None = None,
         dspark_metadata: DSparkDecodeMetadata | None = None,
     ) -> torch.Tensor:
-        del llama_4_scaling, slot_mapping, block_table
         if dspark_metadata is None:
             rope_cos_sin = None
             context_cache_indices = None
@@ -602,7 +601,6 @@ class DeepseekV4DSparkDecoderLayer(DeepseekV2DecoderLayer):
         block_table: torch.Tensor | None = None,
         dspark_metadata: DSparkDecodeMetadata | None = None,
     ) -> torch.Tensor:
-        del residual, llama_4_scaling
         hidden_states, _ = self._forward_hc_blocks(
             positions,
             hidden_states,
@@ -716,7 +714,6 @@ class DeepseekV4DSparkModel(nn.Module):
         context_slot_mapping=None,
         context_request_slots: torch.Tensor | None = None,
     ) -> None:
-        del context_request_slots
         if context_states.numel() == 0:
             return
         main_x = self.main_norm(_linear_output(self.main_proj, context_states))
@@ -775,7 +772,6 @@ class DeepseekV4DSparkModel(nn.Module):
         context_cache_valid: torch.Tensor | None = None,
         context_request_slots: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        del hidden_states
         if inputs_embeds is None:
             inputs_embeds = self.embed_input_ids(input_ids)
         hidden_states = inputs_embeds.unsqueeze(-2).repeat(1, self.hc_mult, 1)
@@ -868,7 +864,6 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
         context_cache_valid: torch.Tensor | None = None,
         context_request_slots: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        del intermediate_tensors, spec_step_idx
         assert input_ids is not None
         return self.model(
             input_ids=input_ids,
@@ -892,7 +887,6 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
         return self.model.prepare_fused_attention_metadata(device, batch_size, draft_len)
 
     def compute_logits(self, hidden_states: torch.Tensor, spec_step_idx: int = 0) -> torch.Tensor | None:
-        del spec_step_idx
         if self.lm_head is None:
             raise AttributeError("DSpark draft model requires shared target lm_head.")
         return self.model.compute_logits(hidden_states, self.lm_head, self.logits_processor)
@@ -909,9 +903,7 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
     def precompute_and_store_context_kv(
         self, context_states, context_positions, context_slot_mapping=None, context_request_slots=None
     ) -> None:
-        self.model.precompute_and_store_context_kv(
-            context_states, context_positions, context_slot_mapping, context_request_slots
-        )
+        self.model.precompute_and_store_context_kv(context_states, context_positions, context_slot_mapping)
 
     def reset_request_slots(self, request_slots: torch.Tensor | None) -> None:
         self.model.reset_request_slots(request_slots)

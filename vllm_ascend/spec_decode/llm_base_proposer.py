@@ -396,7 +396,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         return capture_sizes
 
     def take_draft_probs(self, num_draft_tokens: list[int], req_ids: list[str]) -> torch.Tensor | None:
-        del num_draft_tokens, req_ids
         return None
 
     def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:

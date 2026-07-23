@@ -70,7 +70,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         self.positions = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
         self._slot_mapping_buffer = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
         self._request_slots_buffer = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
-        self._context_request_slots_buffer = torch.zeros(self.max_num_tokens, dtype=torch.int32, device=self.device)
         self._dspark_window_offsets = torch.arange(self._dspark_window_size, dtype=torch.long, device=self.device).view(
             1, -1
         )
@@ -247,7 +246,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         return bool(pending_active_req_ids)
 
     def initialize_attn_backend(self, kv_cache_config, kernel_block_sizes=None) -> None:
-        del kernel_block_sizes
         cache_layer_names = sorted(name for name in self._draft_attn_layer_names if name.endswith(".swa_cache"))
         expected_num_layers = self.model.model.num_dspark_layers
         if len(cache_layer_names) != expected_num_layers:
@@ -302,7 +300,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         is_profile=False,
         **kwargs,
     ) -> None:
-        del dummy_compute_logits, kwargs
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
         block_size = self.num_speculative_tokens
@@ -336,8 +333,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         context_positions = self._context_positions_buffer[:num_context]
         context_positions.copy_(self.arange_dflash[:num_context])
         self._context_slot_mapping_buffer[:num_context].copy_(self.arange_dflash[:num_context])
-        context_request_slots = self._context_request_slots_buffer[:num_context]
-        context_request_slots.zero_()
         self._dflash_num_context = num_context
         if num_input_tokens % block_size != 0:
             raise ValueError(
@@ -384,10 +379,6 @@ class AscendDSparkProposer(AscendDflashProposer):
                 self._runnable(
                     num_input_tokens=num_input_tokens,
                     batch_size=graph_batch_size,
-                    target_positions=self.positions[:num_input_tokens],
-                    inputs_embeds=None,
-                    multi_steps_attn_metadata=[],
-                    num_tokens=num_input_tokens,
                 )
             if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
                 self._update_full_graph_params(forward_context, num_input_tokens, [])
@@ -413,7 +404,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         )
 
     def get_aclgraph_capture_sizes(self, capture_sizes: list[int]) -> list[int]:
-        del capture_sizes
         return self._dspark_capture_sizes
 
     def _assign_request_slots(self, batch_size: int) -> list[int]:
@@ -483,7 +473,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         num_prefill_reqs=0,
         num_decode_reqs=0,
     ) -> tuple[int, torch.Tensor | None, CommonAttentionMetadata, tuple[Any, Any] | None]:
-        del req_scheduled_tokens, long_seq_metadata
         is_prefill = num_decode_reqs == 0 and num_prefill_reqs > 0
         batch_size = cad.num_reqs
         self._dspark_context_lens = cad.seq_lens[:batch_size].clone()
@@ -519,7 +508,6 @@ class AscendDSparkProposer(AscendDflashProposer):
                 target_positions[:num_context].to(self._context_positions_buffer.dtype),
                 invalid_context_position.to(self._context_positions_buffer.dtype),
             )
-            self._context_request_slots_buffer[:num_context] = request_slots_tensor.index_select(0, context_req_indices)
             if getattr(cad, "slot_mapping", None) is not None:
                 self._context_slot_mapping_buffer[:num_context] = torch.where(
                     valid_context_mask,
@@ -666,7 +654,6 @@ class AscendDSparkProposer(AscendDflashProposer):
             self._dflash_hidden_states[:num_context],
             self._context_positions_buffer[:num_context],
             self._context_slot_mapping_buffer[:num_context],
-            self._context_request_slots_buffer[:num_context],
         )
         self.model.model.sync_context_cache_from_paged(
             self._dspark_block_table_tensor,
@@ -838,13 +825,8 @@ class AscendDSparkProposer(AscendDflashProposer):
         self,
         num_input_tokens: int,
         batch_size: int,
-        target_positions: torch.Tensor | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-        multi_steps_attn_metadata: list[dict[str, Any]] | None = None,
-        num_tokens: int | None = None,
         sampling_metadata: SamplingMetadata | None = None,
     ) -> torch.Tensor:
-        del target_positions, inputs_embeds, multi_steps_attn_metadata, num_tokens
         model_inputs = self.build_model_inputs_first_pass(num_input_tokens)
         hidden_states = self.model(**model_inputs)
         return self._sample_sequential(
@@ -872,12 +854,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         num_scheduled_tokens: int = 0,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        del (
-            mm_embed_inputs,
-            num_scheduled_tokens,
-            target_model_batch_desc,
-            token_indices_to_sample,
-        )
         is_prefill = num_decode_reqs == 0 and num_prefill_reqs > 0
         num_tokens, _, _, _ = self.set_inputs_first_pass(
             target_token_ids,
@@ -969,10 +945,6 @@ class AscendDSparkProposer(AscendDflashProposer):
                 run_kwargs = dict(
                     num_input_tokens=num_input_tokens,
                     batch_size=graph_batch_size,
-                    target_positions=target_positions,
-                    inputs_embeds=None,
-                    multi_steps_attn_metadata=[],
-                    num_tokens=num_input_tokens,
                     sampling_metadata=sampling_metadata,
                 )
                 draft_token_ids = self._runnable(**run_kwargs)
