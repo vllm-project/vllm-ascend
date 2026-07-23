@@ -757,11 +757,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                     device=self.weight_dq.device,
                 )
 
-        if self.enable_sparse_li_c8 and get_ascend_device_type() == AscendDeviceType.A5:
-            if hasattr(self, "mlapo_is_quantized") and not self.mlapo_is_quantized:
-                self.c8_k_cache_dtype = act_dtype
-                self.c8_k_scale_cache_dtype = act_dtype
-
         if self.has_indexer and self.enable_sparse_li_c8 and AscendSFAImpl.q_hadamard is None:
             AscendSFAImpl.q_hadamard = torch.tensor(scipy.linalg.hadamard(128), dtype=torch.bfloat16, device="npu") / (
                 128**0.5
@@ -1145,10 +1140,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
         cache_mode = "PA"
 
-        use_custom_kv = self.enable_sparse_sfa_c8 and (
-            get_ascend_device_type() != AscendDeviceType.A5 or self.enable_dsa_cp or not self.has_indexer
-        )
-        if use_custom_kv:
+        if self.enable_sparse_sfa_c8:
             assert self.kv_a_layernorm is not None
             return custom_kv_rmsnorm_rope(
                 kv_no_split,
@@ -1785,11 +1777,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             kv_outputs = self.exec_kv(kv_no_split, cos, sin, kv_cache, kv_slots, attn_metadata)
             k_pe, k_nope = kv_outputs[:2]
             knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
-            if (
-                self.enable_sparse_sfa_c8
-                and not self.enable_dsa_cp
-                and (get_ascend_device_type() != AscendDeviceType.A5 or not self.has_indexer)
-            ):
+            if self.enable_sparse_sfa_c8 and not self.enable_dsa_cp:
                 assert k_pe is not None
                 assert k_nope is not None
                 assert knope_scale is not None

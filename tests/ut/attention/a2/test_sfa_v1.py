@@ -30,7 +30,7 @@ from vllm_ascend.quantization.methods import (
     AscendW8A8LinearMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
-from vllm_ascend.utils import enable_dsa_cp
+from vllm_ascend.utils import AscendDeviceType, enable_dsa_cp
 
 
 class TestAscendSFABackend(TestBase):
@@ -810,10 +810,11 @@ class TestAscendSFAImpl(TestBase):
         mock_npu_kv_rmsnorm_rope_cache,
         mock_custom_kv_rmsnorm_rope,
     ):
-        """exec_kv with sparse SFA C8 delegates to custom_kv_rmsnorm_rope."""
+        """A5 SFA C8 with an indexer still uses custom KV preprocessing."""
         self.impl.enable_sparse_sfa_c8 = True
         self.impl.c8_k_cache_dtype = torch.int8
         self.impl.enable_dsa_cp = False
+        self.impl.has_indexer = True
         self.impl.kv_a_layernorm = MagicMock()
         self.impl.kv_a_layernorm.weight = torch.ones(self.impl.kv_lora_rank)
         self.impl.kv_a_layernorm.variance_epsilon = 1e-5
@@ -837,7 +838,11 @@ class TestAscendSFAImpl(TestBase):
         )
         mock_custom_kv_rmsnorm_rope.return_value = fake_result
 
-        result = self.impl.exec_kv(kv_no_split, cos, sin, kv_cache, slots, MagicMock())
+        with patch(
+            "vllm_ascend.attention.sfa_v1.get_ascend_device_type",
+            return_value=AscendDeviceType.A5,
+        ):
+            result = self.impl.exec_kv(kv_no_split, cos, sin, kv_cache, slots, MagicMock())
         self.assertIs(result, fake_result)
         mock_npu_kv_rmsnorm_rope_cache.assert_not_called()
 
