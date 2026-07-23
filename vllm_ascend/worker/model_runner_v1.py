@@ -1957,9 +1957,9 @@ class NPUModelRunner(GPUModelRunner):
         # a fixed K this attribute never changed, but DSD varies K per step, so
         # it must be refreshed here from the real draft tensor shape. Mirrors
         # upstream gpu_model_runner._copy_draft_token_ids_to_cpu.
-        if torch.is_tensor(self._draft_token_ids):
-            assert isinstance(self._draft_token_ids, torch.Tensor)
-            self.prev_num_spec_tokens = self._draft_token_ids.shape[1]
+        if torch.is_tensor(self._draft_token_ids):  # type: ignore[has-type]
+            assert isinstance(self._draft_token_ids, torch.Tensor)  # type: ignore[has-type]
+            self.prev_num_spec_tokens = self._draft_token_ids.shape[1]  # type: ignore[has-type]
         if self.use_async_scheduling and not (
             scheduler_output.has_structured_output_requests
             or self.input_batch.sampling_metadata.output_token_ids
