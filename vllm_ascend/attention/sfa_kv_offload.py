@@ -172,7 +172,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         self._current_layer_name: str | None = None
 
     def _resolve_preprocess_type(self, act_dtype: torch.dtype) -> PreprocessType:
-        logger.warning(
+        logger.warning_once(
             "KV offload decode requires the native SFA preprocessing path; "
             "sfa_prolog_v3/mlapo is disabled."
         )
