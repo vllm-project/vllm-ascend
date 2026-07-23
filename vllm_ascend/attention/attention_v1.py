@@ -39,7 +39,6 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.context_parallel.common_cp import AscendMetadataForDecode, AscendMetadataForPrefill
@@ -63,7 +62,7 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
-from vllm_ascend.utils import weak_ref_tensors
+from vllm_ascend.utils import is_950, weak_ref_tensors
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -1334,9 +1333,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 )
             else:
                 # ChunkedPrefill mixing prefill+decode: split into a per-phase
-                # FIA call each (gated by enable_attention_pd_split).
+                # FIA call each (A5 only).
                 if (
-                    self.enable_attention_pd_split
+                    is_950()
                     and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
                     and attn_metadata.num_decodes > 0
                     and attn_metadata.num_prefills > 0
