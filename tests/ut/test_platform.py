@@ -224,6 +224,40 @@ class TestNPUPlatform(TestBase):
 
         self.assertEqual(observed_inputs, [77])
 
+    @patch("vllm_ascend.platform.refresh_block_size")
+    @patch("vllm_ascend.platform.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.platform.enable_sp", return_value=True)
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    def test_check_and_update_config_skips_sp_capture_sizes_without_cudagraph(
+        self,
+        mock_auto_detect,
+        mock_init_ascend,
+        _mock_enable_sp,
+        _mock_device_type,
+        _mock_refresh_block_size,
+    ):
+        mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.compilation_config.mode = CompilationMode.NONE
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        vllm_config.compilation_config.cudagraph_capture_sizes = []
+        vllm_config.compilation_config.custom_ops = []
+        vllm_config.compilation_config.splitting_ops = []
+        vllm_config.model_config.enforce_eager = False
+        vllm_config.model_config.enable_sleep_mode = True
+        vllm_config.model_config.is_encoder_decoder = False
+        vllm_config.parallel_config.tensor_parallel_size = 16
+        vllm_config.parallel_config.worker_cls = "manual"
+        vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
+        vllm_config.cache_config.block_size = 1
+        vllm_config._set_cudagraph_sizes = MagicMock()
+        vllm_config.update_sizes_for_sequence_parallelism = MagicMock(return_value=[])
+
+        self.platform.check_and_update_config(vllm_config)
+
+        vllm_config.update_sizes_for_sequence_parallelism.assert_not_called()
+
     def test_get_device_capability(self):
         self.assertIsNone(self.platform.get_device_capability(device_id=0))
 
