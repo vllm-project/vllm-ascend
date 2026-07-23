@@ -31,7 +31,7 @@ This section guides you through container-based environment setup and large mode
     |---------------|----------------------------------|-------------------------------------------|
     | Ascend HDK    | Refer to the documentation [CANN 9.0.1](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html) | Required for CANN |  
     | CANN          | == 9.0.1                        | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | == 2.10.0.post2                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | torch-npu     | == 2.10.0                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
     | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
     | NNAL          | == 9.0.1                        | Required for libatb.so, enables advanced tensor operations |
 
