@@ -34,7 +34,7 @@ from .base import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, Qu
 
 # Import all scheme classes for external access
 from .fp8 import AscendW4A8MXFPDSDynamicFusedMoEMethod, AscendW8A8MXFP8DSDynamicLinearMethod
-from .kv_c8 import AscendFAQuantAttentionMethod
+from .kv_c8 import AscendFAQuantAttentionMethod, AscendC8Fp8KVCacheAttentionMethod
 
 # Import registry functions
 from .registry import get_scheme_class, register_scheme
@@ -95,6 +95,7 @@ __all__ = [
     "AscendW4A4FlatQuantDynamicLinearMethod",
     "AscendW4A4LaosDynamicLinearMethod",
     "AscendFAQuantAttentionMethod",
+    "AscendC8Fp8KVCacheAttentionMethod",
     "AscendW4A4MXFP4DynamicLinearMethod",
     "AscendW4A4MXFP4DynamicFusedMoEMethod",
     "AscendW4A4MXFP4FlatQuantDynamicLinearMethod",
