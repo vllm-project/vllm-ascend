@@ -165,14 +165,12 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
     def receive_weights(
         self,
         update_info: NPUIPCWeightTransferUpdateInfo,
-        load_weights: Callable[[list[tuple[str, torch.Tensor]]], None],
     ) -> None:
         """Receive weights from the trainer via NPU IPC handles.
 
         Args:
             update_info: NPU IPC update info containing parameter names,
                 dtypes, shapes, and IPC handles.
-            load_weights: Callable that loads weights into the model.
         """
         device_index = torch.accelerator.current_device_index()
         physical_npu_id = npu_generate_uuid()
@@ -189,7 +187,7 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
                 tensor_sizes=update_info.tensor_sizes,
                 device_index=device_index,
             )
-            load_weights(weights)
+            self.model.load_weights(weights)
         else:
             # Lazy import: ``rebuild_npu_tensor`` lives in ``torch_npu`` and
             # must not be imported at module load time on non-NPU hosts.
@@ -219,7 +217,7 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
                 weight = rebuild_npu_tensor(*list_args)
                 weights.append((name, weight))
 
-            load_weights(weights)
+            self.model.load_weights(weights)
 
     def shutdown(self) -> None:
         pass

@@ -176,9 +176,7 @@ def _has_lifecycle_endpoints(server: RemoteOpenAIServer) -> bool:
     """
     try:
         response = requests.post(
-            server.url_for("start_weight_update"),
-            json={"is_checkpoint_format": True},
-            timeout=CONTROL_TIMEOUT,
+            server.url_for("start_weight_update"), timeout=CONTROL_TIMEOUT
         )
     except requests.RequestException:
         return False
@@ -297,10 +295,6 @@ def test_hccl_weight_transfer_updates_server_weights():
             packed=True,
             packed_buffer_size_bytes=packed_buffer_size_bytes,
         )
-        if not use_lifecycle:
-            # v0.20.2 folds the layerwise reload lifecycle into update_weights.
-            update_info["is_checkpoint_format"] = True
-
         # update_weights blocks on the server while it waits for HCCL broadcasts,
         # so run it in a thread while the trainer produces the data.
         _log(f"broadcasting {len(names)} tensors via HCCL (packed) ...")

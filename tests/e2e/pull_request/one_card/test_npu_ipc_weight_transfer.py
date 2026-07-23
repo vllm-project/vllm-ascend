@@ -79,9 +79,7 @@ def _has_lifecycle_endpoints(server: RemoteOpenAIServer) -> bool:
     """Probe ``/start_weight_update``; also performs the actual call when present."""
     try:
         response = requests.post(
-            server.url_for("start_weight_update"),
-            json={"is_checkpoint_format": True},
-            timeout=CONTROL_TIMEOUT,
+            server.url_for("start_weight_update"), timeout=CONTROL_TIMEOUT
         )
     except requests.RequestException:
         return False

@@ -142,16 +142,15 @@ def test_receive_weights_rebuilds_with_rebuild_npu_tensor():
 
     engine = object.__new__(NPUIPCWeightTransferEngine)
     received = {}
-
-    def load_weights(weights):
-        received["weights"] = weights
+    engine.model = MagicMock()
+    engine.model.load_weights.side_effect = lambda weights: received.update(weights=weights)
 
     with (
         _patch_rebuild_npu_tensor(fake_rebuild),
         patch(f"{_MODULE}.npu_generate_uuid", return_value=npu_uuid),
         patch("torch.accelerator.current_device_index", return_value=device_index),
     ):
-        engine.receive_weights(update_info, load_weights)
+        engine.receive_weights(update_info)
 
     assert received["weights"][0][0] == "model.weight"
     assert torch.equal(received["weights"][0][1], rebuilt_weight)
