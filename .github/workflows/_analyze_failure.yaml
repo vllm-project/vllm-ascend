@@ -40,7 +40,7 @@ defaults:
 jobs:
   analyze:
     name: cross-reference failures with recommendations
-    continue-on-error: true   # 无法读取/分析失败也不阻断整体流水线
+    continue-on-error: true   # Non-blocking on parse/read failure.
     runs-on: linux-amd64-cpu-8-hk
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
@@ -70,7 +70,7 @@ jobs:
             echo "Recommendations count: ${COUNT}"
           else
             echo "has_recommendations=false" >> $GITHUB_OUTPUT
-            echo "::notice::未读取到推荐用例，跳过后续分析任务"
+            echo "::notice::No recommended test cases detected, skipping subsequent analysis tasks."
           fi
 
       # ---- Step 2: Download test logs ----
