@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+# Run ShellCheck against the project's shell scripts.
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # Copyright 2023 The vLLM team.
