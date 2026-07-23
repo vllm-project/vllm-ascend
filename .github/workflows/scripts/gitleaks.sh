@@ -21,3 +21,4 @@ fi
     --verbose \
     --redact \
     --config="${CONFIG_FILE}"
+    --no-git
