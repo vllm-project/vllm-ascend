@@ -70,7 +70,7 @@ repos:
       - protect
       - --verbose
       - --redact
-      - --config=pre-commit/.gitleaks.toml
+      - --config=.github/workflows/scripts/.gitleaks.tom
   - id: shellcheck
     name: Lint shell scripts
     entry: tools/shellcheck.sh
