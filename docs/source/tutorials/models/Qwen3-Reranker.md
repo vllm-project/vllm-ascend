@@ -281,7 +281,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/cli/) for 
 Take the `serve` as an example. Run the code as follows.
 
 ```bash
-vllm bench serve --model Qwen/Qwen3-Reranker-0.6B --backend vllm-rerank  --prot 8000 --dataset-name random-rerank --endpoint /v1/rerank --random-input 200  --save-result --result-dir ./
+vllm bench serve --model Qwen/Qwen3-Reranker-0.6B --backend vllm-rerank  --port 8000 --dataset-name random-rerank --endpoint /v1/rerank --random-input 200  --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.
