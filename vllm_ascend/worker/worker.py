@@ -939,7 +939,7 @@ class NPUWorker(WorkerBase):
             return num_layers, num_slots, 1.0
 
         indexer_specs = [spec for spec in kv_cache_spec.values() if isinstance(spec, AscendSFAIndexerCacheSpec)]
-        if not any(spec.cache_sparse_c8 for spec in indexer_specs):
+        if not any(spec.cache_sparse_li_c8 for spec in indexer_specs):
             return num_layers, num_slots, num_layers / num_slots
 
         main_page_sizes = {

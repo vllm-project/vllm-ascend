@@ -208,7 +208,7 @@ class KVOffloadDecodeManager:
             raise ValueError("KV offload decode did not find SFA KV cache layers.")
 
         # Under offload, the attention path (sfa_v1.py / device_op.py) gates the
-        # C8 indexer read on the GLOBAL use_sparse_c8_indexer flag, not per-layer.
+        # C8 indexer read on the global sparse LI C8 flag, not per-layer.
         # Mixed five/six-tuple layers would therefore route a non-C8 layer through
         # the quant indexer (or vice versa). Forbid it here so the global gate
         # stays sound; C8 must be all-or-nothing across sparse offload layers.

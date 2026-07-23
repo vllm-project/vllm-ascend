@@ -29,7 +29,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # Sparse C8 changes the main cache into one packed byte tensor. Keep that
     # main-cache property here; indexer-specific C8 properties belong to the
     # indexer spec.
-    cache_sparse_c8: bool = False
+    cache_sparse_sfa_c8: bool = False
     store_on_host: bool = False
 
     @property
@@ -63,9 +63,13 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         assert len(cache_dtype_str_set) == 1, (
             "All attention layers in the same KV cache group must use the same quantization method."
         )
-        cache_sparse_c8_set = set(spec.cache_sparse_c8 for spec in specs)
-        assert len(cache_sparse_c8_set) == 1, (
-            "All attention layers in the same KV cache group must use the same sparse C8 setting."
+        cache_sparse_sfa_c8_set = set(spec.cache_sparse_sfa_c8 for spec in specs)
+        assert len(cache_sparse_sfa_c8_set) == 1, (
+            "All attention layers in the same KV cache group must use the same sparse SFA C8 setting."
+        )
+        store_on_host_set = set(spec.store_on_host for spec in specs)
+        assert len(store_on_host_set) == 1, (
+            "All attention layers in the same KV cache group must use the same host storage setting."
         )
         return cls(
             block_size=specs[0].block_size,
@@ -75,7 +79,8 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             scale_dtype=specs[0].scale_dtype,
             dtype=specs[0].dtype,
             cache_dtype_str=cache_dtype_str_set.pop(),
-            cache_sparse_c8=specs[0].cache_sparse_c8,
+            cache_sparse_sfa_c8=specs[0].cache_sparse_sfa_c8,
+            store_on_host=store_on_host_set.pop(),
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
@@ -100,7 +105,7 @@ class AscendSFAIndexerCacheSpec(FullAttentionSpec):
 
     scale_dim: int = 0
     scale_dtype: torch.dtype = torch.int8
-    cache_sparse_c8: bool = False
+    cache_sparse_li_c8: bool = False
     cache_dtype_str: str | None = None
     sfa_dcp_replicated_indexer_size: int = 1
 
@@ -126,18 +131,18 @@ class AscendSFAIndexerCacheSpec(FullAttentionSpec):
         dtype_set = set(spec.dtype for spec in specs)
         scale_dim_set = set(spec.scale_dim for spec in specs)
         scale_dtype_set = set(spec.scale_dtype for spec in specs)
-        cache_sparse_c8_set = set(spec.cache_sparse_c8 for spec in specs)
+        cache_sparse_li_c8_set = set(spec.cache_sparse_li_c8 for spec in specs)
         sfa_dcp_replicated_indexer_size_set = set(spec.sfa_dcp_replicated_indexer_size for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
             and len(dtype_set) == 1
             and len(scale_dim_set) == 1
             and len(scale_dtype_set) == 1
-            and len(cache_sparse_c8_set) == 1
+            and len(cache_sparse_li_c8_set) == 1
             and len(sfa_dcp_replicated_indexer_size_set) == 1
         ), (
             "All SFA indexer cache layers in the same KV cache group must use "
-            "the same dtype, scale layout, quantization method, sparse C8 "
+            "the same dtype, scale layout, quantization method, sparse LI C8 "
             "setting and DCP replication size."
         )
         return cls(
@@ -148,7 +153,7 @@ class AscendSFAIndexerCacheSpec(FullAttentionSpec):
             cache_dtype_str=cache_dtype_str_set.pop(),
             scale_dim=scale_dim_set.pop(),
             scale_dtype=scale_dtype_set.pop(),
-            cache_sparse_c8=cache_sparse_c8_set.pop(),
+            cache_sparse_li_c8=cache_sparse_li_c8_set.pop(),
             sfa_dcp_replicated_indexer_size=sfa_dcp_replicated_indexer_size_set.pop(),
         )
 

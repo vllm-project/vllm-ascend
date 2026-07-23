@@ -111,7 +111,7 @@ class TestAscendSFAOProjTPParams(TestBase):
         impl.enable_sp = False
         impl.has_indexer = False
         impl.skip_topk = True
-        impl.use_sparse_c8_sfa = False
+        impl.enable_sparse_sfa_c8 = False
         impl.is_kv_producer = False
         impl.q_lora_rank = 8
         impl.kv_lora_rank = 4
