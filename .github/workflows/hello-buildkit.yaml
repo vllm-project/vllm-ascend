@@ -1,0 +1,59 @@
+name: hello-buildkit
+
+on:
+  workflow_dispatch:
+
+jobs:
+  hello:
+    runs-on: linux-aarch64-cpu-2-buildkit-gy006
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+    steps:
+      - name: Hello
+        run: |
+          echo "Hello from buildkit runner!"
+          echo "Hostname: $(hostname)"
+          echo "Arch: $(uname -m)"
+          echo "Kernel: $(uname -r)"
+
+      - name: Check buildctl
+        run: |
+          echo "BUILDKITD_ADDR=${BUILDKITD_ADDR}"
+          echo "DOCKER_CONFIG=${DOCKER_CONFIG}"
+          if command -v buildctl >/dev/null 2>&1; then
+            buildctl --version
+            echo "buildctl is available."
+          else
+            echo "WARNING: buildctl not found on PATH." >&2
+          fi
+
+      - name: Check Vault certs
+        run: |
+          if [ -f "${DOCKER_CONFIG}/ca.pem" ]; then
+            echo "Vault certs present:"
+            ls -la "${DOCKER_CONFIG}/"
+          else
+            echo "WARNING: Vault certs not found in ${DOCKER_CONFIG}" >&2
+          fi
+
+      - name: Check Squid proxy
+        run: |
+          echo "HTTP_PROXY=${HTTP_PROXY}"
+          echo "HTTPS_PROXY=${HTTPS_PROXY}"
+          if [ -f /etc/squid-ca/squid-ca.pem ]; then
+            echo "Squid CA cert found."
+          else
+            echo "WARNING: Squid CA cert not found." >&2
+          fi
+
+      - name: Test proxy connectivity
+        run: |
+          set +e
+          echo "Testing GitHub via proxy..."
+          curl -fsSL --max-time 10 https://github.com > /dev/null 2>&1
+          if [ $? -eq 0 ]; then
+            echo "GitHub reachable via proxy."
+          else
+            echo "WARNING: GitHub not reachable via proxy." >&2
+          fi
+        continue-on-error: true

@@ -1,0 +1,63 @@
+
+name: 'TEST copy not match (v7)'
+
+on:
+  workflow_call:
+    secrets:
+      HW_OBS_AK:
+        required: true  # 声明该密钥为必填
+        description: "Huawei OBS Access Key"
+      HW_OBS_SK:
+        required: true
+        description: "Huawei OBS Secret Key"
+    inputs:
+      vllm:
+        required: true
+        type: string
+      runner:
+        required: true
+        type: string
+      image:
+        required: true
+        type: string
+      type:
+        required: true
+        type: string
+      contains_310:
+        required: true
+        type: boolean
+  workflow_dispatch:
+
+jobs:
+  e2e-2-cards:
+    name: multicard-2
+    runs-on: linux-aarch64-a2b3-test-0
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-a3-ubuntu22.04-py3.11
+      env:
+        VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
+        HCCL_BUFFSIZE: 1024
+        HF_HUB_OFFLINE: 1
+    steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v7
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v7
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ inputs.vllm || '1f486d96a17303ce8db8e02be39545b2be338446' }}
+          path: ./vllm-empty
+          fetch-depth: 1
+
+      - name: Verify checkout
+        run: |
+          echo "=== vllm-ascend repo ==="
+          ls -la
+          echo "=== vllm-empty repo ==="
+          ls -la vllm-empty/
+          echo "=== vllm-ascend git info ==="
+          git log -1 --oneline
+          echo "=== vllm-empty git info ==="
+          cd vllm-empty && git log -1 --oneline

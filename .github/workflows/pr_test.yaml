@@ -18,6 +18,7 @@
 name: E2E
 
 on:
+  workflow_dispatch:
   pull_request:
     types:
       - opened
@@ -39,11 +40,16 @@ defaults:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+  
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
 
 jobs:
   pre-commit:
     if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' }}
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-test-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
@@ -139,6 +145,14 @@ jobs:
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           pip install uc-manager
           uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - name: Restore pre-commit cache
+        uses: runs-on/cache/restore@v5
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+          restore-keys: |
+            pre-commit-
 
       - name: Run pre-commit
         env:

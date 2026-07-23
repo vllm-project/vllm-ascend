@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-case-006-debug
+  namespace: ascend-gha-runners
+  labels:
+    purpose: test-case-006-squid-download
+spec:
+  nodeSelector:
+    kubernetes.io/arch: arm64
+  imagePullSecrets:
+    - name: huawei-swr-image-pull-secret-model-gy
+  restartPolicy: Never
+  containers:
+    - name: debug
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+      command: ["sh", "-c", "sleep 3600"]
+      volumeMounts:
+        - name: squid-ca
+          mountPath: /etc/squid-ca
+          readOnly: true
+  volumes:
+    - name: squid-ca
+      configMap:
+        name: squid-ca-cert
+        optional: true
