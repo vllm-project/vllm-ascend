@@ -2,7 +2,7 @@
 set -eo pipefail
 set -x
 
-BIN_NAME="/gitleaks"
+BIN_NAME="./gitleaks"
 
 if [ -x "${BIN_NAME}" ]; then
     echo "gitleaks binary exists, skip download"
@@ -11,7 +11,13 @@ else
     chmod +x gitleaks
 fi
 
+CONFIG_FILE="./.gitleaks.toml"
+if [ ! -f "${CONFIG_FILE}" ]; then
+    echo "::error::Missing config file: ${CONFIG_FILE}"
+    exit 1
+fi
+
 ./gitleaks detect \
     --verbose \
     --redact \
-    --config=.github/workflows/scripts/.gitleaks.toml
+    --config="${CONFIG_FILE}"
