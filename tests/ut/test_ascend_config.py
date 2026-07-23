@@ -23,6 +23,7 @@ from vllm.config import KVTransferConfig, VllmConfig
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import (
     AscendConfig,
+    EplbConfig,
     SchedulerConfig,
     ShortRequestFirstConfig,
     clear_ascend_config,
@@ -99,6 +100,15 @@ class TestAscendConfig(TestBase):
 
         self.assertTrue(config.is_sparse_li_c8_layer("model.layers.1.self_attn.indexer.k_cache"))
         self.assertTrue(config.is_sparse_li_c8_layer("model.layers.2.self_attn.indexer.k_cache"))
+
+    def test_eplb_load_scope_defaults_to_all(self):
+        self.assertEqual(EplbConfig().load_scope, "all")
+
+    def test_eplb_load_scope_validation(self):
+        self.assertEqual(EplbConfig({"load_scope": "prefill"}).load_scope, "prefill")
+        self.assertEqual(EplbConfig({"load_scope": "decode"}).load_scope, "decode")
+        with self.assertRaisesRegex(ValueError, "load_scope must be one of"):
+            EplbConfig({"load_scope": "prompt"})
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
