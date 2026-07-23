@@ -154,6 +154,92 @@ def test_unquantized_apply_builds_current_fused_experts_input(monkeypatch, moe_c
         assert fused_input.weights.w2 is layer.w2_weight
 
 
+def test_unquantized_apply_routed_does_not_select_experts(monkeypatch):
+    method = _build_unquantized_method()
+    layer = _build_apply_layer()
+    hidden_states = torch.randn(2, 3, dtype=torch.float16)
+    topk_weights = torch.tensor([[0.25, 0.75], [0.6, 0.4]])
+    topk_ids = torch.tensor([[0, 1], [1, 0]])
+    moe_comm_method = MagicMock()
+    moe_comm_method.fused_experts.return_value = torch.ones_like(hidden_states)
+    select_experts = MagicMock()
+
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER, moe_comm_method=moe_comm_method),
+    )
+    monkeypatch.setattr(fused_moe_module, "select_experts", select_experts)
+
+    method.apply_routed(
+        layer=layer,
+        x=hidden_states,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+    )
+
+    select_experts.assert_not_called()
+    fused_input = moe_comm_method.fused_experts.call_args.kwargs["fused_experts_input"]
+    assert fused_input.topk_ids is topk_ids
+
+
+def test_v2_runner_routes_exactly_once(monkeypatch):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    hidden_states = torch.randn(2, 3)
+    router_logits = torch.randn(2, 4)
+    routed_out = torch.ones_like(hidden_states)
+    topk_weights = torch.tensor([[0.25, 0.75], [0.6, 0.4]])
+    topk_ids = torch.tensor([[0, 1], [1, 0]])
+    router = MagicMock()
+    router.select_experts.return_value = (topk_weights, topk_ids)
+    quant_method = MagicMock()
+    quant_method.topk_indices_dtype = torch.int32
+    quant_method.apply_routed.return_value = SimpleNamespace(
+        routed_out=routed_out,
+        expert_tokens=None,
+        group_list_type=1,
+    )
+    routed_experts = nn.Module()
+    routed_experts.quant_method = quant_method
+    routed_experts.expert_map = torch.arange(4)
+    routed_experts.activation = "silu"
+    runner.routed_experts = routed_experts
+    runner.router = router
+    runner._use_v2_model_runner = True
+    runner.enable_npugraph_ex_static_kernel = False
+    runner.enable_shared_expert_dp = False
+    runner.quant_type = QuantType.NONE
+    runner.moe_config = SimpleNamespace(num_experts=4)
+    runner.apply_router_weight_on_input = False
+    comm_method = MagicMock()
+    comm_method.prepare.return_value = SimpleNamespace(
+        hidden_states=hidden_states,
+        router_logits=router_logits,
+        mc2_mask=None,
+        padded_hidden_states_shape=None,
+        pertoken_scale=None,
+    )
+    comm_method.finalize.return_value = routed_out
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(
+            in_profile_run=False,
+            moe_comm_method=comm_method,
+            flash_comm_v1_enabled=False,
+        ),
+    )
+    monkeypatch.setattr(fused_moe_module, "get_forward_context", lambda: SimpleNamespace(input_ids=None))
+
+    result = runner.no_shared_forward_impl(hidden_states, router_logits)
+
+    assert result is routed_out
+    router.select_experts.assert_called_once()
+    quant_method.apply_routed.assert_called_once()
+    quant_method.apply.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "moe_comm_type, flash_comm_v1_enabled, expected",
     [

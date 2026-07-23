@@ -38,8 +38,6 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import Un
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
-from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
@@ -108,7 +106,8 @@ def make_eplb_placement_config(eplb_config, num_redundant_experts: int) -> Simpl
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def __init__(self, moe: FusedMoEConfig = None, tid2eid=None):
         super().__init__(moe=moe)
-        self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
+        vllm_config = get_current_vllm_config()
+        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else get_ascend_config().eplb_config.dynamic_eplb
         self.tid2eid = tid2eid
         self.lora_context = None
 
@@ -123,6 +122,15 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # Ascend uses its own MoE communication and forward_impl path.
         # Do not let upstream modular-kernel initialization replace it.
         return None
+
+    @staticmethod
+    def get_eplb_weight_views(layer):
+        weights = [layer.w13_weight, layer.w2_weight]
+        if layer.w13_bias is not None:
+            weights.append(layer.w13_bias)
+        if layer.w2_bias is not None:
+            weights.append(layer.w2_bias)
+        return weights
 
     def process_weights_after_loading(self, layer):
         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
@@ -215,6 +223,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             if capturer is not None:
                 capturer.capture(layer_id=layer.layer_id, topk_ids=topk_ids)
 
+        zero_expert_result = None
         if zero_expert_num > 0 and zero_expert_type is not None:
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
                 expert_indices=topk_ids,
@@ -232,6 +241,37 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
+        return self.apply_routed(
+            layer=layer,
+            x=x,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            activation=activation,
+            log2phy=log2phy,
+            global_redundant_expert_num=global_redundant_expert_num,
+            pertoken_scale=pertoken_scale,
+            mc2_mask=mc2_mask,
+            zero_expert_result=zero_expert_result,
+        )
+
+    def apply_routed(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        expert_map: torch.Tensor | None = None,
+        apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
+        log2phy: torch.Tensor | None = None,
+        global_redundant_expert_num: int = 0,
+        pertoken_scale: torch.Tensor | None = None,
+        mc2_mask: torch.Tensor | None = None,
+        zero_expert_result: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        topk_weights = topk_weights.to(x.dtype)
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         # NOTE: In the MoECommType.FUSED_MC2 branch, we wrap weights (w1, w2) into lists
         # and provide dummy scales (w1_scale, w2_scale). This is required because:
@@ -294,7 +334,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 lora_context=getattr(layer, "_ascend_moe_lora_context", None),
             )
         )
-        if zero_expert_num > 0 and zero_expert_type is not None:
+        if zero_expert_result is not None:
             final_hidden_states += zero_expert_result
         return final_hidden_states
 
@@ -391,11 +431,47 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         )
         mix_placement = getattr(ascend_config, "mix_placement", False)
 
-        # EPLB initialization (Ascend-specific; mirrors old AscendFusedMoE logic).
+        self._use_v2_model_runner = bool(vllm_config.use_v2_model_runner)
+        if not self._use_v2_model_runner:
+            self._init_v1_eplb(
+                ascend_config.eplb_config,
+                moe_config,
+                routed_experts,
+                mix_placement,
+                n_shared_experts,
+                vllm_config.parallel_config.tensor_parallel_size,
+            )
+
+        setup_moe_comm_method(self.moe_config)
+        if self.multistream_overlap_shared_expert:
+            # Wrap the quant_method's process_weights_after_loading to validate that
+            # splitting shared expert computation (gate_up projection + activation,
+            # then down projection) yields identical results to integrated
+            # computation after weight loading.
+            original_process_weights = self._quant_method.process_weights_after_loading
+
+            @wraps(original_process_weights)
+            def wrapped_process_weights(*args, **kwargs):
+                result = original_process_weights(*args, **kwargs)
+                self._validate_shared_expert_consistency()
+                return result
+
+            self._quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
+
+    def _init_v1_eplb(
+        self,
+        eplb_config,
+        moe_config,
+        routed_experts,
+        mix_placement,
+        n_shared_experts,
+        tensor_parallel_size,
+    ) -> None:
+        from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
+        from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
+
         AscendMoERunner.moe_counter += 1
         self.moe_instance_id = AscendMoERunner.moe_counter
-
-        eplb_config = ascend_config.eplb_config
 
         # The upstream FusedMoE factory has already included redundant expert
         # slots in moe_config and allocated RoutedExperts weights accordingly.
@@ -422,7 +498,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             placement_moe_config,
             mix_placement,
             n_shared_experts,
-            tp_size=vllm_config.parallel_config.tensor_parallel_size,
+            tp_size=tensor_parallel_size,
         )
 
         moe_config.global_redundant_expert_num = self.global_redundant_expert_num
@@ -446,9 +522,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64).npu()
         # Only FlashLB consumes a time series of expert loads. Other EPLB
         # policies (including the default SwiftBalance policy) expect one load
-        # vector per layer and rank. Using the collection interval alone here
-        # adds an unexpected window dimension and produces
-        # [layer, rank, interval, expert] after all-gather.
+        # vector per layer and rank.
         if use_multistage_eplb_load(
             self.dynamic_eplb,
             eplb_config.eplb_policy_type,
@@ -459,25 +533,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             self.num_iter = eplb_config.expert_heat_collection_interval
             self.moe_load = torch.zeros((self.num_iter, local_num_experts), dtype=torch.int32, device="npu")
 
-        setup_moe_comm_method(self.moe_config)
-        if self.multistream_overlap_shared_expert:
-            # Wrap the quant_method's process_weights_after_loading to validate that
-            # splitting shared expert computation (gate_up projection + activation,
-            # then down projection) yields identical results to integrated
-            # computation after weight loading.
-            original_process_weights = self._quant_method.process_weights_after_loading
-
-            @wraps(original_process_weights)
-            def wrapped_process_weights(*args, **kwargs):
-                result = original_process_weights(*args, **kwargs)
-                self._validate_shared_expert_consistency()
-                return result
-
-            self._quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
-
-        # Register this MoE layer with EPLB for PP compatibility.
-        # PPMissingLayer (nn.Identity) never calls AscendFusedMoE.__init__,
-        # so only real MoE layers on this rank are registered.
         VllmEplbAdaptor.register_layer(self)
 
     def _validate_shared_expert_consistency(self):
@@ -640,35 +695,58 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
         pertoken_scale = prepare_output.pertoken_scale
 
-        # Matrix multiply.
-        # apply() expects a RoutedExperts-like layer for weight access
-        # (w13_weight, w2_weight, swiglu_limit, etc.). Pass routed_experts,
-        # not self; the routing params come through the other kwargs.
-        fused_experts_results: FusedExpertsResult = self._quant_method.apply(
-            layer=self.routed_experts,
-            x=hidden_states,
-            router_logits=router_logits,
-            pertoken_scale=pertoken_scale,
-            top_k=self.top_k,
-            renormalize=self.renormalize,
-            use_grouped_topk=self.use_grouped_topk,
-            num_experts=self.moe_config.num_experts,
-            expert_map=self._expert_map,
-            topk_group=self.topk_group,
-            num_expert_group=self.num_expert_group,
-            custom_routing_function=self.custom_routing_function,
-            scoring_func=self.scoring_func,
-            routed_scaling_factor=self._original_routed_scaling_factor,
-            e_score_correction_bias=self.e_score_correction_bias,
-            activation=self.activation,
-            apply_router_weight_on_input=self.apply_router_weight_on_input,
-            enable_force_load_balance=enable_force_load_balance,
-            log2phy=self.log2phy,
-            global_redundant_expert_num=self.global_redundant_expert_num,
-            mc2_mask=mc2_mask,
-        )
+        if self._use_v2_model_runner:
+            topk_weights, topk_ids = self.router.select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                topk_indices_dtype=getattr(self._quant_method, "topk_indices_dtype", None),
+                input_ids=getattr(forward_context, "input_ids", None),
+            )
+            if enable_force_load_balance:
+                random_matrix = torch.rand(
+                    topk_ids.size(0),
+                    self.moe_config.num_experts,
+                    device=topk_ids.device,
+                )
+                topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
+            fused_experts_results: FusedExpertsResult = self._quant_method.apply_routed(
+                layer=self.routed_experts,
+                x=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                pertoken_scale=pertoken_scale,
+                expert_map=self.routed_experts.expert_map,
+                activation=self.activation,
+                apply_router_weight_on_input=self.apply_router_weight_on_input,
+                mc2_mask=mc2_mask,
+            )
+        else:
+            # Model Runner V1 keeps the legacy route-and-compute entry point.
+            fused_experts_results = self._quant_method.apply(
+                layer=self.routed_experts,
+                x=hidden_states,
+                router_logits=router_logits,
+                pertoken_scale=pertoken_scale,
+                top_k=self.top_k,
+                renormalize=self.renormalize,
+                use_grouped_topk=self.use_grouped_topk,
+                num_experts=self.moe_config.num_experts,
+                expert_map=self._expert_map,
+                topk_group=self.topk_group,
+                num_expert_group=self.num_expert_group,
+                custom_routing_function=self.custom_routing_function,
+                scoring_func=self.scoring_func,
+                routed_scaling_factor=self._original_routed_scaling_factor,
+                e_score_correction_bias=self.e_score_correction_bias,
+                activation=self.activation,
+                apply_router_weight_on_input=self.apply_router_weight_on_input,
+                enable_force_load_balance=enable_force_load_balance,
+                log2phy=self.log2phy,
+                global_redundant_expert_num=self.global_redundant_expert_num,
+                mc2_mask=mc2_mask,
+            )
 
-        if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
+        if not self._use_v2_model_runner and self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
             expert_tokens = fused_experts_results.expert_tokens
             group_list_type = fused_experts_results.group_list_type
             assert expert_tokens is not None and group_list_type is not None, (

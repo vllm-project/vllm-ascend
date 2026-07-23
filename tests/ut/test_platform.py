@@ -34,6 +34,8 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.parallel_config.pipeline_parallel_size = 1
         mock_vllm_config.parallel_config.context_parallel_size = 1
         mock_vllm_config.parallel_config.decode_context_parallel_size = 1
+        mock_vllm_config.parallel_config.enable_eplb = False
+        mock_vllm_config.parallel_config.eplb_config = MagicMock(use_async=False, communicator=None)
         mock_vllm_config.cache_config = MagicMock()
         mock_vllm_config.scheduler_config = MagicMock()
         mock_vllm_config.scheduler_config.max_num_seqs = None
@@ -78,6 +80,60 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(NPUPlatform.simple_compile_backend, "eager")
         self.assertEqual(NPUPlatform.ray_device_key, "NPU")
         self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
+
+    def test_validate_eplb_config_allows_v2_load_scope(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.enable_eplb = True
+        vllm_config.additional_config = {"eplb_config": {"load_scope": "prefill"}}
+
+        with patch.dict("os.environ", {}, clear=True):
+            NPUPlatform._validate_eplb_config(vllm_config)
+
+    def test_validate_eplb_config_allows_batch_scope_with_dbo_and_spec_decode(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.enable_eplb = True
+        vllm_config.parallel_config.enable_dbo = True
+        vllm_config.speculative_config = object()
+        vllm_config.additional_config = {"eplb_config": {"load_scope": "decode"}}
+
+        with patch.dict("os.environ", {}, clear=True):
+            NPUPlatform._validate_eplb_config(vllm_config)
+
+    def test_validate_eplb_config_rejects_v2_legacy_fields(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.additional_config = {"eplb_config": {"dynamic_eplb": True}}
+
+        with self.assertRaisesRegex(ValueError, "legacy fields are not supported: dynamic_eplb"):
+            NPUPlatform._validate_eplb_config(vllm_config)
+
+    def test_validate_eplb_config_rejects_v1_load_scope(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = False
+        vllm_config.additional_config = {"eplb_config": {"load_scope": "decode"}}
+
+        with self.assertRaisesRegex(ValueError, "only supported by Model Runner V2"):
+            NPUPlatform._validate_eplb_config(vllm_config)
+
+    def test_validate_eplb_config_rejects_upstream_eplb_on_v1(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = False
+        vllm_config.parallel_config.enable_eplb = True
+
+        with self.assertRaisesRegex(ValueError, "only supported by Model Runner V2"):
+            NPUPlatform._validate_eplb_config(vllm_config)
+
+    def test_validate_eplb_config_rejects_v2_legacy_environment(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+
+        with (
+            patch.dict("os.environ", {"DYNAMIC_EPLB": "1"}, clear=True),
+            self.assertRaisesRegex(ValueError, "Model Runner V1 controls"),
+        ):
+            NPUPlatform._validate_eplb_config(vllm_config)
         self.assertEqual(NPUPlatform.dispatch_key, "PrivateUse1")
         self.assertEqual(NPUPlatform.supported_quantization, [ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD])
 

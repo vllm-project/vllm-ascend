@@ -165,7 +165,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
             and not vllm_config.model_config.enforce_eager
         )
-        self.dynamic_eplb = ascend_config.eplb_config.dynamic_eplb
+        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
         self.in_dtype = vllm_config.model_config.dtype
         self.supports_eplb = True
 
@@ -276,6 +276,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         )
         assert topk_ids is not None
         assert topk_weights is not None
+        zero_expert_result = None
         if zero_expert_num > 0 and zero_expert_type is not None:
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
                 expert_indices=topk_ids,
@@ -291,6 +292,36 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
+        return self.apply_routed(
+            layer=layer,
+            x=x,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+            log2phy=log2phy,
+            global_redundant_expert_num=global_redundant_expert_num,
+            pertoken_scale=pertoken_scale,
+            activation=activation,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            mc2_mask=mc2_mask,
+            zero_expert_result=zero_expert_result,
+        )
+
+    def apply_routed(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        expert_map: torch.Tensor | None = None,
+        log2phy: torch.Tensor | None = None,
+        global_redundant_expert_num: int = 0,
+        pertoken_scale: Any | None = None,
+        activation: str = "silu",
+        apply_router_weight_on_input: bool = False,
+        mc2_mask: torch.Tensor | None = None,
+        zero_expert_result: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         assert topk_weights is not None
         topk_weights = topk_weights.to(self.in_dtype)
 
@@ -335,9 +366,31 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 swiglu_limit=layer.swiglu_limit,
             )
         )
-        if zero_expert_num > 0 and zero_expert_type is not None:
+        if zero_expert_result is not None:
             final_hidden_states += zero_expert_result
         return final_hidden_states
+
+    @staticmethod
+    def get_eplb_weight_views(layer: torch.nn.Module):
+        weights = [
+            layer.w13_weight,
+            layer.w2_weight,
+            layer.w13_weight_scale_fp32,
+            layer.w2_weight_scale,
+        ]
+        fused_w1_scale = getattr(layer, "fused_w1_scale", None)
+        fused_w2_scale = getattr(layer, "fused_w2_scale", None)
+        if (fused_w1_scale is None) != (fused_w2_scale is None):
+            raise RuntimeError("FUSED_MC2 requires both fused_w1_scale and fused_w2_scale.")
+        if fused_w1_scale is not None:
+            num_local_experts = layer.w13_weight.shape[0]
+            weights.extend(
+                [
+                    fused_w1_scale.view(num_local_experts, -1),
+                    fused_w2_scale.view(num_local_experts, -1),
+                ]
+            )
+        return weights
 
     def process_weights_after_loading(self, layer):
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()

@@ -38,11 +38,14 @@ _original_FusedMoE = _fused_moe_layer.FusedMoE
 
 if is_310p():
     from vllm_ascend._310p.fused_moe.fused_moe import AscendMoERunner310 as _DefaultAscendMoERunner
+
+    _DefaultAscendRoutedExperts = None
 else:
     from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner as _DefaultAscendMoERunner
+    from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts as _DefaultAscendRoutedExperts
 
 
-def _ascend_FusedMoE(*args, runner_cls=None, runner_args=None, **kwargs):
+def _ascend_FusedMoE(*args, runner_cls=None, runner_args=None, routed_experts_cls=None, **kwargs):
     if runner_cls is None:
         runner_cls = _DefaultAscendMoERunner
     # RoutedExperts allocates its parameters before AscendMoERunner is
@@ -58,6 +61,8 @@ def _ascend_FusedMoE(*args, runner_cls=None, runner_args=None, **kwargs):
             )
         kwargs["enable_eplb"] = True
         kwargs["num_redundant_experts"] = configured_redundancy or upstream_redundancy
+    if routed_experts_cls is None:
+        routed_experts_cls = _DefaultAscendRoutedExperts
     # 'hash' is a DeepSeek V4 flag already consumed before FusedMoE is called;
     # 'tid2eid' is Ascend-specific and must reach AscendMoERunner via runner_args.
     kwargs.pop("hash", None)
@@ -65,7 +70,13 @@ def _ascend_FusedMoE(*args, runner_cls=None, runner_args=None, **kwargs):
     if tid2eid is not None:
         runner_args = dict(runner_args) if runner_args is not None else {}
         runner_args["tid2eid"] = tid2eid
-    return _original_FusedMoE(*args, runner_cls=runner_cls, runner_args=runner_args, **kwargs)
+    return _original_FusedMoE(
+        *args,
+        runner_cls=runner_cls,
+        runner_args=runner_args,
+        routed_experts_cls=routed_experts_cls,
+        **kwargs,
+    )
 
 
 _fused_moe_layer.FusedMoE = _ascend_FusedMoE

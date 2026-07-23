@@ -289,6 +289,7 @@ nav:
         - developer_guide/Design_Documents/ModelRunner_prepare_inputs.md
         - developer_guide/Design_Documents/disaggregated_prefill.md
         - developer_guide/Design_Documents/eplb_swift_balancer.md
+        - developer_guide/Design_Documents/model_runner_v2_eplb.md
         - developer_guide/Design_Documents/ACL_Graph.md
         - developer_guide/Design_Documents/KV_Cache_Pool_Guide.md
         - developer_guide/Design_Documents/add_custom_aclnn_op.md

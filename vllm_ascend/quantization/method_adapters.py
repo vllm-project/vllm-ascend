@@ -123,6 +123,12 @@ class AscendLinearMethod(LinearMethodBase):
         if hasattr(self.quant_method, "process_weights_after_loading"):
             self.quant_method.process_weights_after_loading(layer)
 
+    def get_eplb_weight_views(self, layer: torch.nn.Module):
+        get_weight_views = getattr(self.quant_method, "get_eplb_weight_views", None)
+        if get_weight_views is None:
+            return []
+        return get_weight_views(layer)
+
     def get_computed_params(self) -> set[str]:
         """Return parameter name patterns that are computed, not loaded.
 
@@ -295,6 +301,39 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             apply_router_weight_on_input=apply_router_weight_on_input,
             mc2_mask=mc2_mask,
             tid2eid=self.tid2eid,
+        )
+
+    def apply_routed(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        expert_map: torch.Tensor | None = None,
+        log2phy: torch.Tensor | None = None,
+        global_redundant_expert_num: int = 0,
+        pertoken_scale: torch.Tensor | None = None,
+        activation: str = "silu",
+        apply_router_weight_on_input: bool = False,
+        mc2_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        apply_routed = getattr(self.quant_method, "apply_routed", None)
+        if apply_routed is None:
+            raise NotImplementedError(
+                f"Model Runner V2 routed MoE is not implemented for {self.quant_method.__class__.__name__}."
+            )
+        return apply_routed(
+            layer=layer,
+            x=x,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+            log2phy=log2phy,
+            global_redundant_expert_num=global_redundant_expert_num,
+            pertoken_scale=pertoken_scale,
+            activation=activation,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            mc2_mask=mc2_mask,
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

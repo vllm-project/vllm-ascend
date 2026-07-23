@@ -91,6 +91,38 @@ class TestAscendW8A8DynamicLinearMethodWithNpu(TestBase):
         self.assertEqual(output.shape, (32, output_size))
 
 
+class TestAscendW8A8FusedMoEEplbWeights(TestBase):
+    num_experts = 8
+
+    def _create_layer(self):
+        layer = torch.nn.Module()
+        layer.w13_weight = torch.empty(self.num_experts, 2, 3)
+        layer.w2_weight = torch.empty(self.num_experts, 3, 2)
+        layer.w13_weight_scale_fp32 = torch.empty(self.num_experts, 6)
+        layer.w2_weight_scale = torch.empty(self.num_experts, 3)
+        return layer
+
+    def test_get_eplb_weight_views_include_fused_mc2_scales(self):
+        layer = self._create_layer()
+        layer.fused_w1_scale = torch.arange(self.num_experts * 6, dtype=torch.int64)
+        layer.fused_w2_scale = torch.arange(self.num_experts * 3, dtype=torch.int64)
+
+        weight_views = AscendW8A8DynamicFusedMoEMethod.get_eplb_weight_views(layer)
+
+        self.assertEqual(len(weight_views), 6)
+        self.assertEqual(weight_views[-2].shape, (self.num_experts, 6))
+        self.assertEqual(weight_views[-1].shape, (self.num_experts, 3))
+        self.assertEqual(weight_views[-2].data_ptr(), layer.fused_w1_scale.data_ptr())
+        self.assertEqual(weight_views[-1].data_ptr(), layer.fused_w2_scale.data_ptr())
+
+    def test_get_eplb_weight_views_reject_incomplete_fused_mc2_scales(self):
+        layer = self._create_layer()
+        layer.fused_w1_scale = torch.empty(self.num_experts * 6, dtype=torch.int64)
+
+        with self.assertRaisesRegex(RuntimeError, "requires both fused_w1_scale and fused_w2_scale"):
+            AscendW8A8DynamicFusedMoEMethod.get_eplb_weight_views(layer)
+
+
 class TestAscendW8A8FusedMoEMethod(TestBase):
     num_experts = 8
     hidden_size = 128
