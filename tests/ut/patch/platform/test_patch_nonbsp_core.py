@@ -138,10 +138,95 @@ def test_balance_load_runs_before_engine_step(monkeypatch):
     )
 
     engine_core = object.__new__(nonbsp_core.NonBSPDPEngineCoreProc)
+    engine_core.engines_running = True
+    engine_core.scheduler = MagicMock()
+    engine_core.scheduler.has_unfinished_requests.return_value = True
     engine_core.run_balance_load = run_balance_load
 
     assert engine_core._process_engine_step() is True
     assert events == ["balance_load", "engine_step"]
+
+
+def _make_process_step_test_engine(*, engines_running: bool, local_unfinished: bool):
+    engine_core = object.__new__(nonbsp_core.NonBSPDPEngineCoreProc)
+    engine_core.engines_running = engines_running
+    engine_core.scheduler = MagicMock()
+    engine_core.scheduler.has_unfinished_requests.return_value = local_unfinished
+    engine_core.run_balance_load = MagicMock()
+    return engine_core
+
+
+def test_idle_connector_maintenance_skips_balance_load(monkeypatch):
+    parent_process_step = MagicMock(return_value=False)
+    monkeypatch.setattr(
+        nonbsp_core.DPEngineCoreProc,
+        "_process_engine_step",
+        parent_process_step,
+    )
+    engine_core = _make_process_step_test_engine(
+        engines_running=False,
+        local_unfinished=False,
+    )
+    engine_core.scheduler.has_finished_requests.return_value = True
+
+    assert engine_core._process_engine_step() is False
+
+    engine_core.run_balance_load.assert_not_called()
+    parent_process_step.assert_called_once_with()
+
+
+def test_target_rank_with_request_joins_balance_load_before_start_wave(monkeypatch):
+    parent_process_step = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        nonbsp_core.DPEngineCoreProc,
+        "_process_engine_step",
+        parent_process_step,
+    )
+    engine_core = _make_process_step_test_engine(
+        engines_running=False,
+        local_unfinished=True,
+    )
+
+    assert engine_core._process_engine_step() is True
+
+    engine_core.run_balance_load.assert_called_once_with()
+    parent_process_step.assert_called_once_with()
+
+
+def test_awake_rank_without_local_request_joins_balance_load(monkeypatch):
+    parent_process_step = MagicMock(return_value=False)
+    monkeypatch.setattr(
+        nonbsp_core.DPEngineCoreProc,
+        "_process_engine_step",
+        parent_process_step,
+    )
+    engine_core = _make_process_step_test_engine(
+        engines_running=True,
+        local_unfinished=False,
+    )
+
+    assert engine_core._process_engine_step() is False
+
+    engine_core.run_balance_load.assert_called_once_with()
+    parent_process_step.assert_called_once_with()
+
+
+def test_wave_rank_with_local_request_joins_balance_load(monkeypatch):
+    parent_process_step = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        nonbsp_core.DPEngineCoreProc,
+        "_process_engine_step",
+        parent_process_step,
+    )
+    engine_core = _make_process_step_test_engine(
+        engines_running=True,
+        local_unfinished=True,
+    )
+
+    assert engine_core._process_engine_step() is True
+
+    engine_core.run_balance_load.assert_called_once_with()
+    parent_process_step.assert_called_once_with()
 
 
 def test_nonbsp_diagnostics_are_disabled_by_default(monkeypatch, capsys):

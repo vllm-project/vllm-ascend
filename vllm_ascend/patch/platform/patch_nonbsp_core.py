@@ -230,10 +230,11 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
             self.scheduler.lb_freeze = False
 
     def _process_engine_step(self) -> bool:
-        # Match the original NonBSP scheduling order: process newly queued
-        # requests, compute the DP load-balancing plan, then schedule/execute
-        # the current step.
-        self.run_balance_load()
+        # Local connector maintenance is not a coordinated DP wave step and
+        # must not advance this rank's NonBSP collective sequence.
+        local_unfinished = self.scheduler.has_unfinished_requests()
+        if self.engines_running or local_unfinished:
+            self.run_balance_load()
         return super()._process_engine_step()
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
