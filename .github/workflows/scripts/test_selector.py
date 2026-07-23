@@ -16,6 +16,7 @@ import sqlite3
 import ssl
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from collections import defaultdict
@@ -184,7 +185,7 @@ class CoverageSelector:
             conn = sqlite3.connect(cov_file)
             cursor = conn.cursor()
 
-            # 查找文件ID（模糊匹配路径）
+            # Find file ID (fuzzy path matching)
             cursor.execute("SELECT id FROM file WHERE path LIKE ?", (f"%{filename}",))
             row = cursor.fetchone()
             if not row:
@@ -192,7 +193,7 @@ class CoverageSelector:
                 return lines
             file_id = row[0]
 
-            # 获取所有 arc，计算覆盖的行号
+            # Get all arcs, calculate covered line numbers
             cursor.execute("SELECT DISTINCT fromno, tono FROM arc WHERE file_id = ?", (file_id,))
             for fromno, tono in cursor.fetchall():
                 if fromno > 0:
@@ -301,7 +302,7 @@ class CodeChangeDetector:
             return ""
 
     def scan_source_files(self) -> dict[str, str]:
-        """扫描源码文件，计算哈希"""
+        """Scan source files, compute hashes"""
         self.file_hashes = {}
         for py_file in self.source_dir.rglob("*.py"):
             rel_path = py_file.relative_to(self.source_dir).as_posix()
@@ -309,7 +310,7 @@ class CodeChangeDetector:
         return self.file_hashes
 
     def detect_changes_by_comparison(self) -> dict[str, set[int]]:
-        """通过文件哈希比对检测变更（返回所有变更文件的全部行）"""
+        """Detect changes by file hash comparison (return all lines for changed files)"""
         changed_files = {}
         current_hashes = {}
 
@@ -325,8 +326,8 @@ class CodeChangeDetector:
             for rel_path, current_hash in current_hashes.items():
                 old_hash = old_hashes.get(rel_path, "")
                 if current_hash != old_hash:
-                    # 文件有变更，返回所有行号（保守估计）
-                    changed_files[rel_path] = set(range(1, 10000))  # 保守：假设全部行都可能变更
+                    # File has changes, return all line numbers (conservative estimate)
+                    changed_files[rel_path] = set(range(1, 10000))  # Conservative: assume all lines may have changed
         else:
             changed_files = {rel_path: set(range(1, 10000)) for rel_path in current_hashes}
             with open(baseline_path, "w") as f:
@@ -336,44 +337,44 @@ class CodeChangeDetector:
 
     def parse_git_diff(self, diff_output: str, filter_prefix: str | None = None) -> dict[str, set[int]]:
         """
-        解析 git diff 输出，提取变更的行号
+        Parse git diff output, extract changed line numbers
 
-        支持两种 diff 格式：
+        Supports two diff formats:
         1. unified diff: @@ -10,3 +10,4 @@ context
-        2. 来自 PR 的 diff
+        2. PR diff
 
         Args:
-            diff_output: diff 内容
-            filter_prefix: 只保留以此前缀开头的文件路径（如 '{REPO_NAME}/' 过滤出产品代码，默认使用 REPO_NAME）
+            diff_output: diff content
+            filter_prefix: only keep files with this prefix (e.g., '{REPO_NAME}/' filters product code, defaults to REPO_NAME)
 
         Returns:
-            {filepath: {lineno, ...}} - 新文件中的变更行号集合
+            {filepath: {lineno, ...}} - set of changed line numbers in the new file
         """
         changed_files = {}
         current_file = None
 
-        # 默认使用 REPO_NAME 作为过滤前缀
+        # Default to REPO_NAME as filter prefix
         if filter_prefix is None:
             filter_prefix = f"{REPO_NAME}/"
 
-        # 解析模式：逐行解析，精确计算每个变更行在新文件中的行号
+        # Parse mode: line by line, precisely calculate each changed line number in the new file
         for raw_line in diff_output.split("\n"):
             line = raw_line.rstrip("\r")
-            # 新文件开始
+            # New file starts
             if line.startswith("diff --git"):
                 continue
 
-            # 文件路径
+            # File path
             elif line.startswith("+++ b/") or line.startswith("--- a/"):
                 path = line[6:].strip()
-                # 去掉 a/ 或 b/ 前缀
+                # Remove a/ or b/ prefix
                 if path.startswith("a/") or path.startswith("b/"):
                     path = path[2:]
-                # 过滤：只保留指定前缀的路径（排除测试文件等）
+                # Filter: only keep paths with specified prefix (exclude test files, etc.)
                 if filter_prefix and not path.startswith(filter_prefix):
                     current_file = None
                     continue
-                # 标准化路径：去掉 filter_prefix 前缀
+                # Normalize path: remove filter_prefix prefix
                 if filter_prefix and path.startswith(filter_prefix):
                     path = path[len(filter_prefix) :]
                 if not path.endswith(".py"):
@@ -382,19 +383,19 @@ class CodeChangeDetector:
                 if current_file not in changed_files:
                     changed_files[current_file] = set()
 
-            # hunk 头：@@ -old_start,old_count +new_start,new_count @@
+            # hunk header: @@ -old_start,old_count +new_start,new_count @@
             elif line.startswith("@@") and current_file:
-                # 解析: @@ -100,10 +100,12 @@
+                # Parse: @@ -100,10 +100,12 @@
                 match = re.search(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
                 if match:
                     old_start = int(match.group(1))
                     old_count = int(match.group(2)) if match.group(2) else 1
-                    # 规则：起始行 = old_start + 2，结束行 = old_start + old_count - 3
+                    # Rule: start line = old_start + 2, end line = old_start + old_count - 3
                     start_line = old_start + 2
                     end_line = old_start + old_count - 3
                     if end_line <= start_line:
                         end_line = old_start + old_count
-                    # 收集 hunk 内的所有行，检查是否有新增行（+ 开头）
+                    # Collect all lines in hunk, check if there are new lines (starting with +)
                     hunk_lines = []
                     for hunk_line in diff_output.split("\n")[diff_output.split("\n").index(line) + 1 :]:
                         if (
@@ -405,7 +406,7 @@ class CodeChangeDetector:
                         ):
                             break
                         hunk_lines.append(hunk_line)
-                    # 如果没有 + 开头的新增行，说明变更只有删除，区间向内缩一行
+                    # If no new lines starting with +, changes only include deletions, shrink range by one line
                     has_addition = any(hline.lstrip().startswith("+") for hline in hunk_lines)
                     if not has_addition:
                         start_line += 1
@@ -417,10 +418,10 @@ class CodeChangeDetector:
 
     def parse_pr_diff_file(self, diff_file_path: str) -> dict[str, set[int]]:
         """
-        从 PR diff 文件解析变更行号
+        Parse changed line numbers from PR diff file
 
         Args:
-            diff_file_path: diff 文件路径
+            diff_file_path: diff file path
         """
         try:
             with open(diff_file_path, encoding="utf-8") as f:
@@ -432,13 +433,13 @@ class CodeChangeDetector:
 
 
 class FunctionParser:
-    """Python函数解析器 - 用于获取函数和分支的行号范围"""
+    """Python function parser - used to get line number ranges of functions and branches"""
 
     @staticmethod
     def get_function_ranges(filepath: str) -> dict[str, list[tuple[int, int]]]:
         """
-        解析Python文件，返回函数名 -> [(起始行, 结束行), ...] 的映射
-        支持同一函数名出现多次的情况（返回所有匹配的区间）
+        Parse Python file, return function name -> [(start_line, end_line), ...] mapping
+        Supports multiple occurrences of the same function name (returns all matching ranges)
         """
         function_ranges = defaultdict(list)
         try:
@@ -456,7 +457,7 @@ class FunctionParser:
     @staticmethod
     def _get_import_lines(filepath: str) -> set[int]:
         """
-        获取文件中所有 import 语句的行号
+        Get line numbers of all import statements in file
         """
         import_lines = set()
         try:
@@ -474,12 +475,12 @@ class FunctionParser:
     @staticmethod
     def get_lines_functions(filepath: str, lines: set[int], skip_imports: bool = False) -> dict[int, str]:
         """
-        获取每行所属的函数名
+        Get function name for each line
 
         Args:
-            filepath: 源文件路径
-            lines: 待查询的行号集合
-            skip_imports: 是否跳过 import 语句行
+            filepath: source file path
+            lines: set of line numbers to query
+            skip_imports: whether to skip import statement lines
         """
         line_to_function = {}
         function_ranges = FunctionParser.get_function_ranges(filepath)
@@ -500,7 +501,7 @@ class FunctionParser:
 
 
 class TestSelector:
-    """测试选择器 - 根据代码变更（行粒度）选择需要运行的测试用例"""
+    """Test selector - select test cases to run based on code changes (line granularity)"""
 
     def __init__(self, test_case_map: dict):
         self.test_case_map = test_case_map
@@ -517,32 +518,32 @@ class TestSelector:
         enable_dedup: bool = False,
     ) -> tuple[list[tuple[str, dict[str, set[int]], int]], str]:
         """
-        根据变更文件选择受影响的测试用例，支持3种独立匹配粒度：
-        - 行级匹配：精确的变更行与覆盖行交集
-        - 函数级匹配：整个函数体范围匹配
-        - 文件级匹配：文件任意覆盖行匹配
+        Select affected test cases based on changed files, supports 3 independent matching granularities:
+        - Line-level matching: precise intersection of changed lines and covered lines
+        - Function-level matching: entire function body range matching
+        - File-level matching: any covered line in file matching
 
-        各粒度级联触发：只有当前粒度未匹配到测试时，才尝试下一粒度。
+        Each granularity cascades: only when current granularity finds no tests, try the next.
 
         Args:
-            changed_files_with_lines: 变更文件及其行号 {filepath: {lineno, ...}}
-            min_affected_lines: 最少受影响的行数，低于此值不选择
-            source_dir: 源码目录，用于函数/文件级扩展
-            enable_line_match: 是否启用行级匹配
-            enable_function_match: 是否启用函数级匹配
-            enable_file_match: 是否启用文件级匹配
-            enable_skip_imports: 是否跳过 import 语句行（仅在函数级匹配时生效）
-            enable_dedup: 是否启用去重
+            changed_files_with_lines: changed files and their line numbers {filepath: {lineno, ...}}
+            min_affected_lines: minimum affected lines, below this value will not be selected
+            source_dir: source code directory, used for function/file-level expansion
+            enable_line_match: whether to enable line-level matching
+            enable_function_match: whether to enable function-level matching
+            enable_file_match: whether to enable file-level matching
+            enable_skip_imports: whether to skip import statement lines (only effective for function-level matching)
+            enable_dedup: whether to enable deduplication
 
         Returns:
             (selected_tests, expand_reason)
             - selected_tests: [(test_case_name, {filepath: {covered_lines}}, total_affected_lines), ...]
-            - expand_reason: 扩展原因说明 ('' 表示无扩展，'line'/'function'/'file' 表示使用的粒度)
+            - expand_reason: expansion reason ('' means no expansion, 'line'/'function'/'file' indicates the granularity used)
         """
         selected = []
         expand_reason = ""
 
-        # 标准化变更文件路径：去掉 REPO_NAME/ 前缀
+        # Normalize changed file paths: remove REPO_NAME/ prefix
         normalized_changed = {}
         for f, lines in changed_files_with_lines.items():
             if f.startswith(f"{REPO_NAME}/"):
@@ -552,32 +553,32 @@ class TestSelector:
 
         total_changed_lines = sum(len(lines) for lines in normalized_changed.values())
 
-        # ===== 行级匹配 + 函数级匹配（并行执行，合并去重） =====
+        # ===== Line-level matching + Function-level matching (parallel execution, merge deduplication) =====
         line_results = []  # [(test_case, affected_detail, total_lines)]
         func_results = []  # [(test_case, affected_detail, total_lines)]
 
-        # ----- 第一阶段：行级匹配 -----
+        # ----- Stage 1: Line-level matching -----
         if enable_line_match:
             for test_case, data in self.test_case_map.items():
                 covered_files = data["files"]  # {filepath: {lineno, ...}}
 
-                # 行级匹配：计算哪些变更行被此测试覆盖
+                # Line-level matching: calculate which changed lines are covered by this test
                 affected_detail = {}  # {filepath: set of covered changed lines}
-                all_intersected_lines = set()  # 所有文件交集的并集
+                all_intersected_lines = set()  # union of intersections across all files
 
                 for changed_file, changed_lines in normalized_changed.items():
                     if changed_file in covered_files:
                         covered_lines = covered_files[changed_file]
-                        # 计算变更行与覆盖行的交集
+                        # Calculate intersection of changed lines and covered lines
                         intersected_lines = changed_lines & covered_lines
                         if intersected_lines:
                             affected_detail[changed_file] = intersected_lines
                             all_intersected_lines.update(intersected_lines)
 
-                # 计算总体覆盖率密度：交集行数 / 变更行总数
+                # Calculate overall coverage density: intersected lines / total changed lines
                 overall_density = len(all_intersected_lines) / total_changed_lines if total_changed_lines else 0
 
-                # 按覆盖率密度和最少受影响行数过滤
+                # Filter by coverage density and minimum affected lines
                 if (
                     all_intersected_lines
                     and overall_density >= COVERAGE_DENSITY_THRESHOLD
@@ -585,28 +586,28 @@ class TestSelector:
                 ):
                     line_results.append((test_case, affected_detail, len(all_intersected_lines)))
 
-            # 按受影响行数排序（多的优先）
+            # Sort by affected lines (more first)
             line_results.sort(key=lambda x: x[2], reverse=True)
 
-            # 行级匹配去重：相同覆盖行只选一个测试
+            # Line-level deduplication: for same covered lines, only select one test
             if line_results and enable_dedup:
                 claimed_lines = set()
                 deduplicated = []
                 for test_case, affected_detail, total_lines in line_results:
-                    # 收集这个测试覆盖的所有行
+                    # Collect all lines covered by this test
                     test_lines = set()
                     for lines in affected_detail.values():
                         test_lines.update(lines)
-                    # 只保留有新行的测试
+                    # Only keep tests with new lines
                     unclaimed = test_lines - claimed_lines
                     if unclaimed:
                         deduplicated.append((test_case, affected_detail, len(unclaimed)))
                         claimed_lines.update(test_lines)
                 line_results = deduplicated
 
-        # ----- 第二阶段：函数级匹配 -----
+        # ----- Stage 2: Function-level matching -----
         if enable_function_match and source_dir:
-            # 收集所有变更行所属的函数
+            # Collect functions that changed lines belong to
             changed_functions = {}  # {filepath: {func_name: Set[linenos]}}
 
             for changed_file, changed_lines in normalized_changed.items():
@@ -628,12 +629,12 @@ class TestSelector:
                 if not source_file:
                     continue
 
-                # 获取变更行的函数映射
+                # Get function mapping for changed lines
                 line_to_function = FunctionParser.get_lines_functions(
                     source_file, changed_lines, skip_imports=enable_skip_imports
                 )
 
-                # 按函数名分组
+                # Group by function name
                 func_to_lines = defaultdict(set)
                 for line, func_name in line_to_function.items():
                     func_to_lines[func_name].add(line)
@@ -642,7 +643,7 @@ class TestSelector:
                     changed_functions[changed_file] = func_to_lines
 
             if changed_functions:
-                # 构建函数 -> 覆盖该函数的测试映射
+                # Build function -> tests covering that function mapping
                 func_to_tests = defaultdict(list)
 
                 for test_case, data in self.test_case_map.items():
@@ -655,7 +656,7 @@ class TestSelector:
                         covered_lines = covered_files[changed_file]
 
                         for func_name in func_to_lines:
-                            # 获取该函数的完整行范围
+                            # Get full line range of this function
                             possible_paths = [
                                 Path(source_dir) / changed_file,
                                 Path(source_dir) / REPO_NAME / changed_file,
@@ -674,7 +675,7 @@ class TestSelector:
                             if not source_file:
                                 continue
 
-                            # 过滤掉 import 语句行（用于显示）
+                            # Filter out import statement lines (for display)
                             if enable_skip_imports:
                                 import_lines = FunctionParser._get_import_lines(source_file)
                                 display_changed_lines = normalized_changed.get(changed_file, set()) - import_lines
@@ -686,7 +687,7 @@ class TestSelector:
                             if func_name not in func_ranges:
                                 continue
 
-                            # 合并所有匹配到的函数范围
+                            # Merge all matched function ranges
                             func_all_lines = set()
                             for func_start, func_end in func_ranges[func_name]:
                                 func_all_lines.update(range(func_start, func_end + 1))
@@ -694,52 +695,52 @@ class TestSelector:
                             if not func_all_lines:
                                 continue
 
-                            # 看看这个测试是否覆盖了该函数的任何行
+                            # Check if this test covers any line of this function
                             covered_in_func = covered_lines & func_all_lines
                             if covered_in_func:
-                                # 取测试覆盖行与实际变更行的交集（用于显示）
+                                # Get intersection of test covered lines and actual changed lines (for display)
                                 covered_changed_lines = covered_lines & display_changed_lines
                                 func_to_tests[func_name].append((test_case, covered_changed_lines))
 
-                # 选择覆盖了变更函数其他行的测试（去重）
+                # Select tests that cover other lines of changed functions (deduplication)
                 for changed_file, func_to_lines in changed_functions.items():
                     for func_name in func_to_lines:
                         if func_name in func_to_tests:
                             for test_case, covered_changed_lines in func_to_tests[func_name]:
                                 existing = [s[0] for s in func_results]
                                 if test_case not in existing and covered_changed_lines:
-                                    # 显示实际的变更行覆盖，而非函数全量覆盖
+                                    # Display actual changed line coverage, not full function coverage
                                     display_lines = covered_changed_lines if covered_changed_lines else set()
                                     func_results.append((test_case, {changed_file: display_lines}, len(display_lines)))
 
                 func_results.sort(key=lambda x: x[2], reverse=True)
 
-        # ===== 合并行级和函数级结果，去重 =====
+        # ===== Merge line-level and function-level results, deduplicate =====
         if line_results or func_results:
-            # 按test_case去重，保留行级结果（更精确）
+            # Deduplicate by test_case, keep line-level results (more precise)
             seen = set()
             for test_case, affected_detail, total_lines in line_results:
                 if test_case not in seen:
                     seen.add(test_case)
                     selected.append((test_case, affected_detail, total_lines))
 
-            # 添加函数级独有的结果
+            # Add function-level exclusive results
             for test_case, affected_detail, total_lines in func_results:
                 if test_case not in seen:
                     seen.add(test_case)
                     selected.append((test_case, affected_detail, total_lines))
 
-            # 按受影响行数排序
+            # Sort by affected lines
             selected.sort(key=lambda x: x[2], reverse=True)
 
             if selected:
                 return selected, "line+function"
 
-            # ===== 第三阶段：文件级匹配（仅当前两级都为空时） =====
+            # ===== Stage 3: Function-level matching (only when first two levels are empty) =====
             print("  Line-level matching empty, trying function-level matching...")
             expand_reason = "function"
 
-            # 收集所有变更行所属的函数
+            # Collect functions that changed lines belong to
             changed_functions = {}  # {filepath: {func_name: Set[linenos]}}
 
             for changed_file, changed_lines in normalized_changed.items():
@@ -761,12 +762,12 @@ class TestSelector:
                 if not source_file:
                     continue
 
-                # 获取变更行的函数映射
+                # Get function mapping for changed lines
                 line_to_function = FunctionParser.get_lines_functions(
                     source_file, changed_lines, skip_imports=enable_skip_imports
                 )
 
-                # 按函数名分组
+                # Group by function name
                 func_to_lines = defaultdict(set)
                 for line, func_name in line_to_function.items():
                     func_to_lines[func_name].add(line)
@@ -777,7 +778,7 @@ class TestSelector:
             if not changed_functions:
                 return selected, expand_reason
 
-            # 构建函数 -> 覆盖该函数的测试映射
+            # Build function -> tests covering that function mapping
             func_to_tests = defaultdict(list)
 
             for test_case, data in self.test_case_map.items():
@@ -790,7 +791,7 @@ class TestSelector:
                     covered_lines = covered_files[changed_file]
 
                     for func_name in func_to_lines:
-                        # 获取该函数的完整行范围
+                        # Get full line range of this function
                         possible_paths = [
                             Path(source_dir) / changed_file,
                             Path(source_dir) / REPO_NAME / changed_file,
@@ -809,7 +810,7 @@ class TestSelector:
                         if not source_file:
                             continue
 
-                        # 过滤掉 import 语句行（用于显示）
+                        # Filter out import statement lines (for display)
                         if enable_skip_imports:
                             import_lines = FunctionParser._get_import_lines(source_file)
                             display_changed_lines = normalized_changed.get(changed_file, set()) - import_lines
@@ -821,7 +822,7 @@ class TestSelector:
                         if func_name not in func_ranges:
                             continue
 
-                        # 合并所有匹配到的函数范围
+                        # Merge all matched function ranges
                         func_all_lines = set()
                         for func_start, func_end in func_ranges[func_name]:
                             func_all_lines.update(range(func_start, func_end + 1))
@@ -829,21 +830,21 @@ class TestSelector:
                         if not func_all_lines:
                             continue
 
-                        # 看看这个测试是否覆盖了该函数的任何行
+                        # Check if this test covers any line of this function
                         covered_in_func = covered_lines & func_all_lines
                         if covered_in_func:
-                            # 取测试覆盖行与实际变更行的交集（用于显示）
+                            # Get intersection of test covered lines and actual changed lines (for display)
                             covered_changed_lines = covered_lines & display_changed_lines
                             func_to_tests[func_name].append((test_case, covered_changed_lines))
 
-            # 选择覆盖了变更函数其他行的测试（去重）
+            # Select tests that cover other lines of changed functions (deduplication)
             for changed_file, func_to_lines in changed_functions.items():
                 for func_name in func_to_lines:
                     if func_name in func_to_tests:
                         for test_case, covered_changed_lines in func_to_tests[func_name]:
                             existing = [s[0] for s in selected]
                             if test_case not in existing and covered_changed_lines:
-                                # 显示实际的变更行覆盖，而非函数全量覆盖
+                                # Display actual changed line coverage, not full function coverage
                                 display_lines = covered_changed_lines if covered_changed_lines else set()
                                 selected.append((test_case, {changed_file: display_lines}, len(display_lines)))
 
@@ -852,12 +853,12 @@ class TestSelector:
             if selected:
                 return selected, expand_reason
 
-        # ===== 第四阶段：文件级匹配 =====
+        # ===== Stage 4: File-level matching =====
         if not selected and enable_file_match:
             print("  Function-level matching empty, trying file-level matching...")
             expand_reason = "file"
 
-            # 文件级匹配：任何覆盖了变更文件的测试都被选中
+            # File-level matching: any test covering the changed file is selected
             for test_case, data in self.test_case_map.items():
                 covered_files = data["files"]
 
@@ -866,9 +867,9 @@ class TestSelector:
                         covered_lines = covered_files[changed_file]
                         if covered_lines:
                             selected.append((test_case, {changed_file: covered_lines}, len(covered_lines)))
-                            break  # 一个文件匹配就够了，不重复计数其他文件
+                            break
 
-            # 去重：同一用例只选一次
+            # Deduplicate: same test case only selected once
             if selected:
                 seen = set()
                 deduplicated = []
@@ -889,13 +890,13 @@ class TestSelector:
         min_affected_lines: int = 1,
         expand_reason: str = "",
     ):
-        """打印选择结果"""
+        """Print selection results"""
         total_changed_lines = sum(len(v) for v in changed_files.values())
 
         print("\n" + "=" * 70)
         print(f"Code changes: {len(changed_files)} files, {total_changed_lines} lines")
 
-        # 显示扩展原因
+        # Display expansion reason
         gran_names = {
             "line": "Line match",
             "function": "Function match",
@@ -938,7 +939,7 @@ class TestSelector:
                 print(f"    - {filepath}: {line_str}")
 
     def _format_line_range(self, lines: list[int]) -> str:
-        """将行号列表压缩为范围表示"""
+        """Compress line number list into range representation"""
         if not lines:
             return ""
 
@@ -965,11 +966,11 @@ class TestSelector:
         return ", ".join(ranges)
 
     def _format_changed_files(self, changed_files: dict[str, set[int]]) -> str:
-        """格式化变更文件"""
+        """Format changed files"""
         result = []
         for f, lines in sorted(changed_files.items()):
             if len(lines) > 10:
-                result.append(f"{f}: {len(lines)} 行")
+                result.append(f"{f}: {len(lines)} lines")
             else:
                 result.append(f"{f}: {sorted(lines)}")
         return ", ".join(result[:5]) + ("..." if len(changed_files) > 5 else "")
@@ -1016,7 +1017,7 @@ def main():
 
     args = parser.parse_args()
 
-    # 处理粒度开关：disable 优先于 enable
+    # Process granularity switches: disable takes precedence over enable
     args.enable_line_match = not args.disable_line_match
     args.enable_function_match = not args.disable_function_match
     args.enable_file_match = not args.disable_file_match
@@ -1043,19 +1044,19 @@ def main():
 
     diff_file = None
     if args.github_pr:
-        # 从 GitHub PR 获取变更
+        # Fetch changes from GitHub PR
         pr_spec = args.github_pr
         repo = None
         pr_num = None
 
-        # 解析 owner/repo#pr_number 格式
+        # Parse owner/repo#pr_number format
         if "#" in pr_spec:
             parts = pr_spec.split("#")
             repo = parts[0]
             pr_num = parts[1]
         else:
             pr_num = pr_spec
-            # 尝试获取当前仓库
+            # Try to get current repository
             try:
                 result = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True, text=True)
                 if result.returncode == 0:
@@ -1074,12 +1075,12 @@ def main():
 
         print(f"Fetching changes from GitHub PR: {repo}#{pr_num}")
 
-        # 创建不验证 SSL 证书的 context
+        # Create context that does not verify SSL certificates
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
 
-        # 使用跨平台临时目录
+        # Use cross-platform temp directory
         diff_file = os.path.join(tempfile.gettempdir(), "pr.diff")
         max_retries = 3
 
@@ -1108,6 +1109,7 @@ def main():
                 if attempt == max_retries:
                     print(f"  All {max_retries} attempts failed, exiting")
                     exit(1)
+                time.sleep(1)
 
         print(f"  PR diff saved to: {diff_file}")
         changed_files_with_lines = change_detector.parse_pr_diff_file(diff_file)
