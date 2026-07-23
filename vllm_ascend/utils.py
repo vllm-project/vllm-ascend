@@ -546,13 +546,26 @@ def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None)
     if kv_transfer_config is None:
         return
 
-    visible_devices = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
-    if visible_devices is None:
-        from vllm_ascend.cpu_binding import DeviceInfo
-
-        devices = sorted([int(x) for x in DeviceInfo.get_npu_map_info()])
+    ascend_visible_devices = os.getenv("ASCEND_VISIBLE_DEVICES")
+    if ascend_visible_devices:
+        phys_all = [int(x) for x in ascend_visible_devices.split(",") if x.strip()]
+        rt_devices = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
+        if rt_devices:
+            rt_list = [int(x) for x in rt_devices.split(",") if x.strip()]
+            if rt_list and all(0 <= x < len(phys_all) for x in rt_list):
+                devices = [phys_all[x] for x in rt_list]
+            else:
+                devices = rt_list
+        else:
+            devices = phys_all
     else:
-        devices = [int(x) for x in visible_devices.split(",") if x.strip()]
+        visible_devices = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
+        if visible_devices is None:
+            from vllm_ascend.cpu_binding import DeviceInfo
+
+            devices = sorted([int(x) for x in DeviceInfo.get_npu_map_info()])
+        else:
+            devices = [int(x) for x in visible_devices.split(",") if x.strip()]
 
     extra_config = kv_transfer_config.kv_connector_extra_config or {}
     local_comm_res_path = extra_config.get("ascend_local_comm_res_path")
