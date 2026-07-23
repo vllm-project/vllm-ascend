@@ -1234,6 +1234,55 @@ class AscendSFADCPImpl(AscendSFAImpl):
         assert attn_metadata.dcp_context is not None, "DCP SFA requires attn_metadata.dcp_context."
         attn_metadata.dcp_context.gather_context = self._start_dcp_query_gather(ql_nope, q_pe)
 
+    def _q_proj_n_rope(
+        self,
+        q_c: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        attn_metadata: M | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        ql_nope, q_pe = super()._q_proj_n_rope(q_c, cos, sin, attn_metadata)
+        assert attn_metadata is not None, "DCP SFA requires attn_metadata for Q projection."
+        self._record_dcp_query_gather_context(ql_nope, q_pe, attn_metadata)
+        return ql_nope, q_pe
+
+    def _maybe_store_kvcache_for_c8_n_dsacp(
+        self,
+        k_pe: torch.Tensor | None,
+        k_nope: torch.Tensor | None,
+        knope_scale: torch.Tensor | None,
+        k_li: torch.Tensor | None,
+        fused_kv_no_split: torch.Tensor | None,
+        kv_ag_handle: torch.distributed.Work | None,
+        kv_cache: tuple[torch.Tensor, ...] | None,
+        slot_mapping_sfa: torch.Tensor,
+        attn_metadata: M,
+        full_gather_o_proj_enabled: bool,
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.distributed.Work | None,
+        list[torch.distributed.Work | None] | None,
+    ]:
+        result = super()._maybe_store_kvcache_for_c8_n_dsacp(
+            k_pe,
+            k_nope,
+            knope_scale,
+            k_li,
+            fused_kv_no_split,
+            kv_ag_handle,
+            kv_cache,
+            slot_mapping_sfa,
+            attn_metadata,
+            full_gather_o_proj_enabled,
+        )
+        # Prefill DCP gathers referenced blocks after the current layer writes
+        # its SFA KV cache and before indexer/top-k work begins.
+        if kv_cache is not None:
+            self._record_dcp_kv_gather_context(kv_cache, attn_metadata)
+        return result
+
     def _execute_sparse_flash_attention_process(
         self,
         ql_nope,
