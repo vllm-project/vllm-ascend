@@ -131,6 +131,33 @@ def _is_w8a8_mxfp8_dynamic(linear) -> bool:
     return isinstance(inner, AscendW8A8MXFP8DynamicLinearMethod)
 
 
+def _has_rms_norm_dynamic_mx_quant() -> bool:
+    ops_npu = getattr(torch.ops, "npu", None)
+    return (
+        (ops_npu is not None and hasattr(ops_npu, "npu_rms_norm_dynamic_mx_quant"))
+        or hasattr(torch_npu, "npu_rms_norm_dynamic_mx_quant")
+    )
+
+
+def _rms_norm_dynamic_mx_quant(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    try:
+        out = torch.ops.npu.npu_rms_norm_dynamic_mx_quant(
+            x,
+            weight,
+            epsilon=eps,
+            dst_type=torch.float8_e4m3fn,
+        )
+    except (AttributeError, TypeError):
+        # Some torch_npu builds expose only a 2-argument wrapper; it still
+        # dispatches the fused operator but uses operator defaults.
+        out = torch_npu.npu_rms_norm_dynamic_mx_quant(x, weight)
+    return out[0], out[1]
+
+
 def pad_to_blocks(x: torch.Tensor, length_list: torch.Tensor, block_size: int = 128):
     """
     Pads a ragged/packed tensor into fixed-size blocks.
@@ -1755,12 +1782,12 @@ class AscendDSAImpl(DSAAttentionImpl):
         is_w8a8 = _is_w8a8_dynamic(self.wq_b)
         is_mxfp8 = _is_w8a8_mxfp8_dynamic(self.wq_b)
         # compress_ratio=4 uses qr as BF16 input for indexer topk selection.
-        # The fused MX op returns quantized qr only, so keep the unfused path
+        # The fused MX op returns quantized qr only, so keep the generic path
         # whenever qr is still consumed downstream.
         can_fuse_q_norm_mx_quant = (
             is_mxfp8
             and get_ascend_device_type() == AscendDeviceType.A5
-            and hasattr(torch_npu, "npu_rms_norm_dynamic_mx_quant")
+            and _has_rms_norm_dynamic_mx_quant()
             and not (self.compress_ratio == 4 and not self.skip_topk)
         )
 
@@ -1785,12 +1812,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             kv = self.cv_wkv.matmul(kv_quant, kv_pertoken_scale)
 
         if can_fuse_q_norm_mx_quant:
-            q_b_quant, q_b_scale = torch_npu.npu_rms_norm_dynamic_mx_quant(
-                wq_a_result,
-                self.q_norm.weight,
-                epsilon=self.eps,
-                dst_type=torch.float8_e4m3fn,
-            )
+            q_b_quant, q_b_scale = _rms_norm_dynamic_mx_quant(wq_a_result, self.q_norm.weight, self.eps)
             qr = None
             qr_pertoken_scale = None
         elif is_prefill:
