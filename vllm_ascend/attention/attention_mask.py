@@ -89,8 +89,7 @@ class AttentionMaskBuilder:
         mask_elements = num_reqs * max_query_len * max_kv_len
         if mask_elements > (1 << 29):
             raise ValueError(
-                "R-SWA mask is too large: "
-                f"{num_reqs}*{max_query_len}*{max_kv_len}={mask_elements} elements"
+                f"R-SWA mask is too large: {num_reqs}*{max_query_len}*{max_kv_len}={mask_elements} elements"
             )
 
         # Keep validation device-side so V2 prompt lengths do not trigger a
