@@ -271,7 +271,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
 
     === "Qwen3.6-27B-w8a8"
 
-        Startup Command (supports up to 262144 context length):
+        Startup Command:
 
         ```bash
         #!/bin/sh
@@ -450,7 +450,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
 
     === "Qwen3.6-27B-w8a8-MXFP8"
 
-        Startup Command (supports up to 262144 context length):
+        Startup Command:
 
         ```bash
         #!/bin/sh
