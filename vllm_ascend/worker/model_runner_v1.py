@@ -29,6 +29,7 @@ from dataclasses import dataclass, replace
 from functools import partial
 from multiprocessing import Manager
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
+from zlib import adler32
 
 import numpy as np
 import torch
@@ -37,7 +38,11 @@ import torch.nn as nn
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
-from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_gather
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+)
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.parallel_state import get_dcp_group, get_dp_group, get_pcp_group, get_pp_group, get_tp_group
@@ -104,6 +109,7 @@ from vllm.v1.worker.ubatch_utils import (
 from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
 # yapf: enable
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
@@ -124,6 +130,7 @@ from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_full_graph_params,
 )
+from vllm_ascend.distributed.kv_transfer.kv_offload_decode.kv_offload_decode_manager import init_kv_offload_decode_manager
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_config import (
     get_gva_layerwise_config,
     get_layerwise_physical_layer_index,
@@ -580,6 +587,28 @@ class NPUModelRunner(GPUModelRunner):
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: Any | None = None
         self._mamba_copy_bufs: Any | None = None
+        self.enable_hamming_sparse = (self.ascend_config.enable_hamming_sparse is True)
+        self.enable_hamming_sparse = self.enable_hamming_sparse and not vllm_config.speculative_config
+        if self.enable_hamming_sparse is True:
+            from vllm_ascend.worker.kvcomp_utils import initialize_kvcomp_metadata
+            self.kvcomp_meta_data = initialize_kvcomp_metadata(max_num_reqs=self.max_num_reqs,
+                block_size=self.block_size, device=self.device, vllm_config=self.vllm_config,
+                parallel_config=self.parallel_config, dtype=self.dtype)
+
+        # TODO remove KV_OFFLOAD_COLOCATE_DEBUG after PD disaggregate is done
+        self.kv_offload_colocate_debug = envs_ascend.KV_OFFLOAD_COLOCATE_DEBUG
+        self.kv_offload_decode_config = self.ascend_config.kv_offload_decode_config
+        self.kv_offload_decode_enabled = self.kv_offload_decode_config.enabled
+        self.kv_offload_decode_manager = None
+        self.tp_rank = get_tensor_model_parallel_rank()
+
+        # Per-request metadata consumed by the KV offload decode resident LRU.
+        self._offload_req_ids_tensor = None
+        self._offload_token_to_req = None
+        if self.kv_offload_decode_enabled:
+            self._offload_req_ids_tensor = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
+            self._offload_token_to_req = self._make_buffer(self.max_num_tokens, dtype=torch.int32)
+
     @property
     def use_cp(self) -> bool:
         return self.pcp_size * self.dcp_size > 1
@@ -2056,6 +2085,11 @@ class NPUModelRunner(GPUModelRunner):
             # allocated blocks that may reuse the same physical KV cache IDs.
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
+        if self.kv_offload_decode_enabled and self.kv_offload_decode_manager is not None:
+            # Draft positions can be overwritten after MTP rejection, so drain
+            # pending copies and invalidate resident rows before state updates.
+            self.kv_offload_decode_manager.prepare_scheduler_step()
+
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
@@ -3081,6 +3115,49 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_stats,
         )
 
+    def _update_kv_offload_request_metadata(
+        self,
+        num_tokens: int,
+        num_reqs: int,
+        num_tokens_padded: int,
+        num_reqs_padded: int,
+    ) -> None:
+        """Populate per-request identity tensors for the KV offload decode LRU.
+
+        Request ids are adler32 hashes of the scheduler request id; rows are
+        reset whenever the occupying request changes. Ported from vllm-ascend
+        ``_update_sfa_request_metadata``.
+        """
+        if self._offload_req_ids_tensor is None or self._offload_token_to_req is None:
+            return
+        req_ids = self.input_batch.req_ids[:num_reqs]
+        self._offload_req_ids_tensor.np[:num_reqs_padded].fill(0)
+        effective_num_reqs = min(num_reqs, len(req_ids))
+        req_id_values = np.asarray(
+            [
+                adler32(req_id.encode("utf-8"))
+                if isinstance(req_id, str)
+                else row + 1
+                for row, req_id in enumerate(req_ids[:effective_num_reqs])
+            ],
+            dtype=np.int64,
+        )
+        self._offload_req_ids_tensor.np[:effective_num_reqs] = req_id_values
+        self._offload_req_ids_tensor.copy_to_gpu(num_reqs_padded)
+
+        query_start_loc_cpu = self.query_start_loc.cpu[: num_reqs + 1]
+        query_lens = np.diff(query_start_loc_cpu.numpy()).astype(np.int32, copy=False)
+        token_to_req = np.repeat(np.arange(num_reqs, dtype=np.int32), query_lens)
+        if token_to_req.shape[0] < num_tokens:
+            raise RuntimeError(
+                "KV offload token_to_req metadata is shorter than the scheduled token batch: "
+                f"metadata={token_to_req.shape[0]}, tokens={num_tokens}"
+            )
+        self._offload_token_to_req.np[:num_tokens] = token_to_req[:num_tokens]
+        if num_tokens_padded > num_tokens:
+            self._offload_token_to_req.np[num_tokens:num_tokens_padded].fill(0)
+        self._offload_token_to_req.copy_to_gpu(num_tokens_padded)
+
     def _build_attention_metadata(
         self,
         num_tokens: int,
@@ -3104,6 +3181,7 @@ class NPUModelRunner(GPUModelRunner):
             return {}, None
         num_tokens_padded = num_tokens_padded or num_tokens
         num_reqs_padded = num_reqs_padded or num_reqs
+        self._update_kv_offload_request_metadata(num_tokens, num_reqs, num_tokens_padded, num_reqs_padded)
         attn_metadata: PerLayerAttnMetadata = {}
         if ubatch_slices is not None:
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
@@ -3241,6 +3319,16 @@ class NPUModelRunner(GPUModelRunner):
             group_len = self.group_len.gpu[:num_reqs_padded],
             group_key_idx = self.group_key_idx.gpu[:num_reqs_padded],
             group_key_cache_idx = self.group_key_cache_idx.gpu[:num_reqs_padded],
+            req_ids_tensor=(
+                self._offload_req_ids_tensor.gpu[:num_reqs_padded]
+                if self._offload_req_ids_tensor is not None
+                else None
+            ),
+            token_to_req=(
+                self._offload_token_to_req.gpu[:num_tokens_padded]
+                if self._offload_token_to_req is not None
+                else None
+            ),
         )
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
@@ -4027,6 +4115,12 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         self.may_reinitialize_input_batch(kv_cache_config)
+        if self.kv_offload_decode_enabled:
+            self.kv_offload_decode_manager = init_kv_offload_decode_manager(
+                self.vllm_config,
+                kv_cache_config,
+                self.kv_offload_decode_config,
+            )
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
         # TODO: refactor the logic of attention
         if (
@@ -4047,6 +4141,8 @@ class NPUModelRunner(GPUModelRunner):
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
+        if self.kv_offload_decode_enabled:
+            self.kv_offload_decode_manager.register_kv_caches(kv_caches)
 
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
@@ -4405,24 +4501,60 @@ class NPUModelRunner(GPUModelRunner):
                     # are allocated as int8 raw bytes first and then viewed as
                     # the target dtype in _reshape_kv_cache_tensors.
                     v_tensor = None
-                    k_tensor = self._allocate_int8_cache_tensor(
-                        k_tensor_size,
-                        alignment,
-                    )
-                    if v_tensor_size is not None:
-                        v_tensor = self._allocate_int8_cache_tensor(
-                            v_tensor_size,
+                    if self.kv_offload_decode_enabled:
+                        # TODO support c8
+                        assert current_sparse_c8 == False, "c8 not supported now"
+                        # TODO remove KV_OFFLOAD_COLOCATE_DEBUG after PD disaggregate is done:
+                        # drop the npu k/v tensors and replace raw_k_tensor by raw_k_tensor_cpu
+                        # to use the original code.
+                        if self.tp_rank == 0:
+                            k_tensor_cpu = self.kv_offload_decode_manager._empty_aligned_cpu_tensor(
+                                [k_tensor_size],
+                                torch.int8,
+                                alignment,
+                            )
+                            v_tensor_cpu = self.kv_offload_decode_manager._empty_aligned_cpu_tensor(
+                                [v_tensor_size],
+                                torch.int8,
+                                alignment,
+                            )
+                        else:
+                            k_tensor_cpu = None
+                            v_tensor_cpu = None
+                        if self.kv_offload_colocate_debug:
+                            k_tensor = self._allocate_int8_cache_tensor(
+                                k_tensor_size,
+                                alignment,
+                            )
+                            v_tensor = self._allocate_int8_cache_tensor(
+                                v_tensor_size,
+                                alignment,
+                            )
+                        else:
+                            k_tensor = None
+                            v_tensor = None
+                    else:
+                        k_tensor = self._allocate_int8_cache_tensor(
+                            k_tensor_size,
                             alignment,
                         )
+                        if v_tensor_size is not None:
+                            v_tensor = self._allocate_int8_cache_tensor(
+                                v_tensor_size,
+                                alignment,
+                            )
 
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         # shared the attn kvcache for all shared layers
                         if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
-                            if current_sparse_c8:
-                                kv_cache_raw_tensors[layer_name_inner] = (k_tensor,)
+                            if self.kv_offload_decode_enabled:
+                                kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor, k_tensor_cpu, v_tensor_cpu, k_tensor_size + v_tensor_size)
                             else:
-                                assert v_tensor is not None
-                                kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor)
+                                if current_sparse_c8:
+                                    kv_cache_raw_tensors[layer_name_inner] = (k_tensor,)
+                                else:
+                                    assert v_tensor is not None
+                                    kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor)
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
             for layer_name in group.layer_names:
@@ -4598,13 +4730,21 @@ class NPUModelRunner(GPUModelRunner):
                     if self.use_sparse and "cache_only_layers" not in layer_name:
                         raw_cache = kv_cache_raw_tensors[layer_name]
                         assert isinstance(raw_cache, tuple)
-                        if current_sparse_c8:
-                            (raw_k_tensor,) = raw_cache
-                            raw_v_tensor = None
-                            sum_page_size_bytes = raw_k_tensor.numel()
+                        if self.kv_offload_decode_enabled:
+                            # TODO support c8
+                            assert current_sparse_c8 == False, "c8 not supported"
+                            # TODO remove KV_OFFLOAD_COLOCATE_DEBUG after PD disaggregate is done:
+                            # drop the npu k/v tensors and only keep raw_k_tensor = raw_k_tensor_cpu
+                            # to use the original code.
+                            raw_k_tensor, raw_v_tensor, raw_k_tensor_cpu, raw_v_tensor_cpu, sum_page_size_bytes = raw_cache
                         else:
-                            raw_k_tensor, raw_v_tensor = raw_cache
-                            sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
+                            if current_sparse_c8:
+                                (raw_k_tensor,) = raw_cache
+                                raw_v_tensor = None
+                                sum_page_size_bytes = raw_k_tensor.numel()
+                            else:
+                                raw_k_tensor, raw_v_tensor = raw_cache
+                                sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
                     elif (
                         self.use_hybrid_blocks
                         and self.hybrid_with_attn_and_mamba
@@ -4658,7 +4798,7 @@ class NPUModelRunner(GPUModelRunner):
                             layer_name
                         ]
                         sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
-                    assert raw_k_tensor is not None
+                    assert raw_k_tensor is not None or self.kv_offload_decode_enabled
                     assert sum_page_size_bytes % current_kv_cache_spec.page_size_bytes == 0
                     num_blocks = sum_page_size_bytes // current_kv_cache_spec.page_size_bytes
 
@@ -4748,18 +4888,49 @@ class NPUModelRunner(GPUModelRunner):
                     if current_sparse_c8:
                         k_cache_dtype = self.c8_k_cache_dtype
 
-                    k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape)
-                    if current_sparse_c8:
-                        v_cache = None
-                    else:
-                        assert raw_v_tensor is not None
-                        v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape)
+                    if self.kv_offload_decode_enabled:
+                        # TODO support c8
+                        assert current_sparse_c8 == False, "c8 not supported"
+                        # TODO remove KV_OFFLOAD_COLOCATE_DEBUG after PD disaggregate is done:
+                        # the npu k_cache/v_cache views below only exist for colocate debug;
+                        # only keep raw_k_tensor = raw_k_tensor_cpu to use the original code.
+                        k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape) if raw_k_tensor is not None else None
+                        v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape) if raw_v_tensor is not None else None
+                        if self.tp_rank == 0:
+                            k_cache_cpu = raw_k_tensor_cpu.view(k_cache_dtype).view(k_shape)
+                            v_cache_cpu = raw_v_tensor_cpu.view(v_cache_dtype).view(v_shape)
+                        else:
+                            k_cache_cpu = None
+                            v_cache_cpu = None
 
-                    if current_sparse_c8:
-                        kv_caches[layer_name] = (k_cache,)
+                        decode_width = 1
+                        if self.vllm_config.speculative_config is not None:
+                            decode_width += self.vllm_config.speculative_config.num_speculative_tokens
+                        topk_buffer_size = self.kv_offload_decode_config.topk_buffer_size
+                        num_kv_heads = 1
+                        k_dim = self.vllm_config.model_config.hf_text_config.kv_lora_rank
+                        v_dim = self.vllm_config.model_config.hf_text_config.qk_rope_head_dim
+                        max_num_topk_rows = min(
+                            self.vllm_config.scheduler_config.max_num_batched_tokens,
+                            self.vllm_config.scheduler_config.max_num_seqs * decode_width,
+                        )
+                        topk_buffer_k = torch.empty([max_num_topk_rows, topk_buffer_size, num_kv_heads, k_dim], dtype=torch.bfloat16, device='npu')
+                        topk_buffer_v = torch.empty([max_num_topk_rows, topk_buffer_size, num_kv_heads, v_dim], dtype=torch.bfloat16, device='npu')
+
+                        kv_caches[layer_name] = (k_cache, v_cache, k_cache_cpu, v_cache_cpu, topk_buffer_k, topk_buffer_v)
                     else:
-                        assert v_cache is not None
-                        kv_caches[layer_name] = (k_cache, v_cache)
+                        k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape)
+                        if current_sparse_c8:
+                            v_cache = None
+                        else:
+                            assert raw_v_tensor is not None
+                            v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape)
+
+                        if current_sparse_c8:
+                            kv_caches[layer_name] = (k_cache,)
+                        else:
+                            assert v_cache is not None
+                            kv_caches[layer_name] = (k_cache, v_cache)
                 elif isinstance(current_kv_cache_spec, MambaSpec):
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     assert raw_tensor is not None
@@ -5006,7 +5177,7 @@ class NPUModelRunner(GPUModelRunner):
         if has_ec_transfer() and get_ec_transfer().is_producer:
             return {}
 
-        kv_cache_spec: dict[str, list[KVCacheSpec]] = defaultdict(list)
+        kv_cache_spec: dict[str, list[KVCacheSpec] | KVCacheSpec] = defaultdict(list)
         attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
         from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 
@@ -5060,6 +5231,7 @@ class NPUModelRunner(GPUModelRunner):
                         dtype=dtype,
                         cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
                         cache_sparse_c8=cache_sparse_c8,
+                        store_on_host=self.kv_offload_decode_enabled,
                     )
                 elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     if getattr(attn_module.impl, "fa_quant_layer", False):
@@ -5127,6 +5299,7 @@ class NPUModelRunner(GPUModelRunner):
                 if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:  # type: ignore[attr-defined]
                     object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
 
+        self.kv_cache_spec = kv_cache_spec # reserve for kv offload decode usage
         return kv_cache_spec
 
     def _check_and_update_cudagraph_mode(
@@ -5243,6 +5416,18 @@ class NPUModelRunner(GPUModelRunner):
             static_forward_context=(self.compilation_config.static_forward_context),
         )
 
+    def get_host_device_memory_usage_ratio(self) -> float:
+        page_size_bytes_host = 0
+        page_size_bytes_device = 0
+        for kv_cache_spec in self.kv_cache_spec.values():
+            assert isinstance(kv_cache_spec, KVCacheSpec)
+            if getattr(kv_cache_spec, 'store_on_host', False):
+                page_size_bytes_host += kv_cache_spec.page_size_bytes
+            else:
+                page_size_bytes_device += kv_cache_spec.page_size_bytes
+
+        assert page_size_bytes_device > 0, "Case of no device kv cache is not considered."
+        return page_size_bytes_host / page_size_bytes_device
 
 def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
     """

@@ -136,6 +136,10 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
+        if get_ascend_config().kv_offload_decode_config.enabled:
+            from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadMetadataBuilder
+
+            return AscendSFAKVOffloadMetadataBuilder
         if enable_sfa_dcp_replicated_indexer():
             from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 
@@ -158,6 +162,10 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["AscendSFAImpl"]:
+        if get_ascend_config().kv_offload_decode_config.enabled:
+            from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
+
+            return AscendSFAKVOffloadImpl
         if enable_sfa_dcp_replicated_indexer():
             from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
 
@@ -235,6 +243,10 @@ class AscendSFAMetadata:
     group_len: torch.Tensor | None = None
     group_key_idx: torch.Tensor | None = None
     group_key_cache_idx: torch.Tensor | None = None
+    # Request identity for the KV offload decode resident LRU; only populated
+    # by AscendSFAKVOffloadMetadataBuilder.
+    req_ids_tensor: torch.Tensor | None = None
+    token_to_req: torch.Tensor | None = None
 
 
 M = TypeVar("M", bound=AscendSFAMetadata)
@@ -1543,7 +1555,15 @@ class AscendSFAImpl(MLAAttentionImpl):
         topk_indices_buffer.copy_(topk_indices_to_cache)
 
     def _execute_sparse_flash_attention_process(
-        self, ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
+        self,
+        ql_nope,
+        q_pe,
+        kv_cache,
+        topk_indices,
+        attn_metadata,
+        actual_seq_lengths_query,
+        actual_seq_lengths_key,
+        block_table=None,
     ):
         return DeviceOperator.execute_sparse_flash_attention_process(
             self,
@@ -1554,6 +1574,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             attn_metadata,
             actual_seq_lengths_query,
             actual_seq_lengths_key,
+            block_table=block_table,
         )
 
     def _record_dcp_query_gather_context(
@@ -1589,6 +1610,15 @@ class AscendSFAImpl(MLAAttentionImpl):
         main_cache = kv_cache
         if main_cache is None or not self.has_indexer:
             return main_cache
+
+        # KV offload decode registers the main MLA cache as a 6-tuple
+        # (k_npu, v_npu, k_cpu, v_cpu, topk_buffer_k, topk_buffer_v); the
+        # attention kernels only consume the leading NPU pair.
+        # TODO remove KV_OFFLOAD_COLOCATE_DEBUG after PD disaggregate is done:
+        # the leading NPU pair only exists for colocate debug (prefill
+        # staging); this truncation follows the colocate tuple layout.
+        if len(main_cache) == 6:
+            main_cache = (main_cache[0], main_cache[1])
 
         indexer_cache = self.indexer.k_cache.kv_cache
         if indexer_cache is None:

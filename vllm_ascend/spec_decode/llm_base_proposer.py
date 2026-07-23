@@ -561,6 +561,43 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # when update. So we can use the shallow copy.
         return copy.copy(attn_metadata)
 
+    def _prepare_dummy_kv_offload_metadata(
+        self,
+        num_tokens: int,
+        num_reqs: int,
+        query_start_loc_cpu: torch.Tensor,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        if not getattr(self.runner, "kv_offload_decode_enabled", False):
+            return None, None
+
+        req_ids_buffer = self.runner._offload_req_ids_tensor
+        token_to_req_buffer = self.runner._offload_token_to_req
+        if req_ids_buffer is None or token_to_req_buffer is None:
+            raise RuntimeError("KV offload decode metadata buffers are not initialized")
+
+        query_lens = np.diff(
+            query_start_loc_cpu[: num_reqs + 1].numpy()
+        ).astype(np.int32, copy=False)
+        token_to_req = np.repeat(np.arange(num_reqs, dtype=np.int32), query_lens)
+        if token_to_req.shape[0] < num_tokens:
+            token_to_req = np.pad(token_to_req, (0, num_tokens - token_to_req.shape[0]))
+
+        req_ids_buffer.np[:num_reqs] = np.arange(1, num_reqs + 1, dtype=np.int64)
+        req_ids_buffer.copy_to_gpu(num_reqs)
+        token_to_req_buffer.np[:num_tokens] = token_to_req[:num_tokens]
+        token_to_req_buffer.copy_to_gpu(num_tokens)
+        return (
+            req_ids_buffer.gpu[:num_reqs],
+            token_to_req_buffer.gpu[:num_tokens],
+        )
+
+    def _freeze_draft_index_attn_metadata(self, attn_metadata):
+        decode_metadata = getattr(attn_metadata, "decode", None)
+        if decode_metadata is not None:
+            if decode_metadata.sas_metadata is not None:
+                decode_metadata.sas_metadata = decode_metadata.sas_metadata.clone()
+        return attn_metadata
+
     @torch.inference_mode()
     def dummy_run(
         self,
@@ -608,6 +645,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # num_reqs is already the padded version
             self.query_start_loc.cpu[: num_reqs + 1].copy_(self.runner.query_start_loc.cpu[: num_reqs + 1])
             copy_snapshot_to_gpu(self.query_start_loc)
+            req_ids_tensor, token_to_req = self._prepare_dummy_kv_offload_metadata(
+                num_tokens,
+                num_reqs,
+                self.query_start_loc.cpu,
+            )
 
             common_attn_metadata = AscendCommonAttentionMetadata(
                 query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
@@ -636,6 +678,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 group_len=self.runner.group_len.gpu[:num_reqs],
                 group_key_idx=self.runner.group_key_idx.gpu[:num_reqs],
                 group_key_cache_idx=self.runner.group_key_cache_idx.gpu[:num_reqs],
+                req_ids_tensor=req_ids_tensor,
+                token_to_req=token_to_req,
             )
             if pcp_manager is not None:
                 # update long_seq related params and flatten block_table
@@ -1884,6 +1928,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.slot_mapping[token_indices]
         )
         common_attn_metadata.slot_mapping[token_indices.shape[0] :].fill_(-1)
+        token_to_req = (
+            common_attn_metadata.token_to_req[token_indices]
+            if common_attn_metadata.token_to_req is not None
+            else None
+        )
 
         # NOTE: Currently positions and seq_lens are not used in attn forward
         # so we do not need to fixed them. But if they are used in the future,
@@ -1918,6 +1967,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             group_len=common_attn_metadata.group_len,
             group_key_idx=common_attn_metadata.group_key_idx,
             group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
+            req_ids_tensor=common_attn_metadata.req_ids_tensor,
+            token_to_req=token_to_req,
         )
         return spec_common_attn_metadata, token_indices
 
@@ -2013,6 +2064,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             group_len=common_attn_metadata.group_len,
             group_key_idx=common_attn_metadata.group_key_idx,
             group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
+            req_ids_tensor=common_attn_metadata.req_ids_tensor,
+            token_to_req=common_attn_metadata.token_to_req,
         )
 
         return spec_common_attn_metadata, token_indices, token_indices_to_sample, num_rejected_tokens_gpu

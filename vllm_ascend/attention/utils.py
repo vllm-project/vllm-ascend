@@ -22,6 +22,14 @@ from vllm_ascend.utils import (
 SFA_QSFA_TILE_SIZE = 128
 
 
+def build_valid_topk_mask(
+    topk_indices: torch.Tensor,
+    seq_len_thresholds: torch.Tensor,
+) -> torch.Tensor:
+    """Mask padding and unwritten tail-block positions in SFA top-k rows."""
+    return (topk_indices >= 0) & (topk_indices < seq_len_thresholds)
+
+
 def get_sfa_qsfa_packed_head_dim(
     kv_lora_rank: int,
     qk_rope_head_dim: int,
@@ -314,6 +322,10 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     group_len: torch.Tensor = None
     group_key_idx: torch.Tensor = None
     group_key_cache_idx: torch.Tensor = None
+    # Per-request / per-token request identity used by the KV offload decode
+    # resident LRU (adler32-hashed request ids and token->request mapping).
+    req_ids_tensor: torch.Tensor | None = None
+    token_to_req: torch.Tensor | None = None
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
@@ -369,6 +381,12 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             group_len=self.group_len,
             group_key_idx=self.group_key_idx,
             group_key_cache_idx=self.group_key_cache_idx,
+            req_ids_tensor=_slice_reqs(self.req_ids_tensor),
+            token_to_req=(
+                self.token_to_req[:num_actual_tokens]
+                if self.token_to_req is not None
+                else None
+            ),
         )
 
 

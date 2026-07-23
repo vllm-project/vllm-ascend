@@ -30,6 +30,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # main-cache property here; indexer-specific C8 properties belong to the
     # indexer spec.
     cache_sparse_c8: bool = False
+    store_on_host: bool = False
 
     @property
     def page_size_bytes(self) -> int:

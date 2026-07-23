@@ -279,6 +279,11 @@ class AscendConfig:
         rejection_sampler_config = additional_config.get("rejection_sampler_config", {})
         self.rejection_sampler_config = RejectionSamplerConfig(rejection_sampler_config)
 
+        self.kv_offload_decode_config = KVOffloadDecodeConfig(
+            self.vllm_config,
+            additional_config.get("kv_offload_decode_config", {}),
+        )
+
     @staticmethod
     def _get_config_value(additional_config: dict[str, Any], config_key: str, env_key: str, env_value: Any) -> Any:
         if config_key in additional_config:
@@ -926,6 +931,37 @@ class SchedulerConfig:
                 env_key,
             )
         return default
+class KVOffloadDecodeConfig:
+    """
+    Configuration for the KV cache offloading (decode).
+    """
+
+    def __init__(self, vllm_config: "VllmConfig", user_config: dict[str, Any]):
+        self.enabled = bool(user_config.get("enabled", False))
+        if not self.enabled:
+            return
+
+        self.topk_buffer_size = int(user_config.get("topk_buffer_size", 4096))
+        self.dram_size_per_dp_GB = user_config.get("dram_size_per_dp_GB", 128)
+
+        if hasattr(vllm_config.model_config.hf_text_config, "compress_ratios"):
+            raise ValueError("KV Offload Decode don't support compress now.")
+        if not hasattr(vllm_config.model_config.hf_text_config, "index_topk"):
+            raise ValueError("KV Offload Decode only support sparse attention model.")
+        # if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
+        #     raise AssertionError(
+        #         "KV Offload Decode is only supported in PD disaggregate scenario "
+        #         "and can only be used in D node."
+        #     )
+
+        self.topk = vllm_config.model_config.hf_text_config.index_topk
+        if self.topk_buffer_size <= 0:
+            raise ValueError("kv_offload_decode_config.topk_buffer_size must be positive")
+        if self.topk_buffer_size < self.topk:
+            raise ValueError(
+                "kv_offload_decode_config.topk_buffer_size must be >= topk, "
+                f"got topk_buffer_size={self.topk_buffer_size}, topk={self.topk}"
+            )
 
 
 _ASCEND_CONFIG: AscendConfig | None = None
