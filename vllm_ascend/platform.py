@@ -407,6 +407,42 @@ class NPUPlatform(Platform):
                 f"({decode_context_parallel_size})."
             )
 
+    @staticmethod
+    def _disable_unsupported_310p_cp_async_dflash(
+        vllm_config: VllmConfig,
+    ) -> None:
+        speculative_config = getattr(vllm_config, "speculative_config", None)
+        scheduler_config = getattr(vllm_config, "scheduler_config", None)
+        parallel_config = getattr(vllm_config, "parallel_config", None)
+        if (
+            not is_310p()
+            or speculative_config is None
+            or getattr(speculative_config, "method", None) != "dflash"
+            or scheduler_config is None
+            or not getattr(scheduler_config, "async_scheduling", False)
+            or parallel_config is None
+        ):
+            return
+
+        uses_context_parallel = (
+            getattr(parallel_config, "decode_context_parallel_size", 1) > 1
+            or getattr(
+                parallel_config,
+                "prefill_context_parallel_size",
+                1,
+            )
+            > 1
+        )
+        if not uses_context_parallel:
+            return
+
+        logger.warning(
+            "Asynchronous DFlash on 310P currently supports single-rank "
+            "metadata preparation only; disabling async scheduling because "
+            "context parallelism is enabled."
+        )
+        scheduler_config.async_scheduling = False
+
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
@@ -427,6 +463,7 @@ class NPUPlatform(Platform):
 
         cls._validate_draft_decode_context_parallel_config(vllm_config)
         cls._validate_parallel_config(vllm_config)
+        cls._disable_unsupported_310p_cp_async_dflash(vllm_config)
 
         # initialize ascend config from vllm additional_config
         cls._fix_incompatible_config(vllm_config)

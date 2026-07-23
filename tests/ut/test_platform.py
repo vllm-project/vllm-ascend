@@ -760,6 +760,36 @@ class TestNPUPlatform(TestBase):
 
         self.platform._validate_parallel_config(vllm_config)
 
+    @patch("vllm_ascend.platform.is_310p", return_value=True)
+    def test_keep_310p_single_rank_async_dflash(self, _mock_is_310p):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.speculative_config = MagicMock(method="dflash")
+        vllm_config.scheduler_config.async_scheduling = True
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+
+        self.platform._disable_unsupported_310p_cp_async_dflash(vllm_config)
+
+        self.assertTrue(vllm_config.scheduler_config.async_scheduling)
+
+    @patch("vllm_ascend.platform.is_310p", return_value=True)
+    def test_disable_310p_cp_async_dflash(self, _mock_is_310p):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.speculative_config = MagicMock(method="dflash")
+        vllm_config.scheduler_config.async_scheduling = True
+        vllm_config.parallel_config.decode_context_parallel_size = 2
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+
+        with self.assertLogs(logger="vllm", level="WARNING") as logs:
+            self.platform._disable_unsupported_310p_cp_async_dflash(
+                vllm_config
+            )
+
+        self.assertFalse(vllm_config.scheduler_config.async_scheduling)
+        self.assertTrue(
+            any("context parallelism" in message for message in logs.output)
+        )
+
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")

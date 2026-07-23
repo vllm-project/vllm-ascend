@@ -23,6 +23,9 @@ from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 from tests.ut.base import TestBase
 from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
+from vllm_ascend.spec_decode.utils import (
+    update_num_computed_tokens_for_batch_change,
+)
 
 
 def _prepare_inputs_source() -> str:
@@ -33,7 +36,7 @@ def _prepare_inputs_source() -> str:
     return source[start:end]
 
 
-def test_prepare_inputs_keeps_aclgraph_metadata_on_cpu() -> None:
+def test_prepare_inputs_uses_device_metadata_after_async_correction() -> None:
     source = _prepare_inputs_source()
 
     assert "block_table.compute_slot_mapping(" in source
@@ -42,12 +45,16 @@ def test_prepare_inputs_keeps_aclgraph_metadata_on_cpu() -> None:
 
     assert "self.input_batch.block_table.compute_slot_mapping(" not in source
     assert "query_start_loc.gpu[: num_reqs + 1]" not in source
-    assert "req_indices_gpu" not in source
-    assert "self.num_computed_tokens[req_indices_gpu]" not in source
+    assert "use_async_device_metadata" in source
+    assert "and not self.use_cp" in source
+    assert "self.num_accepted_tokens.gpu.fill_(1)" in source
+    assert "valid_sampled_token_count_gpu" in source
+    assert "block_table.compute_slot_mapping_device(" in source
+    assert "self.num_computed_tokens[req_indices_gpu]" in source
 
     assert "self.positions[:total_num_scheduled_tokens].copy_(" in source
     assert "self._positions_cpu_buf[:total_num_scheduled_tokens]" in source
-    assert "self.seq_lens[:num_reqs].copy_(" in source
+    assert "self.seq_lens[:num_reqs] = self.num_computed_tokens" in source
     assert "self.optimistic_seq_lens_cpu[:num_reqs]" in source
 
 
@@ -88,6 +95,33 @@ def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
 
     assert calls == ["update", "model"]
     torch.testing.assert_close(hidden_states, torch.ones(1))
+
+
+def test_async_correction_remaps_lengths_and_accepted_counts() -> None:
+    num_computed_tokens = torch.tensor([10, 20, 0], dtype=torch.int32)
+    num_accepted_tokens = torch.ones(3, dtype=torch.int32)
+    prev_positions = torch.tensor([1, 0, -1], dtype=torch.int32)
+    valid_sampled_token_count = torch.tensor([4, 2], dtype=torch.int32)
+    prev_num_draft_tokens = torch.tensor([15, 15], dtype=torch.int32)
+    cpu_num_computed_tokens = torch.tensor([21, 11, 5], dtype=torch.int32)
+
+    update_num_computed_tokens_for_batch_change(
+        num_computed_tokens,
+        num_accepted_tokens,
+        prev_positions,
+        valid_sampled_token_count,
+        prev_num_draft_tokens,
+        cpu_num_computed_tokens,
+    )
+
+    torch.testing.assert_close(
+        num_computed_tokens,
+        torch.tensor([22, 14, 5], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        num_accepted_tokens,
+        torch.tensor([2, 4, 1], dtype=torch.int32),
+    )
 
 
 class TestNPUModelRunner310(TestBase):

@@ -339,10 +339,18 @@ class NPUModelRunner310(NPUModelRunner):
             out=positions_np,
         )
         block_table = cast(MultiGroupBlockTable310, self.input_batch.block_table)
-        block_table.compute_slot_mapping(
-            req_indices,
-            positions_np[:total_num_scheduled_tokens],
+        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+        use_async_device_metadata = (
+            self.use_async_spec_decode
+            and self.valid_sampled_token_count_gpu is not None
+            and bool(prev_req_id_to_index)
+            and not self.use_cp
         )
+        if not use_async_device_metadata:
+            block_table.compute_slot_mapping(
+                req_indices,
+                positions_np[:total_num_scheduled_tokens],
+            )
 
         if self.use_cp:
             self.pcp_manager.init_batch_info(
@@ -467,6 +475,8 @@ class NPUModelRunner310(NPUModelRunner):
         )
         self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
 
+        self._compute_prev_positions(num_reqs)
+
         if not is_rc_device():
             self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
 
@@ -503,6 +513,50 @@ class NPUModelRunner310(NPUModelRunner):
         self.discard_request_indices.np[: self.num_discarded_requests] = discard_request_indices
         self.discard_request_indices.copy_to_gpu(self.num_discarded_requests)
 
+        if use_async_device_metadata:
+            # Keep the previous step's accepted count on device. The async
+            # correction below remaps valid_sampled_token_count_gpu using
+            # prev_positions and overwrites participating decode requests.
+            # New and non-draft requests start with the single target token.
+            self.num_accepted_tokens.gpu.fill_(1)
+        elif self.num_accepted_tokens_event is not None:
+            self.num_accepted_tokens_event.synchronize()
+            if self.use_async_scheduling and prev_req_id_to_index:
+                prev_idx = self.prev_positions.np[:num_reqs]
+                new_mask = prev_idx < 0
+                self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[
+                    np.where(new_mask, 0, prev_idx)
+                ]
+                self.num_accepted_tokens.np[:num_reqs][new_mask] = 1
+                self.input_batch.num_accepted_tokens_cpu[:num_reqs] = self.num_accepted_tokens.np[:num_reqs]
+            else:
+                self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+            self.num_accepted_tokens.np[num_reqs:].fill(1)
+            self.num_accepted_tokens.copy_to_gpu()
+        else:
+            self.num_accepted_tokens.np.fill(1)
+            self.num_accepted_tokens.gpu.fill_(1)
+
+        if use_async_device_metadata:
+            self.prev_positions.copy_to_gpu(num_reqs)
+            self.prev_num_draft_tokens.copy_to_gpu()
+            cpu_values = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
+                device=self.device, non_blocking=True
+            )
+            update_num_computed_tokens_for_batch_change(
+                self.num_computed_tokens,
+                self.num_accepted_tokens.gpu[:num_reqs],
+                self.prev_positions.gpu[:num_reqs],
+                self.valid_sampled_token_count_gpu,
+                self.prev_num_draft_tokens.gpu,
+                cpu_values,
+            )
+        else:
+            self.num_computed_tokens[:num_reqs].copy_(
+                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
+                non_blocking=True,
+            )
+
         self.req_indices.np[:total_num_scheduled_tokens] = req_indices
         self.req_indices.copy_to_gpu(total_num_scheduled_tokens)
 
@@ -514,7 +568,16 @@ class NPUModelRunner310(NPUModelRunner):
             self._positions_cpu_buf[:total_num_scheduled_tokens],
             non_blocking=True,
         )
-        if need_async_num_computed_update:
+        if use_async_device_metadata:
+            req_indices_gpu = self.req_indices.gpu[:total_num_scheduled_tokens]
+            self.positions[:total_num_scheduled_tokens] = (
+                self.num_computed_tokens[req_indices_gpu].to(torch.int64)
+                + self.query_pos.gpu[:total_num_scheduled_tokens]
+            )
+            block_table.compute_slot_mapping_device(
+                req_indices_gpu,
+                self.positions[:total_num_scheduled_tokens],
+            )
             self.seq_lens[:num_reqs] = self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
             if is_rc_device():
                 tail_len = self.seq_lens.shape[0] - num_reqs
@@ -535,6 +598,21 @@ class NPUModelRunner310(NPUModelRunner):
                 )
         if not is_rc_device():
             self.seq_lens[num_reqs:].fill_(0)
+
+        if use_async_device_metadata and (
+            self.uses_mrope or self.uses_xdrope_dim > 0
+        ):
+            req_indices_gpu = self.req_indices.gpu[:total_num_scheduled_tokens]
+            drift = (
+                self.num_computed_tokens[req_indices_gpu].to(torch.int64)
+                - cpu_values[req_indices_gpu]
+            )
+            target = (
+                self.mrope_positions
+                if self.uses_mrope
+                else self.xdrope_positions
+            )
+            target.gpu[:, :total_num_scheduled_tokens] += drift
 
         if (
             self._needs_seq_lens_cpu_sync

@@ -16,6 +16,93 @@ class BlockTable(AscendBlockTable):
         req_indices, positions = self._normalize_slot_mapping_inputs(*args)
         self._compute_slot_mapping_numpy(req_indices, positions)
 
+    def compute_slot_mapping_device(
+        self,
+        req_indices: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> None:
+        """Build slot mapping on the NPU from corrected decode positions.
+
+        Async speculative decoding keeps CPU sequence lengths optimistic until
+        the previous step's acceptance result is consumed on device. Computing
+        slot mapping from CPU positions would therefore address rejected draft
+        slots. This torch-only implementation avoids the Triton kernel that is
+        unavailable on 310P while keeping the corrected positions on device.
+        """
+        if req_indices.device.type == "cpu" or positions.device.type == "cpu":
+            raise TypeError(
+                "compute_slot_mapping_device expects device req_indices and positions"
+            )
+        if req_indices.device != positions.device:
+            raise ValueError(
+                "req_indices and positions must be on the same device"
+            )
+
+        slot_mapping = self._compute_slot_mapping_torch(
+            req_indices,
+            positions,
+        )
+        self.slot_mapping.gpu[: positions.shape[0]].copy_(
+            slot_mapping.to(dtype=self.slot_mapping.gpu.dtype)
+        )
+
+    def _compute_slot_mapping_torch(
+        self,
+        req_indices: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        if positions.shape[0] == 0:
+            return torch.empty(
+                0,
+                dtype=self.slot_mapping.gpu.dtype,
+                device=positions.device,
+            )
+
+        row_stride = self.max_num_blocks_per_req * self.blocks_per_phys_block
+        total_cp_world_size = self.dcp_world_size * self.pcp_world_size
+        req_indices_i32 = req_indices.to(torch.int32)
+        positions_i32 = positions.to(torch.int32)
+        if total_cp_world_size > 1:
+            virtual_block_size = self.block_size * total_cp_world_size
+            logical_block_idx = positions_i32 // virtual_block_size
+            block_table_indices = (
+                req_indices_i32 * row_stride + logical_block_idx
+            ).to(torch.int64)
+            block_numbers = self.block_table.gpu.flatten()[block_table_indices]
+            virtual_block_offsets = positions_i32 % virtual_block_size
+            current_rank = self.dcp_world_size * self.pcp_rank + self.dcp_rank
+            mask = (
+                virtual_block_offsets
+                // self.cp_kv_cache_interleave_size
+                % total_cp_world_size
+                == current_rank
+            )
+            block_offsets = (
+                virtual_block_offsets
+                // (
+                    total_cp_world_size
+                    * self.cp_kv_cache_interleave_size
+                )
+                * self.cp_kv_cache_interleave_size
+                + virtual_block_offsets % self.cp_kv_cache_interleave_size
+            )
+            slot_mapping = block_numbers * self.block_size + block_offsets
+            slot_mapping = torch.where(
+                mask,
+                slot_mapping,
+                torch.full_like(slot_mapping, PAD_SLOT_ID),
+            )
+        else:
+            logical_block_idx = positions_i32 // self.block_size
+            block_table_indices = (
+                req_indices_i32 * row_stride + logical_block_idx
+            ).to(torch.int64)
+            block_numbers = self.block_table.gpu.flatten()[block_table_indices]
+            block_offsets = positions_i32 % self.block_size
+            slot_mapping = block_numbers * self.block_size + block_offsets
+
+        return slot_mapping
+
     def _compute_slot_mapping_numpy(self, req_indices: np.ndarray, positions: np.ndarray) -> None:
         num_tokens = positions.shape[0]
         if num_tokens == 0:
@@ -183,6 +270,15 @@ class MultiGroupBlockTable(AscendMultiGroupBlockTable):
                     query_start_loc_or_positions,
                     positions,
                 )
+
+    def compute_slot_mapping_device(
+        self,
+        req_indices: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> None:
+        for block_table_base in self.block_tables:
+            block_table = cast(BlockTable, block_table_base)
+            block_table.compute_slot_mapping_device(req_indices, positions)
 
     def compute_slot_mapping_draft(
         self,

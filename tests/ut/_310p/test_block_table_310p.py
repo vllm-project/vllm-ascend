@@ -232,6 +232,41 @@ class TestBlockTable310(TestBase):
         with self.assertRaisesRegex(TypeError, "D2H"):
             block_table.compute_slot_mapping(2, device_query_start_loc, positions)
 
+    def test_compute_slot_mapping_device_matches_cpu_reference(self):
+        block_table = self._create_block_table(
+            dcp_world_size=1,
+            dcp_rank=0,
+            pcp_world_size=1,
+            pcp_rank=0,
+            cp_kv_cache_interleave_size=1,
+        )
+        self._setup_block_table_data(block_table, num_reqs=2)
+        block_table.commit_block_table(2)
+
+        req_indices = np.array([0, 0, 1, 1], dtype=np.int64)
+        positions = np.array([0, 129, 3, 255], dtype=np.int64)
+        block_table.compute_slot_mapping(req_indices, positions)
+        expected = block_table.slot_mapping.np[:4].copy()
+
+        actual = block_table._compute_slot_mapping_torch(
+            torch.from_numpy(req_indices),
+            torch.from_numpy(positions),
+        )
+        np.testing.assert_array_equal(actual.numpy(), expected)
+
+        with self.assertRaisesRegex(TypeError, "device req_indices"):
+            block_table.compute_slot_mapping_device(
+                torch.from_numpy(req_indices),
+                torch.from_numpy(positions),
+            )
+
+        # The actual device arithmetic is covered by the 310P runtime test.
+        # Keep the expected mapping explicit for easy regression diagnosis.
+        np.testing.assert_array_equal(
+            expected,
+            np.array([0, 129, 515, 767], dtype=np.int32),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
