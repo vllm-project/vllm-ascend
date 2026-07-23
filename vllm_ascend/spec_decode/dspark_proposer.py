@@ -5,7 +5,7 @@ from copy import copy
 from typing import Any
 
 import torch
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -26,6 +26,18 @@ class AscendDSparkProposer(AscendDflashProposer):
     The draft model uses the target model's selected hidden layers as context
     and emits one DSpark draft block in a single model forward.
     """
+
+    def _create_draft_vllm_config(self) -> VllmConfig:
+        draft_vllm_config = super()._create_draft_vllm_config()
+        if not self.speculative_config.enforce_eager:
+            return draft_vllm_config
+
+        draft_vllm_config = copy(draft_vllm_config)
+        draft_compilation_config = copy(draft_vllm_config.compilation_config)
+        draft_compilation_config.mode = CompilationMode.NONE
+        draft_compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        draft_vllm_config.compilation_config = draft_compilation_config
+        return draft_vllm_config
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device, runner=None):
         super().__init__(vllm_config, device, runner=runner)
