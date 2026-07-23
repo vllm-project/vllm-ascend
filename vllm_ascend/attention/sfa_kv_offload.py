@@ -26,6 +26,7 @@ from vllm.forward_context import (
     get_forward_context,
     is_forward_context_available,
 )
+from vllm.logger import logger
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -33,6 +34,7 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
+    PreprocessType,
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -167,12 +169,14 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             raise NotImplementedError("KV offload decode currently requires TP without context parallelism")
         if self.use_sparse_c8_sfa or self.use_sparse_c8_indexer:
             raise NotImplementedError("KV offload decode does not support sparse C8 yet")
-        if self.enable_sfa_prolog_v3 or self.enable_mlapo:
-            raise NotImplementedError(
-                "KV offload decode requires the native SFA preprocessing path; "
-                "sfa_prolog_v3/mlapo must be disabled"
-            )
         self._current_layer_name: str | None = None
+
+    def _resolve_preprocess_type(self, act_dtype: torch.dtype) -> PreprocessType:
+        logger.warning(
+            "KV offload decode requires the native SFA preprocessing path; "
+            "sfa_prolog_v3/mlapo is disabled."
+        )
+        return PreprocessType.NATIVE
 
     @staticmethod
     def _cpu_cache_pair(manager, layer_name: str):
