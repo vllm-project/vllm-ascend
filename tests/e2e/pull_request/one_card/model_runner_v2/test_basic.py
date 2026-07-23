@@ -35,6 +35,7 @@ DFLASH_MODELS = ["z-lab/Qwen3-8B-DFlash-b16"]
 DSPARK_MAIN_MODEL = ["Qwen/Qwen3-8B"]
 DSPARK_MODELS = ["deepseek-ai/dspark_qwen3_8b_block7"]
 
+# TODO: drop this skip when v0.25.1 maintenance is removed.
 _SKIP_V025_MRV2_SPEC_DECODE = pytest.mark.skipif(
     vllm_version_is("0.25.1"),
     reason="MRV2 speculative decoding is only supported on the verified vLLM main commit",

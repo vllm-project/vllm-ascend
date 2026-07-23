@@ -377,13 +377,7 @@ def _find_longest_cache_hit(
     manager_cls: type[SingleTypeKVCacheManager],
     **kwargs: Any,
 ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
-    try:
-        hit_result = manager_cls.find_longest_cache_hit(**kwargs)
-    except TypeError as exc:
-        if "drop_eagle_block" not in str(exc):
-            raise
-        kwargs["use_eagle"] = kwargs.pop("drop_eagle_block")
-        hit_result = manager_cls.find_longest_cache_hit(**kwargs)
+    hit_result = manager_cls.find_longest_cache_hit(**kwargs)
     if vllm_version_is("0.25.1"):
         hit_blocks = cast(tuple[list[KVCacheBlock], ...], hit_result)
         hit_length = len(hit_blocks[0]) * kwargs["kv_cache_spec"].block_size

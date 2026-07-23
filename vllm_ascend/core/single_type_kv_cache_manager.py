@@ -64,6 +64,7 @@ class CompressAttentionManager(FullAttentionManager):
                 apply_admission_cap=apply_admission_cap,
             )
 
+        # TODO: remove this assertion when v0.25.1 maintenance is dropped.
         assert num_local_computed_tokens is not None and num_tokens_main_model is not None
         num_tokens_main_model //= self.compress_ratio
         return super().get_num_blocks_to_allocate(
