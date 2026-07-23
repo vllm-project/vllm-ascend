@@ -66,9 +66,53 @@ class AttentionMaskBuilder:
         max_query_len: int,
         rswa_window: int,
     ) -> torch.Tensor:
-        prefix_lens = prefix_lens.to(device=self.device, dtype=torch.int64, non_blocking=True).view(-1, 1, 1)
-        seq_lens = seq_lens.to(device=self.device, dtype=torch.int64, non_blocking=True).view(-1, 1, 1)
-        query_lens = query_lens.to(device=self.device, dtype=torch.int64, non_blocking=True).view(-1, 1, 1)
+        if not isinstance(rswa_window, int) or isinstance(rswa_window, bool) or rswa_window <= 0:
+            raise ValueError(f"rswa_window must be a positive integer, got {rswa_window!r}")
+        if not isinstance(max_kv_len, int) or max_kv_len <= 0:
+            raise ValueError(f"max_kv_len must be a positive integer, got {max_kv_len!r}")
+        if not isinstance(max_query_len, int) or max_query_len <= 0:
+            raise ValueError(f"max_query_len must be a positive integer, got {max_query_len!r}")
+
+        prefix_lens = prefix_lens.to(device=self.device, dtype=torch.int64, non_blocking=True).reshape(-1)
+        seq_lens = seq_lens.to(device=self.device, dtype=torch.int64, non_blocking=True).reshape(-1)
+        query_lens = query_lens.to(device=self.device, dtype=torch.int64, non_blocking=True).reshape(-1)
+        num_reqs = prefix_lens.numel()
+        if seq_lens.numel() != num_reqs or query_lens.numel() != num_reqs:
+            raise ValueError(
+                "R-SWA metadata tensors must have the same number of requests: "
+                f"prefix={num_reqs}, seq={seq_lens.numel()}, query={query_lens.numel()}"
+            )
+
+        # An int8 mask still becomes very large for long-context batches. Fail
+        # before allocating a multi-gigabyte temporary instead of surfacing an
+        # opaque device OOM from one of the arange/broadcast operations.
+        mask_elements = num_reqs * max_query_len * max_kv_len
+        if mask_elements > (1 << 29):
+            raise ValueError(
+                "R-SWA mask is too large: "
+                f"{num_reqs}*{max_query_len}*{max_kv_len}={mask_elements} elements"
+            )
+
+        # Keep validation device-side so V2 prompt lengths do not trigger a
+        # synchronous GPU/NPU-to-host copy on the forward path.
+        torch._assert(torch.all(prefix_lens >= 0), "R-SWA prefix_lens must be non-negative")
+        torch._assert(torch.all(seq_lens >= 0), "R-SWA seq_lens must be non-negative")
+        torch._assert(torch.all(query_lens >= 0), "R-SWA query_lens must be non-negative")
+        torch._assert(torch.all(prefix_lens <= seq_lens), "R-SWA prefix_lens must be <= seq_lens")
+        torch._assert(torch.all(query_lens <= seq_lens), "R-SWA query_lens must be <= seq_lens")
+        torch._assert(torch.all(seq_lens <= max_kv_len), "R-SWA seq_lens exceeds max_kv_len")
+        torch._assert(torch.all(query_lens <= max_query_len), "R-SWA query_lens exceeds max_query_len")
+
+        if num_reqs == 0:
+            return torch.ones(
+                (0, 1, max_query_len, max_kv_len),
+                dtype=torch.int8,
+                device=self.device,
+            )
+
+        prefix_lens = prefix_lens.view(-1, 1, 1)
+        seq_lens = seq_lens.view(-1, 1, 1)
+        query_lens = query_lens.view(-1, 1, 1)
 
         query_offsets = torch.arange(
             max_query_len,

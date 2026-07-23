@@ -125,6 +125,11 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
 
         block_table = common_attn_metadata.block_table_tensor
         query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+        if getattr(self.model_config, "rswa_window", None) is not None:
+            raise NotImplementedError(
+                "R-SWA is not supported with Ascend context-parallel attention yet; "
+                "disable context parallelism for this model"
+            )
         # Prefer ``_seq_lens_cpu`` (upstream-canonical, always populated by
         # the model runner via optimistic_seq_lens_cpu); fall back to the
         # Ascend subclass field, then to a GPU->CPU copy if both are absent.

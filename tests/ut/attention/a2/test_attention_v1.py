@@ -29,18 +29,16 @@ LARGE_HEAD_PREFILL_PATH = "vllm_ascend.device.utils.npu_large_head_prefill_atten
 
 class TestAttentionGraphHelpers(TestBase):
     def test_uses_rswa_requires_window_and_prefix_lens(self):
-        metadata = SimpleNamespace(
-            rswa_window=128,
-            rswa_prefix_lens=torch.tensor([4], dtype=torch.int32),
-        )
+        metadata = SimpleNamespace(sparse_mode=0)
         self.assertTrue(attn_module._uses_rswa(metadata))
 
-        metadata.rswa_window = None
+        metadata.sparse_mode = None
         self.assertFalse(attn_module._uses_rswa(metadata))
 
-        metadata.rswa_window = 128
-        metadata.rswa_prefix_lens = None
+        metadata.sparse_mode = 3
         self.assertFalse(attn_module._uses_rswa(metadata))
+
+        self.assertFalse(attn_module._uses_rswa(SimpleNamespace()))
 
     def test_cache_graph_workspace_keeps_first_workspace_by_default(self):
         graph_params = SimpleNamespace(workspaces={1: torch.empty(4)})
@@ -117,7 +115,9 @@ class TestAscendAttentionMetadataBuilder(TestBase):
     def setUp(self):
         self.mock_vllm_config = MagicMock()
         self.mock_vllm_config.speculative_config = None
+        self.mock_vllm_config.quant_config = None
         self.mock_vllm_config.model_config.max_model_len = 640
+        self.mock_vllm_config.model_config.rswa_window = None
         self.mock_vllm_config.model_config.hf_text_config.sliding_window = None
         self.mock_vllm_config.cache_config.block_size = 64
         self.mock_vllm_config.compilation_config.cudagraph_mode = None
@@ -188,6 +188,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         get_attention_mask.assert_not_called()
         self.assertIs(metadata.attn_mask, rswa_mask)
         self.assertEqual(metadata.rswa_window, 3)
+        self.assertEqual(metadata.sparse_mode, 0)
         self.assertTrue(torch.equal(metadata.rswa_prefix_lens, torch.tensor([4])))
 
     def test_build_preserves_non_rswa_mask_path(self):
@@ -220,6 +221,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.assertIs(metadata.attn_mask, default_mask)
         self.assertIsNone(metadata.rswa_window)
         self.assertIsNone(metadata.rswa_prefix_lens)
+        self.assertIsNone(metadata.sparse_mode)
 
     @patch("vllm_ascend.attention.attention_v1.AscendMetadata")
     def test_build(self, mock_ascend_metadata):
