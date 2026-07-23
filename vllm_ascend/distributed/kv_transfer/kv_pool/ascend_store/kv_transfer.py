@@ -144,14 +144,16 @@ class LayerBatchBuilder:
         self,
         block_range: LayerBlockRange,
         is_save: bool = True,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, int]:
         request = block_range.request
         group_id = self.group_id
         block_ids_np: np.ndarray | None
         block_gvas_np: np.ndarray | None
+        gva_block_offset: int
         if is_save:
             group_block_ids = request.block_ids_by_group_np
             group_block_gvas = request.block_gvas_by_group_np
+            group_gva_offsets = request.gva_block_offsets_by_group
             if (
                 group_block_ids is not None
                 and group_block_gvas is not None
@@ -160,12 +162,19 @@ class LayerBatchBuilder:
             ):
                 block_ids_np = group_block_ids[group_id]
                 block_gvas_np = group_block_gvas[group_id]
+                gva_block_offset = (
+                    group_gva_offsets[group_id]
+                    if group_gva_offsets is not None and group_id < len(group_gva_offsets)
+                    else request.gva_block_offset
+                )
             else:
                 block_ids_np = request.block_ids_np
                 block_gvas_np = request.block_gvas_np
+                gva_block_offset = request.gva_block_offset
         else:
             group_block_ids = request.block_ids_by_group_np
             group_block_gvas = request.load_block_gvas_by_group_np
+            group_gva_offsets = request.load_gva_block_offsets_by_group
             if (
                 group_block_ids is not None
                 and group_block_gvas is not None
@@ -174,15 +183,21 @@ class LayerBatchBuilder:
             ):
                 block_ids_np = group_block_ids[group_id]
                 block_gvas_np = group_block_gvas[group_id]
+                gva_block_offset = (
+                    group_gva_offsets[group_id]
+                    if group_gva_offsets is not None and group_id < len(group_gva_offsets)
+                    else request.load_gva_block_offset
+                )
             else:
                 block_ids_np = request.block_ids_np
                 block_gvas_np = request.load_block_gvas_np
+                gva_block_offset = request.load_gva_block_offset
         if block_ids_np is None or block_gvas_np is None:
             raise RuntimeError(
                 f"ReqMeta {'save' if is_save else 'load'} block metadata"
                 f" is not initialized for request {request.req_id}"
             )
-        return block_ids_np, block_gvas_np
+        return block_ids_np, block_gvas_np, gva_block_offset
 
     def build_shared(self, task: LayerTransferTask, is_save: bool = True) -> SharedBlockData | None:
         """Pre-compute shared block data that is identical across all layers."""
@@ -207,8 +222,7 @@ class LayerBatchBuilder:
             is_last_chunks.append(request.is_last_chunk)
             if request.load_keys:
                 all_load_keys.extend(request.load_keys)
-            block_ids_np, block_gvas_np = self._require_request_arrays(block_range, is_save)
-            gva_block_offset = request.gva_block_offset if is_save else request.load_gva_block_offset
+            block_ids_np, block_gvas_np, gva_block_offset = self._require_request_arrays(block_range, is_save)
 
             num_blocks = block_range.end_block - block_range.start_block
             if num_blocks > 0:

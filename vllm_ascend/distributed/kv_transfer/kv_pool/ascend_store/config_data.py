@@ -860,9 +860,11 @@ class ReqMeta:
         block_gvas_np: np.ndarray | None = None,
         block_gvas_by_group_np: list[np.ndarray] | None = None,
         gva_block_offset: int = 0,
+        gva_block_offsets_by_group: list[int] | None = None,
         load_block_gvas_np: np.ndarray | None = None,
         load_block_gvas_by_group_np: list[np.ndarray] | None = None,
         load_gva_block_offset: int = 0,
+        load_gva_block_offsets_by_group: list[int] | None = None,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
@@ -897,9 +899,11 @@ class ReqMeta:
         self.block_gvas_np = block_gvas_np
         self.block_gvas_by_group_np = block_gvas_by_group_np
         self.gva_block_offset = gva_block_offset
+        self.gva_block_offsets_by_group = gva_block_offsets_by_group
         self.load_block_gvas_np = load_block_gvas_np
         self.load_block_gvas_by_group_np = load_block_gvas_by_group_np
         self.load_gva_block_offset = load_gva_block_offset
+        self.load_gva_block_offsets_by_group = load_gva_block_offsets_by_group
 
     @property
     def block_ids(self) -> list[int]:
@@ -923,7 +927,11 @@ class ReqMeta:
     block_gvas_np: np.ndarray | None = None
     block_gvas_by_group_np: list[np.ndarray] | None = None
     gva_block_offset: int = 0
+    gva_block_offsets_by_group: list[int] | None = None
+    load_block_gvas_np: np.ndarray | None = None
     load_block_gvas_by_group_np: list[np.ndarray] | None = None
+    load_gva_block_offset: int = 0
+    load_gva_block_offsets_by_group: list[int] | None = None
 
     @staticmethod
     def from_request_tracker(
