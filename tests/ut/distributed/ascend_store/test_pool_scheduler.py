@@ -410,6 +410,44 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         _meta = scheduler.build_connector_meta(sched_output)
         self.assertNotIn("r1", scheduler._request_trackers)
 
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_layer_reuse_decode_reloads_prefix_without_new_blocks(self, mock_client_cls):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import RequestTracker
+
+        scheduler = KVPoolScheduler(self._make_config(), use_layerwise=False)
+        scheduler.layerwise_offload = True
+        scheduler.save_decode_cache = False
+        scheduler._request_trackers["r1"] = RequestTracker(
+            req_id="r1",
+            token_len=32,
+            allocated_block_ids=[0, 1],
+            token_ids=list(range(32)),
+            num_prompt_tokens=16,
+        )
+        request = MagicMock()
+        request.num_computed_tokens = 32
+        request.num_prompt_tokens = 16
+        request.all_token_ids = list(range(33))
+        request.prompt_token_ids = list(range(16))
+        request.block_hashes = [b"h0", b"h1"]
+        scheduler._unfinished_requests["r1"] = (request, [[0, 1]])
+        scheduler_output = MagicMock()
+        scheduler_output.num_scheduled_tokens = {"r1": 1}
+
+        req_meta = scheduler._process_running_cached_request(
+            None,
+            "r1",
+            0,
+            MagicMock(),
+            scheduler_output,
+            False,
+        )
+
+        self.assertIsNotNone(req_meta)
+        self.assertTrue(req_meta.load_spec.can_load)
+        self.assertEqual(req_meta.load_spec.vllm_cached_tokens, 32)
+        self.assertEqual(req_meta.load_spec.kvpool_cached_tokens, 32)
+
 
 class TestLookupKeyClient(unittest.TestCase):
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
@@ -441,57 +479,6 @@ class TestLookupKeyClient(unittest.TestCase):
         client = LookupKeyClient(config)
         client.close()
         mock_socket.close.assert_called_once_with(linger=0)
-
-
-class TestKVPoolSchedulerGenerateKeys(unittest.TestCase):
-    """Test generate_keys method."""
-
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
-    def _make_scheduler(self, mock_client_cls):
-        config = MagicMock()
-        config.kv_transfer_config.kv_role = "kv_producer"
-        config.kv_transfer_config.kv_connector_extra_config = {}
-        config.kv_transfer_config.get_from_extra_config.return_value = True
-        config.parallel_config.data_parallel_rank = 0
-        config.parallel_config.prefill_context_parallel_size = 1
-        config.parallel_config.decode_context_parallel_size = 1
-        config.parallel_config.tensor_parallel_size = 1
-        config.parallel_config.pipeline_parallel_size = 1
-        config.parallel_config.rank = 0
-        config.parallel_config.world_size = 1
-        config.cache_config.block_size = 16
-        config.cache_config.hash_block_size = 16
-        # Concrete model_config values so KVPoolScheduler.__init__ int math
-        # (num_kv_head < tp_size, get_num_layers, model name split, ...) works.
-        config.model_config.model = "org/llama-7b"
-        config.model_config.use_mla = False
-        config.model_config.hf_text_config = MagicMock(spec=[])
-        config.model_config.get_total_num_kv_heads.return_value = 1
-        config.model_config.get_num_layers.return_value = 2
-        return KVPoolScheduler(config, use_layerwise=False)
-
-    def test_generate_keys_basic(self):
-        scheduler = self._make_scheduler()
-        block_hashes = [b"\xaa\xbb", b"\xcc\xdd"]
-        keys, last_key = scheduler.generate_keys(block_hashes)
-        self.assertEqual(len(keys), 2)
-        self.assertIsNone(last_key)
-        self.assertIn("aabb", keys[0])
-        self.assertIn("ccdd", keys[1])
-
-    def test_generate_keys_with_last_block(self):
-        scheduler = self._make_scheduler()
-        block_hashes = [b"\xaa\xbb"]
-        keys, last_key = scheduler.generate_keys(block_hashes, req_id="r1", has_last_block=True)
-        self.assertEqual(len(keys), 1)
-        self.assertIsNotNone(last_key)
-        self.assertIn("r1_lastblock", last_key)
-
-    def test_generate_keys_empty(self):
-        scheduler = self._make_scheduler()
-        keys, last_key = scheduler.generate_keys([])
-        self.assertEqual(keys, [])
-        self.assertIsNone(last_key)
 
 
 class TestKVPoolSchedulerStoreQueryKeys(unittest.TestCase):
@@ -1104,10 +1091,7 @@ class TestKVPoolSchedulerGetLayerwiseGvaHitTokens(unittest.TestCase):
 
     def test_all_hit(self):
         scheduler = self._make_scheduler()
-        key_info = MagicMock()
-        key_info.size.return_value = 1
-        key_info.gva_list.return_value = [0x1000]
-        scheduler.store_scheduler.batch_get_key_info.return_value = [key_info, key_info]
+        scheduler.store_scheduler.batch_is_exist.return_value = [1, 1]
 
         request = MagicMock()
         request.block_hashes = [b"\xaa", b"\xbb"]
@@ -1116,12 +1100,7 @@ class TestKVPoolSchedulerGetLayerwiseGvaHitTokens(unittest.TestCase):
 
     def test_partial_hit(self):
         scheduler = self._make_scheduler()
-        hit_info = MagicMock()
-        hit_info.size.return_value = 1
-        hit_info.gva_list.return_value = [0x1000]
-        miss_info = MagicMock()
-        miss_info.size.return_value = 0
-        scheduler.store_scheduler.batch_get_key_info.return_value = [hit_info, miss_info]
+        scheduler.store_scheduler.batch_is_exist.return_value = [1, 0]
 
         request = MagicMock()
         request.block_hashes = [b"\xaa", b"\xbb"]
@@ -1130,26 +1109,50 @@ class TestKVPoolSchedulerGetLayerwiseGvaHitTokens(unittest.TestCase):
 
     def test_no_hit(self):
         scheduler = self._make_scheduler()
-        miss_info = MagicMock()
-        miss_info.size.return_value = 0
-        scheduler.store_scheduler.batch_get_key_info.return_value = [miss_info]
+        scheduler.store_scheduler.batch_is_exist.return_value = [0]
 
         request = MagicMock()
         request.block_hashes = [b"\xaa"]
         result = scheduler._get_layerwise_gva_hit_tokens(request, 16, 0)
         self.assertEqual(result, 0)
 
-    def test_with_computed_tokens(self):
+    def test_skips_prefix_already_cached_in_hbm(self):
         scheduler = self._make_scheduler()
-        hit_info = MagicMock()
-        hit_info.size.return_value = 1
-        hit_info.gva_list.return_value = [0x1000]
-        scheduler.store_scheduler.batch_get_key_info.return_value = [hit_info, hit_info]
+        scheduler.store_scheduler.batch_is_exist.return_value = [1, 1]
 
         request = MagicMock()
         request.block_hashes = [b"\xaa", b"\xbb", b"\xcc", b"\xdd"]
         result = scheduler._get_layerwise_gva_hit_tokens(request, 64, 32)
         self.assertEqual(result, 64)
+        queried_keys = scheduler.store_scheduler.batch_is_exist.call_args.args[0]
+        self.assertEqual(len(queried_keys), 2)
+
+    def test_layer_reuse_queries_full_prefix(self):
+        scheduler = self._make_scheduler()
+        scheduler.layerwise_offload = True
+        scheduler.store_scheduler.batch_is_exist.return_value = [1, 1, 1, 1]
+
+        request = MagicMock()
+        request.block_hashes = [b"\xaa", b"\xbb", b"\xcc", b"\xdd"]
+        result = scheduler._get_layerwise_gva_hit_tokens(request, 64, 32)
+        self.assertEqual(result, 64)
+        queried_keys = scheduler.store_scheduler.batch_is_exist.call_args.args[0]
+        self.assertEqual(len(queried_keys), 4)
+
+    def test_multi_group_uses_one_backend_batch(self):
+        scheduler = self._make_scheduler()
+        scheduler.grouped_block_size = [16, 32]
+        scheduler.kv_cache_group_ids = [0, 1]
+        scheduler.kv_cache_group_families = ["default", "default"]
+        scheduler.store_scheduler.batch_is_exist.reset_mock()
+        scheduler.store_scheduler.batch_is_exist.return_value = [1, 1, 0, 1, 1, 1]
+
+        request = MagicMock()
+        request.block_hashes = [b"\xaa", b"\xbb", b"\xcc", b"\xdd"]
+        result = scheduler._get_layerwise_gva_hit_tokens(request, 64, 0)
+
+        self.assertEqual(result, 32)
+        scheduler.store_scheduler.batch_is_exist.assert_called_once()
 
 
 class TestKVPoolSchedulerUpdateStateAfterAllocBranches(unittest.TestCase):

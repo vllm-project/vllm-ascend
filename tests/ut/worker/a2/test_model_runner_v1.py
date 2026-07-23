@@ -283,6 +283,156 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(indexer_spec.page_size_bytes, 2 * 16 * (128 + 2))
         self.assertFalse(hasattr(main_spec, "sfa_dcp_replicated_indexer_size"))
 
+    @patch(
+        "vllm_ascend.worker.model_runner_v1.get_gva_layerwise_config",
+        return_value={"layerwise_num_shared_buffers": 2},
+    )
+    def test_sparse_c8_layer_reuse_allocates_four_complete_physical_slots(self, _mock_config):
+        runner = self._build_runner()
+        runner.use_sparse = True
+        runner.parallel_config = MagicMock()
+        runner.model_config.get_num_layers.return_value = 6
+
+        main_spec = AscendMLAAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.int8,
+            cache_sparse_c8=True,
+        )
+        indexer_spec = AscendSFAIndexerCacheSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.int8,
+            scale_dim=1,
+            scale_dtype=torch.float16,
+            cache_sparse_c8=True,
+        )
+        main_names = [f"model.layers.{layer}.self_attn.attn" for layer in range(6)]
+        indexer_names = [f"model.layers.{layer}.self_attn.indexer.k_cache" for layer in (1, 2, 4)]
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[
+                *[KVCacheTensor(size=main_spec.page_size_bytes * 2, shared_by=[name]) for name in main_names],
+                *[KVCacheTensor(size=indexer_spec.page_size_bytes * 2, shared_by=[name]) for name in indexer_names],
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(layer_names=main_names, kv_cache_spec=main_spec),
+                KVCacheGroupSpec(layer_names=indexer_names, kv_cache_spec=indexer_spec),
+            ],
+        )
+
+        runner._merge_kv_cache_tensors_for_layer_reuse(kv_cache_config)
+
+        self.assertEqual(runner._layerwise_reuse_num_slots, 4)
+        self.assertEqual(
+            runner._layerwise_reuse_slot_by_layer_name[main_names[1]],
+            runner._layerwise_reuse_slot_by_layer_name[main_names[3]],
+        )
+        self.assertEqual(
+            runner._layerwise_reuse_slot_by_layer_name[indexer_names[1]],
+            runner._layerwise_reuse_slot_by_layer_name[indexer_names[2]],
+        )
+
+        raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+
+        self.assertEqual(len(runner._layerwise_c8_indexer_slot_buffers), 4)
+        self.assertTrue(all(len(raw_cache) == 2 for raw_cache in runner._layerwise_c8_indexer_slot_buffers))
+        self.assertIs(raw_caches[main_names[1]][0], raw_caches[main_names[3]][0])
+        self.assertIs(raw_caches[indexer_names[1]], raw_caches[indexer_names[2]])
+
+    @patch(
+        "vllm_ascend.worker.model_runner_v1.get_gva_layerwise_config",
+        return_value={"layerwise_num_shared_buffers": 2},
+    )
+    def test_multigroup_layer_reuse_rejects_non_sfa_cache_with_indexer(self, _mock_config):
+        runner = self._build_runner()
+        runner.parallel_config = MagicMock()
+        runner.model_config.get_num_layers.return_value = 5
+
+        main_spec = AscendMLAAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.bfloat16,
+        )
+        indexer_spec = AscendSFAIndexerCacheSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.bfloat16,
+        )
+        unsupported_spec = FullAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.bfloat16,
+        )
+        main_names = [f"model.layers.{layer}.self_attn.attn" for layer in range(4)]
+        indexer_name = "model.layers.2.self_attn.indexer.k_cache"
+        unsupported_name = "model.layers.4.self_attn.attn"
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[
+                *[KVCacheTensor(size=main_spec.page_size_bytes * 2, shared_by=[name]) for name in main_names],
+                KVCacheTensor(size=indexer_spec.page_size_bytes * 2, shared_by=[indexer_name]),
+                KVCacheTensor(size=unsupported_spec.page_size_bytes * 2, shared_by=[unsupported_name]),
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(layer_names=main_names, kv_cache_spec=main_spec),
+                KVCacheGroupSpec(layer_names=[indexer_name], kv_cache_spec=indexer_spec),
+                KVCacheGroupSpec(layer_names=[unsupported_name], kv_cache_spec=unsupported_spec),
+            ],
+        )
+
+        with self.assertRaisesRegex(NotImplementedError, "unsupported cache specs"):
+            runner._merge_kv_cache_tensors_for_layer_reuse(kv_cache_config)
+
+    @patch(
+        "vllm_ascend.worker.model_runner_v1.get_gva_layerwise_config",
+        return_value={"layerwise_num_shared_buffers": 2},
+    )
+    def test_multigroup_layer_reuse_accepts_non_c8_sfa_main_indexer(self, _mock_config):
+        runner = self._build_runner()
+        runner.parallel_config = MagicMock()
+        runner.model_config.get_num_layers.return_value = 5
+
+        main_spec = AscendMLAAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.bfloat16,
+        )
+        indexer_spec = AscendSFAIndexerCacheSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.bfloat16,
+        )
+        main_names = [f"model.layers.{layer}.self_attn.attn" for layer in range(5)]
+        indexer_name = "model.layers.2.self_attn.indexer.k_cache"
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[
+                *[KVCacheTensor(size=main_spec.page_size_bytes * 2, shared_by=[name]) for name in main_names],
+                KVCacheTensor(size=indexer_spec.page_size_bytes * 2, shared_by=[indexer_name]),
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(layer_names=main_names, kv_cache_spec=main_spec),
+                KVCacheGroupSpec(layer_names=[indexer_name], kv_cache_spec=indexer_spec),
+            ],
+        )
+
+        runner._merge_kv_cache_tensors_for_layer_reuse(kv_cache_config)
+
+        self.assertEqual(runner._layerwise_reuse_num_slots, 4)
+        self.assertEqual(
+            runner._layerwise_reuse_slot_by_layer_name[main_names[1]],
+            runner._layerwise_reuse_slot_by_layer_name[main_names[3]],
+        )
+        self.assertIn(indexer_name, runner._layerwise_reuse_slot_by_layer_name)
+
     @patch("vllm_ascend.worker.model_runner_v1.get_ascend_device_type", return_value=AscendDeviceType.A5)
     @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")

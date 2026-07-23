@@ -19,6 +19,8 @@ import hashlib
 import unittest
 from unittest.mock import MagicMock
 
+import numpy as np
+
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
@@ -382,6 +384,12 @@ class TestRequestTracker(unittest.TestCase):
 
 
 class TestReqMeta(unittest.TestCase):
+    def test_block_ids_are_normalized_to_grouped_numpy_arrays(self):
+        meta = ReqMeta(req_id="r1", block_ids=[1, 2])
+
+        self.assertEqual(len(meta.block_ids_by_group_np), 1)
+        np.testing.assert_array_equal(meta.block_ids_by_group_np[0], [1, 2])
+
     def test_from_request_tracker_basic_save(self):
         tracker = RequestTracker(
             req_id="r1",
