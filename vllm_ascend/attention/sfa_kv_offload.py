@@ -432,6 +432,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             decode_stable_prefix_lens,
             token_to_req,
             capturing=self._in_graph_runtime(),
+            skip_topk=self.skip_topk,
         )
         decode_attn_output = DeviceOperator.execute_sparse_flash_attention_process(
             self,

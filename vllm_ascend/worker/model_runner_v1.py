@@ -2085,10 +2085,6 @@ class NPUModelRunner(GPUModelRunner):
             # allocated blocks that may reuse the same physical KV cache IDs.
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
-        if self.kv_offload_decode_enabled and self.kv_offload_decode_manager is not None:
-            # Draft positions can be overwritten after MTP rejection, so drain
-            # pending copies and invalidate resident rows before state updates.
-            self.kv_offload_decode_manager.prepare_scheduler_step()
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with record_function_or_nullcontext("prepare input"):
@@ -3819,18 +3815,89 @@ class NPUModelRunner(GPUModelRunner):
 
     def profile_run(self) -> None:
         self.eplb_warmup()
-        mc2_tokens_capacity = get_mc2_tokens_capacity()
-        if self.max_num_tokens > mc2_tokens_capacity and select_moe_comm_method(
-            mc2_tokens_capacity, self.vllm_config
-        ) in {MoECommType.MC2, MoECommType.FUSED_MC2}:
-            self._dummy_run(mc2_tokens_capacity, with_prefill=True, is_profile=True)
         origin_max_num_tokens = self.max_num_tokens
-        # in the pcp scenario, the split sequence needs to be used for profile run
-        # TODO: after the vllm pcp function is launched, this logic needs to be brought up to the community
-        if self.pcp_size > 1:
-            self.max_num_tokens = math.ceil(self.max_num_tokens / (self.pcp_size * 2)) * 2
-        super().profile_run()
-        self.max_num_tokens = origin_max_num_tokens
+        topk_profile_buffers: list[tuple[torch.Tensor, torch.Tensor]] = []
+        try:
+            if self.kv_offload_decode_enabled:
+                topk_profile_buffers = self._allocate_kv_offload_topk_profile_buffers()
+
+            mc2_tokens_capacity = get_mc2_tokens_capacity()
+            if self.max_num_tokens > mc2_tokens_capacity and select_moe_comm_method(
+                mc2_tokens_capacity, self.vllm_config
+            ) in {MoECommType.MC2, MoECommType.FUSED_MC2}:
+                self._dummy_run(mc2_tokens_capacity, with_prefill=True, is_profile=True)
+            # in the pcp scenario, the split sequence needs to be used for profile run
+            # TODO: after the vllm pcp function is launched, this logic needs to be brought up to the community
+            if self.pcp_size > 1:
+                self.max_num_tokens = math.ceil(self.max_num_tokens / (self.pcp_size * 2)) * 2
+            super().profile_run()
+        finally:
+            self.max_num_tokens = origin_max_num_tokens
+            del topk_profile_buffers
+
+    def _allocate_kv_offload_topk_buffer_pair(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        decode_width = 1
+        if self.vllm_config.speculative_config is not None:
+            decode_width += self.vllm_config.speculative_config.num_speculative_tokens
+
+        topk_buffer_size = self.kv_offload_decode_config.topk_buffer_size
+        num_kv_heads = 1
+        k_dim = self.vllm_config.model_config.hf_text_config.kv_lora_rank
+        v_dim = self.vllm_config.model_config.hf_text_config.qk_rope_head_dim
+        max_num_topk_rows = min(
+            self.max_num_tokens,
+            self.max_num_reqs * decode_width,
+        )
+        topk_buffer_k_size_bytes = max_num_topk_rows * topk_buffer_size * num_kv_heads * k_dim * torch.bfloat16.itemsize
+        topk_buffer_v_size_bytes = max_num_topk_rows * topk_buffer_size * num_kv_heads * v_dim * torch.bfloat16.itemsize
+        topk_buffer_raw = torch.empty([topk_buffer_k_size_bytes + topk_buffer_v_size_bytes], dtype=torch.int8, device='npu')
+        topk_buffer_k = (
+            topk_buffer_raw[:topk_buffer_k_size_bytes]
+            .view(torch.bfloat16)
+            .view([max_num_topk_rows, topk_buffer_size, num_kv_heads, k_dim])
+        )
+        topk_buffer_v = (
+            topk_buffer_raw[topk_buffer_k_size_bytes:topk_buffer_k_size_bytes + topk_buffer_v_size_bytes]
+            .view(torch.bfloat16)
+            .view([max_num_topk_rows, topk_buffer_size, num_kv_heads, v_dim])
+        )
+        return (topk_buffer_k, topk_buffer_v)
+
+    def _allocate_kv_offload_topk_profile_buffers(
+        self,
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        kv_cache_spec = getattr(self, "kv_cache_spec", None)
+        if kv_cache_spec is None:
+            kv_cache_spec = self.get_kv_cache_spec()
+        num_offload_layers = sum(
+            bool(getattr(spec, "store_on_host", False))
+            for spec in kv_cache_spec.values()
+        )
+        if num_offload_layers == 0:
+            raise RuntimeError(
+                "KV offload decode profile did not find any host-resident SFA "
+                "KV cache layers."
+            )
+
+        buffers = [
+            self._allocate_kv_offload_topk_buffer_pair()
+            for _ in range(num_offload_layers)
+        ]
+        buffer_bytes = sum(
+            tensor.numel() * tensor.element_size()
+            for buffer_pair in buffers
+            for tensor in buffer_pair
+        )
+        if self.tp_rank == 0:
+            logger.info(
+                "Reserved %.2f GiB of KV offload topk buffers across %d "
+                "layers for profile run.",
+                buffer_bytes / (1 << 30),
+                num_offload_layers,
+            )
+        return buffers
 
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
@@ -4559,14 +4626,8 @@ class NPUModelRunner(GPUModelRunner):
                         # drop the npu k/v tensors and replace raw_k_tensor by raw_k_tensor_cpu
                         # to use the original code.
                         if self.tp_rank == 0:
-                            k_tensor_cpu = self.kv_offload_decode_manager._empty_aligned_cpu_tensor(
-                                [k_tensor_size],
-                                torch.int8,
-                                alignment,
-                            )
-                            v_tensor_cpu = self.kv_offload_decode_manager._empty_aligned_cpu_tensor(
-                                [v_tensor_size],
-                                torch.int8,
+                            [k_tensor_cpu, v_tensor_cpu] = self.kv_offload_decode_manager.empty_aligned_int8_cpu_tensors(
+                                [k_tensor_size, v_tensor_size],
                                 alignment,
                             )
                         else:
@@ -4954,19 +5015,9 @@ class NPUModelRunner(GPUModelRunner):
                             k_cache_cpu = None
                             v_cache_cpu = None
 
-                        decode_width = 1
-                        if self.vllm_config.speculative_config is not None:
-                            decode_width += self.vllm_config.speculative_config.num_speculative_tokens
-                        topk_buffer_size = self.kv_offload_decode_config.topk_buffer_size
-                        num_kv_heads = 1
-                        k_dim = self.vllm_config.model_config.hf_text_config.kv_lora_rank
-                        v_dim = self.vllm_config.model_config.hf_text_config.qk_rope_head_dim
-                        max_num_topk_rows = min(
-                            self.vllm_config.scheduler_config.max_num_batched_tokens,
-                            self.vllm_config.scheduler_config.max_num_seqs * decode_width,
+                        topk_buffer_k, topk_buffer_v = (
+                            self._allocate_kv_offload_topk_buffer_pair()
                         )
-                        topk_buffer_k = torch.empty([max_num_topk_rows, topk_buffer_size, num_kv_heads, k_dim], dtype=torch.bfloat16, device='npu')
-                        topk_buffer_v = torch.empty([max_num_topk_rows, topk_buffer_size, num_kv_heads, v_dim], dtype=torch.bfloat16, device='npu')
 
                         kv_caches[layer_name] = (k_cache, v_cache, k_cache_cpu, v_cache_cpu, topk_buffer_k, topk_buffer_v)
                     else:

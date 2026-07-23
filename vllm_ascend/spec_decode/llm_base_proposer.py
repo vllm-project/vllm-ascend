@@ -1633,6 +1633,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.graph_pad_size = -1
             common_attn_metadata.num_input_tokens = input_batch_size
 
+            if getattr(self.runner, "kv_offload_decode_enabled", False):
+                # Draft steps run exactly one token per request, while the
+                # inherited token_to_req still describes the verify-step
+                # layout (num_spec + 1 tokens per request). Rebuild it to the
+                # one-token-per-request layout so the KV offload decode path
+                # routes every decode row to its own request's CPU-pool
+                # blocks/seq_len; otherwise rows of requests >= 1 are mapped
+                # onto request 0 and attend another request's KV.
+                num_draft_reqs = common_attn_metadata.query_start_loc.shape[0] - 1
+                common_attn_metadata.token_to_req = self.arange[:num_draft_reqs]
+
         # The loop part
         used_update_positions += 1
 
