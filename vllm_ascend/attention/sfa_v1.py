@@ -1558,14 +1558,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             actual_seq_lengths_key,
         )
 
-    def _record_dcp_query_gather_context(
-        self,
-        ql_nope: torch.Tensor,
-        q_pe: torch.Tensor,
-        attn_metadata: M,
-    ) -> None:
-        return
-
     def _q_proj_n_rope(
         self,
         q_c: torch.Tensor,
@@ -1797,17 +1789,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
         return (main_cache[0], main_cache[1], indexer_cache[0])
 
-    def _record_dcp_kv_gather_context(
-        self,
-        kv_cache: tuple[torch.Tensor, ...],
-        attn_metadata: M,
-    ) -> None:
-        """Start a DCP KV gather after this layer has populated its cache.
-
-        The base implementation deliberately does nothing. The replicated-indexer
-        DCP implementation overrides it for batches containing prefill requests.
-        """
-        return
 
     def forward(
         self,
