@@ -69,6 +69,15 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         for connector in self._pd_connector_first():
             connector.save_kv_layer(layer_name, kv_layer, attn_metadata, **kwargs)
 
+    def on_kv_cache_written(self, layer_name: str = "") -> None:
+        # PD-first ordering mirrors save_kv_layer: the PD hook clears the
+        # per-slot send-done gate before the AscendStore hook enqueues a save
+        # whose send thread later waits on that same gate.
+        for connector in self._pd_connector_first():
+            hook = getattr(connector, "on_kv_cache_written", None)
+            if callable(hook):
+                hook(layer_name)
+
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         chosen_connector = self._requests_to_connector.get(request.request_id, -1)
         empty_blocks = blocks.new_empty()

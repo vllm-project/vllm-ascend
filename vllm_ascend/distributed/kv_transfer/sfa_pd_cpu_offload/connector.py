@@ -196,6 +196,17 @@ class SFAPDCpuOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             return
         self.connector_worker.save_kv_layer(layer_name, kv_layer, attn_metadata, self._get_connector_metadata())
 
+    def on_kv_cache_written(self, layer_name: str = "") -> None:
+        # Producer-only early dispatch of the PD pull notification at scatter
+        # time. Consumer pulls through KVOffloadDecodeManager; skip there.
+        if not self.is_producer or self.connector_worker is None:
+            return
+        if not self.has_connector_metadata():
+            return
+        hook = getattr(self.connector_worker, "on_kv_cache_written", None)
+        if callable(hook):
+            hook(layer_name, self._get_connector_metadata())
+
     def wait_for_save(self):
         # Decode KV writes are synchronized by KVOffloadDecodeManager. P-side
         # completion is tracked by READ_DONE/storage_send_done_events.
