@@ -159,7 +159,7 @@ vllm serve ${MODEL_PATH} \
           --mm-processor-cache-gb 0 \
           --dtype float16 \
           --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-          --additional_config '{"ascend_compilation_config": {"fuse_norm_quant": false}, "enable_cpu_binding":true}' \
+          --additional_config '{"enable_cpu_binding":true}' \
           --port 8000
 ```
 
@@ -168,9 +168,7 @@ vllm serve ${MODEL_PATH} \
 On Atlas inference products:
 
 - Only `float16` dtype is supported.
-- The `--max_model_len` option is added to prevent errors when generating the attention operator mask.
 - Graph compilation (`--compilation-config`) requires **CANN version >= 9.0.0**. If your CANN version is lower, please revert to eager mode by replacing the `--compilation-config` argument with `--enforce-eager`.
-- The `fuse_norm_quant` option in `--additional_config` is disabled (`false`) because it is not supported by the graph compilation on this hardware. Keep this setting unchanged.
 :::
 
 Key Parameter Descriptions:
@@ -180,7 +178,6 @@ Key Parameter Descriptions:
 - `--mm-processor-cache-gb` sets the size of the multimodal processor cache (in GB). A value of `0` disables caching.
 - `--dtype float16` specifies the model dtype. On Atlas inference products, only `float16` is supported.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode graph compilation for improved performance. On Atlas inference products, `fuse_norm_quant` in graph compilation is disabled by default in `--additional_config`.
-- `--additional_config '{"ascend_compilation_config": {"fuse_norm_quant": false}, "enable_cpu_binding":true}'` disables `fuse_norm_quant` for graph compilation and enables CPU binding.
 
 ::::
 :::::
@@ -263,7 +260,7 @@ The Atlas inference products support only the OM model inference. For details ab
 ::::
 :::::
 
-##### 5.3.2 Using vLLM as the backend, combined with PP-DocLayoutV2 for offline inference
+#### 5.3.2 Using vLLM as the backend, combined with PP-DocLayoutV2 for offline inference
 
 ```python
 from paddleocr import PaddleOCRVL
@@ -385,8 +382,8 @@ PaddleOCR-VL is a lightweight model that runs on a single NPU. The key tuning pa
 
 | Scenario | Configuration | NPUs | TP | DP | Max Model Len | Max Num Batched Tokens | Graph Compilation | dtype |
 |----------|-------------|------|----|----|---------------|------------------------|--------------------|-------|
-| High Throughput | A2 series / Single Machine | 1 | — | — | — | 16384 | FULL_DECODE_ONLY | bfloat16 (default) |
-| High Throughput | Atlas inference products / Single Machine | 1 | — | — | 16384 | — | FULL_DECODE_ONLY; otherwise enforce-eager | float16 |
+| High Throughput | A2 series / Single Machine | 1 | — | — | — | — | FULL_DECODE_ONLY | bfloat16 (default) |
+| High Throughput | Atlas inference products / Single Machine | 1 | — | — | — | — | FULL_DECODE_ONLY; otherwise enforce-eager | float16 |
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment).
 
