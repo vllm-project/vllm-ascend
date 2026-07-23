@@ -62,15 +62,10 @@ repos:
   hooks:
   - id: gitleaks-offline-scan
     name: Gitleaks Secret Scan(Local Binary)
-    entry: gitleaks
+    entry: .github/workflows/scripts/gitleaks.sh
     language: system
     pass_filenames: false
     always_run: true
-    args:
-      - protect
-      - --verbose
-      - --redact
-      - --config=pre-commit/.gitleaks.toml
   - id: shellcheck
     name: Lint shell scripts
     entry: tools/shellcheck.sh
