@@ -30,9 +30,12 @@ THREAD_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 @dataclass
 class ConsumerReadState:
     num_blocks: int
+    tp_size: int
     layer_metadata: dict[str, Any]
     main_name_to_idx: dict[str, int]
     cpu_pools: list[tuple[Any, Any] | None]
+    main_gva_bases: list[tuple[int, int]]
+    main_block_lens: list[tuple[int, int]]
     indexer_tensors: list[Any | None]
     indexer_scale_tensors: list[Any | None]
     dest_blocks_by_req: dict[str, tuple[list[int], list[int]]]
@@ -55,6 +58,21 @@ def _coalesce_desc(
     cum = np.cumsum(length)
     merged_len = cum[run_end] - cum[run_start] + length[run_start]
     return peer[run_start], local[run_start], merged_len
+
+
+def _tp_block_range(
+    num_blocks: int,
+    tp_rank: int,
+    tp_size: int,
+    start_block: int = 0,
+) -> tuple[int, int]:
+    # Rotate the first owner by the chunk's global start so consecutive small
+    # chunks do not all fall on TP0.
+    logical_rank = (tp_rank - start_block % tp_size) % tp_size
+    blocks_per_rank, remainder = divmod(num_blocks, tp_size)
+    start = logical_rank * blocks_per_rank + min(logical_rank, remainder)
+    count = blocks_per_rank + int(logical_rank < remainder)
+    return start, start + count
 
 
 class MembPullReadThread(threading.Thread):
@@ -287,21 +305,20 @@ class MembPullReadThread(threading.Thread):
             p_meta.get("has_indexer", len(p_base_addrs) > main_tensor_count)
         )
 
-        cpu_pool = state.cpu_pools[offload_id]
-        if cpu_pool is None:
-            k_cpu_ptr = v_cpu_ptr = None
-        else:
-            k_cpu, v_cpu = cpu_pool
-            k_cpu_ptr, v_cpu_ptr = k_cpu.data_ptr(), v_cpu.data_ptr()
-            d_k_len = k_cpu.element_size() * math.prod(k_cpu.shape[1:]) * (k_cpu.shape[0] // state.num_blocks)
-            d_v_len = v_cpu.element_size() * math.prod(v_cpu.shape[1:]) * (v_cpu.shape[0] // state.num_blocks)
-            p_k_len = p_block_len[0] * p_block_size_scale[0]
-            p_v_len = p_block_len[1] * p_block_size_scale[1]
-            if (p_k_len, p_v_len) != (d_k_len, d_v_len):
-                raise RuntimeError(
-                    f"MembPull main KV layout mismatch for {layer_name}: "
-                    f"P=({p_k_len}, {p_v_len}), D=({d_k_len}, {d_v_len})"
-                )
+        try:
+            k_cpu_ptr, v_cpu_ptr = state.main_gva_bases[offload_id]
+            d_k_len, d_v_len = state.main_block_lens[offload_id]
+        except IndexError as error:
+            raise RuntimeError(
+                f"MembPull shared CPU pool metadata is missing for {layer_name}"
+            ) from error
+        p_k_len = p_block_len[0] * p_block_size_scale[0]
+        p_v_len = p_block_len[1] * p_block_size_scale[1]
+        if (p_k_len, p_v_len) != (d_k_len, d_v_len):
+            raise RuntimeError(
+                f"MembPull main KV layout mismatch for {layer_name}: "
+                f"P=({p_k_len}, {p_v_len}), D=({d_k_len}, {d_v_len})"
+            )
         d_indexer = state.indexer_tensors[pool_idx]
         if p_has_indexer != (d_indexer is not None):
             raise RuntimeError(
@@ -436,6 +453,15 @@ class MembPullReadThread(threading.Thread):
                 f"MembPull main block count mismatch for req {ext_req_id}: "
                 f"P={len(p_main_block_ids)}, D={len(d_main_ids)}"
             )
+        if has_cpu_destination:
+            owned_start, owned_end = _tp_block_range(
+                len(d_main_ids),
+                self.tp_rank,
+                state.tp_size,
+                main_start_block,
+            )
+            p_main_block_ids = p_main_block_ids[owned_start:owned_end]
+            d_main_ids = d_main_ids[owned_start:owned_end]
         n_main = len(d_main_ids) if has_cpu_destination else 0
         if n_main:
             p_main = np.array(p_main_block_ids, dtype=np.int64)
@@ -551,14 +577,18 @@ class MembPullReadThread(threading.Thread):
             try:
                 cpu_pool = state.cpu_pools[offload_id]
                 if cpu_pool is None:
-                    mk = mv = 0.0
+                    mk = mv = "n/a"
                 else:
                     k_cpu, v_cpu = cpu_pool
-                    mk = k_cpu[d_main_ids].float().sum().item() if d_main_ids else 0.0
-                    mv = v_cpu[d_main_ids].float().sum().item() if d_main_ids else 0.0
+                    mk = "%.6f" % (
+                        k_cpu[d_main_ids].float().sum().item() if d_main_ids else 0.0
+                    )
+                    mv = "%.6f" % (
+                        v_cpu[d_main_ids].float().sum().item() if d_main_ids else 0.0
+                    )
                 mi = state.indexer_tensors[pool_idx][d_indexer_ids].float().sum().item() if d_indexer_ids else 0.0
                 logger.info(
-                    "MFV D layer %s req %s main_k=%.6f main_v=%.6f idx_post=%.6f",
+                    "MFV D layer %s req %s main_k=%s main_v=%s idx_post=%.6f",
                     layer_name,
                     ext_req_id,
                     mk,
@@ -619,10 +649,16 @@ class MembPullReadThread(threading.Thread):
                 indexer_start_block,
             )
             if not local_ptrs:
+                owned_main_start, owned_main_end = _tp_block_range(
+                    len(p_main_block_ids),
+                    self.tp_rank,
+                    self._state.tp_size,
+                    main_start_block,
+                )
                 owns_requested_main = (
                     layer["k_cpu_ptr"] is not None
                     and layer["v_cpu_ptr"] is not None
-                    and bool(p_main_block_ids)
+                    and owned_main_end > owned_main_start
                 )
                 owns_requested_indexer = layer["indexer"] is not None and bool(
                     p_indexer_block_ids
@@ -649,10 +685,9 @@ class MembPullReadThread(threading.Thread):
                 read_infos.append(read_info)
 
         if not all_local_ptrs:
-            # Main KV is replicated across TP ranks and only TP0 owns its CPU
-            # destination. A non-TP0 rank therefore has no local transfer for
-            # a main-only layer (or for a chunk with no indexer blocks ready),
-            # but it still has to acknowledge READ_DONE so P can reuse storage.
+            # This rank may own no main block in a small chunk and the layer may
+            # have no rank-local indexer transfer. It still acknowledges
+            # READ_DONE so its corresponding P rank can reuse the source.
             return
 
         if envs.VLLM_ASCEND_SFA_DEBUG:
