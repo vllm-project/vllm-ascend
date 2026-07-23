@@ -760,7 +760,7 @@ class DynamicDumpConfig:
     Usage (online)::
 
         vllm serve <model> --additional-config \
-            '{"dynamic_dump_config": {"mtp_acceptance_window": 20}}'
+            '{"dynamic_dump_config": {"spec_acceptance_window": 20}}'
 
     Usage (offline)::
 
@@ -768,20 +768,33 @@ class DynamicDumpConfig:
             model,
             additional_config={
                 "dynamic_dump_config": {
-                    "mtp_acceptance_window": 20,
+                    "spec_acceptance_window": 20,
                 }
             },
         )
     """
 
     _defaults = {
-        "mtp_acceptance_window": 10,
-        "mtp_acceptance_low_threshold": 0.3,
-        "mtp_acceptance_len_low_threshold": 1.4,
-        "mtp_acceptance_high_threshold": 0.96,
-        "mtp_acceptance_len_high_threshold": 2.8,
-        "msprobe_dump_cooldown_seconds": 5 * 60,
-        "msprobe_dump_max_times": 0,
+        # Feature switches (spec acceptance on by default for backward compatibility).
+        "enable_spec_acceptance_check": True,
+        "enable_token_logprob_check": False,
+        # Spec acceptance-rate thresholds.
+        "spec_acceptance_window": 10,
+        "spec_acceptance_low_threshold": 0.3,
+        "spec_acceptance_len_low_threshold": 1.4,
+        "spec_acceptance_high_threshold": 0.96,
+        "spec_acceptance_len_high_threshold": 2.8,
+        # Token/logprob anomaly (ILLDetector) online defaults: fast detection.
+        "token_logprob_window": 64,
+        "token_logprob_stride": 32,
+        "token_logprob_topk": 20,
+        "ill_nan_window_thresh": 1,
+        "ill_rare_window_thresh": 1,
+        "ill_garbled_window_thresh": 1,
+        "ill_repet_window_thresh": 2,
+        # Dump rate limits.
+        "dynamic_dump_cooldown_seconds": 5 * 60,
+        "dynamic_dump_max_times": 0,
     }
 
     def __init__(self, config: dict | None = None):
@@ -804,56 +817,84 @@ class DynamicDumpConfig:
         raise AttributeError(f"dynamic_dump_config has no attribute '{key}'")
 
     def _validate(self) -> None:
+        bool_fields = (
+            "enable_spec_acceptance_check",
+            "enable_token_logprob_check",
+        )
         int_fields = (
-            "mtp_acceptance_window",
-            "msprobe_dump_cooldown_seconds",
-            "msprobe_dump_max_times",
+            "spec_acceptance_window",
+            "token_logprob_window",
+            "token_logprob_stride",
+            "token_logprob_topk",
+            "ill_nan_window_thresh",
+            "ill_rare_window_thresh",
+            "ill_garbled_window_thresh",
+            "ill_repet_window_thresh",
+            "dynamic_dump_cooldown_seconds",
+            "dynamic_dump_max_times",
         )
         positive_int_fields = (
-            "mtp_acceptance_window",
-            "msprobe_dump_cooldown_seconds",
+            "spec_acceptance_window",
+            "token_logprob_window",
+            "token_logprob_stride",
+            "token_logprob_topk",
+            "ill_nan_window_thresh",
+            "ill_rare_window_thresh",
+            "ill_garbled_window_thresh",
+            "ill_repet_window_thresh",
+            "dynamic_dump_cooldown_seconds",
         )
         float_fields = (
-            "mtp_acceptance_low_threshold",
-            "mtp_acceptance_len_low_threshold",
-            "mtp_acceptance_high_threshold",
-            "mtp_acceptance_len_high_threshold",
+            "spec_acceptance_low_threshold",
+            "spec_acceptance_len_low_threshold",
+            "spec_acceptance_high_threshold",
+            "spec_acceptance_len_high_threshold",
         )
+
+        for field in bool_fields:
+            value = self.config[field]
+            if not isinstance(value, bool):
+                raise ValueError(f"dynamic_dump_config.{field} must be a bool, got {type(value).__name__}")
 
         for field in int_fields:
             value = self.config[field]
-            if not isinstance(value, int):
+            if not isinstance(value, int) or isinstance(value, bool):
                 raise ValueError(f"dynamic_dump_config.{field} must be an int, got {type(value).__name__}")
             if field in positive_int_fields and value <= 0:
                 raise ValueError(f"dynamic_dump_config.{field} must be positive, got {value}")
-            else:
-                if value < 0:
-                    raise ValueError(f"dynamic_dump_config.{field} must be non-negative, got {value}")
+            elif value < 0:
+                raise ValueError(f"dynamic_dump_config.{field} must be non-negative, got {value}")
 
         for field in float_fields:
             value = self.config[field]
-            if not isinstance(value, (int, float)):
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
                 raise ValueError(f"dynamic_dump_config.{field} must be a float, got {type(value).__name__}")
             self.config[field] = float(value)
 
-        low_rate = self.config["mtp_acceptance_low_threshold"]
-        high_rate = self.config["mtp_acceptance_high_threshold"]
-        low_len = self.config["mtp_acceptance_len_low_threshold"]
-        high_len = self.config["mtp_acceptance_len_high_threshold"]
+        low_rate = self.config["spec_acceptance_low_threshold"]
+        high_rate = self.config["spec_acceptance_high_threshold"]
+        low_len = self.config["spec_acceptance_len_low_threshold"]
+        high_len = self.config["spec_acceptance_len_high_threshold"]
+        window = self.config["token_logprob_window"]
+        stride = self.config["token_logprob_stride"]
 
         if not 0 <= low_rate <= 1:
-            raise ValueError(f"dynamic_dump_config.mtp_acceptance_low_threshold must be in [0, 1], got {low_rate}")
+            raise ValueError(f"dynamic_dump_config.spec_acceptance_low_threshold must be in [0, 1], got {low_rate}")
         if not 0 <= high_rate <= 1:
-            raise ValueError(f"dynamic_dump_config.mtp_acceptance_high_threshold must be in [0, 1], got {high_rate}")
+            raise ValueError(f"dynamic_dump_config.spec_acceptance_high_threshold must be in [0, 1], got {high_rate}")
         if low_rate > high_rate:
             raise ValueError(
-                "dynamic_dump_config.mtp_acceptance_low_threshold must be <= "
-                "dynamic_dump_config.mtp_acceptance_high_threshold"
+                "dynamic_dump_config.spec_acceptance_low_threshold must be <= "
+                "dynamic_dump_config.spec_acceptance_high_threshold"
             )
         if low_len > high_len:
             raise ValueError(
-                "dynamic_dump_config.mtp_acceptance_len_low_threshold must be <= "
-                "dynamic_dump_config.mtp_acceptance_len_high_threshold"
+                "dynamic_dump_config.spec_acceptance_len_low_threshold must be <= "
+                "dynamic_dump_config.spec_acceptance_len_high_threshold"
+            )
+        if window < stride:
+            raise ValueError(
+                f"dynamic_dump_config.token_logprob_window ({window}) must be >= token_logprob_stride ({stride})"
             )
 
 

@@ -2,7 +2,7 @@
 
 ## 1. 目标
 
-`Dumper` 的目标是统一动态 dump 与 MTP 观测逻辑，减少 `model_runner` 中的分散代码，确保在 DP/PP/TP 并行场景下日志和 dump 行为可预测。
+`Dumper` 的目标是统一动态 dump 与 投机接受率观测逻辑，减少 `model_runner` 中的分散代码，确保在 DP/PP/TP 并行场景下日志和 dump 行为可预测。
 
 ## 2. 代码路径
 
@@ -15,24 +15,29 @@
 
 ## 3. 结构与职责
 
-`Dumper` 主要包含四类能力：
+`Dumper` 主要包含五类能力：
 
 1. debugger 生命周期
 - `init_debugger()`：按 `CUDAGraphMode` 选择 `PrecisionDebugger` 或 `AclGraphDumper`
 - `start_dump_data()`：本轮开始前启动 debugger
 - `finalize_dump_data()`：本轮结束后 `stop/step` 并按需回滚 `dump_enable`
 
-2. MTP 观测与触发
-- `check_acceptance_anomaly()`：计算窗口接受率、阈值判断、触发 full log 与 dump
-- `log_mtp_token_details()`：打印 sampled/accepted/prompt/output token 明细
+2. 投机接受率观测与触发（`enable_spec_acceptance_check`）
+- `check_spec_acceptance_anomaly()`：计算窗口接受率、阈值判断、触发 full log 与 dump
+- `log_spec_token_details()`：打印 sampled/accepted/prompt/output token 明细
 
-3. dump 开关控制
+3. Token/logprob 异常检测（`enable_token_logprob_check`）
+- 每请求缓冲 token + topk logprobs；满窗 / 半窗更新后调用 msprobe `ILLDetector`
+- 按 `ill_*_window_thresh` 累计命中后触发 dump（详见 [token_logprob_anomaly_design.md](./token_logprob_anomaly_design.md)）
+
+4. dump 开关控制
 - `enable_msprobe_dump_if_needed()`：触发 dump（含冷却、最大次数、一次请求只触发一次）
-- `disable_msprobe_dump_if_needed()`：延迟一轮后回滚 `dump_enable=false`
+- `disable_msprobe_dump_if_needed()`：本轮 finalize 时回滚 `dump_enable=false`（异常 enable 发生在 finalize 之后，供下一步 forward dump 一次）
 - `set_msprobe_dump_state()`：读写 msprobe 配置文件中的 `dump_enable`
 
-4. 本地请求过滤
+5. 本地请求过滤
 - `is_related_local_request()`：只允许当前 rank 上存在且有效的请求触发 dump
+- `clear_finished_requests()`：请求结束时清理 spec acceptance / token_logprob 状态
 
 ## 4. 调用链（v1 / v2）
 
@@ -49,7 +54,7 @@
 
 3. 采样后阶段
 - `sample_tokens()` 中逐请求调用
-  - `self.dumper.check_acceptance_anomaly(...)`
+  - `self.dumper.check_spec_acceptance_anomaly(...)`
 
 ### 4.2 v2
 
@@ -71,7 +76,7 @@
 ## 5.1 PP（Pipeline Parallel）
 
 - 触发 dump 的硬门控：必须 `PP last rank`
-- 在 `check_acceptance_anomaly()` 与 `enable_msprobe_dump_if_needed()` 中都有该门控
+- 在 `check_spec_acceptance_anomaly()` 与 `enable_msprobe_dump_if_needed()` 中都有该门控
 - 非 last PP 不应成为最终触发者
 
 结论：
@@ -135,7 +140,7 @@
 - `sample_tokens` 或其后处理钩子负责 MTP 统计
 
 2. 维持统一口径
-- v1/v2 对 MTP 接受率口径保持一致
+- v1/v2 对 投机接受率口径保持一致
 - TP 日志与 dump 触发策略保持一致（日志 TP0，dump 可多 TP）
 
 3. v2 接口一致性检查

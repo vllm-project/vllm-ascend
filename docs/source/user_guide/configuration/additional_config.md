@@ -171,13 +171,22 @@ The details of each configuration option are as follows:
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `mtp_acceptance_window` | int | `10` | Sliding window size used to aggregate MTP acceptance behavior. |
-| `mtp_acceptance_low_threshold` | float | `0.3` | Low acceptance-rate threshold for triggering detailed anomaly logging and dump. |
-| `mtp_acceptance_len_low_threshold` | float | `1.4` | Low accepted-length threshold paired with `mtp_acceptance_low_threshold`. |
-| `mtp_acceptance_high_threshold` | float | `0.96` | High acceptance-rate threshold for triggering detailed anomaly logging and dump. |
-| `mtp_acceptance_len_high_threshold` | float | `2.8` | High accepted-length threshold paired with `mtp_acceptance_high_threshold`. |
-| `msprobe_dump_cooldown_seconds` | int | `300` | Minimum cooldown between two auto-triggered dumps. |
-| `msprobe_dump_max_times` | int | `0` | Maximum number of auto-triggered dumps in one worker lifecycle. |
+| `enable_spec_acceptance_check` | bool | `True` | Enable speculative acceptance-rate anomaly detection. |
+| `enable_token_logprob_check` | bool | `False` | Enable token/logprob anomaly detection via msprobe `ILLDetector`. Requires request `logprobs` and `dynamic_dump_max_times > 0`. |
+| `spec_acceptance_window` | int | `10` | Sliding window size used to aggregate speculative acceptance behavior. |
+| `spec_acceptance_low_threshold` | float | `0.3` | Low acceptance-rate threshold for triggering detailed anomaly logging and dump. |
+| `spec_acceptance_len_low_threshold` | float | `1.4` | Low accepted-length threshold paired with `spec_acceptance_low_threshold`. |
+| `spec_acceptance_high_threshold` | float | `0.96` | High acceptance-rate threshold for triggering detailed anomaly logging and dump. |
+| `spec_acceptance_len_high_threshold` | float | `2.8` | High accepted-length threshold paired with `spec_acceptance_high_threshold`. |
+| `token_logprob_window` | int | `64` | Per-request token/logprob buffer length (= one detector window). |
+| `token_logprob_stride` | int | `32` | Re-run detection after this many new tokens once the buffer is full. |
+| `token_logprob_topk` | int | `20` | Max top-k logprobs retained per token for detection. |
+| `ill_nan_window_thresh` | int | `1` | Dump after this many NaN/Inf window hits. |
+| `ill_rare_window_thresh` | int | `1` | Dump after this many rare-character window hits. |
+| `ill_garbled_window_thresh` | int | `1` | Dump after this many garbled window hits. |
+| `ill_repet_window_thresh` | int | `2` | Dump after this many repetition window hits. |
+| `dynamic_dump_cooldown_seconds` | int | `300` | Minimum cooldown between two auto-triggered dumps. |
+| `dynamic_dump_max_times` | int | `0` | Maximum number of auto-triggered dumps in one worker lifecycle. `0` disables dump triggers. |
 
 **short_request_first_config**
 

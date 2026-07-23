@@ -2599,7 +2599,12 @@ class NPUModelRunner(GPUModelRunner):
         if self.dynamic_eplb:
             self.eplb_updator.forward_end(self.eplb_heat_collection_status)
 
+        # finalize before anomaly checks: enable arms dump_enable for the next
+        # forward; the following step's finalize turns it off (no delay rounds).
         self.dumper.finalize_dump_data()
+
+        finished_req_ids = getattr(scheduler_output, "finished_req_ids", None)
+        self.dumper.clear_finished_requests(finished_req_ids)
 
         if self.need_accepted_tokens:
             assert self.sampling_done_event is not None
@@ -2609,13 +2614,18 @@ class NPUModelRunner(GPUModelRunner):
             ):
                 global_stream().wait_event(self.sampling_done_event)
                 self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
-            # Wait for D2H of num_accepted_tokens_cpu before MTP anomaly checks.
+            # Wait for D2H of num_accepted_tokens_cpu before spec acceptance anomaly checks.
             if self.num_accepted_tokens_event is not None:
                 self.num_accepted_tokens_event.synchronize()
-            self.dumper.check_all_acceptance(
+            self.dumper.check_all_spec_acceptance(
                 sampled_tokens=sampler_output.sampled_token_ids,
                 accepted_token_nums=self.input_batch.num_accepted_tokens_cpu,
             )
+
+        self.dumper.check_all_token_logprobs(
+            sampled_token_ids=valid_sampled_token_ids,
+            logprobs_lists=logprobs_lists,
+        )
 
         # Snapshot after check so later start_dump_data().clear() cannot wipe this step's flags.
         model_runner_output.debug_log_full = dict(self.dumper.full_log_requests_this_step)
