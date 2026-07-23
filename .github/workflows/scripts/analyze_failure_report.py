@@ -206,7 +206,7 @@ def generate_report(failed, recommended, matched, log_dir, recommendations_sourc
     # Recommendation source indicator
     if recommendations_source == "output":
         out.append(
-          "> **[Source: Workflow Output]** Recommended test cases are passed from upstream job outputs (e.g., coverage recommendations)"
+          "> **[Source: Workflow Output]** Recommended cases are passed from coverage recommendations outputs"
         )
     elif recommendations_source == "committed":
         out.append(
@@ -258,12 +258,12 @@ def generate_report(failed, recommended, matched, log_dir, recommendations_sourc
     out.append("## Core Conclusion")
     out.append("")
     if not failed:
-        out.append("> No failed test cases in this CI run; no need to compare against the recommendation list.")
+        out.append("> No failed cases in this CI run; no need to compare against the recommendation list.")
     elif len(miss) == 0:
         out.append("> **All failed test cases are within the recommended scope.**")
     else:
         total_failed = len(failed)
-        out.append(f"> ** {len(miss)}/{total_failed} failed test cases are outside the recommended scope.**")
+        out.append(f"> ** {len(miss)}/{total_failed} failed cases are outside the recommended scope.**")
     out.append("")
 
     # ================================================================
