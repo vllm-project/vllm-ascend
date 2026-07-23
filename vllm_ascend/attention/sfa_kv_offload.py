@@ -72,7 +72,20 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         metadata_cls: type[AscendSFAMetadata] | None = None,
         supports_dcp_with_varlen: bool = False,
     ):
-        super().__init__(kv_cache_spec, layer_names, vllm_config, device, metadata_cls, supports_dcp_with_varlen)
+        super().__init__(
+            kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
+            metadata_cls,
+            supports_dcp_with_varlen,
+        )
+        kv_transfer_config = vllm_config.kv_transfer_config
+        self.is_pd_decode_consumer = (
+            kv_transfer_config is not None
+            and kv_transfer_config.is_kv_consumer
+            and not kv_transfer_config.is_kv_producer
+        )
 
     def _populate_offload_metadata(
         self,
@@ -82,7 +95,12 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=self.decode_threshold,
-            treat_short_extends_as_decodes=False,
+            # The D node has already loaded the prompt KV from P. vLLM still
+            # marks the one-token boundary step as prefilling because its
+            # computed-token count is N - 1, but SFA must execute it through
+            # the decode-offload path. Keep colocated producer/debug behavior
+            # unchanged so genuine short prefills still populate the cache.
+            treat_short_extends_as_decodes=self.is_pd_decode_consumer,
         )
         metadata.num_decodes = num_decodes
         metadata.num_prefills = num_prefills
