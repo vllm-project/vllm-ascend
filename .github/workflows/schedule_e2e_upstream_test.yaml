@@ -66,7 +66,7 @@ jobs:
           image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
           env:
             VLLM_LOGGING_LEVEL: ERROR
-            HF_HUB_OFFLINE: 1
+            HF_HUB_OFFLINE: 0
         steps:
           - name: Checkout vllm-project/vllm-ascend repo
             uses: actions/checkout@v7
@@ -107,6 +107,7 @@ jobs:
               pip uninstall -y triton
               pip install -e tests/plugins/bge_m3_sparse_plugin
               pip install -e tests/plugins/prithvi_io_processor_plugin
+              pip install -e tests/plugins/colbert_query_plugin
               sed -i '5i\import vllm_ascend.patch.platform\nimport vllm_ascend.patch.worker' tests/conftest.py
 
           - name: Get csrc hash
@@ -154,7 +155,7 @@ jobs:
               fi
               uv pip install tblib 
               uv pip install pqdm timm schemathesis==3.39.15 "vllm[helion]" "runai-model-streamer[s3,gcs]"
-              uv pip install "mteb[bm25s]" open_clip_torch terratorch==1.2.2 imagehash
+              uv pip install "mteb[bm25s]" open_clip_torch terratorch==1.2.2 imagehash cohere_melody
               uv pip install "lm-eval[api]" num2words "vllm[grpc]" "vllm[audio]"
 
           - name: Run vllm-project/vllm test
@@ -174,7 +175,8 @@ jobs:
                 --continue-on-error
 
     e2e-upstream_multicard:
-        runs-on: linux-aarch64-a2b3-${{ matrix.num_npus }}
+        runs-on: linux-aarch64-a2b3-0
+        #runs-on: linux-aarch64-a2b3-${{ matrix.num_npus }}
         needs: resolve-tag
         strategy:
           fail-fast: false
@@ -285,7 +287,8 @@ jobs:
                 --continue-on-error
               
     e2e-upstream_online:
-        runs-on: linux-aarch64-a2b3-${{ matrix.num_npus }}
+        runs-on: linux-aarch64-a2b3-0
+        #runs-on: linux-aarch64-a2b3-${{ matrix.num_npus }}
         needs: resolve-tag
         strategy:
           fail-fast: false
