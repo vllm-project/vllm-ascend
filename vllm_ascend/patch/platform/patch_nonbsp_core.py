@@ -223,7 +223,8 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
         )
         self.scheduler._lb_kv_prefetch_enabled = lb_active
         if lb_active:
-            has_new_long_req = self._do_lb_allgather()
+            admission_candidates = self.scheduler.prepare_nonbsp_step()
+            has_new_long_req = self._do_lb_allgather(admission_candidates)
             if dynamic_lb_mode and self._lb_dynamic_enable:
                 if has_new_long_req:
                     self._lb_dynamic_step = 0
@@ -266,7 +267,7 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
                 )
         return result
 
-    def _do_lb_allgather(self) -> bool:
+    def _do_lb_allgather(self, admission_candidates: list[Request]) -> bool:
         max_slots = self._lb_max_slots_cached
         dp_size = self._lb_dp_size_cached
         max_num_seqs = self._lb_max_num_seqs
@@ -275,8 +276,7 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
         running_blks = [(len(req.all_token_ids) + blk_size - 1) // blk_size for req in self.scheduler.running]
         waiting_blks = [
             (len(req.all_token_ids) + blk_size - 1) // blk_size
-            for req in self.scheduler.waiting
-            if req.status == RequestStatus.WAITING or self.scheduler.is_lb_paused(req)
+            for req in admission_candidates
         ]
 
         arr = self._lb_data_np

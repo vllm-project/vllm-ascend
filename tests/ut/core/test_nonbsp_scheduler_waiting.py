@@ -54,7 +54,7 @@ def test_nonbsp_scheduler_diagnostics_can_be_enabled(monkeypatch):
     assert len(summaries) == 1
 
 
-def test_nonbsp_uses_single_persistent_waiting_queue():
+def test_nonbsp_keeps_async_kv_load_in_skipped_waiting():
     vllm_config = create_vllm_config(max_num_seqs=2)
     scheduler = create_scheduler(
         vllm_config,
@@ -76,13 +76,13 @@ def test_nonbsp_uses_single_persistent_waiting_queue():
     scheduler_output = scheduler.schedule()
 
     assert remote_request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-    assert remote_request in scheduler.waiting
+    assert remote_request in scheduler.skipped_waiting
+    assert remote_request not in scheduler.waiting
     assert ready_request in scheduler.running
     assert ready_request.request_id in scheduler_output.num_scheduled_tokens
-    assert not scheduler.skipped_waiting
 
 
-def test_nonbsp_blocked_statuses_are_enqueued_in_waiting():
+def test_nonbsp_blocked_statuses_are_enqueued_in_skipped_waiting():
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(
         vllm_config,
@@ -93,11 +93,11 @@ def test_nonbsp_blocked_statuses_are_enqueued_in_waiting():
     request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
     scheduler._enqueue_waiting_request(request)
 
-    assert request in scheduler.waiting
-    assert not scheduler.skipped_waiting
+    assert request in scheduler.skipped_waiting
+    assert request not in scheduler.waiting
 
 
-def test_nonbsp_invalid_async_load_scans_persistent_waiting_queue(monkeypatch):
+def test_nonbsp_invalid_async_load_scans_skipped_waiting(monkeypatch):
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(
         vllm_config,
@@ -105,7 +105,7 @@ def test_nonbsp_invalid_async_load_scans_persistent_waiting_queue(monkeypatch):
     )
     request = create_request(request_id=1)
     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
-    scheduler.waiting.add_request(request)
+    scheduler.skipped_waiting.add_request(request)
     scanned_requests = []
 
     def _capture_requests(requests, *args, **kwargs):
@@ -120,6 +120,137 @@ def test_nonbsp_invalid_async_load_scans_persistent_waiting_queue(monkeypatch):
 
     assert scheduler._handle_invalid_blocks({1}, {}) == set()
     assert scanned_requests[0] == [request]
+
+
+def test_nonbsp_prepare_moves_prefetched_request_to_skipped_waiting():
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(
+        vllm_config,
+        scheduler_cls=NonBSPScheduler,
+    )
+    request = create_request(
+        request_id=1,
+        do_remote_prefill=True,
+        block_size=vllm_config.cache_config.block_size,
+    )
+    scheduler.add_request(request)
+    scheduler._lb_kv_prefetch_enabled = True
+
+    candidates = scheduler.prepare_nonbsp_step()
+
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert request in scheduler.skipped_waiting
+    assert request not in scheduler.waiting
+    assert request not in candidates
+    assert request in scheduler._inflight_prefills
+
+
+def test_nonbsp_in_blk_builds_admission_mask():
+    vllm_config = create_vllm_config(
+        max_num_seqs=2,
+        block_size=8,
+    )
+    vllm_config.kv_transfer_config = None
+    scheduler = create_scheduler(
+        vllm_config,
+        scheduler_cls=NonBSPScheduler,
+    )
+    short_request = create_request(request_id=1, num_tokens=9, block_size=8)
+    long_request = create_request(request_id=2, num_tokens=17, block_size=8)
+    scheduler.add_request(short_request)
+    scheduler.add_request(long_request)
+    scheduler.prepare_nonbsp_step()
+    scheduler.modifications = {
+        "out_blk": [],
+        "in_blk": [3],
+        "freeze": False,
+    }
+
+    scheduler_output = scheduler.schedule()
+
+    assert long_request in scheduler.running
+    assert long_request.request_id in scheduler_output.num_scheduled_tokens
+    assert short_request in scheduler.skipped_waiting
+    assert short_request.request_id not in scheduler_output.num_scheduled_tokens
+
+
+def test_nonbsp_empty_in_blk_blocks_all_admission():
+    vllm_config = create_vllm_config()
+    vllm_config.kv_transfer_config = None
+    scheduler = create_scheduler(
+        vllm_config,
+        scheduler_cls=NonBSPScheduler,
+    )
+    request = create_request(request_id=1)
+    scheduler.add_request(request)
+    scheduler.prepare_nonbsp_step()
+    scheduler.modifications = {
+        "out_blk": [],
+        "in_blk": [],
+        "freeze": False,
+    }
+
+    scheduler_output = scheduler.schedule()
+
+    assert not scheduler.running
+    assert request in scheduler.skipped_waiting
+    assert request.request_id not in scheduler_output.num_scheduled_tokens
+
+
+def test_nonbsp_same_block_count_uses_candidate_order():
+    vllm_config = create_vllm_config(max_num_seqs=2)
+    vllm_config.kv_transfer_config = None
+    scheduler = create_scheduler(
+        vllm_config,
+        scheduler_cls=NonBSPScheduler,
+    )
+    first_request = create_request(request_id=1)
+    second_request = create_request(request_id=2)
+    scheduler.add_request(first_request)
+    scheduler.add_request(second_request)
+    candidates = scheduler.prepare_nonbsp_step()
+    block_num = (len(first_request.all_token_ids) + scheduler.block_size - 1) // scheduler.block_size
+    scheduler.modifications = {
+        "out_blk": [],
+        "in_blk": [block_num],
+        "freeze": False,
+    }
+
+    scheduler.schedule()
+
+    assert candidates == [first_request, second_request]
+    assert first_request in scheduler.running
+    assert second_request in scheduler.skipped_waiting
+
+
+def test_nonbsp_out_request_is_not_readmitted_in_same_step():
+    vllm_config = create_vllm_config()
+    vllm_config.kv_transfer_config = None
+    scheduler = create_scheduler(
+        vllm_config,
+        scheduler_cls=NonBSPScheduler,
+    )
+    request = create_request(request_id=1)
+    scheduler.add_request(request)
+    first_output = scheduler.schedule()
+    scheduler.update_from_output(
+        first_output,
+        create_model_runner_output([request]),
+    )
+    scheduler.prepare_nonbsp_step()
+    block_num = (len(request.all_token_ids) + scheduler.block_size - 1) // scheduler.block_size
+    scheduler.modifications = {
+        "out_blk": [block_num],
+        "in_blk": [block_num],
+        "freeze": False,
+    }
+
+    scheduler.schedule()
+
+    assert request.status == RequestStatus.PREEMPTED
+    assert scheduler.is_lb_paused(request)
+    assert request in scheduler.skipped_waiting
+    assert request not in scheduler.running
 
 
 def _create_nonbsp_scheduler(async_scheduling: bool):

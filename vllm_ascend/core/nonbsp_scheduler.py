@@ -46,8 +46,6 @@ from vllm.v1.core.sched.output import (
     SchedulerOutput,
 )
 from vllm.v1.core.sched.request_queue import (
-    FCFSRequestQueue,
-    PriorityRequestQueue,
     RequestQueue,
     SchedulingPolicy,
     create_request_queue,
@@ -66,22 +64,6 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import NonBSPConfig
 from vllm_ascend.core.scheduler_diagnostics import print_scheduler_summary
-
-
-def _sort_fcfs_queue_by_arrival_time(self: FCFSRequestQueue) -> None:
-    sorted_reqs = sorted(self, key=lambda req: req.arrival_time)
-    self.clear()
-    self.extend(sorted_reqs)
-
-
-def _sort_priority_queue_by_arrival_time(self: PriorityRequestQueue) -> None:
-    # Priority queues are heap-based; native ordering already uses arrival_time
-    # as the tie-breaker after priority.
-    return None
-
-
-FCFSRequestQueue.sort_by_arrival_time = _sort_fcfs_queue_by_arrival_time
-PriorityRequestQueue.sort_by_arrival_time = _sort_priority_queue_by_arrival_time
 
 
 class NonBSPScheduler(SchedulerInterface):
@@ -191,17 +173,15 @@ class NonBSPScheduler(SchedulerInterface):
             raise ValueError(f"Unknown scheduling policy: {self.scheduler_config.policy}") from e
         # Priority queues for requests.
         self.waiting = create_request_queue(self.policy)
-        # Compatibility placeholder for v0.22.1 scheduler interfaces and
-        # diagnostics. NonBSP deliberately keeps every persistent waiting
-        # request in self.waiting, matching the v0.13.0 scheduler. Requests
-        # blocked by async dependencies or per-step constraints are moved to a
-        # local queue during schedule() and restored to self.waiting afterward.
+        # Requests blocked by async dependencies or per-step constraints.
         self.skipped_waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
         self.modifications: dict | None = None
         self.lb_freeze: bool = False
         self._lb_paused_req_ids: set[str] = set()
         self._lb_kv_prefetch_enabled: bool = False
+        self._lb_admission_candidates: list[Request] = []
+        self._lb_admit_req_ids: set[str] | None = None
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
@@ -394,33 +374,54 @@ class NonBSPScheduler(SchedulerInterface):
                 num_new_tokens = num_new_tokens // block_size * block_size
         return num_new_tokens
 
-    def _run_lb_kv_prefetch(self) -> None:
+    def _waiting_requests_in_schedule_order(self) -> list[Request]:
+        if self.policy == SchedulingPolicy.FCFS:
+            return [*self.skipped_waiting, *self.waiting]
+
+        waiting = list(self.waiting)
+        skipped = list(self.skipped_waiting)
+        ordered: list[Request] = []
+        waiting_idx = skipped_idx = 0
+        while waiting_idx < len(waiting) and skipped_idx < len(skipped):
+            if waiting[waiting_idx] < skipped[skipped_idx]:
+                ordered.append(waiting[waiting_idx])
+                waiting_idx += 1
+            else:
+                ordered.append(skipped[skipped_idx])
+                skipped_idx += 1
+        ordered.extend(waiting[waiting_idx:])
+        ordered.extend(skipped[skipped_idx:])
+        return ordered
+
+    def _refresh_blocked_waiting_requests(self) -> None:
+        for request in list(self.skipped_waiting):
+            if self._is_blocked_waiting_status(request.status):
+                self._try_promote_blocked_waiting_request(request)
+
+    def _run_lb_kv_prefetch(self) -> set[str]:
         if self.connector is None or not self._lb_kv_prefetch_enabled:
-            return
+            return set()
 
         kv_prefetch_limit = 2 * self.max_num_running_reqs - len(self.running)
         kv_prefetch_count = 0
-        for request in self.waiting:
-            if kv_prefetch_count >= kv_prefetch_limit:
-                break
-            kv_prefetch_count += 1
-
-            if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                self._try_promote_blocked_waiting_request(request)
-                continue
-
+        kv_not_ready_req_ids: set[str] = set()
+        requests_to_move: list[Request] = []
+        for request in self._waiting_requests_in_schedule_order():
             if request.status not in (RequestStatus.WAITING, RequestStatus.PREEMPTED):
                 continue
             if request.num_computed_tokens != 0:
                 continue
+            if kv_prefetch_count >= kv_prefetch_limit:
+                kv_not_ready_req_ids.add(request.request_id)
+                continue
+            kv_prefetch_count += 1
 
             new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(request)
             ext_tokens, load_async = self.connector.get_num_new_matched_tokens(request, num_new_local_computed_tokens)
             if ext_tokens is None:
+                kv_not_ready_req_ids.add(request.request_id)
                 continue
             if not load_async or not ext_tokens:
-                if request.status == RequestStatus.PREEMPTED:
-                    request.status = RequestStatus.WAITING
                 continue
 
             new_blocks = self.kv_cache_manager.allocate_slots(
@@ -434,6 +435,7 @@ class NonBSPScheduler(SchedulerInterface):
                 full_sequence_must_fit=self.scheduler_reserve_full_isl,
             )
             if new_blocks is None:
+                kv_not_ready_req_ids.add(request.request_id)
                 continue
 
             self.connector.update_state_after_alloc(
@@ -443,11 +445,32 @@ class NonBSPScheduler(SchedulerInterface):
             )
             request.num_computed_tokens = num_new_local_computed_tokens + ext_tokens
             request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+            self._inflight_prefills.add(request)
+            if request in self.waiting:
+                requests_to_move.append(request)
 
-    def _apply_load_balance_modifications(self) -> RequestQueue:
-        lb_isolated_reqs = create_request_queue(self.policy)
-        if not self.modifications:
-            return lb_isolated_reqs
+        if requests_to_move:
+            self.waiting.remove_requests(requests_to_move)
+            for request in requests_to_move:
+                self.skipped_waiting.add_request(request)
+        return kv_not_ready_req_ids
+
+    def prepare_nonbsp_step(self) -> list[Request]:
+        self._refresh_blocked_waiting_requests()
+        kv_not_ready_req_ids = self._run_lb_kv_prefetch()
+        self._lb_admission_candidates = [
+            request
+            for request in self._waiting_requests_in_schedule_order()
+            if request.status in (RequestStatus.WAITING, RequestStatus.PREEMPTED)
+            and request.request_id not in kv_not_ready_req_ids
+        ]
+        return self._lb_admission_candidates
+
+    def _apply_load_balance_modifications(self) -> None:
+        self._lb_admit_req_ids = None
+        if self.modifications is None:
+            self.lb_freeze = False
+            return
 
         out_blks = self.modifications["out_blk"]
         in_blks = self.modifications["in_blk"]
@@ -474,36 +497,19 @@ class NonBSPScheduler(SchedulerInterface):
                     self.running.remove(req)
                     self._lb_pause_request(req, scheduled_timestamp)
 
-        remaining_in = list(in_blks)
-        lb_paused_waiting = [req for req in self.waiting if self.is_lb_paused(req)]
-        fcfs_waiting = sorted(
-            [req for req in self.waiting if req.status == RequestStatus.WAITING],
-            key=lambda req: req.arrival_time,
-        )
-        for req in lb_paused_waiting + fcfs_waiting:
+        remaining_in = [] if self.lb_freeze else list(in_blks)
+        admit_req_ids: set[str] = set()
+        for req in self._lb_admission_candidates:
             if not remaining_in:
                 break
             blk_num = req_blk_num(req)
             if blk_num in remaining_in:
                 remaining_in.remove(blk_num)
-                self.waiting.remove_request(req)
-                self.waiting.prepend_request(req)
+                admit_req_ids.add(req.request_id)
+        self._lb_admit_req_ids = admit_req_ids
 
-        if in_blks:
-            in_blk_counts: dict[int, int] = {}
-            for blk_num in in_blks:
-                in_blk_counts[blk_num] = in_blk_counts.get(blk_num, 0) + 1
-            matched_counts: dict[int, int] = {}
-            for req in list(self.waiting):
-                blk_num = req_blk_num(req)
-                used = matched_counts.get(blk_num, 0)
-                if in_blk_counts.get(blk_num, 0) > used:
-                    matched_counts[blk_num] = used + 1
-                else:
-                    self.waiting.remove_request(req)
-                    lb_isolated_reqs.prepend_request(req)
-
-        return lb_isolated_reqs
+    def _can_admit_waiting_request(self, request: Request) -> bool:
+        return self._lb_admit_req_ids is None or request.request_id in self._lb_admit_req_ids
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
@@ -523,8 +529,7 @@ class NonBSPScheduler(SchedulerInterface):
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
 
-        self._run_lb_kv_prefetch()
-        lb_isolated_reqs = self._apply_load_balance_modifications()
+        self._apply_load_balance_modifications()
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -737,17 +742,18 @@ class NonBSPScheduler(SchedulerInterface):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and self._pause_state == PauseState.UNPAUSED and not self.lb_freeze:
+        if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
 
-            while self.waiting and token_budget > 0:
+            while (self.waiting or self.skipped_waiting) and token_budget > 0:
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
                 # in `running` but still hold a model-runner request slot.
                 num_running = len(self.running) + self.num_waiting_for_streaming_input
                 if num_running >= self.max_num_running_reqs:
                     break
 
-                request_queue = self.waiting
+                request_queue = self._select_waiting_queue_for_scheduling()
+                assert request_queue is not None
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
@@ -761,6 +767,11 @@ class NonBSPScheduler(SchedulerInterface):
                             "%s is still in WAITING_FOR_REMOTE_KVS state.",
                             request_id,
                         )
+                    request_queue.pop_request()
+                    step_skipped_waiting.prepend_request(request)
+                    continue
+
+                if not self._can_admit_waiting_request(request):
                     request_queue.pop_request()
                     step_skipped_waiting.prepend_request(request)
                     continue
@@ -1079,21 +1090,13 @@ class NonBSPScheduler(SchedulerInterface):
                         if self.ec_connector is not None:
                             self.ec_connector.update_state_after_alloc(request, i)
 
-            # v0.13.0-compatible behavior: requests skipped in this pass stay
-            # in the single persistent waiting queue and are retried next step.
             if step_skipped_waiting:
-                self.waiting.prepend_requests(step_skipped_waiting)
+                self.skipped_waiting.prepend_requests(step_skipped_waiting)
 
             # DP prefill balancing: on a step that admitted prefills (release),
             # record whether it was capacity-bound.
             if not defer_prefills:
                 self.prefill_capacity_bound = bool(self.waiting)
-
-        if lb_isolated_reqs:
-            self.waiting.prepend_requests(lb_isolated_reqs)
-
-        if self._lb_kv_prefetch_enabled:
-            self.waiting.sort_by_arrival_time()
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
@@ -1898,10 +1901,21 @@ class NonBSPScheduler(SchedulerInterface):
         )
 
     def _enqueue_waiting_request(self, request: Request) -> None:
-        # Keep a single persistent queue for NonBSP. Blocked requests are
-        # skipped through a per-schedule local queue, so they do not prevent
-        # later schedulable requests from being considered in the same step.
-        self.waiting.add_request(request)
+        if self._is_blocked_waiting_status(request.status):
+            self.skipped_waiting.add_request(request)
+        else:
+            self.waiting.add_request(request)
+
+    def _select_waiting_queue_for_scheduling(self) -> RequestQueue | None:
+        if self.policy == SchedulingPolicy.FCFS:
+            return self.skipped_waiting or self.waiting or None
+
+        if self.waiting and self.skipped_waiting:
+            waiting_req = self.waiting.peek_request()
+            skipped_req = self.skipped_waiting.peek_request()
+            return self.waiting if waiting_req < skipped_req else self.skipped_waiting
+
+        return self.waiting or self.skipped_waiting or None
 
     def _handle_stopped_request(self, request: Request) -> bool:
         """Return True if finished (can be False for resumable requests)."""
@@ -2620,10 +2634,7 @@ class NonBSPScheduler(SchedulerInterface):
 
         # handle async KV loads (not cached yet, evict_blocks=False)
         async_load_reqs = (
-            req
-            for queue in (self.waiting, self.skipped_waiting)
-            for req in queue
-            if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+            req for req in self.skipped_waiting if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
         )
         async_failed_req_ids, num_failed_tokens, _ = self._update_requests_with_invalid_blocks(
             async_load_reqs,

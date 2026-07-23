@@ -191,6 +191,36 @@ def test_balance_load_runs_before_engine_step(monkeypatch):
     assert events == ["balance_load", "engine_step"]
 
 
+def test_run_balance_load_prepares_snapshot_before_allgather():
+    events: list[object] = []
+    candidates = [MagicMock(request_id="candidate")]
+    scheduler = MagicMock()
+
+    def prepare_nonbsp_step():
+        events.append("prepare")
+        return candidates
+
+    scheduler.prepare_nonbsp_step.side_effect = prepare_nonbsp_step
+
+    engine_core = object.__new__(nonbsp_core.NonBSPDPEngineCoreProc)
+    engine_core.scheduler = scheduler
+    engine_core._lb_mode = "static"
+    engine_core._lb_dynamic_enable = False
+    engine_core.step_counter = 0
+    engine_core._lb_start_step = 0
+    engine_core._lb_end_step = -1
+
+    def do_lb_allgather(snapshot):
+        events.append(("allgather", snapshot))
+        return False
+
+    engine_core._do_lb_allgather = do_lb_allgather
+
+    engine_core.run_balance_load()
+
+    assert events == ["prepare", ("allgather", candidates)]
+
+
 def _make_process_step_test_engine(*, engines_running: bool, local_unfinished: bool):
     engine_core = object.__new__(nonbsp_core.NonBSPDPEngineCoreProc)
     engine_core.engines_running = engines_running
@@ -362,7 +392,7 @@ def test_balance_summary_is_suppressed_when_diagnostics_are_disabled(capsys):
     assert capsys.readouterr().out == ""
 
 
-def test_nonbsp_allgather_uses_only_unified_waiting_queue(monkeypatch):
+def test_nonbsp_allgather_uses_admission_candidate_snapshot(monkeypatch):
     waiting_request = MagicMock(
         request_id="waiting",
         all_token_ids=list(range(17)),
@@ -381,9 +411,11 @@ def test_nonbsp_allgather_uses_only_unified_waiting_queue(monkeypatch):
     scheduler = MagicMock()
     scheduler.block_size = 8
     scheduler.running = []
-    scheduler.waiting = [waiting_request, paused_request]
-    scheduler.skipped_waiting = [skipped_request]
-    scheduler.is_lb_paused.side_effect = lambda request: request is paused_request
+    scheduler._lb_admission_candidates = [
+        skipped_request,
+        waiting_request,
+        paused_request,
+    ]
 
     engine_core = object.__new__(nonbsp_core.NonBSPDPEngineCoreProc)
     engine_core.scheduler = scheduler
@@ -416,6 +448,6 @@ def test_nonbsp_allgather_uses_only_unified_waiting_queue(monkeypatch):
     monkeypatch.setattr(nonbsp_core, "_print_requests_by_rank", lambda *args: None)
     monkeypatch.setattr(nonbsp_core, "_print_modifications", lambda *args: None)
 
-    engine_core._do_lb_allgather()
+    engine_core._do_lb_allgather(scheduler._lb_admission_candidates)
 
-    assert captured["requests_by_rank"] == [([3, 5, 0, 0], 0)]
+    assert captured["requests_by_rank"] == [([9, 3, 5, 0], 0)]
