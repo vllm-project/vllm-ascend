@@ -195,26 +195,22 @@ def _muls_add_impl_fake(
 
 
 def _device_print_op_impl(x: torch.Tensor) -> torch.Tensor:
-    from vllm_ascend.utils import _ensure_device_print_registered
-
-    _ensure_device_print_registered()
     torch.ops._C_ascend.device_print_tensor(x)
     return x
 
 
 def _device_print_op_fake(x: torch.Tensor) -> torch.Tensor:
-    return torch.empty_like(x)
+    return x
 
 
-def _device_print_str_op_impl(msg: str) -> None:
-    from vllm_ascend.utils import _ensure_device_print_registered
-
-    _ensure_device_print_registered()
+def _device_print_str_op_impl(x: torch.Tensor, msg: str) -> torch.Tensor:
+    # Return x so the print stays on the FX dataflow without has_side_effect.
     torch.ops._C_ascend.device_print(msg)
+    return x
 
 
-def _device_print_str_op_fake(msg: str) -> None:
-    return
+def _device_print_str_op_fake(x: torch.Tensor, msg: str) -> torch.Tensor:
+    return x
 
 
 direct_register_custom_op(
@@ -294,5 +290,5 @@ direct_register_custom_op(
     op_func=_device_print_str_op_impl,
     fake_impl=_device_print_str_op_fake,
     mutates_args=[],
-    dispatch_key="CompositeExplicitAutograd",
+    dispatch_key="PrivateUse1",
 )
