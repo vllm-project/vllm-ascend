@@ -77,7 +77,7 @@ docker run --rm \
         -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it -d $IMAGE bash
-    ```
+```
 
 ::::
 :::::
@@ -120,31 +120,34 @@ Single-node deployment runs both audio prefill and decoding on one NPU, making i
 :::::{tab-set}
 ::::{tab-item} Atlas A2 inference products
 
-    ```shell
-    vllm serve your_model_path \
-      --served-model-name qwen3-asr \
-      --tensor-parallel-size 1 \
-      --max-model-len 4096 \
-      --gpu-memory-utilization 0.9 \
-      --enforce-eager \
-      --port 8000
-    ```
+```shell
+vllm serve your_model_path \
+    --served-model-name qwen3-asr \
+    --tensor-parallel-size 1 \
+    --max-model-len 4096 \
+    --gpu-memory-utilization 0.9 \
+    --enforce-eager \
+    --port 8000
+```
 ::::
 ::::{tab-item} Atlas inference products
 
-    ```shell
-    vllm serve your_model_path \
-      --served-model-name qwen3-asr \
-      --tensor-parallel-size 1 \
-      --gpu-memory-utilization 0.9 \
-      --dtype float16 \
-      --max-model-len 4096 \
-      --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false,"enable_npu_graph_ex":false}}' \
-      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,4]}' \
-      --port 8000
-    ```
+```{code-block} bash
+   :substitutions:
+
+vllm serve your_model_path \
+  --served-model-name qwen3-asr \
+  --tensor-parallel-size 1 \
+  --gpu-memory-utilization 0.9 \
+  --dtype float16 \
+  --max-model-len 4096 \
+  --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false,"enable_npu_graph_ex":false}}' \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,4]}' \
+  --port 8000
+```
 
 ::::
+
 :::::
 
 Key parameters Descriptions:
@@ -162,7 +165,9 @@ After the service is started, the model can be invoked by sending a prompt.
 
 **Chat Completions API:**
 
-```bash
+```{code-block} bash
+   :substitutions:
+   
 curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
