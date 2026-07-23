@@ -439,7 +439,7 @@ class BaseDeviceAdaptor:
         rope_cos = rope_cos.view(rope_cos.shape[0], rope_cos.shape[-1])
         rope_sin = rope_sin.view(rope_sin.shape[0], rope_sin.shape[-1])
 
-        packed_kv_cache = getattr(sfa_impl, "use_sparse_c8_sfa", False)
+        packed_kv_cache = getattr(sfa_impl, "enable_sparse_sfa_c8", False)
         if packed_kv_cache:
             assert sfa_impl.sfa_qsfa_kr_cache_dummy is not None
             kr_cache = sfa_impl.sfa_qsfa_kr_cache_dummy
@@ -553,17 +553,17 @@ class BaseDeviceAdaptor:
         attn_metadata,
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
-        use_sparse_c8_indexer: bool,
+        enable_sparse_li_c8: bool,
         use_torch_npu_lightning_indexer: bool,
     ) -> torch.Tensor:
         # DSV3.2 currently has graph compilation issues when using torch_npu.npu.lightning_indexer.
         # So two branches are maintained temporarily.
         # TODO: torch.ops._C_ascend.npu_lightning_indexer needs to be removed.
-        packed_kv_cache = getattr(sfa_impl, "use_sparse_c8_sfa", False)
+        packed_kv_cache = getattr(sfa_impl, "enable_sparse_sfa_c8", False)
         indexer_cache_idx = 1 if packed_kv_cache else 2
         indexer_scale_cache_idx = 2 if packed_kv_cache else 3
 
-        if use_sparse_c8_indexer:
+        if enable_sparse_li_c8:
             assert len(kv_cache) == (3 if packed_kv_cache else 4)
             assert q_li_scale is not None
             assert q_li_shape_ori is not None
@@ -612,8 +612,9 @@ class BaseDeviceAdaptor:
             )
         return topk_indices
 
-    @staticmethod
+    @classmethod
     def execute_sparse_flash_attention_process(
+        cls,
         sfa_impl,
         ql_nope: torch.Tensor,
         q_pe: torch.Tensor,
@@ -641,7 +642,7 @@ class BaseDeviceAdaptor:
             torch.float8_e5m2,
         )
         if use_kv_quant_sparse_attention:
-            return BaseDeviceAdaptor.execute_kv_quant_sparse_flash_attention(
+            return cls.execute_kv_quant_sparse_flash_attention(
                 sfa_impl,
                 ql_nope,
                 q_pe,
@@ -1123,6 +1124,48 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             scale=scale,
             **kwargs,
         )
+
+    @staticmethod
+    def execute_kv_quant_sparse_flash_attention(
+        sfa_impl,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv: torch.Tensor,
+        block_table: torch.Tensor,
+        topk_indices: torch.Tensor,
+        actual_seq_lengths_query: torch.Tensor,
+        actual_seq_lengths_key: torch.Tensor,
+        *,
+        sparse_mode: int = 3,
+        return_lse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        query = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
+        result = torch_npu.npu_kv_quant_sparse_flash_attention(
+            query=query,
+            key=kv,
+            value=kv,
+            sparse_indices=topk_indices,
+            scale_value=sfa_impl.scale,
+            sparse_block_size=1,
+            block_table=block_table,
+            actual_seq_lengths_query=actual_seq_lengths_query,
+            actual_seq_lengths_kv=actual_seq_lengths_key,
+            layout_query="TND",
+            layout_kv="PA_BSND",
+            sparse_mode=sparse_mode,
+            attention_mode=2,
+            quant_scale_repo_mode=1,
+            tile_size=getattr(sfa_impl, "sfa_qsfa_tile_size", 128),
+            key_quant_mode=2,
+            value_quant_mode=2,
+            rope_head_dim=getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]),
+        )
+        if return_lse:
+            raise RuntimeError(
+                "C8 sparse flash attention via torch_npu only returns attention_out; "
+                "cannot return softmax max/sum for DCP LSE merge."
+            )
+        return result
 
     @staticmethod
     def npu_moe_init_routing(
@@ -1724,7 +1767,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         sin = sin.view(cos_shape[0], 1, cos_shape[-1])
 
         decode_k_nope = kv_cache[0]
-        use_c8 = getattr(sfa_impl, "use_sparse_c8_sfa", False)
+        use_c8 = getattr(sfa_impl, "enable_sparse_sfa_c8", False)
         kr_cache = (
             torch.zeros(0, 0, decode_k_nope.shape[-2], cos_shape[-1], dtype=torch.bfloat16, device=decode_k_nope.device)
             if use_c8
@@ -1797,14 +1840,14 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         attn_metadata,
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
-        use_sparse_c8_indexer: bool,
+        enable_sparse_li_c8: bool,
         use_torch_npu_lightning_indexer: bool,
     ) -> torch.Tensor:
-        packed_kv_cache = getattr(sfa_impl, "use_sparse_c8_sfa", False)
+        packed_kv_cache = getattr(sfa_impl, "enable_sparse_sfa_c8", False)
         indexer_cache_idx = 1 if packed_kv_cache else 2
         indexer_scale_cache_idx = 2 if packed_kv_cache else 3
 
-        if use_sparse_c8_indexer:
+        if enable_sparse_li_c8:
             assert len(kv_cache) == (3 if packed_kv_cache else 4)
             assert q_li_shape_ori is not None
 

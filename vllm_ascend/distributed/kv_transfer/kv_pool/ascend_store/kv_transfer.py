@@ -196,6 +196,7 @@ class LayerBatchBuilder:
         block_ids_arr, block_gvas_arr = self._ensure_buf(total)
         req_ids: list[str] = []
         is_last_chunks: list[bool | None] = []
+        all_save_keys: list[str] = []
         all_load_keys: list[str] = []
         offset = 0
 
@@ -203,6 +204,8 @@ class LayerBatchBuilder:
             request = block_range.request
             req_ids.append(request.req_id)
             is_last_chunks.append(request.is_last_chunk)
+            if request.save_keys:
+                all_save_keys.extend(request.save_keys)
             if request.load_keys:
                 all_load_keys.extend(request.load_keys)
             block_ids_np, block_gvas_np = self._require_request_arrays(block_range, is_save)
@@ -242,6 +245,7 @@ class LayerBatchBuilder:
             block_gvas_arr=block_gvas_arr,
             req_ids=req_ids,
             is_last_chunks=is_last_chunks,
+            save_keys=all_save_keys,
             load_keys=all_load_keys,
         )
 
@@ -750,8 +754,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 addrs = []
                 sizes = []
                 stored_events: list[BlockStored] = []
-                prev_key = None
-                new_block_hashes = [maybe_convert_block_hash(bh) for bh in block_hashes]
+                all_hashes = [maybe_convert_block_hash(bh) for bh in group_block_hashes]
                 for index, start in enumerate(starts):
                     addr, size, _ = self._prepare_value(
                         start,
@@ -772,9 +775,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
                             else req_meta.original_block_size
                         )
                         if block_size is not None:
+                            block_idx = start // group_block_size
+                            if block_idx >= len(all_hashes):
+                                continue
+                            current_hash = all_hashes[block_idx]
+                            parent_hash = all_hashes[block_idx - 1] if block_idx > 0 else None
                             stored_event = BlockStored(
-                                block_hashes=[new_block_hashes[index]],
-                                parent_block_hash=prev_key,
+                                block_hashes=[current_hash],
+                                parent_block_hash=parent_hash,
                                 token_ids=token_ids,
                                 block_size=block_size,
                                 lora_id=None,
@@ -782,7 +790,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
                                 lora_name=None,
                             )
                             stored_events.append(stored_event)
-                            prev_key = new_block_hashes[index]
                             logger.debug("Added kv cache event '%s' to kv cache events queue", stored_event)
 
                 if self.kv_role == "kv_consumer":
@@ -1241,6 +1248,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self.sync_save_events = sync_save_events
         self.max_transfer_blocks = max_transfer_blocks
         self.max_transfer_bytes = max_transfer_bytes
+        self.write_results: dict[str, int] = {}
         self.group_builders: list[LayerBatchBuilder] | None = group_builders
         if group_builders is not None:
             self.layer_batch_builder = group_builders[0]
@@ -1293,6 +1301,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         all_addrs = []
         all_sizes = []
         all_req_ids = []
+        all_save_keys: list[str] = []
         for task in transfer_tasks:
             shared = task.shared_block_data
             if shared is None:
@@ -1303,6 +1312,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             for req_id in req_meta.req_ids:
                 self.dec_stored_request(req_id)
                 all_req_ids.append(req_id)
+            all_save_keys.extend(shared.save_keys)
             all_gvas.append(req_meta.gvas_array)
             all_addrs.append(req_meta.addr_array)
             all_sizes.append(req_meta.size_array)
@@ -1329,6 +1339,13 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 )
             if res != 0:
                 logger.error("Layerwise %d save batch_copy failed with return code %d", physical_layer, res)
+            if all_save_keys:
+                save_keys = list(dict.fromkeys(all_save_keys))
+                for key in save_keys:
+                    self.write_results[key] = self.write_results.get(key, 0) or res
+                if physical_layer == self.final_layer_id:
+                    results = [self.write_results.pop(key) for key in save_keys]
+                    self.m_store.batch_write_finish(save_keys, results)
             for req_id in all_req_ids:
                 if self.try_finish_and_delete_stored_request(req_id):
                     self.set_finished_request(req_id)
