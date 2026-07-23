@@ -18,7 +18,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `Kimi-K2.6-w4a8` (Quantized version for w4a8): requires 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelscope.cn/models/Eco-Tech/Kimi-K2.6-W4A8).
+- `Kimi-K2.6-w4a8` (Quantized version for w4a8): requires 1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 8) nodes. [Download model weight](https://modelscope.cn/models/Eco-Tech/Kimi-K2.6-W4A8).
 - `kimi-k2.6-eagle3` (Eagle3 MTP draft model for accelerating inference of Kimi-K2.6): [Download model weight](https://huggingface.co/lightseekorg/kimi-k2.6-eagle3)
 - `Kimi-K2.5-DFlash` (a speculative decoding framework that leverages a lightweight block diffusion model for parallel drafting): [Download model weight](https://huggingface.co/z-lab/Kimi-K2.5-DFlash)
 
@@ -616,12 +616,12 @@ Parameter descriptions:
         }'
     ```
 
-Key Parameter Descriptions:
+    Key Parameter Descriptions:
 
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
-- `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
-- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
-- `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
+    - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
+    - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
+    - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
+    - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
 
 2. Run server for each node:
 
@@ -832,11 +832,11 @@ After about several minutes, you can get the performance evaluation result.
 
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
-|High Throughput<br>(16K input)|Single-Node Mixed|16 (A3)|kimi-k2.6-w4a8|Use dp2 tp8 to balance memory capacity and compute efficiency|
-|High Throughput<br>(16K input)|1P1D deployment|32 (A3)|kimi-k2.6-w4a8|dp2 tp8 on both P and D nodes; balanced latency and throughput|
-|High Throughput<br>(16K input)|2P1D deployment|64 (A3)|kimi-k2.6-w4a8|Scale from dp4 tp4 to dp8 tp4 across nodes|
-|Long Context<br>(128K, no prefix cache)|Single-Node Mixed|16 (A3)|kimi-k2.6-w4a8|dp1 tp16 to maximize TP, accommodate extreme context lengths|
-|Long Context<br>(128K, with prefix cache)|Single-Node Mixed|16 (A3)|kimi-k2.6-w4a8|dp2 tp8 to optimize memory bandwidth and improve cache utilization|
+|High Throughput<br>(16k input)|Single-Node Mixed|16 (A3)|kimi-k2.6-w4a8|Use dp2 tp8 to balance memory capacity and compute efficiency|
+|High Throughput<br>(16k input)|1P1D deployment|32 (A3)|kimi-k2.6-w4a8|dp2 tp8 on both P and D nodes; balanced latency and throughput|
+|High Throughput<br>(16k input)|2P1D deployment|64 (A3)|kimi-k2.6-w4a8|Scale from dp4 tp4 to dp8 tp4 across nodes|
+|Long Context<br>(128k, no prefix cache)|Single-Node Mixed|16 (A3)|kimi-k2.6-w4a8|dp1 tp16 to maximize TP, accommodate extreme context lengths|
+|Long Context<br>(128k, with prefix cache)|Single-Node Mixed|16 (A3)|kimi-k2.6-w4a8|dp2 tp8 to optimize memory bandwidth and improve cache utilization|
 |Multimodal<br>(1080P)|Single-Node Mixed|16 (A3)|kimi-k2.6-w4a8|dp1 tp16 for high-resolution visual inputs|
 |Multimodal<br>(1080P)|1P1D deployment|32 (A3)|kimi-k2.6-w4a8|dp2 tp8 or dp16 tp1, depending on memory and concurrency|
 |Multimodal<br>(1080P)|2P1D deployment|64 (A3)|kimi-k2.6-w4a8|dp8 tp2 to dp32 tp1, maximize throughput for heavy multimodal workloads|
@@ -845,14 +845,14 @@ After about several minutes, you can get the performance evaluation result.
 
 |Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|
 |--------|-------------|-----|--|--|-------------------|--------------------|
-|High Throughput / Low Latency (16K)|Server / Single Machine|16|8|2|17K|15|
-|High Throughput / Low Latency (16K)|Server-P Node|16|8|2|17K|3|
-|High Throughput / Low Latency (16K)|Server-D Node|16|8|2|17K|3|
-|Long Context (128K, no cache)|Server / Single Machine|16|16|1|130K|15|
-|Long Context (128K, with cache)|Server / Single Machine|16|8|2|130K|15|
-|Multimodal (1080P)|Server / Single Machine|16|16|1|17K|15|
-|Multimodal (1080P)|Server-P Node|16|8|2|17K|3|
-|Multimodal (1080P)|Server-D Node|16|1|16|17K|3|
+|High Throughput / Low Latency (16k)|Server / Single Machine|16|8|2|17k|15|
+|High Throughput / Low Latency (16k)|Server-P Node|16|8|2|17k|3|
+|High Throughput / Low Latency (16k)|Server-D Node|16|8|2|17k|3|
+|Long Context (128k, no cache)|Server / Single Machine|16|16|1|130k|15|
+|Long Context (128k, with cache)|Server / Single Machine|16|8|2|130k|15|
+|Multimodal (1080P)|Server / Single Machine|16|16|1|17k|15|
+|Multimodal (1080P)|Server-P Node|16|8|2|17k|3|
+|Multimodal (1080P)|Server-D Node|16|1|16|17k|3|
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
 
