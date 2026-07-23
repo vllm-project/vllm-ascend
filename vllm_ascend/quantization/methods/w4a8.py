@@ -756,6 +756,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             mega_w13 = layer.w13_weight.data
         if mega_w2 is None:
             mega_w2 = layer.w2_weight.data
+
         def _to_nz_list(nd_w, weight_param):
             lst = [maybe_trans_nz(s.clone()) for s in nd_w.unbind(dim=0)]
             weight_param.data = torch.empty(0, dtype=nd_w.dtype, device=nd_w.device)

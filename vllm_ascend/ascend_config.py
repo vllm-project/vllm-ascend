@@ -155,9 +155,7 @@ class AscendConfig:
             "VLLM_ASCEND_ENABLE_FUSED_MC2",
             ascend_envs.VLLM_ASCEND_ENABLE_FUSED_MC2,
         )
-        assert self.enable_fused_mc2 in (0, 1, 3), (
-            f"enable_fused_mc2 must be 0, 1 or 3, got {self.enable_fused_mc2}"
-        )
+        assert self.enable_fused_mc2 in (0, 1, 3), f"enable_fused_mc2 must be 0, 1 or 3, got {self.enable_fused_mc2}"
         if self.enable_fused_mc2 in (1, 3) and self.multistream_overlap_shared_expert:
             self.multistream_overlap_shared_expert = False
             logger.warning_once(

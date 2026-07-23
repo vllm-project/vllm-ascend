@@ -311,14 +311,10 @@ def _select_a3_moe_comm_method(
         and _cann_megamoe_supported_by_config(vllm_config, quant_type)
     )
     if num_tokens <= mc2_tokens_capacity:
-        fused_decode_enable = (
-            enable_fused_mc2 == 1 and dispatch_ffn_combine_enable
-        ) or mega_moe_enable
+        fused_decode_enable = (enable_fused_mc2 == 1 and dispatch_ffn_combine_enable) or mega_moe_enable
         return MoECommType.FUSED_MC2 if fused_decode_enable else MoECommType.MC2
 
-    fused_prefill_enable = (
-        enable_fused_mc2 == 1 and dispatch_ffn_combine_enable
-    ) or mega_moe_enable
+    fused_prefill_enable = (enable_fused_mc2 == 1 and dispatch_ffn_combine_enable) or mega_moe_enable
     return MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL
 
 

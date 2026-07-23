@@ -389,8 +389,7 @@ class FusedMC2CommImpl(MoECommMethod):
         )
 
         logger.info(
-            "CANN MegaMoe sym-buffer alloc (must match across all EP ranks): "
-            "ep_rank=%s ep_world=%s global_bs=%s",
+            "CANN MegaMoe sym-buffer alloc (must match across all EP ranks): ep_rank=%s ep_world=%s global_bs=%s",
             getattr(self.token_dispatcher, "ep_rank_id", "?"),
             getattr(self.token_dispatcher, "ep_world_size", "?"),
             self.token_dispatcher.global_bs,
