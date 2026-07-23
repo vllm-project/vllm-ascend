@@ -232,8 +232,7 @@ def rejection_random_sample_kernel(
                                 output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos,
                                 recovered,
                             )
-                        continue
-                    if ENABLE_REDUCE_SAMPLING:
+                    elif ENABLE_REDUCE_SAMPLING:
                         token_idx = start_idx + pos
                         draft_token_id = tl.load(draft_token_ids_ptr + token_idx)
 
