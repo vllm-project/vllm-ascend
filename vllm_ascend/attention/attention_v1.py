@@ -403,15 +403,12 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                     "the model runner must propagate prompt_lens/num_prompt_tokens"
                 )
             if not isinstance(rswa_prefix_lens, torch.Tensor):
-                raise TypeError(
-                    "R-SWA prompt lengths must be a torch.Tensor, "
-                    f"got {type(rswa_prefix_lens).__name__}"
-                )
+                raise TypeError(f"R-SWA prompt lengths must be a torch.Tensor, got {type(rswa_prefix_lens).__name__}")
             if rswa_prefix_lens.numel() < num_reqs:
                 raise RuntimeError(
-                    "R-SWA prompt lengths are shorter than the request batch: "
-                    f"{rswa_prefix_lens.numel()} < {num_reqs}"
+                    f"R-SWA prompt lengths are shorter than the request batch: {rswa_prefix_lens.numel()} < {num_reqs}"
                 )
+
             quant_config = self.vllm_config.quant_config
             if quant_config is not None and getattr(quant_config, "enable_c8_quant", False):
                 raise NotImplementedError(
