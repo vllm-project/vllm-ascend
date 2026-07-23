@@ -943,16 +943,25 @@ class KVOffloadDecodeConfig:
 
         self.topk_buffer_size = int(user_config.get("topk_buffer_size", 4096))
         self.dram_size_per_dp_GB = user_config.get("dram_size_per_dp_GB", 128)
+        self.keep_device_kv_cache = bool(user_config.get("keep_device_kv_cache", False))
 
         if hasattr(vllm_config.model_config.hf_text_config, "compress_ratios"):
             raise ValueError("KV Offload Decode don't support compress now.")
         if not hasattr(vllm_config.model_config.hf_text_config, "index_topk"):
             raise ValueError("KV Offload Decode only support sparse attention model.")
-        # if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
-        #     raise AssertionError(
-        #         "KV Offload Decode is only supported in PD disaggregate scenario "
-        #         "and can only be used in D node."
-        #     )
+        if self.keep_device_kv_cache:
+            logger.warning(
+                "KV offloading with keep_device_kv_cache enabled, "
+                "in this case we will still allocate device kv cache and can not improve sequence length or batch_size. "
+                "You should only use it for debugging in PD colocate scenario."
+            )
+        else:
+            if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
+                raise AssertionError(
+                    "KV Offload Decode is only supported in PD disaggregate scenario "
+                    "and can only be used in D node. For debugging in PD colocate scenario, "
+                    "you can enable keep_device_kv_cache."
+                )
 
         self.topk = vllm_config.model_config.hf_text_config.index_topk
         if self.topk_buffer_size <= 0:

@@ -40,6 +40,11 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
+from vllm_ascend.distributed.kv_transfer.kv_offload_decode.kv_offload_decode_manager import (
+    OFFLOAD_KV_CACHE_TUPLE_LEN,
+    OFFLOAD_K_CACHE_NPU_INDEX,
+    OFFLOAD_V_CACHE_NPU_INDEX,
+)
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.memcache_comm_fence import (
     record_attention_compute_start,
@@ -1614,11 +1619,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         # KV offload decode registers the main MLA cache as a 6-tuple
         # (k_npu, v_npu, k_cpu, v_cpu, topk_buffer_k, topk_buffer_v); the
         # attention kernels only consume the leading NPU pair.
-        # TODO remove KV_OFFLOAD_COLOCATE_DEBUG after PD disaggregate is done:
-        # the leading NPU pair only exists for colocate debug (prefill
-        # staging); this truncation follows the colocate tuple layout.
-        if len(main_cache) == 6:
-            main_cache = (main_cache[0], main_cache[1])
+        if len(main_cache) == OFFLOAD_KV_CACHE_TUPLE_LEN:
+            main_cache = (main_cache[OFFLOAD_K_CACHE_NPU_INDEX], main_cache[OFFLOAD_V_CACHE_NPU_INDEX])
 
         indexer_cache = self.indexer.k_cache.kv_cache
         if indexer_cache is None:

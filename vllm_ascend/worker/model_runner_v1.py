@@ -588,8 +588,6 @@ class NPUModelRunner(GPUModelRunner):
         self._mamba_bufs: Any | None = None
         self._mamba_copy_bufs: Any | None = None
 
-        # TODO remove KV_OFFLOAD_COLOCATE_DEBUG after PD disaggregate is done
-        self.kv_offload_colocate_debug = envs_ascend.KV_OFFLOAD_COLOCATE_DEBUG
         self.kv_offload_decode_config = self.ascend_config.kv_offload_decode_config
         self.kv_offload_decode_enabled = self.kv_offload_decode_config.enabled
         self.kv_offload_decode_manager = None
@@ -4608,58 +4606,39 @@ class NPUModelRunner(GPUModelRunner):
                             k_tensor_split_factor, v_tensor_split_factor = calc_split_factor(kv_head_dim_list)
                         k_tensor_size = int(kv_cache_tensor.size // k_tensor_split_factor)
                         v_tensor_size = int(kv_cache_tensor.size // v_tensor_split_factor)
+                    if self.kv_offload_decode_enabled:
+                        assert self.use_sparse, "KV offload decode only support sparse attention."
+                        assert not current_sparse_c8, "KV offload decode do not supported c8 now."
+                        raw_tensors = self._allocate_kv_cache_tensors_for_kv_offload_decode(
+                            k_tensor_size,
+                            v_tensor_size,
+                            alignment,
+                        )
+                        assert len(kv_cache_tensor.shared_by) == 1, "KV Offload decode do not support HMA."
+                        kv_cache_raw_tensors[layer_name] = raw_tensors
+                        continue
                     # Allocate raw int8 tensors. Even bf16/fp16 KV cache entries
                     # are allocated as int8 raw bytes first and then viewed as
                     # the target dtype in _reshape_kv_cache_tensors.
                     v_tensor = None
-                    if self.kv_offload_decode_enabled:
-                        # TODO support c8
-                        assert current_sparse_c8 == False, "c8 not supported now"
-                        # TODO remove KV_OFFLOAD_COLOCATE_DEBUG after PD disaggregate is done:
-                        # drop the npu k/v tensors and replace raw_k_tensor by raw_k_tensor_cpu
-                        # to use the original code.
-                        if self.tp_rank == 0:
-                            [k_tensor_cpu, v_tensor_cpu] = self.kv_offload_decode_manager.empty_aligned_int8_cpu_tensors(
-                                [k_tensor_size, v_tensor_size],
-                                alignment,
-                            )
-                        else:
-                            k_tensor_cpu = None
-                            v_tensor_cpu = None
-                        if self.kv_offload_colocate_debug:
-                            k_tensor = self._allocate_int8_cache_tensor(
-                                k_tensor_size,
-                                alignment,
-                            )
-                            v_tensor = self._allocate_int8_cache_tensor(
-                                v_tensor_size,
-                                alignment,
-                            )
-                        else:
-                            k_tensor = None
-                            v_tensor = None
-                    else:
-                        k_tensor = self._allocate_int8_cache_tensor(
-                            k_tensor_size,
+                    k_tensor = self._allocate_int8_cache_tensor(
+                        k_tensor_size,
+                        alignment,
+                    )
+                    if v_tensor_size is not None:
+                        v_tensor = self._allocate_int8_cache_tensor(
+                            v_tensor_size,
                             alignment,
                         )
-                        if v_tensor_size is not None:
-                            v_tensor = self._allocate_int8_cache_tensor(
-                                v_tensor_size,
-                                alignment,
-                            )
 
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         # shared the attn kvcache for all shared layers
                         if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
-                            if self.kv_offload_decode_enabled:
-                                kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor, k_tensor_cpu, v_tensor_cpu, k_tensor_size + v_tensor_size)
+                            if current_sparse_c8:
+                                kv_cache_raw_tensors[layer_name_inner] = (k_tensor,)
                             else:
-                                if current_sparse_c8:
-                                    kv_cache_raw_tensors[layer_name_inner] = (k_tensor,)
-                                else:
-                                    assert v_tensor is not None
-                                    kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor)
+                                assert v_tensor is not None
+                                kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor)
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
             for layer_name in group.layer_names:
@@ -4832,24 +4811,27 @@ class NPUModelRunner(GPUModelRunner):
                     current_sparse_c8 = self.use_sparse and kv_cache_spec_uses_sparse_c8(
                         current_kv_cache_spec
                     )
+                    if self.kv_offload_decode_enabled:
+                        assert self.use_sparse, "KV offload decode only support sparse attention."
+                        assert not current_sparse_c8, "KV offload decode do not supported c8 now."
+                        reshaped_tensors = self._reshape_kv_cache_tensors_for_kv_offload_decode(
+                            layer_name,
+                            kv_cache_raw_tensors[layer_name],
+                            current_kv_cache_spec,
+                            attn_backend,
+                        )
+                        kv_caches[layer_name] = reshaped_tensors
+                        continue
                     if self.use_sparse and "cache_only_layers" not in layer_name:
                         raw_cache = kv_cache_raw_tensors[layer_name]
                         assert isinstance(raw_cache, tuple)
-                        if self.kv_offload_decode_enabled:
-                            # TODO support c8
-                            assert current_sparse_c8 == False, "c8 not supported"
-                            # TODO remove KV_OFFLOAD_COLOCATE_DEBUG after PD disaggregate is done:
-                            # drop the npu k/v tensors and only keep raw_k_tensor = raw_k_tensor_cpu
-                            # to use the original code.
-                            raw_k_tensor, raw_v_tensor, raw_k_tensor_cpu, raw_v_tensor_cpu, sum_page_size_bytes = raw_cache
+                        if current_sparse_c8:
+                            (raw_k_tensor,) = raw_cache
+                            raw_v_tensor = None
+                            sum_page_size_bytes = raw_k_tensor.numel()
                         else:
-                            if current_sparse_c8:
-                                (raw_k_tensor,) = raw_cache
-                                raw_v_tensor = None
-                                sum_page_size_bytes = raw_k_tensor.numel()
-                            else:
-                                raw_k_tensor, raw_v_tensor = raw_cache
-                                sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
+                            raw_k_tensor, raw_v_tensor = raw_cache
+                            sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
                     elif (
                         self.use_hybrid_blocks
                         and self.hybrid_with_attn_and_mamba
@@ -4903,7 +4885,7 @@ class NPUModelRunner(GPUModelRunner):
                             layer_name
                         ]
                         sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
-                    assert raw_k_tensor is not None or self.kv_offload_decode_enabled
+                    assert raw_k_tensor is not None
                     assert sum_page_size_bytes % current_kv_cache_spec.page_size_bytes == 0
                     num_blocks = sum_page_size_bytes // current_kv_cache_spec.page_size_bytes
 
@@ -4993,39 +4975,18 @@ class NPUModelRunner(GPUModelRunner):
                     if current_sparse_c8:
                         k_cache_dtype = self.c8_k_cache_dtype
 
-                    if self.kv_offload_decode_enabled:
-                        # TODO support c8
-                        assert current_sparse_c8 == False, "c8 not supported"
-                        # TODO remove KV_OFFLOAD_COLOCATE_DEBUG after PD disaggregate is done:
-                        # the npu k_cache/v_cache views below only exist for colocate debug;
-                        # only keep raw_k_tensor = raw_k_tensor_cpu to use the original code.
-                        k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape) if raw_k_tensor is not None else None
-                        v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape) if raw_v_tensor is not None else None
-                        if self.tp_rank == 0:
-                            k_cache_cpu = raw_k_tensor_cpu.view(k_cache_dtype).view(k_shape)
-                            v_cache_cpu = raw_v_tensor_cpu.view(v_cache_dtype).view(v_shape)
-                        else:
-                            k_cache_cpu = None
-                            v_cache_cpu = None
-
-                        topk_buffer_k, topk_buffer_v = (
-                            self._allocate_kv_offload_topk_buffer_pair()
-                        )
-
-                        kv_caches[layer_name] = (k_cache, v_cache, k_cache_cpu, v_cache_cpu, topk_buffer_k, topk_buffer_v)
+                    k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape)
+                    if current_sparse_c8:
+                        v_cache = None
                     else:
-                        k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape)
-                        if current_sparse_c8:
-                            v_cache = None
-                        else:
-                            assert raw_v_tensor is not None
-                            v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape)
+                        assert raw_v_tensor is not None
+                        v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape)
 
-                        if current_sparse_c8:
-                            kv_caches[layer_name] = (k_cache,)
-                        else:
-                            assert v_cache is not None
-                            kv_caches[layer_name] = (k_cache, v_cache)
+                    if current_sparse_c8:
+                        kv_caches[layer_name] = (k_cache,)
+                    else:
+                        assert v_cache is not None
+                        kv_caches[layer_name] = (k_cache, v_cache)
                 elif isinstance(current_kv_cache_spec, MambaSpec):
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     assert raw_tensor is not None
@@ -5523,6 +5484,83 @@ class NPUModelRunner(GPUModelRunner):
 
         assert page_size_bytes_device > 0, "Case of no device kv cache is not considered."
         return page_size_bytes_host / page_size_bytes_device
+
+    def _allocate_kv_cache_tensors_for_kv_offload_decode(
+        self,
+        k_tensor_size: int,
+        v_tensor_size: int,
+        alignment: int,
+    ) -> tuple[torch.Tensor | int]:
+        if self.tp_rank == 0:
+            [k_tensor_cpu, v_tensor_cpu] = self.kv_offload_decode_manager.empty_aligned_int8_cpu_tensors(
+                [k_tensor_size, v_tensor_size],
+                alignment,
+            )
+        else:
+            k_tensor_cpu = None
+            v_tensor_cpu = None
+
+        if self.kv_offload_decode_config.keep_device_kv_cache:
+            k_tensor = self._allocate_int8_cache_tensor(
+                k_tensor_size,
+                alignment,
+            )
+            v_tensor = self._allocate_int8_cache_tensor(
+                v_tensor_size,
+                alignment,
+            )
+        else:
+            k_tensor = None
+            v_tensor = None
+
+        return (k_tensor, v_tensor, k_tensor_cpu, v_tensor_cpu, k_tensor_size + v_tensor_size)
+
+    def _reshape_kv_cache_tensors_for_kv_offload_decode(
+        self,
+        layer_name: str,
+        raw_cache_tensors: tuple[torch.Tensor | int],
+        current_kv_cache_spec: AttentionSpec,
+        attn_backend: type[AttentionBackend],
+    ) -> tuple[torch.Tensor]:
+        raw_k_tensor, raw_v_tensor, raw_k_tensor_cpu, raw_v_tensor_cpu, sum_page_size_bytes = raw_cache_tensors
+        assert sum_page_size_bytes % current_kv_cache_spec.page_size_bytes == 0
+        num_blocks = sum_page_size_bytes // current_kv_cache_spec.page_size_bytes
+        kv_cache_shape = attn_backend.get_kv_cache_shape(
+            num_blocks,
+            current_kv_cache_spec.block_size,
+            current_kv_cache_spec.num_kv_heads,
+            current_kv_cache_spec.head_size,
+        )
+        mla_num_blocks, mla_block_size, num_kv_heads, _ = kv_cache_shape
+        k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
+        k_shape = (
+            mla_num_blocks,
+            mla_block_size,
+            num_kv_heads,
+            k_dim,
+        )
+        v_shape = (
+            mla_num_blocks,
+            mla_block_size,
+            num_kv_heads,
+            v_dim,
+        )
+        k_cache_dtype = v_cache_dtype = current_kv_cache_spec.dtype
+
+        k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape) if raw_k_tensor is not None else None
+        v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape) if raw_v_tensor is not None else None
+
+        if self.tp_rank == 0:
+            k_cache_cpu = raw_k_tensor_cpu.view(k_cache_dtype).view(k_shape)
+            v_cache_cpu = raw_v_tensor_cpu.view(v_cache_dtype).view(v_shape)
+        else:
+            k_cache_cpu = None
+            v_cache_cpu = None
+
+        topk_buffer_k, topk_buffer_v = (
+            self._allocate_kv_offload_topk_buffer_pair()
+        )
+        return (k_cache, v_cache, k_cache_cpu, v_cache_cpu, topk_buffer_k, topk_buffer_v)
 
 def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
     """

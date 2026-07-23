@@ -99,12 +99,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
-    # KV offload decode debug switch. "1": keep the NPU HBM main k/v cache
-    # tensors as the debug intermediate state (prefill stages in NPU cache and
-    # no host-memory enlargement). "0": future PD-disaggregated production
-    # shape (no NPU main k/v cache, enlarge available memory by the
-    # host/device page ratio). TODO: remove after PD disaggregate is done.
-    "KV_OFFLOAD_COLOCATE_DEBUG": lambda: bool(int(os.getenv("KV_OFFLOAD_COLOCATE_DEBUG", "0"))),
     # KV transfer backend used by the SFA PD CPU offload connector. Valid
     # values are "mooncake" (default) and "memfabric"; the connector currently
     # requires "memfabric". This non-sensitive setting can be overridden by

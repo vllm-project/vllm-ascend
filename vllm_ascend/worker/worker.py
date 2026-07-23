@@ -614,19 +614,7 @@ class NPUWorker(WorkerBase):
             "Available KV cache memory: %.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
         )
         kv_offload_decode_config = get_ascend_config().kv_offload_decode_config
-        # TODO remove KV_OFFLOAD_COLOCATE_DEBUG after PD disaggregate is done
-        kv_offload_colocate_debug = envs_ascend.KV_OFFLOAD_COLOCATE_DEBUG
-        # KV_OFFLOAD_COLOCATE_DEBUG=1: for pd colocate debug, don't enlarge available_memory, still allocate npu kv_cache
-        # KV_OFFLOAD_COLOCATE_DEBUG=0: future pd disaggregate usage, enlarge available_memory, no more npu kv_cache
-        if kv_offload_decode_config.enabled and kv_offload_colocate_debug:
-            # TODO also remove this branch with KV_OFFLOAD_COLOCATE_DEBUG
-            if self.available_kv_cache_memory_bytes > kv_offload_decode_config.dram_size_per_dp_GB * 1024 * 1024 * 1024:
-                raise ValueError(
-                    f"Needed dram size ({GiB(self.available_kv_cache_memory_bytes)} GB) is larger than "
-                    f"user specified dram size ({kv_offload_decode_config.dram_size_per_dp_GB} GB). "
-                    "Please increase kv_offload_decode_config.dram_size_per_dp_GB if available on your device."
-                )
-        if kv_offload_decode_config.enabled and not kv_offload_colocate_debug:
+        if kv_offload_decode_config.enabled:
             """
             A simple patch for kv offload decode: add additional available_memory according to the
             ratio of host memory (kv) and dev memory (indexer), so we can allocate blocks for indexer cache
@@ -634,19 +622,24 @@ class NPUWorker(WorkerBase):
             For further optimization, consider to merge this logic to vllm kv_cache_utils.py,
             or reuse hisparse's host pool logic after it's merged to vllm.
             """
-            host_device_memory_usage_ratio: float = self.model_runner.get_host_device_memory_usage_ratio()
-            enlarge_kv_cache_memory_bytes = host_device_memory_usage_ratio * self.available_kv_cache_memory_bytes
-            if enlarge_kv_cache_memory_bytes > kv_offload_decode_config.dram_size_per_dp_GB * 1024 * 1024 * 1024:
+            keep_device_kv_cache = kv_offload_decode_config.keep_device_kv_cache
+            if keep_device_kv_cache:
+                needed_dram_size_bytes = self.available_kv_cache_memory_bytes
+            else:
+                host_device_memory_usage_ratio: float = self.model_runner.get_host_device_memory_usage_ratio()
+                needed_dram_size_bytes = host_device_memory_usage_ratio * self.available_kv_cache_memory_bytes
+            if needed_dram_size_bytes > kv_offload_decode_config.dram_size_per_dp_GB * 1024 * 1024 * 1024:
                 raise ValueError(
-                    f"Needed dram size ({GiB(enlarge_kv_cache_memory_bytes)} GB) is larger than "
+                    f"Needed dram size ({GiB(needed_dram_size_bytes)} GB) is larger than "
                     f"user specified dram size ({kv_offload_decode_config.dram_size_per_dp_GB} GB). "
                     "Please increase kv_offload_decode_config.dram_size_per_dp_GB if available on your device."
                 )
-            self.available_kv_cache_memory_bytes += enlarge_kv_cache_memory_bytes
-            logger.info_once(
-                "KV offload decode is enabled, enlarge total available memory to "
-                "%.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
-            )
+            if not keep_device_kv_cache:
+                self.available_kv_cache_memory_bytes += needed_dram_size_bytes
+                logger.info_once(
+                    "KV offload decode is enabled, enlarge total available memory to "
+                    "%.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
+                )
 
         return int(self.available_kv_cache_memory_bytes)
 
