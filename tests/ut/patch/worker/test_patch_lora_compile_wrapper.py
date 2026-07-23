@@ -18,6 +18,7 @@ from contextlib import nullcontext
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -39,7 +40,7 @@ def test_clone_forward_uses_independent_code_objects():
         def forward(self, value):
             return value
 
-    model = Model()
+    model: Any = Model()
     base = patch_module._clone_forward(model, "base")
     base_one = patch_module._clone_forward(model, "base_one")
 
@@ -74,7 +75,7 @@ def test_specialized_init_creates_base_variants(monkeypatch):
         def forward(self, value):
             return value
 
-    model = Model()
+    model: Any = Model()
 
     def original_init(self, compile_prefix, is_encoder):
         assert patch_module.envs.VLLM_USE_BYTECODE_HOOK is False
@@ -116,7 +117,7 @@ def test_draft_model_skips_lora_specialization(monkeypatch):
         def forward(self, value):
             return value
 
-    model = Model()
+    model: Any = Model()
     original_init_calls = []
 
     def original_init(self, compile_prefix, is_encoder):
