@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from vllm_ascend.quantization.methods.base import get_moe_num_logical_experts
+from vllm_ascend.quantization.methods.base import AscendLinearScheme, AscendMoEScheme, get_moe_num_logical_experts
 
 
 def test_get_moe_num_logical_experts_uses_vllm_config_field():
@@ -21,3 +21,8 @@ def test_get_moe_num_logical_experts_falls_back_for_older_configs():
         )
         == 128
     )
+
+
+def test_routed_moe_interface_is_not_exposed_on_linear_schemes():
+    assert "get_eplb_weight_views" not in AscendLinearScheme.__dict__
+    assert "get_eplb_weight_views" in AscendMoEScheme.__dict__

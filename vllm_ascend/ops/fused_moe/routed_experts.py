@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from collections.abc import Iterable
 from copy import copy
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from types import SimpleNamespace
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.distributed.utils import is_weak_contiguous
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import RoutedExperts, SharedExperts
@@ -237,6 +239,31 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
                 dtype=vllm_config.model_config.dtype
             )
+
+    def get_expert_weights(self) -> Iterable[torch.Tensor]:
+        try:
+            get_weight_views = self.quant_method.get_eplb_weight_views
+        except AttributeError as exc:
+            raise NotImplementedError(
+                f"{self.quant_method.__class__.__name__} must implement get_eplb_weight_views() for Ascend EPLB."
+            ) from exc
+        weights = list(get_weight_views(self))
+        if not weights:
+            raise NotImplementedError(f"EPLB weight views are not defined for {self.quant_method.__class__.__name__}.")
+        flattened_weights = []
+        for weight in weights:
+            if weight.shape[0] != self.local_num_experts:
+                raise ValueError(
+                    "The first dimension of every EPLB weight view must equal "
+                    f"local_num_experts ({self.local_num_experts}), got {tuple(weight.shape)}."
+                )
+            if not is_weak_contiguous(weight):
+                raise ValueError("Every Ascend EPLB weight view must be weakly contiguous.")
+            try:
+                flattened_weights.append(weight.view(self.local_num_experts, -1))
+            except RuntimeError as exc:
+                raise ValueError("Every Ascend EPLB expert row must be flattenable without a copy.") from exc
+        return flattened_weights
 
     def init_eplb(self, n_shared_experts):
         ascend_config = get_ascend_config()

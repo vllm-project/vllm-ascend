@@ -278,6 +278,28 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         )
         return final_hidden_states
 
+    @staticmethod
+    def get_eplb_weight_views(layer: torch.nn.Module) -> list[torch.Tensor]:
+        weights = [
+            layer.w13_weight,
+            layer.w2_weight,
+            layer.w13_weight_scale_fp32,
+            layer.w2_weight_scale,
+        ]
+        fused_w1_scale = getattr(layer, "fused_w1_scale", None)
+        fused_w2_scale = getattr(layer, "fused_w2_scale", None)
+        if (fused_w1_scale is None) != (fused_w2_scale is None):
+            raise RuntimeError("FUSED_MC2 requires both fused_w1_scale and fused_w2_scale.")
+        if fused_w1_scale is not None:
+            num_local_experts = layer.w13_weight.shape[0]
+            weights.extend(
+                [
+                    fused_w1_scale.view(num_local_experts, -1),
+                    fused_w2_scale.view(num_local_experts, -1),
+                ]
+            )
+        return weights
+
     def process_weights_after_loading(self, layer):
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()

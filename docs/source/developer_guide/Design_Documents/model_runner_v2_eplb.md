@@ -347,7 +347,8 @@ NPU 算子接口必须与上游保持以下 tensor 语义：
 
 ### 7.6 Ascend MoE 计算接口
 
-当前各 quant method 在 `apply()` 内调用 `select_experts()`，该模式必须删除。
+上游已将选路职责收归 `Router/RoutedExperts`。`AscendRoutedExperts` 调用 Router 完成选路后，统一进入只消费
+`topk_weights/topk_ids` 的 quant method `apply()`。
 
 最终调用关系为：
 
@@ -355,7 +356,7 @@ NPU 算子接口必须与上游保持以下 tensor 语义：
 AscendMoERunner.no_shared_forward_impl()
   -> moe_comm_method.prepare(hidden_states, router_logits)
   -> self.router.select_experts()
-  -> AscendFusedMoEMethod.apply_routed(topk_weights, topk_ids)
+  -> AscendFusedMoEMethod.apply(topk_weights, topk_ids)
   -> Ascend dispatch / GMM / combine
   -> moe_comm_method.finalize()
 ```
@@ -364,7 +365,8 @@ AscendMoERunner.no_shared_forward_impl()
 
 - `AscendMoERunner.__init__()` 按 `vllm_config.use_v2_model_runner` 分流：V1 保留 `init_eplb_config()` 和 `VllmEplbAdaptor.register_layer()`；MRV2 不创建 `global_expert_map`、`log2phy`、`moe_load`、`load_counter` 或私有 redundancy 数据。
 - 将上述 V1 初始化从 `__init__()` 抽到 `_init_v1_eplb()`，并把 `init_eplb_config`、`VllmEplbAdaptor` 的 import 移入该函数，确保导入 MRV2 MoE 模块不会加载 `vllm_ascend/eplb/`。`mix_placement` 与 EPLB 解耦，不得为保留 mix placement 而在 MRV2 创建旧 map。
-- 新增 `AscendFusedMoEMethod.apply_routed()` 和 `AscendMoEScheme.apply_routed()`，只接收预计算的 `topk_weights/topk_ids`；现有 `apply()` 作为 V1 兼容入口，完成旧 `select_experts()` 后调用 `apply_routed()`。
+- 复用上游统一的 `AscendFusedMoEMethod.apply()` 和 `AscendMoEScheme.apply()`，只接收预计算的
+  `topk_weights/topk_ids`，不在 quant method 内重复选路。
 - `AscendUnquantizedFusedMoEMethod`、`AscendW8A8DynamicFusedMoEMethod`、`AscendW4A8DynamicFusedMoEMethod`、`AscendW4A16FusedMoEMethod`、`AscendW4A16MXFP4FusedMoEMethod`、`AscendW4A8MXFPDynamicFusedMoEMethod`、`AscendW4A4MXFP4DynamicFusedMoEMethod` 和 `AscendW8A8MXFP8DynamicFusedMoEMethod` 都按该模板拆分；FP8/PDMix 派生类继承基类实现，不复制路由。
 - profile 阶段的 force-load-balance 收敛到 `AscendMoERunner._select_routing()`；正常请求必须调用上游 Router，不得在 quant scheme 覆盖 `topk_ids`。
 - `vllm_ascend/ops/fused_moe/experts_selector.py` 只保留仍被 V1 或独立算子测试使用的接口，MRV2 EPLB 路径不调用它；
@@ -378,7 +380,7 @@ NPU token dispatcher 接收全局物理专家 ID。物理 slot 到本地 slot �
 
 新增 `AscendRoutedExperts.get_expert_weights()`，按以下规则返回权重 view：
 
-1. 优先调用 quant method 的 `get_eplb_weight_views(layer)`；未实现时使用上游通用逻辑。
+1. 调用 quant method 的 `get_eplb_weight_views(layer)`；接口缺失或返回空集合时立即报错，不回退上游参数名枚举。
 2. view 在 `process_weights_after_loading()` 完成后创建并缓存，`set_eplb_state()` 只读取缓存。
 3. 每个 view 必须引用实际计算权重存储；不得为 EPLB 保留长期镜像。
 4. 每专家 weight、scale、offset、bias 必须同时迁移。
@@ -392,7 +394,8 @@ NPU token dispatcher 接收全局物理专家 ID。物理 slot 到本地 slot �
 - `patch_fused_moe._ascend_FusedMoE()` 在非 310P 路径默认传入 `routed_experts_cls=AscendRoutedExperts`；用户显式传入时不覆盖。
 - `AscendFusedMoEMethod.get_eplb_weight_views()` 转发到实际 `AscendMoEScheme`；未实现的 scheme 返回不支持，不以参数名猜测。
 - 第一期 BF16/FP16 返回 `w13_weight` 和 `w2_weight`；W8A8 Dynamic 返回实际计算使用的 `w13_weight`、`w2_weight`、`w13_weight_scale_fp32` 和 `w2_weight_scale`。启用 FUSED_MC2 时，额外返回按本地物理专家分行的 `fused_w1_scale` 和 `fused_w2_scale` view，保证融合 scale 与权重在同一重排事务中迁移。
-- W4A8 最终视图包含 `w13_weight`、`w2_weight`、`w13_weight_scale`、`w2_weight_scale` 以及存在时的 `w13_scale_bias/w2_scale_bias`；其余 scheme 以 `apply_routed()` 实际读取的 per-expert tensor 为唯一依据。
+- W4A8 最终视图包含 `w13_weight`、`w2_weight`、`w13_weight_scale`、`w2_weight_scale` 以及存在时的 `w13_scale_bias/w2_scale_bias`；其余 scheme 以 `apply()` 实际读取的 per-expert tensor 为唯一依据。
+- W4A4 MXFP 和 W8A8 MXFP 返回 weight 与 scale 的零拷贝专家存储视图；权重处理后的内部维转置必须在 view 中反向表达，保证每个 view 可按专家连续展平。
 - 旧 `dynamic_eplb` 分支会把 batched Parameter 拆成 Python tensor list 并删除原 Parameter；MRV2 不进入该分支，否则无法满足上游“第 0 维为本地物理专家”契约。
 
 `VllmEplbAdaptor` 中按量化类型维护的 `EPLB_EXPERT_WEIGHT_NAMES` 不用于 MRV2。
@@ -557,7 +560,7 @@ Ascend patch 只在 `_ascend_scope_matched=False` 时把当次 step 标记为 du
 | `is_eplb_load_scope_matched()` | 下游新增 | 以“任一 prefill 即整批 prefill”规则判断 batch 是否属于目标阶段 |
 | `_ascend_scope_matched` | 下游新增 | 当前主 batch 是否属于目标采集阶段的 CPU bool |
 | `get_eplb_weight_views()` | 下游新增 | quant method 的布局适配接口 |
-| `apply_routed()` | 下游新增 | MRV2 消费预计算路由结果；`apply()` 保留给 V1 |
+| `apply()` | 上游接口 | 消费 Router 预计算的路由结果 |
 | `dynamic_eplb` | MRV2 禁用 | 仅保留给 V1 |
 | `eplb_heat_collection_stage` | MRV2 替换 | 避免 `heat` 和 `stage` 的模糊表达 |
 | `log2phy`、`global_expert_map`、`moe_load` | MRV2 删除 | 由上游 mapping/load tensor 替代 |
@@ -592,11 +595,11 @@ Ascend patch 只在 `_ascend_scope_matched=False` 时把当次 step 标记为 du
 | `vllm_ascend/worker/v2/model_runner.py` | 删除禁用和空 warmup；在 `prepare_inputs()` 更新 batch scope 匹配结果；修正额外 profile dummy run |
 | `vllm_ascend/ops/fused_moe/eplb.py` | 新增 NPU map-and-record 算子 |
 | `vllm_ascend/distributed/eplb_communicator.py` | 新增 HCCL communicator |
-| `vllm_ascend/ops/fused_moe/fused_moe.py:AscendMoERunner` | V1/V2 EPLB 初始化分流和 V1 import 延迟加载；MRV2 调用上游 Router 并消费 `apply_routed()` |
+| `vllm_ascend/ops/fused_moe/routed_experts.py:AscendRoutedExperts` | 调用上游 Router，并把预计算路由结果交给 quant `apply()` |
 | `vllm_ascend/ops/fused_moe/routed_experts.py` | 新增 `AscendRoutedExperts.get_expert_weights()` |
-| `vllm_ascend/quantization/method_adapters.py:AscendFusedMoEMethod` | 增加 `apply_routed()` 和 `get_eplb_weight_views()` 委托 |
-| `vllm_ascend/quantization/methods/base.py:AscendMoEScheme` | 定义 `apply_routed()` 和默认不支持的 weight-view 接口 |
-| `vllm_ascend/quantization/methods/*.py` | V1 `apply()` 保留路由；MRV2 `apply_routed()` 只做计算；按布局返回权重 view |
+| `vllm_ascend/quantization/method_adapters.py:AscendFusedMoEMethod` | 增加 `get_eplb_weight_views()` 委托 |
+| `vllm_ascend/quantization/methods/base.py:AscendMoEScheme` | 定义默认不支持的 weight-view 接口 |
+| `vllm_ascend/quantization/methods/*.py` | `apply()` 只做计算，并按实际布局返回权重 view |
 | `vllm_ascend/patch/platform/patch_fused_moe.py` | 默认注入 `AscendRoutedExperts`；保留用户显式 `routed_experts_cls` |
 | `vllm_ascend/distributed/parallel_state.py` | MRV2 不创建 `_DYNAMIC_EPLB`；上游 EPLB group 为唯一通信组 |
 | `vllm_ascend/eplb/**` | 不修改其 V1 行为；通过依赖测试保证 MRV2 不导入 |
@@ -608,7 +611,7 @@ Ascend patch 只在 `_ascend_scope_matched=False` 时把当次 step 标记为 du
 3. `patch_fused_moe._ascend_FusedMoE()` 创建上游 Router、`AscendRoutedExperts` 和 `AscendMoERunner`；MRV2 分支不初始化旧 EPLB 字段。
 4. 权重处理完成后，上游 `MixtureOfExperts.set_eplb_state()` 调用 `AscendRoutedExperts.get_expert_weights()` 收集真实计算存储。
 5. 每次 `NPUModelRunner.prepare_inputs()` 根据 `is_prefilling_np` 更新 batch scope 匹配结果；上游 `execute_model()` 原样调用 `EPLBController.prepare_forward()` 并进入模型。
-6. `AscendMoERunner.no_shared_forward_impl()` 在 Ascend communication prepare 后执行一次 Router；Router patch 完成映射和负载累加；quant `apply_routed()` 不再查看 logits。
+6. `AscendRoutedExperts.forward_impl()` 执行一次 Router；Router patch 完成映射和负载累加；quant `apply()` 不再查看 logits。
 7. 上游 `step_eplb_after` 调用被薄包装的 `EplbState.step()`；除了非目标阶段转为 dummy-load 语义，window、policy、transfer 和 map commit 全部走上游原函数。
 
 ## 11. 两期实施计划
@@ -621,7 +624,7 @@ Ascend patch 只在 `_ascend_scope_matched=False` 时把当次 step 标记为 du
 2. MRV2 切换到上游配置、`EPLBController/EplbState` 和 `get_eplb_group()`。
 3. 完成 NPU map-and-record 算子和同步 HCCL communicator。
 4. 完成 `load_scope=all/prefill/decode` 的 batch 级采集开关，覆盖纯 P、纯 D 和混合批次。
-5. 修正 Ascend MoE 调用链，引入 `apply_routed()`，保证 MRV2 只路由一次。
+5. 对齐上游 Router/RoutedExperts 调用链，保证每次 MoE forward 只路由一次。
 6. 支持主模型、eager、标准 all-to-all/非融合 MC2、BF16/FP16 和 W8A8。
 7. 保持 V1 旧 EPLB 行为不变。
 
@@ -643,7 +646,7 @@ Ascend patch 只在 `_ascend_scope_matched=False` 时把当次 step 标记为 du
 2. 支持 ACL Graph piecewise、full decode graph 和 graph 后多轮重排。
 3. 支持 MoE 草稿模型、MTP/Eagle/DFlash 中适用的组合，并验证主/草稿模型共享 batch scope 判定。
 4. 支持 PP 和多节点 EP。
-5. 补齐 W4A8、W4A16、W4A4/MXFP、W8A8/MXFP、FP8 派生量化的权重 view。
+5. 补齐 W4A16、W4A16 MXFP、W4A8 MXFP 和其余 FP8 派生量化的权重 view。
 6. 完成标准 MC2、shared expert 多流及 LoRA MoE 的支持或启动期精确拒绝。
 7. 完成 `load_scope != all` 与 DBO、speculative decoding、graph replay 的组合验证。
 8. 若对应上游接口已进入依赖基线，删除可被接口直接替代的 patch；未合入时保留已验证 patch。

@@ -118,19 +118,6 @@ class AscendLinearScheme(ABC):
         """
         ...
 
-    def apply_routed(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        **kwargs,
-    ) -> torch.Tensor:
-        raise NotImplementedError(f"Model Runner V2 routed MoE is not implemented for {self.__class__.__name__}.")
-
-    def get_eplb_weight_views(self, layer: torch.nn.Module) -> list[torch.Tensor]:
-        return []
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Post-loading weight processing (transpose, format conversion, etc.).
 
@@ -265,6 +252,10 @@ class AscendMoEScheme(ABC):
             Output tensor after MoE computation.
         """
         ...
+
+    def get_eplb_weight_views(self, layer: torch.nn.Module) -> list[torch.Tensor]:
+        """Return expert-first weight views consumed by upstream EPLB."""
+        return []
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Post-loading weight processing for MoE layer.

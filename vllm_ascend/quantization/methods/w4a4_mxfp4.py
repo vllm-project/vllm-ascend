@@ -120,6 +120,7 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
 
     model_dtype = None
     quant_type: QuantType = QuantType.W4A4MXFP
+    supports_eplb = True
 
     def __init__(self):
         vllm_config = get_current_vllm_config()
@@ -195,6 +196,15 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale=layer.w2_weight_scale,
             )
         )
+
+    @staticmethod
+    def get_eplb_weight_views(layer: torch.nn.Module) -> list[torch.Tensor]:
+        return [
+            layer.w13_weight.transpose(1, 2),
+            layer.w2_weight.transpose(1, 2),
+            layer.w13_weight_scale.transpose(1, 2),
+            layer.w2_weight_scale.transpose(1, 2),
+        ]
 
     def process_weights_after_loading(self, layer):
         g_num, n_size, k_size = layer.w13_weight_scale.shape

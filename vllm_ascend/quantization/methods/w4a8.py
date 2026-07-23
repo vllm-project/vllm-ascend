@@ -623,6 +623,22 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             return scale.squeeze(1)
         return scale
 
+    @staticmethod
+    def get_eplb_weight_views(layer: torch.nn.Module) -> list[torch.Tensor]:
+        weights = [
+            layer.w13_weight,
+            layer.w2_weight,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+        ]
+        w13_scale_bias = getattr(layer, "w13_scale_bias", None)
+        w2_scale_bias = getattr(layer, "w2_scale_bias", None)
+        if (w13_scale_bias is None) != (w2_scale_bias is None):
+            raise RuntimeError("W4A8 EPLB requires both w13_scale_bias and w2_scale_bias.")
+        if w13_scale_bias is not None:
+            weights.extend([w13_scale_bias, w2_scale_bias])
+        return weights
+
     def process_weights_after_loading(self, layer):
         if self.quant_method == COMPRESSED_TENSORS_METHOD:
             self.process_weights_after_loading_compressed_tensors(layer)
