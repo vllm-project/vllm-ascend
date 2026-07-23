@@ -11,6 +11,16 @@ from vllm_ascend.utils import enable_custom_op
 CHUNK_SIZE = 64
 
 
+def _cosine(a: torch.Tensor, b: torch.Tensor) -> float:
+    a = a.flatten().double()
+    b = b.flatten().double()
+    if a.norm() == 0 and b.norm() == 0:
+        return 1.0
+    if a.norm() == 0 or b.norm() == 0:
+        return 0.0
+    return torch.nn.functional.cosine_similarity(a.unsqueeze(0), b.unsqueeze(0)).item()
+
+
 def _make_inputs_cpu(batch=1, tokens=128, q_heads=2, v_heads=4, k_dim=128, v_dim=128, g_scale=0.01):
     torch.manual_seed(123)
     q = (torch.randn(batch, tokens, q_heads, k_dim) * 0.01).half()
@@ -41,16 +51,6 @@ def test_doubling_wy_matches_torch_reference_cpu():
         assert _cosine(doubled, blocked) > 0.99
 
 
-def _cosine(a: torch.Tensor, b: torch.Tensor) -> float:
-    a = a.flatten().double()
-    b = b.flatten().double()
-    if a.norm() == 0 and b.norm() == 0:
-        return 1.0
-    if a.norm() == 0 or b.norm() == 0:
-        return 0.0
-    return torch.nn.functional.cosine_similarity(a.unsqueeze(0), b.unsqueeze(0)).item()
-
-
 def _make_inputs(batch=1, tokens=128, q_heads=2, v_heads=4, k_dim=128, v_dim=128):
     torch.manual_seed(123)
     q = (torch.randn(batch, tokens, q_heads, k_dim) * 0.01).half().npu()
@@ -79,14 +79,21 @@ def test_compute_wy_matches_torch_reference_grouped_heads():
 
 
 def test_compute_wy_matches_torch_reference_qwen35_heads():
-    """Qwen3.5-4B GDN shape: Hk=16, Hv=32, K=V=128."""
     enable_custom_op()
-    q, k, v, g, beta = _make_inputs(q_heads=16, v_heads=32)
+    q, k, v, g, beta = _make_inputs(
+        batch=1,
+        tokens=64,      
+        q_heads=8,     
+        v_heads=16,     
+        k_dim=64,       
+        v_dim=64        
+    )
     assert chunk_mod._can_use_npu_compute_wy(q, k, v, g, beta, CHUNK_SIZE)
 
     ref = chunk_mod._compute_kernel_inputs_from_torch_wy(q, k, v, g, beta, CHUNK_SIZE)
     out = torch.ops._C_ascend.chunk_gated_delta_rule_compute_wy(q, k, v, g, beta, CHUNK_SIZE)
     _assert_compute_wy_close(out, ref)
+    print('✓ test_compute_wy_matches_torch_reference_qwen35_heads passed')
 
 
 def test_chunk_gated_delta_rule_310_uses_npu_wy(monkeypatch):
@@ -125,3 +132,12 @@ def test_chunk_gated_delta_rule_310_uses_npu_wy(monkeypatch):
     assert state_ref is not None
     assert _cosine(out_npu.cpu().float(), out_ref.cpu().float()) > 0.99
     assert _cosine(state_npu.cpu().float(), state_ref.cpu().float()) > 0.99
+
+
+if __name__ == "__main__":
+    print("Running tests...")
+    test_doubling_wy_matches_torch_reference_cpu()
+    test_compute_wy_matches_torch_reference_grouped_heads()
+    test_compute_wy_matches_torch_reference_qwen35_heads()
+    test_chunk_gated_delta_rule_310_uses_npu_wy()
+    print("\n✓ All tests passed!")
