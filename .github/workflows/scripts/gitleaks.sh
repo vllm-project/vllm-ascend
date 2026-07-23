@@ -20,5 +20,5 @@ fi
 ./gitleaks detect \
     --verbose \
     --redact \
-    --config="${CONFIG_FILE}"
+    --config="${CONFIG_FILE}" \
     --no-git
