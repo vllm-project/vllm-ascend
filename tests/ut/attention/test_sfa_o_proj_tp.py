@@ -13,7 +13,7 @@
 # This file is a part of the vllm-ascend project.
 #
 import sys
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import torch
 
@@ -101,3 +101,62 @@ class TestAscendSFAOProjTPParams(TestBase):
         self.assertEqual(impl.o_proj.weight_scale_second.data_ptr(), original_scale_ptr)
         self.assertFalse(require_o_proj_forward)
         self.assertTrue(torch.equal(output, torch.ones(2, 4)))
+
+    def test_no_indexer_full_o_proj_still_opens_gate_and_saves_layer(self):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.enable_dsa_cp = False
+        impl.enable_dsa_cp_with_o_proj_tp = True
+        impl.enable_sfa_prolog_v3 = False
+        impl.enable_mlapo = False
+        impl.enable_sp = False
+        impl.has_indexer = False
+        impl.skip_topk = True
+        impl.use_sparse_c8_sfa = False
+        impl.is_kv_producer = False
+        impl.q_lora_rank = 8
+        impl.kv_lora_rank = 4
+        impl.qk_rope_head_dim = 2
+        impl.layer_name = "layers.0.attn"
+
+        q_c = MagicMock()
+        kv_no_split = MagicMock()
+        qkv_lora = MagicMock()
+        qkv_lora.split.return_value = (q_c, kv_no_split)
+        impl.fused_qkv_a_proj = MagicMock(return_value=(qkv_lora,))
+        impl.q_a_layernorm = MagicMock(return_value=q_c)
+        impl.exec_kv = MagicMock(return_value=(MagicMock(), MagicMock()))
+        impl._q_proj_and_k_up_proj = MagicMock(return_value=(MagicMock(), MagicMock()))
+        impl.rope_single = MagicMock(return_value=MagicMock())
+        impl._record_dcp_query_gather_context = MagicMock()
+        impl._get_indexcache_topk_indices = MagicMock(return_value=MagicMock())
+        impl._execute_sparse_flash_attention_process = MagicMock(return_value=MagicMock())
+        impl._v_up_proj = MagicMock(return_value=MagicMock())
+        impl.o_proj = MagicMock()
+
+        output = MagicMock()
+        kv_cache = (MagicMock(), MagicMock())
+        impl._compose_sfa_kv_cache = MagicMock(return_value=kv_cache)
+        impl._handle_o_proj_weight_switch_and_forward = MagicMock(return_value=(output, False))
+
+        attn_metadata = MagicMock()
+        attn_metadata.dcp_context = None
+        attn_metadata.num_input_tokens = 1
+
+        with (
+            patch("vllm_ascend.attention.sfa_v1.wait_for_kv_layer_from_connector"),
+            patch("vllm_ascend.attention.sfa_v1.record_attention_compute_start") as record_gate,
+            patch("vllm_ascend.attention.sfa_v1.maybe_save_kv_layer_to_connector") as save_layer,
+            patch("vllm_ascend.attention.sfa_v1.get_weight_prefetch_method", return_value=MagicMock()),
+        ):
+            result = impl.forward(
+                layer_name=impl.layer_name,
+                hidden_states=MagicMock(),
+                kv_cache=kv_cache,
+                attn_metadata=attn_metadata,
+                output=output,
+            )
+
+        self.assertIs(result, output)
+        record_gate.assert_called_once_with()
+        save_layer.assert_called_once_with(impl.layer_name, list(kv_cache))
+        impl.o_proj.assert_not_called()
