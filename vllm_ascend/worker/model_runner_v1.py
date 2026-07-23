@@ -290,6 +290,7 @@ class AscendAsyncGPUModelRunnerOutput(AsyncGPUModelRunnerOutput):
         self._dumper.check_all_token_logprobs(
             sampled_token_ids=output.sampled_token_ids,
             logprobs_lists=output.logprobs,
+            req_ids=output.req_ids,
         )
         # Attach after check; start_dump_data() on a later step may have cleared
         # the dumper's per-step dict already under async overlap.
@@ -2657,19 +2658,30 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         if not self.use_async_scheduling:
+            max_num_logprobs = getattr(
+                getattr(self.input_batch, "sampling_metadata", None),
+                "max_num_logprobs",
+                "N/A",
+            )
             logger.info(
                 "[Anomaly token_logprob][dbg] call-site sync async=%s "
-                "sampled=%s logprobs=%s need_accepted=%s",
+                "sampled=%s logprobs=%s sampler_logprobs_tensors=%s "
+                "max_num_logprobs=%s need_accepted=%s",
                 self.use_async_scheduling,
                 "None"
                 if valid_sampled_token_ids is None
                 else f"len={len(valid_sampled_token_ids)}",
                 "None" if logprobs_lists is None else type(logprobs_lists).__name__,
+                "None"
+                if sampler_output.logprobs_tensors is None
+                else type(sampler_output.logprobs_tensors).__name__,
+                max_num_logprobs,
                 self.need_accepted_tokens,
             )
             self.dumper.check_all_token_logprobs(
                 sampled_token_ids=valid_sampled_token_ids,
                 logprobs_lists=logprobs_lists,
+                req_ids=req_ids_output_copy,
             )
             # Snapshot after check so later start_dump_data().clear() cannot wipe
             # this step's flags. Async: deferred to AscendAsyncGPUModelRunnerOutput.

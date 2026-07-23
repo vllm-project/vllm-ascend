@@ -403,24 +403,39 @@ class Dumper:
             return req_id in requests
         return True
 
-    def enable_msprobe_dump_if_needed(self, req_id: str, req_idx: int | None = None) -> bool:
+    def enable_msprobe_dump_if_needed(
+        self,
+        req_id: str,
+        req_idx: int | None = None,
+        *,
+        skip_related_check: bool = False,
+    ) -> bool:
         if self._debugger is None:
+            logger.info(
+                "[Anomaly msprobe][dbg] skip dump req_id=%s: debugger is None (dump_config / init failed?)",
+                req_id,
+            )
             return False
         if not get_pp_group().is_last_rank:
+            logger.info("[Anomaly msprobe][dbg] skip dump req_id=%s: not last PP", req_id)
             return False
-        if not self.is_related_local_request(req_id, req_idx):
-            if self.runner.tp_rank == 0:
-                logger.info_once(
-                    "[Anomaly msprobe] req_id=%s skip dump: not a related local request",
-                    req_id,
-                )
+        if not skip_related_check and not self.is_related_local_request(req_id, req_idx):
+            logger.info(
+                "[Anomaly msprobe][dbg] skip dump req_id=%s idx=%s: not related local "
+                "(live input_batch may already be empty/reordered under async)",
+                req_id,
+                req_idx,
+            )
             return False
         if req_id in self._msprobe_dumped_req_ids:
-            logger.info_once("[Anomaly msprobe] req_id=%s skip dump: request already dumped once", req_id)
+            logger.info(
+                "[Anomaly msprobe][dbg] skip dump req_id=%s: already dumped once",
+                req_id,
+            )
             return False
         if self._msprobe_dump_total_count >= self._dynamic_dump_max_times:
-            logger.info_once(
-                "[Anomaly msprobe] req_id=%s skip dump: reached local max dump times=%d",
+            logger.info(
+                "[Anomaly msprobe][dbg] skip dump req_id=%s: reached max dump times=%d",
                 req_id,
                 self._dynamic_dump_max_times,
             )
@@ -429,8 +444,8 @@ class Dumper:
         now_ts = time.time()
         elapsed = None if self._msprobe_last_dump_ts is None else now_ts - self._msprobe_last_dump_ts
         if elapsed is not None and elapsed < self._dynamic_dump_cooldown_seconds:
-            logger.info_once(
-                "[Anomaly msprobe] req_id=%s skip dump: cooldown active elapsed=%.2fs remaining=%.2fs",
+            logger.info(
+                "[Anomaly msprobe][dbg] skip dump req_id=%s: cooldown elapsed=%.2fs remaining=%.2fs",
                 req_id,
                 elapsed,
                 self._dynamic_dump_cooldown_seconds - elapsed,
@@ -438,6 +453,10 @@ class Dumper:
             return False
 
         if not self.set_msprobe_dump_state(True):
+            logger.info(
+                "[Anomaly msprobe][dbg] skip dump req_id=%s: set_msprobe_dump_state(True) failed",
+                req_id,
+            )
             return False
         self._msprobe_dump_active = True
         self._msprobe_dumped_req_ids.add(req_id)
@@ -523,8 +542,14 @@ class Dumper:
         self,
         sampled_token_ids: list[list[int]] | None,
         logprobs_lists: Any | None,
+        req_ids: list[str] | None = None,
     ) -> None:
         """Batch entry: append accepted tokens/logprobs and run ILLDetector when due.
+
+        ``req_ids`` should align with ``sampled_token_ids`` (e.g. the
+        ``req_ids_output_copy`` snapshot). Prefer that over live
+        ``input_batch.req_ids``, which may already be empty/reordered by the
+        time this runs after bookkeeping / hybrid postprocess.
 
         Finished-request cleanup is the caller's responsibility via
         ``clear_finished_requests`` (done once before MTP + token checks in v1).
@@ -533,7 +558,8 @@ class Dumper:
         pp_last = get_pp_group().is_last_rank
         tp_rank = getattr(self.runner, "tp_rank", -1)
         logger.info(
-            "[Anomaly token_logprob][dbg] enter enable=%s max_times=%d pp_last=%s tp_rank=%d sampled=%s logprobs=%s",
+            "[Anomaly token_logprob][dbg] enter enable=%s max_times=%d "
+            "pp_last=%s tp_rank=%d sampled=%s logprobs=%s req_ids_arg=%s",
             self._enable_token_logprob_check,
             self._dynamic_dump_max_times,
             pp_last,
@@ -542,6 +568,7 @@ class Dumper:
             if sampled_token_ids is None
             else f"len={len(sampled_token_ids)} lens={[len(x) for x in sampled_token_ids[:8]]}",
             "None" if logprobs_lists is None else type(logprobs_lists).__name__,
+            "None" if req_ids is None else f"len={len(req_ids)}",
         )
         if not self._enable_token_logprob_check:
             logger.info("[Anomaly token_logprob][dbg] return: enable_token_logprob_check=False")
@@ -556,16 +583,19 @@ class Dumper:
             logger.info(
                 "[Anomaly token_logprob][dbg] return: missing data "
                 "sampled_token_ids=%s logprobs_lists=%s "
-                "(need request logprobs=true top_logprobs>=1)",
+                "(need request logprobs=N or chat logprobs=true)",
                 "None" if sampled_token_ids is None else f"len={len(sampled_token_ids)}",
                 type(logprobs_lists).__name__ if logprobs_lists is not None else "None",
             )
             return
 
-        input_batch = getattr(self.runner, "input_batch", None)
-        req_ids = getattr(input_batch, "req_ids", None) if input_batch is not None else None
-        if input_batch is None or not req_ids:
-            logger.info("[Anomaly token_logprob][dbg] return: empty input_batch.req_ids")
+        if req_ids is None:
+            input_batch = getattr(self.runner, "input_batch", None)
+            req_ids = getattr(input_batch, "req_ids", None) if input_batch is not None else None
+        if not req_ids:
+            logger.info(
+                "[Anomaly token_logprob][dbg] return: empty req_ids (pass req_ids snapshot aligned with sampled tokens)"
+            )
             return
 
         detector = self._get_ill_detector()
@@ -589,15 +619,7 @@ class Dumper:
                     len(sampled_token_ids),
                 )
                 break
-            related = self.is_related_local_request(req_id, batch_idx)
             token_ids = sampled_token_ids[batch_idx]
-            if not related:
-                logger.info(
-                    "[Anomaly token_logprob][dbg] skip req: req_id=%s idx=%d not related local",
-                    req_id,
-                    batch_idx,
-                )
-                continue
             if not token_ids:
                 logger.info(
                     "[Anomaly token_logprob][dbg] skip req: req_id=%s idx=%d empty tokens",
@@ -731,11 +753,9 @@ class Dumper:
         )
         if hits[ill_type] < thresh:
             return
-        if not self.enable_msprobe_dump_if_needed(req_id, req_idx=req_idx):
-            logger.info(
-                "[Anomaly token_logprob][dbg] dump not enabled req_id=%s (cooldown/max/local)",
-                req_id,
-            )
+        # Token/logprob check uses output snapshots (esp. async get_output);
+        # live input_batch may already be empty, so skip related-local gate.
+        if not self.enable_msprobe_dump_if_needed(req_id, req_idx=req_idx, skip_related_check=True):
             return
         if log_leader:
             self._debug_log_full_by_req_id[req_id] = True
