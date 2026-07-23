@@ -52,7 +52,7 @@ Atlas 200I Pro requires additional device nodes and driver mounts. See [Set up u
  | CANN          | == 9.1.0                | Required for vllm-ascend and torch-npu    |
  | torch-npu     | == 2.10.0                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
  | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
- | NNAL          | == 9.1.0-beta.1                 | Required for libatb.so, enables advanced tensor operations |
+ | NNAL          | == 9.1.0                 | Required for libatb.so, enables advanced tensor operations |
  | triton / triton-ascend | Not supported          | Uninstalled in `Dockerfile.310p` |
 
 ::::
