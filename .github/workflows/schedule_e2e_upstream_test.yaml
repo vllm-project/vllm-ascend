@@ -160,8 +160,9 @@ jobs:
               fi
               uv pip install tblib 
               uv pip install pqdm timm schemathesis==3.39.15 "vllm[helion]" "runai-model-streamer[s3,gcs]"
-              uv pip install "mteb[bm25s]" open_clip_torch terratorch==1.2.2 imagehash cohere_melody
+              uv pip install "mteb[bm25s]" imagehash cohere_melody
               uv pip install "lm-eval[api]" num2words "vllm[grpc]" "vllm[audio]"
+              uv pip install --no-deps open_clip_torch terratorch==1.2.2
 
           - name: Run vllm-project/vllm test
             working-directory: ./vllm-empty
