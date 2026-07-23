@@ -123,12 +123,3 @@ def test_chunk_gated_delta_rule_310_uses_npu_wy(monkeypatch):
     assert state_ref is not None
     assert _cosine(out_npu.cpu().float(), out_ref.cpu().float()) > 0.99
     assert _cosine(state_npu.cpu().float(), state_ref.cpu().float()) > 0.99
-
-
-if __name__ == "__main__":
-    print("Running tests...")
-    test_doubling_wy_matches_torch_reference_cpu()
-    test_compute_wy_matches_torch_reference_grouped_heads()
-    test_compute_wy_matches_torch_reference_qwen35_heads()
-    test_chunk_gated_delta_rule_310_uses_npu_wy()
-    print("\n✓ All tests passed!")
