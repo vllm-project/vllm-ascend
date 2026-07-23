@@ -442,6 +442,49 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         b.store.batch_get_into_multi_buffers.side_effect = Exception("fail")
         b.get(["k1"], [[100]], [[10]])
 
+    def test_whole_key_debug_logs_legacy_paths_only(self):
+        b = self._make_backend()
+        b.store.batch_put_from_multi_buffers.return_value = [0, 0]
+        b.store.batch_get_into_multi_buffers.return_value = [0, 0]
+
+        with (
+            patch.dict(os.environ, {"VLLM_ASCEND_KVPOOL_RANGE_DEBUG": "1"}),
+            patch.object(_mooncake_backend.logger, "info") as log_info,
+        ):
+            b.put(["k1", "k2"], [[100], [200]], [[10], [20]])
+            b.get(["k1", "k2"], [[300], [400]], [[10], [20]])
+
+        events = [
+            json.loads(call.args[2])
+            for call in log_info.call_args_list
+            if call.args[:2] == ("%s %s", "[KVPOOL_RANGE_DEBUG]")
+        ]
+        self.assertEqual(
+            events,
+            [
+                {"event": "whole_key", "direction": "put", "key_count": 2},
+                {"event": "whole_key", "direction": "get", "key_count": 2},
+            ],
+        )
+
+        b.store = _StrictLayerwiseStore()
+        with (
+            patch.dict(os.environ, {"VLLM_ASCEND_KVPOOL_RANGE_DEBUG": "1"}),
+            patch.object(_mooncake_backend.logger, "info") as ranged_log_info,
+        ):
+            self.assertEqual(
+                b.batch_copy_put(["k"], [[100]], [[64]], [[0]]), [64]
+            )
+            self.assertEqual(
+                b.batch_copy_get(["k"], [[200]], [[64]], [[0]]), [64]
+            )
+        self.assertFalse(
+            any(
+                call.args[:2] == ("%s %s", "[KVPOOL_RANGE_DEBUG]")
+                for call in ranged_log_info.call_args_list
+            )
+        )
+
     def test_register_buffer(self):
         b = self._make_backend()
         backend_module = sys.modules[type(b).__module__]

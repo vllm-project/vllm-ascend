@@ -15,6 +15,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import json
+import os
 import threading
 import unittest
 from unittest.mock import MagicMock, patch
@@ -25,6 +27,9 @@ import numpy as np
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm.distributed.kv_events import BlockStored
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import (
+    kv_transfer as kv_transfer_module,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     KeyMetadata,
     LayerBlockRange,
@@ -945,6 +950,73 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
         self.assertEqual(store.commit_calls, [["key-1"]])
         self.assertEqual(started_keys, set())
 
+    def test_range_debug_records_physical_save_layers_and_final_commit(self):
+        thread, store, _ = self._make_thread()
+        store.copy_put_results = [[160, 160], [128, 128]]
+
+        with (
+            patch.dict(os.environ, {"VLLM_ASCEND_KVPOOL_RANGE_DEBUG": "1"}),
+            patch.object(kv_transfer_module.logger, "info") as log_info,
+        ):
+            for layer_id in range(2):
+                self._run_task(thread, self._make_task(thread, layer_id))
+
+        events = [
+            json.loads(call.args[2])
+            for call in log_info.call_args_list
+            if call.args[:2] == ("%s %s", "[KVPOOL_RANGE_DEBUG]")
+        ]
+        self.assertEqual([event["event"] for event in events], ["range", "range", "commit"])
+        self.assertEqual([event["layer_id"] for event in events], [0, 1, 1])
+        for event, expected_sizes, expected_bytes in zip(
+            events[:2],
+            ([[64, 32, 64], [32, 64, 32]]),
+            (160, 128),
+            strict=True,
+        ):
+            self.assertEqual(event["direction"], "save")
+            self.assertEqual(event["key_count"], 2)
+            self.assertEqual(event["requested_bytes"], [expected_bytes] * 2)
+            self.assertEqual(event["sizes"], [expected_sizes] * 2)
+            self.assertEqual(event["results"], [expected_bytes] * 2)
+            self.assertNotIn("keys", event)
+        self.assertEqual(events[-1]["results"], [0, 0])
+
+    def test_range_debug_disabled_skips_payload_builder(self):
+        thread, store, _ = self._make_thread(num_layers=1)
+
+        with (
+            patch.dict(os.environ, {"VLLM_ASCEND_KVPOOL_RANGE_DEBUG": "0"}),
+            patch.object(
+                kv_transfer_module,
+                "_build_range_debug_payload",
+                side_effect=AssertionError("payload builder must not run"),
+            ) as build_payload,
+        ):
+            self._run_task(thread, self._make_task(thread, 0))
+
+        build_payload.assert_not_called()
+        self.assertEqual(store.commit_calls, [["key-1", "key-2"]])
+
+    def test_range_debug_serialization_failure_preserves_save_cleanup(self):
+        thread, store, started_keys = self._make_thread(num_layers=1)
+        store.copy_put_results = [[288, -1]]
+        store.revoke_results = [[0]]
+
+        with (
+            patch.dict(os.environ, {"VLLM_ASCEND_KVPOOL_RANGE_DEBUG": "1"}),
+            patch.object(
+                kv_transfer_module.json,
+                "dumps",
+                side_effect=RuntimeError("serialize failed"),
+            ),
+        ):
+            self._run_task(thread, self._make_task(thread, 0))
+
+        self.assertEqual(store.revoke_calls, [["key-2"]])
+        self.assertEqual(store.commit_calls, [["key-1"]])
+        self.assertEqual(started_keys, set())
+
     def test_malformed_results_revoke_all_keys_and_finish_request(self):
         for results in ([96], [96, 96, 96], ["invalid", 96]):
             with self.subTest(results=results):
@@ -1248,6 +1320,46 @@ class TestKVCacheStoreLayerRecvingThread(unittest.TestCase):
                 [[96, 128, 192]],
             ),
         )
+        self.assertEqual(invalid_block_ids, {4})
+        self.assertFalse(load_abort_event.is_set())
+
+    def test_range_debug_records_physical_load_layers(self):
+        thread, store, invalid_block_ids, _, _ = self._make_thread()
+        store.copy_get_results = [[160, 160], [128, 128]]
+
+        with (
+            patch.dict(os.environ, {"VLLM_ASCEND_KVPOOL_RANGE_DEBUG": "1"}),
+            patch.object(kv_transfer_module.logger, "info") as log_info,
+        ):
+            for layer_id in range(2):
+                self._run_task(thread, self._make_load_task(thread, layer_id))
+
+        events = [
+            json.loads(call.args[2])
+            for call in log_info.call_args_list
+            if call.args[:2] == ("%s %s", "[KVPOOL_RANGE_DEBUG]")
+        ]
+        self.assertEqual([event["event"] for event in events], ["range", "range"])
+        self.assertEqual([event["direction"] for event in events], ["load", "load"])
+        self.assertEqual([event["layer_id"] for event in events], [0, 1])
+        self.assertEqual(events[0]["requested_bytes"], [160, 160])
+        self.assertEqual(events[0]["results"], [160, 160])
+        self.assertEqual(invalid_block_ids, set())
+
+    def test_range_debug_logger_failure_preserves_load_failure(self):
+        thread, store, invalid_block_ids, _, load_abort_event = self._make_thread(num_layers=1)
+        store.copy_get_results = [[288, -1]]
+
+        with (
+            patch.dict(os.environ, {"VLLM_ASCEND_KVPOOL_RANGE_DEBUG": "1"}),
+            patch.object(
+                kv_transfer_module.logger,
+                "info",
+                side_effect=RuntimeError("logger failed"),
+            ),
+        ):
+            self._run_task(thread, self._make_load_task(thread, 0))
+
         self.assertEqual(invalid_block_ids, {4})
         self.assertFalse(load_abort_event.is_set())
 

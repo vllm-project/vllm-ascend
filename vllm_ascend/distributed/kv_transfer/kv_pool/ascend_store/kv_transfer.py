@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import queue
 import threading
 import time
@@ -14,6 +15,7 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
+from vllm_ascend import envs
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import (
     Backend,
     require_aligned_batch_results,
@@ -36,6 +38,76 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mooncake_session_tracker import (
     MooncakeSessionTracker,
 )
+
+_KVPOOL_RANGE_DEBUG_PREFIX = "[KVPOOL_RANGE_DEBUG]"
+
+
+def _build_range_debug_payload(
+    direction: str,
+    layer_id: int,
+    sizes: list[list[int]],
+    object_offsets: list[list[int]],
+    results: list[int],
+) -> dict[str, Any]:
+    nested_sizes = [[int(size) for size in key_sizes] for key_sizes in sizes]
+    return {
+        "event": "range",
+        "direction": direction,
+        "layer_id": int(layer_id),
+        "key_count": len(results),
+        "requested_bytes": [sum(key_sizes) for key_sizes in nested_sizes],
+        "sizes": nested_sizes,
+        "object_offsets": [
+            [int(offset) for offset in key_offsets]
+            for key_offsets in object_offsets
+        ],
+        "results": [int(result) for result in results],
+    }
+
+
+def _emit_range_debug_event(
+    direction: str,
+    layer_id: int,
+    sizes: list[list[int]],
+    object_offsets: list[list[int]],
+    results: list[int],
+) -> None:
+    try:
+        if not envs.VLLM_ASCEND_KVPOOL_RANGE_DEBUG:
+            return
+        payload = _build_range_debug_payload(
+            direction, layer_id, sizes, object_offsets, results
+        )
+        logger.info(
+            "%s %s",
+            _KVPOOL_RANGE_DEBUG_PREFIX,
+            json.dumps(payload, separators=(",", ":")),
+        )
+    except Exception:
+        pass
+
+
+def _emit_commit_debug_event(
+    layer_id: int,
+    key_count: int,
+    results: list[int],
+) -> None:
+    try:
+        if not envs.VLLM_ASCEND_KVPOOL_RANGE_DEBUG:
+            return
+        payload = {
+            "event": "commit",
+            "layer_id": int(layer_id),
+            "key_count": int(key_count),
+            "results": [int(result) for result in results],
+        }
+        logger.info(
+            "%s %s",
+            _KVPOOL_RANGE_DEBUG_PREFIX,
+            json.dumps(payload, separators=(",", ":")),
+        )
+    except Exception:
+        pass
 
 
 @dataclass(frozen=True)
@@ -1533,15 +1605,21 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         if active_keys:
             if layer_id < len(self.sync_save_events):
                 self.sync_save_events[layer_id].synchronize()
+            active_buffers = [req_meta.all_buffers[index] for index in active_indices]
+            active_sizes = [req_meta.all_sizes[index] for index in active_indices]
+            active_offsets = [req_meta.all_offsets[index] for index in active_indices]
             results = require_aligned_batch_results(
                 "batch_copy_put",
                 active_keys,
                 self.m_store.batch_copy_put(
                     active_keys,
-                    [req_meta.all_buffers[index] for index in active_indices],
-                    [req_meta.all_sizes[index] for index in active_indices],
-                    [req_meta.all_offsets[index] for index in active_indices],
+                    active_buffers,
+                    active_sizes,
+                    active_offsets,
                 ),
+            )
+            _emit_range_debug_event(
+                "save", layer_id, active_sizes, active_offsets, results
             )
             failed_keys = [
                 key
@@ -1565,6 +1643,9 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                         "batch_commit",
                         active_keys,
                         self.m_store.batch_commit(active_keys),
+                    )
+                    _emit_commit_debug_event(
+                        layer_id, len(active_keys), commit_results
                     )
                 except Exception as exc:
                     logger.error(
@@ -1841,15 +1922,21 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         active_keys = [req_meta.keys[index] for index in active_indices]
         if active_keys:
             self._stagger_h2d_submit(layer_id)
+            active_buffers = [req_meta.all_buffers[index] for index in active_indices]
+            active_sizes = [req_meta.all_sizes[index] for index in active_indices]
+            active_offsets = [req_meta.all_offsets[index] for index in active_indices]
             results = require_aligned_batch_results(
                 "batch_copy_get",
                 active_keys,
                 self.m_store.batch_copy_get(
                     active_keys,
-                    [req_meta.all_buffers[index] for index in active_indices],
-                    [req_meta.all_sizes[index] for index in active_indices],
-                    [req_meta.all_offsets[index] for index in active_indices],
+                    active_buffers,
+                    active_sizes,
+                    active_offsets,
                 ),
+            )
+            _emit_range_debug_event(
+                "load", layer_id, active_sizes, active_offsets, results
             )
             failed_indices = [
                 index
