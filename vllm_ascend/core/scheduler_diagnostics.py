@@ -5,6 +5,23 @@ from typing import Any
 from vllm.v1.request import RequestStatus
 
 
+def diagnostics_enabled(vllm_config: Any) -> bool:
+    """Read the diagnostic toggle independently of NonBSP activation."""
+    additional_config = getattr(vllm_config, "additional_config", None)
+    if not isinstance(additional_config, dict):
+        return False
+
+    scheduler_config = additional_config.get("scheduler_config")
+    if not isinstance(scheduler_config, dict):
+        return False
+
+    nonbsp_config = scheduler_config.get("nonbsp_config")
+    if not isinstance(nonbsp_config, dict):
+        return False
+
+    return nonbsp_config.get("enable_diagnostics") is True
+
+
 def print_scheduler_summary(scheduler: Any, scheduler_output: Any) -> None:
     waiting_reqs = list(itertools.chain(scheduler.waiting, scheduler.skipped_waiting))
     lb_paused_status = getattr(RequestStatus, "LB_PAUSED", None)

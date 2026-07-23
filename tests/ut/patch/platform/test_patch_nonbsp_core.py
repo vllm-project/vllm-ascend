@@ -67,11 +67,53 @@ def test_nonbsp_enabled_ignores_legacy_top_level_config(monkeypatch):
     assert nonbsp_core._nonbsp_enabled(vllm_config) is False
 
 
-def test_default_dp_core_diagnostics_method_is_not_patched():
+def _diagnostics_config(enable_diagnostics: bool):
+    vllm_config = MagicMock()
+    vllm_config.additional_config = {
+        "scheduler_config": {
+            "nonbsp_config": {
+                "enabled": False,
+                "enable_diagnostics": enable_diagnostics,
+            }
+        }
+    }
+    return vllm_config
+
+
+def test_default_dp_core_diagnostics_method_is_patched():
     assert (
         nonbsp_core.DPEngineCoreProc._has_global_unfinished_reqs
-        is not nonbsp_core.NonBSPDPEngineCoreProc._has_global_unfinished_reqs
+        is nonbsp_core._has_global_unfinished_reqs_with_diagnostics
     )
+
+
+def test_default_dp_core_diagnostics_are_disabled_by_default(monkeypatch, capsys):
+    monkeypatch.setattr(
+        nonbsp_core,
+        "_ORIGINAL_HAS_GLOBAL_UNFINISHED_REQS",
+        lambda self, local_unfinished: True,
+    )
+    engine_core = MagicMock()
+    engine_core.vllm_config = _diagnostics_config(False)
+    engine_core.step_counter = 7
+
+    assert nonbsp_core._has_global_unfinished_reqs_with_diagnostics(engine_core, True) is True
+    assert capsys.readouterr().out == ""
+
+
+def test_bl_dp_core_diagnostics_can_be_enabled(monkeypatch, capsys):
+    monkeypatch.setattr(
+        nonbsp_core,
+        "_ORIGINAL_HAS_GLOBAL_UNFINISHED_REQS",
+        lambda self, local_unfinished: True,
+    )
+    engine_core = MagicMock()
+    engine_core.vllm_config = _diagnostics_config(True)
+    engine_core.step_counter = 7
+
+    assert nonbsp_core._has_global_unfinished_reqs_with_diagnostics(engine_core, True) is True
+    output = capsys.readouterr().out
+    assert output.count("step_counter: 7") == 1
 
 
 def test_dp_engine_core_initializes_ascend_config(monkeypatch, capsys):
@@ -231,12 +273,13 @@ def test_wave_rank_with_local_request_joins_balance_load(monkeypatch):
 
 def test_nonbsp_diagnostics_are_disabled_by_default(monkeypatch, capsys):
     monkeypatch.setattr(
-        nonbsp_core.DPEngineCoreProc,
-        "_has_global_unfinished_reqs",
+        nonbsp_core,
+        "_ORIGINAL_HAS_GLOBAL_UNFINISHED_REQS",
         lambda self, local_unfinished: False,
     )
 
     engine_core = object.__new__(nonbsp_core.NonBSPDPEngineCoreProc)
+    engine_core.vllm_config = _diagnostics_config(False)
     engine_core._lb_enable_diagnostics = False
     engine_core.step_counter = 7
     engine_core.scheduler = MagicMock()
@@ -251,12 +294,13 @@ def test_nonbsp_diagnostics_are_disabled_by_default(monkeypatch, capsys):
 
 def test_nonbsp_diagnostics_print_step_counter_once(monkeypatch, capsys):
     monkeypatch.setattr(
-        nonbsp_core.DPEngineCoreProc,
-        "_has_global_unfinished_reqs",
+        nonbsp_core,
+        "_ORIGINAL_HAS_GLOBAL_UNFINISHED_REQS",
         lambda self, local_unfinished: True,
     )
 
     engine_core = object.__new__(nonbsp_core.NonBSPDPEngineCoreProc)
+    engine_core.vllm_config = _diagnostics_config(True)
     engine_core._lb_enable_diagnostics = True
     engine_core.step_counter = 7
     engine_core.scheduler = MagicMock()

@@ -29,8 +29,10 @@ import vllm_ascend.patch.platform.patch_balance_schedule as _balance_patch
 import vllm_ascend.patch.platform.patch_nonbsp_request_status  # noqa: F401
 from vllm_ascend.ascend_config import NonBSPConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.core.nonbsp_balance_load import balance_load
+from vllm_ascend.core.scheduler_diagnostics import diagnostics_enabled
 
 RequestStatus = _request_module.RequestStatus
+_ORIGINAL_HAS_GLOBAL_UNFINISHED_REQS = DPEngineCoreProc._has_global_unfinished_reqs
 
 
 def _get_nonbsp_config(vllm_config) -> NonBSPConfig:
@@ -95,6 +97,19 @@ def _print_modifications(modifications, dp_rank: int, enable_diagnostics: bool) 
             flush=True,
         )
     print("=" * 60, flush=True)
+
+
+def _has_global_unfinished_reqs_with_diagnostics(self, local_unfinished: bool) -> bool:
+    if diagnostics_enabled(self.vllm_config):
+        print(
+            f"{datetime.datetime.now()} | _has_global_unfinished_reqs | "
+            f"step_counter: {self.step_counter}",
+            flush=True,
+        )
+    return _ORIGINAL_HAS_GLOBAL_UNFINISHED_REQS(self, local_unfinished)
+
+
+DPEngineCoreProc._has_global_unfinished_reqs = _has_global_unfinished_reqs_with_diagnostics
 
 
 class NonBSPDPEngineCoreProc(DPEngineCoreProc):
@@ -238,11 +253,6 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
         return super()._process_engine_step()
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
-        if self._lb_enable_diagnostics:
-            print(
-                f"{datetime.datetime.now()} | _has_global_unfinished_reqs | step_counter: {self.step_counter}",
-                flush=True,
-            )
         result = super()._has_global_unfinished_reqs(local_unfinished)
         if not result:
             self.scheduler.modifications = None
