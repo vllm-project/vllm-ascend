@@ -491,13 +491,14 @@ ock.mmc.local_service.dram.size = 1GB
 
 | Parameter | Description |
 | :--- | :--- |
-| `ock.mmc.meta_service_url` | Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same. |
-| `ock.mmc.local_service.config_store_url` | Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same. |
-| `ock.mmc.local_service.world_size` | Total count of local service, including services that will be added in the future. |
-| `ock.mmc.local_service.protocol` | `device_rdma` (supported for A2 and A3 when device ROCE available, recommended for A2), `device_sdma` (supported for A3 when HCCS available, recommended for A3). Currently does not support heterogeneous protocol setting.|
-| `ock.mmc.local_service.dram.size` | Sets the size of the memory occupied by the master. The configured value is the size of the memory occupied by each card. |
+| `ock.mmc.meta_service_url` | Configure the endpoint of MetaService. The P node and D node should be configured with the same MetaService endpoint. |
+| `ock.mmc.meta_service.config_store_url` | Configure the Config Store endpoint used by MetaService. |
+| `ock.mmc.local_service.config_store_url` | Configure the Config Store endpoint used by LocalService. Its value must be the same as `ock.mmc.meta_service.config_store_url` in `mmc-meta.conf`. |
+| `ock.mmc.local_service.world_size` | Maximum number of supported LocalService, including services that will be added in the future. |
+| `ock.mmc.local_service.protocol` | The recommended protocols are `device_rdma` (RDMA over device, supported for A2 and A3 when device RoCE is available, recommended for A2) and `device_sdma` (SDMA over device, supported for A3 when HCCS is available, recommended for A3). For details about other supported protocols, see the [MemCache LocalService configuration file](https://gitcode.com/Ascend/memcache/blob/master/config/mmc-local.conf). |
+| `ock.mmc.local_service.dram.size` | Sets the DRAM capacity provided by the current LocalService. |
 
-### Run Memcache Master
+### Run Memcache MetaService
 
 Starting the MetaService service.
 
@@ -721,6 +722,37 @@ echo "vLLM started. Log file: log_mix.log"
 ```
 
 #### [2. Run Inference](#2-run-inference)
+
+### Separated Deployment of MemCache and vLLM
+
+This deployment mode runs MemCache and vLLM in different processes. It is different from vLLM PD disaggregation. In the default co-located mode, vLLM loads the model weights before the KV connector initializes MemCache. As a result, MemCache may not be able to reserve sufficient memory from the remaining available space. Starting a standalone MemCache process before vLLM allows MemCache to reserve a larger memory pool.
+
+Prepare two LocalService configuration files with the same connection and protocol settings. The configuration used by the vLLM process does not contribute DRAM:
+
+```ini
+# mmc-local.conf used by the vLLM process
+ock.mmc.local_service.dram.size = 0GB
+ock.mmc.local_service.max.dram.size = 1024GB
+```
+
+The configuration used by the standalone MemCache process specifies the amount of DRAM to contribute:
+
+```ini
+# mmc-local-standalone.conf used by the standalone MemCache process
+ock.mmc.local_service.dram.size = 600GB
+ock.mmc.local_service.max.dram.size = 1024GB
+```
+
+The preceding sizes are examples. Adjust them according to the available memory, and set `ock.mmc.local_service.max.dram.size` to accommodate the maximum `dram.size` used by the LocalService processes.
+
+Deploy the services in the following order:
+
+1. Start MetaService as described above.
+2. Before starting vLLM, start a standalone MemCache process with `mmc-local-standalone.conf` on every node. These processes contribute the configured DRAM to the memory pool.
+3. Wait until the standalone MemCache process reports successful initialization on every node.
+4. Set `MMC_LOCAL_CONFIG_PATH` to `mmc-local.conf`, and then start the vLLM inference processes as described above. MemCache in the vLLM processes connects to the existing memory pool without contributing additional DRAM.
+
+For the standalone MemCache startup script and the complete A3 deployment procedure, see <https://gitcode.com/Ascend/memcache/wiki/MemCache+vLLM+A3%E5%88%86%E7%A6%BB%E9%83%A8%E7%BD%B2%E6%A1%88%E4%BE%8B.md>.
 
 ## Example of using Yuanrong as a KV Pool backend
 
