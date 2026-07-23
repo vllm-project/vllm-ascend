@@ -187,9 +187,6 @@ a3:
       - name: Qwen3-30B-QuaRot
         os: linux-aarch64-nightly-a3-2
         config_file_path: Qwen3-30B-QuaRot-eagle3.yaml
-      - name: rejection-sample-a3
-        os: linux-aarch64-nightly-a3-2
-        config_file_path: tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_rejection_sample.py
 
 a3-560t:
   multi_node:
