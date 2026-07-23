@@ -300,7 +300,7 @@ def generate_report(failed, recommended, matched, log_dir, recommendations_sourc
         out.append("")
 
     if not hit and not miss:
-        out.append("## No falied cases")
+        out.append("## No failed cases")
         out.append("")
 
     out.append("---")
