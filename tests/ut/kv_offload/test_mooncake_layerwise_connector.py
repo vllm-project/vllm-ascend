@@ -183,6 +183,7 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
             },
             metaserver="http://dummy",
             remote_tp_size=8,
+            remote_pcp_size=1,
             remote_dcp_size=1,
             chunk_finish=False,
         )
@@ -577,6 +578,7 @@ class MockVllmConfig:
         self.parallel_config.data_parallel_size_local = 1
         self.parallel_config.data_parallel_size = 1
         self.parallel_config.data_parallel_rank = 0
+        self.parallel_config.prefill_context_parallel_size = 1
         self.parallel_config.decode_context_parallel_size = 1
         self.cache_config.block_size = 16
         self.cache_config.mamba_cache_mode = None
@@ -1100,6 +1102,9 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
                 return_value=SimpleNamespace(pd_tp_ratio=1, num_head_replica=1, pd_head_ratio=1),
             ),
             patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.get_pcp_group",
+            ),
+            patch(
                 "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.get_decode_context_model_parallel_rank",
                 return_value=0,
             ),
@@ -1120,6 +1125,7 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         mock_v.element_size.return_value = 4
         self.kv_caches = {"encoder.layer.0": (mock_k, mock_v)}
         self.vllm_config.parallel_config.tensor_parallel_size = 1
+        self.vllm_config.parallel_config.prefill_context_parallel_size = 1
         self.vllm_config.parallel_config.decode_context_parallel_size = 1
         self.vllm_config.parallel_config.data_parallel_rank = 0
         self.vllm_config.kv_transfer_config.kv_port = 1234

@@ -240,7 +240,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_indices_to_sample = torch.zeros(
             self.vllm_config.scheduler_config.max_num_batched_tokens, dtype=torch.int32, device=device
         )
-        slot_mapping_lens = self.runner.max_num_tokens
+        # Graph capture appends two request-sized padding regions even when
+        # PCP is disabled in MRV1.
+        slot_mapping_lens = self.runner.max_num_tokens + 2 * self.runner.max_num_reqs
         self.slot_mapping_group = [
             torch.zeros(slot_mapping_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
             for _ in range(self.num_speculative_tokens)
@@ -595,7 +597,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if self.dcp_size > 1 and self.use_cuda_graph and not is_profile and self.block_table_tensor_clone is None:
             self.block_table_tensor_clone = torch.zeros(
                 (
-                    self.runner.max_num_tokens,
+                    self.runner.max_num_tokens + 2 * self.runner.max_num_reqs,
                     self.runner.input_batch.block_table[0].get_device_tensor().shape[1],
                 ),
                 dtype=torch.int32,

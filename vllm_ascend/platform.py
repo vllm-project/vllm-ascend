@@ -704,7 +704,7 @@ class NPUPlatform(Platform):
                     "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareScheduler"
                 )
 
-        dcp_size = parallel_config.decode_context_parallel_size
+        cp_size = parallel_config.prefill_context_parallel_size * parallel_config.decode_context_parallel_size
         use_sparse = model_uses_sfa_sparse(model_config)
         sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(vllm_config)
         if sfa_dcp_replicated_indexer:
@@ -723,22 +723,22 @@ class NPUPlatform(Platform):
         if (
             vllm_config.kv_transfer_config is not None
             and cache_config.block_size != parallel_config.cp_kv_cache_interleave_size
-            and dcp_size > 1
+            and cp_size > 1
         ):
             raise AssertionError(
                 f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size}) "
                 f"and block_size({cache_config.block_size}) "
-                "needs to be equal if DCP is enabled in P/D disaggregate and kv pool scenario."
+                "needs to be equal if PCP or DCP is enabled in P/D disaggregate and kv pool scenario."
             )
 
         if (
             use_sparse
-            and dcp_size > 1
+            and cp_size > 1
             and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size
             and not sfa_dcp_replicated_indexer
         ):
             logger.warning_once(
-                "The current SFA DCP implementation requires "
+                "The current SFA context-parallel implementation requires "
                 f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size})"
                 f" == block_size({cache_config.block_size}). "
                 f"Override cp_kv_cache_interleave_size to {cache_config.block_size}."

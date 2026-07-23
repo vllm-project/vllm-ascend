@@ -25,6 +25,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
         self.moe_config.tp_group.device_group = MagicMock()
         self.moe_config.dp_size = 1
         self.moe_config.tp_size = 1
+        self.moe_config.pcp_size = 1
         self.moe_config.ep_size = 1
         self.moe_config.dp_group = MagicMock()
         self.moe_config.original_num_experts = 8
@@ -173,6 +174,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
 
         self.moe_config.dp_size = 2
         self.moe_config.tp_size = 1
+        self.moe_config.pcp_size = 1
         self.moe_config.ep_size = 1
         self.moe_config.dp_group = mock_dp_group
 

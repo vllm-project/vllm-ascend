@@ -290,6 +290,7 @@ class TestNPUPlatform(TestBase):
 
     def test_set_additional_forward_context_v2_includes_required_moe_fields(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
         dummy_comm_method = object()
 
         with (
@@ -315,6 +316,7 @@ class TestNPUPlatform(TestBase):
 
     def test_set_additional_forward_context_reads_v2_profile_override(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
 
         with (
             patch("vllm_ascend.platform.envs_vllm.VLLM_USE_V2_MODEL_RUNNER", True, create=True),

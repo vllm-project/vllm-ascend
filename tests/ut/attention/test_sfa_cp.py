@@ -50,8 +50,8 @@ def test_sfa_dcp_local_sequence_lengths_follow_interleave_layout() -> None:
     rank0 = _make_builder(rank=0)._get_dcp_local_seq_lens(seq_lens)
     rank1 = _make_builder(rank=1)._get_dcp_local_seq_lens(seq_lens)
 
-    torch.testing.assert_close(rank0, torch.tensor([0, 3, 4, 4, 4, 5, 8]))
-    torch.testing.assert_close(rank1, torch.tensor([0, 0, 0, 1, 4, 4, 4]))
+    torch.testing.assert_close(rank0, torch.tensor([0, 3, 4, 4, 4, 5, 8], dtype=torch.int32))
+    torch.testing.assert_close(rank1, torch.tensor([0, 0, 0, 1, 4, 4, 4], dtype=torch.int32))
 
 
 def test_sfa_dcp_builds_replicated_block_table_view() -> None:
