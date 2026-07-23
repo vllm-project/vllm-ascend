@@ -31,6 +31,9 @@ a2:
       - name: MiniMax-M2.5-w8a8-QuaRot-A2
         os: linux-aarch64-a2b3-8
         config_file_path: MiniMax-M2.5-w8a8-QuaRot-A2.yaml
+      - name: rejection-sample
+        os: linux-aarch64-a2b3-1
+        config_file_path: tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_rejection_sample.py
   multi_node:
     test_config:
       - name: multi-node-qwen3-235b-dp
@@ -156,6 +159,9 @@ a3:
       - name: qwen3-vl-235b-a22b-instruct-w8a8
         os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3-VL-235B-A22B-Instruct-W8A8.yaml
+      - name: rejection-sample
+        os: linux-aarch64-nightly-a3-2
+        config_file_path: tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_rejection_sample.py
   multi_card:
     test_config:
       # pytest-driven tests
