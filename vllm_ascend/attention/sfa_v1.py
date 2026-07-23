@@ -1620,6 +1620,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 f"got {len(main_cache)} tensors for layer_name={self.layer_name}."
             )
         return (main_cache[0], main_cache[1], indexer_cache[0])
+
     def _record_dcp_kv_gather_context(
         self,
         kv_cache: tuple[torch.Tensor, ...],
