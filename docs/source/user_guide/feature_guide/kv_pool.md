@@ -93,7 +93,7 @@ export PYTHONHASHSEED=0
 **Note:** Before proceeding, review the following Mooncake guides:
 
 * [Mooncake Store Deployment Guide](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/deployment/mooncake-store-deployment-guide.md)
-* [SSD Offload](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/deployment/ssd-offload.md)
+* [SSD Offload](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/deployment/ssd/ssd-offload.md)
 
 #### 1. Configure mooncake.json
 
