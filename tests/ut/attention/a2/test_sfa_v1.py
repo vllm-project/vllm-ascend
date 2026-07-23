@@ -192,8 +192,6 @@ class TestAscendSFADeviceOperator(TestBase):
         self.assertEqual(call_kwargs["query"].shape, (3, 4, 10))
         self.assertEqual(call_kwargs["sparse_mode"], 0)
         self.assertTrue(call_kwargs["return_softmax_lse"])
-
-
 class TestAscendSFACacheComposition(TestBase):
     def test_compose_independent_sfa_and_li_c8_layouts(self):
         for enable_sfa_c8, enable_li_c8 in (

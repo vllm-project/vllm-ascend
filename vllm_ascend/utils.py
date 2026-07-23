@@ -1565,6 +1565,14 @@ def kv_cache_spec_uses_sparse_sfa_c8(kv_cache_spec) -> bool:
     )
 
 
+def kv_cache_spec_uses_sparse_li_c8(kv_cache_spec) -> bool:
+    from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+
+    return isinstance(kv_cache_spec, AscendSFAIndexerCacheSpec) and bool(
+        getattr(kv_cache_spec, "cache_sparse_li_c8", False)
+    )
+
+
 def is_hidden_state_cache_spec(spec) -> bool:
     """Whether ``spec`` marks an ``extract_hidden_states`` cache-only layer."""
     from vllm.v1.kv_cache_interface import HiddenStateCacheSpec

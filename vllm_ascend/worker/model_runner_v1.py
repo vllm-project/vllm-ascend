@@ -4171,7 +4171,7 @@ class NPUModelRunner(GPUModelRunner):
         c8_indexer_specs = [
             spec
             for spec in layer_kv_cache_spec.values()
-            if isinstance(spec, AscendSFAIndexerCacheSpec) and spec.cache_sparse_c8
+            if isinstance(spec, AscendSFAIndexerCacheSpec) and spec.cache_sparse_li_c8
         ]
         self._layerwise_c8_indexer_slot_buffers: list[tuple[torch.Tensor, ...]] = []
         if num_reuse_slots and c8_indexer_specs:
@@ -4239,7 +4239,7 @@ class NPUModelRunner(GPUModelRunner):
                 ):
                     current_kv_cache_spec = layer_kv_cache_spec[layer_name]
                     num_blocks = kv_cache_tensor.size // current_kv_cache_spec.page_size_bytes
-                    if current_kv_cache_spec.cache_sparse_c8 and self._layerwise_c8_indexer_slot_buffers:
+                    if current_kv_cache_spec.cache_sparse_li_c8 and self._layerwise_c8_indexer_slot_buffers:
                         slot_ids = {
                             slot_by_layer_name[layer_name_inner]
                             for layer_name_inner in kv_cache_tensor.shared_by
@@ -4290,7 +4290,7 @@ class NPUModelRunner(GPUModelRunner):
                         v_tensor_size = int(kv_cache_tensor.size // v_tensor_split_factor)
                     if self.kv_offload_decode_enabled:
                         assert self.use_sparse, "KV offload decode only support sparse attention."
-                        assert not current_sparse_sfa_c8, "KV offload decode do not supported c8 now."
+                        assert not current_sparse_sfa_c8, "KV offload decode do not support sparse SFA C8."
                         raw_tensors = self._allocate_kv_cache_tensors_for_kv_offload_decode(
                             k_tensor_size,
                             v_tensor_size,
@@ -4495,7 +4495,7 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     if self.kv_offload_decode_enabled:
                         assert self.use_sparse, "KV offload decode only support sparse attention."
-                        assert not current_sparse_sfa_c8, "KV offload decode do not supported c8 now."
+                        assert not current_sparse_sfa_c8, "KV offload decode do not support sparse SFA C8."
                         reshaped_tensors = self._reshape_kv_cache_tensors_for_kv_offload_decode(
                             layer_name,
                             kv_cache_raw_tensors[layer_name],

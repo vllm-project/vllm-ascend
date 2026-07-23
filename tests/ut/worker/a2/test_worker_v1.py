@@ -69,7 +69,7 @@ class TestNPUWorker(TestBase):
             num_kv_heads=1,
             head_size=8,
             dtype=torch.int8,
-            cache_sparse_c8=True,
+            cache_sparse_sfa_c8=True,
         )
         indexer_spec = AscendSFAIndexerCacheSpec(
             block_size=2,
@@ -78,7 +78,7 @@ class TestNPUWorker(TestBase):
             dtype=torch.int8,
             scale_dim=1,
             scale_dtype=torch.float16,
-            cache_sparse_c8=True,
+            cache_sparse_li_c8=True,
         )
         specs = {
             **{f"model.layers.{layer}.self_attn.attn": main_spec for layer in range(6)},

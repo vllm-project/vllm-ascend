@@ -30,6 +30,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.use_compress = False
         runner.use_hybrid_blocks = False
         runner.hybrid_with_attn_and_mamba = False
+        runner.kv_offload_decode_enabled = False
         runner.sfa_dcp_replicated_indexer_size = 1
         runner.runner_only_attn_layers = set()
         runner.is_kv_consumer = False
@@ -547,6 +548,119 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             runner._layerwise_reuse_slot_by_layer_name[main_names[3]],
         )
         self.assertIn(indexer_name, runner._layerwise_reuse_slot_by_layer_name)
+
+    def test_sparse_sfa_and_li_c8_allocate_and_reshape_independently(self):
+        runner = self._build_runner()
+        runner.use_sparse = True
+        runner.block_size = 16
+        runner.c8_k_cache_dtype = torch.int8
+        runner.c8_k_scale_cache_dtype = torch.float16
+        runner._get_attention_kv_cache_dims = lambda _layer_name, _spec: (512, 64)
+
+        attn_layer_name = "model.layers.1.self_attn.attn"
+        indexer_layer_name = "model.layers.1.self_attn.indexer.k_cache"
+        packed_head_dim = get_sfa_qsfa_packed_head_dim(512, 64)
+
+        for enable_sfa_c8, enable_li_c8 in (
+            (False, False),
+            (True, False),
+            (False, True),
+            (True, True),
+        ):
+            with self.subTest(
+                enable_sfa_c8=enable_sfa_c8,
+                enable_li_c8=enable_li_c8,
+            ):
+                main_spec = AscendMLAAttentionSpec(
+                    block_size=runner.block_size,
+                    num_kv_heads=1,
+                    head_size=packed_head_dim if enable_sfa_c8 else 512 + 64,
+                    dtype=torch.int8 if enable_sfa_c8 else torch.bfloat16,
+                    cache_sparse_sfa_c8=enable_sfa_c8,
+                )
+                indexer_spec = AscendSFAIndexerCacheSpec(
+                    block_size=runner.block_size,
+                    num_kv_heads=1,
+                    head_size=128,
+                    dtype=torch.int8 if enable_li_c8 else torch.bfloat16,
+                    scale_dim=1 if enable_li_c8 else 0,
+                    scale_dtype=torch.float16 if enable_li_c8 else torch.int8,
+                    cache_sparse_li_c8=enable_li_c8,
+                )
+                group_spec = UniformTypeKVCacheSpecs.from_specs(
+                    {
+                        attn_layer_name: main_spec,
+                        indexer_layer_name: indexer_spec,
+                    }
+                )
+                self.assertIsNotNone(group_spec)
+                assert group_spec is not None
+
+                kv_cache_config = KVCacheConfig(
+                    num_blocks=2,
+                    kv_cache_tensors=[
+                        KVCacheTensor(
+                            size=main_spec.page_size_bytes * 2,
+                            shared_by=[attn_layer_name],
+                        ),
+                        KVCacheTensor(
+                            size=indexer_spec.page_size_bytes * 2,
+                            shared_by=[indexer_layer_name],
+                        ),
+                    ],
+                    kv_cache_groups=[
+                        KVCacheGroupSpec(
+                            layer_names=[attn_layer_name, indexer_layer_name],
+                            kv_cache_spec=group_spec,
+                        )
+                    ],
+                )
+                backend = MagicMock()
+                backend.get_kv_cache_shape.side_effect = (
+                    lambda num_blocks, block_size, num_kv_heads, head_size: (
+                        num_blocks,
+                        block_size,
+                        num_kv_heads,
+                        head_size,
+                    )
+                )
+                runner._kv_cache_spec_attn_group_iterator = lambda: [
+                    SimpleNamespace(
+                        kv_cache_spec=main_spec,
+                        backend=backend,
+                        layer_names=[attn_layer_name],
+                    ),
+                    SimpleNamespace(
+                        kv_cache_spec=indexer_spec,
+                        backend=backend,
+                        layer_names=[indexer_layer_name],
+                    ),
+                ]
+
+                raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+                caches = runner._reshape_kv_cache_tensors(kv_cache_config, raw_caches)
+
+                main_cache = caches[attn_layer_name]
+                self.assertEqual(len(main_cache), 1 if enable_sfa_c8 else 2)
+                if enable_sfa_c8:
+                    self.assertEqual(main_cache[0].shape, (2, 16, 1, packed_head_dim))
+                    self.assertEqual(main_cache[0].dtype, torch.int8)
+                else:
+                    self.assertEqual(main_cache[0].shape, (2, 16, 1, 512))
+                    self.assertEqual(main_cache[1].shape, (2, 16, 1, 64))
+                    self.assertEqual(main_cache[0].dtype, torch.bfloat16)
+                    self.assertEqual(main_cache[1].dtype, torch.bfloat16)
+
+                indexer_cache = caches[indexer_layer_name]
+                self.assertEqual(len(indexer_cache), 2 if enable_li_c8 else 1)
+                self.assertEqual(indexer_cache[0].shape, (2, 16, 1, 128))
+                self.assertEqual(
+                    indexer_cache[0].dtype,
+                    torch.int8 if enable_li_c8 else torch.bfloat16,
+                )
+                if enable_li_c8:
+                    self.assertEqual(indexer_cache[1].shape, (2, 16, 1, 1))
+                    self.assertEqual(indexer_cache[1].dtype, torch.float16)
 
     @patch("vllm_ascend.worker.model_runner_v1.get_ascend_device_type", return_value=AscendDeviceType.A5)
     @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)

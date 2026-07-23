@@ -67,6 +67,10 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         assert len(cache_sparse_sfa_c8_set) == 1, (
             "All attention layers in the same KV cache group must use the same sparse SFA C8 setting."
         )
+        store_on_host_set = set(spec.store_on_host for spec in specs)
+        assert len(store_on_host_set) == 1, (
+            "All attention layers in the same KV cache group must use the same host storage setting."
+        )
         return cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
@@ -76,6 +80,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             dtype=specs[0].dtype,
             cache_dtype_str=cache_dtype_str_set.pop(),
             cache_sparse_sfa_c8=specs[0].cache_sparse_sfa_c8,
+            store_on_host=store_on_host_set.pop(),
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
