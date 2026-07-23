@@ -1,10 +1,14 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import NamedTuple, TypeVar
+from typing import Any, NamedTuple, TypeVar
 
 import torch
 import torch.distributed as dist
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.attention.pcp import (
+    _gather_prefill_cache_inputs,
+    finalize_mla_pcp_decode,
+)
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -18,6 +22,7 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
+    PreprocessType,
     DSACPContext,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
@@ -25,6 +30,166 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 
 M = TypeVar("M", bound=AscendSFAMetadata)
+
+
+class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
+    """Metadata builder for SFA under MRV2 Prefill Context Parallelism.
+
+    Batch partitioning (zigzag), seq_lens_np / attn_state rebuild, and
+    num_decode_tokens propagation are handled by AscendPCPManager at the
+    model_runner level plus the upstream MLACommonMetadataBuilder. This
+    class is intentionally thin: it exists primarily so that
+    AscendSFABackend.get_builder_cls() can route to it when PCP is on.
+    """
+
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+        metadata_cls: type[AscendSFAMetadata] | None = None,
+        supports_dcp_with_varlen: bool = False,
+    ) -> None:
+        super().__init__(
+            kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
+            metadata_cls,
+            supports_dcp_with_varlen,
+        )
+
+
+class AscendSFACPImpl(AscendSFAImpl):
+    """SFA impl for MRV2 Prefill Context Parallelism.
+
+    Reuses every method on AscendSFAImpl unchanged, and only overrides
+    the hooks where PCP needs to step in:
+
+    1. __init__: force the native preprocess path (prolog_v3 / mlapo
+       fused ops bypass the cross-rank KV gather and are incompatible).
+    2. exec_kv: gather latent KV + cos/sin + slot_mapping across PCP
+       ranks before the fused RMSNorm+RoPE+cache-write op, so every
+       rank writes the complete KV into its replicated cache.
+    3. _execute_sparse_flash_attention_process: apply
+       finalize_mla_pcp_decode on the attention output so decode heads
+       split across PCP ranks are recombined (no-op for prefill).
+    4. _write_indexer_cache: gather indexer key (+ optional scale) and
+       slot_mapping across PCP ranks before the parent's scatter write,
+       so every rank writes the complete set of indexer keys.
+    """
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
+        kv_cache_dtype: str,
+        logits_soft_cap: float | None,
+        attn_type: str,
+        kv_sharing_target_layer_name: str | None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            logits_soft_cap,
+            attn_type,
+            kv_sharing_target_layer_name,
+            **kwargs,
+        )
+        # PCP requires the native forward branch; fused prolog_v3 / mlapo
+        # paths bypass the cross-rank KV gather and are incompatible.
+        self.preprocess_type = PreprocessType.NATIVE
+
+    def exec_kv(
+        self,
+        kv_no_split: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        kv_cache: tuple,
+        slots: torch.Tensor,
+        attn_metadata: M,
+    ):
+        # PCP: gather latent KV, positional cos/sin, and slot_mapping across
+        # PCP ranks before the fused RMSNorm+RoPE+cache-write op. Decode
+        # tokens are replicated across ranks and stay local; only the
+        # prefill partition is all-gathered. After this every rank sees the
+        # complete set of tokens and writes the full KV into its replicated
+        # cache. cos/sin must be gathered alongside kv_no_split because
+        # they are derived from per-token positions and the gathered half
+        # would otherwise be rotated with the wrong positions.
+        num_decode_tokens = attn_metadata.num_decode_tokens or 0
+        (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
+            (kv_no_split, cos, sin), slots, num_decode_tokens
+        )
+        return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
+
+    def _execute_sparse_flash_attention_process(
+        self,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv_cache: tuple,
+        topk_indices: torch.Tensor,
+        attn_metadata: M,
+        actual_seq_lengths_query: torch.Tensor,
+        actual_seq_lengths_key: torch.Tensor,
+    ) -> torch.Tensor:
+        # PCP: after the per-rank attention compute, recombine heads across
+        # PCP ranks for decode (where all ranks share the same Q and the
+        # upstream PCP metadata builder splits heads to avoid redundant
+        # compute). For prefill, where queries are partitioned across
+        # ranks and each rank already produced its local slice with the
+        # full head count, this call is a no-op (output.shape[1] ==
+        # num_heads).
+        attn_output = super()._execute_sparse_flash_attention_process(
+            ql_nope,
+            q_pe,
+            kv_cache,
+            topk_indices,
+            attn_metadata,
+            actual_seq_lengths_query,
+            actual_seq_lengths_key,
+        )
+        return finalize_mla_pcp_decode(attn_output, self.num_heads)
+
+    def _write_indexer_cache(
+        self,
+        k_li: torch.Tensor,
+        k_li_scale: torch.Tensor | None,
+        slot_mapping: torch.Tensor,
+        kv_cache: tuple,
+        attn_metadata: M,
+    ) -> None:
+        # PCP: gather indexer key (and optional scale) plus slot_mapping
+        # across PCP ranks before delegating to the parent's scatter write,
+        # so every rank writes the complete set of indexer keys into its
+        # replicated indexer cache. Same pattern as exec_kv: decode tokens
+        # stay local (replicated), only the prefill partition is gathered.
+        num_decode_tokens = attn_metadata.num_decode_tokens or 0
+        tensors = (k_li,) if k_li_scale is None else (k_li, k_li_scale)
+        gathered_tensors, gathered_slot_mapping = _gather_prefill_cache_inputs(
+            tensors, slot_mapping, num_decode_tokens
+        )
+        k_li = gathered_tensors[0]
+        if k_li_scale is not None:
+            k_li_scale = gathered_tensors[1]
+        super()._write_indexer_cache(
+            k_li,
+            k_li_scale,
+            gathered_slot_mapping,
+            kv_cache,
+            attn_metadata,
+        )
 
 
 class DCPGatherContext(NamedTuple):

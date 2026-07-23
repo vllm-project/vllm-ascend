@@ -125,6 +125,10 @@ class AscendSFABackend(AttentionBackend):
             from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 
             return AscendSFADCPMetadataBuilder
+        if get_current_vllm_config().parallel_config.prefill_context_parallel_size > 1:
+            from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFACPMetadataBuilder
+
+            return AscendSFACPMetadataBuilder
         return AscendSFAMetadataBuilder
 
     @staticmethod
@@ -143,6 +147,10 @@ class AscendSFABackend(AttentionBackend):
             from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
 
             return AscendSFADCPImpl
+        if get_current_vllm_config().parallel_config.prefill_context_parallel_size > 1:
+            from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFACPImpl
+
+            return AscendSFACPImpl
         return AscendSFAImpl
 
     @staticmethod
@@ -1782,6 +1790,52 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
         return (*main_cache, *indexer_cache)
 
+    def _write_indexer_cache(
+        self,
+        k_li: torch.Tensor,
+        k_li_scale: torch.Tensor | None,
+        slot_mapping: torch.Tensor,
+        kv_cache: tuple,
+        attn_metadata: M,
+    ) -> None:
+        dsa_k_cache_idx = self.kv_cache_indexer_k_idx
+        dsa_k_scale_cache_idx = self.kv_cache_indexer_scale_idx
+
+        if get_ascend_config().c8_enable_reshape_optim:
+            torch.ops._C_ascend.store_kv_block(
+                k_li,
+                kv_cache[dsa_k_cache_idx],
+                attn_metadata.group_len,
+                attn_metadata.group_key_idx,
+                attn_metadata.group_key_cache_idx,
+                attn_metadata.block_size,
+            )
+        else:
+            torch_npu.npu_scatter_nd_update_(
+                kv_cache[dsa_k_cache_idx].view(-1, k_li.shape[-1]),
+                slot_mapping.view(-1, 1),
+                k_li.view(-1, k_li.shape[-1]),
+            )
+        if self.use_sparse_c8_indexer:
+            assert len(kv_cache) == (3 if self.use_sparse_c8_sfa else 4)
+            if k_li_scale is not None:
+                if get_ascend_config().c8_enable_reshape_optim:
+                    torch.ops._C_ascend.store_kv_block(
+                        k_li_scale,
+                        kv_cache[dsa_k_scale_cache_idx],
+                        attn_metadata.group_len,
+                        attn_metadata.group_key_idx,
+                        attn_metadata.group_key_cache_idx,
+                        attn_metadata.block_size,
+                    )
+                else:
+                    torch_npu.npu_scatter_nd_update_(
+                        kv_cache[dsa_k_scale_cache_idx].view(-1, k_li_scale.shape[-1]),
+                        slot_mapping.view(-1, 1),
+                        k_li_scale.view(-1, k_li_scale.shape[-1]),
+                    )
+        notify_kv_cache_written(self.layer_name or "")
+
     def forward(
         self,
         layer_name,
@@ -1949,44 +2003,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if kv_cache is not None and self.has_indexer:
             assert k_li is not None
-            use_li_c8_reshape_optim = self._use_li_c8_reshape_optim()
-            dsa_k_cache_idx = self.kv_cache_indexer_k_idx
-            dsa_k_scale_cache_idx = self.kv_cache_indexer_scale_idx
-
-            if use_li_c8_reshape_optim:
-                torch.ops._C_ascend.store_kv_block(
-                    k_li,
-                    kv_cache[dsa_k_cache_idx],
-                    attn_metadata.group_len,
-                    attn_metadata.group_key_idx,
-                    attn_metadata.group_key_cache_idx,
-                    attn_metadata.block_size,
-                )
-            else:
-                torch_npu.npu_scatter_nd_update_(
-                    kv_cache[dsa_k_cache_idx].view(-1, k_li.shape[-1]),
-                    slot_mapping.view(-1, 1),
-                    k_li.view(-1, k_li.shape[-1]),
-                )  # b, s, n, d
-            if self.enable_sparse_li_c8:
-                assert len(kv_cache) == (3 if self.enable_sparse_sfa_c8 else 4)
-                if k_li_scale is not None:
-                    if use_li_c8_reshape_optim:
-                        torch.ops._C_ascend.store_kv_block(
-                            k_li_scale,
-                            kv_cache[dsa_k_scale_cache_idx],
-                            attn_metadata.group_len,
-                            attn_metadata.group_key_idx,
-                            attn_metadata.group_key_cache_idx,
-                            attn_metadata.block_size,
-                        )
-                    else:
-                        torch_npu.npu_scatter_nd_update_(
-                            kv_cache[dsa_k_scale_cache_idx].view(-1, k_li_scale.shape[-1]),
-                            slot_mapping.view(-1, 1),
-                            k_li_scale.view(-1, k_li_scale.shape[-1]),
-                        )
-            notify_kv_cache_written(self.layer_name or "")
+            self._write_indexer_cache(k_li, k_li_scale, slot_mapping, kv_cache, attn_metadata)
 
         if self.enable_dsa_cp and attn_metadata.dsa_cp_context is not None:
             topk_num_tokens = attn_metadata.dsa_cp_context.local_end_with_pad - attn_metadata.dsa_cp_context.local_start
