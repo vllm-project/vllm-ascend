@@ -205,11 +205,11 @@ def generate_report(failed, recommended, matched, log_dir, recommendations_sourc
 
     # Recommendation source indicator
     if recommendations_source == "output":
-        out.append("> **[来源: Workflow Output]** 推荐用例来自上游 job 的 outputs 传递（如 coverage 推荐）")
+        out.append("> **[Source: Workflow Output]** Recommended test cases are passed from upstream job outputs (e.g., coverage recommendations)")
     elif recommendations_source == "committed":
-        out.append("> **[来源: 本地文件]** 推荐用例来自仓库 txt 文件")
+        out.append("> **[Source: Local File]** Recommended test cases come from a txt file in the repository")
     else:
-        out.append("> **[来源: 无]** 未找到推荐用例")
+        out.append("> **[Source: None]** No recommended test cases found")
     out.append("")
 
     # ================================================================
@@ -217,15 +217,15 @@ def generate_report(failed, recommended, matched, log_dir, recommendations_sourc
     # ================================================================
     out.append("---")
     out.append("")
-    out.append(f"## 失败用例（共 {len(failed)} 个）")
+    out.append(f"## Failed Test Cases（共 {len(failed)} 个）")
     out.append("")
     if failed:
         for i, t in enumerate(failed, 1):
-            tag = " **[命中推荐]**" if t in hit else " **[未命中推荐]**"
+            tag = " **[Matched Recommendation]**" if t in hit else " **[Not Matched Recommendation]**"
             out.append(f"{i}. `{t}`{tag}")
         out.append("")
     else:
-        out.append("> 没有失败用例")
+        out.append("> No failed test cases")
         out.append("")
 
     # ================================================================
@@ -233,17 +233,17 @@ def generate_report(failed, recommended, matched, log_dir, recommendations_sourc
     # ================================================================
     out.append("---")
     out.append("")
-    out.append(f"## 推荐用例（共 {len(recommended)} 个）")
+    out.append(f"## Recommended Test Cases（ {len(recommended)} total）")
     out.append("")
     if recommended:
         failed_file_set = {f.split("::")[0] if "::" in f else f for f in failed}
         for i, r in enumerate(recommended, 1):
             rf = r.split("::")[0] if "::" in r else r
-            tag = " **[已失败]**" if rf in failed_file_set else ""
+            tag = " **[Already Failed]**" if rf in failed_file_set else ""
             out.append(f"{i}. `{r}`{tag}")
         out.append("")
     else:
-        out.append("> 无推荐用例")
+        out.append("> No recommended test cases")
         out.append("")
 
     # ================================================================
@@ -251,29 +251,29 @@ def generate_report(failed, recommended, matched, log_dir, recommendations_sourc
     # ================================================================
     out.append("---")
     out.append("")
-    out.append("## 核心结论")
+    out.append("## Core Conclusion")
     out.append("")
     if not failed:
-        out.append("> 本次 CI 没有失败用例，无需对比推荐列表。")
+        out.append("> No failed test cases in this CI run; no need to compare against the recommendation list.")
     elif len(miss) == 0:
-        out.append("> **所有失败用例均在推荐用例范围内。**")
+        out.append("> **All failed test cases are within the recommended scope.**")
     else:
         total_failed = len(failed)
-        out.append(f"> **有 {len(miss)}/{total_failed} 个失败用例不在推荐用例范围内。**")
+        out.append(f"> ** {len(miss)}/{total_failed} failed test cases are outside the recommended scope.**")
     out.append("")
 
     # ================================================================
     #  Section 4: Detail table
     # ================================================================
-    out.append("| 类别 | 数量 |")
+    out.append("| Category | Count |")
     out.append("|---|---|")
-    out.append(f"| 失败且命中推荐 | {len(hit)} |")
-    out.append(f"| 失败但未命中推荐 | {len(miss)} |")
-    out.append(f"| 推荐但未失败 | {len(untested)} |")
+    out.append(f"| Failed & Matched Recommendation | {len(hit)} |")
+    out.append(f"| Failed but Not Matched Recommendation | {len(miss)} |")
+    out.append(f"| Recommended but Not Failed | {len(untested)} |")
     out.append("")
 
     if hit:
-        out.append("## 失败且命中推荐")
+        out.append("## Failed & Matched Recommendation")
         out.append("")
         out.append("| # | Failed test |")
         out.append("|---|---|")
@@ -282,25 +282,25 @@ def generate_report(failed, recommended, matched, log_dir, recommendations_sourc
         out.append("")
 
     if miss:
-        out.append("## 失败但未命中推荐")
+        out.append("## Failed but Not Matched Recommendation")
         out.append("")
-        out.append("> 可能原因：未覆盖的模块、环境问题、不稳定测试。")
+        out.append("> Possible causes: uncovered modules, environment issues, flaky tests.")
         out.append("")
         for t in miss:
             out.append(f"- `{t}`")
         out.append("")
 
     if untested:
-        out.append("## 推荐但未失败")
+        out.append("## Recommended but Not Failed")
         out.append("")
-        out.append("> 这些用例被推荐但本次未失败（已通过或未执行）。")
+        out.append("> These test cases were recommended but did not fail this run (passed or not executed).")
         out.append("")
         for t in untested:
             out.append(f"- `{t}`")
         out.append("")
 
     if not hit and not miss:
-        out.append("## 未检测到失败")
+        out.append("## No falied cases")
         out.append("")
 
     out.append("---")
