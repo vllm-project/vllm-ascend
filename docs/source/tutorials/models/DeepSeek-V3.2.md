@@ -707,7 +707,7 @@ Refer to [Distributed DP Server With Large-Scale Expert Parallelism](https://doc
 
 3. Run the `proxy.sh` script on the prefill master node
 
-    To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_layerwise_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py)
+    Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load_balance_proxy_layerwise_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py)
 
     ```shell
     unset http_proxy
@@ -734,6 +734,11 @@ Refer to [Distributed DP Server With Large-Scale Expert Parallelism](https://doc
         --decoder-ports \
         9100 9101 9102 9103 \
         9100 9101 9102 9103 \
+    ```
+
+    ```shell
+    cd vllm-ascend/examples/disaggregated_prefill_v1/
+    bash proxy.sh
     ```
 
 Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
