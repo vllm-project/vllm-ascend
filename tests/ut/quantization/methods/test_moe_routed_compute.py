@@ -15,7 +15,6 @@ from vllm_ascend.quantization.methods import (
     w8a8_mxfp8,
 )
 
-
 ROUTED_COMPUTE_CASES = [
     (w4a4_mxfp4, w4a4_mxfp4.AscendW4A4MXFP4DynamicFusedMoEMethod),
     (w4a8, w4a8.AscendW4A8DynamicFusedMoEMethod),
