@@ -49,6 +49,8 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.utils import ConstantList, record_function_or_nullcontext
 
+from vllm_ascend.utils import vllm_version_is
+
 
 @dataclass
 class RecomputeSchedulerConfig(SchedulerConfig):
@@ -1020,6 +1022,7 @@ class RecomputeScheduler(Scheduler):
             new_token_ids = generated_token_ids
             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
+            ec_transfer_params = None
             status_before_stop = request.status
             num_output_tokens_before = len(request._output_token_ids)
 
@@ -1088,7 +1091,10 @@ class RecomputeScheduler(Scheduler):
                 finish_reason = request.get_finished_reason()
                 finished = self._handle_stopped_request(request)
                 if finished:
-                    kv_transfer_params = self._free_request(request)
+                    if vllm_version_is("0.25.1"):
+                        kv_transfer_params = self._free_request(request)
+                    else:
+                        kv_transfer_params, ec_transfer_params = self._free_request(request)
 
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
@@ -1104,25 +1110,45 @@ class RecomputeScheduler(Scheduler):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            if new_token_ids or pooler_output is not None or kv_transfer_params or stopped:
+            if new_token_ids or pooler_output is not None or kv_transfer_params or ec_transfer_params or stopped:
                 # Add EngineCoreOutput for this Request.
-                outputs[request.client_index].append(
-                    EngineCoreOutput(
-                        request_id=req_id,
-                        new_token_ids=new_token_ids,
-                        finish_reason=finish_reason,
-                        new_logprobs=new_logprobs,
-                        new_prompt_logprobs_tensors=prompt_logprobs_tensors,
-                        pooling_output=pooler_output,
-                        stop_reason=request.stop_reason,
-                        events=request.take_events(),
-                        prefill_stats=request.take_prefill_stats(),
-                        kv_transfer_params=kv_transfer_params,
-                        trace_headers=request.trace_headers,
-                        routed_experts=routed_experts,
-                        num_nans_in_logits=request.num_nans_in_logits,
+                if vllm_version_is("0.25.1"):
+                    outputs[request.client_index].append(
+                        EngineCoreOutput(
+                            request_id=req_id,
+                            new_token_ids=new_token_ids,
+                            finish_reason=finish_reason,
+                            new_logprobs=new_logprobs,
+                            new_prompt_logprobs_tensors=prompt_logprobs_tensors,
+                            pooling_output=pooler_output,
+                            stop_reason=request.stop_reason,
+                            events=request.take_events(),
+                            prefill_stats=request.take_prefill_stats(),
+                            kv_transfer_params=kv_transfer_params,
+                            trace_headers=request.trace_headers,
+                            routed_experts=routed_experts,
+                            num_nans_in_logits=request.num_nans_in_logits,
+                        )
                     )
-                )
+                else:
+                    outputs[request.client_index].append(
+                        EngineCoreOutput(
+                            request_id=req_id,
+                            new_token_ids=new_token_ids,
+                            finish_reason=finish_reason,
+                            new_logprobs=new_logprobs,
+                            new_prompt_logprobs_tensors=prompt_logprobs_tensors,
+                            pooling_output=pooler_output,
+                            stop_reason=request.stop_reason,
+                            events=request.take_events(),
+                            prefill_stats=request.take_prefill_stats(),
+                            kv_transfer_params=kv_transfer_params,
+                            ec_transfer_params=ec_transfer_params,
+                            trace_headers=request.trace_headers,
+                            routed_experts=routed_experts,
+                            num_nans_in_logits=request.num_nans_in_logits,
+                        )
+                    )
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
