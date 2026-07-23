@@ -674,10 +674,12 @@ class KVCacheRecvingThread(threading.Thread):
                 continue
             cur_remote_block_ids = remote_block_ids[i]
             cur_local_block_ids = local_block_ids[i]
-            if not isinstance(self.kv_cache_specs[i], MambaSpec) and len(cur_local_block_ids) < len(
-                cur_remote_block_ids
-            ):
-                cur_remote_block_ids = cur_remote_block_ids[-len(cur_local_block_ids) :]
+            cur_remote_block_ids = align_remote_blocks_for_prefix_cache(
+                cur_remote_block_ids,
+                cur_local_block_ids,
+                is_mamba=isinstance(self.kv_cache_specs[i], MambaSpec),
+                group_idx=i,
+            )
             grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
                 cur_remote_block_ids, cur_local_block_ids
             )
@@ -1967,10 +1969,46 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:  # type: ignor
             ctx.destroy(linger=0)
 
 
+def align_remote_blocks_for_prefix_cache(
+    remote_block_ids: list[int],
+    local_block_ids: list[int],
+    *,
+    is_mamba: bool,
+    group_idx: int,
+) -> list[int]:
+    """Match remote blocks to the locally allocated prefix-cache misses.
+
+    Attention groups transfer only the uncached suffix. In Mamba align mode,
+    remote entries before the last one are placeholder blocks; the final entry
+    is the complete recurrent state that must be copied to the single local
+    state block.
+    """
+    num_remote_blocks = len(remote_block_ids)
+    num_local_blocks = len(local_block_ids)
+    if num_local_blocks == 0:
+        return []
+    if num_local_blocks > num_remote_blocks:
+        raise ValueError(
+            f"KV cache group {group_idx} has more local blocks "
+            f"({num_local_blocks}) than remote blocks ({num_remote_blocks})"
+        )
+    if num_local_blocks == num_remote_blocks:
+        return remote_block_ids
+    if is_mamba and num_local_blocks != 1:
+        raise ValueError(
+            f"Mamba KV cache group {group_idx} must have exactly one local "
+            f"state block for a partial prefix-cache hit, got {num_local_blocks}"
+        )
+    return remote_block_ids[-num_local_blocks:]
+
+
 def group_concurrent_contiguous(
     src: list[int], dst: list[int]
 ) -> tuple[list[npt.NDArray[np.int64]], list[npt.NDArray[np.int64]]]:
     """Vectorised NumPy implementation."""
+    if len(src) != len(dst):
+        raise ValueError(f"Source and destination block counts must match, got {len(src)} and {len(dst)}")
+
     src_indices: npt.NDArray[np.int64] = np.array(src, dtype=np.int64)
     dst_indices: npt.NDArray[np.int64] = np.array(dst, dtype=np.int64)
 
