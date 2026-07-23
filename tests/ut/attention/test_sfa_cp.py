@@ -1689,7 +1689,7 @@ class TestAscendSFADCPImpl(TestBase):
             slot_mapping=torch.tensor([0, 1], dtype=torch.int32),
             block_table=dcp_block_table,
             seq_lens=dcp_seq_lens,
-            query_gather_context=MagicMock(),
+            gather_context=MagicMock(),
         )
         sfa_output = torch.randn(2, 2, 8)
         softmax_max = torch.randn(2, 2, 1)
