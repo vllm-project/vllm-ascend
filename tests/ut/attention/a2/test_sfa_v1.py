@@ -24,6 +24,7 @@ from vllm_ascend.attention.sfa_v1 import (
     custom_kv_rmsnorm_rope,
 )
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8LinearMethod,
@@ -81,6 +82,122 @@ class TestAscendSFABackend(TestBase):
         self.assertIsNotNone(impl_cls)
 
 
+class TestAscendSFADeviceOperator(TestBase):
+    def _make_common_inputs(self):
+        ql_nope = torch.randn(3, 4, 8)
+        q_pe = torch.randn(3, 4, 2)
+        topk_indices = torch.zeros(3, 1, dtype=torch.int32)
+        attn_metadata = MagicMock()
+        attn_metadata.block_table = torch.zeros(1, 4, dtype=torch.int32)
+        actual_seq_lengths_query = torch.tensor([3], dtype=torch.int32)
+        actual_seq_lengths_key = torch.tensor([3], dtype=torch.int32)
+        impl = MagicMock()
+        impl.scale = 0.125
+        impl.qk_rope_head_dim = 2
+        impl.sfa_qsfa_tile_size = 128
+        return (
+            impl,
+            ql_nope,
+            q_pe,
+            topk_indices,
+            attn_metadata,
+            actual_seq_lengths_query,
+            actual_seq_lengths_key,
+        )
+
+    def test_execute_sparse_flash_attention_returns_softmax_components(self):
+        (
+            impl,
+            ql_nope,
+            q_pe,
+            topk_indices,
+            attn_metadata,
+            actual_seq_lengths_query,
+            actual_seq_lengths_key,
+        ) = self._make_common_inputs()
+        kv_cache = (
+            torch.randn(4, 1, 1, 8),
+            torch.randn(4, 1, 1, 2),
+        )
+        attn_output = torch.randn(3, 4, 8)
+        softmax_max = torch.zeros(1, 3, 4)
+        softmax_sum = torch.full((1, 3, 4), 2.0)
+
+        with patch.object(
+            torch.ops._C_ascend,
+            "npu_sparse_flash_attention",
+            create=True,
+            return_value=(attn_output, softmax_max, softmax_sum),
+        ) as mock_sfa:
+            output, actual_softmax_max, actual_softmax_sum = DeviceOperator.execute_sparse_flash_attention_process(
+                impl,
+                ql_nope,
+                q_pe,
+                kv_cache,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+                return_lse=True,
+            )
+
+        self.assertIs(output, attn_output)
+        self.assertIs(actual_softmax_max, softmax_max)
+        self.assertIs(actual_softmax_sum, softmax_sum)
+        self.assertTrue(mock_sfa.call_args.kwargs["return_softmax_lse"])
+
+    def test_execute_sparse_flash_attention_c8_returns_softmax_components(self):
+        (
+            impl,
+            ql_nope,
+            q_pe,
+            topk_indices,
+            attn_metadata,
+            actual_seq_lengths_query,
+            actual_seq_lengths_key,
+        ) = self._make_common_inputs()
+        packed_kv_cache = (torch.empty(4, 1, 1, 12, dtype=torch.int8),)
+        attn_output = torch.randn(3, 4, 8)
+        softmax_max = torch.ones(1, 3, 4)
+        softmax_sum = torch.full((1, 3, 4), 3.0)
+
+        with (
+            patch.object(
+                torch.ops._C_ascend,
+                "npu_kv_quant_sparse_flash_attention",
+                create=True,
+                return_value=(attn_output, softmax_max, softmax_sum),
+            ) as mock_qsfa,
+            patch(
+                "vllm_ascend.device.device_op.torch_npu.npu_kv_quant_sparse_flash_attention",
+                create=True,
+                side_effect=AssertionError("C8 SFA with LSE must use the custom op"),
+            ),
+        ):
+            output, actual_softmax_max, actual_softmax_sum = DeviceOperator.execute_sparse_flash_attention_process(
+                impl,
+                ql_nope,
+                q_pe,
+                packed_kv_cache,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+                sparse_mode=0,
+                return_lse=True,
+            )
+
+        self.assertIs(output, attn_output)
+        self.assertIs(actual_softmax_max, softmax_max)
+        self.assertIs(actual_softmax_sum, softmax_sum)
+        call_kwargs = mock_qsfa.call_args.kwargs
+        self.assertIs(call_kwargs["key"], packed_kv_cache[0])
+        self.assertIs(call_kwargs["value"], packed_kv_cache[0])
+        self.assertEqual(call_kwargs["query"].shape, (3, 4, 10))
+        self.assertEqual(call_kwargs["sparse_mode"], 0)
+        self.assertTrue(call_kwargs["return_softmax_lse"])
+
+
 class TestAscendSFAKVQuantSparseAttention(TestBase):
     @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_dynamic_block_quant")
     @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_interleave_rope")
@@ -123,11 +240,19 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
         actual_seq_lengths = torch.tensor([3], dtype=torch.int32)
         expected = torch.randn(3, 2, 32)
 
-        with patch(
-            "vllm_ascend.device.device_op.torch_npu.npu_kv_quant_sparse_flash_attention",
-            create=True,
-            return_value=expected,
-        ) as mock_qsfa:
+        with (
+            patch.object(
+                torch.ops._C_ascend,
+                "npu_kv_quant_sparse_flash_attention",
+                create=True,
+                return_value=(expected, torch.empty(0), torch.empty(0)),
+            ) as mock_qsfa,
+            patch(
+                "vllm_ascend.device.device_op.torch_npu.npu_kv_quant_sparse_flash_attention",
+                create=True,
+                side_effect=AssertionError("Base must use _C_ascend custom op"),
+            ),
+        ):
             result = impl._execute_sparse_flash_attention_process(
                 ql_nope,
                 q_pe,
@@ -144,6 +269,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
         self.assertEqual(call_kwargs["query"].shape, (3, 2, 48))
         self.assertEqual(call_kwargs["key_quant_mode"], 2)
         self.assertEqual(call_kwargs["tile_size"], 128)
+        self.assertFalse(call_kwargs["return_softmax_lse"])
 
     def test_prolog_v3_enables_packed_int8_kv_cache(self):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
