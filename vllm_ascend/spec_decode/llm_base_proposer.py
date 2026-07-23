@@ -927,10 +927,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         common_attn_metadata.num_input_tokens = num_input_tokens
 
+        self._pad_draft_buffers(num_tokens, num_input_tokens)
         multi_steps_attn_metadata, attn_metadata_i = self.build_draft_attn_metadata(
             common_attn_metadata, num_input_tokens, num_tokens
         )
-        self._pad_draft_buffers(num_tokens, num_input_tokens)
 
         if self.uses_mrope:
             used_update_positions = self.mrope_positions[:, token_indices_to_sample]
