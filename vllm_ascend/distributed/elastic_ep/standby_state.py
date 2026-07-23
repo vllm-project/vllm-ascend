@@ -12,7 +12,6 @@ from vllm_ascend.distributed.parallel_state import _init_ep_like_group
 
 _STANDBY_MC2: StatelessGroupCoordinator | None = None
 _STANDBY_DYNAMIC_EPLB: StatelessGroupCoordinator | None = None
-_STANDBY_FC3_QUANT_X: StatelessGroupCoordinator | None = None
 
 
 def create_ascend_standby_groups(
@@ -22,7 +21,7 @@ def create_ascend_standby_groups(
     coord_store_port: int,
     backend: str | None = None,
 ) -> None:
-    global _STANDBY_MC2, _STANDBY_DYNAMIC_EPLB, _STANDBY_FC3_QUANT_X
+    global _STANDBY_MC2, _STANDBY_DYNAMIC_EPLB
 
     assert new_world_size_across_dp == torch.distributed.get_world_size() * new_dp_size
     world_group = get_world_group()
@@ -48,20 +47,14 @@ def create_ascend_standby_groups(
             standby_ep_ranks, "dynamic_eplb", master_ip, backend,
             coord_store=coord_store, enable_elastic_ep=True,
         )
-    if config.multistream_overlap_gate:
-        _STANDBY_FC3_QUANT_X = _init_ep_like_group(
-            standby_ep_ranks, "fc3_quant_x", master_ip, backend,
-            coord_store=coord_store, enable_elastic_ep=True,
-        )
 
 
 def pop_ascend_standby_groups() -> dict:
     """Return all standby groups and clear the standby state."""
-    global _STANDBY_MC2, _STANDBY_DYNAMIC_EPLB, _STANDBY_FC3_QUANT_X
+    global _STANDBY_MC2, _STANDBY_DYNAMIC_EPLB
     result = dict(
         mc2=_STANDBY_MC2,
         dynamic_eplb=_STANDBY_DYNAMIC_EPLB,
-        fc3_quant_x=_STANDBY_FC3_QUANT_X,
     )
     _STANDBY_MC2 = None
     _STANDBY_DYNAMIC_EPLB = None

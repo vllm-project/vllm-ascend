@@ -63,7 +63,6 @@ from vllm_ascend.distributed.parallel_state import (
 )
 from vllm_ascend.distributed.utils import use_stateless_pg_with_world_registration
 from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
-from vllm_ascend.quantization.methods import AscendW4A8DynamicFusedMoEMethod
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod
 
 from vllm_ascend.distributed.elastic_ep.eplb_manager import ElasticEplbManager
@@ -180,8 +179,7 @@ def broadcast_expert_mapping(
 
 def setup_moe_comm_and_quant_method(module: nn.Module) -> None:
     if isinstance(
-        quant_method := getattr(module.quant_method, "quant_method", None),
-        (AscendW8A8DynamicFusedMoEMethod, AscendW4A8DynamicFusedMoEMethod),
+        quant_method := getattr(module.quant_method, "quant_method", None), AscendW8A8DynamicFusedMoEMethod
     ):
         try:
             device_group = get_mc2_group().device_group
@@ -294,7 +292,7 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
         self._release_cuda_graphs()
         with use_stateless_pg_with_world_registration():
             _replace_active_groups(world=None, dp=None, ep=None, eplb=None, node_count=None)
-            _replace_ascend_active_groups(mc2=None, dynamic_eplb=None, fc3_quant_x=None)
+            _replace_ascend_active_groups(mc2=None, dynamic_eplb=None)
 
     def switch_and_prepare(self) -> None:
         self.old_ep_size = get_ep_group().world_size

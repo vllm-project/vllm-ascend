@@ -11,6 +11,30 @@ from vllm.distributed.parallel_state import (
 
 from vllm_ascend.ascend_config import get_ascend_config
 
+
+def _init_ep_like_group(
+        group_ranks: list[list[int]],
+        group_name: str,
+        master_ip: str,
+        backend: str,
+        *,
+        coord_store=None,
+        enable_elastic_ep: bool = False,
+) -> GroupCoordinator:
+    """Create an EP-like communication group (mc2 / dynamic_eplb / fc3_quant_x).
+
+    When elastic EP is enabled, use stateless groups so new ranks can join
+    dynamically; otherwise use standard model parallel groups.
+    """
+    if enable_elastic_ep:
+        return _init_stateless_group(
+            group_ranks, group_name, master_ip, backend, coord_store=coord_store,
+        )
+    return init_model_parallel_group(
+        group_ranks, get_world_group().local_rank, backend, group_name=group_name,
+    )
+
+
 # Currently, mc2 op need their own group coordinator.
 _MC2: GroupCoordinator | None = None
 
@@ -103,28 +127,16 @@ def init_ascend_model_parallel(
     )
     group_ranks = [x.tolist() for x in group_ranks]
 
-    def _init_ep_like_group(group_name: str) -> GroupCoordinator:
-        """Create an EP-like communication group (mc2 / dynamic_eplb / fc3_quant_x).
-
-        When elastic EP is enabled, use stateless groups so new ranks can join
-        dynamically; otherwise use standard model parallel groups.
-        """
-        if enable_elastic_ep:
-            return _init_stateless_group(
-                group_ranks,
-                group_name,
-                parallel_config.data_parallel_master_ip,
-                backend,
-                coord_store=coord_store,
-            )
-        return init_model_parallel_group(
-            group_ranks, get_world_group().local_rank, backend, group_name=group_name
-        )
-
     global _MC2, _DYNAMIC_EPLB
-    _MC2 = _init_ep_like_group("mc2")
+    _MC2 = _init_ep_like_group(
+        group_ranks, "mc2", parallel_config.data_parallel_master_ip, backend,
+        coord_store=coord_store, enable_elastic_ep=enable_elastic_ep,
+    )
     if get_ascend_config().eplb_config.dynamic_eplb:
-        _DYNAMIC_EPLB = _init_ep_like_group("dynamic_eplb")
+        _DYNAMIC_EPLB = _init_ep_like_group(
+            group_ranks, "dynamic_eplb", parallel_config.data_parallel_master_ip, backend,
+            coord_store=coord_store, enable_elastic_ep=enable_elastic_ep,
+        )
 
     # Initialize fine-grained TP process groups on Ascend for four components:
     # 1. LM Head: output logits projection (`lmhead_tensor_parallel_size`)
@@ -193,14 +205,6 @@ def model_parallel_initialized():
 def get_mc2_group() -> GroupCoordinator:
     assert _MC2 is not None, "mc2 group is not initialized"
     return _MC2
-
-
-def get_group_name(group) -> str:
-    try:
-        backend = group.device_group._get_backend(torch.device("npu"))
-        return backend.get_hccl_comm_name(group.rank_in_group)
-    except (AttributeError, AssertionError):
-        return ""
 
 
 def get_mlp_tp_group() -> GroupCoordinator:

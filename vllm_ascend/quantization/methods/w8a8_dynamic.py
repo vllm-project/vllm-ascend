@@ -26,7 +26,7 @@ from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
-from vllm_ascend.distributed.parallel_state import get_group_name, get_mc2_group
+from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, enable_dsa_cp, maybe_trans_nz
@@ -171,12 +171,18 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         self.supports_eplb = True
 
         if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
-            self.moe_all_to_all_group_name = get_group_name(get_mc2_group())
-            if not self.moe_all_to_all_group_name:
+            try:
+                device_group = get_mc2_group().device_group
+                # TODO: Try local_rank = ep_group.rank_in_group
+                local_rank = get_mc2_group().rank_in_group
+                backend = device_group._get_backend(torch.device("npu"))
+                self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
+            except AttributeError:
                 logger.warning_once(
                     "[vllm-ascend/W8A8_DYNAMIC] MC2 group metadata unavailable, "
                     "falling back to empty moe_all_to_all_group_name."
                 )
+                self.moe_all_to_all_group_name = ""
 
     def get_weight(
         self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
