@@ -33,7 +33,7 @@ a2:
         config_file_path: MiniMax-M2.5-w8a8-QuaRot-A2.yaml
       - name: rejection-sample
         os: linux-aarch64-a2b3-1
-        config_file_path: tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_rejection_sample.py
+        tests: tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_rejection_sample.py
   multi_node:
     test_config:
       - name: multi-node-qwen3-235b-dp
