@@ -109,17 +109,14 @@ class TestDSparkPositionsFullUnderMultiDp(_DSparkProposerTestBase):
     def test_positions_not_pre_sliced(self, monkeypatch, dp_padding):
         """``cad.positions`` must be the full buffer, not ``[:num_query_total]``."""
         monkeypatch.setattr(
-            "vllm_ascend.spec_decode.dspark_proposer."
-            "copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid",
+            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid",
             MagicMock(),
         )
         num_reqs, block_size, max_num_tokens = 4, 5, 256
         num_query_total = num_reqs * block_size
         num_input_tokens = num_query_total + dp_padding
 
-        proposer = self._make_proposer(
-            max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size
-        )
+        proposer = self._make_proposer(max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size)
         cad = self._call_set_inputs_first_pass(proposer, num_reqs=num_reqs, block_size=block_size)
 
         # DSA attention slices positions[:num_input_tokens] (DP-padded); a
@@ -132,17 +129,14 @@ class TestDSparkPositionsFullUnderMultiDp(_DSparkProposerTestBase):
         """After set_inputs_first_pass + _pad_draft_buffers, positions[:num_input]
         is full-length and zero-padded in the DP region."""
         monkeypatch.setattr(
-            "vllm_ascend.spec_decode.dspark_proposer."
-            "copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid",
+            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid",
             MagicMock(),
         )
         num_reqs, block_size, max_num_tokens = 4, 5, 256
         num_query_total = num_reqs * block_size
         num_input_tokens = num_query_total + dp_padding
 
-        proposer = self._make_proposer(
-            max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size
-        )
+        proposer = self._make_proposer(max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size)
         proposer.positions[num_query_total:num_input_tokens] = -999
         cad = self._call_set_inputs_first_pass(proposer, num_reqs=num_reqs, block_size=block_size)
         proposer._pad_draft_buffers(num_query_total, num_input_tokens)
@@ -164,9 +158,7 @@ class TestPadDraftBuffersBeforeBuild(_DSparkProposerTestBase):
         num_actual = num_reqs * block_size
         num_input = num_actual + 16
 
-        proposer = self._make_proposer(
-            max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size
-        )
+        proposer = self._make_proposer(max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size)
         proposer.positions[num_actual:num_input] = -999
         proposer.input_ids[num_actual:num_input] = -999
         proposer._slot_mapping_buffer[num_actual:num_input] = -999
@@ -176,9 +168,7 @@ class TestPadDraftBuffersBeforeBuild(_DSparkProposerTestBase):
         proposer._pad_draft_buffers(num_actual, num_input)
 
         assert torch.all(proposer.positions[num_actual:num_input] == 0)
-        assert torch.all(
-            proposer.input_ids[num_actual:num_input] == proposer.parallel_drafting_token_id
-        )
+        assert torch.all(proposer.input_ids[num_actual:num_input] == proposer.parallel_drafting_token_id)
         assert torch.all(proposer._slot_mapping_buffer[num_actual:num_input] == -1)
         for buf in proposer._per_group_query_slot_mapping_buffers.values():
             assert torch.all(buf[num_actual:num_input] == -1)
@@ -189,9 +179,7 @@ class TestPadDraftBuffersBeforeBuild(_DSparkProposerTestBase):
         num_reqs, block_size, max_num_tokens = 4, 5, 256
         num_actual = num_reqs * block_size
 
-        proposer = self._make_proposer(
-            max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size
-        )
+        proposer = self._make_proposer(max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size)
         snapshot = proposer.positions.clone()
         proposer._pad_draft_buffers(num_actual, num_actual)
         assert torch.equal(proposer.positions, snapshot)
@@ -212,9 +200,7 @@ class TestPadDraftBuffersBeforeBuild(_DSparkProposerTestBase):
 
             return captured, fake_build
 
-        ok = self._make_proposer(
-            max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size
-        )
+        ok = self._make_proposer(max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size)
         ok.positions[num_actual:num_input] = -999
         cap_ok, build_ok = capture_build()
         ok.build_draft_attn_metadata = build_ok
@@ -222,9 +208,7 @@ class TestPadDraftBuffersBeforeBuild(_DSparkProposerTestBase):
         ok.build_draft_attn_metadata(SimpleNamespace(positions=ok.positions), num_input, num_actual)
         assert torch.all(cap_ok["region"] == 0)
 
-        bug = self._make_proposer(
-            max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size
-        )
+        bug = self._make_proposer(max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size)
         bug.positions[num_actual:num_input] = -999
         cap_bug, build_bug = capture_build()
         bug.build_draft_attn_metadata = build_bug
