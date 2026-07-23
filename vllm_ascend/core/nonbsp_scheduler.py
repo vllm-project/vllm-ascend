@@ -64,7 +64,6 @@ from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
-import vllm_ascend.patch.platform.patch_nonbsp_request_status  # noqa: F401
 from vllm_ascend.ascend_config import NonBSPConfig
 from vllm_ascend.core.scheduler_diagnostics import print_scheduler_summary
 
@@ -201,6 +200,7 @@ class NonBSPScheduler(SchedulerInterface):
         self.running: list[Request] = []
         self.modifications: dict | None = None
         self.lb_freeze: bool = False
+        self._lb_paused_req_ids: set[str] = set()
         self._lb_kv_prefetch_enabled: bool = False
 
         # The request IDs that are finished in between the previous and the
@@ -475,7 +475,7 @@ class NonBSPScheduler(SchedulerInterface):
                     self._lb_pause_request(req, scheduled_timestamp)
 
         remaining_in = list(in_blks)
-        lb_paused_waiting = [req for req in self.waiting if req.status == RequestStatus.LB_PAUSED]
+        lb_paused_waiting = [req for req in self.waiting if self.is_lb_paused(req)]
         fcfs_waiting = sorted(
             [req for req in self.waiting if req.status == RequestStatus.WAITING],
             key=lambda req: req.arrival_time,
@@ -1045,10 +1045,7 @@ class NonBSPScheduler(SchedulerInterface):
                     request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
-                elif request.status in (
-                    RequestStatus.PREEMPTED,
-                    RequestStatus.LB_PAUSED,
-                ):
+                elif request.status == RequestStatus.PREEMPTED:
                     scheduled_resumed_reqs.append(request)
                 else:
                     raise RuntimeError(f"Invalid request status: {request.status}")
@@ -1058,6 +1055,7 @@ class NonBSPScheduler(SchedulerInterface):
                 req_to_new_blocks[request_id] = self.kv_cache_manager.get_blocks(request_id)
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
+                self._lb_paused_req_ids.discard(request_id)
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 if pad_spec_decode:
@@ -1213,6 +1211,7 @@ class NonBSPScheduler(SchedulerInterface):
         method.
         """
         assert request.status == RequestStatus.RUNNING, "Only running requests can be preempted"
+        self._lb_paused_req_ids.discard(request.request_id)
         if self._enable_diagnostics:
             print(
                 f"[nonbsp] preempt | "
@@ -1241,11 +1240,14 @@ class NonBSPScheduler(SchedulerInterface):
     def _lb_pause_request(self, request: Request, timestamp: float) -> None:
         """Pause a request for NonBSP load balancing without freeing KV."""
         assert request.status == RequestStatus.RUNNING, "Only running requests can be lb-paused"
-        request.status = RequestStatus.LB_PAUSED
-        request.num_preemptions += 1
+        request.status = RequestStatus.PREEMPTED
+        self._lb_paused_req_ids.add(request.request_id)
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
         self.waiting.prepend_request(request)
+
+    def is_lb_paused(self, request: Request) -> bool:
+        return request.request_id in self._lb_paused_req_ids
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER
@@ -2136,6 +2138,7 @@ class NonBSPScheduler(SchedulerInterface):
     def _free_request(self, request: Request, delay_free_blocks: bool = False) -> dict[str, Any] | None:
         assert request.is_finished()
 
+        self._lb_paused_req_ids.discard(request.request_id)
         self._inflight_prefills.discard(request)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)

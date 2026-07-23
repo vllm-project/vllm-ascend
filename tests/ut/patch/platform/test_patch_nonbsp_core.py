@@ -1,17 +1,19 @@
+import importlib
 from unittest.mock import MagicMock
 
 import numpy as np
 import torch
 import vllm.v1.request as request_module
 
-import vllm_ascend.patch.platform.patch_nonbsp_core as nonbsp_core
+NativeRequestStatus = request_module.RequestStatus
+nonbsp_core = importlib.import_module("vllm_ascend.patch.platform.patch_nonbsp_core")
 
 RequestStatus = request_module.RequestStatus
 
 
-def test_nonbsp_core_uses_extended_request_status():
-    assert nonbsp_core.RequestStatus is request_module.RequestStatus
-    assert hasattr(nonbsp_core.RequestStatus, "LB_PAUSED")
+def test_nonbsp_core_uses_native_request_status():
+    assert request_module.RequestStatus is NativeRequestStatus
+    assert nonbsp_core.RequestStatus is NativeRequestStatus
 
 
 def test_nonbsp_uses_main_upstream_engine_core_entrypoint():
@@ -362,18 +364,26 @@ def test_balance_summary_is_suppressed_when_diagnostics_are_disabled(capsys):
 
 def test_nonbsp_allgather_uses_only_unified_waiting_queue(monkeypatch):
     waiting_request = MagicMock(
+        request_id="waiting",
         all_token_ids=list(range(17)),
         status=RequestStatus.WAITING,
     )
+    paused_request = MagicMock(
+        request_id="paused",
+        all_token_ids=list(range(33)),
+        status=RequestStatus.PREEMPTED,
+    )
     skipped_request = MagicMock(
+        request_id="skipped",
         all_token_ids=list(range(65)),
         status=RequestStatus.WAITING,
     )
     scheduler = MagicMock()
     scheduler.block_size = 8
     scheduler.running = []
-    scheduler.waiting = [waiting_request]
+    scheduler.waiting = [waiting_request, paused_request]
     scheduler.skipped_waiting = [skipped_request]
+    scheduler.is_lb_paused.side_effect = lambda request: request is paused_request
 
     engine_core = object.__new__(nonbsp_core.NonBSPDPEngineCoreProc)
     engine_core.scheduler = scheduler
@@ -408,4 +418,4 @@ def test_nonbsp_allgather_uses_only_unified_waiting_queue(monkeypatch):
 
     engine_core._do_lb_allgather()
 
-    assert captured["requests_by_rank"] == [([3, 0, 0, 0], 0)]
+    assert captured["requests_by_rank"] == [([3, 5, 0, 0], 0)]

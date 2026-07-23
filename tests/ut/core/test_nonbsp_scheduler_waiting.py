@@ -1,6 +1,3 @@
-# This patch must run before importing RequestStatus because NonBSP extends the
-# enum at import time.
-import vllm_ascend.patch.platform.patch_nonbsp_request_status  # noqa: F401, I001
 from vllm.v1.request import RequestStatus
 
 from tests.ut.kv_offload.utils import (
@@ -192,6 +189,7 @@ def test_nonbsp_async_reclaims_placeholder_for_lb_paused_request():
     )
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
+    num_preemptions = request.num_preemptions
 
     scheduler.running.remove(request)
     scheduler._lb_pause_request(request, 0.0)
@@ -200,7 +198,82 @@ def test_nonbsp_async_reclaims_placeholder_for_lb_paused_request():
         create_model_runner_output([request]),
     )
 
-    assert request.status == RequestStatus.LB_PAUSED
+    assert request.status == RequestStatus.PREEMPTED
+    assert scheduler.is_lb_paused(request)
     assert request in scheduler.waiting
+    assert request.num_preemptions == num_preemptions
     assert request.num_output_placeholders == 0
     assert request.num_output_tokens == 1
+
+
+def test_nonbsp_lb_paused_request_resumes_as_cached():
+    vllm_config, scheduler = _create_nonbsp_scheduler(async_scheduling=False)
+    request = create_request(
+        request_id=1,
+        block_size=vllm_config.cache_config.block_size,
+    )
+    scheduler.add_request(request)
+    first_output = scheduler.schedule()
+    scheduler.update_from_output(
+        first_output,
+        create_model_runner_output([request]),
+    )
+    scheduler.running.remove(request)
+    num_computed_tokens = request.num_computed_tokens
+    num_preemptions = request.num_preemptions
+    block_ids = scheduler.kv_cache_manager.get_blocks(request.request_id).get_block_ids()
+
+    scheduler._lb_pause_request(request, 0.0)
+
+    assert request.status == RequestStatus.PREEMPTED
+    assert scheduler.is_lb_paused(request)
+    assert request.num_computed_tokens == num_computed_tokens
+    assert request.num_preemptions == num_preemptions
+    assert scheduler.kv_cache_manager.get_blocks(request.request_id).get_block_ids() == block_ids
+    assert request.request_id not in scheduler.reset_preempted_req_ids
+
+    resumed_output = scheduler.schedule()
+
+    assert request.status == RequestStatus.RUNNING
+    assert not scheduler.is_lb_paused(request)
+    assert request.request_id in resumed_output.scheduled_cached_reqs.resumed_req_ids
+    assert not resumed_output.scheduled_new_reqs
+
+
+def test_nonbsp_lb_paused_request_keeps_watermark_enabled(monkeypatch):
+    vllm_config, scheduler = _create_nonbsp_scheduler(async_scheduling=False)
+    running_request = create_request(
+        request_id=1,
+        block_size=vllm_config.cache_config.block_size,
+    )
+    paused_request = create_request(
+        request_id=2,
+        block_size=vllm_config.cache_config.block_size,
+    )
+    scheduler.add_request(running_request)
+    scheduler.add_request(paused_request)
+    first_output = scheduler.schedule()
+    scheduler.update_from_output(
+        first_output,
+        create_model_runner_output([running_request, paused_request]),
+    )
+    scheduler.running.remove(paused_request)
+    scheduler._lb_pause_request(paused_request, 0.0)
+
+    original_allocate_slots = scheduler.kv_cache_manager.allocate_slots
+    has_scheduled_reqs_values = []
+
+    def allocate_slots(request, *args, **kwargs):
+        if request is paused_request:
+            has_scheduled_reqs_values.append(kwargs["has_scheduled_reqs"])
+        return original_allocate_slots(request, *args, **kwargs)
+
+    monkeypatch.setattr(
+        scheduler.kv_cache_manager,
+        "allocate_slots",
+        allocate_slots,
+    )
+
+    scheduler.schedule()
+
+    assert has_scheduled_reqs_values == [True]

@@ -26,7 +26,6 @@ from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc
 from vllm.v1.request import Request
 
 import vllm_ascend.patch.platform.patch_balance_schedule as _balance_patch
-import vllm_ascend.patch.platform.patch_nonbsp_request_status  # noqa: F401
 from vllm_ascend.ascend_config import NonBSPConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.core.nonbsp_balance_load import balance_load
 from vllm_ascend.core.scheduler_diagnostics import diagnostics_enabled
@@ -277,7 +276,7 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
         waiting_blks = [
             (len(req.all_token_ids) + blk_size - 1) // blk_size
             for req in self.scheduler.waiting
-            if req.status in (RequestStatus.WAITING, RequestStatus.LB_PAUSED)
+            if req.status == RequestStatus.WAITING or self.scheduler.is_lb_paused(req)
         ]
 
         arr = self._lb_data_np
