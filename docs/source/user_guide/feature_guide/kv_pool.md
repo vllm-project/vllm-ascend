@@ -497,6 +497,30 @@ ock.mmc.local_service.dram.size = 1GB
 | `ock.mmc.local_service.protocol` | `device_rdma` (supported for A2 and A3 when device ROCE available, recommended for A2), `device_sdma` (supported for A3 when HCCS available, recommended for A3). Currently does not support heterogeneous protocol setting.|
 | `ock.mmc.local_service.dram.size` | Sets the size of the memory occupied by the master. The configured value is the size of the memory occupied by each card. |
 
+### Enable Memcache SSD Cache
+
+* Requires Memcache installed with the UBS IO runtime.
+
+#### Configuration
+
+Starting from the `mmc-local.conf` configured in [Configuring the memcache Config File](#configuring-the-memcache-config-file), add the following SSD cache fields:
+
+```shell
+ock.mmc.local_service.storage.enabled = true
+ubsio.disk.path = /dev/nvmexn1:/dev/nvmexn2:/dev/nvmexn3:/dev/nvmexn4:/dev/nvmexn5:/dev/nvmexn6:/dev/nvmexn7:/dev/nvmexn8
+ubsio.mem.size_in_gb = 10
+ubsio.standalone.device_count = 8
+```
+
+| Field | Description |
+| :--- | :--- |
+| `ock.mmc.local_service.storage.enabled` | Set to `true` to enable SSD caching. |
+| `ubsio.disk.path` | **Required when SSD caching is enabled. The configured SSDs or partitions must be exclusively used by UBS IO and must not have any mount points.** Separate multiple paths with colons (`:`). |
+| `ubsio.mem.size_in_gb` | UBS IO memory pool size in GB. Adjust it based on the remaining host memory. |
+| `ubsio.standalone.device_count` | Number of local services whose `ock.mmc.local_service.dram.size` is not `0`. |
+
+For disk partitioning, capacity, eviction watermarks, and other UBS IO parameters, see the [DRAM + SSD Multi-level Pooling Configuration Guide](https://gitcode.com/Ascend/memcache/wiki/DRAM%20+%20SSD%20%E5%A4%9A%E7%BA%A7%E6%B1%A0%E5%8C%96%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md).
+
 ### Run Memcache Master
 
 Starting the MetaService service.
