@@ -1,4 +1,4 @@
-# Qwen-VL-Dense(Qwen3-VL-2B/4B/8B/32B)
+# Qwen-VL-Dense(Qwen3-VL-8B/32B)
 
 ## 1 Introduction
 
@@ -10,7 +10,7 @@ This tutorial uses the vLLM-Ascend `v0.11.0rc3-a3` version for demonstration, sh
 
 !!! note
 
-    For **Atlas inference products**, Qwen3-VL Dense requires vLLM-Ascend `v0.18.0` or later. Do not use the demonstration version above on this hardware.
+    For **Atlas inference products**, Qwen3-VL Dense requires vLLM-Ascend `v0.18.0` or later(for Ascend950DT, the model is supported from `vllm-ascend:v0.23.0rc1`). Do not use the demonstration version above on this hardware.
 
 ## 2 Supported Features
 
@@ -24,13 +24,13 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 Requires 1 card on Atlas 800I A2 (64G × 8), Atlas 800 A3 (64G × 16), or Atlas inference products:
 
-- `Qwen3-VL-2B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-2B-Instruct)
-- `Qwen3-VL-4B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct)
 - `Qwen3-VL-8B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
+- `Qwen3-VL-8B-Instruct-w8a8`(Quantized version): [Download model weight](todo)
 
 Requires 2 cards on Atlas 800I A2 (64G × 8), Atlas 800 A3 (64G × 16), or Atlas inference products:
 
 - `Qwen3-VL-32B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)
+- `Qwen3-VL-32B-Instruct-w8a8`(Quantized version): [Download model weight](todo)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -39,6 +39,46 @@ It is recommended to download the model weight to the shared directory of multip
 ### 4.1 Docker Image Installation
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+
+=== "Ascend950DT series"
+
+    Start the docker image on your each node.
+
+    ```shell
+    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-#TODO
+    export NAME=vllm-ascend
+
+    docker run --rm \
+    --name $NAME \
+    --net=host \
+    --shm-size=1g \
+    --privileged=true \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci_manager \
+    --device /dev/hisi_hdc \
+    --device /dev/ummu \
+    --device /dev/uburma \
+    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
+    -v /etc/hixlep/:/etc/hixlep/ \
+    -v /root/.cache:/root/.cache \
+    -v /usr/local/sbin:/usr/local/sbin \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
+    -v /usr/bin/urma_admin:/usr/bin/urma_admin \
+    -v /lib/route.conf:/lib/route.conf \
+    -v /usr/lib64:/usr/lib64 \
+    -itd $IMAGE bash
+    ```
 
 === "A2 / A3 series"
 
@@ -159,23 +199,61 @@ For more details, please refer to the [Installation Guide](../../installation.md
 
 Run docker container to start the vLLM server on single-NPU:
 
+=== "A5 series"
+
+    ```bash
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+
+    vllm serve Qwen/Qwen3-VL-8B-Instruct \
+      --host 0.0.0.0 \
+      --port $2 \
+      --quantization ascend \
+      --served-model-name qwen3vl \
+      --no-enable-prefix-caching \
+      --data-parallel-size $3 \
+      --tensor-parallel-size $4 \
+      --trust-remote-code \
+      --max-num-seqs 128 \
+      --max-model-len 32768 \
+      --max-num-batched-tokens 16384 \
+      --gpu-memory-utilization 0.91 \
+      --async-scheduling \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32]}' \
+      --mm-processor-cache-gb 0
+    ```
+
 === "A2 / A3 series"
 
     ```bash
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+
     vllm serve Qwen/Qwen3-VL-8B-Instruct \
+    --host 0.0.0.0 \
+    --port $2 \
     --dtype bfloat16 \
-    --max_model_len 16384 \
-    --max-num-batched-tokens 16384
-    ```
-
-=== "Atlas inference products"
-
-    ```bash
-    vllm serve Qwen/Qwen3-VL-8B-Instruct \
-    --dtype float16 \
-    --max_model_len 16384 \
+    --served-model-name qwen3vl \
+    --no-enable-prefix-caching \
+    --data-parallel-size $3 \
+    --tensor-parallel-size $4 \
+    --trust-remote-code \
+    --max-num-seqs 128 \
+    --max-model-len 32768 \
+    --max-num-batched-tokens 16384 \
+    --gpu-memory-utilization 0.91 \
+    --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32]}' \
-    --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}'
+    --mm-processor-cache-gb 0 
+
     ```
 
     !!! note
