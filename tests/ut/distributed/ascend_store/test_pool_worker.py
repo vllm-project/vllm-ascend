@@ -133,6 +133,30 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker.cache_coordinator.find_longest_cache_hit.assert_called_once()
         self.assertFalse(worker.cache_coordinator.find_longest_cache_hit.call_args.kwargs["apply_eagle"])
 
+    def test_infer_cache_group_metadata_keeps_pp_layers_and_skips_mtp(self):
+        cls = self._make_worker_class()
+        worker = object.__new__(cls)
+        worker.num_layers = 2
+        worker.hf_config = MagicMock(num_hidden_layers=4)
+        caches = [MagicMock(), MagicMock(), MagicMock()]
+        for address, cache in zip((1000, 2000, 3000), caches):
+            cache.data_ptr.return_value = address
+        worker.kv_caches = {
+            "model.layers.2.self_attn": (caches[0],),
+            "model.layers.3.self_attn": (caches[1],),
+            "model.mtp.0.self_attn": (caches[2],),
+        }
+        worker._get_cache_block_metadata = MagicMock(return_value=(160, 160, 160, 1))
+        worker.group_kv_caches_base_addr = {}
+        worker.group_block_len = {}
+        worker.group_block_stride = {}
+        worker.group_num_layers = {}
+
+        worker._infer_cache_group_metadata(0, list(worker.kv_caches))
+
+        self.assertEqual(worker.group_kv_caches_base_addr[0], [1000, 2000])
+        self.assertEqual(worker.group_num_layers[0], 2)
+
 
 class TestKVPoolWorkerInit(unittest.TestCase):
     """Test KVPoolWorker initialization with mocked dependencies."""

@@ -613,7 +613,7 @@ class KVPoolWorker:
         physical_layers = set()
         for layer_name in layer_names:
             phys = self._extract_physical_layer_index(layer_name)
-            if phys >= self.num_layers:
+            if phys >= getattr(self.hf_config, "num_hidden_layers", self.num_layers):
                 continue
             physical_layers.add(phys)
             cache_or_caches = self.kv_caches[layer_name]
