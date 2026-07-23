@@ -963,10 +963,10 @@ class NPUModelRunner(GPUModelRunner):
                 # the K used last step. Under dynamic SD that width can be < the
                 # configured maximum, so use ``prev_num_spec_tokens`` (tracked in
                 # ``_copy_draft_token_ids_to_cpu``) rather than ``num_spec_tokens``.
-                # ``prev_num_spec_tokens`` is only set once the first draft has
-                # been produced; before that (first step) fall back to the
-                # configured ``num_spec_tokens`` -- matching vLLM's base init.
-                getattr(self, "prev_num_spec_tokens", self.num_spec_tokens),
+                # It is initialized in ``GPUModelRunner.__init__`` (to the
+                # configured max K, or 0 when spec decoding is off), so it is
+                # always present before the first draft is produced.
+                self.prev_num_spec_tokens,
                 prev_positions=prev_positions_gpu,
             )
 
@@ -1246,10 +1246,9 @@ class NPUModelRunner(GPUModelRunner):
                 draft_token_ids=self._draft_token_ids,  # type: ignore[has-type]
                 # Previous step's draft width (see the note on the other
                 # generate_pcp_mtp_input call); matters when dynamic SD varies K.
-                # Not set until the first draft is produced, and never set when
-                # spec decoding is off but CP is on -- fall back to
-                # ``num_spec_tokens`` (0 when spec decoding is disabled).
-                num_spec_tokens=getattr(self, "prev_num_spec_tokens", self.num_spec_tokens),
+                # Initialized in ``GPUModelRunner.__init__`` (max K, or 0 when
+                # spec decoding is off), so it is always present here.
+                num_spec_tokens=self.prev_num_spec_tokens,
                 prepare_input_ids=self._prepare_input_ids,
             )
         else:
