@@ -159,6 +159,12 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 self._get_effective_block_size(g.kv_cache_spec) % hash_block_size == 0
                 for g in kv_cache_config.kv_cache_groups
             ), "block_size must be divisible by hash_block_size"
+        self.enable_partial_hash_hits = dcp_world_size == 1 and any(
+            isinstance(g.kv_cache_spec, MambaSpec)
+            and g.kv_cache_spec.mamba_cache_mode == "align"
+            and g.kv_cache_spec.block_size > hash_block_size
+            for g in kv_cache_config.kv_cache_groups
+        )
         self.verify_and_split_kv_cache_groups()
 
         # Align the WRITE-path mask granularity (reachable_block_mask) with the
@@ -329,14 +335,16 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     dcp_world_size=self.dcp_world_size,
                     pcp_world_size=self.pcp_world_size,
                 )
-                _new_hit_length = len(hit_blocks[0]) * effective_block_size
+                if not vllm_version_is("0.25.1") or len(hit_blocks) == 2 and isinstance(hit_blocks[1], int):
+                    hit_blocks, _new_hit_length = hit_blocks
+                else:
+                    _new_hit_length = len(hit_blocks[0]) * effective_block_size
                 if use_eagle:
                     eagle_verified.add(idx)
                 elif _new_hit_length < curr_hit_length:
                     # length shrunk; invalidate previous eagle verifications
                     eagle_verified.clear()
                 curr_hit_length = _new_hit_length
-                curr_hit_length = len(hit_blocks[0]) * effective_block_size
                 for group_id, blocks in zip(group_ids, hit_blocks):
                     hit_blocks_by_group[group_id] = blocks
 
@@ -431,14 +439,16 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     dcp_world_size=self.dcp_world_size,
                     pcp_world_size=self.pcp_world_size,
                 )
-                _new_hit_length = len(hit_blocks[0]) * effective_block_size
+                if not vllm_version_is("0.25.1") or len(hit_blocks) == 2 and isinstance(hit_blocks[1], int):
+                    hit_blocks, _new_hit_length = hit_blocks
+                else:
+                    _new_hit_length = len(hit_blocks[0]) * effective_block_size
                 if use_eagle:
                     eagle_verified.add(idx)
                 elif _new_hit_length < curr_hit_length:
                     # length shrunk; invalidate previous eagle verifications
                     eagle_verified.clear()
                 curr_hit_length = _new_hit_length
-                curr_hit_length = len(hit_blocks[0]) * effective_block_size
                 for group_id, blocks in zip(group_ids, hit_blocks):
                     hit_blocks_by_group[group_id] = blocks
 

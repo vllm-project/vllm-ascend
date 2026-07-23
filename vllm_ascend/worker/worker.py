@@ -71,6 +71,7 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     register_ascend_customop,
     setup_ascend_local_comm_res,
+    vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -783,6 +784,55 @@ class NPUWorker(WorkerBase):
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
+
+    def get_draft_model(self) -> nn.Module | None:
+        if vllm_version_is("0.25.1"):  # type: ignore[attr-defined]
+            return None
+        return self.model_runner.get_draft_model()
+
+    def start_draft_weight_update(self) -> None:
+        if vllm_version_is("0.25.1"):
+            self.start_weight_update()
+            return
+        self._start_weight_update(is_draft=True)
+
+    def _start_weight_update(self, is_draft: bool = False) -> None:
+        self._check_weight_transfer_engine()
+        assert self.weight_transfer_engine is not None
+        if is_draft and not self.weight_transfer_engine.supports_draft_weight_update:
+            raise RuntimeError(
+                f"{type(self.weight_transfer_engine).__name__} does not support draft model weight updates."
+            )
+        if self._weight_update_active:
+            raise RuntimeError(
+                "start_weight_update called while a weight update is already active. Call finish_weight_update first."
+            )
+        self._check_nz_disabled()
+        try:
+            if is_draft:
+                self._set_draft_weight_update_target()
+            model = self.model_runner.model
+            from vllm.model_executor.model_loader.reload import (
+                initialize_layerwise_reload,
+            )
+
+            with torch.device(self.device):
+                initialize_layerwise_reload(model)
+        except BaseException:
+            self.weight_transfer_engine.reset_weight_update_target()
+            raise
+        self._is_checkpoint_format = True
+        self._weight_update_active = True
+
+    def _set_draft_weight_update_target(self) -> None:
+        assert self.weight_transfer_engine is not None
+        draft_model = self.get_draft_model()
+        if draft_model is None:
+            raise RuntimeError("Draft model weight update requested, but no draft model is configured.")
+        speculative_config = self.vllm_config.speculative_config
+        if speculative_config is None or speculative_config.draft_model_config is None:
+            raise RuntimeError("Draft model weight update requested, but no draft model config is configured.")
+        self.weight_transfer_engine.set_weight_update_target(draft_model, speculative_config.draft_model_config)
 
     @torch.inference_mode()
     def profile_prefill_latency(self, num_tokens: int) -> float:
