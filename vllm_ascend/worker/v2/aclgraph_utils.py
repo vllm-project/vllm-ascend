@@ -90,6 +90,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
         logger.info_once("run_fullgraph with num_tokens=%s", num_tokens)
+        self.model_runner.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
 
         positions = self.model_runner.input_buffers.positions[:num_tokens]
