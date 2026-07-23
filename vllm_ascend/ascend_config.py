@@ -271,10 +271,6 @@ class AscendConfig:
 
         # Enable optimized reduce sampling scheme
         self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
-        if (vllm_config is not None and 
-            getattr(vllm_config, 'kv_transfer_config', None) is not None and 
-            vllm_config.kv_transfer_config.kv_role == "kv_producer"):
-            self.enable_reduce_sample = False
 
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()
