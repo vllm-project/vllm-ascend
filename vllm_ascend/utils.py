@@ -33,7 +33,6 @@ import regex as re
 import torch
 import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
-from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
@@ -601,6 +600,12 @@ def vllm_version_is(target_vllm_version: str):
 
 
 def get_total_cp_world_size() -> int:
+    # Lazy import: vllm.distributed pulls in vllm.utils.system_utils which
+    # imports vllm.platforms.current_platform. Importing it at module top
+    # level creates a circular import because utils is imported during
+    # platform resolution (vllm_ascend.platform -> vllm_ascend.utils).
+    from vllm.distributed import get_dcp_group, get_pcp_group
+
     try:
         pcp_world_size = get_pcp_group().world_size
     except AssertionError:
