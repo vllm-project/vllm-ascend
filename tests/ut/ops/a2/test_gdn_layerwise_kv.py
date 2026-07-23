@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
@@ -66,6 +67,7 @@ def test_npu_connector_observes_updated_gdn_state_after_compile():
     with (
         inductor_config.patch(compile_threads=1),
         override_forward_context(forward_context),
+        patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
         patch("vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating", return_value=gating),
         patch("vllm_ascend.ops.gdn.clear_ssm_states"),
         patch("vllm_ascend.ops.gdn.chunk_gated_delta_rule", side_effect=chunk_attention),

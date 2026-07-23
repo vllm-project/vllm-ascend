@@ -141,6 +141,7 @@ def create_request(
             remote_bootstrap_addr="my-bootstrap",
             transfer_id=f"transfer-{request_id}",
             remote_tp_size=1,
+            remote_pcp_size=1,
             remote_dcp_size=1,
         )
 

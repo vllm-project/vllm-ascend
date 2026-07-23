@@ -38,18 +38,20 @@ class TestKeyMetadata(unittest.TestCase):
         meta = KeyMetadata(
             model_name="llama",
             head_or_tp_rank=0,
+            pcp_rank=0,
             dcp_rank=0,
             pp_rank=0,
         )
         self.assertEqual(meta.model_name, "llama")
         self.assertEqual(meta.head_or_tp_rank, 0)
+        self.assertEqual(meta.pcp_rank, 0)
         self.assertEqual(meta.dcp_rank, 0)
         self.assertEqual(meta.pp_rank, 0)
 
 
 class TestPoolKey(unittest.TestCase):
     def setUp(self):
-        self.meta = KeyMetadata("llama", 1, 3, 0)
+        self.meta = KeyMetadata("llama", 1, 2, 3, 0)
 
     def test_hash_equal(self):
         k1 = PoolKey(self.meta, "abc123")
@@ -65,6 +67,7 @@ class TestPoolKey(unittest.TestCase):
         k = PoolKey(self.meta, "hash1")
         s = k.to_string()
         self.assertIn("llama", s)
+        self.assertIn("@pcp2", s)
         self.assertIn("@dcp3", s)
         self.assertIn("@head_or_tp_rank:1", s)
         self.assertIn("@pp_rank:0", s)
@@ -82,13 +85,13 @@ class TestPoolKey(unittest.TestCase):
 
 class TestLayerPoolKey(unittest.TestCase):
     def test_hash(self):
-        meta = KeyMetadata("model", 0, 0, 0)
+        meta = KeyMetadata("model", 0, 0, 0, 0)
         k1 = LayerPoolKey(meta, "h1", 0)
         k2 = LayerPoolKey(meta, "h1", 1)
         self.assertNotEqual(hash(k1), hash(k2))
 
     def test_to_string_contains_layer_id(self):
-        meta = KeyMetadata("model", 0, 0, 0)
+        meta = KeyMetadata("model", 0, 0, 0, 0)
         k = LayerPoolKey(meta, "h1", 5)
         s = k.to_string()
         self.assertIn("@layer_id:5", s)
@@ -98,7 +101,7 @@ class TestLayerPoolKey(unittest.TestCase):
 
 class TestChunkedTokenDatabase(unittest.TestCase):
     def setUp(self):
-        self.meta = KeyMetadata("llama", 0, 0, 0)
+        self.meta = KeyMetadata("llama", 0, 0, 0, 0)
         self.db = ChunkedTokenDatabase([self.meta], block_size=[16], partitions=None)
         self.db.set_group_buffers({0: [1000, 2000]}, {0: [160, 320]}, group_num_layers={0: 1})
 

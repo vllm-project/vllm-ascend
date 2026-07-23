@@ -81,11 +81,13 @@ def test_init_ascend_model_parallel(mock_distributed, parallel_config):
 def _build_parallel_config(
     tensor_parallel_size=1,
     pipeline_parallel_size=1,
+    prefill_context_parallel_size=1,
     data_parallel_index=0,
 ):
     return SimpleNamespace(
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
+        prefill_context_parallel_size=prefill_context_parallel_size,
         data_parallel_index=data_parallel_index,
     )
 
@@ -107,8 +109,15 @@ def _build_parallel_config(
         # data_parallel_index re-adds it (result equals rank_in_group).
         (dict(tensor_parallel_size=4, data_parallel_index=1), 6, 6),
         (dict(tensor_parallel_size=4, data_parallel_index=1), 7, 7),
-        # TP * PP contribute to replica_size; DCP/EP do not.
+        # TP * PP * prefill-CP all contribute to replica_size; DCP/EP do not.
         (dict(tensor_parallel_size=2, pipeline_parallel_size=2, data_parallel_index=1), 1, 5),
+        (
+            dict(
+                tensor_parallel_size=2, pipeline_parallel_size=2, prefill_context_parallel_size=2, data_parallel_index=1
+            ),
+            3,
+            11,
+        ),
     ],
 )
 def test_get_global_rank(parallel_config_kwargs, rank_in_group, expected):
