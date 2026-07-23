@@ -165,7 +165,6 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 | `kimi-k2.5` | Kimi-K2.5 |
 | `qwen3-235b-a22b-w8a8` | Qwen3-235B-A22B-W8A8 |
 | `Qwen3.5-397B-A17B-w8a8-mtp` | Qwen3.5-397B-A17B W8A8 + MTP |
-| `MiniMax-M2.5-w8a8-QuaRot-A3` | MiniMax-M2.5 W8A8 + QuaRot |
 | `Qwen3.5-27B-w8a8-A3` | Qwen3.5-27B W8A8 |
 | `Qwen3.5-122B-A10B-W8A8-A3` | Qwen3.5-122B-A10B W8A8 |
 | `DeepSeek-V4-Flash-W8A8-A3` | DeepSeek-V4-Flash W8A8 |

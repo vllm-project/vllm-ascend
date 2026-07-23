@@ -282,7 +282,6 @@ To evaluate the effectiveness of Dynamic Chunked Pipeline Parallel in long seque
     | ----------------------------- | ------------------------- |
     |  CPP2TP8   | Input throughput: 22424 tps/card |
     |  DP2TP8   | Input throughput: 16150 tps/card |
-    |  PCP2TP8   | Input throughput: 18197 tps/card |
     |  TP16   | Input throughput: 18875 tps/card |
 
 ## Constraints
