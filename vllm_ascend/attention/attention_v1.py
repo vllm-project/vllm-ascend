@@ -391,10 +391,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             if not isinstance(rswa_window, int) or isinstance(rswa_window, bool) or rswa_window <= 0:
                 raise ValueError(f"rswa_window must be a positive integer, got {rswa_window!r}")
             if rswa_window > self.model_config.max_model_len:
-                raise ValueError(
-                    f"rswa_window {rswa_window} exceeds max_model_len "
-                    f"{self.model_config.max_model_len}"
-                )
+                raise ValueError(f"rswa_window {rswa_window} exceeds max_model_len {self.model_config.max_model_len}")
             if not common_attn_metadata.causal:
                 raise ValueError("R-SWA requires causal attention")
             if rswa_prefix_lens is None:
