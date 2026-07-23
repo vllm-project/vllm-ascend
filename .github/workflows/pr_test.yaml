@@ -339,7 +339,7 @@ jobs:
           else
             echo "coverage_paths=" >> "$GITHUB_OUTPUT"
             echo "::notice::recommended_pytest_paths.txt not found"
-          fi          
+          fi
 
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
