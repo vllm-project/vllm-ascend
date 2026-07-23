@@ -1763,34 +1763,6 @@ void store_kv_block(
 
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_k2q_csr_meta(
-    const at::Tensor &q2k,
-    const at::Tensor &cu_seqlens,
-    const at::Tensor &cu_block_lens,
-    int64_t order_method,
-    int64_t total_rows,
-    int64_t max_kv,
-    int64_t use_simt)
-{
-    (void)cu_seqlens;
-    (void)cu_block_lens;
-    (void)order_method;
-    (void)max_kv;
-    (void)use_simt;
-
-    TORCH_CHECK(q2k.dim() == 3, "q2k must be 3-D [H, T, topk]");
-    const int64_t H = q2k.size(0);
-    const int64_t T = q2k.size(1);
-    const int64_t topk = q2k.size(2);
-    // ACLGraph capture should pass total_rows explicitly; fallback keeps shape valid.
-    const int64_t tr = total_rows >= 0 ? total_rows : 1;
-    auto opts = q2k.options().dtype(at::kInt);
-    at::Tensor row_ptr = at::empty({H, tr + 1}, opts);
-    at::Tensor q_ind = at::empty({H, T * topk}, opts);
-    at::Tensor slot = at::empty({H, T * topk}, opts);
-    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(row_ptr, q_ind, slot);
-}
-
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -1910,8 +1882,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
      // store_kv_block
     ops.impl("store_kv_block_pre", &vllm_ascend::meta::store_kv_block_pre);
     ops.impl("store_kv_block", &vllm_ascend::meta::store_kv_block);
-    // npu_k2q_csr
-    ops.impl("npu_k2q_csr", &vllm_ascend::meta::npu_k2q_csr_meta);
     // npu_fused_gdn_gating
     ops.impl("npu_fused_gdn_gating", &vllm_ascend::meta::npu_fused_gdn_gating_meta);
 }
