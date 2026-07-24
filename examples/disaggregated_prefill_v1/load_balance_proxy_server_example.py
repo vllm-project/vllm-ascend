@@ -1110,9 +1110,9 @@ async def handle_completions_impl(api: str, request: Request):
                             # carry cached_tokens that needs patching.
                             patched = patch_cached_tokens_in_chunk(chunk_json, instance_info.p_cached_tokens)
                             if stream_flag:
-                                yield f"data: {json.dumps(patched)}\n\n".encode()
+                                yield f"data: {json.dumps(patched,ensure_ascii=False)}\n\n".encode("utf-8")
                             else:
-                                yield json.dumps(patched).encode("utf-8")
+                                yield json.dumps(patched,ensure_ascii=False).encode("utf-8")
                             if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
                                 chunk = encode_response_chunk(chunk_json, is_sse)
                             yield chunk
@@ -1153,9 +1153,9 @@ async def handle_completions_impl(api: str, request: Request):
                             else:
                                 choice["text"] = generated_token
                         if stream_flag:
-                            yield f"data: {json.dumps(chunk_json)}\n\n".encode()
+                            yield f"data: {json.dumps(chunk_json,ensure_ascii=False)}\n\n".encode("utf-8")
                         else:
-                            yield json.dumps(chunk_json).encode("utf-8")
+                            yield json.dumps(chunk_json,ensure_ascii=False).encode("utf-8")
                             chunk = encode_response_chunk(chunk_json, is_sse)
                         yield chunk
             except asyncio.CancelledError:
