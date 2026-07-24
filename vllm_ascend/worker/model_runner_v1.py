@@ -1311,7 +1311,6 @@ class NPUModelRunner(GPUModelRunner):
             num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
             # For chunked prefills, use -1 as mask rather than 0, as guided
             # decoding may rollback speculative tokens.
-            new_schedule_reqs = [x.req_id for x in scheduler_output.scheduled_new_reqs]
             num_decode_draft_tokens = np.full(num_reqs, -1, dtype=np.int32)
             for (
                 req_id,
@@ -1320,9 +1319,13 @@ class NPUModelRunner(GPUModelRunner):
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 draft_len = len(draft_token_ids)
                 num_draft_tokens[req_idx] = draft_len
-                if (self.is_kv_consumer and req_id in new_schedule_reqs) or \
-                   (self.input_batch.num_computed_tokens_cpu[req_idx] >= \
-                    self.input_batch.num_prompt_tokens[req_idx]):
+                # A row is a spec-decode row only when its whole prompt is already
+                # computed, i.e. exactly one non-draft (decode) token is scheduled.
+                # At a PD handoff the prompt-tail token can still be pending while
+                # num_computed already reached prompt_len, so the previous
+                # condition wrongly flagged it as a spec boundary and corrupted
+                # the GDN/Mamba recurrence state (aligns with vllm PR #47466).
+                if num_scheduled_tokens[req_idx] == draft_len + 1:
                     num_decode_draft_tokens[req_idx] = draft_len
                 else:
                     num_decode_draft_tokens[req_idx] = -1
