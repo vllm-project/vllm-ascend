@@ -203,6 +203,10 @@ TITLES = {
     "user_guide/feature_guide/quantization.md": {"en": "Quantization", "zh": "量化"},
     "user_guide/feature_guide/rfork.md": {"en": "RFork", "zh": "RFork"},
     "user_guide/feature_guide/sequence_parallelism.md": {"en": "Sequence Parallelism", "zh": "序列并行"},
+    "user_guide/feature_guide/short_request_first.md": {
+        "en": "ShortRequestFirst Prefill Scheduling",
+        "zh": "ShortRequestFirst 预填充调度",
+    },
     "user_guide/feature_guide/sleep_mode.md": {"en": "Sleep Mode", "zh": "休眠模式"},
     "user_guide/feature_guide/speculative_decoding.md": {"en": "Speculative Decoding", "zh": "推测解码"},
     "user_guide/feature_guide/structured_output.md": {"en": "Structured Output", "zh": "结构化输出"},
