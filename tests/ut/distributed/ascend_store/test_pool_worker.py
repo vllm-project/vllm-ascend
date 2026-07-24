@@ -109,6 +109,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
     def test_external_coordinator_lookup_disables_eagle_drop(self):
         cls = self._make_worker_class()
         worker = object.__new__(cls)
+        worker.hash_block_size = 128
         worker.num_kv_cache_groups = 1
         worker.cache_coordinator = MagicMock()
         worker.cache_coordinator.find_longest_cache_hit.return_value = ((), 128)
