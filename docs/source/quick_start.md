@@ -15,6 +15,7 @@ This section guides you through container-based environment setup and large mode
 - Atlas 800I A2 inference series (Atlas 800I A2)
 - Atlas A3 training series (Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD)
 - Atlas 800I A3 inference series (Atlas 800I A3)
+- Atlas A5 inference series (Atlas 950DT A5)
 - Atlas inference products
 
 ## Requirements
@@ -77,6 +78,8 @@ export DEVICE=/dev/davinci0
 # export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 # Atlas A3:
 # export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+# Atlas A5:
+# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a5
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
 --name vllm-ascend \
@@ -143,6 +146,8 @@ export DEVICE=/dev/davinci0
 # export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-openeuler
 # Atlas A3:
 # export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3-openeuler
+# Atlas A5:
+# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a5-openeuler
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-openeuler
 docker run --rm \
 --name vllm-ascend \
