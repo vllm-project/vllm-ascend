@@ -102,7 +102,7 @@ test_cases:
       - '{"enable_weight_nz_layout":true}'
     benchmarks:
       <<: *benchmarks_gsm8k_lite
-  - name: "Qwen3_32B_w8a8_Perfermance_A3"
+  - name: "Qwen3_32B_w8a8_Performance_A3"
     model: "vllm-ascend/Qwen3-32B-W8A8-wl"
     envs:
       <<: *envs
