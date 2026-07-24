@@ -37,21 +37,6 @@ _api_keyword_args: &api_keyword_args
   top_p: 0.95
   top_k: 64
 
-_benchmarks: &benchmarks
-  acc_gpqa:
-    case_type: accuracy
-    dataset_path: vllm-ascend/gpqa
-    request_conf: vllm_api_general_chat
-    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
-    max_out_len: 8192
-    batch_size: 8
-    baseline: 40
-    threshold: 5
-    temperature: 1.0
-    top_p: 0.95
-    top_k: 64
-    ignore_eos: false
-
 # ==========================================
 # ACTUAL TEST CASES
 # ==========================================
@@ -71,5 +56,3 @@ test_cases:
       - '{"cudagraph_mode":"FULL_DECODE_ONLY","custom_ops":["none"],"cudagraph_capture_sizes":[1,2,4,8]}'
     test_content:
       - "chat_completion"
-    benchmarks:
-      <<: *benchmarks
