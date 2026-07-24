@@ -134,7 +134,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 logger = logging.getLogger(__name__)
@@ -834,6 +834,35 @@ def build_prefill_request(req_data: dict) -> dict:
     return payload
 
 
+def _should_retry(exc: Exception) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500 or exc.response.status_code == 429
+    return isinstance(exc, httpx.RequestError)
+
+
+async def _handle_retry(
+    exc: Exception,
+    attempt: int,
+    max_retries: int,
+    base_delay: float,
+    endpoint: str,
+    *,
+    context: str = "for ",
+    force_retry: bool = False,
+) -> None:
+    retryable = force_retry or _should_retry(exc)
+    if not retryable:
+        status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else "unknown"
+        logger.error("Client error %s %s%s, not retrying.", status_code, context, endpoint)
+        raise exc
+    if attempt < max_retries:
+        logger.warning("Attempt %s failed %s%s: %s", attempt, context, endpoint, exc)
+        await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
+    else:
+        logger.error("All %s attempts failed %s%s.", max_retries, context, endpoint)
+        raise exc
+
+
 async def send_request_to_service(
     client: httpx.AsyncClient,
     endpoint: str,
@@ -844,20 +873,13 @@ async def send_request_to_service(
 ):
     req_data = build_prefill_request(req_data)
     headers = auth_headers(request_id)
-    last_exc = None
     for attempt in range(1, max_retries + 1):
         try:
             response = await client.post(endpoint, json=req_data, headers=headers)
             response.raise_for_status()
             return response
-        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
-            logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, exc)
-            last_exc = exc
-            if attempt < max_retries:
-                await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
-            else:
-                logger.error("All %s attempts failed for %s.", max_retries, endpoint)
-                raise last_exc
+        except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            await _handle_retry(exc, attempt, max_retries, base_delay, endpoint)
 
 
 async def stream_service_response_with_retry(
@@ -878,23 +900,21 @@ async def stream_service_response_with_retry(
                     first_chunk_sent = True
                     yield chunk
                 return
-        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
-            if attempt < max_retries:
-                logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
-                await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
-            else:
-                logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
-                raise exc
+        except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            await _handle_retry(exc, attempt, max_retries, base_delay, endpoint, context="for streaming ")
         except Exception as exc:
             if "first_chunk_sent" in locals() and first_chunk_sent:
                 logger.error("Streaming to client interrupted after response started: %s", exc)
                 return
-            if attempt < max_retries:
-                logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
-                await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
-            else:
-                logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
-                raise exc
+            await _handle_retry(
+                exc,
+                attempt,
+                max_retries,
+                base_delay,
+                endpoint,
+                context="for streaming ",
+                force_retry=True,
+            )
 
 
 async def _abort_prefill_selection(
@@ -1121,6 +1141,17 @@ async def handle_completions_impl(api: str, request: Request):
 
         media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
         return StreamingResponse(generate_stream(), media_type=media_type)
+    except httpx.HTTPStatusError as exc:
+        # Convert upstream HTTPStatusError to FastAPI HTTPException so the
+        # framework can properly handle it (return correct status code to
+        # client, trigger middleware, etc.) and we can release resources.
+        if not request_released and "instance_info" in locals():
+            await _finish_instance(runtime, instance_info, release_prefill_kv=True)
+            request_released = True
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=str(exc),
+        )
     except Exception:
         import traceback
 
