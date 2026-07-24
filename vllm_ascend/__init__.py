@@ -36,8 +36,12 @@ def _ensure_global_patch():
 
 
 def register():
-    """Register the NPU platform."""
+    """Register the NPU platform and optional quantization backends."""
+    from vllm_ascend.platform import NPUPlatform
+    from vllm_ascend.quantization.nvfp4 import NVFP4_METHOD  # noqa: F401
 
+    if NVFP4_METHOD not in NPUPlatform.supported_quantization:
+        NPUPlatform.supported_quantization.append(NVFP4_METHOD)
     return "vllm_ascend.platform.NPUPlatform"
 
 
