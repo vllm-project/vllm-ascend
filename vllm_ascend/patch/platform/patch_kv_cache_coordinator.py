@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM projectx
+import os
 import sys
 from collections.abc import Mapping
 from math import lcm
@@ -32,6 +33,10 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
 from vllm_ascend.utils import vllm_version_is
+
+# Feature flag: PD分离下Mamba状态走独立通道路由
+# 设置 VLLM_ASCEND_PD_MAMBA_ROUTING=1 启用
+_PD_MAMBA_ROUTING_ENABLED = os.environ.get("VLLM_ASCEND_PD_MAMBA_ROUTING", "0") == "1"
 
 USE_MULTI_GROUPS_KV_CACHE = True
 
@@ -252,6 +257,16 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         block_sizes = [self._get_effective_block_size(spec) for spec, _, _ in self.attention_groups]
         self.lcm_block_size = lcm(*block_sizes)
 
+        # Progressive per-group alignment: sorted descending by effective block size.
+        # During find_longest_cache_hit(), try largest alignment first,
+        # progressively back off to smaller ones when groups disagree.
+        # This prevents the coarse global LCM from over-truncating
+        # (e.g. 32K hit dropped to 16K by MTP block removal + LCM rounding).
+        self._progressive_align_steps = sorted(
+            set(self._get_effective_block_size(spec) for spec, _, _ in self.attention_groups),
+            reverse=True,
+        )
+
     def find_longest_cache_hit(
         self,
         block_hashes: list[BlockHash],
@@ -299,8 +314,41 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         eagle_verified: set[int] = set()
 
         while True:
+            if hit_length == 0:
+                break
+
+            # Progressive per-group alignment: try largest block size first,
+            # progressively back off to smaller ones when groups disagree.
+            # This replaces the single global LCM alignment that causes
+            # MTP block drops to cascade into 50% prefix cache loss (#9247 ref).
+            aligned = False
+            for align_step in self._progressive_align_steps:
+                candidate = (hit_length // align_step) * align_step
+                if candidate == 0:
+                    continue
+                hit_length = candidate
+                aligned = True
+                break
+            if not aligned:
+                hit_length = 0
+                break
+
             curr_hit_length = hit_length
             for idx, (spec, group_ids, manager_cls) in enumerate(self.attention_groups):
+                # PD Mamba Routing: Mamba状态的连续隐状态走独立传输通道,
+                # 不参与KV块LCM对齐。对齐时取木桶最短板(Attention∩Mamba),
+                # 而非Mamba失败就直接归零浪费Attention的KV Cache。
+                if _PD_MAMBA_ROUTING_ENABLED and isinstance(spec, MambaSpec):
+                    if hit_blocks_by_group[group_ids[0]] is None:
+                        for gid in group_ids:
+                            hit_blocks_by_group[gid] = []
+                    # 优雅降级: Mamba只能支撑mamba_valid_length,
+                    # Attention的hit_length取min, 不掀桌子
+                    mamba_valid = self._get_effective_block_size(spec)
+                    if mamba_valid > 0:
+                        curr_hit_length = min(curr_hit_length, mamba_valid)
+                    continue  # Mamba group不参与LCM块对齐
+
                 effective_block_size = self._get_effective_block_size(spec)
                 cached_blocks = hit_blocks_by_group[group_ids[0]]
                 if isinstance(spec, FullAttentionSpec) and cached_blocks is not None:
@@ -325,7 +373,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     block_pool=self.block_pool,
                     kv_cache_spec=spec,
                     **eagle_kwarg,
-                    alignment_tokens=self.lcm_block_size,
+                    alignment_tokens=spec.block_size,  # per-group, not global LCM (#9247)
                     dcp_world_size=self.dcp_world_size,
                     pcp_world_size=self.pcp_world_size,
                 )
