@@ -188,10 +188,12 @@ def enable_dcp():
 class AscendDCPMetadata:
     """Per-batch metadata required by decode context parallelism."""
 
-    num_computed_tokens_of_dcp: list[list[int]] | None = None
+    num_computed_tokens_of_dcp: list[list[int]] | torch.Tensor | None = None
     query_lens_cpu: torch.Tensor = None
     max_query_len: int = 0
     dcp_mtp_attn_mask: torch.Tensor = None
+    draft_cp_seq_len: torch.Tensor | None = None
+    draft_base_seq_lens: torch.Tensor | None = None
 
 
 @dataclass

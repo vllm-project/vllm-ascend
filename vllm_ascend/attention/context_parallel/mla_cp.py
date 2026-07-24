@@ -147,10 +147,13 @@ class AscendMlaDCPMetadataBuilder(
         decode_metadata = super().build_decode_metadata(common_prefix_len, common_attn_metadata)
         assert isinstance(decode_metadata, AscendMLADCPDecodeMetadata)
         dcp_metadata = self._require_dcp_metadata(common_attn_metadata)
-        decode_metadata.cp_seq_len = self._get_dcp_rank_context_lens(
-            common_attn_metadata,
-            end=self.num_decodes,
-        ).tolist()
+        if dcp_metadata.draft_cp_seq_len is not None:
+            decode_metadata.cp_seq_len = dcp_metadata.draft_cp_seq_len[: self.num_decodes]
+        else:
+            decode_metadata.cp_seq_len = self._get_dcp_rank_context_lens(
+                common_attn_metadata,
+                end=self.num_decodes,
+            ).tolist()
         decode_metadata.actual_seq_lengths_q = torch.arange(self.num_decodes) + 1
         decode_metadata.dcp_mtp_attn_mask = dcp_metadata.dcp_mtp_attn_mask
         return decode_metadata
@@ -310,6 +313,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 AscendAttentionState.SpecDecoding,
                 AscendAttentionState.ChunkedPrefill,
                 AscendAttentionState.DecodeOnly,
+                AscendAttentionState.PrefillCacheHit,
             ]
             and self.speculative_config is not None
         ):
@@ -320,7 +324,13 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             q_pe = q_pe.view(num_decodes, -1, q_pe.shape[1], q_pe.shape[-1])
             sparse_mode = 0
             spec_attn_mask = attn_metadata.decode.dcp_mtp_attn_mask  # type:ignore
-            actual_seq_lengths = attn_metadata.query_lens
+            decode_query_lens = attn_metadata.query_lens[:num_decodes]
+            assert sum(decode_query_lens) == num_tokens
+            # This function only runs the decode sub-batch. A mixed
+            # decode/prefill batch still carries query lengths for every
+            # request in the common metadata, but FIA requires the query-length
+            # list to match the decode batch dimension and block table.
+            actual_seq_lengths = attn_metadata.query_lens[:num_decodes]
         else:
             q_nope = q_nope.view(num_tokens, num_heads, 1, -1).contiguous()
             q_pe = q_pe.view(num_tokens, num_heads, 1, -1)

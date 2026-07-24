@@ -1696,6 +1696,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_ratio_to_sas_metadata=dict(),
                 block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
             )
+        if dcp_manager is not None:
+            dcp_manager.prepare_spec_decode_drafting_cp_metadata(
+                common_attn_metadata=common_attn_metadata,
+                kv_cache_spec=kv_cache_spec,
+                seq_lens=ori_seq_len,
+                draft_index=draft_index,
+                seq_lens_cpu=ori_seq_len_cpu,
+            )
         attn_metadata = attn_metadata_builder.build_for_drafting(
             common_attn_metadata,
             draft_index,
