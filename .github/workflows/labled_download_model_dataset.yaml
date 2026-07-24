@@ -47,7 +47,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           JSON_PATH=".github/workflows/misc/model_dataset_list.json"
 
           git fetch origin main

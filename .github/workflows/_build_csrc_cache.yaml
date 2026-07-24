@@ -89,7 +89,7 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt-get install -y git zstd
-          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Config mirrors (openeuler)
         if: fromJSON(inputs.target).os == 'openeuler'
@@ -98,9 +98,10 @@ jobs:
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           yum install -y git zstd
-          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Prepare source snapshot
+      - name: Rebase on ${{ inputs.base_ref }} snapshot
+        if: inputs.base_sha != ''
         env:
           SOURCE_REPOSITORY: ${{ inputs.repository || github.repository }}
           BASE_REPOSITORY: ${{ inputs.base_repository || inputs.repository || github.repository }}
@@ -110,24 +111,26 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE"
 
-          if [ -n "$BASE_SHA" ]; then
-            if [ -z "$BASE_REF" ]; then
-              echo "::error::base_ref is required when base_sha is set."
-              exit 1
-            fi
-
-            git config user.name "vllm-ascend-ci"
-            git config user.email "vllm-ascend-ci@users.noreply.github.com"
-            BASE_REMOTE=origin
-            if [ "$BASE_REPOSITORY" != "$SOURCE_REPOSITORY" ]; then
-              BASE_REMOTE=csrc-base
-              git remote add "$BASE_REMOTE" "https://github.com/${BASE_REPOSITORY}.git"
-            fi
-            git fetch "$BASE_REMOTE" "$BASE_REF"
-            git cat-file -e "${BASE_SHA}^{commit}"
-            git rebase "$BASE_SHA"
+          if [ -z "$BASE_REF" ]; then
+            echo "::error::base_ref is required when base_sha is set."
+            exit 1
           fi
 
+          git config user.name "vllm-ascend-ci"
+          git config user.email "vllm-ascend-ci@users.noreply.github.com"
+          BASE_REMOTE=origin
+          if [ "$BASE_REPOSITORY" != "$SOURCE_REPOSITORY" ]; then
+            BASE_REMOTE=csrc-base
+            git remote add "$BASE_REMOTE" "https://github.com/${BASE_REPOSITORY}.git"
+          fi
+          git fetch "$BASE_REMOTE" "$BASE_REF"
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git rebase "$BASE_SHA"
+
+      - name: Update submodules
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
           git submodule sync --recursive
           git submodule update --init --recursive
 

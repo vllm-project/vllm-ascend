@@ -34,6 +34,10 @@ on:
       - '.github/workflows/configs/csrc_cache_targets.json'
   workflow_dispatch:
 
+defaults:
+  run:
+    shell: bash -el {0}
+
 concurrency:
   group: ascend-csrc-build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -60,8 +64,17 @@ jobs:
       - name: Calculate csrc hash
         id: hash
         run: |
-          CSRC_HASH=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake \
-            | sha256sum | awk '{print $1}')
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+
+          CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake)
+          if [ -z "$CSRC_MANIFEST" ]; then
+            echo "::error::No tracked csrc inputs found."
+            exit 1
+          fi
+
+          CSRC_HASH=$(printf '%s\n' "$CSRC_MANIFEST" | sha256sum | awk '{print $1}')
           echo "csrc_hash=$CSRC_HASH" >> "$GITHUB_OUTPUT"
 
   build-cache:

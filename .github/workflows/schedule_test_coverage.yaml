@@ -88,7 +88,7 @@ jobs:
         id: full-scope
         run: |
           pip install regex pyyaml
-          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           python3 .github/workflows/scripts/select_tests.py \
             --changed-files vllm_ascend/dummy.py \
             --run-all-modules

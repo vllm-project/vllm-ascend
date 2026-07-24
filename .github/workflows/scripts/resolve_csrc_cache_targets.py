@@ -28,10 +28,22 @@ def load_targets(config_path: Path = _CONFIG_PATH) -> dict[str, dict]:
         return json.load(config_file)
 
 
+def _extract_image_tag(image: str) -> str:
+    image_name, separator, image_tag = image.rpartition(":")
+    if not separator or not image_name or not image_tag or "/" in image_tag or "@" in image_name:
+        raise ValueError(f"csrc cache image must use a tag: {image!r}")
+    return image_tag
+
+
 def resolve_targets(target_ids: list[str] | None, config_path: Path = _CONFIG_PATH) -> list[dict]:
     configured = load_targets(config_path)
     selected_ids = list(configured) if target_ids is None else target_ids
-    return [{"id": target_id, **configured[target_id]} for target_id in selected_ids]
+    targets = []
+    for target_id in selected_ids:
+        target = {"id": target_id, **configured[target_id]}
+        target["image_tag"] = _extract_image_tag(target["image"])
+        targets.append(target)
+    return targets
 
 
 def write_outputs(targets: list[dict]) -> None:

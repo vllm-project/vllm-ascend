@@ -49,6 +49,10 @@ on:
         default: ''
         description: 'Fixed base commit to rebase onto.'
 
+defaults:
+  run:
+    shell: bash -el {0}
+
 jobs:
   prepare-cache-checks:
     name: Prepare csrc cache checks
@@ -76,7 +80,7 @@ jobs:
             .github/workflows/scripts/resolve_csrc_cache_targets.py
           sparse-checkout-cone-mode: false
 
-      - name: Prepare source snapshot
+      - name: Rebase on ${{ inputs.base_ref }} snapshot
         if: inputs.base_sha != ''
         env:
           SOURCE_REPOSITORY: ${{ inputs.repository || github.repository }}
@@ -106,8 +110,17 @@ jobs:
       - name: Calculate csrc hash
         id: hash
         run: |
-          CSRC_HASH=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake \
-            | sha256sum | awk '{print $1}')
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+
+          CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake)
+          if [ -z "$CSRC_MANIFEST" ]; then
+            echo "::error::No tracked csrc inputs found."
+            exit 1
+          fi
+
+          CSRC_HASH=$(printf '%s\n' "$CSRC_MANIFEST" | sha256sum | awk '{print $1}')
           echo "csrc_hash=$CSRC_HASH" >> "$GITHUB_OUTPUT"
 
       - name: Resolve requested cache targets
@@ -215,21 +228,12 @@ jobs:
                   if not cache_hit:
                       missing.append(result)
 
-          hits = [target_id for target_id, cache_hit in results if cache_hit]
           misses = [target_id for target_id, cache_hit in results if not cache_hit]
-          print(f"csrc cache hits ({len(hits)}): {', '.join(hits) or 'none'}")
-          print(f"csrc cache misses ({len(misses)}): {', '.join(misses) or 'none'}")
-
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
-              print("### csrc cache lookup results", file=summary)
-              if results:
-                  print("| Target | Result |", file=summary)
-                  print("| --- | --- |", file=summary)
-                  for target_id, cache_hit in results:
-                      status = "Hit" if cache_hit else "Miss"
-                      print(f"| `{target_id}` | {status} |", file=summary)
-              else:
-                  print("No csrc cache targets were requested.", file=summary)
+          print("csrc cache lookup results:")
+          for target_id, cache_hit in results:
+              print(f"- {target_id}: {'hit' if cache_hit else 'miss'}")
+          if not results:
+              print("- no csrc cache targets requested")
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               print(

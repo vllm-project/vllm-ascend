@@ -37,6 +37,10 @@ on:
       GITEE_TOKEN:
         required: false
 
+defaults:
+  run:
+    shell: bash -el {0}
+
 jobs:
   build:
     name: Build nightly-${{ inputs.target }} image

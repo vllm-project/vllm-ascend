@@ -5,6 +5,10 @@ on:
   issue_comment:
     types: [created]
 
+defaults:
+  run:
+    shell: bash -el {0}
+
 jobs:
   remove-wait-feedback-on-comment:
     if: ${{ github.event_name == 'issue_comment' && contains(github.event.issue.labels.*.name, 'wait-feedback') }}
