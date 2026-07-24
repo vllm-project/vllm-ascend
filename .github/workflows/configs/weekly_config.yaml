@@ -138,8 +138,6 @@ a3:
         os: linux-aarch64-a3-16
         config_file_path: Qwq_32b_A3.yaml
 
-
-
 310p:
   single_node:
     test_config:
