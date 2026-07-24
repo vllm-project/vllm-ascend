@@ -32,7 +32,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import logger
-from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
@@ -486,31 +485,14 @@ class RecomputeScheduler(Scheduler):
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
+                    hit_diverged = False
                     # Get locally-cached tokens.
-                    if (
-                        self.connector is not None
-                        and not self.is_kv_producer
-                        and self.has_mamba_layers
-                        and isinstance(
-                            self.kv_cache_manager.coordinator,
-                            HybridKVCacheCoordinator,
-                        )
-                    ):
-                        computed_blocks, per_group_hits = (
-                            self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
-                                request.block_hashes,
-                                request.num_tokens - 1,
-                            )
-                        )
-                        new_computed_blocks = self.kv_cache_manager.create_kv_cache_blocks(computed_blocks)
-                        num_new_local_computed_tokens = max(per_group_hits)
-                        if self.kv_cache_manager.log_stats:
-                            assert self.kv_cache_manager.prefix_cache_stats is not None
-                            self.kv_cache_manager.prefix_cache_stats.record(
-                                num_tokens=request.num_tokens,
-                                num_hits=num_new_local_computed_tokens,
-                                preempted=request.num_preemptions > 0,
-                            )
+                    if self.connector is not None:
+                        (
+                            new_computed_blocks,
+                            num_new_local_computed_tokens,
+                            hit_diverged,
+                        ) = self.kv_cache_manager.get_computed_blocks_for_connector(request)
                     else:
                         computed_result = self.kv_cache_manager.get_computed_blocks(request)
                         if vllm_version_is("0.25.1"):
@@ -549,6 +531,22 @@ class RecomputeScheduler(Scheduler):
                         num_external_computed_tokens = ext_tokens
                         connector_prefix_cache_queries = request.num_tokens - num_new_local_computed_tokens
                         connector_prefix_cache_hits = num_external_computed_tokens
+
+                        if hit_diverged and num_external_computed_tokens == 0:
+                            # No external suffix backs the deeper local hit;
+                            # recompute from the boundary all groups share.
+                            (
+                                new_computed_blocks,
+                                num_new_local_computed_tokens,
+                            ) = self.kv_cache_manager.get_computed_blocks(request)
+                            connector_prefix_cache_queries = request.num_tokens - num_new_local_computed_tokens
+
+                    if self.has_mamba_layers:
+                        num_uncached_common_prefix_tokens = getattr(
+                            self.kv_cache_manager.coordinator,
+                            "num_uncached_common_prefix_tokens",
+                            0,
+                        )
 
                     # Total computed tokens (local + external).
                     num_computed_tokens = num_new_local_computed_tokens + num_external_computed_tokens
