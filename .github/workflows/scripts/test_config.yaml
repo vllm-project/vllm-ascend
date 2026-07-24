@@ -19,7 +19,7 @@
 #     <module>/a3_4/       -> A3 NPU x4
 #     <module>/310p/       -> 310P NPU
 #   E2E (tests/e2e/):
-#     pull_request/{one_card,two_card,four_card}/  -> matched by card count
+#     pull_request/{one_card,two_card,four_card,eight_card}/ -> matched by card count
 #     *_310p.py files under one/two-card dirs      -> 310P NPU x1
 #     *_310p.py files under four-card dirs         -> 310P NPU x4
 #
@@ -298,6 +298,7 @@
   tests:
     - tests/ut/models/minimax_m3/test_minimax_m3.py
     - tests/e2e/pull_request/one_card/test_minimax_m3_sparse_attn.py
+    - tests/e2e/pull_request/eight_card/test_minimax_m3_online_gsm8k.py
     - tests/ut/models/minimax_m3/test_minimax_m3_vit.py
     - tests/ut/models/minimax_m3/test_msa_m3.py
 
@@ -786,6 +787,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_qwen3_5.py: 610
   tests/e2e/pull_request/four_card/test_qwen3_next.py: 1180
   tests/e2e/pull_request/four_card/test_graph_mode.py: 480
+  tests/e2e/pull_request/eight_card/test_minimax_m3_online_gsm8k.py: 1800
   tests/ut/attention/a2/test_attention_cp.py: 40
   tests/ut/attention/a2/test_attention_cp_precision.py: 30
   tests/ut/attention/a2/test_attention_v1.py: 30
@@ -837,6 +839,8 @@ runner_mapping:
   tests/e2e/pull_request/four_card:
     default: a3_x4
     310p: 310p_x4
+  tests/e2e/pull_request/eight_card:
+    default: a3_x8
   tests/ut/.+/a3_2:
     default: a3_x2
   tests/ut/.+/a2:
@@ -853,4 +857,5 @@ partition:
   a2_x1: 5
   a3_x2: 3
   a3_x4: 3
+  a3_x8: 1
   cpu_x0: 1
