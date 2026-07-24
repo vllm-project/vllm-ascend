@@ -31,8 +31,10 @@ def _build_method(scheme_cls):
     method.dynamic_eplb = False
     if isinstance(method, w4a8.AscendW4A8DynamicFusedMoEMethod):
         method.is_per_channel_weight = False
+        method.use_expert_weight_list = False
     if isinstance(method, w8a8_dynamic.AscendW8A8DynamicFusedMoEMethod):
         method.in_dtype = torch.float32
+        method.use_expert_weight_list = False
     return method
 
 
