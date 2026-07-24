@@ -55,7 +55,7 @@ ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
 _CUSTOM_OP_ENABLED = None
-_DEVICE_PRINT_OP_REGISTERED = False
+_DEVICE_PRINT_READY = False
 _CURRENT_STREAM = None
 _GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
@@ -175,17 +175,17 @@ def is_950():
     return get_ascend_device_type() == AscendDeviceType.A5
 
 
-def _mark_op_side_effectful(op: Any) -> None:
-    torch.fx.node.has_side_effect(op)
-    default_overload = getattr(op, "default", None)
-    if default_overload is not None:
-        torch.fx.node.has_side_effect(default_overload)
+def _ensure_device_print_ready() -> None:
+    """Load Ascend C++ ops and register the vLLM custom-op wrappers.
 
+    Tensor/string printing goes through ``torch.ops.vllm.device_print_op`` /
+    ``device_print_str_op``, both of which return a carrier tensor so FX keeps
+    the nodes on the dataflow without ``has_side_effect``. The underlying
+    ``_C_ascend.device_print*`` kernels stay inside that custom-op boundary.
+    """
+    global _DEVICE_PRINT_READY
 
-def _ensure_device_print_registered() -> None:
-    global _DEVICE_PRINT_OP_REGISTERED
-
-    if _DEVICE_PRINT_OP_REGISTERED:
+    if _DEVICE_PRINT_READY:
         return
 
     if not enable_custom_op():
@@ -194,21 +194,28 @@ def _ensure_device_print_registered() -> None:
             "when custom ops are enabled in the current Ascend build."
         )
 
+    # Registers torch.ops.vllm.device_print_op / device_print_str_op.
+    import vllm_ascend.ops.register_custom_ops  # noqa: F401
+
     try:
-        # Mark device_print ops side-effectful so FX/Inductor does not DCE or reorder these debug callbacks.
-        _mark_op_side_effectful(torch.ops._C_ascend.device_print)
-        _mark_op_side_effectful(torch.ops._C_ascend.device_print_tensor)
-        _DEVICE_PRINT_OP_REGISTERED = True
+        _ = torch.ops._C_ascend.device_print
+        _ = torch.ops._C_ascend.device_print_tensor
+        _ = torch.ops.vllm.device_print_op
+        _ = torch.ops.vllm.device_print_str_op
     except AttributeError as exc:
         raise RuntimeError(
-            "device_print requires _C_ascend.device_print ops to be available "
+            "device_print requires _C_ascend.device_print and "
+            "vllm.device_print_op / device_print_str_op to be available "
             "when custom ops are enabled in the current Ascend build."
         ) from exc
+
+    _DEVICE_PRINT_READY = True
 
 
 def device_print(
     value: torch.Tensor | int | float | bool | str | torch.dtype | torch.device | torch.Size,
-) -> None:
+    carrier: torch.Tensor | None = None,
+) -> torch.Tensor:
     """Print one value from a device callback.
 
     This helper is intended for debugging. To stay replay-safe under
@@ -217,20 +224,29 @@ def device_print(
     Avoid using it in hot paths or long-running high-frequency loops, otherwise
     there may be memory issues due to too many retained payloads.
 
+    Both tensor and text prints go through vLLM custom ops that **return a
+    tensor**, so callers must chain the result onto the FX dataflow (no
+    ``has_side_effect`` needed)::
+
+        >>> x = device_print(x)                 # print tensor
+        >>> x = device_print("msg", x)          # print text, keep x
+        >>> y = device_print(self.linear(x))
+
     Supported usage:
 
         >>> from vllm_ascend.utils import device_print
-        >>> device_print(x)
-        >>> device_print("already formatted text")
-        >>> device_print(7)
+        >>> x = device_print(x)
+        >>> x = device_print("already formatted text", x)
+        >>> x = device_print(7, x)
 
     Unsupported usage:
 
-        >>> device_print("x =", x)
-        >>> device_print("This is ", x, "and this is ", y)
+        >>> device_print("x =", x)   # multi-arg text formatting
+        >>> device_print("msg")      # text without a carrier tensor
 
     If you need device-time tensor values, pass the tensor itself. If you need
-    text, pass one final string that is already formatted.
+    text, pass one final string that is already formatted, plus a carrier
+    tensor so the print is not dead-code-eliminated under ``torch.compile``.
 
     Tensor values are copied to host on the current stream before the callback
     prints them, so printing remains ordered with respect to the surrounding
@@ -238,20 +254,29 @@ def device_print(
 
     DO NOT FORMAT A DEVICE TENSOR INTO A STRING YOURSELF AND THEN PRINT, for example:
 
-        >>> device_print(f"x = {x}")
-        >>> device_print("x = " + str(x))
+        >>> device_print(f"x = {x}", x)
+        >>> device_print("x = " + str(x), x)
     """
-    _ensure_device_print_registered()
+    _ensure_device_print_ready()
 
     if isinstance(value, torch.Tensor):
-        torch.ops._C_ascend.device_print_tensor(value)
-    elif isinstance(value, (str, int, float, bool, torch.dtype, torch.device, torch.Size)):
-        torch.ops._C_ascend.device_print(str(value))
-    else:
-        raise TypeError(
-            f"Unsupported device_print value type: {type(value)!r}. "
-            "Use exactly one argument: device_print(tensor), device_print('formatted text')."
-        )
+        if carrier is not None:
+            raise TypeError(
+                "device_print(tensor) does not take a carrier; use device_print(x) "
+                "or device_print('msg', x) for text."
+            )
+        return torch.ops.vllm.device_print_op(value)
+    if isinstance(value, (str, int, float, bool, torch.dtype, torch.device, torch.Size)):
+        if carrier is None:
+            raise TypeError(
+                "Non-tensor device_print requires a carrier tensor so the print "
+                "stays on the FX dataflow, e.g. x = device_print('msg', x)."
+            )
+        return torch.ops.vllm.device_print_str_op(carrier, str(value))
+    raise TypeError(
+        f"Unsupported device_print value type: {type(value)!r}. "
+        "Use device_print(tensor) or device_print('formatted text', carrier_tensor)."
+    )
 
 
 def _should_trans_nz(weight: torch.Tensor) -> bool:

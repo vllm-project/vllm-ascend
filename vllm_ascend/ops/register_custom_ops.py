@@ -194,6 +194,25 @@ def _muls_add_impl_fake(
     return torch.empty_like(x)
 
 
+def _device_print_op_impl(x: torch.Tensor) -> torch.Tensor:
+    torch.ops._C_ascend.device_print_tensor(x)
+    return x
+
+
+def _device_print_op_fake(x: torch.Tensor) -> torch.Tensor:
+    return x
+
+
+def _device_print_str_op_impl(x: torch.Tensor, msg: str) -> torch.Tensor:
+    # Return x so the print stays on the FX dataflow without has_side_effect.
+    torch.ops._C_ascend.device_print(msg)
+    return x
+
+
+def _device_print_str_op_fake(x: torch.Tensor, msg: str) -> torch.Tensor:
+    return x
+
+
 direct_register_custom_op(
     op_name="maybe_chunk_residual",
     op_func=_maybe_chunk_residual_impl,
@@ -254,6 +273,22 @@ direct_register_custom_op(
     op_name="muls_add",
     op_func=muls_add_triton,
     fake_impl=_muls_add_impl_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="device_print_op",
+    op_func=_device_print_op_impl,
+    fake_impl=_device_print_op_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="device_print_str_op",
+    op_func=_device_print_str_op_impl,
+    fake_impl=_device_print_str_op_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )
