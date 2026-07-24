@@ -71,6 +71,7 @@ class FusedMoEResult:
     before_gmm2_evt: torch.npu.Event | None = None
     before_combine_evt: torch.npu.Event | None = None
     swiglu_limit: float = 0.0
+    swiglu_alpha: float = 0.0
 
 
 @dataclass
@@ -81,6 +82,7 @@ class FusedMoEEvents:
     before_gmm2: torch.npu.Event | None = field(default=None)
     before_combine: torch.npu.Event | None = field(default=None)
     swiglu_limit: float = 0.0
+    swiglu_alpha: float = 0.0
 
 
 def mock_false():
@@ -289,6 +291,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
                 swiglu_limit=layer.swiglu_limit,
+                swiglu_alpha=layer.swiglu_alpha,
                 # Per-layer MoE LoRA state, set once by AscendFusedMoEWithLoRA
                 # when an adapter wraps this layer; None for non-LoRA layers.
                 lora_context=getattr(layer, "_ascend_moe_lora_context", None),
@@ -705,6 +708,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 before_gmm2_evt=fused_experts_results.before_gmm2_evt,
                 before_combine_evt=fused_experts_results.before_combine_evt,
                 swiglu_limit=fused_experts_results.swiglu_limit,
+                swiglu_alpha=fused_experts_results.swiglu_alpha,
             )
         else:
             # The vLLM FusedMoE forward_impl does not return events.
@@ -855,6 +859,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 before_gmm2=fused_moe_results.before_gmm2_evt,
                 before_combine=fused_moe_results.before_combine_evt,
                 swiglu_limit=fused_moe_results.swiglu_limit,
+                swiglu_alpha=fused_moe_results.swiglu_alpha,
             ),
         )
         return shared_out, routed_out
