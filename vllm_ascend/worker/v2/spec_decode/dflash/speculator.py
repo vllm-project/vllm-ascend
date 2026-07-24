@@ -81,9 +81,11 @@ class AscendDFlashSpeculator(DFlashSpeculator):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         with build_attn_metadata_wrapper():
             attn_metadata = self._build_draft_attn_metadata(
-                num_reqs=num_reqs_padded,
+                num_reqs=self.input_batch.num_reqs,
                 num_reqs_padded=num_reqs_padded,
                 num_tokens_padded=num_tokens_padded,
+                seq_lens_cpu_upper_bound=self.input_batch.seq_lens_cpu_upper_bound,
+                step=self.num_query_per_req,
                 causal=self._group_causal,
             )
         return [attn_metadata]
@@ -107,6 +109,7 @@ class AscendDFlashSpeculator(DFlashSpeculator):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
     ) -> torch.Tensor:
+        self.input_batch = input_batch
         with build_attn_metadata_wrapper():
             return super().propose(
                 input_batch,
