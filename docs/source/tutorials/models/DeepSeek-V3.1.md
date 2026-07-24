@@ -791,7 +791,7 @@ Parameter descriptions:
         }'
     ```
 
-2. `run_dp_template.sh` script(A5)
+2. `run_dp_template.sh` script(Ascend950DT)
 
 === "Prefill Node"
 
@@ -947,7 +947,7 @@ Key Parameter Descriptions:
     python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
     ```
 
-=== "A5 series"
+=== "Ascend950DT series"
 
     ```shell
     # p0_0
@@ -968,7 +968,7 @@ Key Parameter Descriptions:
     python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 24 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
     ```
 
-4. Run the `proxy.sh` script on the prefill master node(The proxy.sh of the A5 is consistent with the A3)
+4. Run the `proxy.sh` script on the prefill master node(The proxy.sh of the Ascend950DT is consistent with the A3)
 
     Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
