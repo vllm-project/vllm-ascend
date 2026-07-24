@@ -82,3 +82,7 @@ minEntropy = 3.0
 redact = true
 maxMatchLength = 2048
 scanGitHistory = false
+
+[[allowlists]]
+paths = ["^tests/ut/spec_decode/a2/test_eagle_proposer.py"]
+rules = ["generic-api-key"]
