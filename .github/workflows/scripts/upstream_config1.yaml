@@ -153,8 +153,6 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/tool_parsers/test_poolside_v1_tool_parser.py
     estimated_time: 20
-  - name: tests/plugins_tests/lora_resolvers/test_hf_hub_resolver.py
-    estimated_time: 20
   - name: tests/plugins_tests/lora_resolvers/test_filesystem_resolver.py
     estimated_time: 20
   - name: tests/plugins_tests/test_colbert_query_io_processor_plugins.py
