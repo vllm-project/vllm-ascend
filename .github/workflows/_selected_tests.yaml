@@ -336,7 +336,7 @@ jobs:
             ref: ${{ inputs.ref || github.ref }}
 
         - name: Download all coverage artifacts
-          uses: actions/download-artifact@v5
+          uses: actions/download-artifact@v8
           with:
             path: all-coverage
             pattern: selected-test-coverage-*
