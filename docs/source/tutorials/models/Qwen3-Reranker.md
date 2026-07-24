@@ -169,7 +169,9 @@ suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
 query_template = "{prefix}<Instruct>: {instruction}\n<Query>: {query}\n"
 document_template = "<Document>: {doc}{suffix}"
 
-instruction = "Given a web search query, retrieve relevant passages that answer the query"
+instruction = (
+    "Given a web search query, retrieve relevant passages that answer the query"
+)
 
 query = "What is the capital of China?"
 
@@ -178,15 +180,15 @@ documents = [
     "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun.",
 ]
 
-documents = [document_template.format(doc=doc, suffix=suffix) for doc in documents]
+documents = [
+    document_template.format(doc=doc, suffix=suffix) for doc in documents
+]
 
-response = requests.post(
-    url,
-    json={
-        "query": query_template.format(prefix=prefix, instruction=instruction, query=query),
-        "documents": documents,
-    },
-).json()
+response = requests.post(url,
+                         json={
+                             "query": query_template.format(prefix=prefix, instruction=instruction, query=query),
+                             "documents": documents,
+                         }).json()
 
 print(response)
 ```
@@ -237,35 +239,34 @@ Here are two accuracy evaluation methods.
 2. Run follow code to execute the accuracy evaluation.
 
     ```python
+  
     import os
-
+    
     from mteb.models.vllm_wrapper import VllmCrossEncoderWrapper
-
+    
     if __name__ == "__main__":
         import mteb
-
+    
         data_path = "/home/data/mteb_data"
         os.environ["HF_DATASETS_CACHE"] = data_path
         os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-
-        model = VllmCrossEncoderWrapper(
-            f"/home/data/Qwen3-Reranker-0.6B",
-            revision="norm",
-            dtype="float16",
-            enforce_eager=True,
-            max_model_len=10240,
-            hf_overrides={
-                "architectures": ["Qwen3VLForSequenceClassification"],
-                "classifier_from_token": ["no", "yes"],
-                "is_original_qwen3_reranker": True,
-            },
-        )
-
+    
+        model = VllmCrossEncoderWrapper(f"/home/data/Qwen3-Reranker-0.6B",
+                                    revision="norm",
+                                    dtype="float16",
+                                    enforce_eager=True,
+                                    max_model_len=10240,
+                                    hf_overrides={"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": True})
+    
         cache = mteb.ResultCache("/home/data/mteb_data")
-        tasks = mteb.get_tasks(task_types=["Reranking"], languages=["zho"])
+        tasks = mteb.get_tasks(
+            task_types=["Reranking"],
+            languages=["zho"]
+        )
         tasks = mteb.get_tasks(tasks=["MultiLongDocReranking"])
         results = mteb.evaluate(model, tasks=tasks, cache=cache, overwrite_strategy="always")
         print(results)
+
     ```
 
 3. After execution, you can get the result.
