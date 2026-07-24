@@ -120,6 +120,7 @@ def _apply_dsv4_rope(
     *,
     inverse: bool = False,
     cos_sin: tuple[torch.Tensor, torch.Tensor] | None = None,
+    partial_slice: list[int] | None = None,
 ) -> torch.Tensor:
     if cos_sin is None:
         cos, sin = get_cos_and_sin_dsa(positions)
@@ -129,32 +130,20 @@ def _apply_dsv4_rope(
         cos_t, sin_t = cos_sin
     if inverse:
         sin_t = -sin_t
-    return rotary_emb(x, cos_t, sin_t)
+    if partial_slice is None:
+        return rotary_emb(x, cos_t, sin_t)
 
-
-def _apply_dsv4_rope_tail(
-    rotary_emb: nn.Module,
-    positions: torch.Tensor,
-    x: torch.Tensor,
-    *,
-    inverse: bool = False,
-    cos_sin: tuple[torch.Tensor, torch.Tensor] | None = None,
-) -> torch.Tensor:
-    rotary_dim = rotary_emb.rotary_dim
-    if cos_sin is None:
-        cos, sin = get_cos_and_sin_dsa(positions)
-        cos_t = cos[rotary_emb.layername]
-        sin_t = sin[rotary_emb.layername]
-    else:
-        cos_t, sin_t = cos_sin
-    if inverse:
-        sin_t = -sin_t
+    x_rope = x
+    if x_rope.dim() == 2:
+        x_rope = x_rope.unsqueeze(-2)
+    if x_rope.dim() == 3:
+        x_rope = x_rope.unsqueeze(1)
     torch.ops._C_ascend.inplace_partial_rotary_mul(
-        x.unsqueeze(1),
+        x_rope,
         cos_t,
         sin_t,
         rotary_mode="interleave",
-        partial_slice=[x.shape[-1] - rotary_dim, x.shape[-1]],
+        partial_slice=partial_slice,
     )
     return x
 
@@ -316,14 +305,13 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         rope_cos_sin: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         kv = self.kv_norm(_linear_output(self.wkv, hidden_states))
-        k_nope, k_pe = kv.split([self.nope_head_dim, self.rope_head_dim], dim=-1)
-        k_pe = _apply_dsv4_rope(
+        return _apply_dsv4_rope(
             self.rotary_emb,
             positions,
-            k_pe.unsqueeze(1),
+            kv,
             cos_sin=rope_cos_sin,
-        ).squeeze(1)
-        return torch.cat([k_nope, k_pe], dim=-1).contiguous()
+            partial_slice=[self.nope_head_dim, self.head_dim],
+        ).contiguous()
 
     def precompute_context_kv(
         self,
@@ -526,10 +514,14 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         qr = self.q_norm(_linear_output(self.wq_a, hidden_states))
         q = _linear_output(self.wq_b, qr).view(-1, self.n_local_heads, self.head_dim)
         q = self.q_norm_without_weight(q)
-        q_nope, q_pe = q.split([self.nope_head_dim, self.rope_head_dim], dim=-1)
-        q_pe = _apply_dsv4_rope(self.rotary_emb, positions, q_pe, cos_sin=rope_cos_sin)
+        q = _apply_dsv4_rope(
+            self.rotary_emb,
+            positions,
+            q,
+            cos_sin=rope_cos_sin,
+            partial_slice=[self.nope_head_dim, self.head_dim],
+        )
         shared_kv = self._project_shared_kv(hidden_states, positions, rope_cos_sin)
-        q = torch.cat([q_nope, q_pe], dim=-1)
         if positions.numel() % self.block_size != 0:
             raise ValueError(
                 f"DSpark decode requires a multiple of block_size tokens, got "
@@ -552,12 +544,13 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             context_request_slots,
         ).flatten(0, 1)
 
-        out = _apply_dsv4_rope_tail(
+        out = _apply_dsv4_rope(
             self.rotary_emb,
             positions,
             out,
             inverse=True,
             cos_sin=rope_cos_sin,
+            partial_slice=[self.nope_head_dim, self.head_dim],
         )
         group_dim = self.n_local_heads * self.head_dim // self.n_local_groups
         out = out.reshape(-1, self.n_local_groups, group_dim)
@@ -652,8 +645,7 @@ class DeepseekV4DSparkModel(nn.Module):
         ascend_device_type = get_ascend_device_type()
         if ascend_device_type != AscendDeviceType.A5:
             raise RuntimeError(
-                "DeepSeek V4 DSpark is only supported on Ascend A5, "
-                f"but detected Ascend {ascend_device_type.name}."
+                f"DeepSeek V4 DSpark is only supported on Ascend A5, but detected Ascend {ascend_device_type.name}."
             )
         config = vllm_config.speculative_config.draft_model_config.hf_config
         logger.info_once("Initializing the DeepSeek V4 DSpark draft model.")
