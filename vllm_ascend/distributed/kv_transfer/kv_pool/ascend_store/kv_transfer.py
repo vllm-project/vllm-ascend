@@ -18,6 +18,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend im
 # isort: off
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     ChunkedTokenDatabase,
+    infer_cache_family_ratio,
     LayerBatchReqMeta,
     LayerBlockRange,
     LayerLoadTask,
@@ -684,14 +685,17 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
         for group_id in req_meta.kv_cache_group_ids or [0]:
             group_block_size = self._get_block_size(group_id)
+            cache_family = self.token_database.group_cache_families["kv"].get(group_id)
+            raw_group_block_size = group_block_size * infer_cache_family_ratio(cache_family)
+
             group_store_mask = (
                 list(store_masks[group_id]) if store_masks is not None and group_id < len(store_masks) else None
             )
             if group_store_mask is not None:
                 skipped_chunks = 0
                 for chunk_id, allowed in enumerate(group_store_mask):
-                    start = chunk_id * group_block_size
-                    if allowed and should_skip(start, start + group_block_size):
+                    start = chunk_id * raw_group_block_size
+                    if allowed and should_skip(start, start + raw_group_block_size):
                         group_store_mask[chunk_id] = False
                         skipped_chunks += 1
                 if skipped_chunks:
@@ -716,13 +720,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 start: int,
                 group_block_size=group_block_size,
                 group_store_mask=group_store_mask,
+                raw_group_block_size=raw_group_block_size,
             ) -> bool:
                 block_idx = start // group_block_size
                 mask_allows = group_store_mask is None or (
                     block_idx < len(group_store_mask) and group_store_mask[block_idx]
                 )
-                chunk_start = block_idx * group_block_size
-                return mask_allows and not should_skip(chunk_start, chunk_start + group_block_size)
+                chunk_start = block_idx * raw_group_block_size
+                return mask_allows and not should_skip(chunk_start, chunk_start + raw_group_block_size)
 
             pre_shard = self.dcp_size <= 1 and not align_state_group
             iterator = self.token_database.process_token_key_strings_with_block_ids(

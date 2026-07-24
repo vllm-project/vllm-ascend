@@ -1766,7 +1766,6 @@ class KVPoolWorker:
             * self.cache_coordinator.lcm_block_size
         )
         lookup_masks = self.cache_coordinator.lookup_mask(aligned_len)
-        store_masks = self.cache_coordinator.store_mask(aligned_len, None)
 
         for group_id in kv_cache_group_ids:
             keys: list[str] = []
@@ -1785,18 +1784,14 @@ class KVPoolWorker:
                 )
             lookup_start = hbm_hit_tokens // effective_block_size * effective_block_size
             lookup_mask = lookup_masks[group_id] if lookup_masks is not None and group_id < len(lookup_masks) else None
-            store_mask = store_masks[group_id] if store_masks is not None and group_id < len(store_masks) else None
 
             def chunk_filter(
                 start: int,
                 base_block_size=base_block_size,
                 lookup_mask=lookup_mask,
-                store_mask=store_mask,
             ) -> bool:
                 chunk_idx = start // base_block_size
-                if lookup_mask is not None and (chunk_idx >= len(lookup_mask) or not lookup_mask[chunk_idx]):
-                    return False
-                return store_mask is None or (chunk_idx < len(store_mask) and store_mask[chunk_idx])
+                return lookup_mask is None or (chunk_idx < len(lookup_mask) and lookup_mask[chunk_idx])
 
             for _, _, key_string, chunk_hash in self.token_database.process_token_key_strings(
                 token_len,
