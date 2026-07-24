@@ -69,6 +69,43 @@ SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
 
 
+def _uses_rswa(attn_metadata: "AscendMetadata") -> bool:
+    return getattr(attn_metadata, "sparse_mode", None) == 0
+
+
+def _refresh_graph_block_tables(
+    captured: torch.Tensor | None,
+    updated: torch.Tensor | None,
+) -> torch.Tensor | None:
+    """Keep the captured graph input address while refreshing its contents."""
+    if captured is None or updated is None or captured is updated:
+        return captured if captured is not None else updated
+    if not isinstance(captured, torch.Tensor) or not isinstance(updated, torch.Tensor):
+        return captured
+    if captured.shape != updated.shape:
+        raise RuntimeError(
+            "CUDA/NPU graph replay block table shape changed: "
+            f"captured={tuple(captured.shape)}, updated={tuple(updated.shape)}"
+        )
+    captured.copy_(updated)
+    return captured
+
+
+def _refresh_graph_mask(captured: torch.Tensor | None, updated: torch.Tensor | None) -> torch.Tensor | None:
+    """Refresh a captured explicit mask without changing its graph input address."""
+    if captured is None or updated is None or captured is updated:
+        return captured if captured is not None else updated
+    if not isinstance(captured, torch.Tensor) or not isinstance(updated, torch.Tensor):
+        return captured
+    if captured.shape != updated.shape:
+        raise RuntimeError(
+            "CUDA/NPU graph replay R-SWA mask shape changed: "
+            f"captured={tuple(captured.shape)}, updated={tuple(updated.shape)}"
+        )
+    captured.copy_(updated)
+    return captured
+
+
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -206,6 +243,12 @@ class AscendMetadata:
     # prefill reshape_and_cache event
     reshape_cache_event: torch.npu.Event = None
 
+    rswa_prefix_lens: torch.Tensor | None = None
+    rswa_window: int | None = None
+    # Explicit sparse mode override. R-SWA uses sparse_mode=0 and an explicit
+    # mask; None preserves the layer's ordinary causal/SWA mode.
+    sparse_mode: int | None = None
+
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     """
@@ -301,14 +344,12 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
         attn_state = common_attn_metadata.attn_state
 
-        # Get attn_mask from singleton AttentionMaskBuilder
-        attn_mask = self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config)
-
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
 
         actual_seq_lengths_q = query_start_loc_cpu[1:].tolist()
         seq_lens_list = seq_lens.tolist()
+        query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         # flashcomm1/SP (or cudagraph) padding makes the model runner insert a
         # dummy padding request into query_start_loc to satisfy the FIA TND-layout
         # constraint (sum of q lengths == hidden_states.shape[0]), bumping the
@@ -343,6 +384,57 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 dim=0,
             )
 
+        rswa_window = getattr(self.model_config, "rswa_window", None)
+        rswa_prefix_lens = common_attn_metadata.rswa_prefix_lens
+        sparse_mode = None
+        if rswa_window is not None:
+            if not isinstance(rswa_window, int) or isinstance(rswa_window, bool) or rswa_window <= 0:
+                raise ValueError(f"rswa_window must be a positive integer, got {rswa_window!r}")
+            if rswa_window > self.model_config.max_model_len:
+                raise ValueError(f"rswa_window {rswa_window} exceeds max_model_len {self.model_config.max_model_len}")
+            if not common_attn_metadata.causal:
+                raise ValueError("R-SWA requires causal attention")
+            if rswa_prefix_lens is None:
+                raise RuntimeError(
+                    "R-SWA is enabled but prompt lengths are missing; "
+                    "the model runner must propagate prompt_lens/num_prompt_tokens"
+                )
+            if not isinstance(rswa_prefix_lens, torch.Tensor):
+                raise TypeError(f"R-SWA prompt lengths must be a torch.Tensor, got {type(rswa_prefix_lens).__name__}")
+            if rswa_prefix_lens.numel() < num_reqs:
+                raise RuntimeError(
+                    f"R-SWA prompt lengths are shorter than the request batch: {rswa_prefix_lens.numel()} < {num_reqs}"
+                )
+
+            quant_config = self.vllm_config.quant_config
+            if quant_config is not None and getattr(quant_config, "enable_c8_quant", False):
+                raise NotImplementedError(
+                    "R-SWA is not supported with C8 KV-cache quantization on Ascend; "
+                    "disable C8 quantization or unset rswa_window"
+                )
+
+            rswa_prefix_lens = rswa_prefix_lens[:num_reqs_fia]
+            if rswa_prefix_lens.shape[0] < num_reqs_fia:
+                padding_len = num_reqs_fia - rswa_prefix_lens.shape[0]
+                rswa_prefix_lens = torch.cat([rswa_prefix_lens, rswa_prefix_lens.new_zeros(padding_len)])
+            # CANN FIA sparse_mode=0 validates the explicit R-SWA mask S2
+            # against the configured maximum model length, so keep the mask
+            # width fixed at max_model_len and rely on seq_lens to mask unused
+            # KV positions for each request.
+            max_kv_len = self.model_config.max_model_len
+            attn_mask = self.attn_mask_builder.get_rswa_attn_mask(
+                prefix_lens=rswa_prefix_lens,
+                seq_lens=seq_lens[:num_reqs_fia],
+                query_lens=query_lens_cpu[:num_reqs_fia],
+                max_kv_len=max_kv_len,
+                max_query_len=common_attn_metadata.max_query_len,
+                rswa_window=rswa_window,
+            )
+            sparse_mode = 0
+        else:
+            # Get attn_mask from singleton AttentionMaskBuilder
+            attn_mask = self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config)
+
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
             num_decode_tokens=num_decode_tokens,
@@ -360,6 +452,9 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             num_decodes=num_decodes,
             causal=common_attn_metadata.causal,
             model_runner_type=self.model_config.runner_type,
+            rswa_prefix_lens=rswa_prefix_lens,
+            rswa_window=rswa_window,
+            sparse_mode=sparse_mode,
         )
         return attn_metadata
 
@@ -440,6 +535,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # KV-sharing layers replay with the target layer's metadata instead of
         # their own module name, matching vLLM's shared KV-cache ownership.
         return self.kv_sharing_target_layer_name or layer_name
+
+    def _ensure_c8_rswa_compatible(self, attn_metadata: AscendMetadata) -> None:
+        if self.enable_c8_quant and _uses_rswa(attn_metadata):
+            raise NotImplementedError(
+                "R-SWA is not supported with C8 KV-cache quantization on Ascend; "
+                "the explicit R-SWA mask cannot be used by the C8 FIA path"
+            )
 
     @staticmethod
     def update_graph_params(
@@ -578,13 +680,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
                     if _EXTRA_CTX.is_draft_model:
                         draft_step, key = draft_attn_key_steps[attn_count]
-                        seq_lens = attn_metadata[draft_step][key].seq_lens_list
-                        actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
+                        metadata = attn_metadata[draft_step][key]
+                        seq_lens = metadata.seq_lens_list
+                        actual_seq_lengths_q = metadata.actual_seq_lengths_q
                         attn_count = attn_count + 1
                     else:
                         metadata_key = layer_name if layer_name is not None and layer_name in attn_metadata else key
-                        seq_lens = attn_metadata[metadata_key].seq_lens_list
-                        actual_seq_lengths_q = attn_metadata[metadata_key].actual_seq_lengths_q
+                        metadata = attn_metadata[metadata_key]
+                        seq_lens = metadata.seq_lens_list
+                        actual_seq_lengths_q = metadata.actual_seq_lengths_q
+                    if _uses_rswa(metadata):
+                        attn_mask = _refresh_graph_mask(attn_mask, metadata.attn_mask)
+                        sparse_mode = metadata.sparse_mode
+                    else:
+                        sparse_mode = 4 if sliding_window is not None else 3
 
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     torch_npu.npu_fused_infer_attention_score_v2.out(
@@ -599,7 +708,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         actual_seq_kvlen=seq_lens,
                         num_key_value_heads=num_kv_heads,
                         num_query_heads=num_heads,
-                        sparse_mode=4 if sliding_window is not None else 3,
+                        sparse_mode=sparse_mode,
+                        # FIA ignores pre_tokens/next_tokens when sparse_mode=0
+                        # because R-SWA uses an explicit mask.
                         pre_tokens=sliding_window if sliding_window is not None else SWA_INT_MAX,
                         next_tokens=0,
                         softmax_scale=scale,
@@ -753,14 +864,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         metadata = attn_metadata[draft_step][key]
                         seq_lens = metadata.seq_lens_list
                         actual_seq_lengths_q = metadata.actual_seq_lengths_q
-                        block_tables = metadata.block_tables
+                        block_tables = _refresh_graph_block_tables(block_tables, metadata.block_tables)
                         attn_count = attn_count + 1
                         if not metadata.causal:
                             sparse_mode = 0
                     else:
                         metadata_key = layer_name if layer_name is not None and layer_name in attn_metadata else key
-                        seq_lens = attn_metadata[metadata_key].seq_lens_list
-                        actual_seq_lengths_q = attn_metadata[metadata_key].actual_seq_lengths_q
+                        metadata = attn_metadata[metadata_key]
+                        seq_lens = metadata.seq_lens_list
+                        actual_seq_lengths_q = metadata.actual_seq_lengths_q
                         # NOTE:
                         # For models with sliding-window attention on the FIA full-graph replay path,
                         # rebinding `block_tables` to the latest metadata tensor causes corrupted /
@@ -769,8 +881,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         # Keep the captured block_tables tensor on this affected path.
                         # Non-SWA models preserve the original behavior and continue to refresh
                         # block_tables from attn_metadata.
-                        if not hasattr(vllm_config.model_config.hf_text_config, "sliding_window"):
-                            block_tables = attn_metadata[metadata_key].block_tables
+                        if _uses_rswa(metadata) or hasattr(vllm_config.model_config.hf_text_config, "sliding_window"):
+                            block_tables = _refresh_graph_block_tables(block_tables, metadata.block_tables)
+                        else:
+                            block_tables = metadata.block_tables
+                        if _uses_rswa(metadata):
+                            attn_mask = _refresh_graph_mask(attn_mask, metadata.attn_mask)
+                            sparse_mode = metadata.sparse_mode
                     layer_count += 1
 
                     torch.npu.graph_task_update_begin(update_stream, handle)
@@ -836,12 +953,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         input_layout = "TND"
         attn_mask = attn_metadata.attn_mask
-        sparse_mode = 4 if self.sliding_window else 3 if attn_metadata.causal else 0
+        if _uses_rswa(attn_metadata):
+            sparse_mode = attn_metadata.sparse_mode
+        else:
+            sparse_mode = 4 if self.sliding_window else 3 if attn_metadata.causal else 0
         pre_tokens = self.sliding_window or SWA_INT_MAX
         next_tokens = 0 if self.sliding_window else SWA_INT_MAX
 
         extra_args = {}
         if self.enable_c8_quant and layer is not None:
+            self._ensure_c8_rswa_compatible(attn_metadata)
             extra_args = {
                 "key_antiquant_scale": layer._c8_k_aq_scale_nz_bnsd,
                 "value_antiquant_scale": layer._c8_v_aq_scale_nz_bnsd,
@@ -992,6 +1113,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
     ) -> torch.Tensor:
+        self._ensure_c8_rswa_compatible(attn_metadata)
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
         actual_seq_lengths_kv = attn_metadata.seq_lens
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
@@ -1002,6 +1124,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
+        if _uses_rswa(attn_metadata):
+            sparse_mode = attn_metadata.sparse_mode
+        else:
+            sparse_mode = 4 if self.sliding_window is not None else 3
         use_max_workspace = self._use_max_workspace_for_fia_graph
         workspace = graph_params.workspaces.get(num_tokens)
         should_update_workspace_cache = False
@@ -1021,7 +1147,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_key_value_heads=self.num_kv_heads,
                 softmax_scale=self.scale,
                 num_query_heads=self.num_heads,
-                sparse_mode=4 if self.sliding_window is not None else 3,
+                sparse_mode=sparse_mode,
                 pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
                 next_tokens=0,
                 learnable_sink=self.sinks,
@@ -1047,7 +1173,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_key_value_heads=self.num_kv_heads,
                 softmax_scale=self.scale,
                 num_query_heads=self.num_heads,
-                sparse_mode=4 if self.sliding_window is not None else 3,
+                sparse_mode=sparse_mode,
                 pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
                 next_tokens=0,
                 learnable_sink=self.sinks,
@@ -1098,7 +1224,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_kvlen=actual_seq_lengths_kv,
             num_key_value_heads=self.num_kv_heads,
             num_query_heads=self.num_heads,
-            sparse_mode=4 if self.sliding_window is not None else 3,
+            sparse_mode=sparse_mode,
             pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
             next_tokens=0,
             softmax_scale=self.scale,
@@ -1274,7 +1400,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_qlen = attn_metadata.actual_seq_lengths_q
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
                 actual_seq_qlen = torch.tensor([1] * len(attn_metadata.seq_lens_list), dtype=torch.int32).cumsum(dim=0)
-            if self.sliding_window is not None:
+            if _uses_rswa(attn_metadata):
+                sparse_mode = attn_metadata.sparse_mode
+            elif self.sliding_window is not None:
                 sparse_mode = 4
             else:
                 sparse_mode = 3
@@ -1302,6 +1430,22 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     query=query,
                     key=key,
                     value=value,
+                    block_table=block_table,
+                    input_layout="TND",
+                    block_size=block_size,
+                    actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
+                    actual_seq_lengths_kv=actual_seq_lengths_kv,
+                    num_key_value_heads=self.num_kv_heads,
+                    num_heads=self.num_heads,
+                    scale=self.scale,
+                    sparse_mode=0,
+                )
+            elif _uses_rswa(attn_metadata):
+                attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+                    query=query,
+                    key=key,
+                    value=value,
+                    atten_mask=attn_metadata.attn_mask,
                     block_table=block_table,
                     input_layout="TND",
                     block_size=block_size,
@@ -1579,6 +1723,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         if attn_metadata is None:
             return output.fill_(0)
 
+        self._ensure_c8_rswa_compatible(attn_metadata)
         self._prepare_c8_scales(layer, query.device)
         float_key, float_value = None, None
         if self.vllm_config.kv_transfer_config is None:

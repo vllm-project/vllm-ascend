@@ -46,3 +46,74 @@ class TestAttentionMaskBuilder(TestBase):
         attention_mask_builder = AttentionMaskBuilder(torch.device("cpu"))
         attn_mask = attention_mask_builder.get_splitfuse_attn_mask()
         self.assertEqual(attn_mask.shape, (2048, 2048))
+
+    def test_get_rswa_attn_mask(self):
+        attention_mask_builder = AttentionMaskBuilder(torch.device("cpu"))
+        attn_mask = attention_mask_builder.get_rswa_attn_mask(
+            prefix_lens=torch.tensor([4], dtype=torch.int32),
+            seq_lens=torch.tensor([8], dtype=torch.int32),
+            query_lens=torch.tensor([1], dtype=torch.int32),
+            max_kv_len=8,
+            max_query_len=1,
+            rswa_window=3,
+        )
+
+        self.assertEqual(attn_mask.shape, (1, 1, 1, 8))
+        # KV 0..3 are the global prefix. KV 5..7 are in the decode window
+        # for query position 7. KV 4 is the generated-token gap.
+        self.assertEqual(attn_mask[0, 0, 0].tolist(), [0, 0, 0, 0, 1, 0, 0, 0])
+
+    def test_get_rswa_attn_mask_with_padding(self):
+        attention_mask_builder = AttentionMaskBuilder(torch.device("cpu"))
+        attn_mask = attention_mask_builder.get_rswa_attn_mask(
+            prefix_lens=torch.tensor([2, 3], dtype=torch.int32),
+            seq_lens=torch.tensor([5, 4], dtype=torch.int32),
+            query_lens=torch.tensor([2, 1], dtype=torch.int32),
+            max_kv_len=6,
+            max_query_len=2,
+            rswa_window=2,
+        )
+
+        self.assertEqual(attn_mask.shape, (2, 1, 2, 6))
+        self.assertEqual(
+            attn_mask[0, 0].tolist(),
+            [
+                [0, 0, 0, 0, 1, 1],
+                [0, 0, 1, 0, 0, 1],
+            ],
+        )
+        self.assertEqual(attn_mask[1, 0, 0].tolist(), [0, 0, 0, 0, 1, 1])
+        self.assertEqual(attn_mask[1, 0, 1].tolist(), [1, 1, 1, 1, 1, 1])
+
+    def test_get_rswa_attn_mask_validates_lengths(self):
+        attention_mask_builder = AttentionMaskBuilder(torch.device("cpu"))
+        with self.assertRaises(AssertionError):
+            attention_mask_builder.get_rswa_attn_mask(
+                prefix_lens=torch.tensor([-1]),
+                seq_lens=torch.tensor([4]),
+                query_lens=torch.tensor([1]),
+                max_kv_len=4,
+                max_query_len=1,
+                rswa_window=2,
+            )
+        with self.assertRaises(AssertionError):
+            attention_mask_builder.get_rswa_attn_mask(
+                prefix_lens=torch.tensor([5]),
+                seq_lens=torch.tensor([4]),
+                query_lens=torch.tensor([1]),
+                max_kv_len=4,
+                max_query_len=1,
+                rswa_window=2,
+            )
+
+    def test_get_rswa_attn_mask_empty_batch(self):
+        attention_mask_builder = AttentionMaskBuilder(torch.device("cpu"))
+        attn_mask = attention_mask_builder.get_rswa_attn_mask(
+            prefix_lens=torch.empty(0, dtype=torch.int32),
+            seq_lens=torch.empty(0, dtype=torch.int32),
+            query_lens=torch.empty(0, dtype=torch.int32),
+            max_kv_len=8,
+            max_query_len=2,
+            rswa_window=3,
+        )
+        self.assertEqual(attn_mask.shape, (0, 1, 2, 8))

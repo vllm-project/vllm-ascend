@@ -366,6 +366,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             encoder_seq_lens_cpu=_slice_reqs(self.encoder_seq_lens_cpu),
             logits_indices_padded=self.logits_indices_padded,
             num_logits_indices=self.num_logits_indices,
+            rswa_prefix_lens=_slice_reqs(self.rswa_prefix_lens),
             group_len=self.group_len,
             group_key_idx=self.group_key_idx,
             group_key_cache_idx=self.group_key_cache_idx,

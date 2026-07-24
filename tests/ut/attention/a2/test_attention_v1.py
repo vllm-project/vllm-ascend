@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import torch
 
 import vllm_ascend.attention.attention_v1 as attn_module
+from tests.ut.attention.utils import BatchSpec, create_common_attn_metadata
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
@@ -27,6 +28,18 @@ LARGE_HEAD_PREFILL_PATH = "vllm_ascend.device.utils.npu_large_head_prefill_atten
 
 
 class TestAttentionGraphHelpers(TestBase):
+    def test_uses_rswa_requires_window_and_prefix_lens(self):
+        metadata = SimpleNamespace(sparse_mode=0)
+        self.assertTrue(attn_module._uses_rswa(metadata))
+
+        metadata.sparse_mode = None
+        self.assertFalse(attn_module._uses_rswa(metadata))
+
+        metadata.sparse_mode = 3
+        self.assertFalse(attn_module._uses_rswa(metadata))
+
+        self.assertFalse(attn_module._uses_rswa(SimpleNamespace()))
+
     def test_cache_graph_workspace_keeps_first_workspace_by_default(self):
         graph_params = SimpleNamespace(workspaces={1: torch.empty(4)})
         candidate_workspace = torch.empty(8)
@@ -102,7 +115,9 @@ class TestAscendAttentionMetadataBuilder(TestBase):
     def setUp(self):
         self.mock_vllm_config = MagicMock()
         self.mock_vllm_config.speculative_config = None
+        self.mock_vllm_config.quant_config = None
         self.mock_vllm_config.model_config.max_model_len = 640
+        self.mock_vllm_config.model_config.rswa_window = None
         self.mock_vllm_config.model_config.hf_text_config.sliding_window = None
         self.mock_vllm_config.cache_config.block_size = 64
         self.mock_vllm_config.compilation_config.cudagraph_mode = None
@@ -145,6 +160,68 @@ class TestAscendAttentionMetadataBuilder(TestBase):
 
         self.assertTrue(torch.equal(unpadded_metadata._seq_lens_cpu, internal_seq_lens_cpu[:2]))
         self.assertIsNone(unpadded_metadata.seq_lens_cpu)
+
+    def test_build_uses_rswa_mask_and_metadata(self):
+        self.mock_vllm_config.model_config.rswa_window = 3
+        common_attn_metadata = create_common_attn_metadata(
+            BatchSpec(seq_lens=[8], query_lens=[1]),
+            block_size=64,
+            device=torch.device("cpu"),
+        )
+        common_attn_metadata.rswa_prefix_lens = torch.tensor([4], dtype=torch.int32)
+        rswa_mask = torch.zeros((1, 1, 1, 640), dtype=torch.int8)
+
+        with (
+            patch.object(
+                self.builder.attn_mask_builder,
+                "get_rswa_attn_mask",
+                return_value=rswa_mask,
+            ) as get_rswa_mask,
+            patch.object(
+                self.builder.attn_mask_builder,
+                "get_attention_mask",
+            ) as get_attention_mask,
+        ):
+            metadata = self.builder.build(0, common_attn_metadata)
+
+        get_rswa_mask.assert_called_once()
+        get_attention_mask.assert_not_called()
+        self.assertIs(metadata.attn_mask, rswa_mask)
+        self.assertEqual(metadata.rswa_window, 3)
+        self.assertEqual(metadata.sparse_mode, 0)
+        self.assertTrue(torch.equal(metadata.rswa_prefix_lens, torch.tensor([4])))
+
+    def test_build_preserves_non_rswa_mask_path(self):
+        self.mock_vllm_config.model_config.rswa_window = None
+        common_attn_metadata = create_common_attn_metadata(
+            BatchSpec(seq_lens=[8], query_lens=[1]),
+            block_size=64,
+            device=torch.device("cpu"),
+        )
+        default_mask = torch.zeros((2048, 2048), dtype=torch.bool)
+
+        with (
+            patch.object(
+                self.builder.attn_mask_builder,
+                "get_rswa_attn_mask",
+            ) as get_rswa_mask,
+            patch.object(
+                self.builder.attn_mask_builder,
+                "get_attention_mask",
+                return_value=default_mask,
+            ) as get_attention_mask,
+        ):
+            metadata = self.builder.build(0, common_attn_metadata)
+
+        get_rswa_mask.assert_not_called()
+        get_attention_mask.assert_called_once_with(
+            common_attn_metadata.causal,
+            self.mock_vllm_config.model_config,
+        )
+        self.assertIs(metadata.attn_mask, default_mask)
+        self.assertIsNone(metadata.rswa_window)
+        self.assertIsNone(metadata.rswa_prefix_lens)
+        self.assertIsNone(metadata.sparse_mode)
 
     @patch("vllm_ascend.attention.attention_v1.AscendMetadata")
     def test_build(self, mock_ascend_metadata):
