@@ -1448,6 +1448,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
             n_prefill = num_tokens - num_decode_tokens
             output[num_decode_tokens:num_tokens] = prefill_out.view(n_prefill, self.num_heads, self.head_size)
+        return output
 
     def forward_paged_attention(
         self,
