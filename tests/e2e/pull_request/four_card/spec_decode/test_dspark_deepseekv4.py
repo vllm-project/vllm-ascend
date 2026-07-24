@@ -77,6 +77,8 @@ def test_deepseek_v4_dspark_acceptance_tp4(model_name):
 
     acceptance_per_pos = [num_accepted_tokens / num_drafts for num_accepted_tokens in num_accepted_tokens_per_pos]
 
-    match = all((a >= b) or (b - a < 0.06) for a, b in zip(acceptance_per_pos, golden))
-    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden} (num_drafts={num_drafts})"
+    match = all((a >= b) or (b - a < 0.03) for a, b in zip(acceptance_per_pos, golden))
+    assert match, (
+        f"acceptance_per_pos {acceptance_per_pos} is not greater than golden {golden} (num_drafts={num_drafts})"
+    )
     cleanup_dist_env_and_memory()

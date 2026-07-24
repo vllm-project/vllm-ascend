@@ -5,6 +5,7 @@ from importlib import import_module
 from typing import Any, cast
 
 from vllm.logger import logger
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
@@ -19,6 +20,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     _block_hash_to_bytes,
     get_block_hashes,
 )
+from vllm_ascend.utils import vllm_version_is
 
 _CACHE_MISSING = object()
 _MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
@@ -27,10 +29,15 @@ _MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
 class ExternalCachedBlockPool:
     """Duck-typed BlockPool backed by external AscendStore key existence."""
 
-    def __init__(self, exists: set[tuple[int, bytes]] | None = None) -> None:
+    def __init__(
+        self,
+        hash_block_size: int,
+        exists: set[tuple[int, bytes]] | None = None,
+    ) -> None:
         # exists=None is used for load/store masks where hit length has already
         # been decided and each manager only needs to apply its own reachability.
         self._exists = exists
+        self.hash_block_size = hash_block_size
         self.null_block = KVCacheBlock(block_id=0)
         self._present_block = KVCacheBlock(block_id=1)
 
@@ -161,7 +168,7 @@ class AscendStoreCoordinator:
         masks, _ = self.find_longest_cache_hit(
             block_hashes,
             token_len,
-            ExternalCachedBlockPool(),
+            ExternalCachedBlockPool(self.hash_block_size),
             apply_eagle=False,
         )
         return tuple(
@@ -200,6 +207,9 @@ class AscendStoreCoordinator:
         return tuple(masks)
 
     def block_hashes_for_spec(self, block_hashes: list[BlockHash], spec: KVCacheSpec) -> BlockHashList:
+        if not vllm_version_is("0.25.1"):
+            # vLLM #46384 moved hash-size resolution into each manager.
+            return block_hashes
         if spec.block_size == self.hash_block_size:
             return block_hashes
         return cast(BlockHashList, get_block_hashes(block_hashes, spec.block_size, self.hash_block_size))
@@ -216,7 +226,7 @@ class AscendStoreCoordinator:
         if len(self.attention_groups) == 1:
             spec, group_ids, manager_cls = self.attention_groups[0]
             hashes = self.block_hashes_for_spec(block_hashes, spec)
-            hit_blocks = _find_longest_cache_hit(
+            hit_blocks, hit_length = _find_longest_cache_hit(
                 manager_cls,
                 block_hashes=hashes,
                 max_length=max_length,
@@ -229,10 +239,11 @@ class AscendStoreCoordinator:
             blocks_by_group: list[list[KVCacheBlock]] = [[] for _ in range(len(self.kv_cache_groups))]
             for group_id, blocks in zip(group_ids, hit_blocks, strict=True):
                 blocks_by_group[group_id] = blocks
-            return tuple(blocks_by_group), len(hit_blocks[0]) * spec.block_size
+            return tuple(blocks_by_group), hit_length
 
         hit_length = max_length
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * len(self.kv_cache_groups)
+        hit_length_by_group: list[int] = [0] * len(self.kv_cache_groups)
         is_simple_hybrid = len(self.attention_groups) == 2 and isinstance(
             self.attention_groups[0][0], FullAttentionSpec
         )
@@ -242,9 +253,10 @@ class AscendStoreCoordinator:
             curr_hit_length = hit_length
 
             for index, (spec, group_ids, manager_cls) in enumerate(self.attention_groups):
-                cached = hit_blocks_by_group[group_ids[0]]
+                first_group_id = group_ids[0]
+                cached = hit_blocks_by_group[first_group_id]
                 if isinstance(spec, FullAttentionSpec) and cached is not None:
-                    curr_hit_length = curr_hit_length // spec.block_size * spec.block_size
+                    curr_hit_length = min(curr_hit_length, hit_length_by_group[first_group_id])
                     continue
 
                 drop_eagle_block = index in eagle_indices and index not in eagle_verified
@@ -252,7 +264,7 @@ class AscendStoreCoordinator:
                 if drop_eagle_block:
                     max_group_length = min(curr_hit_length + spec.block_size, max_length)
                 hashes = self.block_hashes_for_spec(block_hashes, spec)
-                hit_blocks = _find_longest_cache_hit(
+                hit_blocks, new_hit_length = _find_longest_cache_hit(
                     manager_cls,
                     block_hashes=hashes,
                     max_length=max_group_length,
@@ -262,7 +274,6 @@ class AscendStoreCoordinator:
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self.lcm_block_size,
                 )
-                new_hit_length = len(hit_blocks[0]) * spec.block_size
                 if drop_eagle_block:
                     eagle_verified.add(index)
                 elif new_hit_length < curr_hit_length:
@@ -270,6 +281,7 @@ class AscendStoreCoordinator:
                 curr_hit_length = new_hit_length
                 for group_id, blocks in zip(group_ids, hit_blocks, strict=True):
                     hit_blocks_by_group[group_id] = blocks
+                    hit_length_by_group[group_id] = new_hit_length
 
             if curr_hit_length >= hit_length:
                 break
@@ -279,11 +291,12 @@ class AscendStoreCoordinator:
 
         spec0, group_ids0, _ = self.attention_groups[0]
         if isinstance(spec0, FullAttentionSpec):
-            num_blocks = hit_length // spec0.block_size
+            num_blocks = cdiv(hit_length, spec0.block_size)
             for group_id in group_ids0:
                 full_blocks = hit_blocks_by_group[group_id]
                 assert full_blocks is not None
                 del full_blocks[num_blocks:]
+                hit_length_by_group[group_id] = hit_length
 
         return (
             tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group),
@@ -363,14 +376,13 @@ def _get_manager_class(spec: KVCacheSpec) -> type[SingleTypeKVCacheManager]:
 def _find_longest_cache_hit(
     manager_cls: type[SingleTypeKVCacheManager],
     **kwargs: Any,
-) -> tuple[list[KVCacheBlock], ...]:
-    try:
-        return manager_cls.find_longest_cache_hit(**kwargs)
-    except TypeError as exc:
-        if "drop_eagle_block" not in str(exc):
-            raise
-        kwargs["use_eagle"] = kwargs.pop("drop_eagle_block")
-        return manager_cls.find_longest_cache_hit(**kwargs)
+) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+    hit_result = manager_cls.find_longest_cache_hit(**kwargs)
+    if vllm_version_is("0.25.1"):
+        hit_blocks = cast(tuple[list[KVCacheBlock], ...], hit_result)
+        hit_length = len(hit_blocks[0]) * kwargs["kv_cache_spec"].block_size
+        return hit_blocks, hit_length
+    return cast(tuple[tuple[list[KVCacheBlock], ...], int], hit_result)
 
 
 def _reachable_block_mask(

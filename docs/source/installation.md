@@ -6,21 +6,38 @@ This document describes how to install vllm-ascend manually.
 
 - OS: Linux
 - Python: >= 3.10, < 3.13
-- Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series.
-- Atlas inference products.
+- Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series and Atlas inference products.
 - Software:
 
-    | Software      | Supported version                | Note                                      |
-    |---------------|----------------------------------|-------------------------------------------|
-    | Ascend HDK    | Refer to the documentation [CANN 9.0.1](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html) | Required for CANN |
-    | CANN          | == 9.0.1                        | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | == 2.10.0.post2                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
-    | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
-    | NNAL          | == 9.0.1                        | Required for libatb.so, enables advanced tensor operations |
+    === "Atlas A2 inference products / Atlas A3 inference products"
 
-!!! note "Atlas inference products"
+        | Software      | Supported version                | Note                                      |
+        |---------------|----------------------------------|-------------------------------------------|
+        | Ascend HDK    | Refer to the documentation [CANN 9.0.1](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html) | Required for CANN |
+        | CANN          | == 9.0.1                        | Required for vllm-ascend and torch-npu    |
+        | torch-npu     | == 2.10.0.post2                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+        | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
+        | NNAL          | == 9.0.1                        | Required for libatb.so, enables advanced tensor operations |
 
-    Atlas inference products require CANN 9.1.0 beta. The Atlas A2/A3 requirements in the table above remain unchanged.
+    === "Atlas inference products"
+
+        | Software      | Supported version                | Note                                      |
+        |---------------|----------------------------------|-------------------------------------------|
+        | Ascend HDK    | Refer to the documentation [CANN 9.1.0-beta.1](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910beta1/releasenote/9.1.0-beta.1/release-note.md) | Required for CANN |
+        | CANN          | == 9.1.0-beta.1                 | Required for vllm-ascend and torch-npu    |
+        | torch-npu     | == 2.10.0.post2                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+        | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
+        | NNAL          | == 9.1.0-beta.1                 | Required for libatb.so, enables advanced tensor operations |
+        | triton / triton-ascend | Not supported          | Uninstalled in `Dockerfile.310p` |
+
+!!! important "Install a matched software stack"
+
+    Treat vLLM Ascend, vLLM, PyTorch, torch-npu, CANN, and Triton Ascend as
+    one compatibility set. For a release installation, select one complete
+    row from the [release compatibility matrix](community/versioning_policy.md#release-compatibility-matrix).
+    For main-branch development, use the exact vLLM commit recorded in
+    `.github/vllm-main-verified.commit`; an arbitrary vLLM tag or PyPI release
+    can have different transitive dependencies.
 
 There are two installation methods:
 
@@ -94,6 +111,7 @@ Refer to [CANN Installation](https://www.hiascend.com/cann/download?versionId=73
         chmod +x ./Ascend-cann-toolkit_9.0.1_linux-"$(uname -i)".run
         ./Ascend-cann-toolkit_9.0.1_linux-"$(uname -i)".run --full
         source /usr/local/Ascend/ascend-toolkit/set_env.sh
+        export ASCEND_TOOLKIT_HOME="${ASCEND_TOOLKIT_HOME:-/usr/local/Ascend/ascend-toolkit/latest}"
 
         wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.1/Ascend-cann-910b-ops_9.0.1_linux-"$(uname -i)".run
         chmod +x ./Ascend-cann-910b-ops_9.0.1_linux-"$(uname -i)".run
@@ -119,9 +137,9 @@ First, install system dependencies and configure the pip mirror:
 ```bash
 # Using apt-get with mirror
 sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
-apt-get update -y && apt-get install -y gcc g++ cmake libnuma-dev wget git curl jq
+apt-get update -y && apt-get install -y gcc g++ cmake ninja-build libnuma-dev wget git curl jq
 # Or using yum
-# yum update -y && yum install -y gcc g++ cmake numactl-devel wget git curl jq
+# yum update -y && yum install -y gcc g++ cmake ninja-build numactl-devel wget git curl jq
 # Config pip mirror, only versions 0.11.0 and earlier are supported, if using a version later than 0.11.0, do not execute this command
 pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 ```
@@ -215,6 +233,67 @@ Then you can install `vllm` and `vllm-ascend` from a **pre-built wheel** using o
         ```bash
         pip uninstall -y triton-ascend triton
         ```
+
+### CPU-only build verification
+
+CPU-only verification checks that the Python package can be built when no
+Ascend device is visible. It does **not** validate NPU runtime loading,
+inference examples, custom kernels, or NPU-specific tests. A CANN toolkit is
+still required because the build reads its headers and libraries.
+
+Install the Python build backend and native build tools first. The editable
+build uses setuptools-scm directly, and `arctic-inference` requires CMake and
+Ninja when a compatible wheel is not available:
+
+```bash
+python -m pip install --upgrade \
+    pip "setuptools>=64" "setuptools-scm>=8" wheel \
+    attrs googleapis-common-protos \
+    "cmake>=3.26" ninja
+```
+
+This build-only procedure intentionally does not install vLLM. If you continue
+with combined vLLM and vLLM Ascend testing on the main branch, use the exact
+vLLM commit recorded in `.github/vllm-main-verified.commit` and verify the
+combined environment as described below.
+
+On x86, install the CPU variants of the PyTorch packages from the PyTorch CPU
+index before installing the remaining Ascend dependencies:
+
+```bash
+python -m pip install \
+    --index-url https://download.pytorch.org/whl/cpu/ \
+    torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0
+python -m pip install \
+    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+    torch-npu==2.10.0.post2 triton-ascend==3.2.1
+python -m pip install \
+    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+    -r requirements.txt
+```
+
+Set the build target explicitly and disable device backend auto-loading before
+building vLLM Ascend:
+
+```bash
+export ASCEND_TOOLKIT_HOME="${ASCEND_TOOLKIT_HOME:-/usr/local/Ascend/ascend-toolkit/latest}"
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+export COMPILE_CUSTOM_KERNELS=0
+export SOC_VERSION=ascend910b1  # Atlas A2; use the matching value below for other products
+python -m pip install \
+    --no-build-isolation \
+    --no-deps \
+    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+    -e .
+```
+
+Together, the explicit build dependencies above and `requirements.txt` supply
+the complete build-system requirements before the non-isolated editable
+build. `--no-build-isolation` only reuses packages from the current build
+environment; it does not make incompatible vLLM, PyTorch, and torch-npu
+versions compatible. Before treating an environment as runtime-capable, run
+`python -m pip check` and resolve every reported conflict. Skip inference
+examples and NPU-specific tests when no device is available.
 
 !!! note
 

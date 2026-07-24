@@ -300,6 +300,109 @@ class TestAscendModelSlimConfig(TestBase):
         self.assertEqual(config.quant_description["model.layers.0.moe.experts.0.gate_proj.weight"], "INT8")
 
 
+class TestGetCacheScaleMapper(TestBase):
+    def test_return_default_mapper(self):
+        # From vllm upstream QuantizationConfig testcase.
+        config = AscendModelSlimConfig({})
+        mapper = config.get_cache_scale_mapper()
+        self.assertIsNotNone(mapper)
+        # deprecated fused kv_scale and bare scales
+        self.assertEqual(
+            mapper._map_name("model.layers.0.self_attn.kv_scale"),
+            "model.layers.0.self_attn.attn.k_scale",
+        )
+        self.assertEqual(
+            mapper._map_name("model.layers.0.self_attn.k_scale"),
+            "model.layers.0.self_attn.attn.k_scale",
+        )
+        # Qwen3-MoE / llm-compressor fused qkv_proj
+        self.assertEqual(
+            mapper._map_name("model.layers.0.self_attn.qkv_proj.k_scale"),
+            "model.layers.0.self_attn.attn.k_scale",
+        )
+        self.assertEqual(
+            mapper._map_name("model.layers.0.self_attn.qkv_proj.v_scale"),
+            "model.layers.0.self_attn.attn.v_scale",
+        )
+        # already in vLLM form -> unchanged (idempotent)
+        self.assertEqual(
+            mapper._map_name("model.layers.0.self_attn.attn.k_scale"),
+            "model.layers.0.self_attn.attn.k_scale",
+        )
+        # non-kv scales must not be touched
+        self.assertEqual(
+            mapper._map_name("model.layers.0.self_attn.k_proj.weight_scale"),
+            "model.layers.0.self_attn.k_proj.weight_scale",
+        )
+        # regular weights untouched
+        self.assertEqual(
+            mapper._map_name("model.layers.0.self_attn.q_proj.weight"),
+            "model.layers.0.self_attn.q_proj.weight",
+        )
+
+    def test_c8_kv_cache_type_returns_mapper(self):
+        config = AscendModelSlimConfig({"kv_cache_type": "C8"})
+        mapper = config.get_cache_scale_mapper()
+        self.assertIsNotNone(mapper)
+        # C8 mappings: k_proj → attn
+        self.assertEqual(
+            mapper._map_name("model.layers.0.k_proj.kv_cache_scale"),
+            "model.layers.0.attn.k_cache_scale",
+        )
+        self.assertEqual(
+            mapper._map_name("model.layers.0.k_proj.kv_cache_offset"),
+            "model.layers.0.attn.k_cache_offset",
+        )
+        self.assertEqual(
+            mapper._map_name("model.layers.0.v_proj.kv_cache_scale"),
+            "model.layers.0.attn.v_cache_scale",
+        )
+        self.assertEqual(
+            mapper._map_name("model.layers.0.v_proj.kv_cache_offset"),
+            "model.layers.0.attn.v_cache_offset",
+        )
+
+    def test_fa_quant_returns_mapper(self):
+        config = AscendModelSlimConfig(
+            {
+                "fa_quant_type": "C8",
+                "layers.1.fa_k.scale": "C8",
+            }
+        )
+        mapper = config.get_cache_scale_mapper()
+        self.assertIsNotNone(mapper)
+        self.assertEqual(
+            mapper._map_name("model.layers.1.fa_k.scale"),
+            "model.layers.1.mla_attn.mla_attn.fa_k.scale",
+        )
+        self.assertEqual(
+            mapper._map_name("model.layers.1.fa_q.scale"),
+            "model.layers.1.mla_attn.mla_attn.fa_q.scale",
+        )
+        self.assertEqual(
+            mapper._map_name("model.layers.1.fa_v.offset"),
+            "model.layers.1.mla_attn.mla_attn.fa_v.offset",
+        )
+
+    def test_indexer_quant_returns_mapper(self):
+        config = AscendModelSlimConfig(
+            {
+                "indexer_quant_type": "INT8",
+                "layers.1.indexer.quant_type": "INT8",
+            }
+        )
+        mapper = config.get_cache_scale_mapper()
+        self.assertIsNotNone(mapper)
+        self.assertEqual(
+            mapper._map_name("model.layers.1.indexer.q_rot"),
+            "model.layers.1.mla_attn.mla_attn.indexer.q_rot",
+        )
+        self.assertEqual(
+            mapper._map_name("model.layers.1.indexer.k_rot"),
+            "model.layers.1.mla_attn.mla_attn.indexer.k_rot",
+        )
+
+
 class TestApplyVllmMapper(TestBase):
     def test_apply_mapper_with_populated_quant_description(self):
         config = AscendModelSlimConfig({"old_key.weight": "INT8"})

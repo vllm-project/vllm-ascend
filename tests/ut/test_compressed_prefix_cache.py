@@ -22,6 +22,7 @@ from vllm.v1.request import Request
 
 from vllm_ascend.core.single_type_kv_cache_manager import CompressAttentionManager
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import AscendHybridKVCacheCoordinator
+from vllm_ascend.utils import vllm_version_is
 
 pytestmark = pytest.mark.cpu_test
 
@@ -98,7 +99,7 @@ def test_compressed_prefix_cache_uses_logical_block_hash() -> None:
     )[0]
     assert cached_hash == expected_hash
 
-    hit_blocks = CompressAttentionManager.find_longest_cache_hit(
+    hit_result = CompressAttentionManager.find_longest_cache_hit(
         block_hashes=request_b.block_hashes,
         max_length=logical_block_size,
         kv_cache_group_ids=[0],
@@ -106,7 +107,8 @@ def test_compressed_prefix_cache_uses_logical_block_hash() -> None:
         kv_cache_spec=spec,
         drop_eagle_block=False,
         alignment_tokens=logical_block_size,
-    )[0]
+    )
+    hit_blocks = hit_result[0] if vllm_version_is("0.25.1") else hit_result[0][0]
 
     assert hit_blocks == []
 
@@ -125,7 +127,7 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
     )
     manager.cache_blocks(request, num_tokens=logical_block_size)
 
-    hit_blocks = CompressAttentionManager.find_longest_cache_hit(
+    hit_result = CompressAttentionManager.find_longest_cache_hit(
         block_hashes=request.block_hashes,
         max_length=logical_block_size,
         kv_cache_group_ids=[0],
@@ -133,7 +135,8 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
         kv_cache_spec=spec,
         drop_eagle_block=False,
         alignment_tokens=logical_block_size,
-    )[0]
+    )
+    hit_blocks = hit_result[0] if vllm_version_is("0.25.1") else hit_result[0][0]
 
     assert hit_blocks == manager.req_to_blocks[request.request_id]
 
@@ -189,10 +192,22 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
         )
         manager.cache_blocks(request_a, num_tokens=logical_block_size)
 
-    hit_blocks, hit_length = coordinator.find_longest_cache_hit(
+    per_group_blocks, per_group_hits = coordinator.find_longest_cache_hit_per_group(
+        request_a.block_hashes,
+        max_cache_hit_length=logical_block_size,
+    )
+    assert isinstance(per_group_hits, tuple)
+    assert per_group_hits == (logical_block_size, logical_block_size)
+    assert all(per_group_blocks)
+
+    hit_result = coordinator.find_longest_cache_hit(
         request_b.block_hashes,
         max_cache_hit_length=logical_block_size,
     )
+    if vllm_version_is("0.25.1"):
+        hit_blocks, hit_length = hit_result
+    else:
+        hit_blocks, hit_length, _ = hit_result
 
     assert hit_length == 0
     assert hit_blocks == ([], [])

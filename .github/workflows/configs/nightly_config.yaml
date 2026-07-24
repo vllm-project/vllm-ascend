@@ -9,10 +9,6 @@
 a2:
   single_node:
     test_config:
-      # pytest-driven tests
-      - name: test_custom_op_multi_card
-        os: linux-aarch64-a2b3-4
-        tests: tests/e2e/nightly/single_node/ops/multicard_ops_a2/
       # YAML-driven tests
       - name: qwen3-vl-32b-instruct-w8a8
         os: linux-aarch64-a2b3-4
@@ -98,9 +94,6 @@ a3:
         size: 2
   double_node:
     test_config:
-      - name: multi-node-deepseek-r1-w8a8-longseq
-        config_file_path: DeepSeek-R1-W8A8-longseq.yaml
-        size: 2
       - name: multi-node-qwen3-dp
         config_file_path: Qwen3-235B-A22B.yaml
         size: 2
@@ -118,9 +111,6 @@ a3:
         size: 2
       - name: multi-node-qwenw8a8-2node-eplb
         config_file_path: Qwen3-235B-W8A8-EPLB.yaml
-        size: 2
-      - name: multi-node-qwenw8a8-2node-longseq
-        config_file_path: Qwen3-235B-W8A8-longseq.yaml
         size: 2
   single_node:
     test_config:
@@ -145,9 +135,6 @@ a3:
       - name: Qwen3.5-122B-A10B-W8A8-A3
         os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3.5-122B-A10B-W8A8-A3.yaml
-      - name: Qwen3.5-397B-A17B-w8a8-mtp-longseq
-        os: linux-aarch64-nightly-a3-16
-        config_file_path: Qwen3.5-397B-A17B-w8a8-mtp-longseq-A3.yaml
       - name: deepseek-v3-2-w8a8
         os: linux-aarch64-nightly-a3-16
         config_file_path: DeepSeek-V3.2-W8A8.yaml
@@ -212,9 +199,6 @@ a3-560t:
         size: 2
   double_node:
     test_config:
-      - name: multi-node-deepseek-r1-w8a8-longseq
-        config_file_path: DeepSeek-R1-W8A8-longseq.yaml
-        size: 2
       - name: multi-node-qwen3-dp
         config_file_path: Qwen3-235B-A22B.yaml
         size: 2
@@ -232,9 +216,6 @@ a3-560t:
         size: 2
       - name: multi-node-qwenw8a8-2node-eplb
         config_file_path: Qwen3-235B-W8A8-EPLB.yaml
-        size: 2
-      - name: multi-node-qwenw8a8-2node-longseq
-        config_file_path: Qwen3-235B-W8A8-longseq.yaml
         size: 2
   single_node:
     test_config:
@@ -259,9 +240,6 @@ a3-560t:
       - name: Qwen3.5-122B-A10B-W8A8-A3
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: Qwen3.5-122B-A10B-W8A8-A3.yaml
-      - name: Qwen3.5-397B-A17B-w8a8-mtp-longseq
-        os: linux-aarch64-a3-16-cn12-001
-        config_file_path: Qwen3.5-397B-A17B-w8a8-mtp-longseq-A3.yaml
       - name: deepseek-v3-2-w8a8
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: DeepSeek-V3.2-W8A8.yaml
@@ -311,3 +289,16 @@ a3-560t:
       - name: Qwen3-30B-QuaRot
         os: linux-aarch64-a3-2-cn12-001
         config_file_path: Qwen3-30B-QuaRot-eagle3.yaml
+
+310p:
+  single_node:
+    test_config:
+      - name: Qwen3-8B-w8a8sc-310p
+        os: linux-aarch64-310p-4
+        config_file_path: Qwen3-8B-w8a8sc-310p.yaml
+      - name: Qwen3-14B-w8a8sc-310p
+        os: linux-aarch64-310p-4
+        config_file_path: Qwen3-14B-w8a8sc-310p.yaml
+      - name: Qwen3-32B-w8a8sc-310p
+        os: linux-aarch64-310p-4
+        config_file_path: Qwen3-32B-w8a8sc-310p.yaml

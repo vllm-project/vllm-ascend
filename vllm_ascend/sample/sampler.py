@@ -1,4 +1,5 @@
 import torch
+import torch_npu
 import vllm.envs as envs
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
@@ -232,7 +233,7 @@ def _apply_top_k_top_p_pytorch(
         return logits
 
 
-def _apply_top_k_top_p_ascendc(
+def _apply_top_k_top_p_torch_npu(
     logits: torch.Tensor,
     k: torch.Tensor,
     p: torch.Tensor,
@@ -254,16 +255,16 @@ def _apply_top_k_top_p_ascendc(
         gathered_idx = tp_group.all_gather(local_global_idx, dim=-1)
 
         if not (p is None and k is None):
-            gathered_vals = torch.ops._C_ascend.npu_apply_top_k_top_p(gathered_vals, k=k, p=p)
+            gathered_vals = torch_npu.npu_top_k_top_p(gathered_vals, k=k, p=p)
         return gathered_vals, gathered_idx
 
     if p is None and k is None:
         return logits
-    return torch.ops._C_ascend.npu_apply_top_k_top_p(logits, k=k, p=p)
+    return torch_npu.npu_top_k_top_p(logits, k=k, p=p)
 
 
 apply_top_k_top_p = (
-    _apply_top_k_top_p_ascendc
+    _apply_top_k_top_p_torch_npu
     if get_ascend_device_type() in [AscendDeviceType.A2, AscendDeviceType.A3]
     else _apply_top_k_top_p_pytorch
 )
