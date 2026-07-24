@@ -206,13 +206,15 @@ class LayerBatchBuilder:
         req_ids: list[str] = []
         is_last_chunks: list[bool | None] = []
         all_load_keys: list[str] = []
+        seen_load_req: set[int] = set()
         offset = 0
 
         for block_range in task.block_ranges:
             request = block_range.request
             req_ids.append(request.req_id)
             is_last_chunks.append(request.is_last_chunk)
-            if request.load_keys:
+            if request.load_keys and id(request) not in seen_load_req:
+                seen_load_req.add(id(request))
                 all_load_keys.extend(request.load_keys)
             block_ids_np, block_gvas_np = self._require_request_arrays(block_range, is_save)
             gva_block_offset = request.gva_block_offset if is_save else request.load_gva_block_offset
@@ -1577,7 +1579,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             self.max_transfer_bytes,
         )
         if layer_id <= 2 or res != 0:
-            logger.info(
+            logger.debug(
                 "load_thread: layer=%d groups=%d blocks=%d res=%d",
                 layer_id,
                 len(all_gvas),
@@ -1588,10 +1590,11 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             logger.error("Layerwise %d load batch_copy failed with return code %d", layer_id, res)
 
         if layer_id == self.final_layer_id and all_load_keys:
-            self.m_store.batch_remove_lease(all_load_keys)
+            unique_load_keys = list(dict.fromkeys(all_load_keys))
+            self.m_store.batch_remove_lease(unique_load_keys)
             logger.info(
                 "[KVPOOL] load_thread released %d leases after final layer %d",
-                len(all_load_keys),
+                len(unique_load_keys),
                 layer_id,
             )
         if layer_id == self.final_layer_id:
