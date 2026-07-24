@@ -13,7 +13,7 @@ Expert balancing for MoE (Mixture of Experts) models in LLM (Large Language) ser
 
 ### Models
 
-All MOE models supported by vLLM-Ascend.
+All MoE models supported by vLLM-Ascend.
 But we have only verified the performance on deepseek-v3.1/r1 models.
 
 > [!IMPORTANT]
@@ -54,7 +54,7 @@ EPLB has three usage modes:
 
 ### Dynamic EPLB
 
-We need to add environment variable `export DYNAMIC_EPLB="true"` to enable vLLM-Ascend EPLB. Enable dynamic balancing with auto-tuned parameters. Adjust expert_heat_collection_interval and algorithm_execution_interval based on workload patterns. In the current version, we recommend using the following: policy of swift balancer(2).
+We need to add environment variable `export DYNAMIC_EPLB="true"` to enable vLLM-Ascend EPLB. Enable dynamic balancing with auto-tuned parameters. Adjust expert_heat_collection_interval and algorithm_execution_interval based on workload patterns. In the current version, we recommend using SwiftBalanceEplb (policy type 2).
 
 | Parameter | Description | Default |
 | --- | --- | --- |
@@ -65,7 +65,7 @@ We need to add environment variable `export DYNAMIC_EPLB="true"` to enable vLLM-
 | num_redundant_experts | Number of redundant experts. | 0 |
 | eplb_heat_collection_stage | Request stage used to collect expert heat. Available values: `all`, `prefill`, and `decode`. | `all` |
 
-```shell
+```mermaid
 graph TB
    A[start] --> B(collect_heat)
    B --> C(execute_algorithm)
@@ -207,7 +207,7 @@ vllm serve Qwen/Qwen3-235B-A22 \
 1. Parameter Tuning:
    - expert_heat_collection_interval: Higher values (e.g., 600+) for stable workloads; lower values (e.g., 50-100) for fluctuating traffic.
    - algorithm_execution_interval: Should be ≥ 50 to avoid premature balancing during startup.
-   - num_redundant_experts: Must match (num_experts + num_redundant_experts) is divisible by expert-parallel size.
+   - num_redundant_experts: (num_experts + num_redundant_experts) must be divisible by the expert-parallel size.
 
 2. Hardware Requirements:
    - Ensure that all NPUs have identical memory capacity and compute capabilities.
@@ -215,6 +215,6 @@ vllm serve Qwen/Qwen3-235B-A22 \
    - shm needs to be mounted for container
 
 3. Monitoring & Validation:
-   - Track metrics: Search for [Expert Hotness] in log, we will calculate the peak-to-average ratio of the load for each layer at different ranks, and then find their mean and maximum values. Current means actual peak-to-average ratio, update means estimated peak-to-average ratio after algorithm adjustment.
+   - Track metrics: Search for [Expert Hotness] in the log. We will calculate the peak-to-average ratio of the load for each layer at different ranks, and then find their mean and maximum values. Current means actual peak-to-average ratio, update means estimated peak-to-average ratio after algorithm adjustment.
    - Use vLLM monitor to detect imbalances during runtime.
    - Always verify expert map JSON structure before loading (validate with jq or similar tools).
