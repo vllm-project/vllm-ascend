@@ -856,10 +856,6 @@ def mlp_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 0
 
 
-def matmul_allreduce_enable() -> bool:
-    return get_ascend_config().enable_matmul_allreduce
-
-
 def enable_sp_by_pass():
     return get_ascend_config().enable_sp_by_pass
 
@@ -929,29 +925,6 @@ def is_drafter_moe_model(vllm_config: VllmConfig):
         if "Step3p5MTP" in model_configs["architectures"]:
             _IS_DRAFTER_MOE_MODEL = False
     return _IS_DRAFTER_MOE_MODEL
-
-
-def speculative_enable_dispatch_gmm_combine_decode(vllm_config: VllmConfig) -> bool:
-    """When draft contains MOE Arch and non-w8a8, disable dispatch_gmm_combine_decode."""
-    if vllm_config.speculative_config is None:
-        return True
-    speculative_method = getattr(vllm_config.speculative_config, "method", None)
-    if speculative_method in [None, "ngram", "suffix"]:
-        return True
-    if speculative_method in ["eagle", "eagle3"]:
-        if is_drafter_moe_model(vllm_config):
-            draft_model_config = vllm_config.speculative_config.draft_model_config
-            hf_text_config = draft_model_config.hf_text_config
-            quant_type = getattr(hf_text_config, "moe_quantize", None)
-            if quant_type is None:
-                quant_type = getattr(hf_text_config, "quantize", None)
-            return quant_type == "w8a8_dynamic"
-        else:
-            return True
-    if speculative_method == "mtp":
-        mtp_quant_type = getattr(vllm_config.model_config.hf_text_config, "mtp_quantize", None)
-        return mtp_quant_type == "w8a8_dynamic"
-    return False
 
 
 def _is_contain_expert(config: Any):
@@ -1131,7 +1104,7 @@ def is_pd_decode_recompute_scheduler_enabled(vllm_config: VllmConfig | None = No
         kv_cfg = vllm_config.kv_transfer_config
         if kv_cfg is None or not kv_cfg.is_kv_consumer or kv_cfg.is_kv_producer:
             return False
-        return get_ascend_config().recompute_scheduler_enable
+        return get_ascend_config().scheduler_config.recompute_scheduler_enable
     except (RuntimeError, AttributeError):
         return False
 
@@ -1199,7 +1172,7 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
     Skipping is applicable for all dense models and for moe models only on ranks
     that act as KV consumers. We skip the DP all-reduce when either:
     - Both the prefill and decode communication methods are MC2 (or FUSED_MC2), or
-    - Decode requires MC2 and ascend_config.recompute_scheduler_enable is True.
+    - Decode requires MC2 and ascend_config.scheduler_config.recompute_scheduler_enable is True.
 
     Skipping means each rank may have a different number of tokens, so MC2 needs
     a non-zero global_bs and must NOT receive mc2_mask.
@@ -1238,7 +1211,9 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
     prefill_must_use_mc2 = needs_mc2(scheduler_config.max_num_batched_tokens)
     # Skip all-reduce if decode requires MC2 and either prefill also
     # requires MC2 or recompute-based scheduler is enabled.
-    return decode_must_use_mc2 and (prefill_must_use_mc2 or get_ascend_config().recompute_scheduler_enable)
+    return decode_must_use_mc2 and (
+        prefill_must_use_mc2 or get_ascend_config().scheduler_config.recompute_scheduler_enable
+    )
 
 
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:
@@ -1249,71 +1224,6 @@ def has_layer_idx(model_instance: torch.nn.Module) -> bool:
     if _HAS_LAYER_IDX is None:
         _HAS_LAYER_IDX = hasattr(model_instance, "model") and hasattr(model_instance.model, "start_layer")
     return _HAS_LAYER_IDX
-
-
-def flashcomm2_enable() -> bool:
-    config_val = get_ascend_config().enable_flashcomm2_parallel_size
-    return config_val > 0
-
-
-def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
-    flashcomm2_oproj_tp_size = ascend_config.enable_flashcomm2_parallel_size
-    global_tp_size = vllm_config.parallel_config.tensor_parallel_size
-
-    if ascend_config.enable_flashcomm2_parallel_size <= 0:
-        return 0
-
-    logger.info("Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = %s", flashcomm2_oproj_tp_size)
-
-    if not ascend_config.enable_flashcomm1:
-        logger.warning_once(
-            "It is recommended to enable FLASHCOMM1 simultaneously when starting FLASHCOMM2 for optimal performance."
-        )
-    if ascend_config.finegrained_tp_config.oproj_tensor_parallel_size > 0:
-        raise AssertionError(
-            "flashcomm2_oproj_tensor_parallel_size cannot be enabled simultaneously with oproj_tensor_parallel_size"
-        )
-    if global_tp_size <= flashcomm2_oproj_tp_size:
-        raise AssertionError(
-            f"flashcomm2_oproj_tensor_parallel_size ({flashcomm2_oproj_tp_size}) cannot exceed "
-            f"global tensor parallel size ({global_tp_size})"
-        )
-    if global_tp_size % flashcomm2_oproj_tp_size != 0:
-        raise AssertionError(
-            f"Global tensor parallel size ({global_tp_size}) must be divisible by "
-            f"flashcomm2_oproj_tensor_parallel_size ({flashcomm2_oproj_tp_size})"
-        )
-    if vllm_config.kv_transfer_config is None:
-        logger.warning_once(
-            "It is recommended to enable FLASHCOMM2 in P-scenario deployments, enable it in hybrid deployment "
-            "may lead to decode performance degradation."
-        )
-    if vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer:
-        raise AssertionError(
-            "FLASHCOMM2 primarily targets P-scenario deployments, with additional support "
-            "for hybrid deployment scenarios. It is not applicable in D-scenario environments."
-        )
-
-    return flashcomm2_oproj_tp_size
-
-
-def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:
-    # Reorganize batch_ids so that, after the all2all and reduce-scatter operation,
-    # each batch_id corresponds to the rank_id within the DP domain.
-    # For example, when DP = [0, 1, 2, ..., 15] and flashcomm2_oproj_tensor_parallel_size = 2,
-    # the reorganized batch_ids will be [[batch0, batch8], [batch1, batch9], ..., [batch7, batch15]].
-    flashcomm2_otp_size = get_ascend_config().flashcomm2_oproj_tensor_parallel_size
-    num_oproj_tensor_parallel_groups: int = global_tp_size // flashcomm2_otp_size
-
-    reorgnized_batch_ids = []
-    for i in range(num_oproj_tensor_parallel_groups):
-        ranks = []
-        for j in range(flashcomm2_otp_size):
-            rank_idx = i + j * num_oproj_tensor_parallel_groups
-            ranks.append(rank_idx)
-        reorgnized_batch_ids.append(ranks)
-
-    return reorgnized_batch_ids
 
 
 def refresh_block_size(vllm_config):
@@ -1494,10 +1404,12 @@ def enable_dsa_cp_with_o_proj_tp() -> bool:
     vllm_config = get_current_vllm_config()
     kv_transfer_config = vllm_config.kv_transfer_config
 
-    # In PD-mixed mode, keep the original TP o_proj weight when:
+    # Keep the original TP o_proj weight when:
     # 1) KV pooling is disabled, or
-    # 2) KV pooling is enabled with kv_role == "kv_both".
-    return kv_transfer_config is None or kv_transfer_config.kv_role == "kv_both"
+    # 2) KV pooling is enabled on a prefill producer (including kv_both).
+    # DSA-CP prefill produces a full-head attention output, so the runtime
+    # asynchronously gathers a temporary full o_proj weight for the forward.
+    return kv_transfer_config is None or kv_transfer_config.is_kv_producer
 
 
 def check_gdn_layer(vllm_config) -> bool:

@@ -4,7 +4,11 @@
 
 This is an optimization based on FX graphs, which can be considered an acceleration solution for the aclgraph mode.
 
-You can get its code [code](https://gitcode.com/Ascend/torchair)
+You can get its code [torchair source code repository](https://gitcode.com/Ascend/torchair)
+
+!!! note "Atlas inference products"
+
+    Atlas inference products and Atlas 200I Pro do not support `enable_npugraph_ex`. Set --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}'.
 
 ## Default FX Graph Optimization
 
@@ -19,7 +23,7 @@ npugraph_ex now provides some operator fusion passes, and more will be added in 
 
 Operator combinations that meet the replacement rules can be replaced with the corresponding fused operators.
 
-You can get the default [fusion pass list](https://www.hiascend.com/document/detail/zh/Pytorch/2600/modthirdparty/torchairuseguide/docs/zh/npugraph_ex/basic/pattern_fusion_pass.md#功能简介)
+You can get the default [fusion pass list](https://www.hiascend.com/document/detail/zh/Pytorch/latest/modthirdparty/torchairuseguide/docs/zh/npugraph_ex/basic/pattern_fusion_pass.md#功能简介)
 
 ## Custom fusion pass
 
@@ -69,12 +73,12 @@ def extra_check(match: Match):
     x1 = match.kwargs.get("x1")
 
     if x1 is None:
-        return False 
+        return False
     if not hasattr(x1, "meta") or "val" not in x1.meta:
         return False
 
     a_shape = x1.meta["val"].shape
-    return a_shape[-1] == 7168 
+    return a_shape[-1] == 7168
 
 # Define some sample inputs to trace search_fn and replace_fn into an FX graph
 fake_mode = FakeTensorMode()

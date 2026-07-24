@@ -22,6 +22,7 @@ method is refactored, this override should be updated accordingly.
 
 import inspect
 import time
+from typing import cast
 
 from vllm.config import VllmConfig
 from vllm.logger import logger
@@ -41,6 +42,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.core.profiling_chunk_predictor import ProfilingChunkManager
+from vllm_ascend.utils import vllm_version_is
 
 
 class ProfilingChunkScheduler(Scheduler):
@@ -80,7 +82,7 @@ class ProfilingChunkScheduler(Scheduler):
         from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 
         init_ascend_config(vllm_config)
-        profiling_cfg = get_ascend_config().profiling_chunk_config
+        profiling_cfg = get_ascend_config().scheduler_config.profiling_chunk_config
         self.profiling_chunk_config = profiling_cfg
         base_chunk = self.max_num_scheduled_tokens
 
@@ -494,9 +496,17 @@ class ProfilingChunkScheduler(Scheduler):
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
-                    new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(
-                        request
-                    )
+                    computed_result = self.kv_cache_manager.get_computed_blocks(request)
+                    if vllm_version_is("0.25.1"):
+                        new_computed_blocks, num_new_local_computed_tokens = cast(
+                            tuple[KVCacheBlocks, int], computed_result
+                        )
+                    else:
+                        (
+                            new_computed_blocks,
+                            num_new_local_computed_tokens,
+                            request.shared_prefix_boundary,
+                        ) = cast(tuple[KVCacheBlocks, int, int], computed_result)
 
                     if self.connector is not None:
                         ext_tokens, load_kv_async = self.connector.get_num_new_matched_tokens(

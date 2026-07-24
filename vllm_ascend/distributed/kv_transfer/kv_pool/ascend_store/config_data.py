@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -14,9 +13,6 @@ from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
 from vllm.v1.core.sched.output import NewRequestData
 
 from vllm_ascend.memcache_comm_fence import AttentionComputeStartGate
-
-_GROUPED_BLOCK_HASH_DOMAIN = b"vllm-ascend-grouped-block-hash-v1\0"
-_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
 
 
 @dataclass(frozen=True)
@@ -595,21 +591,16 @@ def get_block_hashes(
         return block_hashes
     assert group_block_size % hash_block_size == 0, "block_size must be divisible by hash_block_size"
     scale_factor = group_block_size // hash_block_size
+    # Both supported lanes use chained hashes. The last fine-grained hash
+    # already identifies the complete larger block.
     return [
-        _rehash_block_hash_group(block_hashes[idx : idx + scale_factor])
+        block_hashes[idx + scale_factor - 1]
         for idx in range(0, len(block_hashes) // scale_factor * scale_factor, scale_factor)
     ]
 
 
-def _rehash_block_hash_group(block_hashes: Sequence[BlockHash | str]) -> BlockHash:
-    hasher = hashlib.sha256()
-    hasher.update(_GROUPED_BLOCK_HASH_DOMAIN)
-    hasher.update(len(block_hashes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
-    for block_hash in block_hashes:
-        hash_bytes = _block_hash_to_bytes(block_hash)
-        hasher.update(len(hash_bytes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
-        hasher.update(hash_bytes)
-    return BlockHash(hasher.digest())
+def block_hash_to_str(block_hash: BlockHash | str) -> str:
+    return block_hash if isinstance(block_hash, str) else block_hash.hex()
 
 
 def _block_hash_to_bytes(block_hash: BlockHash | str) -> bytes:
@@ -657,6 +648,7 @@ class RequestTracker:
     # Full prompt length before chunk truncation, used by sparse retention masks.
     num_prompt_tokens: int | None = None
     block_gvas: list[int] = field(default_factory=list)
+    block_gvas_by_group: list[list[int]] = field(default_factory=list)
     gva_block_offset: int = 0
     last_block_gva: int | None = None
 
@@ -686,6 +678,7 @@ class RequestTracker:
         token_ids: list[int] | None = None,
         num_prompt_tokens: int | None = None,
         block_gvas: list[int] | None = None,
+        block_gvas_by_group: list[list[int]] | None = None,
         gva_block_offset: int = 0,
         last_block_gva: int | None = None,
         block_keys: list[str] | None = None,
@@ -709,6 +702,7 @@ class RequestTracker:
         self.token_ids = token_ids
         self.num_prompt_tokens = num_prompt_tokens
         self.block_gvas = [] if block_gvas is None else block_gvas
+        self.block_gvas_by_group = block_gvas_by_group if block_gvas_by_group is not None else []
         self.gva_block_offset = gva_block_offset
         self.last_block_gva = last_block_gva
         self.block_keys = [] if block_keys is None else block_keys
@@ -849,9 +843,12 @@ class ReqMeta:
         ends: list[int] | None = None,
         sizes_per_chunk: list[list[int]] | None = None,
         block_ids_np: np.ndarray | None = None,
+        block_ids_by_group_np: list[np.ndarray] | None = None,
         block_gvas_np: np.ndarray | None = None,
+        block_gvas_by_group_np: list[np.ndarray] | None = None,
         gva_block_offset: int = 0,
         load_block_gvas_np: np.ndarray | None = None,
+        load_block_gvas_by_group_np: list[np.ndarray] | None = None,
         load_gva_block_offset: int = 0,
     ) -> None:
         if token_len_chunk is None:
@@ -883,9 +880,12 @@ class ReqMeta:
         self.ends = ends
         self.sizes_per_chunk = sizes_per_chunk
         self.block_ids_np = block_ids_np
+        self.block_ids_by_group_np = block_ids_by_group_np
         self.block_gvas_np = block_gvas_np
+        self.block_gvas_by_group_np = block_gvas_by_group_np
         self.gva_block_offset = gva_block_offset
         self.load_block_gvas_np = load_block_gvas_np
+        self.load_block_gvas_by_group_np = load_block_gvas_by_group_np
         self.load_gva_block_offset = load_gva_block_offset
 
     @property
@@ -906,8 +906,11 @@ class ReqMeta:
     sizes_per_chunk: list[list[int]] | None = None
 
     block_ids_np: np.ndarray | None = None
+    block_ids_by_group_np: list[np.ndarray] | None = None
     block_gvas_np: np.ndarray | None = None
+    block_gvas_by_group_np: list[np.ndarray] | None = None
     gva_block_offset: int = 0
+    load_block_gvas_by_group_np: list[np.ndarray] | None = None
 
     @staticmethod
     def from_request_tracker(
@@ -997,7 +1000,13 @@ class ReqMeta:
             last_block_gva=tracker.last_block_gva,
             partial_block_index=partial_block_index,
             block_ids_np=np.asarray(tracker.allocated_block_ids, dtype=np.int64),
+            block_ids_by_group_np=[np.asarray(ids, dtype=np.int64) for ids in tracker.allocated_block_ids_by_group]
+            if tracker.allocated_block_ids_by_group
+            else None,
             block_gvas_np=np.asarray(tracker.block_gvas, dtype=np.int64),
+            block_gvas_by_group_np=[np.asarray(gvas, dtype=np.int64) for gvas in tracker.block_gvas_by_group]
+            if hasattr(tracker, "block_gvas_by_group") and tracker.block_gvas_by_group
+            else None,
             gva_block_offset=tracker.gva_block_offset,
             kv_cache_group_ids=list(range(len(tracker.allocated_block_ids_by_group))),
             kv_cache_families_by_group=kv_cache_group_families,
@@ -1058,6 +1067,8 @@ class LayerTransferTask:
     layer_id: int
     block_ranges: list[LayerBlockRange]
     shared_block_data: SharedBlockData | None = None
+    group_id: int = 0
+    layer_idx_in_group: int = 0
     # Cache for KVCacheStoreKeyLayerSendingThread:
     # maps block_range index -> list of (start, end, key_all_layers)
     cached_process_tokens: dict[int, list[tuple[int, int, list]]] | None = None

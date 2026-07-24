@@ -6,9 +6,6 @@
 #
 msgid ""
 msgstr ""
-
-msgid ""
-msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-07-02 07:02+0000\n"
@@ -21,6 +18,9 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
+
+msgid ""
+msgstr ""
 
 msgid ""
 "MiniMax-M2 is MiniMax's flagship large language model series, including "
@@ -79,41 +79,6 @@ msgid ""
 msgstr ""
 "如果需要部署多节点环境，请按照[验证多节点通信环境](../../installation.md#verify-multi-node-"
 "communication)验证多节点通信。"
-
-msgid ""
-"Select an image based on your machine type and start the container on your "
-"node. For the available image tags and published versions, refer to [Using "
-"Docker](../../installation.md#set-up-using-docker)."
-msgstr ""
-"根据机器类型选择镜像并在节点上启动容器。可用的镜像标签和发布版本请参考[使用Docker](../../installation.md#set-up-"
-"using-docker)。"
-
-msgid "**A3 series**"
-msgstr "**A3系列**"
-
-msgid "**A2 series**"
-msgstr "**A2系列**"
-
-msgid ""
-"Map your model weight directory into the container (the example maps it to "
-"`/root/.cache/`)."
-msgstr "将模型权重目录映射到容器中（示例映射到`/root/.cache/`）。"
-
-msgid ""
-"Save the script as `minimax-docker-run.sh`, then start and enter the "
-"container:"
-msgstr "将脚本保存为`minimax-docker-run.sh`，然后启动并进入容器："
-
-msgid "**Verification:**"
-msgstr "**验证：**"
-
-msgid "After starting the container, verify the installation with:"
-msgstr "启动容器后，使用以下命令验证安装："
-
-msgid ""
-"Expected result: `docker ps` shows the container with status \"Up\", and "
-"`npu-smi info` lists the expected number of NPU devices."
-msgstr "预期结果：`docker ps`显示容器状态为\"Up\"，`npu-smi info`列出预期的NPU设备数量。"
 
 msgid ""
 "If you prefer to build from source instead of using the Docker image, "
@@ -277,13 +242,13 @@ msgid ""
 "Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md)"
 " for general tuning methods."
 msgstr ""
-"通用调优方法请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。"
+"通用调优方法请参考[优化与调优](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。"
 
 msgid ""
 "Please refer to the [Feature "
 "Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
-msgstr "详细功能描述请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)。"
+msgstr "详细功能描述请参考[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
 
 msgid ""
 "The following optimizations are enabled by default and require no additional"
@@ -703,3 +668,57 @@ msgid ""
 msgstr ""
 "| jemalloc预加载 | 所有场景 | `export LD_PRELOAD=/usr/lib/aarch64-linux-"
 "gnu/libjemalloc.so.2` | 替换默认内存分配器以减少碎片 | 确保容器中已安装jemalloc |"
+
+msgid ""
+"You can use the official all-in-one Docker image. For the available image "
+"tags and published versions, refer to [Using "
+"Docker](../../installation.md#set-up-using-docker)."
+msgstr ""
+"您可以使用官方的一体化Docker镜像。有关可用的镜像标签和已发布的版本，请参考[安装指南](../../installation.md#set-"
+"up-using-docker)。"
+
+msgid "=== \"A3 series\""
+msgstr "=== \"A3系列\""
+
+msgid "**Docker Run:**"
+msgstr "**Docker运行：**"
+
+msgid ""
+"A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).\n"
+"        If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3)."
+msgstr ""
+"A3有8个NPU，采用双芯片设计（共16个芯片：`/dev/davinci[0-15]`）。\n"
+"        如果您在共享机器上，请仅映射您需要的芯片（例如，NPU 0-3使用`/dev/davinci[0-7]`）。"
+
+msgid "=== \"A2 series\""
+msgstr "=== \"A2系列\""
+
+msgid ""
+"!!! tip\n"
+"    The mounts above are the minimum required for NPU driver access. Add additional `-v` mounts (e.g., model weight paths, datasets) as needed for your environment."
+msgstr ""
+"!!! tip\n"
+"    上述挂载是访问NPU驱动所需的最低要求。根据您的环境需要，添加额外的`-v`挂载（例如，模型权重路径、数据集）。"
+
+msgid ""
+"The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed as "
+"Python packages in site-packages."
+msgstr "默认工作目录是`/workspace`。vLLM和vLLM-Ascend作为Python包安装在site-packages中。"
+
+msgid "**Installation Verification:**"
+msgstr "**安装验证：**"
+
+msgid ""
+"After starting the container, run the following command to verify the "
+"installation:"
+msgstr "启动容器后，运行以下命令验证安装："
+
+msgid ""
+"Expected result: The container is listed with status `Up`. You can also "
+"verify the vllm-ascend version inside the container:"
+msgstr "预期结果：容器列出且状态为`Up`。您还可以在容器内验证vllm-ascend版本："
+
+msgid ""
+"Expected result: The version information is displayed, matching the pulled "
+"image version."
+msgstr "预期结果：显示版本信息，与拉取的镜像版本一致。"

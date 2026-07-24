@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Callable
+from contextlib import contextmanager
 from typing import Any
 
 import torch
@@ -36,6 +37,20 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
 from vllm_ascend.worker.v2.utils import communicator_switch
+
+
+def collect_sorted_captured_token_sizes(capture_descs: dict) -> list[int]:
+    """Collect the actual per-graph token counts that will be captured.
+
+    With speculative decoding under FULL_DECODE_ONLY, each raw
+    ``cudagraph_capture_size`` is rounded up to a multiple of
+    ``decode_query_len`` (see ``CudaGraphManager._init_candidates``), so the
+    real graph sizes differ from ``compilation_config.cudagraph_capture_sizes``.
+    The attention backend keys its per-size graph params (events/handles/...)
+    by these rounded token counts, so they must be derived from the actual
+    capture descriptors, not the raw config sizes.
+    """
+    return sorted({desc.num_tokens for descs in capture_descs.values() for desc in descs})
 
 
 class ModelAclGraphManager(ModelCudaGraphManager):
@@ -61,8 +76,11 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         # when call `run_fullgraph` method in CudaGraphManager,
         # then we don't need to # copy `execute_model` method in `NPUModelRunner` class.
         self.model_runner = model_runner
-        # capture_sizes sorts in ascending order.
-        self.capture_sizes = sorted(self.compilation_config.cudagraph_capture_sizes)
+        # The attention backend keys its per-size graph params by the actual
+        # captured token counts (rounded up to decode_query_len when using
+        # speculative decoding), so derive them from the capture descriptors
+        # instead of the raw config sizes.
+        self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
         # vllm-ascend need to update graph params of attention backend.
         # so we need to set graph params before capture full graph.
         if super().needs_capture():
@@ -161,3 +179,25 @@ class ModelWithContext(nn.Module):
     def compute_logits(self, hidden_states: torch.Tensor):
         # draft model has `compute_logits`, which is not in ModelWithContext
         return self.original_model.compute_logits(hidden_states)
+
+    def compute_draft_logits(self, hidden_states: torch.Tensor):
+        return self.original_model.compute_draft_logits(hidden_states)
+
+    def markov_embed(self, token_ids: torch.Tensor):
+        return self.original_model.markov_embed(token_ids)
+
+    def markov_bias(self, markov_embed: torch.Tensor):
+        return self.original_model.markov_bias(markov_embed)
+
+    def map_draft_to_target(self, draft_ids: torch.Tensor):
+        return self.original_model.map_draft_to_target(draft_ids)
+
+
+@contextmanager
+def model_capture_wrapper(speculator, is_draft_model_prefill):
+    """Context manager to override speculator's model for speculator capturing."""
+    try:
+        speculator.model = ModelWithContext(speculator.model, True, is_draft_model_prefill)
+        yield
+    finally:
+        speculator.model = speculator.model.get_original_model()

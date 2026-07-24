@@ -373,10 +373,10 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --max-num-batched-tokens 16384 \
     --max-num-seqs 64 \
     --trust-remote-code \
-    --gpu-memory-utilization 0.85 \
+    --gpu-memory-utilization 0.75 \
     --quantization ascend \
     --enforce-eager \
-    --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 3}' \
+    --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 1}' \
     --additional-config '{"enable_cpu_binding":true}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
@@ -436,7 +436,7 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --max-num-seqs 16 \
     --trust-remote-code \
     --no-enable-prefix-caching \
-    --gpu-memory-utilization 0.85 \
+    --gpu-memory-utilization 0.75 \
     --quantization ascend \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \

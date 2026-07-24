@@ -51,13 +51,14 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config.xlite_graph_config.full_mode = False
         mock_ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         mock_ascend_config.ascend_fusion_config = None
-        mock_ascend_config.recompute_scheduler_enable = False
-        mock_ascend_config.enable_balance_scheduling = False
+        mock_ascend_config.scheduler_config.recompute_scheduler_enable = False
+        mock_ascend_config.scheduler_config.enable_balance_scheduling = False
         mock_ascend_config.enable_mc2_hierarchy_comm = False
         mock_ascend_config.enable_fused_mc2 = False
         mock_ascend_config.enable_flashcomm1 = False
         mock_ascend_config.enable_shared_expert_dp = False
-        mock_ascend_config.short_request_first_config.enabled = False
+        mock_ascend_config.scheduler_config.short_request_first_config.enabled = False
+        mock_ascend_config.scheduler_config.profiling_chunk_config.enabled = False
         mock_ascend_config.update_compile_ranges_split_points = MagicMock()
         return mock_ascend_config
 
@@ -223,6 +224,40 @@ class TestNPUPlatform(TestBase):
 
         self.assertEqual(observed_inputs, [77])
 
+    @patch("vllm_ascend.platform.refresh_block_size")
+    @patch("vllm_ascend.platform.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.platform.enable_sp", return_value=True)
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    def test_check_and_update_config_skips_sp_capture_sizes_without_cudagraph(
+        self,
+        mock_auto_detect,
+        mock_init_ascend,
+        _mock_enable_sp,
+        _mock_device_type,
+        _mock_refresh_block_size,
+    ):
+        mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.compilation_config.mode = CompilationMode.NONE
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        vllm_config.compilation_config.cudagraph_capture_sizes = []
+        vllm_config.compilation_config.custom_ops = []
+        vllm_config.compilation_config.splitting_ops = []
+        vllm_config.model_config.enforce_eager = False
+        vllm_config.model_config.enable_sleep_mode = True
+        vllm_config.model_config.is_encoder_decoder = False
+        vllm_config.parallel_config.tensor_parallel_size = 16
+        vllm_config.parallel_config.worker_cls = "manual"
+        vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
+        vllm_config.cache_config.block_size = 1
+        vllm_config._set_cudagraph_sizes = MagicMock()
+        vllm_config.update_sizes_for_sequence_parallelism = MagicMock(return_value=[])
+
+        self.platform.check_and_update_config(vllm_config)
+
+        vllm_config.update_sizes_for_sequence_parallelism.assert_not_called()
+
     def test_get_device_capability(self):
         self.assertIsNone(self.platform.get_device_capability(device_id=0))
 
@@ -257,7 +292,6 @@ class TestNPUPlatform(TestBase):
             patch("vllm_ascend.platform.envs_vllm.VLLM_USE_V2_MODEL_RUNNER", True, create=True),
             patch("vllm_ascend.platform.is_moe_model", return_value=True),
             patch("vllm_ascend.platform.enable_sp", return_value=False),
-            patch("vllm_ascend.platform.flashcomm2_enable", return_value=False),
             patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=4),
             patch("vllm.distributed.get_dp_group", return_value=MagicMock(world_size=1)),
             patch("vllm_ascend.ascend_forward_context.select_moe_comm_method", return_value=MoECommType.ALLGATHER),
@@ -282,7 +316,6 @@ class TestNPUPlatform(TestBase):
             patch("vllm_ascend.platform.envs_vllm.VLLM_USE_V2_MODEL_RUNNER", True, create=True),
             patch("vllm_ascend.platform.is_moe_model", return_value=True),
             patch("vllm_ascend.platform.enable_sp", return_value=False),
-            patch("vllm_ascend.platform.flashcomm2_enable", return_value=False),
             patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=2),
             patch("vllm.distributed.get_dp_group", return_value=MagicMock(world_size=1)),
             patch("vllm_ascend.ascend_forward_context.select_moe_comm_method", return_value=MoECommType.ALLGATHER),
@@ -501,7 +534,7 @@ class TestNPUPlatform(TestBase):
         self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
     ):
         mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
-        mock_ascend_config.recompute_scheduler_enable = True
+        mock_ascend_config.scheduler_config.recompute_scheduler_enable = True
         mock_init_ascend.return_value = mock_ascend_config
 
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -533,7 +566,7 @@ class TestNPUPlatform(TestBase):
         self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
     ):
         mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
-        mock_ascend_config.recompute_scheduler_enable = True
+        mock_ascend_config.scheduler_config.recompute_scheduler_enable = True
         mock_init_ascend.return_value = mock_ascend_config
 
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -566,8 +599,8 @@ class TestNPUPlatform(TestBase):
         self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
     ):
         mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
-        mock_ascend_config.recompute_scheduler_enable = True
-        mock_ascend_config.profiling_chunk_config.enabled = False
+        mock_ascend_config.scheduler_config.recompute_scheduler_enable = True
+        mock_ascend_config.scheduler_config.profiling_chunk_config.enabled = False
         mock_init_ascend.return_value = mock_ascend_config
 
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -592,7 +625,7 @@ class TestNPUPlatform(TestBase):
             self.platform.check_and_update_config(vllm_config)
 
         mock_init_recompute.assert_not_called()
-        self.assertFalse(mock_ascend_config.recompute_scheduler_enable)
+        self.assertFalse(mock_ascend_config.scheduler_config.recompute_scheduler_enable)
         self.assertIs(vllm_config.scheduler_config, scheduler_config)
         mock_warning.assert_called_once()
         self.assertIn(
@@ -608,8 +641,8 @@ class TestNPUPlatform(TestBase):
         self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
     ):
         mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
-        mock_ascend_config.recompute_scheduler_enable = True
-        mock_ascend_config.profiling_chunk_config.enabled = False
+        mock_ascend_config.scheduler_config.recompute_scheduler_enable = True
+        mock_ascend_config.scheduler_config.profiling_chunk_config.enabled = False
         mock_init_ascend.return_value = mock_ascend_config
 
         recompute_scheduler_config = MagicMock()
@@ -654,8 +687,8 @@ class TestNPUPlatform(TestBase):
         self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
     ):
         mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
-        mock_ascend_config.recompute_scheduler_enable = False
-        mock_ascend_config.enable_balance_scheduling = True
+        mock_ascend_config.scheduler_config.recompute_scheduler_enable = False
+        mock_ascend_config.scheduler_config.enable_balance_scheduling = True
         mock_init_ascend.return_value = mock_ascend_config
 
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -686,8 +719,8 @@ class TestNPUPlatform(TestBase):
         self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
     ):
         mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
-        mock_ascend_config.recompute_scheduler_enable = False
-        mock_ascend_config.enable_balance_scheduling = True
+        mock_ascend_config.scheduler_config.recompute_scheduler_enable = False
+        mock_ascend_config.scheduler_config.enable_balance_scheduling = True
         mock_init_ascend.return_value = mock_ascend_config
 
         vllm_config = TestNPUPlatform.mock_vllm_config()

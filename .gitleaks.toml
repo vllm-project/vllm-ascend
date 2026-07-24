@@ -1,0 +1,84 @@
+# ==============================================
+# Gitleaks Custom Configuration
+# Path: .gitleaks.toml (repository root)
+# Status: Inherits all official built-in rules by default. No custom rules or global suppressions enabled.
+# Standard inheritance syntax: [extend] useDefault = true (officially recommended, compatible with offline binaries)
+# ==============================================
+title = "VLLM Ascend pre-commit secret scan config"
+
+# Standard inheritance for built-in rules
+# useDefault = true: Load all built-in secret detection rules (AWS/Git/SSH/OBS, etc.)
+# Note: useDefault and path are mutually exclusive; cannot be used together
+[extend]
+useDefault = true
+# disabledRules = ["generic-api-key","generic-password"]
+# Uncomment to globally disable specified built-in rule IDs in bulk
+
+# ==============================================================================
+# 1. Two approaches to globally disable built-in rules (examples)
+# ==============================================================================
+# Approach A (new recommended, bulk disable within [extend])
+# [extend]
+# useDefault = true
+# disabledRules = ["generic-api-key","generic-password"]
+
+# Approach B (legacy compatible, disable one by one)
+# [[rules.disabled]]
+# id = "generic-api-key"
+# [[rules.disabled]]
+# id = "generic-password"
+# List all built-in rule IDs: ./gitleaks detect --list-rules --config=.gitleaks.toml
+
+# ==============================================================================
+# 2. Custom business detection rules (examples, disabled for now)
+# Fixed format [[rules]] for detecting project-specific hardcoded credentials
+# ==============================================================================
+# [[rules]]
+# id = "huawei-obs-plain-ak-sk"
+# description = "Hardcoded Huawei OBS plaintext AK/SK"
+# regex = '''(access_key|secret_key|AK|SK)\s*[:=]\s*["']?[A-Z0-9]{20,}["']?'''
+# secretGroup = 1
+# entropy = 3.5
+# keywords = ["ak", "sk", "obs"]
+# # Local allowlist for a rule: skip ut test directories
+# [[rules.allowlist]]
+# paths = ["^ut/", "^test/"]
+
+# ==============================================================================
+# 3. Global allowlist configuration (new syntax requires [[allowlists]], not [allowlist])
+# Syntax requirement: at least one non-commented array to avoid load failure
+# ==============================================================================
+
+# Allow external vllm dependency directory
+[[allowlists]]
+paths = ["^vllm-empty/"]
+
+# Allow tilingKey generic-api-key false positives in the specified file
+[[allowlists]]
+paths = [
+    "^csrc/notify_dispatch/op_host/notify_dispatch_tiling.cpp"
+]
+rules = ["generic-api-key"]
+
+# Placeholder allowlist for syntax validation; does not permit any files
+[[allowlists]]
+paths = ["^$"]
+stopwords = []
+commits = []
+
+# ==============================================================================
+# 4. Inline single-line / full-file suppression comments (no config modification required)
+# ==============================================================================
+# Option 1: Suppress secret alert only for current line (recommended)
+# access_key = "AKXXXXXXXXXXXXXXXXXXXX"  # gitleaks:allow
+#
+# Option 2: Suppress all alerts for the entire file, placed at file top
+# # gitleaks:skip-file
+
+# ==============================================================================
+# Global scan parameters
+# ==============================================================================
+minEntropy = 3.0
+redact = true
+maxMatchLength = 2048
+scanGitHistory = false
