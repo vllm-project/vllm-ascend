@@ -9,8 +9,6 @@ env_common: &env_common
   HCCL_OP_EXPANSION_MODE: "AIV"
   OMP_PROC_BIND: false
   OMP_NUM_THREADS: 1
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
-  VLLM_ASCEND_ENABLE_FUSED_MC2: 2
   TASK_QUEUE_ENABLE: 1
   SERVER_PORT: 8080
   
@@ -41,6 +39,7 @@ deployment:
         --trust-remote-code
         --gpu-memory-utilization 0.9
         --no-enable-prefix-caching
+        --additional-config '{"enable_fused_mc2":1,"enable_flashcomm1":true}'
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
@@ -79,6 +78,7 @@ deployment:
         --gpu-memory-utilization 0.9
         --no-enable-prefix-caching
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        --additional-config '{"enable_fused_mc2":1,"enable_flashcomm1":true}'
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",

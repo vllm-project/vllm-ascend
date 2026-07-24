@@ -32,6 +32,12 @@ The following model variants are available. It is recommended to download the mo
 |-------|-------------|---------------------|----------|
 | Qwen3-30B-A3B-w8a8-QuaRot-310  |W8A8 | Atlas inference products (TP2)                                                                                               | [Download](https://modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
 
+**Quantized Versions for Atlas inference products:**
+
+| Model | Quantization | Hardware Requirement | Download |
+|-------|-------------|---------------------|----------|
+| Qwen3-30B-A3B-w8a8-QuaRot-310  |W8A8 | Atlas inference products (TP2)                                                                                               | [Download](https://modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
+
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
 If the W8A8 quantized weights are not available for direct download, you can obtain them by quantizing the BF16 model using **msmodelslim**. Refer to the [Quantization Guide](../../user_guide/feature_guide/quantization.md) for details. All model paths in this document should be adjusted to your actual local paths.

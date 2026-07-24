@@ -41,15 +41,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint-and-select-tests:
+  pre-commit:
     if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
-      has_tests: ${{ steps.scope.outputs.has_tests || steps.noop.outputs.has_tests }}
-      test_groups: ${{ steps.scope.outputs.test_groups || steps.noop.outputs.test_groups }}
-      matched_modules: ${{ steps.scope.outputs.matched_modules || steps.noop.outputs.matched_modules }}
       main_commit: ${{ steps.vllm.outputs.main_commit }}
       release_tag: ${{ steps.vllm.outputs.release_tag }}
     steps:
@@ -128,22 +125,6 @@ jobs:
               - 'requirements.txt'
               - 'requirements-dev.txt'
               - 'requirements-lint.txt'
-            src:
-              - 'vllm_ascend/**'
-              - 'setup.py'
-              - 'csrc/**'
-              - 'requirements.txt'
-              - 'pyproject.toml'
-              - 'cmake/**'
-              - '.github/workflows/pr_test.yaml'
-              - '.github/workflows/_selected_tests.yaml'
-              - '.github/workflows/scripts/select_tests.py'
-              - '.github/workflows/scripts/run_selected_tests.sh'
-              - '.github/workflows/scripts/test_config.yaml'
-              - '.github/workflows/scripts/runner_label.json'
-              - 'tests/**'
-              - 'tools/**'
-              - 'CMakeLists.txt'
 
       - name: Install vllm-ascend dev (conditional)
         if: steps.filter.outputs.lint_tracker == 'true'
@@ -159,6 +140,12 @@ jobs:
           pip install uc-manager
           uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
+      - name: Install and run Gitleaks Secret Scan
+        run: |
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          chmod +x .github/workflows/scripts/gitleaks.sh
+          .github/workflows/scripts/gitleaks.sh
+          
       - name: Run pre-commit
         env:
           PRE_COMMIT_HOME: /tmp/pre-commit-cache
@@ -183,6 +170,42 @@ jobs:
             tools/mypy.sh 1 "$python_version"
             echo "============================"
           done
+
+  select-tests:
+    needs: pre-commit
+    runs-on: linux-amd64-cpu-8-hk
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:lint
+    outputs:
+      has_tests: ${{ steps.scope.outputs.has_tests || steps.noop.outputs.has_tests }}
+      test_groups: ${{ steps.scope.outputs.test_groups || steps.noop.outputs.test_groups }}
+      matched_modules: ${{ steps.scope.outputs.matched_modules || steps.noop.outputs.matched_modules }}
+    steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            src:
+              - 'vllm_ascend/**'
+              - 'setup.py'
+              - 'csrc/**'
+              - 'requirements.txt'
+              - 'pyproject.toml'
+              - 'cmake/**'
+              - '.github/workflows/pr_test.yaml'
+              - '.github/workflows/_selected_tests.yaml'
+              - '.github/workflows/scripts/select_tests.py'
+              - '.github/workflows/scripts/run_selected_tests.sh'
+              - '.github/workflows/scripts/test_config.yaml'
+              - '.github/workflows/scripts/runner_label.json'
+              - 'tests/**'
+              - 'tools/**'
+              - 'CMakeLists.txt'
 
       - name: Validate test coverage config
         run: |
@@ -210,49 +233,124 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   run-selected-tests:
-    needs: lint-and-select-tests
-    if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' && contains(github.event.pull_request.labels.*.name, 'ready') }}
+    needs: [pre-commit, select-tests]
+    if: ${{ needs.select-tests.outputs.has_tests == 'true' && contains(github.event.pull_request.labels.*.name, 'ready') }}
     strategy:
       matrix:
         vllm_version:
-          - ${{ needs.lint-and-select-tests.outputs.main_commit }}
-          - ${{ needs.lint-and-select-tests.outputs.release_tag }}
+          - ${{ needs.pre-commit.outputs.main_commit }}
+          - ${{ needs.pre-commit.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
-      test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
+      test_groups: ${{ needs.select-tests.outputs.test_groups }}
   
   run-selected-tests-upstream:
-    needs: lint-and-select-tests
+    needs: [pre-commit, select-tests]
     if: ${{ contains(github.event.pull_request.labels.*.name, 'ready') }}
     strategy:
       matrix:
         vllm_version:
-          - ${{ needs.lint-and-select-tests.outputs.main_commit }}
-          - ${{ needs.lint-and-select-tests.outputs.release_tag }}
+          - ${{ needs.pre-commit.outputs.main_commit }}
+          - ${{ needs.pre-commit.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests_upstream.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
-      test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
+      test_groups: ${{ needs.select-tests.outputs.test_groups }}
 
   generate-hitest:
     name: Generate hitest recommendations
-    needs: lint-and-select-tests
-    if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' }}
+    needs: select-tests
+    if: ${{ needs.select-tests.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/_manual-hitest.yaml
     secrets:
       HITEST_APIG_APPCODE: ${{ secrets.HITEST_APIG_APPCODE }}
       HITEST_KEY: ${{ secrets.HITEST_KEY }}
       HITEST_SECRET: ${{ secrets.HITEST_SECRET }}
 
+  recommend-tests-from-coverage:
+    name: Recommend tests from coverage
+    runs-on: linux-amd64-cpu-8-hk
+    continue-on-error: true
+    outputs:
+      coverage_paths: ${{ steps.export-paths.outputs.coverage_paths }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout vllm-ascend scripts
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: |
+            .github/workflows/scripts
+          sparse-checkout-cone-mode: false
+
+      - name: Download test case map
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/test_case_map.json" \
+            -o test_case_map.json
+          test -s test_case_map.json
+          echo "Downloaded test_case_map.json"
+          du -h test_case_map.json
+
+      - name: Download coverage package and extract covstub
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/coverage.tar" \
+            -o coverage.tar
+          test -s coverage.tar
+          echo "Downloaded coverage.tar"
+          du -h coverage.tar
+          tar xf coverage.tar vllm-ascend/covstub
+          test -d vllm-ascend/covstub
+          echo "Extracted vllm-ascend/covstub"
+          find vllm-ascend/covstub -maxdepth 2 -type d | head -20 || true
+
+      - name: Recommend tests for current PR
+        run: |
+          set -euo pipefail
+          if ! python3 -c "import regex" >/dev/null 2>&1; then
+            echo "regex not found for $(python3 -V); bootstrapping pip and installing regex"
+            curl -fsSL https://bootstrap.pypa.io/get-pip.py -o get-pip.py
+            python3 get-pip.py --break-system-packages
+            python3 -m pip install --break-system-packages regex
+          fi
+          python3 -c "import regex; print('regex ok:', regex.__file__)"
+          PR_SPEC="vllm-project/vllm-ascend#${{ github.event.pull_request.number }}"
+          echo "Selecting tests for PR: ${PR_SPEC}"
+          python3 .github/workflows/scripts/test_selector.py \
+            --github-pr "${PR_SPEC}" \
+            --source-dir ./vllm-ascend/covstub \
+            --map-file test_case_map.json
+
+      - name: Export coverage paths output
+        id: export-paths
+        if: always()
+        run: |
+          FILE="recommended_pytest_paths.txt"
+          if [ -f "$FILE" ]; then
+            {
+              echo "coverage_paths<<EOF"
+              cat "$FILE"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "Exported $(wc -l < "$FILE") recommended paths"
+          else
+            echo "coverage_paths=" >> "$GITHUB_OUTPUT"
+            echo "::notice::recommended_pytest_paths.txt not found"
+          fi 
+
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
-    needs: [lint-and-select-tests, run-selected-tests]
+    needs: [pre-commit, select-tests, run-selected-tests]
     if: ${{ always() && contains(github.event.pull_request.labels.*.name, 'ready') }}
     runs-on: linux-amd64-cpu-2-hk
     steps:
@@ -260,15 +358,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          LINT_RESULT="${{ needs.lint-and-select-tests.result }}"
-          HAS_TESTS="${{ needs.lint-and-select-tests.outputs.has_tests }}"
+          PRE_COMMIT_RESULT="${{ needs.pre-commit.result }}"
+          SELECT_TESTS_RESULT="${{ needs.select-tests.result }}"
+          HAS_TESTS="${{ needs.select-tests.outputs.has_tests }}"
 
           echo "=== CI Gate Summary ==="
-          echo "lint-and-select-tests: ${LINT_RESULT}"
+          echo "pre-commit: ${PRE_COMMIT_RESULT}"
+          echo "select-tests: ${SELECT_TESTS_RESULT}"
           echo "has_tests: ${HAS_TESTS}"
 
-          if [ "${LINT_RESULT}" != "success" ] && [ "${LINT_RESULT}" != "skipped" ]; then
-            echo "::error::lint-and-select-tests did not succeed (result: ${LINT_RESULT})"
+          if [ "${PRE_COMMIT_RESULT}" != "success" ] && [ "${PRE_COMMIT_RESULT}" != "skipped" ]; then
+            echo "::error::pre-commit did not succeed (result: ${PRE_COMMIT_RESULT})"
+            exit 1
+          fi
+
+          if [ "${SELECT_TESTS_RESULT}" != "success" ] && [ "${SELECT_TESTS_RESULT}" != "skipped" ]; then
+            echo "::error::select-tests did not succeed (result: ${SELECT_TESTS_RESULT})"
             exit 1
           fi
 
@@ -282,3 +387,14 @@ jobs:
           fi
 
           echo "=== CI Gate: PASSED ==="
+
+  #this job collects failure from uploaded logs
+  analyze-failure-report:
+    name: Analyze failure report
+    needs: [run-selected-tests, recommend-tests-from-coverage]
+    if: always()
+    uses: ./.github/workflows/_analyze_failure.yaml
+    with:
+      log_artifact_pattern: selected-test-logs-*
+      recommendations_file: .github/workflows/scripts/recommended_pytest_paths.txt
+      recommendations_content: ${{ needs.recommend-tests-from-coverage.outputs.coverage_paths || '' }}

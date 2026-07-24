@@ -1,43 +1,159 @@
 # Qwen3-VL-Embedding
 
-## Introduction
+## 1 Introduction
 
 The Qwen3-VL-Embedding and Qwen3-VL-Reranker model series are the latest additions to the Qwen family, built upon the recently open-sourced and powerful Qwen3-VL foundation model. Specifically designed for multimodal information retrieval and cross-modal understanding, this suite accepts diverse inputs including text, images, screenshots, and videos, as well as inputs containing a mixture of these modalities. This guide describes how to run the model with vLLM Ascend.
 
-## Supported Features
+## 2 Supported Features
 
 Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-## Environment Preparation
+## 3 Prerequisites
 
-### Model Weight
+### 3.1 Model Weight
 
-- `Qwen3-VL-Embedding-8B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-8B)
+- `Qwen3-VL-Embedding-2B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-8B)
 - `Qwen3-VL-Embedding-2B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-2B)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
-### Installation
+## 4 Installation
 
-You can use our official docker image to run `Qwen3-VL-Embedding` series models.
+### 4.1 Docker Image Installation
 
-- Start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+You can use our official docker image to run `Qwen3-VL-Embedding` model directly.
+
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+
+=== "A3 series"
+
+    Start the docker image on your each node.
+
+    ```shell
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --net=host \
+        --privileged=true \
+        --device /dev/davinci0 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
+
+=== "A2 series"
+
+    Start the docker image on your each node.
+
+    ```shell
+      export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --net=host \
+        --privileged=true \
+        --device /dev/davinci0 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
+
+=== "Atlas inference products"
+
+    ```shell
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --net=host \
+        --privileged=true \
+        --device /dev/davinci0 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
+
+After a successful docker run, you can verify the running container service by executing the `docker ps` command.
+
+### 4.2 Source Code Installation
 
 If you don't want to use the docker image as above, you can also build all from source:
 
 - Install `vllm-ascend` from source, refer to [installation](../../installation.md).
 
-## Deployment
+If you want to deploy multi-node environment, you need to set up environment on each node.
 
-Using the Qwen3-VL-Embedding-8B model as an example, first run the docker container with the following command:
+## 5 Online Service Deployment
 
-### Online Inference
+=== "A3/A2 series"
 
-```bash
-vllm serve Qwen/Qwen3-VL-Embedding-8B --runner pooling
-```
+    Start the docker image on your each node.
 
-Once your server is started, you can query the model with input prompts.
+    ```shell
+    #!/bin/sh
+    vllm serve Qwen/Qwen3-VL-Embedding-2B  \
+      --served-model-name Qwen/Qwen3-VL-Embedding-2B  \
+      --runner pooling \
+      --port 8000 \
+      --max-model-len 1024
+    ```
+
+=== "Atlas inference products"
+
+    Start the docker image on your each node.
+
+    ```shell
+    #!/bin/sh
+    vllm serve Qwen/Qwen3-VL-Embedding-2B  \
+      --served-model-name Qwen/Qwen3-VL-Embedding-2B  \
+      --compilation-config '{"cudagraph_capture_sizes": [1024,512]}' \
+      --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+      --runner pooling \
+      --dtype float16 \
+      --port 8000 \
+      --max-model-len 1024
+    ```
+
+    Required  Parameter Descriptions:
+
+    `--compilation-config` For Atlas inference products, due to limited hardware streams, the size of cudagraph_capture_sizes is restricted.
+
+Key Parameter Descriptions:
+
+- `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. For Atlas inference products if automatic parsing resolves to a large context length, allocating this mask (O(max_model_len^2)) may exceed NPU memory and trigger OOM. Be sure to set an explicit and conservative value, such as --max-model-len 1024.
+
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+
+## 6 Functional Verification
+
+Once your server is started, you can verify by follow command:
+
+Service Verification:
 
 ```bash
 curl -X POST http://localhost:8000/v1/embeddings -H "Content-Type: application/json" -d '{
@@ -48,79 +164,98 @@ curl -X POST http://localhost:8000/v1/embeddings -H "Content-Type: application/j
 }'
 ```
 
-### Offline Inference
+Expected Result:
 
-```python
-import torch
-from vllm import LLM
+The service returns HTTP 200 OK with a JSON response containing the `embedding` field. Example output:
 
-def get_detailed_instruct(task_description: str, query: str) -> str:
-    return f'Instruct: {task_description}\nQuery: {query}'
-
-if __name__=="__main__":
-    # Each query must come with a one-sentence instruction that describes the task
-    task = 'Given a web search query, retrieve relevant passages that answer the query'
-
-    queries = [
-        get_detailed_instruct(task, 'What is the capital of China?'),
-        get_detailed_instruct(task, 'Explain gravity')
-    ]
-    # No need to add instruction for retrieval documents
-    documents = [
-        "The capital of China is Beijing.",
-        "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun."
-    ]
-    input_texts = queries + documents
-
-    model = LLM(model="Qwen/Qwen3-VL-Embedding-8B",
-                runner="pooling",
-                distributed_executor_backend="mp")
-
-    outputs = model.embed(input_texts)
-    embeddings = torch.tensor([o.outputs.embedding for o in outputs])
-    scores = (embeddings[:2] @ embeddings[2:].T)
-    print(scores.tolist())
+```json
+{
+  "id": "embd-8136155c01e8411d",
+  "object": "list",
+  "created": 1784538286,
+  "model": "Qwen/Qwen3-VL-Embedding-2B",
+  "data": [
+    {
+      "index": 0,
+      "object": "embedding",
+      "embedding": [
+        -0.028474265709519386,
+        -0.02678542211651802
+      ]
+    },
+    {
+      "index": 1,
+      "object": "embedding",
+      "embedding": [
+        -0.016785264015197754,
+        -0.003787524998188019
+      ]
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 39,
+    "total_tokens": 39,
+    "completion_tokens": 0,
+    "prompt_tokens_details": null
+  }
+}
 ```
 
-If you run this script successfully, you can see the info shown below:
+For more usage examples, please reference the [examples](https://github.com/vllm-project/vllm/tree/main/examples/pooling/embed)
 
-```bash
-Adding requests: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:00<00:00, 192.47it/s]
-Processed prompts:   0%|                                            | 0/4 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s](EngineCore_DP0 pid=2425173) (Worker pid=2425180) INFO 01-09 00:44:40 [acl_graph.py:194] Replaying aclgraph
-(EngineCore_DP0 pid=2425173) (Worker pid=2425180) ('Warning: torch.save with "_use_new_zipfile_serialization = False" is not recommended for npu tensor, which may bring unexpected errors and hopefully set "_use_new_zipfile_serialization = True"', 'if it is necessary to use this, please convert the npu tensor to cpu tensor for saving')
-Processed prompts: 100%|████████████████████████████████████| 4/4 [00:00<00:00, 21.34it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]
-[[0.9279120564460754, 0.32747742533683777], [0.4124627113342285, 0.7425257563591003]]
-```
+## 7 Accuracy Evaluation
 
-For more examples, refer to the vLLM official examples:
+Here are two accuracy evaluation methods.
 
-- [Offline Vision Embedding Example](https://github.com/vllm-project/vllm/blob/main/examples/pooling/embed/vision_embedding_offline.py)
-- [Online Vision Embedding Example](https://github.com/vllm-project/vllm/blob/main/examples/pooling/embed/vision_embedding_online.py)
+### Using MTEB
 
-## Performance
+1. Refer to [MTEB](https://docs.mteb.org/) for details.
 
-Run performance of `Qwen3-VL-Embedding-8B` as an example.
+2. Run follow code to execute the accuracy evaluation.
+
+    ```python
+  
+    import os
+    import mteb
+    
+    from mteb.models.vllm_wrapper import VllmEncoderWrapper
+    
+    if __name__ == "__main__":
+    
+        data_path = "/home/data/mteb_data"
+        os.environ["HF_DATASETS_CACHE"] = data_path
+        os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+    
+        model = VllmEncoderWrapper(f"/root/.cache/Qwen3-VL-Embedding-2B",
+                                    revision="norm",
+                                    dtype="float16",
+                                    max_model_len=10240,
+                                   )
+    
+        cache = mteb.ResultCache("/home/data/mteb_data")
+        tasks = mteb.get_tasks(tasks=["LeCaRDv2"])
+        results = mteb.evaluate(model, tasks=tasks, cache=cache, encode_kwargs={"batch_size": 2}, overwrite_strategy="always")
+        df = results.to_dataframe()
+        print(df)
+    ```
+
+3. After execution, you can get the result.
+
+## 8 Performance Evaluation
+
+### Using vLLM Benchmark
+
+Run performance of `Qwen3-VL-Embedding-2B` as an example.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/cli/) for more details.
 
 Take the `serve` as an example. Run the code as follows.
 
 ```bash
-vllm bench serve --model Qwen/Qwen3-VL-Embedding-8B --backend openai-embeddings --dataset-name random --endpoint /v1/embeddings --random-input 200 --save-result --result-dir ./
+vllm bench serve --model Qwen/Qwen3-VL-Embedding-2B --backend openai-embeddings --port 8000 --dataset-name random --endpoint /v1/embeddings --random-input 200 --save-result --result-dir ./
 ```
 
-After about several minutes, you can get the performance evaluation result. With this tutorial, the performance result is:
+After about several minutes, you can get the performance evaluation result.
 
-```bash
-============ Serving Benchmark Result ============
-Successful requests:                     1000
-Failed requests:                         0
-Benchmark duration (s):                  19.53
-Total input tokens:                      200000
-Request throughput (req/s):              51.20
-Total token throughput (tok/s):          10240.42
-----------------End-to-end Latency----------------
-Mean E2EL (ms):                          10360.53
-Median E2EL (ms):                        10354.37
-P99 E2EL (ms):                           19423.21
-==================================================
-```
+## 9 FAQ
+
+For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).

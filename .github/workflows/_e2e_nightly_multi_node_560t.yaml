@@ -95,7 +95,19 @@ on:
         type: boolean
         default: false
         description: enable Pod AOP pipeline on failure
+      send_ready_signal:
+        required: false
+        type: boolean
+        default: false
+        description: send a commit status signal after LWS is created (used by double-node to unblock downstream jobs)
+      run_id:
+        required: false
+        type: string
+        default: ''
+        description: unique run identifier to isolate signals across concurrent runs (e.g. github.run_id)
     secrets:
+      PAT_TOKEN:
+        required: false
       KUBECONFIG_B64_560T:
         required: true
       OBS_ACCESS_KEY_ID:
@@ -243,6 +255,7 @@ jobs:
           kubectl apply -f ./lws.yaml
 
       - name: Wait for pods ready
+        id: wait-pods
         run: |
           set -euo pipefail
           SIZE="${{ inputs.size }}"
@@ -284,6 +297,25 @@ jobs:
             fi
             sleep 2
           done
+
+      - name: Signal pods status via commit status
+        if: always() && inputs.send_ready_signal
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          STATUS_CONTEXT="double-node-pods-ready-560t/${{ inputs.run_id }}/${{ inputs.name || inputs.config_file_path }}"
+          if [ "${{ steps.wait-pods.outcome }}" = "success" ]; then
+            STATE="success"
+            DESC="Pods ready"
+          else
+            STATE="failure"
+            DESC="Wait pods timeout or failed"
+          fi
+          curl -s -X POST \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }}" \
+            -d "{\"state\":\"${STATE}\",\"description\":\"${DESC}\",\"context\":\"${STATUS_CONTEXT}\"}"
 
       - name: Stream logs
         id: stream_logs
