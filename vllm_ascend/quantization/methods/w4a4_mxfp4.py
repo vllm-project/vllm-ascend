@@ -65,6 +65,22 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
         params_dict["weight_scale"] = torch.empty(output_size, cdiv(input_size, self.group_size), dtype=torch.uint8)
         return params_dict
 
+    @staticmethod
+    def _get_matmul_view(layer: torch.nn.Module, tensor: torch.Tensor, cache_name: str) -> torch.Tensor:
+        if not tensor.is_contiguous():
+            return tensor
+
+        cache_key = (tensor.data_ptr(), tuple(tensor.shape), tuple(tensor.stride()))
+        key_attr = f"_w4a4_mxfp4_{cache_name}_key"
+        view_attr = f"_w4a4_mxfp4_{cache_name}_view"
+        base_attr = f"_w4a4_mxfp4_{cache_name}_base"
+        if getattr(layer, key_attr, None) != cache_key:
+            base = tensor.transpose(0, 1).contiguous()
+            setattr(layer, base_attr, base)
+            setattr(layer, view_attr, base.transpose(0, 1))
+            setattr(layer, key_attr, cache_key)
+        return getattr(layer, view_attr)
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -84,10 +100,13 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
         if bias is not None and bias.dtype != torch.float32:
             bias = bias.to(torch.float32)
 
+        weight = self._get_matmul_view(layer, layer.weight, "weight")
+        weight_scale = self._get_matmul_view(layer, layer.weight_scale, "weight_scale")
+
         output = torch_npu.npu_quant_matmul(
             quantized_x,
-            layer.weight,
-            layer.weight_scale,
+            weight,
+            weight_scale,
             scale_dtype=FLOAT8_E8M0FNU_DTYPE,
             pertoken_scale=pertoken_scale,
             pertoken_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
