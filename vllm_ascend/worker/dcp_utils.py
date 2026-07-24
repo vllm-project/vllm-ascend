@@ -501,9 +501,7 @@ class DCPManager:
         while retaining the DCP MTP mask and other per-batch state.
         """
         dcp_metadata = common_attn_metadata.context_parallel_metadata
-        assert dcp_metadata is not None, (
-            "DCP metadata must be populated for speculative drafting."
-        )
+        assert dcp_metadata is not None, "DCP metadata must be populated for speculative drafting."
 
         dcp_metadata = copy.copy(dcp_metadata)
         original_query_lens_cpu = dcp_metadata.query_lens_cpu
@@ -511,9 +509,7 @@ class DCPManager:
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         dcp_metadata.query_lens_cpu = query_lens_cpu
-        dcp_metadata.max_query_len = (
-            int(query_lens_cpu.max().item()) if query_lens_cpu.numel() else 0
-        )
+        dcp_metadata.max_query_len = int(query_lens_cpu.max().item()) if query_lens_cpu.numel() else 0
 
         is_mla = self._is_mla_kv_cache_spec(kv_cache_spec)
         if is_mla:
@@ -540,16 +536,12 @@ class DCPManager:
             seq_lens_for_dcp = dcp_metadata.draft_base_seq_lens
         else:
             seq_lens_for_dcp = seq_lens_cpu if seq_lens_cpu is not None else seq_lens
-        local_seq_lens = self._get_dcp_local_seq_lens(
-            seq_lens_for_dcp + draft_index + 1
-        )
+        local_seq_lens = self._get_dcp_local_seq_lens(seq_lens_for_dcp + draft_index + 1)
         dcp_metadata.num_computed_tokens_of_dcp = local_seq_lens
         dcp_metadata.draft_cp_seq_len = local_seq_lens[:, self.dcp_world_rank]
         if is_mla and getattr(self, "speculative_config", None) is not None:
             num_draft_reqs = query_lens_cpu.shape[0]
-            draft_histories = (
-                dcp_metadata.draft_base_seq_lens[:num_draft_reqs] + draft_index
-            ).to("cpu")
+            draft_histories = (dcp_metadata.draft_base_seq_lens[:num_draft_reqs] + draft_index).to("cpu")
             mask = self.generate_mtp_attention_mask_for_decode(
                 draft_histories.tolist(),
                 query_lens_cpu[:num_draft_reqs].numpy(),
@@ -557,15 +549,11 @@ class DCPManager:
             )
             self.dcp_mtp_attn_mask.np[:num_draft_reqs] = mask
             self.dcp_mtp_attn_mask.copy_to_gpu(num_draft_reqs)
-            dcp_metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask.gpu[
-                :num_draft_reqs
-            ]
+            dcp_metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask.gpu[:num_draft_reqs]
         common_attn_metadata.context_parallel_metadata = dcp_metadata
 
         if common_attn_metadata.is_prefilling is not None:
-            common_attn_metadata.is_prefilling = torch.zeros_like(
-                common_attn_metadata.is_prefilling
-            )
+            common_attn_metadata.is_prefilling = torch.zeros_like(common_attn_metadata.is_prefilling)
 
     def update_spec_decode_drafting_cp_metadata(
         self,
