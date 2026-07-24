@@ -1290,6 +1290,12 @@ def check_kv_extra_config(vllm_config):
     def _check(name: str, config: dict):
         tp_key = "tp_size"
         dp_key = "dp_size"
+        if not config:
+            logger.debug(
+                "KV transfer extra config '%s' not provided; remote topology will be auto-discovered.",
+                name,
+            )
+            return
         if tp_key in config:
             config_tp = config[tp_key]
             vllm_tp = vllm_config.parallel_config.tensor_parallel_size
