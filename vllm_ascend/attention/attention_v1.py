@@ -1254,7 +1254,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             weak_ref_tensors(key),
             weak_ref_tensors(value),
             weak_ref_tensors(block_table),
-            weak_ref_tensors(attn_metadata.attn_mask) if not (self.self.enable_c8_fp8_quant and layer is not None) else None,
+            weak_ref_tensors(attn_metadata.attn_mask) if not (self.enable_c8_fp8_quant and layer is not None) else None,
             block_size,
             actual_seq_lengths_kv,
             self.num_kv_heads,
@@ -2405,9 +2405,6 @@ class AscendC8Fp8AttentionBackendImpl(AscendAttentionBackendImpl):
                 return raw.to(device=device)
             expected = self.num_kv_heads * self.head_size
 
-            if raw.numel() != 1:
-                return raw.expand(1, self.num_kv_heads, self.head_size).contiguous().to(device=device)
-
             if raw.numel() != expected:
                 total_kv_heads = raw.numel() // self.head_size
                 tp_rank = get_tensor_model_parallel_rank()
@@ -2428,7 +2425,7 @@ class AscendC8Fp8AttentionBackendImpl(AscendAttentionBackendImpl):
         layer._c8_k_aq_scale_nz_bnsd = layer._c8_k_scale.view(nz_bnsd).contiguous().to(torch.bf16)
         layer._c8_v_aq_scale_nz_bnsd = layer._c8_v_scale.view(nz_bnsd).contiguous().to(torch.bf16)
 
-        layer._c8_scales_prepared = True
+        layer._c8_fp8_scales_prepared = True
 
     def _dequant_paged_kv_to_dense(
         self,

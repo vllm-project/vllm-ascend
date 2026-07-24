@@ -625,6 +625,18 @@ class AscendModelSlimConfig(QuantizationConfig):
         cache_scale_mapper = WeightsMapper(orig_to_new_suffix=suffix_map)
         return cache_scale_mapper | QuantizationConfig.get_cache_scale_mapper()
 
+    @staticmethod
+    def get_cache_scale_mapper() -> "WeightsMapper":
+        """Map C8 checkpoint KV-cache scale/offset names to vLLM parameter names."""
+        orig_to_new_regex = {
+            re.compile(r"\.k_proj\.kv_cache_scale$"): r".attn.k_cache_scale",
+            re.compile(r"\.k_proj\.kv_cache_offset$"): r".attn.k_cache_offset",
+            re.compile(r"\.v_proj\.kv_cache_scale$"): r".attn.v_cache_scale",
+            re.compile(r"\.v_proj\.kv_cache_offset$"): r".attn.v_cache_offset",
+        }
+        c8_mapper = WeightsMapper(orig_to_new_substr=orig_to_new_regex)
+        return c8_mapper | QuantizationConfig.get_cache_scale_mapper()
+
     def _has_quant_weight(self, prefix: str, packed_modules_mapping: Mapping[str, list[str]]) -> bool:
         proj_name = prefix.split(".")[-1]
         if proj_name in packed_modules_mapping:
@@ -720,7 +732,7 @@ class AscendModelSlimConfig(QuantizationConfig):
 
             logger.debug("Select AscendKVCacheMethod(C8) for %s (layer=%s)", prefix, "AttentionLayerBase[C8]")
             return AscendKVCacheMethod(AscendC8KVCacheAttentionMethod(self.quant_description, prefix))
-        elif isinstance(layer, AttentionLayerBase) and self.is_c8_quant_layer(prefix):
+        elif isinstance(layer, AttentionLayerBase) and self.is_c8_fp8_quant_layer(prefix):
             from .methods.kv_c8 import AscendC8Fp8KVCacheAttentionMethod
 
             logger.debug("Select AscendKVCacheMethod(C8_FP8) for %s (layer=%s)", prefix, "AttentionLayerBase[C8_FP8]")
