@@ -6,6 +6,10 @@ This is an optimization based on FX graphs, which can be considered an accelerat
 
 You can get its code [torchair source code repository](https://gitcode.com/Ascend/torchair)
 
+!!! note "Atlas inference products"
+
+    Atlas inference products and Atlas 200I Pro do not support `enable_npugraph_ex`. Set --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}'.
+
 ## Default FX Graph Optimization
 
 ### FX Graph pass
@@ -28,7 +32,9 @@ Users can register a custom graph fusion pass in npugraph_ex to modify PyTorch F
 Below is the declaration of this API and a demo of its usage.
 
 ```python
-register_replacement(search_fn, replace_fn, example_inputs, trace_fn=fwd_only, extra_check=_return_true, search_fn_pattern=None)
+register_replacement(
+    search_fn, replace_fn, example_inputs, trace_fn=fwd_only, extra_check=_return_true, search_fn_pattern=None
+)
 ```
 
 |Parameter Name| Input/Output |Explanation|Is necessary|
@@ -50,6 +56,7 @@ from torch._inductor.pattern_matcher import Match
 from torch._subclasses.fake_tensor import FakeTensorMode
 from npugraph_ex.core.utils import logger
 
+
 # Assume fusing the add operator and the npu_rms_norm operator into the npu_add_rms_norm operator
 # Define a search_fn to find the operator combinations in the original FX graph before fusion.
 def search_fn(x1, x2, gamma):
@@ -57,24 +64,25 @@ def search_fn(x1, x2, gamma):
     y, _ = torch_npu.npu_rms_norm(xOut, gamma)
     return y, xOut
 
+
 # Define a replace_fn, that is, a fusion operator, used to replace operator combinations in the FX graph
 def replace_fn(x1, x2, gamma):
-    y, _, xOut = torch_npu.npu_add_rms_norm(
-        x1, x2, gamma
-    )
+    y, _, xOut = torch_npu.npu_add_rms_norm(x1, x2, gamma)
     return y, xOut
+
 
 # extra_check can pass in additional validation logic. Here, it is used to check whether the last dimension of the first input parameter x1 is a specific value; if it is not the specific value, fusion is not allowed.
 def extra_check(match: Match):
     x1 = match.kwargs.get("x1")
 
     if x1 is None:
-        return False 
+        return False
     if not hasattr(x1, "meta") or "val" not in x1.meta:
         return False
 
     a_shape = x1.meta["val"].shape
-    return a_shape[-1] == 7168 
+    return a_shape[-1] == 7168
+
 
 # Define some sample inputs to trace search_fn and replace_fn into an FX graph
 fake_mode = FakeTensorMode()
@@ -89,7 +97,7 @@ with fake_mode:
         search_fn=search_fn,
         replace_fn=replace_fn,
         example_inputs=(input_tensor(), input_tensor(), kwargs_tensor()),
-        extra_check=extra_check
+        extra_check=extra_check,
     )
 ```
 

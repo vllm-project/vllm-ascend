@@ -27,7 +27,6 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
 from tests.e2e.conftest import ModelName
-from vllm_ascend.utils import vllm_version_is
 
 os.environ["VLLM_BATCH_INVARIANT"] = "1"
 
@@ -40,8 +39,6 @@ REGEX_COMPILATION_TIMEOUT_ENV = {"VLLM_REGEX_COMPILATION_TIMEOUT_S": "30"}
 @pytest.fixture(params=[False, True], ids=["v1", "v2"])
 def model_runner_env(request):
     use_v2_model_runner = request.param
-    if use_v2_model_runner and vllm_version_is("0.24.0"):
-        pytest.skip("The v2 model runner is not supported on vLLM v0.24.0.")
 
     with patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1" if use_v2_model_runner else "0"}):
         yield

@@ -142,11 +142,9 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 
 | Test name | Description |
 |-----------|-------------|
-| `multi-node-deepseek-r1-w8a8-longseq` | DeepSeek-R1-W8A8 long sequence, 2-node |
 | `multi-node-qwen3-dp` | Qwen3-235B-A22B, 2-node DP |
 | `multi-node-qwenw8a8-2node-eplb` | Qwen3-235B-W8A8 with EPLB, 2-node |
 | `multi-node-dpsk3.2-2node` | DeepSeek-V3.2-W8A8, 2-node |
-| `multi-node-qwenw8a8-2node-longseq` | Qwen3-235B-W8A8 long sequence, 2-node |
 | `multi-node-qwen-disagg-pd` | Qwen3-235B disaggregated PD, 2-node |
 | `multi-node-qwen-vl-disagg-pd` | Qwen3-VL-235B disaggregated PD, 2-node |
 | `multi-node-deepseek-v3.1` | DeepSeek-V3.1-BF16, 2-node |
@@ -245,15 +243,15 @@ This is useful for automated root-cause analysis of nightly regressions.
 
 ## Adding a New Test Case — Worked Example
 
-To add `my-new-test` to the A2 single-node section:
+To add `my-new-test` to the A3 multi-card section:
 
 1. Edit `.github/workflows/configs/nightly_config.yaml`, append under
-   `a2.single_node.test_config`:
+   `a3.multi_card.test_config`:
 
    ```yaml
      - name: my-new-test
-       os: linux-aarch64-a2b3-4
-       tests: tests/e2e/nightly/single_node/ops/multicard_ops_a2/test_my_new.py
+       os: linux-aarch64-nightly-a3-4
+       tests: tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_my_new.py
    ```
 
 2. Commit the new pytest file (`test_my_new.py`) in the same PR.
@@ -267,10 +265,10 @@ To add `my-new-test` to the A2 single-node section:
 The workflow will:
 
 - `pr_nightly_command.yml` reads your PR's `nightly_config.yaml` and resolves
-  `my-new-test` → dispatch A2 only.
-- `Nightly-A2` is dispatched at `main`, but `generate-a2-matrix` checks out your
+  `my-new-test` → dispatch A3 only.
+- `Nightly-A3` is dispatched at `main`, but `setup-vars` checks out your
   PR commit and reads the new entry from the matrix.
-- `single-node-tests` runs one matrix job for `my-new-test`, with
+- `multi-card-tests` runs one matrix job for `my-new-test`, with
   `should_run=true`. The reusable workflow checks out your PR code (via
   `vllm_ascend_ref`) and runs your pytest.
 

@@ -113,26 +113,25 @@
     cmp_ratio = 4
     ori_win_left = 127
     ori_win_right = 0
-    layout_q = 'TND'
-    layout_kv = 'PA_ND'
+    layout_q = "TND"
+    layout_kv = "PA_ND"
     ori_mask_mode = 4
     cmp_mask_mode = 3
-    q = torch.tensor(np.random.uniform(-10, 10, (b*s1, n1, dn))).to(data_type).npu()
+    q = torch.tensor(np.random.uniform(-10, 10, (b * s1, n1, dn))).to(data_type).npu()
 
     cu_seqlens_q = torch.arange(0, (b + 1) * s1, step=s1).to(torch.int32).npu()
     t = cu_seqlens_q[-1].item()
-    seqused_kv = torch.tensor([s2_act]*b).to(torch.int32).npu()
+    seqused_kv = torch.tensor([s2_act] * b).to(torch.int32).npu()
 
     cmp_kv_len = s2_act // cmp_ratio
-    idxs = random.sample(range(cmp_kv_len - s1 + 1),  k)
-    cmp_sparse_indices = torch.tensor([idxs for _ in range(t * n2)]).reshape(t, n2, k). \
-        to(torch.int32).npu()
+    idxs = random.sample(range(cmp_kv_len - s1 + 1), k)
+    cmp_sparse_indices = torch.tensor([idxs for _ in range(t * n2)]).reshape(t, n2, k).to(torch.int32).npu()
 
-    ori_block_num =  math.ceil(s2_act/ori_block_size) * b
+    ori_block_num = math.ceil(s2_act / ori_block_size) * b
     ori_block_table = torch.tensor(np.random.permutation(range(ori_block_num))).to(torch.int32).reshape(b, -1).npu()
     ori_kv = torch.tensor(np.random.uniform(-5, 10, (ori_block_num, ori_block_size, n2, dn))).to(data_type).npu()
 
-    block_num2 =  math.ceil(cmp_kv_len/ori_block_size) * b
+    block_num2 = math.ceil(cmp_kv_len / ori_block_size) * b
     cmp_block_table = torch.tensor(np.random.permutation(range(block_num2))).to(torch.int32).reshape(b, -1).npu()
     cmp_kv = torch.tensor(np.random.uniform(-5, 10, (block_num2, cmp_block_size, n2, dn))).to(data_type).npu()
     sinks = torch.rand(n1).to(torch.float32).npu()
@@ -154,7 +153,7 @@
         layout_q=layout_q,
         layout_kv=layout_kv,
         has_ori_kv=True,
-        has_cmp_kv=True
+        has_cmp_kv=True,
     )
     attn_out, softmax_lse = torch.ops.custom.npu_sparse_attn_sharedkv(
         q,
@@ -179,7 +178,8 @@
         ori_win_right=ori_win_right,
         layout_q=layout_q,
         layout_kv=layout_kv,
-        return_softmax_lse=False)
+        return_softmax_lse=False,
+    )
     ```
 
 - aclgraph模式调用
@@ -208,42 +208,68 @@
     cmp_ratio = 4
     ori_win_left = 127
     ori_win_right = 0
-    layout_q = 'TND'
-    layout_kv = 'PA_ND'
+    layout_q = "TND"
+    layout_kv = "PA_ND"
     ori_mask_mode = 4
     cmp_mask_mode = 3
-    q = torch.tensor(np.random.uniform(-10, 10, (b*s1, n1, dn))).to(data_type).npu()
+    q = torch.tensor(np.random.uniform(-10, 10, (b * s1, n1, dn))).to(data_type).npu()
 
     cu_seqlens_q = torch.arange(0, (b + 1) * s1, step=s1).to(torch.int32).npu()
     t = cu_seqlens_q[-1].item()
-    seqused_kv = torch.tensor([s2_act]*b).to(torch.int32).npu()
+    seqused_kv = torch.tensor([s2_act] * b).to(torch.int32).npu()
 
     cmp_kv_len = s2_act // cmp_ratio
-    idxs = random.sample(range(cmp_kv_len - s1 + 1),  k)
-    cmp_sparse_indices = torch.tensor([idxs for _ in range(t * n2)]).reshape(t, n2, k). \
-        to(torch.int32).npu()
+    idxs = random.sample(range(cmp_kv_len - s1 + 1), k)
+    cmp_sparse_indices = torch.tensor([idxs for _ in range(t * n2)]).reshape(t, n2, k).to(torch.int32).npu()
 
-    ori_block_num =  math.ceil(s2_act/ori_block_size) * b
+    ori_block_num = math.ceil(s2_act / ori_block_size) * b
     ori_block_table = torch.tensor(np.random.permutation(range(ori_block_num))).to(torch.int32).reshape(b, -1).npu()
     ori_kv = torch.tensor(np.random.uniform(-5, 10, (ori_block_num, ori_block_size, n2, dn))).to(data_type).npu()
 
-    block_num2 =  math.ceil(cmp_kv_len/ori_block_size) * b
+    block_num2 = math.ceil(cmp_kv_len / ori_block_size) * b
     cmp_block_table = torch.tensor(np.random.permutation(range(block_num2))).to(torch.int32).reshape(b, -1).npu()
     cmp_kv = torch.tensor(np.random.uniform(-5, 10, (block_num2, cmp_block_size, n2, dn))).to(data_type).npu()
     sinks = torch.rand(n1).to(torch.float32).npu()
 
     from npugraph_ex.configs.compiler_config import CompilerConfig
+
     config = CompilerConfig()
     npu_backend = nge.get_npu_backend(compiler_config=config)
+
 
     class Network(torch.nn.Module):
         def __init__(self):
             super(Network, self).__init__()
 
-        def forward(self, num_heads_q, num_heads_kv, head_dim, batch_size, max_seqlen_q, max_seqlen_kv,
-            topk, has_ori_kv, has_cmp_kv, q, ori_kv, cmp_kv, cmp_sparse_indices, ori_block_table,
-            cmp_block_table, cu_seqlens_q, seqused_kv, softmax_scale, cmp_ratio, sinks,
-            ori_mask_mode, cmp_mask_mode, ori_win_left, ori_win_right, layout_q, layout_kv):
+        def forward(
+            self,
+            num_heads_q,
+            num_heads_kv,
+            head_dim,
+            batch_size,
+            max_seqlen_q,
+            max_seqlen_kv,
+            topk,
+            has_ori_kv,
+            has_cmp_kv,
+            q,
+            ori_kv,
+            cmp_kv,
+            cmp_sparse_indices,
+            ori_block_table,
+            cmp_block_table,
+            cu_seqlens_q,
+            seqused_kv,
+            softmax_scale,
+            cmp_ratio,
+            sinks,
+            ori_mask_mode,
+            cmp_mask_mode,
+            ori_win_left,
+            ori_win_right,
+            layout_q,
+            layout_kv,
+        ):
             metadata = torch.ops.custom.npu_sparse_attn_sharedkv_metadata(
                 num_heads_q=num_heads_q,
                 num_heads_kv=num_heads_kv,
@@ -263,7 +289,7 @@
                 layout_kv=layout_kv,
                 has_ori_kv=has_ori_kv,
                 has_cmp_kv=has_cmp_kv,
-                device="npu:0"
+                device="npu:0",
             )
             npu_out = torch.ops.custom.npu_sparse_attn_sharedkv(
                 q,
@@ -288,8 +314,10 @@
                 ori_win_right=ori_win_right,
                 layout_q=layout_q,
                 layout_kv=layout_kv,
-                return_softmax_lse=False)
+                return_softmax_lse=False,
+            )
             return npu_out
+
 
     mod = torch.compile(Network().npu(), backend=npu_backend, fullgraph=True)
     attn_out, softmax_lse = mod(
@@ -318,7 +346,8 @@
         ori_win_left=ori_win_left,
         ori_win_right=ori_win_right,
         layout_q=layout_q,
-        layout_kv=layout_kv)
+        layout_kv=layout_kv,
+    )
     ```
 
 更多使用示例见[pytest示例](./tests/pytest/README.md)。

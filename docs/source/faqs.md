@@ -2,6 +2,7 @@
 
 ## Version Specific FAQs
 
+- [[v0.23.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/12238)
 - [[v0.22.1rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/10593)
 - [[v0.21.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/9970)
 - [[v0.20.2rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/9586)
@@ -170,10 +171,10 @@ There are several factors that affect output determinism:
    from vllm import LLM, SamplingParams
 
    prompts = [
-      "Hello, my name is",
-      "The president of the United States is",
-      "The capital of France is",
-      "The future of AI is",
+       "Hello, my name is",
+       "The president of the United States is",
+       "The capital of France is",
+       "The future of AI is",
    ]
 
    # Create a sampling params object.
@@ -184,9 +185,9 @@ There are several factors that affect output determinism:
    # Generate texts from the prompts.
    outputs = llm.generate(prompts, sampling_params)
    for output in outputs:
-      prompt = output.prompt
-      generated_text = output.outputs[0].text
-      print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+       prompt = output.prompt
+       generated_text = output.outputs[0].text
+       print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
    ```
 
 2. Set the following environment parameters:
@@ -302,3 +303,7 @@ Single-node deployment is recommended when the model fits within the memory of a
 ### 25. When should I enable FlashComm_v1?
 
 Enable FlashComm_v1 (`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`) when using Tensor Parallelism (TP ≥ 2) with high concurrency. It is threshold-protected and will not activate in low-concurrency scenarios where it could degrade performance.
+
+### 26. What is the difference between FIA and PA operators for attention?
+
+FIA (Flash Attention) is the default attention operator in vLLM-Ascend. In some batch-size settings (particularly medium concurrency), FIA may exhibit suboptimal performance. The PA (Page Attention) operator can be manually enabled via `pa_shape_list` in `--additional-config`. When the runtime batch size matches a value in `pa_shape_list`, the framework switches to PA. This is a temporary tuning knob — future FIA optimizations will make this parameter obsolete.

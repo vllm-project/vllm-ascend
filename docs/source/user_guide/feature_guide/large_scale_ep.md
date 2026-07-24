@@ -231,30 +231,35 @@ Execute the following Python file on all nodes to use the distributed DP server.
     import multiprocessing
     import os
     import sys
-    dp_size = 2 # total number of DP engines for decode/prefill
-    dp_size_local = 2 # number of DP engines on the current node
-    dp_rank_start = 0 # starting DP rank for the current node
+
+    dp_size = 2  # total number of DP engines for decode/prefill
+    dp_size_local = 2  # number of DP engines on the current node
+    dp_rank_start = 0  # starting DP rank for the current node
     # dp_ip is different on prefiller nodes in this example
-    dp_ip = "192.0.0.1" # master node IP for DP communication
-    dp_port = 13395 # port used for DP communication
-    engine_port = 9000 # starting port for all DP groups on the current node
+    dp_ip = "192.0.0.1"  # master node IP for DP communication
+    dp_port = 13395  # port used for DP communication
+    engine_port = 9000  # starting port for all DP groups on the current node
     template_path = "./run_dp_template.sh"
     if not os.path.exists(template_path):
-      print(f"Template file {template_path} does not exist.")
-      sys.exit(1)
+        print(f"Template file {template_path} does not exist.")
+        sys.exit(1)
+
+
     def run_command(dp_rank_local, dp_rank, engine_port_):
-      command = f"bash ./run_dp_template.sh {dp_size} {dp_ip} {dp_port} {dp_rank_local} {dp_rank} {engine_port_} {dp_size_local}"
-      os.system(command)
+        command = f"bash ./run_dp_template.sh {dp_size} {dp_ip} {dp_port} {dp_rank_local} {dp_rank} {engine_port_} {dp_size_local}"
+        os.system(command)
+
+
     processes = []
     for i in range(dp_size_local):
-      dp_rank = dp_rank_start + i
-      dp_rank_local = i
-      engine_port_ = engine_port + i
-      process = multiprocessing.Process(target=run_command, args=(dp_rank_local, dp_rank, engine_port_))
-      processes.append(process)
-      process.start()
+        dp_rank = dp_rank_start + i
+        dp_rank_local = i
+        engine_port_ = engine_port + i
+        process = multiprocessing.Process(target=run_command, args=(dp_rank_local, dp_rank, engine_port_))
+        processes.append(process)
+        process.start()
     for process in processes:
-      process.join()
+        process.join()
     ```
 
 === "Decoder node"
@@ -263,30 +268,35 @@ Execute the following Python file on all nodes to use the distributed DP server.
     import multiprocessing
     import os
     import sys
-    dp_size = 64 # total number of DP engines for decode/prefill
-    dp_size_local = 16 # number of DP engines on the current node
-    dp_rank_start = 0 # starting DP rank for the current node. e.g. 0/16/32/48
+
+    dp_size = 64  # total number of DP engines for decode/prefill
+    dp_size_local = 16  # number of DP engines on the current node
+    dp_rank_start = 0  # starting DP rank for the current node. e.g. 0/16/32/48
     # dp_ip is the same on decoder nodes in this example
-    dp_ip = "192.0.0.5" # master node IP for DP communication.
-    dp_port = 13395 # port used for DP communication
-    engine_port = 9000 # starting port for all DP groups on the current node
+    dp_ip = "192.0.0.5"  # master node IP for DP communication.
+    dp_port = 13395  # port used for DP communication
+    engine_port = 9000  # starting port for all DP groups on the current node
     template_path = "./run_dp_template.sh"
     if not os.path.exists(template_path):
-      print(f"Template file {template_path} does not exist.")
-      sys.exit(1)
+        print(f"Template file {template_path} does not exist.")
+        sys.exit(1)
+
+
     def run_command(dp_rank_local, dp_rank, engine_port_):
-      command = f"bash ./run_dp_template.sh {dp_size} {dp_ip} {dp_port} {dp_rank_local} {dp_rank} {engine_port_} {dp_size_local}"
-      os.system(command)
+        command = f"bash ./run_dp_template.sh {dp_size} {dp_ip} {dp_port} {dp_rank_local} {dp_rank} {engine_port_} {dp_size_local}"
+        os.system(command)
+
+
     processes = []
     for i in range(dp_size_local):
-      dp_rank = dp_rank_start + i
-      dp_rank_local = i
-      engine_port_ = engine_port + i
-      process = multiprocessing.Process(target=run_command, args=(dp_rank_local, dp_rank, engine_port_))
-      processes.append(process)
-      process.start()
+        dp_rank = dp_rank_start + i
+        dp_rank_local = i
+        engine_port_ = engine_port + i
+        process = multiprocessing.Process(target=run_command, args=(dp_rank_local, dp_rank, engine_port_))
+        processes.append(process)
+        process.start()
     for process in processes:
-      process.join()
+        process.join()
     ```
 
 Note that the prefiller nodes and the decoder nodes may have different configurations. In this example, each prefiller node is deployed as a master node independently, while the decoder nodes use the 192.0.0.5 node as the master node. This leads to differences in 'dp_size_local' and 'dp_rank_start'
@@ -364,21 +374,21 @@ models = [
     dict(
         attr="service",
         type=VLLMCustomAPIChatStream,
-        abbr='vllm-api-stream-chat',
+        abbr="vllm-api-stream-chat",
         path="vllm-ascend/DeepSeek-R1-W8A8",
         model="dsr1",
-        request_rate = 28,
-        retry = 2,
-        host_ip = "192.0.0.1", # Proxy service host IP
-        host_port = 8000,  # Proxy service Port
-        max_out_len = 10,
+        request_rate=28,
+        retry=2,
+        host_ip="192.0.0.1",  # Proxy service host IP
+        host_port=8000,  # Proxy service Port
+        max_out_len=10,
         batch_size=1536,
         trust_remote_code=True,
-        generation_kwargs = dict(
-            temperature = 0,
-            seed = 1024,
+        generation_kwargs=dict(
+            temperature=0,
+            seed=1024,
             ignore_eos=False,
-        )
+        ),
     )
 ]
 ```

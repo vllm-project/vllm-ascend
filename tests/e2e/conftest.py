@@ -962,7 +962,6 @@ class VllmRunner:
         tensor_parallel_size: int = 1,
         block_size: int = 16,
         enable_chunked_prefill: bool = True,
-        swap_space: int = 4,
         enforce_eager: bool | None = False,
         quantization: str | None = None,
         **kwargs,
@@ -979,7 +978,6 @@ class VllmRunner:
             tokenizer_mode=tokenizer_mode,
             trust_remote_code=True,
             dtype=dtype,
-            swap_space=swap_space,
             enforce_eager=enforce_eager,
             disable_log_stats=disable_log_stats,
             tensor_parallel_size=tensor_parallel_size,
@@ -1393,7 +1391,6 @@ class DPVllmRunner(VllmRunner):
         tensor_parallel_size: int = 1,
         block_size: int = 16,
         enable_chunked_prefill: bool = True,
-        swap_space: int = 4,
         enforce_eager: bool | None = False,
         quantization: str | None = None,
         data_parallel_size: int = 2,
@@ -1416,7 +1413,6 @@ class DPVllmRunner(VllmRunner):
             tokenizer_mode=tokenizer_mode,
             trust_remote_code=True,
             dtype=dtype,
-            swap_space=swap_space,
             enforce_eager=enforce_eager,
             disable_log_stats=disable_log_stats,
             tensor_parallel_size=tensor_parallel_size,
@@ -1924,7 +1920,9 @@ def qwen_prompt(questions: list[str]) -> list[str]:
 
 
 def hunyuan_prompt(questions: list[str]) -> list[str]:
-    placeholder = "<｜hy_place▁holder▁no▁100｜><｜hy_place▁holder▁no▁102｜><｜hy_place▁holder▁no▁101｜>"  # noqa: E501
+    # vLLM's Hunyuan prompt update adds the image start/end tokens around
+    # this placeholder. Supplying the wrapper here would duplicate it.
+    placeholder = "<｜hy_place▁holder▁no▁102｜>"  # noqa: E501
     return [f"<｜hy_begin▁of▁sentence｜>{placeholder}{question}<｜hy_User｜>" for question in questions]
 
 

@@ -15,7 +15,6 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_sp,
-    flashcomm2_enable,
     get_ascend_device_type,
     has_layer_idx,
     is_drafter_moe_model,
@@ -134,11 +133,9 @@ def set_ascend_forward_context(
         forward_context.mmrs_fusion = mmrs_fusion
         forward_context.num_tokens = num_tokens
         forward_context.flash_comm_v1_enabled = flash_comm_v1_enabled
-        # TODO(Levi-JQ): another PR to normalize the enabling logic for sp/fc2
-        forward_context.flashcomm_v2_enabled = flashcomm2_enable() and tp_world_size > 1 and num_tokens is not None
 
         forward_context.pad_size = 0
-        if forward_context.flash_comm_v1_enabled or forward_context.flashcomm_v2_enabled:
+        if forward_context.flash_comm_v1_enabled:
             pad_size = (tp_world_size - (num_tokens % tp_world_size)) % tp_world_size
             forward_context.pad_size = pad_size
 
@@ -164,7 +161,7 @@ def set_ascend_forward_context(
         if dp_world_size > 1 and forward_context.dp_metadata is not None:
             dp_meta = forward_context.dp_metadata
             max_tokens_across_dp = dp_meta.num_tokens_across_dp_cpu.max().item()
-            if forward_context.flash_comm_v1_enabled or forward_context.flashcomm_v2_enabled:
+            if forward_context.flash_comm_v1_enabled:
                 padded_length = (max_tokens_across_dp + tp_world_size - 1) // tp_world_size * tp_world_size
                 pad_size = padded_length - num_tokens
                 forward_context.padded_length = padded_length
@@ -316,8 +313,15 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
 
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     soc_version = get_ascend_device_type()
+    lora_config = getattr(vllm_config, "lora_config", None)
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
+    elif lora_config is not None and vllm_config.parallel_config.enable_expert_parallel:
+        # LoRA + EP requires AlltoAll because the MC2/FusedMC2 paths
+        # Ascend MoE LoRA cannot patch FusedMC2 path for dispatch_ffn_combine
+        # is a single fused C++ op. This covers both normal model
+        # forward and _dummy_run during profile_run.
+        moe_comm_type = MoECommType.ALLTOALL
     elif soc_version == AscendDeviceType.A2:
         moe_comm_type = _select_a2_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
     elif soc_version == AscendDeviceType.A3:
@@ -353,7 +357,6 @@ class _ExtraForwardContextProxy:
         "mmrs_fusion",
         "num_tokens",
         "flash_comm_v1_enabled",
-        "flashcomm_v2_enabled",
         "pad_size",
         "padded_length",
         "num_tokens_across_dp",

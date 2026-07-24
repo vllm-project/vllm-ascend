@@ -1,4 +1,3 @@
-import vllm.model_executor.layers.fla.ops
 import vllm.model_executor.layers.mamba.ops.causal_conv1d
 import vllm.v1.worker.gpu.sample.gumbel
 from vllm.triton_utils import HAS_TRITON, triton
@@ -8,15 +7,23 @@ from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.layernorm_guard import LayerNormFn
 from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_recurrent_gated_delta_rule_fwd_kernel
 from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_npu
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.25.1"):
+    import vllm.model_executor.layers.fla.ops as fla_ops  # type: ignore[import-not-found]
+    import vllm.model_executor.layers.fla.ops.fused_recurrent as fla_fused_recurrent  # type: ignore[import-not-found]
+    import vllm.model_executor.layers.fla.ops.layernorm_guard as fla_layernorm_guard  # type: ignore[import-not-found]
+else:
+    import vllm.third_party.flash_linear_attention.ops as fla_ops
+    import vllm.third_party.flash_linear_attention.ops.fused_recurrent as fla_fused_recurrent
+    import vllm.third_party.flash_linear_attention.ops.layernorm_guard as fla_layernorm_guard
 
 triton.next_power_of_2 = next_power_of_2
 
 vllm.model_executor.layers.mamba.ops.causal_conv1d.causal_conv1d_update = causal_conv1d_update_npu
-vllm.model_executor.layers.fla.ops.fused_recurrent.fused_recurrent_gated_delta_rule_fwd_kernel = (
-    fused_recurrent_gated_delta_rule_fwd_kernel
-)
-vllm.model_executor.layers.fla.ops.layernorm_guard.LayerNormFn = LayerNormFn
-vllm.model_executor.layers.fla.ops.chunk_gated_delta_rule = chunk_gated_delta_rule
+fla_fused_recurrent.fused_recurrent_gated_delta_rule_fwd_kernel = fused_recurrent_gated_delta_rule_fwd_kernel
+fla_layernorm_guard.LayerNormFn = LayerNormFn
+fla_ops.chunk_gated_delta_rule = chunk_gated_delta_rule
 
 # On NPU platforms without an active Triton backend (e.g. 310P), replace the
 # Triton-based fused_post_conv_prep with a pure-PyTorch fallback so that
@@ -63,7 +70,7 @@ if not HAS_TRITON:
 
         return q, k, v, g, torch.sigmoid(b.float())
 
-    vllm.model_executor.layers.fla.ops.fused_post_conv_prep = _fused_post_conv_prep_pytorch
+    fla_ops.fused_post_conv_prep = _fused_post_conv_prep_pytorch
 
     def _fused_recurrent_packed_decode_pytorch(
         mixed_qkv,
@@ -121,6 +128,4 @@ if not HAS_TRITON:
 
         return out, initial_state
 
-    vllm.model_executor.layers.fla.ops.fused_recurrent.fused_recurrent_gated_delta_rule_packed_decode = (
-        _fused_recurrent_packed_decode_pytorch
-    )
+    fla_fused_recurrent.fused_recurrent_gated_delta_rule_packed_decode = _fused_recurrent_packed_decode_pytorch

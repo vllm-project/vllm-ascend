@@ -19,7 +19,6 @@ import torch
 from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.triton_utils import triton
@@ -35,6 +34,11 @@ from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_s
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.25.1"):
+    from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd  # type: ignore[import-not-found]
+else:
+    from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
@@ -142,11 +146,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
-        if vllm_version_is("0.24.0"):
-            output[:num_tokens], _ = self.out_proj(core_attn_out)
-        else:
-            out, _ = self.out_proj(core_attn_out)
-            return out
+        out, _ = self.out_proj(core_attn_out)
+        if output is not None:
+            output[:num_tokens] = out
+        return out
 
     def _forward_core(
         self,

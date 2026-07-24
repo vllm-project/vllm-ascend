@@ -263,6 +263,7 @@ import os
 import subprocess
 import sys
 
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dp-size", type=int, required=True, help="Data parallel size.")
@@ -274,6 +275,7 @@ def parse_args():
     parser.add_argument("--vllm-start-port", type=int, default=9000, help="Starting port for the engine.")
     return parser.parse_args()
 
+
 args = parse_args()
 dp_size = args.dp_size
 tp_size = args.tp_size
@@ -284,6 +286,7 @@ dp_rank_start = args.dp_rank_start
 dp_address = args.dp_address
 dp_rpc_port = args.dp_rpc_port
 vllm_start_port = args.vllm_start_port
+
 
 def run_command(visible_devices, dp_rank, vllm_engine_port):
     command = [
@@ -298,6 +301,7 @@ def run_command(visible_devices, dp_rank, vllm_engine_port):
         str(tp_size),
     ]
     subprocess.run(command, check=True)
+
 
 if __name__ == "__main__":
     template_path = "./run_dp_template.sh"

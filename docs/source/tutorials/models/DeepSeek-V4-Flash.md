@@ -78,14 +78,18 @@ Select an image based on your machine type and start the docker image on your no
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```
-
+    
 === "A2 series"
 
     Start the docker image on each node.
 
     ```bash
-
+    # deepseek-v4-flash uses the following image
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    
+    # deepseek-v4-flash-dspark uses the following image
+    export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
+    
     docker run --rm \
         --name vllm-ascend \
         --shm-size=512g \
@@ -180,6 +184,41 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         "enable_dsa_cp": true,
         "multistream_overlap_shared_expert":true}'
     ```
+
+=== "A2 series with dspark"
+
+    Run the following script to execute online inference.
+
+    ```shell
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    export HCCL_BUFFSIZE=1024
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE=AIV
+
+    vllm serve /root/.cache/modelscope/hub/models/UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test \
+        --max-model-len 800000 \
+        --max-num-batched-tokens 8192 \
+        --served-model-name dsv4-dspark \
+        --gpu-memory-utilization 0.9 \
+        --max-num-seqs 32 \
+        --data-parallel-size 1 \
+        --tensor-parallel-size 8 \
+        --enable-expert-parallel \
+        --tokenizer-mode deepseek_v4 \
+        --tool-call-parser deepseek_v4 \
+        --enable-auto-tool-choice \
+        --reasoning-parser deepseek_v4 \
+        --no-disable-hybrid-kv-cache-manager \
+        --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
+        --quantization ascend \
+        --port 8000 \
+        --block-size 128 \
+        --speculative-config '{"method": "dspark", "num_speculative_tokens": 7, "enforce_eager": true}'  \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    ```
+    tps more than 50+ ,its reach  2X speed of dsv4f with mtp
 
 === "A3 series"
 
@@ -287,51 +326,18 @@ Before you start, please:
     import subprocess
     import sys
 
+
     def parse_args():
         parser = argparse.ArgumentParser()
-        parser.add_argument(
-            "--dp-size",
-            type=int,
-            required=True,
-            help="Data parallel size."
-        )
-        parser.add_argument(
-            "--tp-size",
-            type=int,
-            default=1,
-            help="Tensor parallel size."
-        )
-        parser.add_argument(
-            "--dp-size-local",
-            type=int,
-            default=-1,
-            help="Local data parallel size."
-        )
-        parser.add_argument(
-            "--dp-rank-start",
-            type=int,
-            default=0,
-            help="Starting rank for data parallel."
-        )
-        parser.add_argument(
-            "--dp-address",
-            type=str,
-            required=True,
-            help="IP address for data parallel master node."
-        )
-        parser.add_argument(
-            "--dp-rpc-port",
-            type=str,
-            default=12345,
-            help="Port for data parallel master node."
-        )
-        parser.add_argument(
-            "--vllm-start-port",
-            type=int,
-            default=9000,
-            help="Starting port for the engine."
-        )
+        parser.add_argument("--dp-size", type=int, required=True, help="Data parallel size.")
+        parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallel size.")
+        parser.add_argument("--dp-size-local", type=int, default=-1, help="Local data parallel size.")
+        parser.add_argument("--dp-rank-start", type=int, default=0, help="Starting rank for data parallel.")
+        parser.add_argument("--dp-address", type=str, required=True, help="IP address for data parallel master node.")
+        parser.add_argument("--dp-rpc-port", type=str, default=12345, help="Port for data parallel master node.")
+        parser.add_argument("--vllm-start-port", type=int, default=9000, help="Starting port for the engine.")
         return parser.parse_args()
+
 
     args = parse_args()
     dp_size = args.dp_size
@@ -343,6 +349,7 @@ Before you start, please:
     dp_address = args.dp_address
     dp_rpc_port = args.dp_rpc_port
     vllm_start_port = args.vllm_start_port
+
 
     def run_command(visible_devices, dp_rank, vllm_engine_port):
         command = [
@@ -358,6 +365,7 @@ Before you start, please:
         ]
         subprocess.run(command, check=True)
 
+
     if __name__ == "__main__":
         template_path = "./run_dp_template.sh"
         if not os.path.exists(template_path):
@@ -370,9 +378,7 @@ Before you start, please:
             dp_rank = dp_rank_start + i
             vllm_engine_port = vllm_start_port + i
             visible_devices = ",".join(str(x) for x in range(i * tp_size, (i + 1) * tp_size))
-            process = multiprocessing.Process(target=run_command,
-                                            args=(visible_devices, dp_rank,
-                                                    vllm_engine_port))
+            process = multiprocessing.Process(target=run_command, args=(visible_devices, dp_rank, vllm_engine_port))
             processes.append(process)
             process.start()
 
@@ -579,6 +585,7 @@ Before you start, please:
     import subprocess
     import sys
 
+
     def parse_args():
         parser = argparse.ArgumentParser()
         parser.add_argument("--dp-size", type=int, required=True, help="Data parallel size.")
@@ -590,6 +597,7 @@ Before you start, please:
         parser.add_argument("--vllm-start-port", type=int, default=9000, help="Starting port for the engine.")
         return parser.parse_args()
 
+
     args = parse_args()
     dp_size = args.dp_size
     tp_size = args.tp_size
@@ -600,6 +608,7 @@ Before you start, please:
     dp_address = args.dp_address
     dp_rpc_port = args.dp_rpc_port
     vllm_start_port = args.vllm_start_port
+
 
     def run_command(visible_devices, dp_rank, vllm_engine_port):
         command = [
@@ -614,6 +623,7 @@ Before you start, please:
             str(tp_size),
         ]
         subprocess.run(command, check=True)
+
 
     if __name__ == "__main__":
         template_path = "./run_dp_template.sh"

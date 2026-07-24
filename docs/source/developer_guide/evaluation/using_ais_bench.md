@@ -159,7 +159,7 @@ There are several arguments that you should update according to your environment
 - `path`: Update to your model weight path.
 - `model`: Update to your model name in vLLM.
 - `host_ip` and `host_port`: Update to your vLLM server ip and port.
-- `max_out_len`: Note `max_out_len` + LLM input length should be less than `max_model_len`(config in your vllm server), `32768` will be suitable for most datasets.
+- `max_out_len`: Note `max_out_len` + LLM input length should be less than `max_model_len` (config in your vllm server), `32768` will be suitable for most datasets.
 - `batch_size`: Update according to your dataset.
 - `temperature`: Update inference argument.
 
@@ -171,27 +171,26 @@ models = [
     dict(
         attr="service",
         type=VLLMCustomAPIChat,
-        abbr='vllm-api-general-chat',
+        abbr="vllm-api-general-chat",
         path="xxxx",
         model="xxxx",
-        request_rate = 0,
-        retry = 2,
-        host_ip = "localhost",
-        host_port = 8000,
-        max_out_len = xxx,
-        batch_size = xxx,
+        request_rate=0,
+        retry=2,
+        host_ip="localhost",
+        host_port=8000,
+        max_out_len=xxx,
+        batch_size=xxx,
         trust_remote_code=False,
-        generation_kwargs = dict(
-            temperature = 0.6,
-            top_k = 10,
-            top_p = 0.95,
-            seed = None,
-            repetition_penalty = 1.03,
+        generation_kwargs=dict(
+            temperature=0.6,
+            top_k=10,
+            top_p=0.95,
+            seed=None,
+            repetition_penalty=1.03,
         ),
-        pred_postprocessor=dict(type=extract_non_reasoning_content)
+        pred_postprocessor=dict(type=extract_non_reasoning_content),
     )
 ]
-
 ```
 
 #### Execute Accuracy Evaluation

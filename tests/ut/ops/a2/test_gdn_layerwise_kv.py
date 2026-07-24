@@ -23,6 +23,7 @@ from vllm.forward_context import ForwardContext, override_forward_context
 from tests.ut.ops.test_gdn_layerwise_kv import (
     _GDNForwardWrapper,
     _make_prefill_metadata,
+    _run_gdn_forward,
 )
 
 
@@ -80,19 +81,12 @@ def test_npu_connector_observes_updated_gdn_state_after_compile():
         patch("vllm_ascend.attention.utils.is_v1_kv_transfer_group", return_value=True),
         patch("vllm_ascend.attention.utils.get_kv_transfer_group", return_value=connector),
     ):
-        # vLLM 0.24 writes to output; earlier versions return the result.
-        eager_output = model(hidden_states, output)
-        torch.testing.assert_close(
-            output if eager_output is None else eager_output,
-            hidden_states + 1,
-        )
+        eager_output = _run_gdn_forward(model, hidden_states, output)
+        torch.testing.assert_close(eager_output, hidden_states + 1)
         compiled_model = torch.compile(model, backend="inductor", fullgraph=True)
         for _ in range(2):
-            compiled_output = compiled_model(hidden_states, output)
-            torch.testing.assert_close(
-                output if compiled_output is None else compiled_output,
-                hidden_states + 1,
-            )
+            compiled_output = _run_gdn_forward(compiled_model, hidden_states, output)
+            torch.testing.assert_close(compiled_output, hidden_states + 1)
         torch.npu.synchronize()
 
     assert connector.save_kv_layer.call_count == 3

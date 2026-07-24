@@ -164,6 +164,7 @@
     import torch.nn as nn
     import math
 
+
     def get_seq_used_by_batch(batch_idx, S, seqused, cu_seqlens):
         if seqused is not None:
             return seqused[batch_idx]
@@ -173,11 +174,12 @@
             else:
                 return S
 
+
     data_type = torch.bfloat16
     hidden_size = 4096
     rope_head_dim = 64
     norm_eps = 1e-6
-    coff = 1 # 1:no overlap 2:overlap
+    coff = 1  # 1:no overlap 2:overlap
     cmp_ratio = 128
     rotary_mode = 2
     head_dim = 512
@@ -187,9 +189,9 @@
     S = 1
     S_max = 0
     block_size = 128
-    start_pos = [8191] * B # (B,)
-    start_p=8191
-    seqused = None # (B,), None时cu_seqlens的数据全部参与计算，否则按传参实际值计算
+    start_pos = [8191] * B  # (B,)
+    start_p = 8191
+    seqused = None  # (B,), None时cu_seqlens的数据全部参与计算，否则按传参实际值计算
 
     # BS是否合轴
     bs_combine_flag = True
@@ -205,10 +207,10 @@
     if bs_combine_flag:
         if cu_seqlens is None:
             T = B * S
-            if T !=0:
+            if T != 0:
                 cu_seqlens = torch.arange(0, T + 1, S, dtype=torch.int32)
             else:
-                cu_seqlens = torch.zeros((B+1), dtype=torch.int32)
+                cu_seqlens = torch.zeros((B + 1), dtype=torch.int32)
         else:
             cu_seqlens = torch.tensor(cu_seqlens).to(torch.int32)
         for i in range(B):
@@ -250,12 +252,16 @@
                 block_table[i][j] = next_block_id
                 next_block_id = next_block_id + 1
 
-    if B==0:
+    if B == 0:
         kv_state = torch.tensor(np.random.uniform(-10, 10, (0, block_size, coff * head_dim))).to(torch.float32)
         score_state = torch.tensor(np.random.uniform(-10, 10, (0, block_size, coff * head_dim))).to(torch.float32)
     else:
-        kv_state = torch.tensor(np.random.uniform(-10, 10, (torch.max(block_table) + 1, block_size, coff * head_dim))).to(torch.float32)
-        score_state = torch.tensor(np.random.uniform(-10, 10, (torch.max(block_table) + 1, block_size, coff * head_dim))).to(torch.float32)
+        kv_state = torch.tensor(np.random.uniform(-10, 10, (torch.max(block_table) + 1, block_size, coff * head_dim))).to(
+            torch.float32
+        )
+        score_state = torch.tensor(
+            np.random.uniform(-10, 10, (torch.max(block_table) + 1, block_size, coff * head_dim))
+        ).to(torch.float32)
 
     # other input
     if bs_combine_flag:
@@ -283,28 +289,26 @@
     if seqused is not None:
         seqused = torch.tensor(seqused).to(torch.int32).npu()
 
-    cmp_kv,_ ,_ ,_ ,_ = (
-        torch.ops.custom.compressor(
-            x,
-            wkv,
-            wgate,
-            kv_state,
-            score_state,
-            ape,
-            norm_weight,
-            rope_sin,
-            rope_cos,
-            kv_block_table = block_table,
-            score_block_table = block_table,
-            cu_seqlens = cu_seqlens,
-            seqused = seqused,
-            start_pos = start_pos,
-            rope_head_dim = rope_head_dim,
-            cmp_ratio = cmp_ratio,
-            coff = coff,
-            norm_eps = norm_eps,
-            rotary_mode = rotary_mode
-        )
+    cmp_kv, _, _, _, _ = torch.ops.custom.compressor(
+        x,
+        wkv,
+        wgate,
+        kv_state,
+        score_state,
+        ape,
+        norm_weight,
+        rope_sin,
+        rope_cos,
+        kv_block_table=block_table,
+        score_block_table=block_table,
+        cu_seqlens=cu_seqlens,
+        seqused=seqused,
+        start_pos=start_pos,
+        rope_head_dim=rope_head_dim,
+        cmp_ratio=cmp_ratio,
+        coff=coff,
+        norm_eps=norm_eps,
+        rotary_mode=rotary_mode,
     )
     ```
 - aclgraph调用
@@ -318,6 +322,7 @@
     import custom_ops
     import math
 
+
     def get_seq_used_by_batch(batch_idx, S, seqused, cu_seqlens):
         if seqused is not None:
             return seqused[batch_idx]
@@ -327,11 +332,12 @@
             else:
                 return S
 
+
     data_type = torch.bfloat16
     hidden_size = 4096
     rope_head_dim = 64
     norm_eps = 1e-6
-    coff = 1 # 1:no overlap 2:overlap
+    coff = 1  # 1:no overlap 2:overlap
     cmp_ratio = 128
     rotary_mode = 2
     head_dim = 512
@@ -341,9 +347,9 @@
     S = 1
     S_max = 0
     block_size = 128
-    start_pos = [8191] * B # (B,)
-    start_p=8191
-    seqused = None # (B,), None时cu_seqlens的数据全部参与计算，否则按传参实际值计算
+    start_pos = [8191] * B  # (B,)
+    start_p = 8191
+    seqused = None  # (B,), None时cu_seqlens的数据全部参与计算，否则按传参实际值计算
 
     # BS是否合轴
     bs_combine_flag = True
@@ -359,10 +365,10 @@
     if bs_combine_flag:
         if cu_seqlens is None:
             T = B * S
-            if T !=0:
+            if T != 0:
                 cu_seqlens = torch.arange(0, T + 1, S, dtype=torch.int32)
             else:
-                cu_seqlens = torch.zeros((B+1), dtype=torch.int32)
+                cu_seqlens = torch.zeros((B + 1), dtype=torch.int32)
         else:
             cu_seqlens = torch.tensor(cu_seqlens).to(torch.int32)
         for i in range(B):
@@ -404,12 +410,16 @@
                 block_table[i][j] = next_block_id
                 next_block_id = next_block_id + 1
 
-    if B==0:
+    if B == 0:
         kv_state = torch.tensor(np.random.uniform(-10, 10, (0, block_size, coff * head_dim))).to(torch.float32)
         score_state = torch.tensor(np.random.uniform(-10, 10, (0, block_size, coff * head_dim))).to(torch.float32)
     else:
-        kv_state = torch.tensor(np.random.uniform(-10, 10, (torch.max(block_table) + 1, block_size, coff * head_dim))).to(torch.float32)
-        score_state = torch.tensor(np.random.uniform(-10, 10, (torch.max(block_table) + 1, block_size, coff * head_dim))).to(torch.float32)
+        kv_state = torch.tensor(np.random.uniform(-10, 10, (torch.max(block_table) + 1, block_size, coff * head_dim))).to(
+            torch.float32
+        )
+        score_state = torch.tensor(
+            np.random.uniform(-10, 10, (torch.max(block_table) + 1, block_size, coff * head_dim))
+        ).to(torch.float32)
 
     # other input
     if bs_combine_flag:
@@ -437,63 +447,84 @@
     if seqused is not None:
         seqused = torch.tensor(seqused).to(torch.int32).npu()
 
+
     class CompressorNetwork(nn.Module):
         def __init__(self):
             super(CompressorNetwork, self).__init__()
 
-        def forward(self, x, wkv, wgate, kv_state, score_state, ape, norm_weight, rope_sin,
-                    rope_cos, rope_head_dim, cmp_ratio, kv_block_table = None, score_block_table = None, cu_seqlens = None,
-                    seqused = None, start_pos = None, coff = 1, norm_eps = 1e-6, rotary_mode = 1):
-            cmp_kv,_ ,_ ,_ ,_ = (
-                torch.ops.custom.compressor(
-                    x,
-                    wkv,
-                    wgate,
-                    kv_state,
-                    score_state,
-                    ape,
-                    norm_weight,
-                    rope_sin,
-                    rope_cos,
-                    kv_block_table = kv_block_table,
-                    score_block_table = score_block_table,
-                    cu_seqlens = cu_seqlens,
-                    seqused = seqused,
-                    start_pos = start_pos,
-                    rope_head_dim = rope_head_dim,
-                    cmp_ratio = cmp_ratio,
-                    coff = coff,
-                    norm_eps = norm_eps,
-                    rotary_mode = rotary_mode
-                )
+        def forward(
+            self,
+            x,
+            wkv,
+            wgate,
+            kv_state,
+            score_state,
+            ape,
+            norm_weight,
+            rope_sin,
+            rope_cos,
+            rope_head_dim,
+            cmp_ratio,
+            kv_block_table=None,
+            score_block_table=None,
+            cu_seqlens=None,
+            seqused=None,
+            start_pos=None,
+            coff=1,
+            norm_eps=1e-6,
+            rotary_mode=1,
+        ):
+            cmp_kv, _, _, _, _ = torch.ops.custom.compressor(
+                x,
+                wkv,
+                wgate,
+                kv_state,
+                score_state,
+                ape,
+                norm_weight,
+                rope_sin,
+                rope_cos,
+                kv_block_table=kv_block_table,
+                score_block_table=score_block_table,
+                cu_seqlens=cu_seqlens,
+                seqused=seqused,
+                start_pos=start_pos,
+                rope_head_dim=rope_head_dim,
+                cmp_ratio=cmp_ratio,
+                coff=coff,
+                norm_eps=norm_eps,
+                rotary_mode=rotary_mode,
             )
             return cmp_kv
 
+
     from torchair.configs.compiler_config import CompilerConfig
+
     config = CompilerConfig()
     npu_backend = torchair.get_npu_backend(compiler_config=config)
     torch._dynamo.reset()
     npu_mode = torch.compile(CompressorNetwork(), fullgraph=True, backend=npu_backend, dynamic=False)
     cmp_kv = npu_mode(
-                    x,
-                    wkv,
-                    wgate,
-                    kv_state,
-                    score_state,
-                    ape,
-                    norm_weight,
-                    rope_sin,
-                    rope_cos,
-                    kv_block_table = block_table,
-                    score_block_table = block_table,
-                    cu_seqlens = cu_seqlens,
-                    seqused = seqused,
-                    start_pos = start_pos,
-                    rope_head_dim = rope_head_dim,
-                    cmp_ratio = cmp_ratio,
-                    coff = coff,
-                    norm_eps = norm_eps,
-                    rotary_mode = rotary_mode)
+        x,
+        wkv,
+        wgate,
+        kv_state,
+        score_state,
+        ape,
+        norm_weight,
+        rope_sin,
+        rope_cos,
+        kv_block_table=block_table,
+        score_block_table=block_table,
+        cu_seqlens=cu_seqlens,
+        seqused=seqused,
+        start_pos=start_pos,
+        rope_head_dim=rope_head_dim,
+        cmp_ratio=cmp_ratio,
+        coff=coff,
+        norm_eps=norm_eps,
+        rotary_mode=rotary_mode,
+    )
     ```
 
 更多使用示例见[pytest示例](./tests/pytest/README.md)。

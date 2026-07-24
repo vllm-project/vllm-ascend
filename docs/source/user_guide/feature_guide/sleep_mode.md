@@ -114,7 +114,7 @@ The following is a simple example of how to use sleep mode.
         prompt = "How are you?"
 
         free, total = torch.npu.mem_get_info()
-        print(f"Free memory before sleep: {free / 1024 ** 3:.2f} GiB")
+        print(f"Free memory before sleep: {free / 1024**3:.2f} GiB")
         # record npu memory use baseline in case other process is running
         used_bytes_baseline = total - free
         llm = LLM("Qwen/Qwen2.5-0.5B-Instruct", enable_sleep_mode=True)
@@ -124,7 +124,7 @@ The following is a simple example of how to use sleep mode.
         llm.sleep(level=1)
 
         free_npu_bytes_after_sleep, total = torch.npu.mem_get_info()
-        print(f"Free memory after sleep: {free_npu_bytes_after_sleep / 1024 ** 3:.2f} GiB")
+        print(f"Free memory after sleep: {free_npu_bytes_after_sleep / 1024**3:.2f} GiB")
         used_bytes = total - free_npu_bytes_after_sleep - used_bytes_baseline
         # now the memory usage should be less than the model weights
         # (0.5B model, 1GiB weights)

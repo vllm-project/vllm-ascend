@@ -138,7 +138,7 @@ For example:
      Modify `__init__` of `vllm_adaptor.py` to add a new moe model eplb params:
 
      ```python
-        if self.model.config.model_type == "qwen3_moe":
+     if self.model.config.model_type == "qwen3_moe":
          self.num_dense_layers = 0
          self.global_expert_num = self.model.config.num_experts
      ```
@@ -178,16 +178,14 @@ For example:
 All integer input parameters must explicitly specify their maximum and minimum values and be subject to valid value validation. For example, `expert_heat_collection_interval` must be greater than 0:
 
 ```python
-    @staticmethod
-    def check_iterations(iterations):
-        if not isinstance(iterations, int):
-            raise TypeError(f"The {iterations} is not int.")
-        if iterations <= 0:
-            raise ValueError(
-                f"The {iterations} can not be less than or equal to 0.")
-        if iterations > sys.maxsize:
-            raise ValueError(
-                f"The {iterations} can not be larger than {sys.maxsize}")
+@staticmethod
+def check_iterations(iterations):
+    if not isinstance(iterations, int):
+        raise TypeError(f"The {iterations} is not int.")
+    if iterations <= 0:
+        raise ValueError(f"The {iterations} can not be less than or equal to 0.")
+    if iterations > sys.maxsize:
+        raise ValueError(f"The {iterations} can not be larger than {sys.maxsize}")
 ```
 
 #### File Path
@@ -195,27 +193,26 @@ All integer input parameters must explicitly specify their maximum and minimum v
 The file path for EPLB must be checked for legality, such as whether the file path is valid and whether it has appropriate read and write permissions. For example:
 
 ```python
-    @staticmethod
-    def check_expert_map_path(expert_map):
-        if expert_map is None:
-            return
-        if not isinstance(expert_map, str):
-            raise TypeError("The expert_map is not str.")
-        if not expert_map.strip():
-            raise ValueError("The expert_map is not empty.")
-        _, ext = os.path.splitext(expert_map)
-        if ext.lower() != ".json":
-            raise TypeError("The expert_map is not json.")
-        if not os.path.exists(expert_map):
-            raise ValueError("The expert_map does not exist.")
-        try:
-            with open(expert_map, "w", encoding='utf-8') as f:
-                f.read()
-        except Exception as e:
-            raise IOError(
-                f"Fail read expert info from {expert_map}, please check the reading permission of {expert_map} : {e}"
-            )
-
+@staticmethod
+def check_expert_map_path(expert_map):
+    if expert_map is None:
+        return
+    if not isinstance(expert_map, str):
+        raise TypeError("The expert_map is not str.")
+    if not expert_map.strip():
+        raise ValueError("The expert_map is not empty.")
+    _, ext = os.path.splitext(expert_map)
+    if ext.lower() != ".json":
+        raise TypeError("The expert_map is not json.")
+    if not os.path.exists(expert_map):
+        raise ValueError("The expert_map does not exist.")
+    try:
+        with open(expert_map, "w", encoding="utf-8") as f:
+            f.read()
+    except Exception as e:
+        raise IOError(
+            f"Fail read expert info from {expert_map}, please check the reading permission of {expert_map} : {e}"
+        )
 ```
 
 ### Function Specifications

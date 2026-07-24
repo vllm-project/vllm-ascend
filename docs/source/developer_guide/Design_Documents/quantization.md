@@ -56,13 +56,13 @@ Based on the above content, we present a brief description of the adaptation pro
 ```python
 from vllm_ascend.quantization.methods import register_scheme, AscendLinearScheme, AscendMoEScheme
 
+
 @register_scheme("W4A8_DYNAMIC", "linear")
-class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
-    ...
+class AscendW4A8DynamicLinearMethod(AscendLinearScheme): ...
+
 
 @register_scheme("W4A8_DYNAMIC", "moe")
-class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
-    ...
+class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme): ...
 ```
 
 - **Step 3: Implementation**. Create an algorithm implementation file, such as `vllm_ascend/quantization/methods/w4a8.py`, and implement the method class and logic.
@@ -87,8 +87,7 @@ packed_modules_model_mapping = {
             "gate_proj",
             "up_proj",
         ],
-        "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
     },
 }
 ```

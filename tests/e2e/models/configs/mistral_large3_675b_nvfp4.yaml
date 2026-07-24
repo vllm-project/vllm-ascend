@@ -1,0 +1,98 @@
+# Mistral Large 3 675B NVFP4 Ascend e2e configuration.
+#
+# Validation status (2026-07-19): BLOCKED_BY_HARDWARE_CAPACITY.
+# The tested instance had 2 x Ascend 910B2C and only 117.56 GiB on /data.
+# The approximately 403 GB checkpoint could not be downloaded or loaded.
+# The metric below is a reference target, not an Ascend measurement.
+model_name: "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4"
+model_type: "vllm"
+hardware: "Atlas A3 Series"
+
+# Deployments may replace model_name with this complete local checkpoint.
+local_model_path: "/models/Mistral-Large-3-675B-Instruct-2512-NVFP4"
+
+resource_requirements:
+  recommended_npu: "16 x Atlas A3 NPU or a topology proven to fit the checkpoint"
+  minimum_model_disk_gib: 500
+  checkpoint_size_gib_approx: 403
+  tested_instance:
+    npu: "2 x Ascend 910B2C"
+    hbm_mib_per_npu: 65536
+    data_filesystem_gib: 117.56
+    safe_weight_capacity_gib: 100.74
+  blocked_reason: >-
+    The complete checkpoint cannot fit on the tested /data filesystem, and
+    two NPUs do not provide reliable HBM capacity for the 675B model.
+
+validation:
+  status: "blocked_by_hardware_capacity"
+  real_checkpoint_downloaded: false
+  real_weight_service_started: false
+  openai_api_verified: false
+  reference_case:
+    model_name: "Qwen/Qwen-7B-Chat"
+    hardware: "2 x Ascend 910B2C"
+    tensor_parallel_size: 2
+    gpu_memory_utilization: 0.90
+    max_model_len: 8192
+    result: "passed_real_weights_http_200_non_empty_output"
+    evidence: >-
+      FINAL_ACCEPTANCE.zh-CN.md and qwen7b_* logs in the archived run_logs.
+      This proves the same vLLM-Ascend TP and OpenAI API environment, not the
+      Mistral NVFP4 checkpoint itself.
+
+serve:
+  tensor_parallel_size: 16
+  dtype: bfloat16
+  quantization: nvfp4
+  max_model_len: 131072
+  max_num_seqs: 16
+  gpu_memory_utilization: 0.90
+  trust_remote_code: true
+  enable_expert_parallel: true
+
+envs:
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "1"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+
+smoke_test:
+  endpoint: "/v1/chat/completions"
+  served_model_name: "mistral-large-3-nvfp4"
+  pass_gate: "HTTP 200 and non-empty choices[0].message.content"
+  sampling_params:
+    temperature: 0
+    max_tokens: 512
+    seed: 0
+  prompts:
+    - name: "complex_reasoning"
+      prompt: >-
+        A factory has three production lines. Line A produces 120 units per
+        hour with a 2% defect rate, line B produces 80 units per hour with a
+        5% defect rate, and line C produces 100 units per hour with a 1%
+        defect rate. All lines run for 10 hours. Compute the expected number
+        of non-defective units and show each calculation step.
+    - name: "multilingual_support"
+      prompt: >-
+        请先用中文解释数据主权对跨境云服务的影响，然后用 English summarize
+        the main compliance risks, et terminez en français avec deux
+        recommendations concrètes.
+    - name: "enterprise_incident_response"
+      prompt: >-
+        Produce a P0 response plan for a payment platform whose error rate rose
+        from 0.2% to 8% after a database migration. Cover containment,
+        rollback criteria, communication, evidence preservation, and follow-up.
+
+tasks:
+  - name: "gpqa_diamond"
+    metrics:
+      # Reference value only; it was not measured on the blocked Ascend setup.
+      - name: "exact_match,none"
+        value: 0.6717
+
+num_fewshot: 0
+apply_chat_template: true
+fewshot_as_multiturn: false
+batch_size: 16
