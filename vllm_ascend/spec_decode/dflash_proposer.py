@@ -236,15 +236,27 @@ class AscendDflashProposer(AscendEagleProposer):
 
             else:
                 self._dflash_num_context = num_input_tokens
-                self._runnable(
-                    num_input_tokens=num_input_tokens,
-                    batch_size=num_reqs,
-                    token_indices_to_sample=self.token_indices_to_sample[: num_reqs * self.num_speculative_tokens],
-                    target_positions=self._get_positions(num_input_tokens),
-                    inputs_embeds=None,
-                    multi_steps_attn_metadata=multi_steps_attn_metadata,
-                    num_tokens=num_input_tokens,
+                prepare_context_kv = getattr(
+                    self,
+                    "prepare_dspark_context_kv_for_graph",
+                    None,
                 )
+                context_kv_precomputed = (
+                    prepare_context_kv(get_forward_context()) if callable(prepare_context_kv) else False
+                )
+                try:
+                    self._runnable(
+                        num_input_tokens=num_input_tokens,
+                        batch_size=num_reqs,
+                        token_indices_to_sample=self.token_indices_to_sample[: num_reqs * self.num_speculative_tokens],
+                        target_positions=self._get_positions(num_input_tokens),
+                        inputs_embeds=None,
+                        multi_steps_attn_metadata=multi_steps_attn_metadata,
+                        num_tokens=num_input_tokens,
+                    )
+                finally:
+                    if context_kv_precomputed:
+                        self._dspark_context_kv_precomputed = False
 
             forward_context = get_forward_context()
             if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:

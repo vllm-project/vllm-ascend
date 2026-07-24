@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
+import os
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import replace
@@ -150,6 +151,20 @@ def _is_glm_model(model_config) -> bool:
     return "glm" in str(model_type).lower()
 
 
+def _is_dspark_draft_model(model_config) -> bool:
+    if model_config is None:
+        return False
+    hf_config = getattr(model_config, "hf_config", None)
+    if hf_config is None:
+        return False
+    architectures = getattr(hf_config, "architectures", []) or []
+    return (
+        "Qwen3DSparkModel" in architectures
+        or "DSparkDraftModel" in architectures
+        or getattr(hf_config, "speculators_model_type", None) == "dspark"
+    )
+
+
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
 
@@ -216,14 +231,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.use_cuda_graph = self.runner._use_aclgraph() and not self.speculative_config.enforce_eager
         self._raise_if_padded_drafter_batch_disabled_and_full_graph_enabled()
 
-        # GLM series models: speculative decoding does not yet support running
-        # the draft model in graph mode. Force the draft model to always use
-        # eager mode. This is equivalent to the user adding
-        # `"enforce_eager": true` to the `--speculative-config`, and keeps
-        # the target model's graph-mode setting untouched.
-        # TODO(lilinsiman): Remove this code segment after future versions of the GLM
-        # series models support graph input for speculative inference.
-        if _is_glm_model(self.vllm_config.model_config):
+        # Keep the GLM force-eager default. The validated DSpark path can opt
+        # into draft graph capture explicitly without changing other GLM
+        # speculative methods.
+        enable_glm_dspark_draft_graph = (
+            self.method == "dspark"
+            and _is_dspark_draft_model(draft_model_config)
+            and os.getenv("VLLM_ASCEND_ENABLE_GLM_DSPARK_DRAFT_GRAPH", "0").lower() in ("1", "true", "yes", "on")
+        )
+        if _is_glm_model(self.vllm_config.model_config) and not enable_glm_dspark_draft_graph:
             if self.use_cuda_graph:
                 logger.warning(
                     "GLM series models with speculative decoding currently do "
@@ -233,6 +249,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     "speculative decoding will be added in a future release. "
                 )
             self.use_cuda_graph = False
+        elif enable_glm_dspark_draft_graph and self.use_cuda_graph:
+            logger.warning(
+                "VLLM_ASCEND_ENABLE_GLM_DSPARK_DRAFT_GRAPH is enabled; "
+                "attempting ACL graph capture for the DSpark draft model."
+            )
 
         # TODO: Remove it when the bug of fx-graph is solved
         self.maybe_eager_context: AbstractContextManager[Any] = nullcontext()
@@ -852,6 +873,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # is run in eager mode currently, which means `_pad_query_start_loc_for_fia` is not called,
             # while draft model is run in graph model, which means we should pad the `query_start_loc`.
             # Need to be fixed in the future.
+            actual_num_reqs = common_attn_metadata.num_reqs
             num_reqs = common_attn_metadata.query_start_loc.shape[0]
             self.query_start_loc.gpu[:num_reqs].copy_(common_attn_metadata.query_start_loc)
             self.query_start_loc.cpu[:num_reqs].copy_(common_attn_metadata.query_start_loc_cpu)
@@ -872,8 +894,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.block_table_tensor = self._adjust_tensor(
                 common_attn_metadata.block_table_tensor, slicing_length
             )
-            if self.method == "dflash":
+            if self.method in ("dflash", "dspark"):
                 common_attn_metadata.seq_lens = self._adjust_tensor(common_attn_metadata.seq_lens, num_reqs_padded)
+                stabilize_padded_metadata = getattr(
+                    self,
+                    "_stabilize_padded_graph_metadata",
+                    None,
+                )
+                if callable(stabilize_padded_metadata):
+                    stabilize_padded_metadata(
+                        common_attn_metadata,
+                        actual_num_reqs,
+                        num_reqs_padded,
+                    )
             else:
                 common_attn_metadata.seq_lens = self._adjust_tensor(self.runner.seq_lens, num_reqs_padded)
                 common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
@@ -1046,13 +1079,38 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             }
             runnable = cast(Callable[..., Any], self._runnable)
             run_draft: Callable[[], Any] = partial(runnable, **model_inputs)
+            prepare_context_kv = getattr(
+                self,
+                "prepare_dspark_context_kv_for_graph",
+                None,
+            )
+            context_kv_precomputed = prepare_context_kv(forward_context) if callable(prepare_context_kv) else False
 
-            if self.enable_enpu:
-                self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
-                draft_token_ids = run_draft()
-            else:
-                draft_token_ids = run_draft()
-                self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
+            try:
+                # DSpark rewrites cross-attention sequence lengths and slots
+                # every verifier iteration. Update graph parameters before
+                # replay so the draft query observes the current rollback
+                # state instead of the previous iteration's metadata.
+                update_graph_params_before_run = self.enable_enpu or (
+                    self.method == "dspark" and forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
+                )
+                if update_graph_params_before_run:
+                    self._update_full_graph_params_if_needed(
+                        forward_context,
+                        num_input_tokens,
+                        multi_steps_attn_metadata,
+                    )
+                    draft_token_ids = run_draft()
+                else:
+                    draft_token_ids = run_draft()
+                    self._update_full_graph_params_if_needed(
+                        forward_context,
+                        num_input_tokens,
+                        multi_steps_attn_metadata,
+                    )
+            finally:
+                if context_kv_precomputed:
+                    self._dspark_context_kv_precomputed = False
         return draft_token_ids
 
     def compute_draft_token_ids(self, hidden_states: torch.Tensor):
@@ -1186,7 +1244,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # Dspark speculation requires autoregressive applications of MarkovHead and ConfidenceHead.
                 # The MarkovHead performs bias correction on logits.
                 # The ConfidenceHead predicts the expected acceptance length of tokens(Not yet achieved).
-                raw_logits = self.model.compute_logits(last_hidden_states)
+                raw_logits = self.model.compute_logits(sample_hidden_states)
                 logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
                 num_blk = logits.shape[0]
                 draft_token_ids = self._dspark_draft_buffer[:num_blk]
