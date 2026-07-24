@@ -1,0 +1,323 @@
+on:
+
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+    branches:
+      - main
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+env:
+  # Single source of truth for all shared variables across jobs.
+  # NOTE: GitHub Actions does not support env context in reusable workflow `with:` inputs,
+  # so these values are exported as job outputs via the `setup-vars` job below.
+  ASCEND_LOG_PREFIX: '/root/.cache/ascend-logs'
+
+jobs:
+
+# labeled_doctest.yaml self-runner 测试 
+
+  setup-matrix:
+    name: Setup test matrix
+    runs-on: linux-amd64-cpu-4-hk
+    outputs:
+      matrix: ${{ steps.set_matrix_pr.outputs.matrix || steps.set_matrix_doc.outputs.matrix }}
+    steps:
+      # PR runs should validate the PR content itself. The matrix is generated
+      # from this checkout instead of resolving a Read the Docs version.
+      - name: Checkout current source
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v7
+        with:
+          path: matrix-src
+
+      - name: Set matrix (PR-driven)
+        id: set_matrix_pr
+        run: |
+          set -euo pipefail
+
+          matrix_file="$(mktemp)"
+          trap 'rm -f "${matrix_file}"' EXIT
+          echo '{"include":[]}' > "${matrix_file}"
+
+          doc_repository="${GITHUB_REPOSITORY}"
+          doc_version="pull_request"
+          doc_ref="${GITHUB_REF}"
+          doc_verbose_name="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
+          documentation_url=""
+          repo_dir="${GITHUB_WORKSPACE}/matrix-src"
+
+          vllm_ascend_version="$(python3 "${repo_dir}/docs/source/conf.py" \
+            | jq -r '.vllm_ascend_version // empty')"
+          if [ -z "${vllm_ascend_version}" ]; then
+            echo "Failed to resolve vllm_ascend_version from ${doc_ref}." >&2
+            exit 1
+          fi
+
+          for os_variant in ubuntu openeuler; do
+            if [ "${os_variant}" = "ubuntu" ]; then
+              image="quay.io/ascend/vllm-ascend:${vllm_ascend_version}"
+            else
+              image="quay.io/ascend/vllm-ascend:${vllm_ascend_version}-${os_variant}"
+            fi
+
+            next_matrix_file="$(mktemp)"
+            jq \
+              --arg doc_repository "${doc_repository}" \
+              --arg doc_version "${doc_version}" \
+              --arg doc_ref "${doc_ref}" \
+              --arg doc_verbose_name "${doc_verbose_name}" \
+              --arg documentation_url "${documentation_url}" \
+              --arg vllm_ascend_version "${vllm_ascend_version}" \
+              --arg os_variant "${os_variant}" \
+              --arg image "${image}" \
+              '.include += [{
+                doc_repository: $doc_repository,
+                doc_version: $doc_version,
+                doc_ref: $doc_ref,
+                doc_verbose_name: $doc_verbose_name,
+                documentation_url: $documentation_url,
+                vllm_ascend_version: $vllm_ascend_version,
+                os_variant: $os_variant,
+                image: $image
+              }]' "${matrix_file}" > "${next_matrix_file}"
+            mv "${next_matrix_file}" "${matrix_file}"
+          done
+
+          echo "Resolved PR-driven doctest matrix:"
+          jq . "${matrix_file}"
+
+          {
+            echo "matrix<<EOF"
+            jq -c . "${matrix_file}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Set matrix (doc-driven)
+        id: set_matrix_doc
+        env:
+          INPUT_DOC_VERSIONS: ${{ inputs.doc_versions || '["v0.18.0","latest"]' }}
+        run: |
+          set -euo pipefail
+
+          matrix_file="$(mktemp)"
+          workdir="$(mktemp -d)"
+          trap 'rm -rf "${matrix_file}" "${workdir}"' EXIT
+          echo '{"include":[]}' > "${matrix_file}"
+
+          # Manual and scheduled runs are version-driven. Resolve each RTD
+          # version to the Git ref that owns the published documentation.
+          echo "${INPUT_DOC_VERSIONS}" | jq -e 'type == "array" and all(.[]; type == "string")' >/dev/null
+
+          while IFS= read -r doc_version; do
+            version_url="https://readthedocs.org/api/v3/projects/vllm-ascend/versions/${doc_version}/"
+            metadata_file="${workdir}/${doc_version}.json"
+            repo_dir="${workdir}/repo-${doc_version//[^A-Za-z0-9._-]/-}"
+
+            echo "Resolving Read the Docs version: ${doc_version}"
+            curl --fail --show-error --location \
+              --retry 3 \
+              --retry-delay 5 \
+              "${version_url}" \
+              -o "${metadata_file}"
+
+            doc_ref="$(jq -r '.identifier // empty' "${metadata_file}")"
+            doc_verbose_name="$(jq -r '.verbose_name // empty' "${metadata_file}")"
+            documentation_url="$(jq -r '.urls.documentation // empty' "${metadata_file}")"
+
+            if [ -z "${doc_ref}" ]; then
+              echo "Read the Docs version ${doc_version} does not have an identifier." >&2
+              exit 1
+            fi
+
+            git clone --depth 1 --branch "${doc_ref}" \
+              https://github.com/vllm-project/vllm-ascend.git "${repo_dir}"
+
+            doc_repository="vllm-project/vllm-ascend"
+            vllm_ascend_version="$(python3 "${repo_dir}/docs/source/conf.py" \
+              | jq -r '.vllm_ascend_version // empty')"
+            if [ -z "${vllm_ascend_version}" ]; then
+              echo "Failed to resolve vllm_ascend_version from ${doc_ref}." >&2
+              exit 1
+            fi
+
+            for os_variant in ubuntu openeuler; do
+              if [ "${os_variant}" = "ubuntu" ]; then
+                image="quay.io/ascend/vllm-ascend:${vllm_ascend_version}"
+              else
+                image="quay.io/ascend/vllm-ascend:${vllm_ascend_version}-${os_variant}"
+              fi
+
+              next_matrix_file="$(mktemp)"
+              jq \
+                --arg doc_repository "${doc_repository}" \
+                --arg doc_version "${doc_version}" \
+                --arg doc_ref "${doc_ref}" \
+                --arg doc_verbose_name "${doc_verbose_name}" \
+                --arg documentation_url "${documentation_url}" \
+                --arg vllm_ascend_version "${vllm_ascend_version}" \
+                --arg os_variant "${os_variant}" \
+                --arg image "${image}" \
+                '.include += [{
+                  doc_repository: $doc_repository,
+                  doc_version: $doc_version,
+                  doc_ref: $doc_ref,
+                  doc_verbose_name: $doc_verbose_name,
+                  documentation_url: $documentation_url,
+                  vllm_ascend_version: $vllm_ascend_version,
+                  os_variant: $os_variant,
+                  image: $image
+                }]' "${matrix_file}" > "${next_matrix_file}"
+              mv "${next_matrix_file}" "${matrix_file}"
+            done
+          done < <(echo "${INPUT_DOC_VERSIONS}" | jq -r '.[]')
+
+          echo "Resolved doc-driven doctest matrix:"
+          jq . "${matrix_file}"
+
+          {
+            echo "matrix<<EOF"
+            jq -c . "${matrix_file}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+
+  build_and_release_code:
+    name: release code
+    runs-on: linux-amd64-cpu-8-hk
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - name: checkout vllm-ascend
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: checkout vllm-ascend ${{ inputs.tag }}
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          ref: ${{ inputs.tag }}
+
+      - name: Print
+        run: |
+          lscpu
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install twine setuptools_scm
+
+      - name: Generate tar.gz
+        env:
+          SOC_VERSION: ascend910b1
+        run: |
+          python3 setup.py sdist
+          ls dist
+
+      - name: Archive tar.gz
+        uses: actions/upload-artifact@v7
+        with:
+          name: vllm-ascend-src
+          path: dist/*
+
+          
+#schedule_nightly_test_a3.yaml 测试 linux-aarch64-a3-0
+
+  parse-trigger:
+    name: Parse trigger and determine test scope
+
+    runs-on: linux-aarch64-a3-0
+    outputs:
+      run: ${{ steps.parse.outputs.run }}
+      filter: ${{ steps.parse.outputs.filter }}
+      ref: ${{ steps.parse.outputs.ref }}
+    steps:
+      - name: Parse trigger
+        id: parse
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const eventName = context.eventName;
+            const testCases = '${{ inputs.test_cases }}'.trim();
+
+            core.setOutput('ref', context.sha || 'unknown');
+
+            if (testCases) {
+              core.setOutput('run', 'true');
+              if (testCases === 'all') {
+                core.setOutput('filter', 'all');
+              } else {
+                core.setOutput('filter', ',' + testCases.split(',').map(s => s.trim()).join(',') + ',');
+              }
+              return;
+            }
+
+            core.setOutput('run', 'false');
+            core.setOutput('filter', '');
+
+
+
+  setup-vars:
+    name: Export global env vars as job outputs
+    needs: parse-trigger
+    runs-on: linux-amd64-cpu-8-hk
+    outputs:
+      ascend_log_prefix: ${{ steps.export.outputs.ascend_log_prefix }}
+      vllm_ascend_branches: ${{ steps.export.outputs.vllm_ascend_branches }}
+      multi_node: ${{ steps.set-matrix.outputs.multi_node }}
+      double_node: ${{ steps.set-matrix.outputs.double_node }}
+      single_node: ${{ steps.set-matrix.outputs.single_node }}
+      multi_card: ${{ steps.set-matrix.outputs.multi_card }}
+    steps:
+      - id: export
+        run: |
+          {
+            echo "ascend_log_prefix=${{ env.ASCEND_LOG_PREFIX }}"
+            input_branch="${{ inputs.vllm_ascend_branch }}"
+            normalized=$(echo "$input_branch" | tr '/' '-')
+            echo "vllm_ascend_branches=[\"${normalized}\"]"
+          } >> $GITHUB_OUTPUT
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.vllm_ascend_branch }}
+
+      - name: Checkout PR code
+        if: github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != ''
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.vllm_ascend_ref }}
+          sparse-checkout: .github/workflows/configs/
+          path: ./pr
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Read A3 test matrix config
+        id: set-matrix
+        env:
+          MATRIX_FILE: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != '' && './pr/.github/workflows/configs/nightly_config.yaml' || '.github/workflows/configs/nightly_config.yaml' }}
+          MATRIX_OUTPUTS: '{"multi_node":"a3.multi_node.test_config","double_node":"a3.double_node.test_config","single_node":"a3.single_node.test_config","multi_card":"a3.multi_card.test_config"}'
+        run: |
+          python3 -m pip install pyyaml -q
+          python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
+
+
+
+
