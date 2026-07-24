@@ -754,6 +754,13 @@ class NPUWorker(WorkerBase):
         # may cause performance degradation at runtime.
         if get_ascend_device_type() != AscendDeviceType.A5:
             self._warm_up_atb()
+        # Warm up the structured-output bitmask kernel here (always called, in
+        # both eager and graph modes) so its one-time Triton JIT does not stall
+        # the first guided-decode request. capture_model() also warms it but only
+        # runs when graphs are captured (not enforce_eager); the once-guard makes
+        # the double call a no-op. Only the v1 runner exposes this public hook.
+        if hasattr(self.model_runner, "maybe_warmup_grammar_bitmask_kernel"):
+            self.model_runner.maybe_warmup_grammar_bitmask_kernel()
         # Bind after warmup so hot allocations are already materialized on the
         # worker process before migratepages/taskset run.
         if get_ascend_config().enable_cpu_binding:

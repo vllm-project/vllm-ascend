@@ -89,7 +89,6 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID, RejectionSampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer_gpu import copy_num_valid_draft_tokens
-from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.cp_utils import (
@@ -170,6 +169,18 @@ from vllm_ascend.utils import (
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPAsyncSpecDecodeRebuildResult, PCPManager
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
+
+# NOTE: the grammar-bitmask Triton kernel currently lives in the v2
+# structured_outputs module. Our device-apply helpers were added there
+# alongside the pre-existing v2 kernel (which patch/worker/patch_v2/
+# patch_triton.py also imports), so they are imported here to share a
+# single implementation across the v1 and v2 paths. TODO: hoist these
+# shared helpers into a neutral vllm_ascend/ops/structured_outputs.py in
+# a follow-up to drop this v1->v2 dependency.
+from vllm_ascend.worker.v2.structured_outputs import (
+    apply_grammar_bitmask as apply_grammar_bitmask_npu,
+)
+from vllm_ascend.worker.v2.structured_outputs import warmup_grammar_bitmask_kernel
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType,
@@ -483,6 +494,13 @@ class NPUModelRunner(GPUModelRunner):
         self.decode_threshold = 1 + (self.speculative_config.num_speculative_tokens if self.speculative_config else 0)
 
         self.use_aclgraph = self._use_aclgraph()
+
+        # One-time guard so the structured-output bitmask Triton kernel only pays
+        # its ~5s JIT compile once (warmed up during graph capture, see
+        # capture_model). Structured outputs are enabled per request, so we
+        # cannot reliably gate this on a global config flag; the warmup is a
+        # cheap one-shot no-op kernel launch.
+        self._grammar_bitmask_kernel_warmed = False
 
         eplb_config = self.ascend_config.eplb_config
         self.dynamic_eplb = eplb_config.dynamic_eplb
@@ -2466,12 +2484,14 @@ class NPUModelRunner(GPUModelRunner):
 
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
-            # here we are different from gpu_model_runner,
-            # the apply_grammar_bitmask uses torch.compile to optimize this,ascend does not support it now
-            logits_dtype = logits.dtype
-            logits = logits.to("cpu").float()
-            apply_grammar_bitmask(scheduler_output, grammar_output, self.input_batch, logits)
-            logits = logits.to(self.device).to(logits_dtype)
+            # Apply the bitmask in-place on the device logits via the NPU Triton
+            # kernel. This avoids the device->CPU->device round-trip the upstream
+            # util incurs on Ascend (its device branch routes through a
+            # torch.compile path that NPU does not support); logits stay on the
+            # NPU in their native dtype.
+            apply_grammar_bitmask_npu(
+                logits, scheduler_output, grammar_output, self.input_batch
+            )
 
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
@@ -5043,7 +5063,38 @@ class NPUModelRunner(GPUModelRunner):
         if mgr is not None and hasattr(self, "update_stream"):
             mgr.update_stream = self.update_stream
 
+        self.maybe_warmup_grammar_bitmask_kernel()
+
         return cuda_graph_size
+
+    def maybe_warmup_grammar_bitmask_kernel(self) -> None:
+        """Pay the structured-output bitmask kernel's one-time JIT cost upfront.
+
+        The first launch of the NPU grammar-bitmask Triton kernel triggers a
+        ~5s JIT compile. A tiny no-op launch here keeps that cost off the first
+        guided decode request. Called from the worker's
+        ``compile_or_warm_up_model`` (runs in both eager and graph modes) and
+        from ``capture_model`` (graph mode only); the once-guard makes the
+        repeated call a no-op. Wrapped so warmup failure never blocks startup.
+        """
+        if self._grammar_bitmask_kernel_warmed:
+            return
+        self._grammar_bitmask_kernel_warmed = True
+        try:
+            # Warm in the model's real logits dtype (e.g. bf16). Triton caches
+            # the kernel per logits-pointer dtype, so warming float32 would not
+            # populate the bf16 entry the real guided path hits.
+            warmup_grammar_bitmask_kernel(
+                self.device,
+                self.model_config.get_vocab_size(),
+                self.model_config.dtype,
+            )
+        except Exception:
+            logger.warning(
+                "Structured-output bitmask kernel warmup failed; the first "
+                "guided decode step will pay the JIT compile cost instead.",
+                exc_info=True,
+            )
 
     def _prepare_multimodal_fields(self):
         """
