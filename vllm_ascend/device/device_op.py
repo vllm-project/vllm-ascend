@@ -15,6 +15,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import os
 from typing import Any
 
 import torch
@@ -162,6 +163,35 @@ class BaseDeviceAdaptor:
             bias_opt=bias_opt,
         )
         return topk_weights, topk_ids.to(torch.int32), out
+
+    @staticmethod
+    def npu_mm_reduce_scatter_base(
+        x1: torch.Tensor,
+        x2: torch.Tensor,
+        hcom: str,
+        world_size: int,
+        *,
+        reduce_op: str = "sum",
+        bias: torch.Tensor | None = None,
+        x1_scale: torch.Tensor | None = None,
+        x2_scale: torch.Tensor | None = None,
+        comm_turn: int = 0,
+        output_dtype: torch.dtype | None = None,
+        comm_mode: str = "aiv",
+    ):
+        return torch_npu.npu_mm_reduce_scatter_base(
+            x1,
+            x2,
+            hcom,
+            world_size,
+            reduce_op=reduce_op,
+            bias=bias,
+            comm_turn=comm_turn,
+            x1_scale=x1_scale,
+            x2_scale=x2_scale,
+            output_dtype=output_dtype,
+            comm_mode=comm_mode,
+        )
 
     @staticmethod
     def npu_dynamic_quant(
@@ -494,8 +524,9 @@ class BaseDeviceAdaptor:
             )
         return topk_indices
 
-    @staticmethod
+    @classmethod
     def execute_sparse_flash_attention_process(
+        cls,
         sfa_impl,
         ql_nope: torch.Tensor,
         q_pe: torch.Tensor,
@@ -504,8 +535,13 @@ class BaseDeviceAdaptor:
         attn_metadata,
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
-    ) -> torch.Tensor:
-        block_table = attn_metadata.block_table
+        *,
+        block_table: torch.Tensor | None = None,
+        sparse_mode: int = 3,
+        return_lse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if block_table is None:
+            block_table = attn_metadata.block_table
         kv = kv_cache[0]
 
         # The kv-quant sparse attention op only accepts packed quantized KV.
@@ -518,7 +554,7 @@ class BaseDeviceAdaptor:
             torch.float8_e5m2,
         )
         if use_kv_quant_sparse_attention:
-            return BaseDeviceAdaptor.execute_kv_quant_sparse_flash_attention(
+            result = cls._execute_kv_quant_sparse_flash_attention(
                 sfa_impl,
                 ql_nope,
                 q_pe,
@@ -527,30 +563,40 @@ class BaseDeviceAdaptor:
                 topk_indices,
                 actual_seq_lengths_query,
                 actual_seq_lengths_key,
+                sparse_mode=sparse_mode,
+                return_lse=return_lse,
             )
-
-        key_rope = kv_cache[1]
-        attn_output, _, _ = torch.ops._C_ascend.npu_sparse_flash_attention(
-            query=ql_nope,
-            key=kv,
-            value=kv,
-            sparse_indices=topk_indices,
-            scale_value=sfa_impl.scale,
-            sparse_block_size=1,
-            block_table=block_table,
-            actual_seq_lengths_query=actual_seq_lengths_query,
-            actual_seq_lengths_kv=actual_seq_lengths_key,
-            query_rope=q_pe,
-            key_rope=key_rope,
-            layout_query="TND",
-            layout_kv="PA_BSND",
-            sparse_mode=3,
-            attention_mode=2,
-        )
-        return attn_output
+        else:
+            key_rope = kv_cache[1]
+            result = torch.ops._C_ascend.npu_sparse_flash_attention(
+                query=ql_nope,
+                key=kv,
+                value=kv,
+                sparse_indices=topk_indices,
+                scale_value=sfa_impl.scale,
+                sparse_block_size=1,
+                block_table=block_table,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_kv=actual_seq_lengths_key,
+                query_rope=q_pe,
+                key_rope=key_rope,
+                layout_query="TND",
+                layout_kv="PA_BSND",
+                sparse_mode=sparse_mode,
+                attention_mode=2,
+                return_softmax_lse=return_lse,
+            )
+        if not isinstance(result, tuple):
+            if return_lse:
+                raise RuntimeError("Sparse flash attention did not return softmax max/sum for DCP LSE merge.")
+            return result
+        if return_lse:
+            return result
+        else:
+            return result[0]
 
     @staticmethod
-    def execute_kv_quant_sparse_flash_attention(
+    def _execute_kv_quant_sparse_flash_attention(
         sfa_impl,
         ql_nope: torch.Tensor,
         q_pe: torch.Tensor,
@@ -559,9 +605,12 @@ class BaseDeviceAdaptor:
         topk_indices: torch.Tensor,
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
-    ) -> torch.Tensor:
+        *,
+        sparse_mode: int = 3,
+        return_lse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         query = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
-        return torch_npu.npu_kv_quant_sparse_flash_attention(
+        return torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention(
             query=query,
             key=kv,
             value=kv,
@@ -573,13 +622,14 @@ class BaseDeviceAdaptor:
             actual_seq_lengths_kv=actual_seq_lengths_key,
             layout_query="TND",
             layout_kv="PA_BSND",
-            sparse_mode=3,
+            sparse_mode=sparse_mode,
             attention_mode=2,
             quant_scale_repo_mode=1,
             tile_size=getattr(sfa_impl, "sfa_qsfa_tile_size", 128),
             key_quant_mode=2,
             value_quant_mode=2,
-            rope_head_dim=getattr(sfa_impl, "qk_rope_head_dim", 64),
+            rope_head_dim=getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]),
+            return_softmax_lse=return_lse,
         )
 
     @staticmethod
@@ -949,6 +999,48 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )
 
     @staticmethod
+    def _execute_kv_quant_sparse_flash_attention(
+        sfa_impl,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv: torch.Tensor,
+        block_table: torch.Tensor,
+        topk_indices: torch.Tensor,
+        actual_seq_lengths_query: torch.Tensor,
+        actual_seq_lengths_key: torch.Tensor,
+        *,
+        sparse_mode: int = 3,
+        return_lse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        query = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
+        result = torch_npu.npu_kv_quant_sparse_flash_attention(
+            query=query,
+            key=kv,
+            value=kv,
+            sparse_indices=topk_indices,
+            scale_value=sfa_impl.scale,
+            sparse_block_size=1,
+            block_table=block_table,
+            actual_seq_lengths_query=actual_seq_lengths_query,
+            actual_seq_lengths_kv=actual_seq_lengths_key,
+            layout_query="TND",
+            layout_kv="PA_BSND",
+            sparse_mode=sparse_mode,
+            attention_mode=2,
+            quant_scale_repo_mode=1,
+            tile_size=getattr(sfa_impl, "sfa_qsfa_tile_size", 128),
+            key_quant_mode=2,
+            value_quant_mode=2,
+            rope_head_dim=getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]),
+        )
+        if return_lse:
+            raise RuntimeError(
+                "C8 sparse flash attention via torch_npu only returns attention_out; "
+                "cannot return softmax max/sum for DCP LSE merge."
+            )
+        return result
+
+    @staticmethod
     def npu_moe_init_routing(
         hidden_states,
         topk_ids,
@@ -1015,6 +1107,39 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
         return topk_weights, topk_ids.to(torch.int32), out
+
+    @staticmethod
+    def npu_mm_reduce_scatter_base(
+        x1: torch.Tensor,
+        x2: torch.Tensor,
+        hcom: str,
+        world_size: int,
+        *,
+        reduce_op: str = "sum",
+        bias: torch.Tensor | None = None,
+        x1_scale: torch.Tensor | None = None,
+        x2_scale: torch.Tensor | None = None,
+        comm_turn: int = 0,
+        output_dtype: torch.dtype | None = None,
+        comm_mode: str = "ai_cpu",
+    ):
+        expansion_mode = os.environ.get("HCCL_OP_EXPANSION_MODE")
+        if expansion_mode == "CCU_SCHED":
+            comm_mode = "ccu"
+
+        return torch_npu.npu_mm_reduce_scatter_base(
+            x1,
+            x2,
+            hcom,
+            world_size,
+            reduce_op=reduce_op,
+            bias=bias,
+            comm_turn=comm_turn,
+            x1_scale=x1_scale,
+            x2_scale=x2_scale,
+            output_dtype=output_dtype,
+            comm_mode=comm_mode,
+        )
 
     @staticmethod
     def npu_dynamic_quant(

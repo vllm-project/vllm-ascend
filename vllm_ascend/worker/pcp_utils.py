@@ -48,7 +48,6 @@ from vllm_ascend.worker.pcp_layout import (
     get_cumsum_and_arange,
 )
 from vllm_ascend.worker.pcp_metadata import build_context_parallel_metadata
-from vllm_ascend.worker.utils import copy_snapshot_to_gpu
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -1463,7 +1462,7 @@ class PCPManager:
             out=self.input_ids_pcp_full.cpu[:total_num_scheduled_tokens_pcp_full],
         )
         self.input_ids_pcp_full.copy_to_gpu(total_num_scheduled_tokens_pcp_full)
-        copy_snapshot_to_gpu(self.query_start_loc_pcp_full)
+        self.query_start_loc_pcp_full.copy_to_gpu()
         if self.use_async_scheduling:
             self._update_input_ids_pcp_full_ids(
                 input_batch,
