@@ -93,6 +93,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature depends on FLASHCOMM1. Please ensure that FLASHCOMM1 is enabled before enabling this feature.|
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
+| `dp_allreduce_on_npu`              | bool | `False` | Whether to use NPU device group for DP metadata all-reduce. When `True`, DP metadata synchronization (e.g., `num_tokens`, cudagraph mode flags) is routed through the NPU device group instead of the CPU group. This can avoid data corruption issues on certain devices where CPU-side all-reduce may return dirty data. |
 | `enable_reduce_sample`              | bool | `False` | Whether to enable reduce sample optimization to reduce communication and computation overheads in the tensor parallelism scenario. When enabled, logits are kept partitioned across TP ranks and only the small set of top-k candidate values/indices is communicated, instead of performing a full-vocabulary all-to-all/all-gather. |
 
 The details of each configuration option are as follows:
