@@ -38,6 +38,10 @@ on:
           - v0.21.0rc1
           - v0.20.2rc1
 
+defaults:
+  run:
+    shell: bash -el {0}
+
 jobs:
   build_and_release_code:
     name: release code

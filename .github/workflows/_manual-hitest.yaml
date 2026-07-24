@@ -48,7 +48,7 @@ jobs:
           fetch-depth: 0
 
       - name: Git safe directory config
-        run: git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Execute hitest entry
         continue-on-error: true

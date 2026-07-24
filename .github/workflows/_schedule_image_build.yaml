@@ -65,6 +65,10 @@ on:
             description: 'Quay password for pushing temp tag digests'
             required: false
 
+defaults:
+  run:
+    shell: bash -el {0}
+
 env:
   QUAY_REPO: quay.io/ascend/vllm-ascend
   QUAY_TEMP_REPO: quay.io/atlas-ci/vllm-atlas-temp
@@ -133,6 +137,7 @@ jobs:
     - uses: actions/checkout@v7
       if: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_commit != '' }}
       with:
+        submodules: recursive
         fetch-depth: 0
         persist-credentials: false
         ref: ${{ inputs.vllm_ascend_commit }}
@@ -198,41 +203,54 @@ jobs:
           echo "value=buildcache-${{ matrix.tag }}" >> $GITHUB_OUTPUT
         fi
 
-    - name: Get csrc hash
-      id: get_csrc_hash
-      run: |
-        CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
-        -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
-        echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
-
     - name: Get Dockerfile base image tag
       id: get_base_image_tag
       run: |
         DOCKERFILE="${{ inputs.dockerfile || 'Dockerfile' }}"
         BASE_IMAGE_TAG=$(grep -m1 '^FROM' "$DOCKERFILE" | awk -F: '{print $NF}')
         echo "BASE_IMAGE_TAG=$BASE_IMAGE_TAG" >> $GITHUB_OUTPUT
-        
+
+    - name: Get csrc hash
+      id: get_csrc_hash
+      run: |
+        set -euo pipefail
+        git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        cd "$GITHUB_WORKSPACE"
+
+        CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake)
+        if [ -z "$CSRC_MANIFEST" ]; then
+          echo "::error::No tracked csrc inputs found."
+          exit 1
+        fi
+
+        CSRC_HASH=$(printf '%s\n' "$CSRC_MANIFEST" | sha256sum | awk '{print $1}')
+        echo "CSRC_HASH=$CSRC_HASH" >> "$GITHUB_OUTPUT"
+
     - name: Get architecture
       id: get_arch
       run: |
         ARCH=$(uname -m)
         case "$ARCH" in
-          x86_64) echo "arch=X64" >> $GITHUB_OUTPUT ;;
-          aarch64) echo "arch=ARM64" >> $GITHUB_OUTPUT ;;
-          *) echo "arch=$ARCH" >> $GITHUB_OUTPUT ;;
+          x86_64) echo "arch=X64" >> "$GITHUB_OUTPUT" ;;
+          aarch64) echo "arch=ARM64" >> "$GITHUB_OUTPUT" ;;
+          *) echo "arch=$ARCH" >> "$GITHUB_OUTPUT" ;;
         esac
 
-    - name: Cache vllm-ascend csrc
+    - name: Install csrc cache dependencies
+      run: |
+        sudo apt-get update -y
+        sudo apt-get install -y zstd
+
+    - name: Restore vllm-ascend csrc cache
       id: cache-csrc
       uses: runs-on/cache/restore@v5
       with:
         path: |
-            vllm_ascend/_cann_ops_custom
-            vllm_ascend/*.so
-            vllm_ascend/lib
-            vllm_ascend/include
+          vllm_ascend/_cann_ops_custom
+          vllm_ascend/*.so
+          vllm_ascend/lib
+          vllm_ascend/include
         key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ steps.get_base_image_tag.outputs.BASE_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-
 
     - name: Build and push
       uses: docker/build-push-action@v7

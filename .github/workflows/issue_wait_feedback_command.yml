@@ -4,6 +4,10 @@ on:
   repository_dispatch:
     types: [wait-feedback-command]
 
+defaults:
+  run:
+    shell: bash -el {0}
+
 permissions:
   issues: write
 

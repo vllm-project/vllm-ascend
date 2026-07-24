@@ -20,6 +20,10 @@ name: PR Create
 on:
   pull_request_target:
 
+defaults:
+  run:
+    shell: bash -el {0}
+
 permissions:
   pull-requests: write
 

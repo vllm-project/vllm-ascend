@@ -40,8 +40,10 @@ jobs:
     outputs:
       pr_sha: ${{ steps.resolve.outputs.pr_sha }}
       pr_base_ref: ${{ steps.resolve.outputs.pr_base_ref }}
+      pr_base_sha: ${{ steps.resolve.outputs.pr_base_sha }}
       test_groups: ${{ steps.groups.outputs.test_groups }}
       has_tests: ${{ steps.groups.outputs.has_tests }}
+      csrc_cache_target_ids: ${{ steps.groups.outputs.csrc_cache_target_ids }}
       notify_comment_id: ${{ steps.notify.outputs.comment-id }}
       main_commit: ${{ steps.vllm.outputs.main_commit }}
       release_tag: ${{ steps.vllm.outputs.release_tag }}
@@ -111,7 +113,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           ref: ${{ github.event.client_payload.pull_request.head.sha }}
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: Read verified vLLM refs
         id: vllm
@@ -136,11 +138,13 @@ jobs:
         env:
           PR_SHA: ${{ github.event.client_payload.pull_request.head.sha }}
           PR_BASE_REF: ${{ github.event.client_payload.pull_request.base.ref }}
+          PR_BASE_SHA: ${{ github.event.client_payload.pull_request.base.sha }}
           ALL_ARGS: ${{ github.event.client_payload.slash_command.args.all }}
         run: |
           {
             echo "pr_sha=$PR_SHA"
             echo "pr_base_ref=${PR_BASE_REF:-main}"
+            echo "pr_base_sha=$PR_BASE_SHA"
             echo "all_args=$ALL_ARGS"
           } >> "$GITHUB_OUTPUT"
 
@@ -179,6 +183,16 @@ jobs:
           echo "::error::No valid test paths matched. Please verify the paths exist and try again."
           exit 1
 
+  ensure-csrc-cache:
+    needs: e2e-test
+    if: ${{ needs.e2e-test.outputs.has_tests == 'true' }}
+    uses: ./.github/workflows/_ensure_csrc_cache.yaml
+    with:
+      target_ids: ${{ needs.e2e-test.outputs.csrc_cache_target_ids }}
+      source_ref: ${{ needs.e2e-test.outputs.pr_sha }}
+      base_ref: ${{ needs.e2e-test.outputs.pr_base_ref }}
+      base_sha: ${{ needs.e2e-test.outputs.pr_base_sha }}
+
   trigger-selected-tests:
     name: e2e-comment (${{ matrix.vllm_version }})
     strategy:
@@ -187,13 +201,14 @@ jobs:
         vllm_version:
           - ${{ needs.e2e-test.outputs.main_commit }}
           - ${{ needs.e2e-test.outputs.release_tag }}
-    needs: [e2e-test]
+    needs: [e2e-test, ensure-csrc-cache]
     if: ${{ needs.e2e-test.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
       ref: ${{ needs.e2e-test.outputs.pr_sha }}
       base_ref: ${{ needs.e2e-test.outputs.pr_base_ref }}
+      base_sha: ${{ needs.e2e-test.outputs.pr_base_sha }}
       test_groups: ${{ needs.e2e-test.outputs.test_groups }}
 
   report:
