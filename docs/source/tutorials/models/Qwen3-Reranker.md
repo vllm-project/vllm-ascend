@@ -1,8 +1,8 @@
-# Qwen3-VL-Reranker
+# Qwen3-Reranker
 
 ## 1 Introduction
 
-The Qwen3-VL-Embedding and Qwen3-VL-Reranker model series are the latest additions to the Qwen family, built upon the recently open-sourced and powerful Qwen3-VL foundation model. Specifically designed for multimodal information retrieval and cross-modal understanding, this suite accepts diverse inputs including text, images, screenshots, and videos, as well as inputs containing a mixture of these modalities. This guide describes how to run the model with vLLM Ascend.
+The Qwen3 Reranker model series is the latest proprietary model of the Qwen family, specifically designed for text embedding and ranking tasks. Building upon the dense foundational models of the Qwen3 series, it provides a comprehensive range of text embeddings and reranking models in various sizes (0.6B, 4B, and 8B). This guide describes how to run the model with vLLM Ascend. Note that only 0.9.2rc1 and higher versions of vLLM Ascend support the model.
 
 ## 2 Supported Features
 
@@ -12,8 +12,9 @@ Refer to [supported features](../../user_guide/support_matrix/supported_models.m
 
 ### 3.1 Model Weight
 
-- `Qwen3-VL-Reranker-8B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-8B)
-- `Qwen3-VL-Reranker-2B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-2B)
+- `Qwen3-Reranker-8B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-Reranker-8B)
+- `Qwen3-Reranker-4B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-Reranker-4B)
+- `Qwen3-Reranker-0.6B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-Reranker-0.6B)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
@@ -21,7 +22,7 @@ It is recommended to download the model weight to the shared directory of multip
 
 ### 4.1 Docker Image Installation
 
-You can use our official docker image to run `Qwen3-VL-Reranker` model directly.
+You can use our official docker image to run `Qwen3-Reranker` model directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
@@ -123,38 +124,6 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ## 5 Online Service Deployment
 
-### 5.1 Chat Template
-
-The Qwen3-VL-Reranker model requires a specific chat template for proper formatting. Create a file named `qwen3_vl_reranker.jinja` with the following content:
-
-```jinja
-<|im_start|>system
-Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>
-<|im_start|>user
-<Instruct>: {{
-    messages
-    | selectattr("role", "eq", "system")
-    | map(attribute="content")
-    | first
-    | default("Given a search query, retrieve relevant candidates that answer the query.")
-}}<Query>:{{
-    messages
-    | selectattr("role", "eq", "query")
-    | map(attribute="content")
-    | first
-}}
-<Document>:{{
-    messages
-    | selectattr("role", "eq", "document")
-    | map(attribute="content")
-    | first
-}}<|im_end|>
-<|im_start|>assistant
-
-```
-
-Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
-
 :::::{tab-set}
 :sync-group: Deployment
 
@@ -164,11 +133,10 @@ Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
 ```{code-block} bash
    :substitutions:
 
-vllm serve Qwen/Qwen3-VL-Reranker-2B \
-  --served-model-name Qwen/Qwen3-VL-Reranker-2B \
+vllm serve Qwen/Qwen3-Reranker-0.6B \
+  --served-model-name Qwen/Qwen3-Reranker-0.6B \
   --runner pooling \
   --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}' \
-  --chat-template ./qwen3_vl_reranker.jinja \
   --port 8000 \
   --max-model-len 1024
 ```
@@ -177,16 +145,13 @@ vllm serve Qwen/Qwen3-VL-Reranker-2B \
 ::::{tab-item} Atlas inference products
 :sync: Atlas inference products
 
-    Start the docker image on your each node.
-
 ```{code-block} bash
    :substitutions:
-   
-vllm serve Qwen/Qwen3-VL-Reranker-2B \
-  --served-model-name Qwen/Qwen3-VL-Reranker-2B \
+
+vllm serve Qwen/Qwen3-Reranker-0.6B \
+  --served-model-name Qwen/Qwen3-Reranker-0.6B \
   --runner pooling \
   --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}' \
-  --chat-template ./qwen3_vl_reranker.jinja \
   --compilation-config '{"cudagraph_capture_sizes": [1024,512]}' \
   --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
   --dtype float16 \
@@ -213,11 +178,42 @@ Once your server is started, you can verify by follow command:
 
 Service Verification:
 
-```bash
-curl  http://localhost:8000/v1/rerank \
-    -X POST \
-    -d '{"query":"What is the capital of China?", "documents": ["The capital of China is Beijing.", "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun."]}' \
-    -H 'Content-Type: application/json'
+```python
+import requests
+
+url = "http://127.0.0.1:8000/v1/rerank"
+
+# Please use the query_template and document_template to format the query and
+# document for better reranker results.
+
+prefix = '<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>\n<|im_start|>user\n'
+suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+
+query_template = "{prefix}<Instruct>: {instruction}\n<Query>: {query}\n"
+document_template = "<Document>: {doc}{suffix}"
+
+instruction = (
+    "Given a web search query, retrieve relevant passages that answer the query"
+)
+
+query = "What is the capital of China?"
+
+documents = [
+    "The capital of China is Beijing.",
+    "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun.",
+]
+
+documents = [
+    document_template.format(doc=doc, suffix=suffix) for doc in documents
+]
+
+response = requests.post(url,
+                         json={
+                             "query": query_template.format(prefix=prefix, instruction=instruction, query=query),
+                             "documents": documents,
+                         }).json()
+
+print(response)
 ```
 
 Expected Result:
@@ -226,28 +222,28 @@ The service returns HTTP 200 OK with a JSON response containing the `relevance_s
 
 ```json
 {
-    "id": "score-xxxxx",
-    "model": "Qwen/Qwen3-VL-Reranker-2B",
+    "id": "score-xxx",
+    "model": "Qwen/Qwen3-Reranker-0.6B",
     "usage": {
-        "prompt_tokens": 179,
-        "total_tokens": 179
+        "prompt_tokens": 193,
+        "total_tokens": 193
     },
     "results": [
         {
             "index": 0,
             "document": {
-                "text": "The capital of China is Beijing.",
+                "text": "<Document>: The capital of China is Beijing.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
                 "multi_modal": null
             },
-            "relevance_score": 0.7209711670875549
+            "relevance_score": 0.9994981288909912
         },
         {
             "index": 1,
             "document": {
-                "text": "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun.",
+                "text": "<Document>: Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
                 "multi_modal": null
             },
-            "relevance_score": 0.18871910870075226
+            "relevance_score": 0.00000506485957885161
         }
     ]
 }
@@ -278,7 +274,7 @@ Here are two accuracy evaluation methods.
         os.environ["HF_DATASETS_CACHE"] = data_path
         os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
     
-        model = VllmCrossEncoderWrapper(f"/home/data/Qwen3-VL-Reranker-2B",
+        model = VllmCrossEncoderWrapper(f"/home/data/Qwen3-Reranker-0.6B",
                                     revision="norm",
                                     dtype="float16",
                                     enforce_eager=True,
@@ -302,13 +298,13 @@ Here are two accuracy evaluation methods.
 
 ### Using vLLM Benchmark
 
-Run performance of `Qwen3-VL-Reranker-2B` as an example.
+Run performance of `Qwen3-Reranker-0.6B` as an example.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/cli/) for more details.
 
 Take the `serve` as an example. Run the code as follows.
 
 ```bash
-vllm bench serve --model Qwen/Qwen3-VL-Reranker-2B --backend vllm-rerank --port 8000 --dataset-name random-rerank --endpoint /v1/rerank --random-input 200  --save-result --result-dir ./
+vllm bench serve --model Qwen/Qwen3-Reranker-0.6B --backend vllm-rerank  --port 8000 --dataset-name random-rerank --endpoint /v1/rerank --random-input 200  --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.
