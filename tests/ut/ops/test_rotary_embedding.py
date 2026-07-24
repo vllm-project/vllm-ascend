@@ -21,7 +21,11 @@ import pytest
 import torch
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, YaRNScalingRotaryEmbedding
 
-from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, AscendYaRNRotaryEmbedding
+from vllm_ascend.ops.rotary_embedding import (
+    AscendApplyRotaryEmb,
+    AscendRotaryEmbedding,
+    AscendYaRNRotaryEmbedding,
+)
 
 HEAD_SIZE = 64
 ROTARY_DIM = 64
@@ -346,3 +350,77 @@ class TestAscendYaRNRotaryEmbeddingForwardOOT:
         check_parent_init_signature_has_not_changed(
             YaRNScalingRotaryEmbedding.__init__, AscendYaRNRotaryEmbedding.__init__
         )
+
+
+class TestAscendApplyRotaryEmb:
+    @staticmethod
+    def _make_op(enable_fp32_compute: bool = False):
+        op = AscendApplyRotaryEmb.__new__(AscendApplyRotaryEmb)
+        op.enable_fp32_compute = enable_fp32_compute
+        return op
+
+    @staticmethod
+    def _npu_rotary_mul_reference(x, cos, sin):
+        x1, x2 = torch.chunk(x, 2, dim=-1)
+        rotated = torch.cat((-x2, x1), dim=-1)
+        return x * cos + rotated * sin
+
+    @patch("vllm_ascend.ops.rotary_embedding.torch_npu.npu_rotary_mul", create=True)
+    def test_full_rotary_keeps_existing_fast_path(self, mock_rotary_mul):
+        x = torch.randn(2, 4, 3, 8)
+        cos = torch.randn(4, 4)
+        sin = torch.randn(4, 4)
+        expected = torch.randn_like(x)
+        mock_rotary_mul.return_value = expected
+
+        output = self._make_op().forward_oot(x, cos, sin)
+
+        npu_x, npu_cos, npu_sin = mock_rotary_mul.call_args.args
+        assert npu_x is x
+        assert npu_cos.shape == (1, 4, 1, 8)
+        assert npu_sin.shape == (1, 4, 1, 8)
+        assert output is expected
+
+    @patch("vllm_ascend.ops.rotary_embedding.torch_npu.npu_rotary_mul", create=True)
+    def test_partial_rotary_passes_remaining_dimensions_through(self, mock_rotary_mul):
+        # MiniMax-M3 vision uses rotary_dim=78 with a larger head dimension.
+        x = torch.randn(2, 4, 3, 80)
+        cos = torch.randn(4, 39)
+        sin = torch.randn(4, 39)
+        mock_rotary_mul.side_effect = self._npu_rotary_mul_reference
+
+        output = self._make_op().forward_oot(x, cos, sin)
+
+        npu_x, npu_cos, npu_sin = mock_rotary_mul.call_args.args
+        assert npu_x.shape == (2, 4, 3, 78)
+        expected_rot = self._npu_rotary_mul_reference(
+            x[..., :78],
+            torch.cat((cos, cos), dim=-1).reshape(1, 4, 1, 78),
+            torch.cat((sin, sin), dim=-1).reshape(1, 4, 1, 78),
+        )
+        torch.testing.assert_close(output[..., :78], expected_rot)
+        torch.testing.assert_close(output[..., 78:], x[..., 78:])
+        assert npu_cos.shape[-1] == 78
+        assert npu_sin.shape[-1] == 78
+
+    @patch("vllm_ascend.ops.rotary_embedding.torch_npu.npu_rotary_mul", create=True)
+    def test_partial_rotary_preserves_3d_shape_and_dtype(self, mock_rotary_mul):
+        x = torch.randn(4, 3, 10, dtype=torch.bfloat16)
+        cos = torch.randn(4, 4)
+        sin = torch.randn(4, 4)
+        mock_rotary_mul.side_effect = self._npu_rotary_mul_reference
+
+        output = self._make_op(enable_fp32_compute=True).forward_oot(x, cos, sin)
+
+        assert mock_rotary_mul.call_args.args[0].dtype == torch.float32
+        assert output.shape == x.shape
+        assert output.dtype == x.dtype
+        torch.testing.assert_close(output[..., 8:], x[..., 8:])
+
+    def test_rotary_dim_must_not_exceed_head_dim(self):
+        x = torch.randn(2, 4, 3, 6)
+        cos = torch.randn(4, 4)
+        sin = torch.randn(4, 4)
+
+        with pytest.raises(ValueError, match=r"rotary_dim \(8\).*head_dim \(6\)"):
+            self._make_op().forward_oot(x, cos, sin)

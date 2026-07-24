@@ -33,6 +33,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.is_kv_consumer = False
         runner.vllm_config = MagicMock()
         runner.vllm_config.kv_transfer_config = None
+        # Required by _get_layer_kv_cache_specs (MiniMax indexer override path).
+        runner.compilation_config = SimpleNamespace(static_forward_context={})
         runner.model_config = MagicMock()
         runner.model_config.use_mla = True
         backend = MagicMock()
@@ -513,11 +515,12 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
             scheduled_spec_decode_tokens={"req0": [-1, -1, -1]},
         )
 
-        spec_decode_metadata = runner._calc_spec_decode_metadata(
-            num_draft_tokens=np.array([3], dtype=np.int32),
-            cu_num_scheduled_tokens=np.array([4], dtype=np.int32),
-            num_pcp_pads=None,
-        )
+        with patch.object(torch.Tensor, "pin_memory", lambda tensor: tensor):
+            spec_decode_metadata = runner._calc_spec_decode_metadata(
+                num_draft_tokens=np.array([3], dtype=np.int32),
+                cu_num_scheduled_tokens=np.array([4], dtype=np.int32),
+                num_pcp_pads=None,
+            )
         runner._sanitize_placeholder_input_ids_for_forward(
             scheduler_output,
             num_forward_tokens=4,

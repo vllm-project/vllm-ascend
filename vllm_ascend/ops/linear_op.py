@@ -440,6 +440,19 @@ class ShardedCPColumnParallelOp(CustomColumnParallelOp):
         return output, output_bias
 
 
+_MULTIMODAL_ENCODER_PREFIX_PARTS = (
+    "vision_tower",
+    "vision_model",
+    "multi_modal_projector",
+    "patch_merge_mlp",
+)
+
+
+def _should_skip_sp_for_multimodal_encoder(prefix: str) -> bool:
+    prefix_parts = prefix.split(".")
+    return any(part in prefix_parts for part in _MULTIMODAL_ENCODER_PREFIX_PARTS)
+
+
 def _get_column_parallel_op(
     prefix, layer
 ) -> MLPColumnParallelOp | DSV4OProjColumnParallelOp | SequenceColumnParallelOp | ShardedCPColumnParallelOp | None:
@@ -449,7 +462,7 @@ def _get_column_parallel_op(
         return DSV4OProjColumnParallelOp(layer)
     if "gate_up_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
         return MLPColumnParallelOp(layer)
-    if enable_sp():
+    if enable_sp() and not _should_skip_sp_for_multimodal_encoder(prefix):
         # "share_expert" added for Step3p5
         if "shared_expert" in prefix or "share_expert" in prefix:
             return None
@@ -459,10 +472,11 @@ def _get_column_parallel_op(
             "qkv_proj",  # qkv linear of most LLMs
             "conv1d",  # gated deltanet of Qwen3 Next
             "query_key_value",  # qkv linear of Bailing
+            "indexer_proj",  # indexer linear of M3
             "g_proj",  # attention gate projection of Step3p5
         ]
         for a_prefix in sp_column_prefix:
-            if a_prefix in prefix and "vision_model" not in prefix:
+            if a_prefix in prefix:
                 return SequenceColumnParallelOp(layer)
 
     return None
@@ -477,7 +491,7 @@ def _get_row_parallel_op(
         return MLPRowParallelOp(layer)
     if "o_proj" in prefix and oproj_tp_enable():
         return OProjRowParallelOp(layer)
-    if enable_sp():
+    if enable_sp() and not _should_skip_sp_for_multimodal_encoder(prefix):
         # "share_expert" added for Step3p5
         if "shared_expert" in prefix or "share_expert" in prefix:
             return None
@@ -489,7 +503,7 @@ def _get_row_parallel_op(
             "wo_b",  # attn output linear of v4
         ]
         for a_prefix in sp_row_prefixes:
-            if a_prefix in prefix and "vision_model" not in prefix:
+            if a_prefix in prefix:
                 return SequenceRowParallelOp(layer)
 
     return None
