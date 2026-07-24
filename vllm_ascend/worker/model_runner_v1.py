@@ -5035,6 +5035,17 @@ class NPUModelRunner(GPUModelRunner):
 
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""
+        # Initialize Mamba SSU backend before cudagraph capture.
+        # Required for models with Mamba layers (e.g., Jamba).
+        # The upstream GPU model runner does this internally, but
+        # vllm-ascend replaces the runner so we must do it here.
+        from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+            initialize_mamba_ssu_backend,
+        )
+        initialize_mamba_ssu_backend(
+            self.vllm_config.mamba_config,
+            self.kv_cache_config,
+        )
         parent_module_name = _get_gpu_model_runner_module_name(self)
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
             cuda_graph_size = GPUModelRunner.capture_model(self)
