@@ -1643,7 +1643,7 @@ class NPUModelRunner(GPUModelRunner):
         # Initialize a new stream to overlap the copy operation with
         # prepare_input of draft model.
         default_stream = torch.npu.current_stream()
-        with torch.npu.stream(self.valid_sampled_token_count_copy_stream): 
+        with torch.npu.stream(self.valid_sampled_token_count_copy_stream):
             self.valid_sampled_token_count_copy_stream.wait_stream(default_stream)
             counts = valid_sampled_tokens_count
             counts_cpu = self.valid_sampled_token_count_cpu
@@ -3730,7 +3730,6 @@ class NPUModelRunner(GPUModelRunner):
         return output
 
     def profile_run(self) -> None:
-        self.eplb_warmup()
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         if self.max_num_tokens > mc2_tokens_capacity and select_moe_comm_method(
             mc2_tokens_capacity, self.vllm_config
@@ -3763,7 +3762,7 @@ class NPUModelRunner(GPUModelRunner):
             # collect eplb heat for all requests.
             self.eplb_heat_collection_status =  True
 
-    def load_model(self) -> None:
+    def load_model(self, load_dummy_weights: bool = False) -> None:
         load_model_start_time = time.perf_counter()
         logger.info("Starting to load model %s...", self.model_config.model)
 
@@ -3781,7 +3780,9 @@ class NPUModelRunner(GPUModelRunner):
                     return
                 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
                 DefaultModelLoader._init_ep_weight_filter = mock_pass
-            self.model: nn.Module = get_model(vllm_config=self.vllm_config)
+            if load_dummy_weights:
+                self.load_config.load_format = "dummy"
+            self.model: nn.Module = get_model(vllm_config=self.vllm_config, load_config=self.load_config)
             for name, _ in self.model.named_parameters():
                 # sinks is a kind of parameter in attention
                 # only set in weight name

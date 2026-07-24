@@ -21,6 +21,7 @@ class TestNPUCommunicator(unittest.TestCase):
     @patch("torch.distributed.get_world_size", return_value=2)
     @patch("torch.distributed.get_process_group_ranks", return_value=[0, 1])
     @patch("torch.npu.device")
+    @patch("vllm_ascend.distributed.device_communicators.pyhccl.PyHcclCommunicator")
     def test_all_to_all_with_sizes(self, *_):
         def patched_all_to_all(output_tensor_list, input_tensor_list, group=None, async_op=False):
             output_tensor_list[:] = [torch.tensor([10, 20]), torch.tensor([50, 60])]
@@ -51,6 +52,7 @@ class TestNPUCommunicator(unittest.TestCase):
     @patch("torch.distributed.get_world_size", return_value=2)
     @patch("torch.distributed.get_process_group_ranks", return_value=[0, 1])
     @patch("torch.npu.device")
+    @patch("vllm_ascend.distributed.device_communicators.pyhccl.PyHcclCommunicator")
     def test_all_to_all_without_sizes(self, *_):
         def patched_all_to_all(output_tensor_list, input_tensor_list, group=None, async_op=False):
             output_tensor_list[:] = [torch.tensor([[10, 20]]), torch.tensor([[50, 60]])]
@@ -64,3 +66,48 @@ class TestNPUCommunicator(unittest.TestCase):
             output = comm.all_to_all(input_, scatter_dim=0, gather_dim=0)
 
         assert output.tolist() == [[10, 20], [50, 60]]
+
+    @patch("vllm.config.get_current_vllm_config", return_value=None)
+    @patch("torch.npu.current_device", return_value=0)
+    @patch("torch.distributed.get_group_rank", return_value=0)
+    @patch("torch.distributed.get_world_size", return_value=2)
+    @patch("torch.distributed.get_rank", return_value=0)
+    @patch("torch.distributed.get_process_group_ranks", return_value=[0, 1])
+    def test_destroy(self, *_):
+        mock_pyhccl_comm = MagicMock()
+        with (
+            patch.dict(dist.distributed_c10d._world.pg_map, {dist.group.WORLD: MagicMock()}, clear=False),
+            patch(
+                "vllm_ascend.distributed.device_communicators.pyhccl.PyHcclCommunicator", return_value=mock_pyhccl_comm
+            ),
+        ):
+            comm = NPUCommunicator(cpu_group=dist.group.WORLD)
+
+        self.assertIsNotNone(comm.pyhccl_comm)
+        comm.destroy()
+
+        mock_pyhccl_comm.destroy.assert_called_once()
+        self.assertIsNone(comm.pyhccl_comm)
+
+    @patch("vllm.config.get_current_vllm_config", return_value=None)
+    @patch("torch.npu.current_device", return_value=0)
+    @patch("torch.distributed.get_group_rank", return_value=0)
+    @patch("torch.distributed.get_world_size", return_value=2)
+    @patch("torch.distributed.get_rank", return_value=0)
+    @patch("torch.distributed.get_process_group_ranks", return_value=[0, 1])
+    def test_batch_isend_irecv(self, *_):
+        mock_pyhccl_comm = MagicMock()
+        mock_pyhccl_comm.available = True
+        mock_pyhccl_comm.disabled = False
+        with (
+            patch.dict(dist.distributed_c10d._world.pg_map, {dist.group.WORLD: MagicMock()}, clear=False),
+            patch(
+                "vllm_ascend.distributed.device_communicators.pyhccl.PyHcclCommunicator", return_value=mock_pyhccl_comm
+            ),
+        ):
+            comm = NPUCommunicator(cpu_group=dist.group.WORLD)
+
+        p2p_ops = MagicMock()
+        comm.batch_isend_irecv(p2p_ops)
+
+        comm.pyhccl_comm.batch_isend_irecv.assert_called_once()

@@ -25,6 +25,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from ..utils import weak_ref_tensors
 
 _acl_graph_wrappers: weakref.WeakSet[Any] = weakref.WeakSet()
+_acl_graph_pool: tuple[int, int] | None = None
 _STREAM_RESOURCE_ERROR_CODE = "207008"
 _STREAM_RESOURCE_ERROR_MARKERS = (
     "insufficient_stream_resources",
@@ -82,6 +83,20 @@ class ACLGraphWrapper:
     guaranteed when VLLM_LOGGING_LEVEL == "DEBUG".
     """
 
+    @classmethod
+    def clear_all_graphs(cls) -> None:
+        global _acl_graph_pool
+        _acl_graph_pool = None
+        for instance in list(_acl_graph_wrappers):
+            instance.clear_graphs()
+
+    @classmethod
+    def get_graph_pool(cls):
+        global _acl_graph_pool
+        if _acl_graph_pool is None:
+            _acl_graph_pool = current_platform.graph_pool_handle()
+        return _acl_graph_pool
+
     def __init__(
         self,
         runnable: Callable,
@@ -104,7 +119,7 @@ class ACLGraphWrapper:
         # assert runtime_mode is not NONE(no aclgraph), otherwise, we don't
         # need to initialize a ACLGraphWrapper.
         assert self.runtime_mode != CUDAGraphMode.NONE
-        self.graph_pool = current_platform.get_global_graph_pool()
+        self.graph_pool = ACLGraphWrapper.get_graph_pool()
 
         if cudagraph_options is None:
             cudagraph_options = CUDAGraphOptions()
@@ -129,6 +144,10 @@ class ACLGraphWrapper:
     def unwrap(self) -> Callable:
         # in case we need to access the original runnable.
         return self.runnable
+
+    def clear_graphs(self):
+        self.concrete_aclgraph_entries.clear()
+        self.graph_pool = ACLGraphWrapper.get_graph_pool()
 
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()
@@ -307,6 +326,13 @@ class GraphParams:
 
 
 _graph_params: GraphParams | None = None
+
+
+def reset_graph_params():
+    global _graph_params, _draft_graph_params, _draft_graph_prefill_params
+    _graph_params = None
+    _draft_graph_params = None
+    _draft_graph_prefill_params = None
 
 
 def set_graph_params(aclgraph_capture_sizes: list[int]):
