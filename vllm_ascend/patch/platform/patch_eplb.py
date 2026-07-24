@@ -38,6 +38,25 @@ def _is_npu_platform(platform) -> bool:
     return getattr(platform, "device_type", None) == "npu"
 
 
+def _wrap_parallel_config_post_init(original_post_init):
+    @wraps(original_post_init)
+    def _post_init(self, *args, **kwargs):
+        platform = _parallel_config.current_platform
+        if (
+            self.enable_eplb
+            and _is_npu_platform(platform)
+            and not self.eplb_config.use_async
+            and self.eplb_config.communicator is None
+        ):
+            # torch_nccl means torch.distributed on the device process
+            # group. The communicator factory maps it to HCCL on NPU.
+            self.eplb_config.communicator = "torch_nccl"
+        return original_post_init(self, *args, **kwargs)
+
+    setattr(_post_init, _PATCH_MARKER, True)
+    return _post_init
+
+
 def _patch_parallel_config() -> None:
     platform = _parallel_config.current_platform
     if not isinstance(platform, _CudaAlikeEplbPlatformProxy):
@@ -48,42 +67,36 @@ def _patch_parallel_config() -> None:
 
     original_post_init = ParallelConfig.__post_init__
     if not getattr(original_post_init, _PATCH_MARKER, False):
-
-        @wraps(original_post_init)
-        def _post_init(self):
-            platform = _parallel_config.current_platform
-            if (
-                self.enable_eplb
-                and _is_npu_platform(platform)
-                and not self.eplb_config.use_async
-                and self.eplb_config.communicator is None
-            ):
-                # torch_nccl means torch.distributed on the device process
-                # group. The communicator factory maps it to HCCL on NPU.
-                self.eplb_config.communicator = "torch_nccl"
-            return original_post_init(self)
-
-        setattr(_post_init, _PATCH_MARKER, True)
-        ParallelConfig.__post_init__ = _post_init
+        ParallelConfig.__post_init__ = _wrap_parallel_config_post_init(original_post_init)
 
     rebuild_dataclass(ParallelConfig, force=True)
+
+
+def _wrap_communicator_factory(original_factory):
+    factory_signature = signature(original_factory)
+    required_parameters = {"group_coordinator", "backend", "expert_weights", "expert_buffer"}
+    if not required_parameters.issubset(factory_signature.parameters):
+        raise RuntimeError("Unsupported vLLM EPLB contract: communicator factory signature changed.")
+
+    @wraps(original_factory)
+    def _create_eplb_communicator(*args, **kwargs):
+        bound = factory_signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        group_coordinator = bound.arguments["group_coordinator"]
+        backend = bound.arguments["backend"]
+        if backend == "torch_nccl" and _is_npu_platform(_parallel_config.current_platform):
+            return HcclEplbCommunicator(group_coordinator.device_group)
+        return original_factory(*args, **kwargs)
+
+    setattr(_create_eplb_communicator, _PATCH_MARKER, True)
+    return _create_eplb_communicator
 
 
 def _patch_communicator_factory() -> None:
     original_factory = _eplb_communicator.create_eplb_communicator
     if getattr(original_factory, _PATCH_MARKER, False):
         return
-    required_parameters = {"group_coordinator", "backend", "expert_weights", "expert_buffer"}
-    if not required_parameters.issubset(signature(original_factory).parameters):
-        raise RuntimeError("Unsupported vLLM EPLB contract: communicator factory signature changed.")
-
-    @wraps(original_factory)
-    def _create_eplb_communicator(group_coordinator, backend, expert_weights, expert_buffer):
-        if backend == "torch_nccl" and _is_npu_platform(_parallel_config.current_platform):
-            return HcclEplbCommunicator(group_coordinator.device_group)
-        return original_factory(group_coordinator, backend, expert_weights, expert_buffer)
-
-    setattr(_create_eplb_communicator, _PATCH_MARKER, True)
+    _create_eplb_communicator = _wrap_communicator_factory(original_factory)
     _eplb_communicator.create_eplb_communicator = _create_eplb_communicator
     # eplb_state imports the factory by name, so update its retained binding too.
     _eplb_state.create_eplb_communicator = _create_eplb_communicator
@@ -115,23 +128,33 @@ def _patch_router() -> None:
     BaseRouter._apply_eplb_mapping = _apply_eplb_mapping
 
 
+def _wrap_eplb_state_step(original_step):
+    step_signature = signature(original_step)
+    required_parameters = {"self", "is_dummy", "is_profile", "log_stats"}
+    if not required_parameters.issubset(step_signature.parameters):
+        raise RuntimeError("Unsupported vLLM EPLB contract: EplbState.step signature changed.")
+
+    @wraps(original_step)
+    def _step(self, *args, **kwargs):
+        if getattr(self, "_ascend_scope_matched", True):
+            return original_step(self, *args, **kwargs)
+
+        bound = step_signature.bind(self, *args, **kwargs)
+        bound.apply_defaults()
+        if not bound.arguments["is_dummy"] and not bound.arguments["is_profile"]:
+            bound.arguments["is_dummy"] = True
+            bound.arguments["log_stats"] = False
+        return original_step(*bound.args, **bound.kwargs)
+
+    setattr(_step, _PATCH_MARKER, True)
+    return _step
+
+
 def _patch_eplb_state() -> None:
     original_step = _eplb_state.EplbState.step
     if getattr(original_step, _PATCH_MARKER, False):
         return
-    required_parameters = {"self", "is_dummy", "is_profile", "log_stats"}
-    if not required_parameters.issubset(signature(original_step).parameters):
-        raise RuntimeError("Unsupported vLLM EPLB contract: EplbState.step signature changed.")
-
-    @wraps(original_step)
-    def _step(self, is_dummy=False, is_profile=False, log_stats=False):
-        if not is_dummy and not is_profile and not getattr(self, "_ascend_scope_matched", True):
-            is_dummy = True
-            log_stats = False
-        return original_step(self, is_dummy=is_dummy, is_profile=is_profile, log_stats=log_stats)
-
-    setattr(_step, _PATCH_MARKER, True)
-    _eplb_state.EplbState.step = _step
+    _eplb_state.EplbState.step = _wrap_eplb_state_step(original_step)
 
 
 _patch_parallel_config()

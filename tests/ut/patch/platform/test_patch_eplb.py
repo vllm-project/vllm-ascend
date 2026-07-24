@@ -72,6 +72,71 @@ def test_parallel_config_platform_patch_is_idempotent():
     assert parallel_module.current_platform is proxy
 
 
+def test_parallel_config_post_init_forwards_additive_parameters():
+    sentinel = object()
+    calls = []
+
+    def original_post_init(config, init_value, *, init_mode="default"):
+        calls.append((config, init_value, init_mode))
+        return sentinel
+
+    wrapped_post_init = patch_eplb._wrap_parallel_config_post_init(original_post_init)
+    config = SimpleNamespace(enable_eplb=False)
+
+    result = wrapped_post_init(config, "value", init_mode="custom")
+
+    assert result is sentinel
+    assert calls == [(config, "value", "custom")]
+
+
+def test_communicator_factory_forwards_additive_parameters():
+    sentinel = object()
+    calls = []
+
+    def original_factory(
+        group_coordinator,
+        backend,
+        expert_weights,
+        expert_buffer,
+        *,
+        transport_options=None,
+    ):
+        calls.append(
+            (
+                group_coordinator,
+                backend,
+                expert_weights,
+                expert_buffer,
+                transport_options,
+            )
+        )
+        return sentinel
+
+    wrapped_factory = patch_eplb._wrap_communicator_factory(original_factory)
+    coordinator = object()
+    expert_weights = object()
+    expert_buffer = object()
+
+    result = wrapped_factory(
+        coordinator,
+        "torch_gloo",
+        expert_weights,
+        expert_buffer,
+        transport_options={"mode": "future"},
+    )
+
+    assert result is sentinel
+    assert calls == [
+        (
+            coordinator,
+            "torch_gloo",
+            expert_weights,
+            expert_buffer,
+            {"mode": "future"},
+        )
+    ]
+
+
 def test_router_patch_calls_npu_custom_op(monkeypatch):
     topk_ids = torch.tensor([[0, 1]], dtype=torch.int32)
     physical_ids = torch.tensor([[2, 1]], dtype=torch.int32)
@@ -99,6 +164,51 @@ def test_router_patch_calls_npu_custom_op(monkeypatch):
     assert result is physical_ids
     router._validate_eplb_state.assert_called_once_with()
     assert custom_op.call_args.args[-1] is layer_state.num_unpadded_tokens_tensors[0]
+
+
+def test_eplb_state_step_forwards_additive_parameters():
+    sentinel = object()
+    calls = []
+
+    def original_step(
+        self,
+        is_dummy=False,
+        is_profile=False,
+        log_stats=False,
+        *,
+        future_option=None,
+    ):
+        calls.append((self, is_dummy, is_profile, log_stats, future_option))
+        return sentinel
+
+    wrapped_step = patch_eplb._wrap_eplb_state_step(original_step)
+    state = SimpleNamespace(_ascend_scope_matched=False)
+
+    result = wrapped_step(state, future_option="future")
+
+    assert result is sentinel
+    assert calls == [(state, True, False, False, "future")]
+
+
+def test_eplb_state_step_preserves_upstream_defaults():
+    calls = []
+
+    def original_step(
+        self,
+        is_dummy=False,
+        is_profile=True,
+        log_stats=True,
+        *,
+        future_option=None,
+    ):
+        calls.append((self, is_dummy, is_profile, log_stats, future_option))
+
+    wrapped_step = patch_eplb._wrap_eplb_state_step(original_step)
+    state = SimpleNamespace(_ascend_scope_matched=False)
+
+    wrapped_step(state)
+
+    assert calls == [(state, False, True, True, None)]
 
 
 def test_non_matching_scope_discards_pass_without_advancing_load_window(monkeypatch):
