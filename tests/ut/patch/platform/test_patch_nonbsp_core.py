@@ -444,7 +444,11 @@ def test_nonbsp_allgather_uses_admission_candidate_snapshot(monkeypatch):
         return [{"out_blk": [], "in_blk": [], "freeze": True}]
 
     monkeypatch.setattr(nonbsp_core.dist, "all_gather", all_gather)
-    monkeypatch.setattr(nonbsp_core, "balance_load", balance_load)
+    monkeypatch.setattr(
+        nonbsp_core.NonBSPDPEngineCoreProc,
+        "_balance_load",
+        staticmethod(balance_load),
+    )
     monkeypatch.setattr(nonbsp_core, "_print_requests_by_rank", lambda *args: None)
     monkeypatch.setattr(nonbsp_core, "_print_modifications", lambda *args: None)
 
