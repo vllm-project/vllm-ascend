@@ -288,10 +288,12 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
 # - non-310P: follow VLLM_ASCEND_ENABLE_NZ
 # - FP32: never convert
 # - meta tensor: never convert
-def maybe_trans_nz(weight: torch.Tensor) -> torch.Tensor:
+def maybe_trans_nz(weight: torch.Tensor, customize_dtype=None, input_dtype=None) -> torch.Tensor:
     if not _should_trans_nz(weight):
         return weight
-    return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
+    return torch_npu.npu_format_cast(
+        weight, ACL_FORMAT_FRACTAL_NZ, customize_dtype=customize_dtype, input_dtype=input_dtype
+    )
 
 
 def _round_up(x: int, align: int):

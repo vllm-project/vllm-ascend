@@ -127,6 +127,28 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             layer_name=f"{prefix}.attn",
         )
 
+        # If mlapo will further process fused_qkv_a_proj / q_proj weights
+        # (transpose, reshape, and do its own NZ conversion), mark them so
+        # that quant methods (e.g. w8a8_mxfp8) skip their own NZ conversion.
+        # Must be set at init time, before VLLM traverses sub-modules and
+        # calls process_weights_after_loading on them.
+        impl = self.mla_attn.impl
+        if getattr(impl, "enable_mlapo", False) and not getattr(impl, "enable_dsa_cp", False):
+            from vllm_ascend.quantization.methods.w8a8_mxfp8 import (
+                AscendW8A8MXFP8DynamicLinearMethod,
+            )
+
+            for _layer in (impl.fused_qkv_a_proj, impl.q_proj):
+                if _layer is not None and isinstance(
+                    getattr(
+                        getattr(_layer, "quant_method", None),
+                        "quant_method",
+                        None,
+                    ),
+                    AscendW8A8MXFP8DynamicLinearMethod,
+                ):
+                    _layer._mlapo_managed = True
+
         original_process_weights = self.mla_attn.process_weights_after_loading
 
         def wrapped_process_weights(act_dtype: torch.dtype):
