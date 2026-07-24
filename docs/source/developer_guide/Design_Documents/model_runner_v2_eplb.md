@@ -1,129 +1,194 @@
-# Model Runner V2 EPLB 上游化功能设计说明书
+# Model Runner V2 EPLB Upstream Integration Design Specification
 
-## 1. 文档信息
+## 1. Overview and Goals
 
-| 项目 | 内容 |
-|---|---|
-| 状态 | 设计已冻结，第一期实现中 |
-| 编写日期 | 2026-07-22 |
-| vLLM Ascend 基线 | `upstream/main`，提交 `885b6aa90` |
-| vLLM 发布基线 | `.github/vllm-release-tag.commit` 指定的 `v0.25.1` |
-| vLLM 主线验证基线 | `.github/vllm-main-verified.commit` 指定的 `54503ecec0f3ac31e5ecfc5f28652e4cc42307b5` |
-| 适用范围 | Ascend NPU Model Runner V2（以下简称 MRV2） |
-| 交付约束 | 最多两期，总周期不超过两个月 |
+### 1.1 Document Information
 
-本文中的“上游 EPLB”特指 vLLM `EPLBController`、`EplbState`、`EplbLayerState`、上游 Router、默认均衡策略和权重重排流程；“旧 EPLB”特指 `vllm_ascend/eplb/` 及其在 Model Runner V1 中的调用链。
+| Item | Description |
+| --- | --- |
+| Status | Design frozen; Phase 1 implementation in progress |
+| Date | 2026-07-22 |
+| vLLM Ascend baseline | `upstream/main`, commit `885b6aa90` |
+| vLLM release baseline | `v0.25.1`, as pinned by `.github/vllm-release-tag.commit` |
+| vLLM main verification baseline | `54503ecec0f3ac31e5ecfc5f28652e4cc42307b5`, as pinned by `.github/vllm-main-verified.commit` |
+| Scope | Ascend NPU Model Runner V2, hereafter referred to as MRV2 |
+| Delivery constraint | At most two phases, with a total schedule of no more than two months |
 
-## 2. 结论
+In this document, "upstream EPLB" specifically refers to the vLLM
+`EPLBController`, `EplbState`, `EplbLayerState`, upstream Router, default
+balancing policy, and weight rearrangement flow. "Legacy EPLB" refers to
+`vllm_ascend/eplb/` and its call chain in Model Runner V1.
 
-MRV2 EPLB 采用“上游控制面、Ascend 设备实现、定点 patch 接入”的单一架构：配置、生命周期、模型注册、状态、负载窗口、均衡策略、重排事务和主/草稿模型协同全部使用上游实现；vLLM Ascend 只提供 NPU 映射与负载统计算子、P/D batch 采集开关、NPU stream/event 适配、HCCL 权重通信和量化权重视图。当前以下游 patch 保证两个固定上游基线可交付，长期再将同样的硬件边界收敛为上游设备后端接口。
+### 1.2 Decision
 
-实现分两期，但两期使用同一套接口和状态模型：第一期关闭异步重排，交付同步 EPLB 的完整闭环；第二期只补齐异步、ACL Graph、推测解码、流水并行和剩余量化组合，不更换第一期架构。
+MRV2 EPLB adopts a single architecture consisting of an upstream control plane,
+Ascend device implementations, and focused patch-based integration.
+Configuration, lifecycle management, model registration, state, load windows,
+balancing policy, rearrangement transactions, and coordination between the main
+and draft models all use upstream implementations. vLLM Ascend provides only the
+NPU mapping and load-recording operator, the P/D batch collection switch, NPU
+stream/event adaptation, HCCL weight communication, and quantized weight views.
+For current delivery, downstream patches guarantee compatibility with two fixed
+upstream baselines. In the long term, the same hardware boundary will be
+consolidated into an upstream device-backend interface.
 
-## 3. 背景与问题
+Implementation is divided into two phases, both using the same interfaces and
+state model. Phase 1 disables asynchronous rearrangement and delivers a complete
+synchronous EPLB path. Phase 2 only adds asynchronous execution, ACL Graph,
+speculative decoding, pipeline parallelism, and the remaining quantization
+combinations; it does not replace the Phase 1 architecture.
 
-### 3.1 当前实现
+### 1.3 Background and Problem Statement
 
-Model Runner V1 在 `vllm_ascend/worker/model_runner_v1.py` 中直接管理 `EplbProcess`、`EplbUpdator`、`D2DExpertWeightLoader` 和 `VllmEplbAdaptor`，并在前向前后插入独立计数、策略计算和逐层换权逻辑。
+#### 1.3.1 Current Implementation
 
-旧实现还维护独立的：
+Model Runner V1 directly manages `EplbProcess`, `EplbUpdator`,
+`D2DExpertWeightLoader`, and `VllmEplbAdaptor` in
+`vllm_ascend/worker/model_runner_v1.py`, and inserts independent counters, policy
+calculation, and layer-by-layer weight replacement before and after forward
+execution.
 
-- `additional_config.eplb_config` 和 `DYNAMIC_EPLB`；
-- `global_expert_map`、`_expert_map`、`log2phy` 和 `moe_load`；
-- Swift、FlashLB、Random 等下游策略；
-- 独立 EPLB 进程组、子进程和设备间权重搬运状态机；
-- 按量化类型硬编码的专家权重名称表。
+The legacy implementation also maintains its own:
 
-MRV2 已继承上游 `vllm.v1.worker.gpu.model_runner.GPUModelRunner`，但当前存在两个显式阻断：
+- `additional_config.eplb_config` and `DYNAMIC_EPLB`;
+- `global_expert_map`, `_expert_map`, `log2phy`, and `moe_load`;
+- downstream policies such as Swift, FlashLB, and Random;
+- independent EPLB process groups, subprocesses, and a device-to-device weight
+  movement state machine;
+- hard-coded expert-weight name tables for each quantization type.
 
-- `vllm_ascend/worker/v2/model_runner.py` 在初始化时拒绝 `dynamic_eplb`；
-- 同一文件保留空的 `eplb_warmup()`，没有接入任何有效状态。
+MRV2 already inherits from the upstream
+`vllm.v1.worker.gpu.model_runner.GPUModelRunner`, but two explicit blockers
+remain:
 
-MoE 层已经使用上游 `FusedMoE → MoERunner → RoutedExperts` 工厂结构，但 `AscendMoERunner` 仍初始化旧 EPLB 状态，Ascend quant method 仍在各自 `apply()` 内重复执行专家选择，未消费上游 Router 产生的物理专家 ID。
+- `vllm_ascend/worker/v2/model_runner.py` rejects `dynamic_eplb` during
+  initialization;
+- the same file retains an empty `eplb_warmup()` and does not connect any
+  effective state.
 
-### 3.2 上游已具备的能力
+MoE layers already use the upstream `FusedMoE -> MoERunner -> RoutedExperts`
+factory structure. However, `AscendMoERunner` still initializes legacy EPLB
+state, and Ascend quantization methods still repeat expert selection inside
+their respective `apply()` methods instead of consuming the physical expert IDs
+produced by the upstream Router.
 
-vLLM `v0.25.1` 已提供：
+#### 1.3.2 Capabilities Already Available Upstream
 
-- `ParallelConfig.enable_eplb` 和 `EPLBConfig`；
-- `EPLBController` 对模型加载、主模型/草稿模型注册、前向准备和 step 的管理；
-- `EplbState` 对专家负载窗口、默认策略、同步/异步重排和图模式稳定 tensor view 的管理；
-- `EplbLayerState` 对单层负载、逻辑到物理映射及副本数量的引用；
-- Router 内统一的逻辑专家选择、物理专家映射和负载统计位置；
-- `MixtureOfExperts`、`MoERunner`、`RoutedExperts.get_expert_weights()` 等模型和权重接口；
-- 独立于 EP 前向通信的 `get_eplb_group()`；
-- 同步及异步专家权重重排流程。
+vLLM `v0.25.1` already provides:
 
-### 3.3 上游在 Ascend 上的缺口
+- `ParallelConfig.enable_eplb` and `EPLBConfig`;
+- `EPLBController` management of model loading, main/draft model registration,
+  forward preparation, and steps;
+- `EplbState` management of the expert-load window, default policy,
+  synchronous/asynchronous rearrangement, and stable tensor views for graph
+  mode;
+- `EplbLayerState` references to per-layer load, logical-to-physical mapping,
+  and replica counts;
+- a unified Router location for logical expert selection, physical expert
+  mapping, and load recording;
+- model and weight interfaces including `MixtureOfExperts`, `MoERunner`, and
+  `RoutedExperts.get_expert_weights()`;
+- `get_eplb_group()`, independent of EP forward communication;
+- synchronous and asynchronous expert-weight rearrangement flows.
 
-缺口均属于设备相关边界：
+#### 1.3.3 Gaps in Upstream Support for Ascend
 
-1. `ParallelConfig` 以 `current_platform.is_cuda_alike()` 判断 EPLB 能力，当前 OOT NPU 平台会被拒绝。
-2. Router 的 `eplb_map_to_physical_and_record()` 仅为 CUDA/ROCm 注册 Triton 实现，非 CUDA-like 平台返回原始逻辑专家 ID。
-3. EPLB 异步线程、事件和通信实现中仍存在 `torch.cuda.Stream/Event` 及 CUDA 设备索引假设。
-4. 内置 communicator 不表达 HCCL 能力，也不能声明该后端是否支持异步多流。
-5. Ascend quant method 没有遵循上游 modular MoE 的“先路由、后计算”接口。
-6. NZ、量化权重和 scale/offset 的实际布局不能直接由上游通用 `named_parameters()` 推导。
+All remaining gaps are at device-specific boundaries:
 
-这些缺口不要求复制上游 EPLB 控制逻辑，只需要稳定的设备后端接口。
+1. `ParallelConfig` uses `current_platform.is_cuda_alike()` to determine EPLB
+   capability, so the current OOT NPU platform is rejected.
+2. The Router's `eplb_map_to_physical_and_record()` registers a Triton
+   implementation only for CUDA/ROCm; non-CUDA-like platforms return the
+   original logical expert IDs.
+3. The EPLB asynchronous thread, event, and communication implementations still
+   assume `torch.cuda.Stream/Event` and CUDA device indices.
+4. Built-in communicators cannot express HCCL capability or declare whether a
+   backend supports asynchronous multi-stream execution.
+5. Ascend quantization methods do not follow the modular MoE contract of routing
+   first and computing afterward.
+6. The actual layouts of NZ weights, quantized weights, and scale/offset tensors
+   cannot be inferred directly from generic upstream `named_parameters()`.
 
-## 4. 设计目标与边界
+These gaps do not require copying upstream EPLB control logic. They require only
+a stable device-backend interface.
 
-### 4.1 目标
+### 1.4 Design Goals and Boundaries
 
-“完整接入上游 EPLB”必须同时满足以下条件：
+#### 1.4.1 Goals
 
-1. MRV2 的 EPLB 行为只读取 `parallel_config.enable_eplb`、上游 `parallel_config.eplb_config` 和下游单字段 `load_scope`；不得读取其他旧 EPLB 配置。
-2. MRV2 直接使用上游 `EPLBController` 和 `EplbState`，不新增前向前后 EPLB 调度逻辑。
-3. 模型和每个 MoE 层通过上游 `MixtureOfExperts`、`MoERunner` 和 `EplbLayerState` 注册。
-4. 逻辑专家选择只执行一次，发生在上游 Router；NPU 计算只消费 Router 输出。
-5. 负载窗口、策略计算、映射提交和重排时机由上游决定。
-6. MRV2 不导入 `vllm_ascend/eplb/`，也不访问旧 `dynamic_eplb` 状态。
-7. EPLB 关闭时，不增加设备 tensor、通信组、权重 buffer 或额外同步。
-8. P/D 采集范围只改变负载是否进入上游 window，不改变专家映射、重排周期或跨 rank 通信顺序。
-9. 当前 patch 只覆盖本文列出的函数，通过签名和行为契约测试阻止上游漂移；不复制 `EplbState`、policy 或重排函数主体。
+"Full integration with upstream EPLB" must satisfy all of the following:
 
-### 4.2 最终功能范围
+1. MRV2 EPLB behavior reads only `parallel_config.enable_eplb`, upstream
+   `parallel_config.eplb_config`, and the single downstream field `load_scope`.
+   It must not read any other legacy EPLB configuration.
+2. MRV2 directly uses upstream `EPLBController` and `EplbState` and adds no EPLB
+   scheduling logic before or after forward execution.
+3. The model and every MoE layer register through upstream
+   `MixtureOfExperts`, `MoERunner`, and `EplbLayerState`.
+4. Logical expert selection executes exactly once in the upstream Router; NPU
+   computation only consumes the Router output.
+5. The upstream implementation determines the load window, policy calculation,
+   mapping commit, and rearrangement timing.
+6. MRV2 does not import `vllm_ascend/eplb/` or access legacy `dynamic_eplb`
+   state.
+7. When EPLB is disabled, no additional device tensors, communication groups,
+   weight buffers, or synchronization are introduced.
+8. The P/D collection scope changes only whether load enters the upstream
+   window. It does not change expert mapping, the rearrangement period, or the
+   order of cross-rank communication.
+9. Current patches cover only the functions listed in this document and use
+   signature and behavioral contract tests to detect upstream drift. They do
+   not copy the bodies of `EplbState`, policies, or rearrangement functions.
 
-最终态支持上游 EPLB 的以下稳定能力：
+#### 1.4.2 Final Functional Scope
 
-- 冗余物理专家；
-- 专家负载窗口与周期重排；
-- 上游默认均衡策略；
-- 同步和异步重排；
-- balancedness 日志；
-- `all | prefill | decode` 三种负载采集范围，支持混合 P/D 批次；
-- 主模型和 MoE 草稿模型分别统计、统一调度；
-- eager、ACL Graph piecewise 和 full decode graph；
-- TP/DP/EP、PP 及多节点 EP；
-- Ascend 当前支持的主流非量化及量化 MoE 权重布局。
+The final state supports the following stable upstream EPLB capabilities:
 
-### 4.3 旧能力处理
+- redundant physical experts;
+- expert-load windows and periodic rearrangement;
+- the upstream default balancing policy;
+- synchronous and asynchronous rearrangement;
+- balancedness logging;
+- three load-collection scopes, `all | prefill | decode`, including mixed P/D
+  batches;
+- independent statistics with unified scheduling for the main model and MoE
+  draft model;
+- eager execution, ACL Graph piecewise mode, and full decode graphs;
+- TP/DP/EP, PP, and multi-node EP;
+- mainstream unquantized and quantized MoE weight layouts currently supported
+  by Ascend.
 
-以下能力没有对应的上游稳定接口，不进入 MRV2 私有实现：
+#### 1.4.3 Treatment of Legacy Capabilities
 
-| 旧能力 | MRV2 决策 | 原因 |
-|---|---|---|
-| `eplb_policy_type=2/3`、Swift、FlashLB | 不迁移 | 策略与硬件无关；如仍需要，应先贡献到上游策略接口 |
-| `expert_map_path` | 不迁移 | 上游没有面向普通服务启动的静态映射文件接口 |
-| `expert_map_record_path` | 不迁移 | 上游没有对应导出协议 |
-| `eplb_heat_collection_stage` | 迁移并更名 | MRV2 使用 `additional_config.eplb_config.load_scope`；batch 中存在任一 prefill 请求即将整批判定为 prefill，否则判定为 decode |
-| `DYNAMIC_EPLB`、`EXPERT_MAP_RECORD` | MRV2 不读取 | 上游以 `enable_eplb` 为唯一开关 |
-| Elastic EP | 不在本项目交付范围 | 属于独立功能；设计不阻断后续复用上游 `setup_from_mapping()` |
-| Ascend 310P | 不在 MRV2 范围 | 310P 使用独立 model runner 和 MoE 实现 |
+The following capabilities do not have a corresponding stable upstream
+interface and are not reimplemented privately in MRV2:
 
-旧能力继续由 Model Runner V1 承载，直到 V1 单独退场；本项目不删除 `vllm_ascend/eplb/`，但必须切断其与 MRV2 的依赖。
+| Legacy capability | MRV2 decision | Rationale |
+| --- | --- | --- |
+| `eplb_policy_type=2/3`, Swift, FlashLB | Do not migrate | Policies are hardware-independent; if still required, they should first be contributed through the upstream policy interface |
+| `expert_map_path` | Do not migrate | Upstream does not provide a static mapping-file interface for ordinary service startup |
+| `expert_map_record_path` | Do not migrate | Upstream has no corresponding export protocol |
+| `eplb_heat_collection_stage` | Migrate and rename | MRV2 uses `additional_config.eplb_config.load_scope`; a batch containing any prefill request is classified entirely as prefill, otherwise as decode |
+| `DYNAMIC_EPLB`, `EXPERT_MAP_RECORD` | Not read by MRV2 | Upstream uses `enable_eplb` as the only switch |
+| Elastic EP | Outside project scope | This is a separate feature; the design does not prevent later reuse of upstream `setup_from_mapping()` |
+| Ascend 310P | Outside MRV2 scope | 310P uses an independent model runner and MoE implementation |
 
-### 4.4 方案选择
+Legacy capabilities remain available in Model Runner V1 until V1 is retired
+separately. This project does not delete `vllm_ascend/eplb/`, but it must sever
+MRV2's dependency on that package.
 
-| 方案 | 决策 | 判定依据 |
-|---|---|---|
-| 把 V1 EPLB 迁入 MRV2 | 拒绝 | 仍保留两套配置、策略和重排状态机 |
-| 把上游 EPLB 代码复制到下游 | 拒绝 | 上游修改时仍需要逐段对齐 |
-| 在下游对硬件边界做定点 patch | 当前采用 | 不等待上游合入；改动面可限定、可做双基线契约测试 |
-| 上游增加单一设备后端接口 | 长期目标 | 以同样的硬件边界替换 patch，不改变下游设备实现 |
+#### 1.4.4 Selected Approach
 
-## 5. 总体架构
+| Option | Decision | Basis |
+| --- | --- | --- |
+| Migrate V1 EPLB into MRV2 | Rejected | Retains two configuration systems, policies, and rearrangement state machines |
+| Copy upstream EPLB into the downstream repository | Rejected | Still requires line-by-line alignment whenever upstream changes |
+| Apply focused downstream patches at hardware boundaries | Selected for current delivery | Does not wait for upstream acceptance; the change surface is bounded and can be protected by dual-baseline contract tests |
+| Add a single device-backend interface upstream | Long-term target | Replaces patches at the same hardware boundary without changing downstream device implementations |
+
+## 2. Architecture and Integration Strategy
+
+### 2.1 Overall Architecture
 
 ```mermaid
 flowchart TB
@@ -138,11 +203,11 @@ flowchart TB
     I["InputBatch P/D metadata"] --> G["Batch load-scope gate"]
     G --> S
     L --> Q["Ascend quantized MoE compute"]
-    S --> X["Upstream rearrange transaction"]
+    S --> X["Upstream rearrangement transaction"]
     X --> A
     A --> H["HCCL weight communicator"]
 
-    subgraph UP["vLLM owns"]
+    subgraph UP["Owned by vLLM"]
         C
         R
         S
@@ -153,7 +218,7 @@ flowchart TB
         X
     end
 
-    subgraph ASC["vLLM Ascend owns"]
+    subgraph ASC["Owned by vLLM Ascend"]
         B
         Q
         H
@@ -162,195 +227,301 @@ flowchart TB
     end
 ```
 
-### 5.1 所有权
+#### 2.1.1 Ownership
 
-| 能力 | 所有者 | 下游是否允许重写 |
-|---|---|---|
-| 开关、窗口、周期、冗余专家数、异步开关 | vLLM | 否 |
-| 模型注册和 step 生命周期 | vLLM | 否 |
-| 负载窗口、映射 tensor、提交顺序 | vLLM | 否 |
-| 均衡策略 | vLLM | 否 |
-| 逻辑专家选择语义 | vLLM Router | 否 |
-| P/D 负载采集范围 | vLLM Ascend 扩展；长期上游化 | 是 |
-| 逻辑到物理映射及负载累加算子 | 当前由 patch 转发到 Ascend 实现 | 是 |
-| stream/event | 当前使用 MRV2 NPU 兼容层；长期上游接口 | 是 |
-| 权重发送/接收 | vLLM `EplbCommunicator` 接口，Ascend HCCL 实现 | 是 |
-| 专家权重视图 | vLLM `get_expert_weights()` 接口，Ascend 量化布局实现 | 是 |
-| MoE GEMM、dispatch/combine、MC2 | vLLM Ascend | 是 |
+| Capability | Owner | May downstream override it? |
+| --- | --- | --- |
+| Switches, window, interval, redundant expert count, async switch | vLLM | No |
+| Model registration and step lifecycle | vLLM | No |
+| Load window, mapping tensors, commit order | vLLM | No |
+| Balancing policy | vLLM | No |
+| Logical expert selection semantics | vLLM Router | No |
+| P/D load-collection scope | vLLM Ascend extension; upstream in the long term | Yes |
+| Logical-to-physical mapping and load-accumulation operator | Currently forwarded by a patch to the Ascend implementation | Yes |
+| Stream/event | Currently uses the MRV2 NPU compatibility layer; upstream interface in the long term | Yes |
+| Weight send/receive | vLLM `EplbCommunicator` interface with an Ascend HCCL implementation | Yes |
+| Expert-weight views | vLLM `get_expert_weights()` interface with Ascend quantized-layout implementations | Yes |
+| MoE GEMM, dispatch/combine, MC2 | vLLM Ascend | Yes |
 
-## 6. 当前 patch 与长期接口
+### 2.2 Current Patch-Based Integration
 
-### 6.1 当前实施方式
+#### 2.2.1 Current Implementation
 
-新增 `vllm_ascend/patch/platform/patch_eplb.py`，由 `NPUPlatform.pre_register_and_update()` 在配置构造前导入。该文件只做函数转发和能力适配，具体 NPU 实现位于普通下游模块。
+Add `vllm_ascend/patch/platform/patch_eplb.py`, imported by
+`NPUPlatform.pre_register_and_update()` before configuration construction. The
+file performs only function forwarding and capability adaptation; concrete NPU
+implementations reside in ordinary downstream modules.
 
-当前 patch 限定为以下五类：
+Current patches are limited to the following five categories:
 
-1. 配置构造：放开 `ParallelConfig._validate_parallel_config()` 中的 CUDA-like 限制，保留其余 EP、TP/DP 和 redundancy 校验。
-2. 通信构造：包装 `ParallelConfig.__post_init__()` 和 `create_eplb_communicator()`，把 Ascend 默认后端设为 HCCL。
-3. Router：替换 `BaseRouter._apply_eplb_mapping()`，转发到 NPU map-and-record 算子。
-4. 状态边界：包装 `EplbState.step()` 和 `EplbState.__init__()`，分别实现非目标 batch 不入 window 和 NPU async device index。
-5. 异步错误：包装 `start_async_worker()`，把子线程异常传回主线程，不改写上游 transfer loop。
+1. Configuration construction: relax the CUDA-like restriction in
+   `ParallelConfig._validate_parallel_config()` while preserving all other EP,
+   TP/DP, and redundancy validation.
+2. Communication construction: wrap `ParallelConfig.__post_init__()` and
+   `create_eplb_communicator()` to set HCCL as the Ascend default backend.
+3. Router: replace `BaseRouter._apply_eplb_mapping()` and forward to the NPU
+   map-and-record operator.
+4. State boundary: wrap `EplbState.step()` and `EplbState.__init__()` to keep
+   non-target batches out of the window and provide the NPU async device index.
+5. Asynchronous errors: wrap `start_async_worker()` to propagate child-thread
+   exceptions to the main thread without rewriting the upstream transfer loop.
 
-### 6.2 patch 约束
+#### 2.2.2 Patch Constraints
 
-- patch 必须幂等，重复导入 platform/worker patch 不得重复包装。
-- 启动时校验目标类、函数名和关键参数；契约不匹配时立即失败，不以 `try/except` 忽略。
-- 不替换或复制 Pydantic validator；只代理 `vllm.config.parallel` 模块持有的 `current_platform`，使原 validator 在 NPU 上通过 EPLB 能力检查，并继续执行全部原生校验。`ParallelConfig.__post_init__()` wrapper 生效后只 rebuild `ParallelConfig`；不得依赖重建 `VllmConfig` 的嵌套 schema。
-- patch 不得复制 `EplbState.step()`、`rearrange()`、`transfer_layer()` 或 policy 主体。
-- 发布基线 `v0.25.1` 和 main-verified 基线分别运行 patch 导入、签名和行为契约测试。
-- 每个 patch 在 `vllm_ascend/patch/__init__.py` 记录原因、上游替代点和删除条件。
+- Patches must be idempotent. Repeated imports of platform/worker patches must
+  not wrap a target more than once.
+- Target classes, function names, and key parameters are validated at startup.
+  Contract mismatches fail immediately and must not be ignored with
+  `try/except`.
+- Patches must not replace or copy Pydantic validators. They only proxy the
+  `current_platform` object held by `vllm.config.parallel`, allowing the
+  original validator to pass the EPLB capability check on NPU while continuing
+  to run all native validation. After the `ParallelConfig.__post_init__()`
+  wrapper takes effect, only `ParallelConfig` is rebuilt; the implementation
+  must not rely on rebuilding the nested `VllmConfig` schema.
+- Patches must not copy the bodies of `EplbState.step()`, `rearrange()`,
+  `transfer_layer()`, or any policy.
+- Patch import, signature, and behavioral contract tests run independently
+  against the `v0.25.1` release baseline and the main-verified baseline.
+- Every patch records its rationale, upstream replacement point, and removal
+  condition in `vllm_ascend/patch/__init__.py`.
 
-### 6.3 长期 `EplbDeviceBackend`
+### 2.3 Long-Term `EplbDeviceBackend`
 
-在 vLLM 增加设备后端协议，由 `Platform.get_eplb_device_backend_cls()` 返回实现类路径；CUDA/ROCm 保持现有实现，Ascend 返回 `AscendEplbBackend`。
+Add a device-backend protocol to vLLM. The implementation class path is returned
+by `Platform.get_eplb_device_backend_cls()`. CUDA/ROCm retain their current
+implementation, while Ascend returns `AscendEplbBackend`.
 
-接口职责限定为：
+The interface is limited to the following responsibilities:
 
-- `map_and_record(...)`：逻辑专家映射和负载累加；
-- `create_stream(device)`、`stream_context(stream)`：异步重排流；
-- `create_event(enable_timing=False)`：主线程与异步线程同步及耗时统计；
-- `current_device_index(device)`：异步线程绑定设备；
-- `create_communicator(...)`：构造实现上游 `EplbCommunicator` 的设备通信对象；
-- `supports_async`：声明当前设备后端是否允许异步重排。
+- `map_and_record(...)`: logical expert mapping and load accumulation;
+- `create_stream(device)` and `stream_context(stream)`: the asynchronous
+  rearrangement stream;
+- `create_event(enable_timing=False)`: main-thread/async-thread synchronization
+  and timing;
+- `current_device_index(device)`: device binding for the asynchronous thread;
+- `create_communicator(...)`: construction of a device communication object
+  implementing upstream `EplbCommunicator`;
+- `supports_async`: declaration of whether the current device backend supports
+  asynchronous rearrangement.
 
-`ParallelConfig` 的 EPLB 校验改为检查 `current_platform.get_eplb_device_backend_cls()`，不再使用 `is_cuda_alike()` 推断能力。
+`ParallelConfig` EPLB validation changes to check
+`current_platform.get_eplb_device_backend_cls()` instead of inferring capability
+from `is_cuda_alike()`.
 
-该接口进入依赖基线后，`patch_eplb.py` 按能力校验、Router、communicator、stream/event 的对应关系逐项删除；batch scope 判定、NPU 算子、`HcclEplbCommunicator` 和 quant weight view 原样保留，仅改为由上游接口构造。
+After this interface enters the dependency baseline, `patch_eplb.py` is removed
+incrementally according to the corresponding capability check, Router,
+communicator, and stream/event entry points. Batch-scope evaluation, the NPU
+operator, `HcclEplbCommunicator`, and quantized weight views remain unchanged;
+only their construction is redirected through the upstream interface.
 
-## 7. 详细设计
+## 3. Detailed Design
 
-### 7.1 配置
+### 3.1 Configuration
 
-MRV2 使用以下上游参数：
+MRV2 uses the following upstream parameters:
 
-- `--enable-expert-parallel`；
-- `--enable-eplb`；
-- `--eplb-config.window_size`；
-- `--eplb-config.step_interval`；
-- `--eplb-config.num_redundant_experts`；
-- `--eplb-config.use_async`；
-- `--eplb-config.log_balancedness`；
-- `--eplb-config.log_balancedness_interval`；
-- `--eplb-config.policy default`；
-- `--eplb-config.communicator`。
+- `--enable-expert-parallel`;
+- `--enable-eplb`;
+- `--eplb-config.window_size`;
+- `--eplb-config.step_interval`;
+- `--eplb-config.num_redundant_experts`;
+- `--eplb-config.use_async`;
+- `--eplb-config.log_balancedness`;
+- `--eplb-config.log_balancedness_interval`;
+- `--eplb-config.policy default`;
+- `--eplb-config.communicator`.
 
-上述字段也可以通过 `--eplb-config` JSON 一次传入；字段名和语义与上游 `EPLBConfig` 一致。
+These fields can also be passed together as JSON through `--eplb-config`. Their
+names and semantics are identical to upstream `EPLBConfig`.
 
-MRV2 额外提供一个过渡期配置：
+MRV2 additionally provides one transitional configuration:
 
 ```text
 --additional-config '{"eplb_config":{"load_scope":"prefill"}}'
 ```
 
-`load_scope` 可取 `all`、`prefill` 或 `decode`，默认为 `all`。它以 batch 为单位决定本次负载是否进入上游 expert-load window，映射和 MoE 计算始终对整批 token 执行。该字段长期迁入上游 `EPLBConfig`；当前不修改上游 Pydantic schema，避免扩大 patch 范围。
+`load_scope` accepts `all`, `prefill`, or `decode` and defaults to `all`. It
+determines, at batch granularity, whether load from the current batch enters the
+upstream expert-load window. Mapping and MoE computation always process the
+entire batch. In the long term, this field should move into upstream
+`EPLBConfig`; the current implementation does not change the upstream Pydantic
+schema in order to keep the patch scope bounded.
 
-现有 `EplbConfig._defaults` 直接增加 `load_scope="all"`，`_validate_config()` 增加 `all/prefill/decode` 枚举校验，不新增配置类。`load_scope` 只允许 MRV2 设置和读取；V1 继续使用 `eplb_heat_collection_stage`，显式设置 `load_scope` 时启动失败。
+Add `load_scope="all"` directly to the existing `EplbConfig._defaults` and add
+`all/prefill/decode` enum validation to `_validate_config()`; do not introduce
+another configuration class. Only MRV2 may set and read `load_scope`. V1
+continues to use `eplb_heat_collection_stage` and fails at startup if
+`load_scope` is explicitly configured.
 
-配置规则：
+Configuration rules:
 
-1. `vllm_config.use_v2_model_runner=True` 时，`additional_config.eplb_config` 只允许 `load_scope`；出现 `dynamic_eplb`、`expert_map_path`、旧 interval、policy 或 record path 时启动失败。
-2. MRV2 检测到旧 `DYNAMIC_EPLB` 或 `EXPERT_MAP_RECORD` 环境变量启用时启动失败；不得让旧 platform patch 和新状态机同时生效。
-3. 第一期要求显式配置 `use_async=false`；设置为 `true` 时启动失败。
-4. 第二期完成后，`use_async` 完全遵循上游默认值和用户值。
-5. `policy` 只接受上游已注册策略；不把旧数字策略值映射为 `default`。
-6. Ascend 上 `communicator` 省略或为 `null` 时，`patch_eplb.py` 在上游 `ParallelConfig.__post_init__()` 执行前写入上游合法值 `torch_nccl`；该值在 NPU 上表示基于设备进程组的 `torch.distributed` 通信，并由 communicator factory 映射为 HCCL，阻止上游改写为 Gloo、NIXL 或 PyNCCL。
-7. Ascend 上显式配置 CUDA 专用 communicator 时启动失败，并提示删除该字段以使用平台默认 HCCL；不做运行时隐式回退。
-8. `load_scope != all` 要求 `enable_eplb=True`；否则启动失败。
-9. MRV2 检测到旧 `eplb_heat_collection_stage` 字段时启动失败；值为 `prefill/decode` 时给出 `load_scope` 的等价配置，值为 `all` 时提示删除该字段。
-10. V1 检测到用户显式设置 `load_scope` 时启动失败，并提示继续使用 `eplb_heat_collection_stage`；默认生成的 `load_scope=all` 不参与 V1 行为。
+1. When `vllm_config.use_v2_model_runner=True`,
+   `additional_config.eplb_config` accepts only `load_scope`. The service fails
+   at startup if it contains `dynamic_eplb`, `expert_map_path`, legacy
+   intervals, policies, or record paths.
+2. MRV2 fails at startup if the legacy `DYNAMIC_EPLB` or
+   `EXPERT_MAP_RECORD` environment variable is enabled. The legacy platform
+   patch and the new state machine must never be active together.
+3. Phase 1 requires `use_async=false` to be configured explicitly. Setting it
+   to `true` fails at startup.
+4. After Phase 2 is complete, `use_async` fully follows the upstream default or
+   the user-provided value.
+5. `policy` accepts only policies registered upstream. Legacy numeric policy
+   values are not mapped to `default`.
+6. On Ascend, when `communicator` is omitted or `null`, `patch_eplb.py` writes
+   the upstream-valid value `torch_nccl` before upstream
+   `ParallelConfig.__post_init__()` executes. On NPU, this value means
+   `torch.distributed` communication over the device process group and is
+   mapped to HCCL by the communicator factory. This prevents upstream from
+   rewriting it to Gloo, NIXL, or PyNCCL.
+7. Explicit configuration of a CUDA-only communicator on Ascend fails at
+   startup and instructs the user to remove the field to use the platform
+   default HCCL backend. There is no implicit runtime fallback.
+8. `load_scope != all` requires `enable_eplb=True`; otherwise startup fails.
+9. If MRV2 detects the legacy `eplb_heat_collection_stage` field, startup
+   fails. Values `prefill/decode` produce an equivalent `load_scope`
+   configuration hint; value `all` instructs the user to remove the field.
+10. If V1 detects explicitly configured `load_scope`, startup fails and
+    instructs the user to continue using `eplb_heat_collection_stage`. The
+    generated default `load_scope=all` does not affect V1 behavior.
 
-旧参数不能自动换算，原因如下：
+Legacy parameters are not converted automatically:
 
-| 旧参数 | 上游近似参数 | 是否自动换算 | 原因 |
-|---|---|---|---|
-| `dynamic_eplb` | `enable_eplb` | 否 | 开关涉及两套生命周期 |
-| `expert_heat_collection_interval` | `window_size` | 否 | 统计窗口语义不同 |
-| `algorithm_execution_interval` | `step_interval` | 否 | 旧周期还包含逐层换权阶段 |
-| `num_redundant_experts` | 同名参数 | 否 | 必须与上游物理专家初始化同时生效 |
-| `eplb_policy_type` | `policy` | 否 | 策略实现和结果不等价 |
-| `eplb_heat_collection_stage` | `load_scope` | 否 | 名称和批次判断语义均改变，需要用户显式迁移 |
+| Legacy parameter | Closest upstream parameter | Automatically converted? | Rationale |
+| --- | --- | --- | --- |
+| `dynamic_eplb` | `enable_eplb` | No | The switches control two different lifecycles |
+| `expert_heat_collection_interval` | `window_size` | No | The statistical-window semantics differ |
+| `algorithm_execution_interval` | `step_interval` | No | The legacy interval also includes layer-by-layer weight replacement |
+| `num_redundant_experts` | Same name | No | It must take effect together with upstream physical-expert initialization |
+| `eplb_policy_type` | `policy` | No | The policy implementations and results are not equivalent |
+| `eplb_heat_collection_stage` | `load_scope` | No | Both the name and batch-classification semantics change, so explicit migration is required |
 
-### 7.2 Model Runner 生命周期
+### 3.2 Model Runner Lifecycle
 
-`vllm_ascend/worker/v2/model_runner.py` 执行以下修改：
+Make the following changes in `vllm_ascend/worker/v2/model_runner.py`:
 
-1. 删除 dynamic EPLB 的 `NotImplementedError`。
-2. 删除空的 `eplb_warmup()`；上游在 `load_model()` 内完成 EPLB 状态构造和模型注册。
-3. `__init__()` 只保存 `load_scope`，不创建额外 tensor 或运行时状态类。
-4. `prepare_inputs()` 生成 `is_prefilling_np` 后判断 batch 阶段，并把匹配结果写入 `EplbState._ascend_scope_matched`。
-5. 不覆盖上游 `load_model()`、`execute_model()`、`sample_tokens()` 和 `_dummy_run()` 的 EPLB 逻辑。
-6. Ascend 为 MC2 预留通信 buffer 的额外 `_dummy_run()` 传入 `skip_eplb=True`，避免 profile 阶段执行两次 EPLB dummy rearrange。
-7. 正常 profile 仍由上游 `_dummy_run(is_profile=True)` 触发一次 communicator buffer 预留。
+1. Remove the `NotImplementedError` for dynamic EPLB.
+2. Remove the empty `eplb_warmup()`; upstream constructs EPLB state and
+   registers the model inside `load_model()`.
+3. `__init__()` only stores `load_scope`; it does not create extra tensors or
+   runtime-state classes.
+4. After `prepare_inputs()` generates `is_prefilling_np`, classify the batch
+   phase and write the match result to `EplbState._ascend_scope_matched`.
+5. Do not override the upstream EPLB logic in `load_model()`,
+   `execute_model()`, `sample_tokens()`, or `_dummy_run()`.
+6. Pass `skip_eplb=True` to the extra `_dummy_run()` used by Ascend to reserve
+   MC2 communication buffers, preventing the profile phase from executing the
+   EPLB dummy rearrangement twice.
+7. The normal profile path still uses upstream `_dummy_run(is_profile=True)` to
+   reserve communicator buffers exactly once.
 
-MRV2 不增加 `forward_before()`、`forward_end()`、`load_model()` override 或独立 iteration counter。
+MRV2 does not add a `forward_before()`, `forward_end()`, `load_model()`
+override, or an independent iteration counter.
 
-### 7.3 模型与层注册
+### 3.3 Model and Layer Registration
 
-主模型必须满足上游 `MixtureOfExperts` 协议：
+The main model must satisfy the upstream `MixtureOfExperts` protocol:
 
-- `moe_layers` 只包含当前 PP rank 上实际存在的 `MoERunner`；
-- `num_moe_layers == len(moe_layers)`；
-- `num_logical_experts`、`num_physical_experts`、`num_local_physical_experts` 和 `num_redundant_experts` 来自上游 `FusedMoE` 初始化结果；
-- `set_eplb_state()` 使用协议默认实现，将每层 view 注入 `MoERunner.set_eplb_state()`；
-- `expert_weights` 只在权重加载及量化后由 `set_eplb_state()` 收集。
+- `moe_layers` contains only `MoERunner` instances that actually exist on the
+  current PP rank;
+- `num_moe_layers == len(moe_layers)`;
+- `num_logical_experts`, `num_physical_experts`,
+  `num_local_physical_experts`, and `num_redundant_experts` come from the
+  upstream `FusedMoE` initialization result;
+- `set_eplb_state()` uses the default protocol implementation to inject each
+  layer view into `MoERunner.set_eplb_state()`;
+- `expert_weights` is collected by `set_eplb_state()` only after weight loading
+  and quantization.
 
-Ascend 自有模型（例如 DeepSeek V4 及其 MTP 变体）必须与上游模型使用相同协议，不新增模型名判断和 EPLB adaptor。
+Ascend-owned models, such as DeepSeek V4 and its MTP variants, must use the same
+protocol as upstream models. They must not introduce model-name checks or an
+EPLB adapter.
 
-MoE 草稿模型由上游 `EPLBController.maybe_register_speculator()` 注册；Ascend speculator 继续继承上游 `set_eplb_state()` 和 `_prepare_eplb_forward()`，不创建第二个 EPLB 控制器。
+The upstream `EPLBController.maybe_register_speculator()` registers MoE draft
+models. The Ascend speculator continues to inherit upstream
+`set_eplb_state()` and `_prepare_eplb_forward()` and does not create a second
+EPLB controller.
 
-### 7.4 P/D 负载采集范围
+### 3.4 P/D Load-Collection Scope
 
-新增 `vllm_ascend/worker/v2/eplb.py:is_eplb_load_scope_matched()`，只负责根据 CPU 批次元数据判断整个 batch 是否属于配置的采集阶段。
+Add `vllm_ascend/worker/v2/eplb.py:is_eplb_load_scope_matched()`. This stateless
+function determines from CPU batch metadata whether the entire batch belongs to
+the configured collection phase.
 
-语义规则：
+Semantic rules:
 
-1. `all` 始终匹配，行为与上游一致。
-2. `is_prefilling_np` 中存在任一 `True` 时，整个 batch 判定为 `prefill`；只有全部为 `False` 时才判定为 `decode`。
-3. batch 阶段与 `load_scope` 匹配时，整批负载进入 window；不匹配时，整批负载丢弃。
-4. Chunked prefill 所在 batch 判定为 prefill；DBO 的所有 ubatch 和 speculative decoding 的主/草稿模型沿用本次主 batch 的同一判定。
-5. dummy/profile token 不进入负载 window，不受 `load_scope` 影响。
+1. `all` always matches and behaves identically to upstream.
+2. If `is_prefilling_np` contains any `True`, classify the entire batch as
+   `prefill`; classify it as `decode` only when all entries are `False`.
+3. If the batch phase matches `load_scope`, load from the entire batch enters
+   the window; otherwise, discard load from the entire batch.
+4. A batch containing chunked prefill is classified as prefill. All DBO
+   ubatches and the main/draft models in speculative decoding reuse the same
+   classification for the current main batch.
+5. Dummy/profile tokens never enter the load window and are not affected by
+   `load_scope`.
 
-该判断只执行一次 CPU `np.any()`，不创建 mask、不增加 H2D copy，也不修改 Router 或 map-and-record 算子接口。
+The check performs one CPU `np.any()` only. It creates no mask, adds no H2D
+copy, and does not change the Router or map-and-record operator interface.
 
-`patch_eplb.py` 包装 `EplbState.step()`：当 `_ascend_scope_matched=False` 且非 dummy/profile 时，以 `is_dummy=True, log_stats=False` 调用原函数。这会清空本批主模型和草稿模型的 pass load，且不推进本 rank 的 `expert_load_window_step`，但仍推进 `expert_rearrangement_step`，因此不改变跨 rank 集合通信时序。上游本就允许各 rank 的 window step 不同。
+`patch_eplb.py` wraps `EplbState.step()`. When
+`_ascend_scope_matched=False` outside dummy/profile execution, the wrapper calls
+the original function with `is_dummy=True, log_stats=False`. This clears the
+pass load of the main and draft models for the current batch and does not
+advance this rank's `expert_load_window_step`, but it still advances
+`expert_rearrangement_step`. Cross-rank collective communication order
+therefore remains unchanged. Upstream already permits different window steps
+on different ranks.
 
-### 7.5 路由与负载统计
+### 3.5 Routing and Load Recording
 
-每层前向只执行一次路由：
+Each layer executes routing exactly once:
 
-1. 上游 Router 根据 logits 产生逻辑 `topk_ids` 和 `topk_weights`。
-2. patch 后的 `BaseRouter._apply_eplb_mapping()` 调用 `vllm_ascend.ops.fused_moe.eplb.map_and_record()`。
-3. NPU 算子根据 `logical_to_physical_map` 和 `logical_replica_count` 将逻辑 ID 转为全局物理 ID。
-4. 算子按上游 Knuth hash 规则选择同一逻辑专家的副本，保证与 CUDA 语义一致。
-5. 当 `should_record_tensor=True` 时，算子把非 padding token 原子累加到 `expert_load_view`；batch 阶段过滤在 step 边界统一完成。
-6. Router 输出物理 `topk_ids`，后续 dispatch、MoE 计算和 combine 不再访问逻辑专家映射。
+1. The upstream Router produces logical `topk_ids` and `topk_weights` from the
+   logits.
+2. The patched `BaseRouter._apply_eplb_mapping()` calls
+   `vllm_ascend.ops.fused_moe.eplb.map_and_record()`.
+3. The NPU operator converts logical IDs into global physical IDs using
+   `logical_to_physical_map` and `logical_replica_count`.
+4. The operator selects a replica of the same logical expert using the upstream
+   Knuth hash rule, preserving CUDA semantics.
+5. When `should_record_tensor=True`, the operator atomically accumulates
+   non-padding tokens into `expert_load_view`. Batch-phase filtering occurs
+   uniformly at the step boundary.
+6. The Router outputs physical `topk_ids`; subsequent dispatch, MoE computation,
+   and combine operations no longer access the logical expert mapping.
 
-NPU 算子接口必须与上游保持以下 tensor 语义：
+The NPU operator interface must preserve the following upstream tensor
+semantics:
 
-| Tensor | 形状 | 所有者 | 更新方式 |
-|---|---|---|---|
-| `topk_ids` | `[num_tokens, top_k]` | Router | 输入为逻辑 ID，输出为物理 ID |
-| `logical_to_physical_map` | `[num_logical_experts, max_replica_slots]` | `EplbState` | 重排后原地更新 |
-| `logical_replica_count` | `[num_logical_experts]` | `EplbState` | 重排后原地更新 |
-| `expert_load_view` | `[num_physical_experts]` | `EplbState` | NPU 原子累加 |
-| `should_record_tensor` | 标量 bool | `EplbState` | 每 step 原地更新 |
-| `num_unpadded_tokens` | 标量 int32 | `EplbState` | 每次前向填充 |
+| Tensor | Shape | Owner | Update |
+| --- | --- | --- | --- |
+| `topk_ids` | `[num_tokens, top_k]` | Router | Logical IDs as input, physical IDs as output |
+| `logical_to_physical_map` | `[num_logical_experts, max_replica_slots]` | `EplbState` | Updated in place after rearrangement |
+| `logical_replica_count` | `[num_logical_experts]` | `EplbState` | Updated in place after rearrangement |
+| `expert_load_view` | `[num_physical_experts]` | `EplbState` | Atomically accumulated on NPU |
+| `should_record_tensor` | Scalar bool | `EplbState` | Updated in place at every step |
+| `num_unpadded_tokens` | Scalar int32 | `EplbState` | Filled for every forward pass |
 
-热路径约束：
+Hot-path constraints:
 
-- 不调用 `.item()`、`.cpu()` 或 `synchronize()`；
-- 不新建逻辑/物理映射副本；
-- 除物理 `topk_ids` 输出外不分配临时大 tensor；
-- EPLB 关闭时直接返回原始 `topk_ids`；
-- 算子必须支持 ACL Graph capture，且所有状态通过稳定地址的 tensor view 读取。
+- do not call `.item()`, `.cpu()`, or `synchronize()`;
+- do not create copies of logical/physical mappings;
+- do not allocate large temporary tensors other than the physical `topk_ids`
+  output;
+- when EPLB is disabled, return the original `topk_ids` directly;
+- the operator must support ACL Graph capture, and all state must be read
+  through tensor views with stable addresses.
 
-### 7.6 Ascend MoE 计算接口
+### 3.6 Ascend MoE Compute Interface
 
-当前各 quant method 在 `apply()` 内调用 `select_experts()`。MRV2 执行路径必须绕过该 legacy 入口，V1
-仍保留该入口；两条路径在选路完成后统一进入只消费 `topk_weights/topk_ids` 的 `apply_routed()`。
+Each current quantization method calls `select_experts()` inside `apply()`. The
+MRV2 execution path must bypass this legacy entry point, while V1 retains it.
+After routing is complete, both paths converge on `apply_routed()`, which
+consumes only `topk_weights/topk_ids`.
 
-最终调用关系为：
+The final call relationship is:
 
 ```text
 AscendMoERunner.no_shared_forward_impl()
@@ -361,51 +532,111 @@ AscendMoERunner.no_shared_forward_impl()
   -> moe_comm_method.finalize()
 ```
 
-改造要求：
+Refactoring requirements:
 
-- `AscendMoERunner.__init__()` 按 `vllm_config.use_v2_model_runner` 分流：V1 保留 `init_eplb_config()` 和 `VllmEplbAdaptor.register_layer()`；MRV2 不创建 `global_expert_map`、`log2phy`、`moe_load`、`load_counter` 或私有 redundancy 数据。
-- 将上述 V1 初始化从 `__init__()` 抽到 `_init_v1_eplb()`，并把 `init_eplb_config`、`VllmEplbAdaptor` 的 import 移入该函数，确保导入 MRV2 MoE 模块不会加载 `vllm_ascend/eplb/`。`mix_placement` 与 EPLB 解耦，不得为保留 mix placement 而在 MRV2 创建旧 map。
-- 新增 `AscendFusedMoEMethod.apply_routed()` 和 `AscendMoEScheme.apply_routed()`，只接收预计算的 `topk_weights/topk_ids`；现有 `apply()` 作为 V1 兼容入口，完成旧 `select_experts()` 后调用 `apply_routed()`。
-- `AscendUnquantizedFusedMoEMethod`、`AscendW8A8DynamicFusedMoEMethod`、`AscendW4A8DynamicFusedMoEMethod`、`AscendW4A16FusedMoEMethod`、`AscendW4A16MXFP4FusedMoEMethod`、`AscendW4A8MXFPDynamicFusedMoEMethod`、`AscendW4A4MXFP4DynamicFusedMoEMethod` 和 `AscendW8A8MXFP8DynamicFusedMoEMethod` 都按该模板拆分；FP8/PDMix 派生类继承基类实现，不复制路由。
-- profile 阶段的 force-load-balance 收敛到 `AscendMoERunner._select_routing()`；正常请求必须调用上游 Router，不得在 quant scheme 覆盖 `topk_ids`。
-- `vllm_ascend/ops/fused_moe/experts_selector.py` 只保留仍被 V1 或独立算子测试使用的接口，MRV2 EPLB 路径不调用它；
-- `AscendMoERunner` 可以保留 NPU dispatch/combine 和 shared expert 多流编排，但不得保留 EPLB map、load 或 iteration 状态。
+- In `AscendMoERunner.__init__()`, branch on
+  `vllm_config.use_v2_model_runner`: V1 retains `init_eplb_config()` and
+  `VllmEplbAdaptor.register_layer()`, while MRV2 does not create
+  `global_expert_map`, `log2phy`, `moe_load`, `load_counter`, or private
+  redundancy data.
+- Extract the V1 initialization above from `__init__()` into
+  `_init_v1_eplb()`, and move the imports of `init_eplb_config` and
+  `VllmEplbAdaptor` into that function. Importing MRV2 MoE modules must not load
+  `vllm_ascend/eplb/`. `mix_placement` is independent of EPLB; MRV2 must not
+  create the legacy map merely to preserve mix placement.
+- Add `AscendFusedMoEMethod.apply_routed()` and
+  `AscendMoEScheme.apply_routed()`, which accept only precomputed
+  `topk_weights/topk_ids`. The existing `apply()` remains the V1 compatibility
+  entry point and calls `apply_routed()` after legacy `select_experts()`.
+- Apply this split to `AscendUnquantizedFusedMoEMethod`,
+  `AscendW8A8DynamicFusedMoEMethod`, `AscendW4A8DynamicFusedMoEMethod`,
+  `AscendW4A16FusedMoEMethod`, `AscendW4A16MXFP4FusedMoEMethod`,
+  `AscendW4A8MXFPDynamicFusedMoEMethod`,
+  `AscendW4A4MXFP4DynamicFusedMoEMethod`, and
+  `AscendW8A8MXFP8DynamicFusedMoEMethod`. FP8/PDMix subclasses inherit the base
+  implementation and do not duplicate routing.
+- Consolidate force-load-balance during profiling into
+  `AscendMoERunner._select_routing()`. Normal requests must call the upstream
+  Router; quantization schemes must not overwrite `topk_ids`.
+- `vllm_ascend/ops/fused_moe/experts_selector.py` retains only interfaces still
+  used by V1 or standalone operator tests. The MRV2 EPLB path does not call it.
+- `AscendMoERunner` may retain NPU dispatch/combine and shared-expert
+  multi-stream orchestration, but must not retain EPLB mapping, load, or
+  iteration state.
 
-NPU token dispatcher 接收全局物理专家 ID。物理 slot 到本地 slot 的映射使用上游 `ExpertMapManager.expert_map`；物理 slot 的归属不随 EPLB 重排变化，因此映射不需要在每次重排后重建。
+The NPU token dispatcher accepts global physical expert IDs. Mapping from a
+physical slot to a local slot uses upstream `ExpertMapManager.expert_map`.
+Ownership of physical slots does not change during EPLB rearrangement, so the
+mapping does not need to be rebuilt after every rearrangement.
 
-### 7.7 专家权重视图
+### 3.7 Expert-Weight Views
 
-上游重排要求每层权重组可通过 `shape[0]` 获取本地物理专家数，并可通过整数下标取得单个专家 tensor。普通 ND 权重直接返回 expert-first tensor；常驻 tensor list 通过轻量 list 适配器满足同一契约。
+Upstream rearrangement requires every per-layer weight group to expose the
+number of local physical experts through `shape[0]` and to return a single
+expert tensor through integer indexing. Ordinary ND weights return
+expert-first tensors directly. Persistent tensor lists satisfy the same
+contract through a lightweight list adapter.
 
-新增 `AscendRoutedExperts.get_expert_weights()`，按以下规则返回权重 view：
+Add `AscendRoutedExperts.get_expert_weights()` and return weight views according
+to the following rules:
 
-1. 调用 quant method 的 `get_eplb_weight_views(layer)`；接口缺失或返回空集合时立即报错，不回退上游参数名枚举。
-2. view 在 `process_weights_after_loading()` 完成后创建；`set_eplb_state()` 只读取实际计算存储。
-3. 每个 view 必须引用实际计算权重存储；不得为 EPLB 保留长期镜像。
-4. 每专家 weight、scale、offset、bias 必须同时迁移。
-5. 全专家共享的 activation scale、全局常量、路由 bias 和 hash table 必须排除。
-6. NZ 或压缩布局无法表达第 0 维专家切片时，quant method 必须提供布局感知的搬运 view 或搬运算子；不得用隐式 reshape 产生错误视图。
-7. 所有层的 view 数量、dtype、shape 和 stride 在启动时校验；不满足条件时启动失败。
+1. Call the quantization method's `get_eplb_weight_views(layer)`. If the
+   interface is absent or returns an empty collection, fail immediately; do not
+   fall back to enumerating upstream parameter names.
+2. Create views after `process_weights_after_loading()` completes.
+   `set_eplb_state()` reads only the storage used by actual computation.
+3. Every view must reference actual compute-weight storage. Do not retain a
+   long-lived mirror exclusively for EPLB.
+4. Per-expert weights, scales, offsets, and biases must move together.
+5. Exclude activation scales shared by all experts, global constants, routing
+   biases, and hash tables.
+6. If an NZ or compressed layout cannot express an expert slice along
+   dimension 0, the quantization method must provide a layout-aware movement
+   view or movement operator. It must not use an implicit reshape that produces
+   an invalid view.
+7. Validate the count, dtype, shape, and stride of all layer views at startup;
+   fail startup when a constraint is not satisfied.
 
-代码落点：
+Code locations:
 
-- 新增 `vllm_ascend/ops/fused_moe/routed_experts.py:AscendRoutedExperts`，覆盖 `get_expert_weights()`。
-- `patch_fused_moe._ascend_FusedMoE()` 在非 310P 路径默认传入 `routed_experts_cls=AscendRoutedExperts`；用户显式传入时不覆盖。
-- `AscendFusedMoEMethod.get_eplb_weight_views()` 转发到实际 `AscendMoEScheme`；未实现的 scheme 返回不支持，不以参数名猜测。
-- BF16/FP16 返回 `w13_weight` 和 `w2_weight`。
-- W8A8 Dynamic 在 NZ 转换后，将 weight、scale 以及可选 FUSED_MC2 scale 按专家复制为常驻 tensor list，并删除对应 batched tensor；计算与 EPLB 重排读取同一组 list。
-- W4A8 在 NZ 转换后，将 weight、scale 和 scale bias 按专家复制为常驻 tensor list，并删除对应 batched tensor；ModelSlim 和 compressed-tensors 权重执行相同的最终布局收敛。
-- W4A4 MXFP 和 W8A8 MXFP 保持原生 ND batched tensor，不做 NZ 转换和 list 切分；其 EPLB view 以零拷贝方式反向表达内部维转置，并保证单专家切片连续。
-- W4A16、W4A16 MXFP 和 W4A8 MXFP 当前显式声明 `supports_eplb=False`；在对应权重布局和算子完成独立验证前，启动阶段拒绝 EPLB。
-- `dynamic_eplb` 仍只控制 V1 旧 EPLB；MRV2 是否构造常驻 tensor list 仅由上游 `enable_eplb` 决定。
+- Add
+  `vllm_ascend/ops/fused_moe/routed_experts.py:AscendRoutedExperts`, overriding
+  `get_expert_weights()`.
+- `patch_fused_moe._ascend_FusedMoE()` passes
+  `routed_experts_cls=AscendRoutedExperts` by default on non-310P paths and
+  preserves an explicitly supplied class.
+- `AscendFusedMoEMethod.get_eplb_weight_views()` delegates to the concrete
+  `AscendMoEScheme`. Schemes that do not implement it report unsupported
+  behavior rather than guessing from parameter names.
+- BF16/FP16 return `w13_weight` and `w2_weight`.
+- After NZ conversion, W8A8 Dynamic copies weights, scales, and optional
+  FUSED_MC2 scales into persistent per-expert tensor lists and deletes the
+  corresponding batched tensors. Computation and EPLB rearrangement read the
+  same lists.
+- After NZ conversion, W4A8 copies weights, scales, and scale biases into
+  persistent per-expert tensor lists and deletes the corresponding batched
+  tensors. ModelSlim and compressed-tensors weights converge to the same final
+  layout.
+- W4A4 MXFP and W8A8 MXFP retain native ND batched tensors and perform neither
+  NZ conversion nor list splitting. Their EPLB views represent internal
+  dimension transposition in reverse without copying and keep every
+  single-expert slice contiguous.
+- W4A16, W4A16 MXFP, and W4A8 MXFP explicitly declare
+  `supports_eplb=False` for now. EPLB is rejected at startup until the
+  corresponding weight layouts and operators complete independent validation.
+- `dynamic_eplb` continues to control only legacy V1 EPLB. In MRV2,
+  construction of persistent tensor lists is controlled only by upstream
+  `enable_eplb`.
 
-`VllmEplbAdaptor` 中按量化类型维护的 `EPLB_EXPERT_WEIGHT_NAMES` 不用于 MRV2。
+The quantization-specific `EPLB_EXPERT_WEIGHT_NAMES` maintained by
+`VllmEplbAdaptor` is not used by MRV2.
 
-### 7.8 权重重排事务
+### 3.8 Weight-Rearrangement Transaction
 
-策略计算、发送/接收计划和 map 计算继续使用上游实现；Ascend 只实现 `EplbCommunicator`。
+Policy calculation, send/receive planning, and mapping calculation continue to
+use upstream implementations. Ascend implements only `EplbCommunicator`.
 
-同步重排顺序：
+The synchronous rearrangement order is:
 
 ```mermaid
 sequenceDiagram
@@ -415,393 +646,538 @@ sequenceDiagram
     participant W as Expert Weights
     participant M as Mapping Views
 
-    S->>S: 汇总并 all-reduce 负载窗口
-    S->>P: 计算新 physical_to_logical_map
-    P-->>S: 返回 CPU 新映射
-    S->>C: 按层提交 send/recv
-    C-->>S: 所有传输完成
-    S->>W: buffer 写回目标物理 slot
-    S->>M: 原地提交三类映射 tensor
+    S->>S: Aggregate and all-reduce the load window
+    S->>P: Compute a new physical_to_logical_map
+    P-->>S: Return the new CPU mapping
+    S->>C: Submit per-layer send/recv operations
+    C-->>S: Complete all transfers
+    S->>W: Write buffers into target physical slots
+    S->>M: Commit all three mapping tensors in place
 ```
 
-事务不变量：
-
-- 先完成权重接收和本地复制，再提交映射；
-- map 提交使用 `copy_()`，不更换已被 graph 捕获的地址；
-- 任一 rank 通信失败时不允许继续服务；运行中自动关闭 EPLB 会导致跨 rank 权重和映射不一致，因此不是合法降级方式；
-- profile 只预留 buffer，不修改权重和 map；
-- EPLB 使用上游独立 `get_eplb_group()`，不得复用正在执行 MoE all-to-all 的通信序列。
-
-### 7.9 HCCL communicator
-
-`HcclEplbCommunicator` 实现上游接口：
-
-- `add_send(tensors, dst_rank, expert_id)`；
-- `add_recv(tensors, src_rank, expert_id)`；
-- `execute()`；
-- `set_stream(stream)`；
-- `needs_profile_buffer_reservation`。
-
-实现要求：
-
-- 类位于 `vllm_ascend/distributed/eplb_communicator.py`，内部维护当轮 `torch.distributed.P2POp` 队列，`execute()` 使用 `batch_isend_irecv()` 并等待所有 request。
-- 使用 `get_eplb_group().device_group`，不使用旧 `get_dynamic_eplb_group()`；
-- 每个专家的所有 weight view 使用相同顺序发送和接收；
-- W8A8/W4A8 传入的单专家 tensor 均为独立存储且 `storage_offset()==0`，HCCL 直接收发，不在重排热路径 clone 或 copy-back；
-- 空任务直接返回；
-- `execute()` 无论成功或失败都清空本轮 P2P 队列；
-- 同步模式使用当前计算流；
-- 异步模式使用独立 NPU stream，并通过 event 保证 buffer 生产、消费和复用顺序；
-- 不在热路径创建新的 process group；
-- 多节点使用 HCCL，不采用 Gloo 搬运完整专家权重作为正式方案。
-- `patch_eplb.py` 同时替换 `eplb_communicator.create_eplb_communicator` 和 `eplb_state` 中已 import 的同名绑定，避免因 Python `from ... import ...` 保留旧引用。
-
-### 7.10 异步重排
-
-第二期启用上游 async worker，Ascend 后端负责设备运行时对象，不改写 worker 状态机。
-
-异步流程必须保持上游双缓冲语义：
-
-1. 主线程生成负载快照并触发异步线程。
-2. 异步线程计算新映射，把一层新权重写入 `expert_buffer`。
-3. 主线程在 step 边界把 buffer 写入真实权重。
-4. 主线程提交该层 map，记录 `consumed_event`。
-5. 异步线程收到 event 后复用 buffer，处理下一层。
-
-额外要求：
-
-- async worker 必须绑定当前 NPU device index；
-- HCCL EPLB group 必须与 EP 前向 group 隔离；
-- `patch_eplb.py` 的 `start_async_worker()` wrapper 把异常写入 `EplbState._ascend_async_error`；`EplbState.step()` wrapper 在进入上游 step 前通过 EPLB CPU group 汇总失败标志，任一 rank 失败则所有 rank 终止。
-- 不复制 `transfer_run_periodically()`、`transfer_layer()` 和 `_move_to_workspace()`；线程启停语义保持上游行为，上游增加显式 stop 接口后直接继承。
-
-### 7.11 ACL Graph
-
-ACL Graph 不捕获重排通信，只捕获 Router 和 MoE 前向。
-
-保证 graph 可复用的条件：
-
-- `logical_to_physical_map`、`logical_replica_count`、`expert_load_view`、`should_record_tensor` 和 `num_unpadded_tokens` 地址固定；
-- 重排只修改 tensor 内容；
-- 专家权重 Parameter 的 storage 地址固定，重排使用原地 copy；
-- NPU map-and-record 算子没有 host 分支和 host 同步；
-- profile dummy rearrange 只执行一次。
-
-若启用 Elastic EP 导致物理专家总数或 tensor shape 改变，必须重新构图；该组合不在本项目范围内。
-
-### 7.12 推测解码与 PP
-
-主模型和 MoE 草稿模型在同一个 `EplbState` 中按 `ModelConfig.compute_hash()` 保存独立 `EplbModelState`，两者分别维护负载窗口、权重 buffer 和映射。
-
-草稿模型每次前向继续调用继承自上游 speculator 的 `_prepare_eplb_forward()`，由上游维护有效 token 数。P/D 判断以本次主 batch 为准，同一调度 step 内的主模型和草稿模型使用同一个 `_ascend_scope_matched` 结果，不增加草稿模型专用 phase 状态。
-
-PP 场景只注册本 rank 的真实 MoE 层，`PPMissingLayer` 不进入 `moe_layers`；层序号使用本地 MoE 顺序，不使用全模型绝对 layer ID。
-
-### 7.13 MoE 通信优化的兼容策略
-
-| 功能 | EPLB 行为 |
-|---|---|
-| 标准 all-to-all / all-gather | 直接使用物理专家 ID |
-| 非融合 MC2 | 使用上游 physical-to-local map |
-| FUSED_MC2 | Router 产出的全局物理专家 ID直接传入 `dispatch_ffn_combine`；weight 和融合 scale 使用同一组物理 slot 完成重排 |
-| shared expert 多流 | 保留；其 stream 必须等待 routed expert 权重提交 event |
-| RFork weight transfer | 保持禁用；服务启动后专家权重会变化 |
-| LoRA MoE | 只有 LoRA 专家相关权重进入重排 view 后才声明支持，否则启动失败 |
-
-FUSED_MC2 不使用独立 EPLB 映射。若量化布局不能提供完整的 per-expert weight/scale view，启动失败并指出缺失 tensor；不得全局关闭 FUSED_MC2 或静默切换通信实现。
-
-## 8. 数据与状态管理
-
-### 8.1 初始化期分配
-
-允许且只允许在模型注册时创建：
-
-- `physical_to_logical_map`；
-- `logical_to_physical_map`；
-- `logical_replica_count`；
-- `expert_load_pass` 和 `expert_load_window`；
-- `should_record_tensor` 和每个 ubatch 的 `num_unpadded_tokens`；
-- 每种专家权重对应的一个 `expert_buffer`；
-- 缓存后的专家权重 view。
-
-### 8.2 每次前向
-
-每次前向只允许：
-
-- 填充 `num_unpadded_tokens`；
-- 根据 CPU 批次元数据更新 batch scope 匹配结果；
-- 读取 mapping view；
-- 生成物理 `topk_ids`；
-- 原子累加当前层负载。
-
-不得在每次前向创建 CPU map、复制专家权重或发起 EPLB 通信。
-
-### 8.3 每个 step
-
-上游 `step_eplb_after` 负责：
-
-- 把本次负载写入 window；
-- 清零 pass load；
-- 更新 record 开关；
-- 到达周期时触发同步或异步重排。
-
-Ascend patch 只在 `_ascend_scope_matched=False` 时把当次 step 标记为 dummy-load step；重排 step 计数、触发时机和集合通信仍由上游执行。
-
-## 9. 接口与命名
-
-| 名称 | 操作 | 说明 |
-|---|---|---|
-| `EPLBController` | 保留 | 上游生命周期入口 |
-| `EplbState` / `EplbLayerState` | 保留 | 上游唯一状态源 |
-| `patch_eplb.py` | 当前新增 | 固定上游基线的定点适配入口 |
-| `EplbDeviceBackend` | 长期上游新增 | OOT 设备 EPLB 扩展接口 |
-| `AscendEplbBackend` | 长期下游新增 | 组合现有 NPU 算子和 communicator，替换 patch |
-| `HcclEplbCommunicator` | 下游新增 | 专家权重 HCCL 搬运 |
-| `AscendRoutedExperts` | 下游新增 | 提供量化/NZ 专家权重 view |
-| `load_scope` | 下游新增 | EPLB 配置内的负载采集范围；`all/prefill/decode` |
-| `is_eplb_load_scope_matched()` | 下游新增 | 以“任一 prefill 即整批 prefill”规则判断 batch 是否属于目标阶段 |
-| `_ascend_scope_matched` | 下游新增 | 当前主 batch 是否属于目标采集阶段的 CPU bool |
-| `get_eplb_weight_views()` | 下游新增 | quant method 的布局适配接口 |
-| `apply_routed()` | 下游新增 | MRV2 消费预计算路由结果；`apply()` 保留给 V1 |
-| `dynamic_eplb` | MRV2 禁用 | 仅保留给 V1 |
-| `eplb_heat_collection_stage` | MRV2 替换 | 避免 `heat` 和 `stage` 的模糊表达 |
-| `log2phy`、`global_expert_map`、`moe_load` | MRV2 删除 | 由上游 mapping/load tensor 替代 |
-| `VllmEplbAdaptor`、`EplbUpdator` | MRV2 禁用 | 不进入 v2 import graph |
-
-## 10. 文件改动范围
-
-### 10.1 当前 patch 的上游目标
-
-| 上游文件与符号 | patch 行为 |
-|---|---|
-| `vllm/config/parallel.py:current_platform` | 在该模块内代理平台对象；仅把 NPU 的 `is_cuda_alike()` 能力结果改为 true，原 validator 及其他平台方法不变 |
-| `vllm/config/parallel.py:ParallelConfig.__post_init__` | 在原函数前将 `communicator=None` 转为 `torch_nccl`；该上游合法值在 NPU 上表示 torch.distributed/HCCL |
-| `vllm/distributed/eplb/eplb_communicator.py:create_eplb_communicator` | NPU 且 `backend == "torch_nccl"` 时构造 `HcclEplbCommunicator`，其余情况原样调用上游 factory |
-| `vllm/model_executor/layers/fused_moe/router/base_router.py:BaseRouter._apply_eplb_mapping` | 保留原状态校验，改为调用 NPU 算子，并继续按当前 ubatch 传入上游有效 token 数 |
-| `vllm/distributed/eplb/eplb_state.py:EplbState.__init__` | 原函数返回后，将 NPU `device.index` 写入 `cuda_device_index` 兼容字段 |
-| `vllm/distributed/eplb/eplb_state.py:EplbState.step` | 非目标阶段以 dummy-load 语义调用原函数；事前检查异步 worker 失败 |
-| `vllm/distributed/eplb/async_worker.py:start_async_worker` | 保留原 transfer loop，增加异常回传 |
-
-长期上游改动为 `vllm/platforms/interface.py` 增加 `EplbDeviceBackend`，并将上表构造点改为接口调用；它不是两期交付的前置条件。
-
-### 10.2 vLLM Ascend
-
-| 文件 | 改动 |
-|---|---|
-| `vllm_ascend/patch/platform/patch_eplb.py` | 新增幂等 patch 组装器、结构校验和上游函数包装 |
-| `vllm_ascend/patch/platform/__init__.py` | 在 `patch_fused_moe` 前导入 `patch_eplb` |
-| `vllm_ascend/patch/__init__.py` | 记录每个 EPLB patch 的原因、上游目标和删除条件 |
-| `vllm_ascend/ascend_config.py:EplbConfig` | 在现有 `_defaults` 增加 `load_scope`，并在 `_validate_config()` 校验枚举；不新增配置类 |
-| `vllm_ascend/platform.py:NPUPlatform._fix_incompatible_config` | 在 `AscendConfig` 构造前按 runner 校验原始字段：MRV2 只允许 `load_scope`，V1 禁止显式设置 `load_scope`；同时拒绝 MRV2 旧环境变量 |
-| `vllm_ascend/worker/v2/eplb.py` | 新增无状态 batch scope 判定函数 |
-| `vllm_ascend/worker/v2/model_runner.py` | 删除禁用和空 warmup；在 `prepare_inputs()` 更新 batch scope 匹配结果；修正额外 profile dummy run |
-| `vllm_ascend/ops/fused_moe/eplb.py` | 新增 NPU map-and-record 算子 |
-| `vllm_ascend/distributed/eplb_communicator.py` | 新增 HCCL communicator |
-| `vllm_ascend/ops/fused_moe/fused_moe.py:AscendMoERunner` | V1/V2 EPLB 初始化分流和 V1 import 延迟加载；MRV2 调用上游 Router 并消费 `apply_routed()` |
-| `vllm_ascend/ops/fused_moe/routed_experts.py` | 新增 `AscendRoutedExperts.get_expert_weights()` |
-| `vllm_ascend/quantization/method_adapters.py:AscendFusedMoEMethod` | 增加 `apply_routed()` 和 `get_eplb_weight_views()` 委托 |
-| `vllm_ascend/quantization/methods/base.py:AscendMoEScheme` | 定义 `apply_routed()` 和默认不支持的 weight-view 接口 |
-| `vllm_ascend/quantization/methods/*.py` | V1 `apply()` 保留路由；MRV2 `apply_routed()` 只做计算；按布局返回权重 view |
-| `vllm_ascend/patch/platform/patch_fused_moe.py` | 默认注入 `AscendRoutedExperts`；保留用户显式 `routed_experts_cls` |
-| `vllm_ascend/distributed/parallel_state.py` | MRV2 不创建 `_DYNAMIC_EPLB`；上游 EPLB group 为唯一通信组 |
-| `vllm_ascend/eplb/**` | 不修改其 V1 行为；通过依赖测试保证 MRV2 不导入 |
-
-### 10.3 关键修改顺序
-
-1. `patch_eplb.py` 先于 EngineArgs/VllmConfig 构造生效，在 `vllm.config.parallel` 模块内安装平台能力代理；原 Pydantic validator 保持不变，已缓存的 `VllmConfig` 嵌套 schema 也读取同一模块全局对象。
-2. `ParallelConfig.__post_init__()` wrapper 设置 `torch_nccl` 后调用原函数；`EPLBController.prepare_load()` 仍创建原生 `EplbState`。
-3. `patch_fused_moe._ascend_FusedMoE()` 创建上游 Router、`AscendRoutedExperts` 和 `AscendMoERunner`；MRV2 分支不初始化旧 EPLB 字段。
-4. 权重处理完成后，上游 `MixtureOfExperts.set_eplb_state()` 调用 `AscendRoutedExperts.get_expert_weights()` 收集真实计算存储。
-5. 每次 `NPUModelRunner.prepare_inputs()` 根据 `is_prefilling_np` 更新 batch scope 匹配结果；上游 `execute_model()` 原样调用 `EPLBController.prepare_forward()` 并进入模型。
-6. `AscendMoERunner.no_shared_forward_impl()` 在 Ascend communication prepare 后执行一次 Router；Router patch 完成映射和负载累加；quant `apply_routed()` 不再查看 logits。
-7. 上游 `step_eplb_after` 调用被薄包装的 `EplbState.step()`；除了非目标阶段转为 dummy-load 语义，window、policy、transfer 和 map commit 全部走上游原函数。
-
-## 11. 两期实施计划
-
-### 11.1 第一期：同步 EPLB 闭环（第 1—4 周）
-
-交付内容：
-
-1. 完成 `patch_eplb.py` 及发布/main-verified 双基线契约测试。
-2. MRV2 切换到上游配置、`EPLBController/EplbState` 和 `get_eplb_group()`。
-3. 完成 NPU map-and-record 算子和同步 HCCL communicator。
-4. 完成 `load_scope=all/prefill/decode` 的 batch 级采集开关，覆盖纯 P、纯 D 和混合批次。
-5. 修正 Ascend MoE 调用链，引入 `apply_routed()`，保证 MRV2 只路由一次。
-6. 支持主模型、eager、标准 all-to-all/非融合 MC2、BF16/FP16、W8A8、W4A8、W4A4 MXFP 和 W8A8 MXFP。
-7. 保持 V1 旧 EPLB 行为不变。
-
-退出条件：
-
-- MRV2 import graph 不包含 `vllm_ascend/eplb`；
-- 2 卡和 4 卡 NPU 上至少发生一次真实专家换权和 map 提交；
-- EPLB 开关前后生成结果一致；
-- 关闭 EPLB 时性能和内存无可测新增；
-- 同步重排无死锁，重排后所有 rank 的 map checksum 一致；
-- 含任一 prefill 请求的混合批次整体按 prefill 处理；非匹配批次不推进 load window；
-- `use_async=true` 在启动阶段明确拒绝。
-
-### 11.2 第二期：最终功能闭合（第 5—8 周）
-
-交付内容：
-
-1. 启用上游 async worker，完成 NPU stream/event 和异步 HCCL 验证。
-2. 支持 ACL Graph piecewise、full decode graph 和 graph 后多轮重排。
-3. 支持 MoE 草稿模型、MTP/Eagle/DFlash 中适用的组合，并验证主/草稿模型共享 batch scope 判定。
-4. 支持 PP 和多节点 EP。
-5. 评估并补齐当前显式关闭的 W4A16、W4A16 MXFP、W4A8 MXFP 和其余量化格式；未通过布局与算子验证的格式继续保持启动期拒绝。
-6. 完成标准 MC2、shared expert 多流及 LoRA MoE 的支持或启动期精确拒绝。
-7. 完成 `load_scope != all` 与 DBO、speculative decoding、graph replay 的组合验证。
-8. 若对应上游接口已进入依赖基线，删除可被接口直接替代的 patch；未合入时保留已验证 patch。
-
-退出条件：
-
-- 上游 `EPLBConfig` 的 sync/async、window、step、redundancy 和日志行为均有 NPU 证据；
-- eager 与 ACL Graph 在至少两轮真实重排后结果一致；
-- 异步换权过程中连续请求无错误、无跨 rank map 分歧、无 buffer 覆盖；
-- 主模型和 MoE 草稿模型分别统计并完成重排；
-- P/D scope 在草稿模型、DBO 和 graph replay 下与 eager 结果一致；
-- 单节点和多节点用例通过；
-- 支持矩阵、用户配置和限制文档完成更新。
-
-第一期不得引入将在第二期替换的状态类、配置项或 weight loader；第二期只扩展同一 patch 边界和 quant view 支持矩阵。
-
-上游接口若未在第二期结束前合入依赖基线，继续交付本文定义并通过双基线验证的 patch；后续用上游接口替换 patch 属于依赖升级维护，不构成第三期功能实现。
-
-## 12. 测试设计
-
-### 12.1 单元测试
-
-| 测试对象 | 必测内容 |
-|---|---|
-| patch | `tests/ut/patch/platform/test_patch_eplb.py`：重复导入幂等、模块内平台代理、`ParallelConfig`/`VllmConfig` 嵌套校验、目标签名漂移失败、原函数仅调用一次 |
-| 配置 | V1/V2 字段使用边界、旧字段和环境变量拒绝、V1 显式 `load_scope` 拒绝、枚举、EP 前置条件、第一期 async、communicator 选择 |
-| load scope | `tests/ut/worker/v2/test_eplb_load_scope.py`：`all`、纯 P、纯 D、任一 prefill 的混合批次 |
-| map-and-record | `tests/ut/ops/test_eplb.py`：单/多副本、非法 ID、padding、record 开关、hash 结果、dtype、空输入 |
-| 权重 view | 每种量化的 view 数量、shape、stride、storage、排除项 |
-| communicator | `tests/ut/distributed/test_eplb_communicator.py`：本地复制、跨 rank 计划、空任务、多 tensor、异常后队列清理 |
-| map 提交 | `data_ptr` 不变、权重先于 map、三类 map 一致 |
-| lifecycle | profile 不记负载、额外 MC2 dummy 不触发 EPLB、正常 step 只执行一次 |
-| 依赖边界 | MRV2 模块导入后 `sys.modules` 不出现 `vllm_ascend.eplb` |
-
-NPU 算子的 CPU reference 必须逐元素复现上游 CUDA map-and-record 语义，不能以最终模型精度测试代替算子语义测试。
-
-`tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py` 改为 MRV2 上游参数用例，删除 skip 和 `DYNAMIC_EPLB`；不在旧 V1 用例上叠加新分支。
-
-### 12.2 NPU 功能测试
-
-最低测试矩阵：
-
-| 维度 | 第一期 | 第二期 |
-|---|---|---|
-| 模型 | Qwen3 MoE | Qwen3 MoE、DeepSeek 系列、一个 MoE 草稿模型 |
-| 卡数 | 2、4 | 2、4、8，多节点至少一组 |
-| dtype/量化 | BF16/FP16、W8A8、W4A8、W4A4 MXFP、W8A8 MXFP | 最终支持矩阵；其余格式验证后再开启 |
-| MoE 通信 | all-to-all/all-gather、MC2、FUSED_MC2 | 第一期组合及多节点通信 |
-| 执行模式 | eager | eager、piecewise、full decode graph |
-| 重排 | sync，两轮 | sync/async，至少三轮 |
-| 并行 | TP/EP | TP/DP/EP、PP |
-| 采集范围 | `all/prefill/decode`，含混合 P/D | 主模型、草稿模型、DBO、graph replay |
-
-每个动态重排测试必须验证：
-
-1. 重排前后输出或 token 序列一致。
-2. 每层每个 rank 的 map checksum 一致。
-3. 新增物理副本的全部权重 tensor 与源逻辑专家一致。
-4. 至少一个专家发生跨 rank 搬运，避免测试只覆盖 no-op 方案。
-5. 重排后负载统计继续写入新物理专家 ID。
-
-### 12.3 性能与资源测试
-
-发布报告至少包含：
-
-- EPLB 关闭、开启但未重排、同步重排和异步重排四种状态的吞吐与 TPOT；
-- `load_scope=all/prefill/decode` 的稳态吞吐、目标 batch 比例及 batch 判定耗时；
-- map-and-record 算子耗时及调用次数；
-- 每轮重排的通信字节数、总耗时和最大单层耗时；
-- `expert_load_window`、mapping、weight buffer 的设备内存占用；
-- 异步模式主流等待时间和 p99 请求延迟。
-
-硬性门禁：
-
-- EPLB 关闭时不执行 map-and-record 算子，不分配 EPLB buffer；
-- `load_scope` 不分配设备 buffer，不增加 H2D/D2H copy；
-- `load_scope != all` 时每个主 batch 只执行一次 CPU batch 阶段判断；
-- 稳态前向无 host/device 同步；
-- graph 模式不因 map 内容变化重新 capture；
-- 异步模式不在主流等待完整层的 HCCL 传输。
-
-## 13. 可观测性与故障处理
-
-### 13.1 日志和指标
-
-启动时记录一次：
-
-- vLLM 基线、patch 目标契约检查结果和当前接入方式；
-- policy、window、step、冗余专家数、sync/async、communicator、`load_scope`；
-- 模型数、每模型 MoE 层数、逻辑/物理/本地专家数；
-- 每层 weight view 的数量、dtype 和 shape 摘要。
-
-每轮重排记录：
-
-- round ID、触发 step、重排模式；
-- map checksum；
-- 跨 rank 搬运专家数和字节数；
-- 策略计算、通信、提交耗时；
-- 自上一轮重排后的目标阶段 batch/token 数、被过滤 batch 数和有效 load-window step 数；
-- balancedness，仅在上游配置启用时采集。
-
-P/D batch 和 token 数直接由主 batch 的 CPU 调度元数据累计，不读取 NPU tensor。不得默认打印完整 expert map、逐专家负载数组或逐请求 phase。
-
-### 13.2 故障策略
-
-| 故障 | 处理 |
-|---|---|
-| patch 目标缺失、签名或行为契约不匹配 | 配置构造前启动失败，并打印不兼容的上游提交 |
-| 配置或权重布局不支持 | 启动失败 |
-| NPU map 算子不可用 | 启动失败 |
-| batch phase 元数据缺失或非法 | 前向前终止，不允许猜测采集阶段 |
-| 任一 rank HCCL 传输失败 | 协调终止服务 |
-| async worker 异常 | 设置共享失败状态，下一 step 协调终止 |
-| map checksum 不一致 | 立即终止，不继续生成 |
-| FUSED_MC2 的 expert ID 或 weight/scale view 契约不满足 | 启动失败，不切换通信实现 |
-| balancedness 日志失败 | 记录 warning，不影响推理 |
-
-## 14. 兼容与回滚
-
-- Model Runner V1 继续使用旧配置和旧 EPLB，不受本项目改动影响。
-- MRV2 EPLB 以 `--enable-eplb` 为唯一入口，不提供运行时切换。
-- `load_scope` 默认为 `all`；将其改回 `all` 可关闭 P/D 过滤，但不关闭 EPLB。
-- MRV2 遇到 `eplb_heat_collection_stage` 时只输出迁移提示并拒绝启动，不读取旧值作为运行时别名。
-- 发布回滚通过关闭 `--enable-eplb` 完成；已经发生重排的进程不能在运行中关闭 EPLB后继续服务。
-- 若第二期异步功能出现问题，允许用户显式设置 `use_async=false` 回到同一架构下的同步路径，不回退到旧 EPLB。
-- 上游依赖升级时，以发布/main-verified 双基线契约测试判断 patch 是否兼容，不根据版本字符串维护多套实现。
-- 上游 `EplbDeviceBackend` 可用后，只替换构造与转发入口；用户配置、batch scope 判定、NPU 算子、communicator 和 weight view 不变。
-
-## 15. 风险与控制
-
-| 风险 | 影响 | 控制措施 |
-|---|---|---|
-| 上游私有符号或 Pydantic 构造方式变化 | patch 静默失效或绕过校验 | 固定双基线、导入期结构断言、行为契约测试；不兼容时阻止发版 |
-| P/D phase 或 token 区间判断错误 | 负载窗口混入错误阶段 | 直接使用 `is_prefilling_np/query_start_loc_np`，覆盖纯 P、纯 D、混合、chunked、padding、draft 和 DBO slice |
-| quant 权重 view 漏掉 scale/offset | 重排后精度错误 | 每种量化做逐 tensor checksum 和重排后精度测试 |
-| HCCL 多流顺序错误 | 死锁或 buffer 覆盖 | 独立 EPLB group、event 事务、空/异常路径 UT、多轮压力测试 |
-| graph 捕获了旧地址 | 重排不生效或非法访问 | 所有 map/weight 原地更新，测试 `data_ptr` 和多轮 replay |
-| PP 层编号错位 | map 更新到错误层 | 只使用本地 `moe_layers` 顺序，PPMissingLayer 不注册 |
-| 主/草稿模型共用错误状态 | 负载和权重串扰 | 按 `ModelConfig.compute_hash()` 独立 `EplbModelState` |
-| 旧配置被误认为兼容 | 行为静默变化 | MRV2 启动期拒绝，不做自动参数换算 |
-| 支持组合过多拖延周期 | 两个月无法闭合 | 第一期固定 BF16/W8A8+sync；第二期按量化族复用统一 view 接口，不新增第三期 |
-
-## 16. 最终验收标准
-
-项目完成必须同时满足：
-
-1. MRV2 EPLB 控制链不存在 `vllm_ascend/eplb` 依赖。
-2. 下游不存在 EPLB policy、负载窗口、迭代器或 map 状态副本。
-3. 每层只执行一次专家选择，Ascend quant method 不读取 router logits 进行二次路由。
-4. 同步和异步均使用上游 `EplbState` 重排事务。
-5. eager、ACL Graph、主模型和 MoE 草稿模型通过多轮真实换权测试。
-6. 所有声明支持的量化格式提供完整、可验证的专家权重 view。
-7. EPLB 关闭路径无新增通信、buffer 和设备同步。
-8. 文档、示例和支持矩阵只展示上游 EPLB 配置及 `load_scope` 扩展，不再把旧配置描述为 MRV2 能力。
-9. `load_scope=all/prefill/decode` 在纯 P、纯 D、混合批次、chunked prefill、草稿模型、DBO 和 graph replay 中遵循“任一 prefill 即整批 prefill”的语义，且不改变路由和重排通信顺序。
-10. 所有 patch 均通过发布/main-verified 双基线的幂等、签名、schema 和行为契约测试；目标漂移时必须在启动或 CI 阶段失败。
+Transaction invariants:
+
+- complete weight reception and local copies before committing mappings;
+- commit mappings with `copy_()` without changing addresses captured by a
+  graph;
+- if communication fails on any rank, the service must not continue.
+  Automatically disabling EPLB at runtime is not a valid fallback because it
+  would leave weights and mappings inconsistent across ranks;
+- profiling reserves buffers only and does not modify weights or mappings;
+- EPLB uses the independent upstream `get_eplb_group()` and must not reuse the
+  communication sequence currently executing MoE all-to-all.
+
+### 3.9 HCCL Communicator
+
+`HcclEplbCommunicator` implements the upstream interface:
+
+- `add_send(tensors, dst_rank, expert_id)`;
+- `add_recv(tensors, src_rank, expert_id)`;
+- `execute()`;
+- `set_stream(stream)`;
+- `needs_profile_buffer_reservation`.
+
+Implementation requirements:
+
+- The class resides in `vllm_ascend/distributed/eplb_communicator.py`, maintains
+  a queue of `torch.distributed.P2POp` objects for the current round, and uses
+  `batch_isend_irecv()` in `execute()` before waiting for every request.
+- Use `get_eplb_group().device_group`, not legacy
+  `get_dynamic_eplb_group()`.
+- Send and receive all weight views for an expert in the same order.
+- Single-expert tensors passed by W8A8/W4A8 have independent storage and
+  `storage_offset()==0`; HCCL sends and receives them directly without clone or
+  copy-back operations in the rearrangement hot path.
+- Return immediately for an empty task.
+- Clear the current P2P queue after `execute()`, whether it succeeds or fails.
+- Use the current compute stream in synchronous mode.
+- Use a dedicated NPU stream in asynchronous mode, with events enforcing
+  buffer production, consumption, and reuse order.
+- Do not create a process group in the hot path.
+- Use HCCL for multi-node operation. Moving complete expert weights through
+  Gloo is not an accepted production design.
+- `patch_eplb.py` replaces both
+  `eplb_communicator.create_eplb_communicator` and the same imported binding
+  retained in `eplb_state`, avoiding stale references created by Python
+  `from ... import ...`.
+
+### 3.10 Asynchronous Rearrangement
+
+Phase 2 enables the upstream async worker. The Ascend backend supplies device
+runtime objects without rewriting the worker state machine.
+
+The asynchronous flow must preserve the upstream double-buffering semantics:
+
+1. The main thread creates a load snapshot and wakes the asynchronous thread.
+2. The asynchronous thread computes a new mapping and writes one layer of new
+   weights into `expert_buffer`.
+3. At the step boundary, the main thread writes the buffer into the actual
+   weights.
+4. The main thread commits the mapping for that layer and records
+   `consumed_event`.
+5. After receiving the event, the asynchronous thread reuses the buffer for the
+   next layer.
+
+Additional requirements:
+
+- the async worker must bind to the current NPU device index;
+- the HCCL EPLB group must be isolated from the EP forward group;
+- the `start_async_worker()` wrapper in `patch_eplb.py` writes exceptions into
+  `EplbState._ascend_async_error`; before entering the upstream step, the
+  `EplbState.step()` wrapper aggregates failure flags through the EPLB CPU
+  group, and a failure on any rank terminates all ranks;
+- do not copy `transfer_run_periodically()`, `transfer_layer()`, or
+  `_move_to_workspace()`; thread start/stop semantics remain upstream behavior,
+  and the implementation directly inherits an explicit stop interface once
+  upstream provides one.
+
+### 3.11 ACL Graph
+
+ACL Graph captures only the Router and MoE forward path, not rearrangement
+communication.
+
+Conditions for graph reuse:
+
+- addresses of `logical_to_physical_map`, `logical_replica_count`,
+  `expert_load_view`, `should_record_tensor`, and `num_unpadded_tokens` remain
+  stable;
+- rearrangement changes only tensor contents;
+- expert-weight Parameter storage addresses remain stable and rearrangement
+  uses in-place copies;
+- the NPU map-and-record operator has no host branch or host synchronization;
+- the profiling dummy rearrangement executes exactly once.
+
+If Elastic EP changes the total number of physical experts or a tensor shape,
+the graph must be recaptured. This combination is outside the project scope.
+
+### 3.12 Speculative Decoding and PP
+
+The main model and MoE draft model are stored as independent `EplbModelState`
+objects in the same `EplbState`, keyed by `ModelConfig.compute_hash()`. They
+maintain separate load windows, weight buffers, and mappings.
+
+Every draft-model forward pass continues to call
+`_prepare_eplb_forward()` inherited from the upstream speculator, and upstream
+maintains the valid token count. P/D classification is based on the current
+main batch. Within the same scheduling step, the main and draft models use the
+same `_ascend_scope_matched` result; no draft-specific phase state is added.
+
+In PP scenarios, register only real MoE layers on the current rank.
+`PPMissingLayer` is not included in `moe_layers`. Layer indices use local MoE
+order rather than absolute layer IDs in the full model.
+
+### 3.13 Compatibility with MoE Communication Optimizations
+
+| Feature | EPLB behavior |
+| --- | --- |
+| Standard all-to-all / all-gather | Directly use physical expert IDs |
+| Non-fused MC2 | Use the upstream physical-to-local mapping |
+| FUSED_MC2 | Pass the global physical expert IDs produced by the Router directly to `dispatch_ffn_combine`; rearrange weights and fused scales using the same physical slots |
+| Multi-stream shared experts | Preserve the feature; its stream must wait for the routed-expert weight-commit event |
+| RFork weight transfer | Keep disabled because expert weights change after service startup |
+| LoRA MoE | Declare support only after LoRA expert-related weights are included in rearrangement views; otherwise fail startup |
+
+FUSED_MC2 does not use a separate EPLB mapping. If a quantized layout cannot
+provide complete per-expert weight/scale views, startup fails and reports the
+missing tensors. It must not globally disable FUSED_MC2 or silently switch the
+communication implementation.
+
+## 4. State, Interfaces, and Code Changes
+
+### 4.1 Data and State Management
+
+#### 4.1.1 Initialization-Time Allocation
+
+Only the following may be created during model registration:
+
+- `physical_to_logical_map`;
+- `logical_to_physical_map`;
+- `logical_replica_count`;
+- `expert_load_pass` and `expert_load_window`;
+- `should_record_tensor` and per-ubatch `num_unpadded_tokens`;
+- one `expert_buffer` for every expert-weight type;
+- cached expert-weight views.
+
+#### 4.1.2 Per-Forward Operations
+
+Each forward pass may only:
+
+- fill `num_unpadded_tokens`;
+- update the batch-scope match result from CPU batch metadata;
+- read mapping views;
+- produce physical `topk_ids`;
+- atomically accumulate the current layer's load.
+
+A forward pass must not create a CPU mapping, copy expert weights, or initiate
+EPLB communication.
+
+#### 4.1.3 Per-Step Operations
+
+Upstream `step_eplb_after` is responsible for:
+
+- writing the current load into the window;
+- clearing pass load;
+- updating the record switch;
+- triggering synchronous or asynchronous rearrangement at the configured
+  interval.
+
+The Ascend patch only marks the current step as a dummy-load step when
+`_ascend_scope_matched=False`. The upstream implementation still owns
+rearrangement-step counting, trigger timing, and collective communication.
+
+### 4.2 Interfaces and Naming
+
+| Name | Action | Description |
+| --- | --- | --- |
+| `EPLBController` | Keep | Upstream lifecycle entry point |
+| `EplbState` / `EplbLayerState` | Keep | The sole upstream state source |
+| `patch_eplb.py` | Add for current delivery | Focused adaptation entry point for fixed upstream baselines |
+| `EplbDeviceBackend` | Add upstream in the long term | EPLB extension interface for OOT devices |
+| `AscendEplbBackend` | Add downstream in the long term | Composes the existing NPU operator and communicator to replace patches |
+| `HcclEplbCommunicator` | Add downstream | HCCL transport for expert weights |
+| `AscendRoutedExperts` | Add downstream | Provides expert-weight views for quantized/NZ layouts |
+| `load_scope` | Add downstream | Load-collection scope inside EPLB configuration: `all/prefill/decode` |
+| `is_eplb_load_scope_matched()` | Add downstream | Determines whether the batch belongs to the target phase using the "any prefill makes the entire batch prefill" rule |
+| `_ascend_scope_matched` | Add downstream | CPU bool indicating whether the current main batch belongs to the target collection phase |
+| `get_eplb_weight_views()` | Add downstream | Layout-adaptation interface for quantization methods |
+| `apply_routed()` | Add downstream | MRV2 consumes precomputed routing results; `apply()` remains for V1 |
+| `dynamic_eplb` | Disable in MRV2 | Retained only for V1 |
+| `eplb_heat_collection_stage` | Replace in MRV2 | Avoids the ambiguous terms `heat` and `stage` |
+| `log2phy`, `global_expert_map`, `moe_load` | Remove from MRV2 | Replaced by upstream mapping/load tensors |
+| `VllmEplbAdaptor`, `EplbUpdator` | Disable in MRV2 | Excluded from the V2 import graph |
+
+### 4.3 File-Level Change Scope
+
+#### 4.3.1 Current Upstream Patch Targets
+
+| Upstream file and symbol | Patch behavior |
+| --- | --- |
+| `vllm/config/parallel.py:current_platform` | Proxy the platform object only in this module; report `is_cuda_alike()` as true for NPU while preserving the original validator and all other platform methods |
+| `vllm/config/parallel.py:ParallelConfig.__post_init__` | Convert `communicator=None` to `torch_nccl` before invoking the original function; on NPU, this upstream-valid value means torch.distributed/HCCL |
+| `vllm/distributed/eplb/eplb_communicator.py:create_eplb_communicator` | Construct `HcclEplbCommunicator` when the platform is NPU and `backend == "torch_nccl"`; otherwise call the upstream factory unchanged |
+| `vllm/model_executor/layers/fused_moe/router/base_router.py:BaseRouter._apply_eplb_mapping` | Preserve the original state checks, call the NPU operator, and continue passing the upstream valid-token count for the current ubatch |
+| `vllm/distributed/eplb/eplb_state.py:EplbState.__init__` | After the original function returns, write the NPU `device.index` into the compatibility field `cuda_device_index` |
+| `vllm/distributed/eplb/eplb_state.py:EplbState.step` | Invoke the original function with dummy-load semantics for non-target phases; first check for async-worker failure |
+| `vllm/distributed/eplb/async_worker.py:start_async_worker` | Preserve the original transfer loop and add exception propagation |
+
+The long-term upstream change adds `EplbDeviceBackend` to
+`vllm/platforms/interface.py` and redirects the construction points above
+through that interface. It is not a prerequisite for the two delivery phases.
+
+#### 4.3.2 vLLM Ascend
+
+| File | Change |
+| --- | --- |
+| `vllm_ascend/patch/platform/patch_eplb.py` | Add an idempotent patch assembler, structural checks, and upstream function wrappers |
+| `vllm_ascend/patch/platform/__init__.py` | Import `patch_eplb` before `patch_fused_moe` |
+| `vllm_ascend/patch/__init__.py` | Record the reason, upstream target, and removal condition for every EPLB patch |
+| `vllm_ascend/ascend_config.py:EplbConfig` | Add `load_scope` to the existing `_defaults` and validate the enum in `_validate_config()`; do not introduce another configuration class |
+| `vllm_ascend/platform.py:NPUPlatform._fix_incompatible_config` | Validate raw fields by runner before constructing `AscendConfig`: MRV2 permits only `load_scope`, V1 rejects explicit `load_scope`, and MRV2 also rejects legacy environment variables |
+| `vllm_ascend/worker/v2/eplb.py` | Add the stateless batch-scope classification function |
+| `vllm_ascend/worker/v2/model_runner.py` | Remove the blocker and empty warmup; update the batch-scope match result in `prepare_inputs()`; fix the extra profiling dummy run |
+| `vllm_ascend/ops/fused_moe/eplb.py` | Add the NPU map-and-record operator |
+| `vllm_ascend/distributed/eplb_communicator.py` | Add the HCCL communicator |
+| `vllm_ascend/ops/fused_moe/fused_moe.py:AscendMoERunner` | Split V1/V2 EPLB initialization and lazily import V1 dependencies; MRV2 calls the upstream Router and consumes `apply_routed()` |
+| `vllm_ascend/ops/fused_moe/routed_experts.py` | Add `AscendRoutedExperts.get_expert_weights()` |
+| `vllm_ascend/quantization/method_adapters.py:AscendFusedMoEMethod` | Add delegation for `apply_routed()` and `get_eplb_weight_views()` |
+| `vllm_ascend/quantization/methods/base.py:AscendMoEScheme` | Define `apply_routed()` and a default unsupported weight-view interface |
+| `vllm_ascend/quantization/methods/*.py` | Retain routing in V1 `apply()`; MRV2 `apply_routed()` performs computation only; return weight views according to layout |
+| `vllm_ascend/patch/platform/patch_fused_moe.py` | Inject `AscendRoutedExperts` by default while preserving an explicitly provided `routed_experts_cls` |
+| `vllm_ascend/distributed/parallel_state.py` | MRV2 does not create `_DYNAMIC_EPLB`; the upstream EPLB group is the only communication group |
+| `vllm_ascend/eplb/**` | Do not change V1 behavior; use dependency tests to ensure MRV2 does not import it |
+
+#### 4.3.3 Critical Modification Order
+
+1. `patch_eplb.py` takes effect before `EngineArgs/VllmConfig` construction and
+   installs the platform capability proxy in the `vllm.config.parallel` module.
+   The original Pydantic validator remains unchanged, and the cached nested
+   `VllmConfig` schema reads the same module-global object.
+2. The `ParallelConfig.__post_init__()` wrapper sets `torch_nccl` and then calls
+   the original function. `EPLBController.prepare_load()` still creates a
+   native `EplbState`.
+3. `patch_fused_moe._ascend_FusedMoE()` creates the upstream Router,
+   `AscendRoutedExperts`, and `AscendMoERunner`. The MRV2 branch does not
+   initialize legacy EPLB fields.
+4. After weight processing is complete, upstream
+   `MixtureOfExperts.set_eplb_state()` calls
+   `AscendRoutedExperts.get_expert_weights()` to collect actual compute
+   storage.
+5. Every `NPUModelRunner.prepare_inputs()` updates the batch-scope match result
+   from `is_prefilling_np`. Upstream `execute_model()` calls
+   `EPLBController.prepare_forward()` unchanged and then enters the model.
+6. `AscendMoERunner.no_shared_forward_impl()` runs the Router exactly once
+   after Ascend communication preparation. The Router patch maps IDs and
+   accumulates load; quantized `apply_routed()` no longer reads logits.
+7. Upstream `step_eplb_after` calls the thinly wrapped `EplbState.step()`.
+   Except for converting a non-target phase into dummy-load semantics, the
+   window, policy, transfer, and mapping commit all execute in the original
+   upstream function.
+
+## 5. Implementation and Validation Plan
+
+### 5.1 Two-Phase Implementation Plan
+
+#### 5.1.1 Phase 1: Complete Synchronous EPLB Path (Weeks 1-4)
+
+Deliverables:
+
+1. Complete `patch_eplb.py` and dual-baseline contract tests for release and
+   main-verified revisions.
+2. Switch MRV2 to upstream configuration, `EPLBController/EplbState`, and
+   `get_eplb_group()`.
+3. Complete the NPU map-and-record operator and synchronous HCCL communicator.
+4. Complete the batch-level `load_scope=all/prefill/decode` collection switch,
+   covering pure P, pure D, and mixed batches.
+5. Correct the Ascend MoE call chain and introduce `apply_routed()`, ensuring
+   MRV2 routes exactly once.
+6. Support the main model, eager mode, standard all-to-all/non-fused MC2,
+   BF16/FP16, W8A8, W4A8, W4A4 MXFP, and W8A8 MXFP.
+7. Preserve legacy V1 EPLB behavior.
+
+Exit criteria:
+
+- the MRV2 import graph does not contain `vllm_ascend/eplb`;
+- at least one real expert-weight transfer and mapping commit occurs on 2-card
+  and 4-card NPU runs;
+- generated results are identical with EPLB enabled and disabled;
+- disabling EPLB adds no measurable performance or memory overhead;
+- synchronous rearrangement does not deadlock, and mapping checksums are
+  consistent across all ranks after rearrangement;
+- a mixed batch containing any prefill request is processed entirely as
+  prefill, and non-matching batches do not advance the load window;
+- `use_async=true` is explicitly rejected at startup.
+
+#### 5.1.2 Phase 2: Complete the Final Feature Set (Weeks 5-8)
+
+Deliverables:
+
+1. Enable the upstream async worker and complete NPU stream/event and
+   asynchronous HCCL validation.
+2. Support ACL Graph piecewise mode, full decode graphs, and multiple
+   post-graph rearrangements.
+3. Support applicable combinations of MoE draft models, MTP, Eagle, and DFlash,
+   and verify that the main and draft models share the same batch-scope
+   classification.
+4. Support PP and multi-node EP.
+5. Evaluate and complete currently disabled W4A16, W4A16 MXFP, W4A8 MXFP, and
+   other quantization formats. Formats that have not passed independent layout
+   and operator validation remain rejected at startup.
+6. Complete support for standard MC2, multi-stream shared experts, and LoRA
+   MoE, or reject unsupported combinations precisely at startup.
+7. Complete combined validation of `load_scope != all` with DBO, speculative
+   decoding, and graph replay.
+8. If the corresponding upstream interface has entered the dependency
+   baseline, remove patches that the interface directly replaces. Otherwise,
+   retain the validated patches.
+
+Exit criteria:
+
+- NPU evidence covers upstream `EPLBConfig` behavior for sync/async, window,
+  interval, redundancy, and logging;
+- eager and ACL Graph results remain identical after at least two real
+  rearrangement rounds;
+- continuous requests during asynchronous weight replacement produce no
+  errors, cross-rank mapping divergence, or buffer overwrite;
+- the main model and MoE draft model collect statistics and rearrange
+  independently;
+- P/D scope produces results consistent with eager mode for draft models, DBO,
+  and graph replay;
+- single-node and multi-node test cases pass;
+- the support matrix, user configuration, and limitation documentation are
+  updated.
+
+Phase 1 must not introduce state classes, configuration fields, or weight
+loaders that Phase 2 will replace. Phase 2 only extends the same patch boundary
+and quantized-view support matrix.
+
+If the upstream interface has not entered the dependency baseline by the end of
+Phase 2, deliver the patches defined in this document after dual-baseline
+validation. Replacing the patches with the upstream interface later is
+dependency-upgrade maintenance and does not constitute a third implementation
+phase.
+
+### 5.2 Test Design
+
+#### 5.2.1 Unit Tests
+
+| Test target | Required coverage |
+| --- | --- |
+| Patches | `tests/ut/patch/platform/test_patch_eplb.py`: idempotent repeated import, module-local platform proxy, nested `ParallelConfig`/`VllmConfig` validation, failure on target-signature drift, and exactly one invocation of the original function |
+| Configuration | V1/V2 field boundaries, rejection of legacy fields and environment variables, V1 rejection of explicit `load_scope`, enum validation, EP prerequisites, Phase 1 async behavior, and communicator selection |
+| Load scope | `tests/ut/worker/v2/test_eplb_load_scope.py`: `all`, pure P, pure D, and mixed batches containing any prefill request |
+| Map-and-record | `tests/ut/ops/test_eplb.py`: single/multiple replicas, invalid IDs, padding, record switch, hash result, dtype, and empty input |
+| Weight views | View count, shape, stride, storage, and exclusions for every quantization format |
+| Communicator | `tests/ut/distributed/test_eplb_communicator.py`: local copy, cross-rank plan, empty task, multiple tensors, and queue cleanup after exceptions |
+| Mapping commit | Stable `data_ptr`, weights before mappings, and consistency among all three mapping types |
+| Lifecycle | Profiling does not record load, the extra MC2 dummy run does not trigger EPLB, and a normal step executes exactly once |
+| Dependency boundary | `vllm_ascend.eplb` is absent from `sys.modules` after importing MRV2 modules |
+
+The CPU reference for the NPU operator must reproduce upstream CUDA
+map-and-record semantics element by element. Final model-accuracy testing cannot
+replace operator-semantic testing.
+
+Convert `tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py` into an MRV2
+case using upstream parameters, and remove the skip and `DYNAMIC_EPLB`. Do not
+add a new branch to the legacy V1 case.
+
+#### 5.2.2 NPU Functional Tests
+
+Minimum test matrix:
+
+| Dimension | Phase 1 | Phase 2 |
+| --- | --- | --- |
+| Models | Qwen3 MoE | Qwen3 MoE, DeepSeek family, and one MoE draft model |
+| Device count | 2, 4 | 2, 4, 8, with at least one multi-node case |
+| Dtype/quantization | BF16/FP16, W8A8, W4A8, W4A4 MXFP, W8A8 MXFP | Final support matrix; enable other formats only after validation |
+| MoE communication | all-to-all/all-gather, MC2, FUSED_MC2 | Phase 1 combinations plus multi-node communication |
+| Execution mode | eager | eager, piecewise, full decode graph |
+| Rearrangement | sync, two rounds | sync/async, at least three rounds |
+| Parallelism | TP/EP | TP/DP/EP, PP |
+| Collection scope | `all/prefill/decode`, including mixed P/D | Main model, draft model, DBO, graph replay |
+
+Every dynamic-rearrangement test must verify:
+
+1. Outputs or token sequences remain identical before and after rearrangement.
+2. Per-layer mapping checksums match across all ranks.
+3. Every weight tensor of each new physical replica matches its source logical
+   expert.
+4. At least one expert moves across ranks, preventing the test from covering
+   only a no-op plan.
+5. Load recording continues to write to the new physical expert IDs after
+   rearrangement.
+
+#### 5.2.3 Performance and Resource Tests
+
+The release report must include:
+
+- throughput and TPOT with EPLB disabled, enabled without rearrangement,
+  synchronous rearrangement, and asynchronous rearrangement;
+- steady-state throughput, target-batch ratio, and batch-classification cost
+  for `load_scope=all/prefill/decode`;
+- map-and-record operator latency and invocation count;
+- communication bytes, total latency, and maximum per-layer latency for each
+  rearrangement round;
+- device-memory consumption of `expert_load_window`, mappings, and weight
+  buffers;
+- main-stream wait time and p99 request latency in asynchronous mode.
+
+Hard gates:
+
+- with EPLB disabled, do not execute the map-and-record operator or allocate
+  EPLB buffers;
+- `load_scope` allocates no device buffer and adds no H2D/D2H copy;
+- when `load_scope != all`, execute exactly one CPU batch-phase classification
+  per main batch;
+- steady-state forward execution has no host/device synchronization;
+- graph mode does not recapture because mapping contents change;
+- asynchronous mode does not make the main stream wait for a complete layer's
+  HCCL transfer.
+
+## 6. Operations, Compatibility, and Acceptance
+
+### 6.1 Observability and Failure Handling
+
+#### 6.1.1 Logs and Metrics
+
+Log once at startup:
+
+- the vLLM baseline, patch-target contract-check result, and current integration
+  mechanism;
+- policy, window, interval, redundant expert count, sync/async, communicator,
+  and `load_scope`;
+- model count, number of MoE layers per model, and logical/physical/local
+  expert counts;
+- a summary of count, dtype, and shape for every layer's weight views.
+
+Log for every rearrangement round:
+
+- round ID, trigger step, and rearrangement mode;
+- mapping checksum;
+- number of experts and bytes transferred across ranks;
+- policy-computation, communication, and commit latency;
+- target-phase batch/token counts since the previous rearrangement, filtered
+  batch count, and valid load-window step count;
+- balancedness, only when enabled by upstream configuration.
+
+P/D batch and token counts are accumulated directly from CPU scheduling
+metadata for the main batch and do not read NPU tensors. By default, do not
+print complete expert mappings, per-expert load arrays, or per-request phases.
+
+#### 6.1.2 Failure Policy
+
+| Failure | Handling |
+| --- | --- |
+| Patch target missing or signature/behavioral contract mismatch | Fail before configuration construction and print the incompatible upstream commit |
+| Unsupported configuration or weight layout | Fail startup |
+| NPU mapping operator unavailable | Fail startup |
+| Batch-phase metadata missing or invalid | Stop before forward execution; do not guess the collection phase |
+| HCCL transfer failure on any rank | Coordinate service termination |
+| Async worker exception | Set shared failure state and coordinate termination at the next step |
+| Mapping checksum mismatch | Terminate immediately and do not continue generation |
+| FUSED_MC2 expert-ID or weight/scale-view contract violation | Fail startup without changing the communication implementation |
+| Balancedness logging failure | Log a warning without affecting inference |
+
+### 6.2 Compatibility and Rollback
+
+- Model Runner V1 continues to use the legacy configuration and EPLB
+  implementation and is unaffected by this project.
+- MRV2 uses `--enable-eplb` as the only EPLB entry point and does not provide a
+  runtime switch.
+- `load_scope` defaults to `all`. Setting it back to `all` disables P/D
+  filtering but does not disable EPLB.
+- When MRV2 encounters `eplb_heat_collection_stage`, it prints a migration hint
+  and rejects startup. It does not read the legacy value as a runtime alias.
+- Release rollback is performed by disabling `--enable-eplb`. A process that
+  has already rearranged experts cannot disable EPLB at runtime and continue
+  serving.
+- If Phase 2 asynchronous functionality has an issue, users may explicitly set
+  `use_async=false` to return to the synchronous path under the same
+  architecture; the system does not fall back to legacy EPLB.
+- On upstream dependency upgrades, determine patch compatibility through
+  release/main-verified dual-baseline contract tests rather than maintaining
+  multiple implementations selected by version strings.
+- Once upstream `EplbDeviceBackend` is available, replace only construction and
+  forwarding entry points. User configuration, batch-scope classification, the
+  NPU operator, communicator, and weight views remain unchanged.
+
+### 6.3 Risks and Mitigations
+
+| Risk | Impact | Mitigation |
+| --- | --- | --- |
+| Upstream private symbols or Pydantic construction changes | Patches silently fail or bypass validation | Pin two baselines, assert structure at import time, run behavioral contract tests, and block release on incompatibility |
+| Incorrect P/D phase or token-range classification | The load window contains samples from the wrong phase | Use `is_prefilling_np/query_start_loc_np` directly and cover pure P, pure D, mixed, chunked, padding, draft, and DBO slices |
+| Quantized weight view omits a scale/offset | Incorrect results after rearrangement | Validate per-tensor checksums for every quantization format and run post-rearrangement accuracy tests |
+| Incorrect HCCL multi-stream ordering | Deadlock or buffer overwrite | Use an independent EPLB group, event-based transactions, unit tests for empty/error paths, and multi-round stress tests |
+| Graph captures stale addresses | Rearrangement has no effect or causes invalid access | Update all mappings/weights in place and test `data_ptr` stability across multiple replays |
+| PP layer indices are misaligned | Mapping updates target the wrong layer | Use local `moe_layers` order only and do not register `PPMissingLayer` |
+| Main and draft models share incorrect state | Load and weights interfere | Maintain independent `EplbModelState` objects keyed by `ModelConfig.compute_hash()` |
+| Legacy configuration is mistaken for compatible configuration | Behavior changes silently | Reject it during MRV2 startup and perform no automatic parameter conversion |
+| Too many supported combinations delay delivery | The project does not close within two months | Fix Phase 1 to BF16/W8A8 plus sync; in Phase 2, reuse the unified view interface by quantization family and do not introduce a third phase |
+
+### 6.4 Final Acceptance Criteria
+
+The project is complete only when all of the following are satisfied:
+
+1. The MRV2 EPLB control path has no dependency on `vllm_ascend/eplb`.
+2. Downstream contains no duplicate EPLB policy, load window, iterator, or
+   mapping state.
+3. Each layer performs expert selection exactly once; Ascend quantization
+   methods do not read Router logits to route again.
+4. Both synchronous and asynchronous paths use the upstream `EplbState`
+   rearrangement transaction.
+5. Eager mode, ACL Graph, the main model, and MoE draft models pass multi-round
+   real weight-replacement tests.
+6. Every declared supported quantization format provides complete and
+   verifiable expert-weight views.
+7. The EPLB-disabled path adds no communication, buffer, or device
+   synchronization.
+8. Documentation, examples, and the support matrix present only upstream EPLB
+   configuration plus the `load_scope` extension and no longer describe legacy
+   configuration as an MRV2 capability.
+9. For pure P, pure D, mixed batches, chunked prefill, draft models, DBO, and
+   graph replay, `load_scope=all/prefill/decode` follows the rule that any
+   prefill request classifies the entire batch as prefill, without changing
+   routing or rearrangement communication order.
+10. Every patch passes idempotency, signature, schema, and behavioral contract
+    tests against the release and main-verified baselines. Target drift must
+    fail during startup or CI.
