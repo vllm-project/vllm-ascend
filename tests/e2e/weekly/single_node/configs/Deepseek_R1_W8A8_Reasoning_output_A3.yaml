@@ -1,0 +1,73 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  LCCL_DETERMINISTIC: "1"
+  VLLM_USE_V1: "1"
+  HCCL_DETERMINISTIC: "true"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  HCCL_BUFFSIZE: "1024"
+  ATB_MATMUL_SHUFFLE_K_ENABLE: "0"
+  ATB_LLM_LCOC_ENABLE: "1"
+  SERVER_PORT: "DEFAULT_PORT"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "100"
+
+_server_cmd: &server_cmd
+  - "--port"
+  - "$SERVER_PORT"
+  - "--data-parallel-size"
+  - "4"
+  - "--data-parallel-size-local"
+  - "4"
+  - "--tensor-parallel-size"
+  - "2"
+  - "--seed"
+  - "1024"
+  - "--enable-expert-parallel"
+  - "--max-num-seqs"
+  - "32"
+  - "--max-num-batched-tokens"
+  - "4096"
+  - "--max-num-seqs"
+  - "6000"
+  - "--max-num-batched-tokens"
+  - "6000"
+  - "--trust-remote-code"
+  - "enforce-eager"
+  - "--gpu-memory-utilization"
+  - "0.92"
+  - "--quantization"
+  - "ascend"
+  - "--no-enable-prefix-caching"
+  - "--reasoning-parser"
+  - "deepseek_r1"
+  - "--additional-config"
+  - '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":false,"enable_multistream_shared_expert":false}}'
+
+
+_benchmarks: &benchmarks
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gsm8k_lite
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 4096
+    num_prompts: 32
+    batch_size: 16
+    baseline: 100
+    threshold: 10
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "Deepseek_R1_W8A8_reasoning_output_012"
+    model: "vllm-ascend/DeepSeek-R1-W8A8_vllm"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    benchmarks:
+      <<: *benchmarks

@@ -289,3 +289,16 @@ a3-560t:
       - name: Qwen3-30B-QuaRot
         os: linux-aarch64-a3-2-cn12-001
         config_file_path: Qwen3-30B-QuaRot-eagle3.yaml
+
+310p:
+  single_node:
+    test_config:
+      - name: Qwen3-8B-w8a8sc-310p
+        os: linux-aarch64-310p-4
+        config_file_path: Qwen3-8B-w8a8sc-310p.yaml
+      - name: Qwen3-14B-w8a8sc-310p
+        os: linux-aarch64-310p-4
+        config_file_path: Qwen3-14B-w8a8sc-310p.yaml
+      - name: Qwen3-32B-w8a8sc-310p
+        os: linux-aarch64-310p-4
+        config_file_path: Qwen3-32B-w8a8sc-310p.yaml
