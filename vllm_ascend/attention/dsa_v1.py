@@ -119,13 +119,155 @@ def hadamard_scale(out: torch.Tensor, x_shape: tuple[int, ...], dim: int, scale:
     return out[..., :dim].reshape(*x_shape)
 
 
+class DSAQuantizationFusion:
+    """
+    Encapsulates all W8A8 dynamic quantization fusion logic for DSA attention.
+
+    Provides unified APIs for:
+    - Hidden states shared quantization (share_hs_quant)
+    - RMS Norm + Dynamic Quant fusion
+    - Quantized matmul operations
+    - Indexer quantization support
+    """
+
+    def __init__(
+        self,
+        wq_a: torch.nn.Module = None,
+        wq_b: torch.nn.Module = None,
+        wkv: torch.nn.Module = None,
+        q_norm: torch.nn.Module = None,
+        eps: float = 1e-6,
+        indexer_wq_b: torch.nn.Module = None,
+    ):
+        self.wq_a = wq_a
+        self.wq_b = wq_b
+        self.wkv = wkv
+        self.q_norm = q_norm
+        self.eps = eps
+        self.indexer_wq_b = indexer_wq_b
+
+        # Pre-compute quantization flags for fusion decisions
+        self._wq_a_is_dynamic = wq_a is not None and self._is_w8a8_dynamic(wq_a)
+        self._wq_b_is_dynamic = wq_b is not None and self._is_w8a8_dynamic(wq_b)
+        self._wkv_is_dynamic = wkv is not None and self._is_w8a8_dynamic(wkv)
+        self._indexer_wq_b_is_dynamic = (
+            indexer_wq_b is not None and self._is_w8a8_dynamic(indexer_wq_b)
+        )
+
+        # Share hidden states quantization between wq_a and wkv
+        self.share_hs_quant = self._wq_a_is_dynamic and self._wkv_is_dynamic
+
+    @staticmethod
+    def _is_w8a8_dynamic(linear) -> bool:
+        """True iff ``linear`` is wired up with ``AscendW8A8DynamicLinearMethod``."""
+        qm = getattr(linear, "quant_method", None)
+        if qm is None or isinstance(qm, AscendUnquantizedLinearMethod):
+            return False
+        inner = getattr(qm, "quant_method", None)
+        return isinstance(inner, AscendW8A8DynamicLinearMethod)
+
+    @property
+    def is_wq_a_dynamic(self) -> bool:
+        """Check if wq_a uses W8A8 dynamic quantization."""
+        return self._wq_a_is_dynamic
+
+    @property
+    def is_wq_b_dynamic(self) -> bool:
+        """Check if wq_b uses W8A8 dynamic quantization."""
+        return self._wq_b_is_dynamic
+
+    @property
+    def is_wkv_dynamic(self) -> bool:
+        """Check if wkv uses W8A8 dynamic quantization."""
+        return self._wkv_is_dynamic
+
+    @property
+    def is_indexer_wq_b_dynamic(self) -> bool:
+        """Check if indexer_wq_b uses W8A8 dynamic quantization."""
+        return self._indexer_wq_b_is_dynamic
+
+    def quantize_hidden_states(self, hidden_states: torch.Tensor):
+        """
+        Perform hidden states dynamic quantization (Vector operator).
+
+        Returns:
+            (quantized_hidden_states, pertoken_scale): For use with npu_quant_matmul
+
+        Note: Only performs actual quantization if share_hs_quant is enabled.
+              Otherwise returns (hidden_states, None) for non-quantized path.
+        """
+        if self.share_hs_quant:
+            return torch_npu.npu_dynamic_quant(hidden_states)
+        return hidden_states, None
+
+    def rms_norm_dynamic_quant_fusion(
+        self,
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """
+        Perform RMS Norm + Dynamic Quant fusion (Cube operator).
+
+        This fusion combines:
+        1. RMS Normalization (q_norm)
+        2. Per-token dynamic quantization
+
+        Returns:
+            (normalized_quantized_x, pertoken_scale): For use with npu_quant_matmul
+
+        Note: Only uses fusion kernel if wq_b is W8A8 dynamic.
+              Otherwise returns (q_norm(x), None) for non-quantized path.
+        """
+        if self._wq_b_is_dynamic:
+            return torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
+                x, self.q_norm.weight, epsilon=self.eps
+            )
+        return self.q_norm(x), None
+
+    def quant_matmul(
+        self,
+        x: torch.Tensor,
+        weight: torch.nn.Parameter,
+        weight_scale: torch.nn.Parameter,
+        pertoken_scale: torch.Tensor | None = None,
+        bias: torch.Tensor | None = None,
+        output_dtype: torch.dtype = torch.float16,
+    ) -> torch.Tensor:
+        """
+        Perform quantized matrix multiplication.
+
+        Args:
+            x: Input tensor (or quantized tensor from quantize_hidden_states)
+            weight: Quantized weight matrix
+            weight_scale: Per-channel weight scale
+            pertoken_scale: Per-token activation scale (from rms_norm_dynamic_quant_fusion)
+            bias: Optional bias
+            output_dtype: Output data type
+
+        Returns:
+            Matmul result in output_dtype
+        """
+        if pertoken_scale is not None:
+            return torch_npu.npu_quant_matmul(
+                x,
+                weight,
+                weight_scale,
+                pertoken_scale=pertoken_scale,
+                bias=bias,
+                output_dtype=output_dtype,
+            )
+        # Fallback for non-quantized path
+        return torch_npu.npu_quant_matmul(
+            x,
+            weight,
+            weight_scale,
+            bias=bias,
+            output_dtype=output_dtype,
+        )
+
+
 def _is_w8a8_dynamic(linear) -> bool:
-    """True iff ``linear`` is wired up with ``AscendW8A8DynamicLinearMethod``."""
-    qm = getattr(linear, "quant_method", None)
-    if qm is None or isinstance(qm, AscendUnquantizedLinearMethod):
-        return False
-    inner = getattr(qm, "quant_method", None)
-    return isinstance(inner, AscendW8A8DynamicLinearMethod)
+    """Legacy compatibility function. Use DSAQuantizationFusion instead."""
+    return DSAQuantizationFusion._is_w8a8_dynamic(linear)
 
 
 def pad_to_blocks(x: torch.Tensor, length_list: torch.Tensor, block_size: int = 128):
@@ -1551,6 +1693,18 @@ class AscendDSAImpl(DSAAttentionImpl):
             self.compressor_norm = self.compressor.norm
             self.compressor_norm_eps = self.compressor.norm_eps
 
+        # Quantization fusion helper: encapsulates all W8A8 dynamic fusion logic
+        # Initialize after indexer is set to include indexer_wq_b
+        indexer_wq_b = getattr(self, 'inderxer_wq_b', None)
+        self.quant_fusion = DSAQuantizationFusion(
+            wq_a=self.wq_a,
+            wq_b=self.wq_b,
+            wkv=self.wkv,
+            q_norm=self.q_norm,
+            eps=self.eps,
+            indexer_wq_b=indexer_wq_b,
+        )
+
         # IndexCache: skip_topk indicates this layer reuses topk from a previous
         # indexer-bearing layer; use_index_cache marks whether the buffer must
         # be kept fresh on non-skip layers so downstream skip layers can read.
@@ -1850,7 +2004,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         main_stream = torch.npu.current_stream()
         aux_stream = dsv4_dsa_overlap_stream()
 
-        is_w8a8 = _is_w8a8_dynamic(self.wq_b)
+        is_w8a8 = self.quant_fusion.is_wq_b_dynamic
 
         # Part1: q_quant[V] -> q_a_down[C]  ||  kv_quant[V]
         q_quant, q_pertoken_scale = self.cv_wq_a.quantize(hidden_states)
@@ -1976,38 +2130,35 @@ class AscendDSAImpl(DSAAttentionImpl):
                 hidden_states, cos, sin, swa_kv_cache, swa_prefill_metadata.slot_mapping, is_prefill=True
             )
         else:
-            # mlaprolog
-            share_hs_quant = _is_w8a8_dynamic(self.wq_a) and _is_w8a8_dynamic(self.wkv)
-            if share_hs_quant:
-                hs_int8, hs_pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
-                q_a = torch_npu.npu_quant_matmul(
-                    hs_int8,
-                    self.wq_a.weight,
-                    self.wq_a.weight_scale,
-                    pertoken_scale=hs_pertoken_scale,
-                    bias=self.wq_a.bias,
+            # mlaprolog: use quant_fusion helper for all W8A8 dynamic fusion
+            qf = self.quant_fusion
+
+            # Step 1: Hidden states quantization (shared between wq_a and wkv)
+            hs_int8, hs_pertoken_scale = qf.quantize_hidden_states(hidden_states)
+
+            # Step 2: wq_a matmul
+            if qf.share_hs_quant:
+                q_a = qf.quant_matmul(
+                    hs_int8, self.wq_a.weight, self.wq_a.weight_scale,
+                    pertoken_scale=hs_pertoken_scale, bias=self.wq_a.bias,
                     output_dtype=hidden_states.dtype,
                 )
             else:
                 q_a = self.wq_a(hidden_states)
 
-            # q
-            if _is_w8a8_dynamic(self.wq_b):
-                qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
-                    q_a, self.q_norm.weight, epsilon=self.eps
-                )
-                q = torch_npu.npu_quant_matmul(
-                    qr,
-                    self.wq_b.weight,
-                    self.wq_b.weight_scale,
-                    pertoken_scale=qr_pertoken_scale,
-                    bias=self.wq_b.bias,
+            # Step 3: RMS Norm + Dynamic Quant fusion for wq_b
+            qr, qr_pertoken_scale = qf.rms_norm_dynamic_quant_fusion(q_a)
+
+            # Step 4: wq_b matmul
+            if qf.is_wq_b_dynamic:
+                q = qf.quant_matmul(
+                    qr, self.wq_b.weight, self.wq_b.weight_scale,
+                    pertoken_scale=qr_pertoken_scale, bias=self.wq_b.bias,
                     output_dtype=hidden_states.dtype,
                 ).unflatten(-1, (self.n_local_heads, self.head_dim))
             else:
-                qr = self.q_norm(q_a)
                 q = self.wq_b(qr).unflatten(-1, (self.n_local_heads, self.head_dim))
-                qr_pertoken_scale = None
+
             q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
 
             torch.ops._C_ascend.inplace_partial_rotary_mul(
@@ -2017,14 +2168,12 @@ class AscendDSAImpl(DSAAttentionImpl):
                 rotary_mode="interleave",
                 partial_slice=[self.nope_head_dim, self.head_dim],
             )
-            # win kv & tok_dis
-            if share_hs_quant:
-                kv = torch_npu.npu_quant_matmul(
-                    hs_int8,
-                    self.wkv.weight,
-                    self.wkv.weight_scale,
-                    pertoken_scale=hs_pertoken_scale,
-                    bias=self.wkv.bias,
+
+            # win kv & tok_dis: use shared hidden states quantization
+            if qf.share_hs_quant:
+                kv = qf.quant_matmul(
+                    hs_int8, self.wkv.weight, self.wkv.weight_scale,
+                    pertoken_scale=hs_pertoken_scale, bias=self.wkv.bias,
                     output_dtype=hidden_states.dtype,
                 )
             else:
@@ -2289,51 +2438,35 @@ class AscendDSAImpl(DSAAttentionImpl):
                 hidden_states, cos, sin, swa_kv_cache, swa_decode_metadata.slot_mapping, is_prefill=False
             )
         else:
-            # Share one dynamic-quant of hidden_states between wq_a (main stream)
-            # and wkv (attention stream) when both sides are W8A8 dynamic.
-            share_hs_quant = _is_w8a8_dynamic(self.wq_a) and _is_w8a8_dynamic(self.wkv)
-            if share_hs_quant:
-                hs_int8, hs_pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
+            # Decode: use quant_fusion helper for all W8A8 dynamic fusion
+            qf = self.quant_fusion
 
-            # q
-            if _is_w8a8_dynamic(self.wq_b):
-                if share_hs_quant:
-                    q_a = torch_npu.npu_quant_matmul(
-                        hs_int8,
-                        self.wq_a.weight,
-                        self.wq_a.weight_scale,
-                        pertoken_scale=hs_pertoken_scale,
-                        bias=self.wq_a.bias,
-                        output_dtype=hidden_states.dtype,
-                    )
-                else:
-                    q_a = self.wq_a(hidden_states)
-                qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
-                    q_a, self.q_norm.weight, epsilon=self.eps
+            # Step 1: Hidden states quantization (shared between wq_a and wkv)
+            hs_int8, hs_pertoken_scale = qf.quantize_hidden_states(hidden_states)
+
+            # Step 2: wq_a matmul
+            if qf.share_hs_quant:
+                q_a = qf.quant_matmul(
+                    hs_int8, self.wq_a.weight, self.wq_a.weight_scale,
+                    pertoken_scale=hs_pertoken_scale, bias=self.wq_a.bias,
+                    output_dtype=hidden_states.dtype,
                 )
-                q = torch_npu.npu_quant_matmul(
-                    qr,
-                    self.wq_b.weight,
-                    self.wq_b.weight_scale,
-                    pertoken_scale=qr_pertoken_scale,
-                    bias=self.wq_b.bias,
+            else:
+                q_a = self.wq_a(hidden_states)
+
+            # Step 3: RMS Norm + Dynamic Quant fusion for wq_b
+            qr, qr_pertoken_scale = qf.rms_norm_dynamic_quant_fusion(q_a)
+
+            # Step 4: wq_b matmul
+            if qf.is_wq_b_dynamic:
+                q = qf.quant_matmul(
+                    qr, self.wq_b.weight, self.wq_b.weight_scale,
+                    pertoken_scale=qr_pertoken_scale, bias=self.wq_b.bias,
                     output_dtype=hidden_states.dtype,
                 ).unflatten(-1, (self.n_local_heads, self.head_dim))
             else:
-                if share_hs_quant:
-                    q_a = torch_npu.npu_quant_matmul(
-                        hs_int8,
-                        self.wq_a.weight,
-                        self.wq_a.weight_scale,
-                        pertoken_scale=hs_pertoken_scale,
-                        bias=self.wq_a.bias,
-                        output_dtype=hidden_states.dtype,
-                    )
-                    qr = q = self.q_norm(q_a)
-                else:
-                    qr = q = self.q_norm(self.wq_a(hidden_states))
-                q = self.wq_b(q).unflatten(-1, (self.n_local_heads, self.head_dim))
-                qr_pertoken_scale = None
+                qr = self.q_norm(q_a)
+                q = self.wq_b(qr).unflatten(-1, (self.n_local_heads, self.head_dim))
 
             q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
 
@@ -2345,14 +2478,11 @@ class AscendDSAImpl(DSAAttentionImpl):
                 partial_slice=[self.nope_head_dim, self.head_dim],
             )
 
-            # win kv & tok_dis
-            if share_hs_quant:
-                kv = torch_npu.npu_quant_matmul(
-                    hs_int8,
-                    self.wkv.weight,
-                    self.wkv.weight_scale,
-                    pertoken_scale=hs_pertoken_scale,
-                    bias=self.wkv.bias,
+            # win kv & tok_dis: use shared hidden states quantization
+            if qf.share_hs_quant:
+                kv = qf.quant_matmul(
+                    hs_int8, self.wkv.weight, self.wkv.weight_scale,
+                    pertoken_scale=hs_pertoken_scale, bias=self.wkv.bias,
                     output_dtype=hidden_states.dtype,
                 )
             else:
@@ -2582,7 +2712,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         ) = attn_metadata
 
         if (
-            _is_w8a8_dynamic(self.inderxer_wq_b)
+            self.quant_fusion.is_indexer_wq_b_dynamic
             and qr_pertoken_scale is not None
             and get_ascend_device_type() not in {AscendDeviceType.A5}
         ):
@@ -2827,7 +2957,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         aux_stream = dsv4_dsa_overlap_stream()
 
         # ===== Part0: Pre-compute on main =====
-        if _is_w8a8_dynamic(self.inderxer_wq_b) and qr_pertoken_scale is not None:
+        if self.quant_fusion.is_indexer_wq_b_dynamic and qr_pertoken_scale is not None:
             qr_quant_ready = qr
             qr_scale_ready = qr_pertoken_scale
         else:
@@ -2891,7 +3021,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 )
 
         # Main: matmul q from qr (directly submit, V/C different engines dispatch naturally)
-        if _is_w8a8_dynamic(self.inderxer_wq_b) and qr_pertoken_scale is not None:
+        if self.quant_fusion.is_indexer_wq_b_dynamic and qr_pertoken_scale is not None:
             q = torch_npu.npu_quant_matmul(
                 qr_quant_ready,
                 self.inderxer_wq_b.weight,
