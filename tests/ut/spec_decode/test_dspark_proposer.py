@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import inspect
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -33,21 +33,58 @@ from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBasePropos
 # 0 = single-DP (no padding); >0 = multi-DP where num_input_tokens >
 # num_query_total, the out-of-bounds regime.
 MULTI_DP_PADDING_SIZES = [0, 8, 32]
+_NUM_SPECULATIVE_TOKENS = 3
+_MAX_BATCH_SIZE = 2
+_MAX_NUM_TOKENS = 8
+_HIDDEN_SIZE = 16
 
 
 class _DSparkProposerTestBase:
-    """Shared builder for a bypass-init ``AscendDSparkProposer``."""
+    """Shared helpers for ``AscendDSparkProposer`` tests."""
 
     @staticmethod
-    def _make_proposer(*, max_num_tokens: int, num_reqs: int, block_size: int):
-        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
-        device = torch.device("cpu")
-        num_query_total = num_reqs * block_size
+    def _make_vllm_config(hf_config: SimpleNamespace) -> SimpleNamespace:
+        """Build the minimal config consumed by the DSpark initializer."""
+        draft_model_config = SimpleNamespace(hf_config=hf_config, get_hidden_size=lambda: _HIDDEN_SIZE)
+        return SimpleNamespace(
+            speculative_config=SimpleNamespace(draft_sample_method="greedy", draft_model_config=draft_model_config)
+        )
 
+    @classmethod
+    def _make_proposer(
+        cls,
+        *,
+        max_num_tokens: int,
+        num_reqs: int,
+        block_size: int,
+        hf_config: SimpleNamespace | None = None,
+    ):
+        device = torch.device("cpu")
+        vllm_config = cls._make_vllm_config(hf_config or SimpleNamespace())
+
+        def mock_parent_init(
+            proposer: AscendDSparkProposer,
+            vllm_config: SimpleNamespace,
+            device: torch.device,
+            runner: object | None = None,
+        ) -> None:
+            del runner
+            proposer.draft_model_config = vllm_config.speculative_config.draft_model_config
+            proposer.num_speculative_tokens = block_size
+            proposer.max_batch_size = num_reqs
+            proposer.max_num_tokens = max_num_tokens
+            proposer.dtype = torch.float32
+            proposer.device = device
+            proposer.hidden_size = _HIDDEN_SIZE
+            proposer.hidden_states = torch.empty(0)
+            proposer._dflash_hidden_states = torch.empty(0)
+
+        with patch.object(AscendDSparkProposer.__base__, "__init__", mock_parent_init):
+            proposer = AscendDSparkProposer(vllm_config, device)
+
+        num_query_total = num_reqs * proposer.num_query_per_req
         proposer.positions = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
         proposer.positions[:num_query_total] = torch.arange(num_query_total, dtype=torch.int32)
-        proposer.num_speculative_tokens = block_size
-        proposer.device = device
         proposer.parallel_drafting_token_id = 0
         proposer.kv_cache_gid = 0
         proposer._dflash_num_context = 0
@@ -230,3 +267,32 @@ class TestPadDraftBuffersBeforeBuild(_DSparkProposerTestBase):
                 "in _propose, otherwise the attention backend reads un-zeroed "
                 "positions in the DP-padding region."
             )
+
+
+class TestDSparkInitialization(_DSparkProposerTestBase):
+    """Tests for DSpark initialization configuration."""
+
+    @pytest.mark.parametrize(
+        ("hf_config", "expected_sample_from_anchor", "expected_num_query_per_req"),
+        [
+            pytest.param(SimpleNamespace(), True, _NUM_SPECULATIVE_TOKENS),
+            pytest.param(SimpleNamespace(dspark_bonus_anchor=True), False, 1 + _NUM_SPECULATIVE_TOKENS),
+        ],
+    )
+    def test_configures_anchor_sampling(
+        self,
+        hf_config: SimpleNamespace,
+        expected_sample_from_anchor: bool,
+        expected_num_query_per_req: int,
+    ) -> None:
+        """Verify the bonus-anchor flag selects the expected query layout."""
+        proposer = self._make_proposer(
+            max_num_tokens=_MAX_NUM_TOKENS,
+            num_reqs=_MAX_BATCH_SIZE,
+            block_size=_NUM_SPECULATIVE_TOKENS,
+            hf_config=hf_config,
+        )
+        expected_max_query_tokens = _MAX_BATCH_SIZE * expected_num_query_per_req
+        assert proposer.sample_from_anchor is expected_sample_from_anchor
+        assert proposer.num_query_per_req == expected_num_query_per_req
+        assert proposer.max_query_tokens == expected_max_query_tokens
