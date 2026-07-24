@@ -472,6 +472,30 @@ class NPUPlatform(Platform):
 
         from vllm.config.compilation import CUDAGraphMode
 
+        architecture = None
+        if model_config is not None:
+            architectures = getattr(model_config, "architectures", None)
+            if architectures:
+                architecture = architectures[0]
+
+        if model_config is not None and architecture == "Qwen2ForCausalLM":
+            if os.environ.get("VLLM_ASCEND_USE_NATIVE_QWEN2_ROPE", "1") != "0":
+                logger.warning(
+                    "Using native rotary fallback for %s on NPU to avoid incorrect outputs on the compiled path.",
+                    architecture,
+                )
+            elif os.environ.get("VLLM_ASCEND_ALLOW_UNSAFE_QWEN2_ACLGRAPH", "0") != "1":
+                logger.warning(
+                    "Disabling NPU graph compilation for %s because native rotary fallback was disabled and the "
+                    "default ACL graph path can produce incorrect outputs. Set VLLM_ASCEND_USE_NATIVE_QWEN2_ROPE=1 "
+                    "to use the default safe fix, or VLLM_ASCEND_ALLOW_UNSAFE_QWEN2_ACLGRAPH=1 to restore the "
+                    "previous behavior.",
+                    architecture,
+                )
+                enforce_eager = True
+                model_config.enforce_eager = True
+                compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
         if ascend_config.xlite_graph_config.enabled:
             if ascend_config.xlite_graph_config.full_mode and vllm_config.speculative_config is None:
                 logger.info("ACLGraph has been disabled when speculation is disabled in xlite full mode")
