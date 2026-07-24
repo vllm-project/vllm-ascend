@@ -44,7 +44,6 @@ import regex as re
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-import torch_npu
 from torch.nn.parameter import Parameter
 from vllm.distributed import (
     split_tensor_along_last_dim,
@@ -56,6 +55,7 @@ from vllm.logger import logger
 from vllm.model_executor.models.utils import extract_layer_index
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import (
     get_mlp_tp_group,
     get_otp_group,
@@ -359,7 +359,6 @@ class SequenceRowParallelOp(CustomRowParallelOp):
             x = F.pad(x, (0, 0, 0, pad_size))
 
         world_size = self.layer.tp_size
-        comm_mode = "aiv"
         hcom_name = get_tp_group().device_group._get_backend(torch.device("npu")).get_hccl_comm_name(self.layer.tp_rank)
 
         from vllm.model_executor.layers.linear import UnquantizedLinearMethod
@@ -369,7 +368,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
 
         # For unquant
         if mmrs_fusion and isinstance(self.layer.quant_method, UnquantizedLinearMethod):
-            output = torch_npu.npu_mm_reduce_scatter_base(
+            output = DeviceOperator.npu_mm_reduce_scatter_base(
                 x,
                 self.layer.weight.t(),
                 hcom_name,
@@ -377,7 +376,6 @@ class SequenceRowParallelOp(CustomRowParallelOp):
                 reduce_op="sum",
                 bias=None,
                 comm_turn=0,
-                comm_mode=comm_mode,
             )
             if bias_ is not None:
                 output.add_(bias_)
@@ -398,7 +396,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
             quant_bias = self.layer.quant_bias
             deq_scale = self.layer.deq_scale
             output_dtype = torch.bfloat16
-            output = torch_npu.npu_mm_reduce_scatter_base(
+            output = DeviceOperator.npu_mm_reduce_scatter_base(
                 x_quant,
                 self.layer.weight,
                 hcom_name,
@@ -408,7 +406,6 @@ class SequenceRowParallelOp(CustomRowParallelOp):
                 comm_turn=0,
                 x2_scale=deq_scale,
                 output_dtype=output_dtype,
-                comm_mode=comm_mode,
             )
             output = torch.add(output, torch.mul(quant_bias, deq_scale).to(self.layer.params_dtype))
         else:
