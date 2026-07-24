@@ -3882,7 +3882,12 @@ class TestEagleProposerSetInputsFirstPass:
 
         next_token_ids = torch.tensor([100, 200, 300, 400], dtype=torch.int32, device=self.device)
 
-        target_hidden_states = torch.randn(18, proposer.hidden_size, dtype=proposer.dtype, device=self.device)
+        target_hidden_states = torch.randn(
+            sum(query_lens),
+            proposer.hidden_size,
+            dtype=proposer.dtype,
+            device=self.device,
+        )
 
         long_seq_metadata = MagicMock()
         expected_token_indices = torch.tensor([2, 4, 8, 11], dtype=torch.int32, device=self.device)
