@@ -117,6 +117,7 @@ class _DSparkProposerTestBase:
         proposer._per_group_context_slot_mapping_buffers = {gid: slot.clone()}
         return proposer
 
+# fmt: off
     @staticmethod
     def _invoke_set_inputs_first_pass(
         proposer,
@@ -162,6 +163,7 @@ class _DSparkProposerTestBase:
             num_rejected_tokens_gpu=num_rejected,
         )
         return num_query_total, token_indices, cad, extra, next_token_ids, target_hidden_states
+# fmt: on
 
 
 class TestDSparkPositionsFullUnderMultiDp(_DSparkProposerTestBase):
@@ -344,6 +346,9 @@ class TestDSparkInitialization(_DSparkProposerTestBase):
         assert proposer.sample_from_anchor is expected_sample_from_anchor
         assert proposer.num_query_per_req == expected_num_query_per_req
         assert proposer.max_query_tokens == expected_max_query_tokens
+
+
+# fmt: off
 class TestSetPerGroupAttnMetadata(_DSparkProposerTestBase):
     """``set_per_group_attn_metadata`` stores the runner-provided per-group
     block table / slot mapping into the read-only dicts the proposer consults
@@ -680,3 +685,4 @@ class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
         kv_cache_config = SimpleNamespace(kv_cache_groups=[non_overlapping_group])
         with pytest.raises(RuntimeError, match="registered draft attention groups"):
             proposer.initialize_attn_backend(kv_cache_config)
+# fmt: on
