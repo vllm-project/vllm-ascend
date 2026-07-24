@@ -17,6 +17,7 @@
 import gc
 import os
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import copy
 from typing import Any, cast
@@ -146,34 +147,34 @@ def _reset_process_global_model_state(vllm_config: VllmConfig, model: Module | N
         logger.debug("RFork fallback: skip clearing _ROPE_DICT: %s", e)
 
 
-@contextmanager
-def _rfork_pre_transfer_weight_processing(model: Module):
-    """Bypass FusedMoE post-load validation during RFork pre-transfer layout work.
-
-    AscendMoERunner wraps quant_method.process_weights_after_loading with a
-    shared-expert consistency check. RFork's processed-layout transfer calls
-    process_weights_after_loading before receiver weights arrive, so only this
-    RFork phase should use the wrapped function's original implementation.
-    """
+def _iter_ascend_moe_quant_methods(model: Module) -> Iterator[Any]:
+    """Yield each quant method owned by an Ascend MoE runner once."""
     from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 
-    restored: list[tuple[Any, object]] = []
     seen_quant_methods: set[int] = set()
     for module in model.modules():
         if not isinstance(module, AscendMoERunner):
             continue
 
-        quant_method = getattr(module, "quant_method", None) or getattr(module, "_quant_method", None)
+        # AscendMoERunner exposes the routed experts' method via private _quant_method.
+        quant_method = getattr(module, "_quant_method", None)
         if quant_method is None or id(quant_method) in seen_quant_methods:
             continue
 
+        seen_quant_methods.add(id(quant_method))
+        yield cast(Any, quant_method)
+
+
+@contextmanager
+def _rfork_pre_transfer_weight_processing(model: Module):
+    """Use the unwrapped MoE post-load step so RFork pre-transfer skips shared-expert validation."""
+    restored: list[tuple[Any, object]] = []
+    for quant_method in _iter_ascend_moe_quant_methods(model):
         process_weights = getattr(quant_method, "process_weights_after_loading", None)
         original_process_weights = getattr(process_weights, "__wrapped__", None)
         if original_process_weights is None:
             continue
 
-        quant_method = cast(Any, quant_method)
-        seen_quant_methods.add(id(quant_method))
         restored.append((quant_method, process_weights))
         quant_method.process_weights_after_loading = original_process_weights
 
@@ -182,6 +183,8 @@ def _rfork_pre_transfer_weight_processing(model: Module):
     finally:
         for quant_method, process_weights in restored:
             quant_method.process_weights_after_loading = process_weights
+
+
 def _is_dynamic_eplb_enabled(vllm_config: VllmConfig) -> bool:
     parallel_config = getattr(vllm_config, "parallel_config", None)
     if bool(getattr(parallel_config, "enable_eplb", False)):
@@ -192,6 +195,35 @@ def _is_dynamic_eplb_enabled(vllm_config: VllmConfig) -> bool:
     if not isinstance(eplb_config, dict):
         return False
     return bool(eplb_config.get("dynamic_eplb") or eplb_config.get("expert_map_record_path"))
+
+
+@contextmanager
+def _rfork_skip_unquantized_moe_post_load_processing(model: Module):
+    """Suppress unquantized MoE post-load processing; dense layers still run theirs."""
+
+    from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
+
+    restored_methods: list[tuple[Any, object]] = []
+    for quant_method in _iter_ascend_moe_quant_methods(model):
+        if not isinstance(quant_method, AscendUnquantizedFusedMoEMethod):
+            continue
+
+        process_weights = getattr(quant_method, "process_weights_after_loading", None)
+        if process_weights is None:
+            continue
+
+        restored_methods.append((quant_method, process_weights))
+        quant_method.process_weights_after_loading = _noop_process_weights_after_loading  # type: ignore[method-assign]
+
+    try:
+        yield
+    finally:
+        for quant_method, process_weights in restored_methods:
+            quant_method.process_weights_after_loading = process_weights
+
+
+def _noop_process_weights_after_loading(*args: Any, **kwargs: Any) -> None:
+    pass
 
 
 @register_model_loader("rfork")
@@ -348,9 +380,9 @@ class RForkModelLoader(BaseModelLoader):
                     torch.npu.synchronize()
 
                 weight_load_start_time = time.perf_counter()
-                if not rfork_worker.pre_transfer(model):
+                if not rfork_worker.pre_transfer(model, processed_layout_transfer):
                     raise RuntimeError("pre_transfer failed.")
-                if not rfork_worker.transfer(model):
+                if not rfork_worker.transfer(model, processed_layout_transfer):
                     raise RuntimeError("transfer failed.")
                 if not rfork_worker.post_transfer():
                     raise RuntimeError("post_transfer failed.")
@@ -359,10 +391,10 @@ class RForkModelLoader(BaseModelLoader):
                     time.perf_counter() - weight_load_start_time,
                 )
 
-                rfork_worker.start_seed_service(model)
+                rfork_worker.start_seed_service(model, processed_layout_transfer)
                 if not processed_layout_transfer:
-                    process_weights_after_loading(model, model_config, target_device)
-
+                    with _rfork_skip_unquantized_moe_post_load_processing(model):
+                        process_weights_after_loading(model, model_config, target_device)
                 return model.eval()
             except Exception as e:
                 logger.warning("RFork transfer failed: %s, clean up and fall back to default loader", e)
@@ -397,7 +429,7 @@ class RForkModelLoader(BaseModelLoader):
 
                 try:
                     rfork_worker.reset_transfer_state()
-                    rfork_worker.start_seed_service(model)
+                    rfork_worker.start_seed_service(model, processed_layout_transfer)
                 except Exception as e:
                     logger.warning(
                         "Fallback model loaded, but start_seed_service failed: %s",

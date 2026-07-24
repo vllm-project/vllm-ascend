@@ -30,6 +30,7 @@ from vllm_ascend.model_loader.rfork.rfork_loader import (
     _make_fallback_load_config,
     _reset_process_global_model_state,
     _rfork_pre_transfer_weight_processing,
+    _rfork_skip_unquantized_moe_post_load_processing,
 )
 from vllm_ascend.model_loader.rfork.seed_protocol import get_local_seed_key
 
@@ -497,10 +498,14 @@ def test_rfork_fallback_clears_only_failed_model_state_before_reinit(monkeypatch
     loader = RForkModelLoader(load_config)
     model_config = SimpleNamespace(dtype=torch.float32, model="/models/test", quantization="ascend")
     vllm_config = _vllm_config(model_config=model_config)
-    stale_attention = SimpleNamespace()
-    stale_moe = SimpleNamespace()
-    unrelated_layer = SimpleNamespace()
-    fallback_down_proj = SimpleNamespace()
+
+    class _FakeModule:
+        pass
+
+    stale_attention = _FakeModule()
+    stale_moe = _FakeModule()
+    unrelated_layer = _FakeModule()
+    fallback_down_proj = _FakeModule()
     vllm_config.compilation_config = SimpleNamespace(
         static_forward_context={
             "model.layers.0.self_attn.indexer.k_cache": stale_attention,
@@ -534,11 +539,11 @@ def test_rfork_fallback_clears_only_failed_model_state_before_reinit(monkeypatch
 
     rfork_worker = SimpleNamespace(
         is_seed_available=lambda: True,
-        pre_transfer=lambda model: True,
-        transfer=lambda model: False,
+        pre_transfer=lambda model, processed_layout: True,
+        transfer=lambda model, processed_layout: False,
         post_transfer=lambda: True,
         reset_transfer_state=lambda: None,
-        start_seed_service=lambda model: None,
+        start_seed_service=lambda model, processed_layout: None,
     )
 
     monkeypatch.setattr(loader, "_ensure_rfork_worker", lambda vc, mc: rfork_worker)
@@ -595,7 +600,7 @@ def test_rfork_seed_miss_fallback_preserves_existing_process_global_state(monkey
         is_seed_available=lambda: False,
         post_transfer=lambda: True,
         reset_transfer_state=lambda: None,
-        start_seed_service=lambda model: None,
+        start_seed_service=lambda model, processed_layout: None,
     )
 
     monkeypatch.setattr(loader, "_ensure_rfork_worker", lambda vc, mc: rfork_worker)
@@ -625,7 +630,7 @@ def test_rfork_pre_transfer_weight_processing_unwraps_and_restores_quant_methods
 
     class _FakeAscendMoERunner:
         def __init__(self, quant_method):
-            self.quant_method = quant_method
+            self._quant_method = quant_method
 
     calls = []
 
@@ -659,3 +664,59 @@ def test_rfork_pre_transfer_weight_processing_unwraps_and_restores_quant_methods
         assert quant_method.process_weights_after_loading is original_process_weights
         raise RuntimeError("boom")
     assert quant_method.process_weights_after_loading is wrapped_process_weights
+
+
+def test_rfork_skips_only_unquantized_moe_post_load_processing(monkeypatch):
+    import vllm_ascend.ops.fused_moe.fused_moe as fused_moe_module
+    import vllm_ascend.ops.fused_moe.routed_experts as routed_experts_module
+
+    class _FakeAscendUnquantizedFusedMoEMethod:
+        def __init__(self, process_weights_after_loading):
+            self.process_weights_after_loading = process_weights_after_loading
+
+    class _FakeAscendMoERunner:
+        def __init__(self, quant_method):
+            self._quant_method = quant_method
+
+    calls = []
+
+    def unquantized_process(*args, **kwargs):
+        calls.append("unquantized")
+
+    def quantized_process(*args, **kwargs):
+        calls.append("quantized")
+
+    unquantized_method = _FakeAscendUnquantizedFusedMoEMethod(unquantized_process)
+    quantized_method = SimpleNamespace(process_weights_after_loading=quantized_process)
+    unquantized_layer = _FakeAscendMoERunner(unquantized_method)
+    quantized_layer = _FakeAscendMoERunner(quantized_method)
+    duplicate_unquantized_layer = _FakeAscendMoERunner(unquantized_method)
+
+    class _FakeModule:
+        def modules(self):
+            return iter(
+                [
+                    self,
+                    unquantized_layer,
+                    quantized_layer,
+                    duplicate_unquantized_layer,
+                ]
+            )
+
+    monkeypatch.setattr(
+        routed_experts_module,
+        "AscendUnquantizedFusedMoEMethod",
+        _FakeAscendUnquantizedFusedMoEMethod,
+    )
+    monkeypatch.setattr(fused_moe_module, "AscendMoERunner", _FakeAscendMoERunner)
+
+    with _rfork_skip_unquantized_moe_post_load_processing(_FakeModule()):
+        assert unquantized_method.process_weights_after_loading() is None
+        quantized_method.process_weights_after_loading()
+        assert calls == ["quantized"]
+    assert unquantized_method.process_weights_after_loading is unquantized_process
+    assert quantized_method.process_weights_after_loading is quantized_process
+
+    with pytest.raises(RuntimeError, match="boom"), _rfork_skip_unquantized_moe_post_load_processing(_FakeModule()):
+        raise RuntimeError("boom")
+    assert unquantized_method.process_weights_after_loading is unquantized_process
