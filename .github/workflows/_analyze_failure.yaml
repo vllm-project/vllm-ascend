@@ -32,6 +32,11 @@ on:
         required: false
         default: ''
         description: 'Content of recommendations from upstream job output (priority 1)'
+    secrets:
+      OBS_ACCESS_KEY_FAILURE_ANALYSIS:
+        required: false
+      OBS_SECRET_ACCESS_KEY_FAILURE_ANALYSIS:
+        required: false
 
 defaults:
   run:
@@ -116,3 +121,152 @@ jobs:
           path: ./test-logs/failure_report.md
           if-no-files-found: ignore
           retention-days: 14
+
+  archive-failure-report-to-obs:
+    name: Archive failure report to OBS
+    needs: analyze
+    if: ${{ always() }}
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    concurrency:
+      group: failure-analysis-obs-daily-archive
+      cancel-in-progress: false
+    env:
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_FAILURE_ANALYSIS }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY_FAILURE_ANALYSIS }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_TITLE: ${{ github.event.pull_request.title }}
+      RUN_ID: ${{ github.run_id }}
+      RUN_ATTEMPT: ${{ github.run_attempt }}
+    steps:
+      - name: Download failure analysis report
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          name: failure-analysis-report
+          path: ./failure-analysis-report
+
+      - name: Install OBS SDK
+        if: always()
+        run: pip install esdk-obs-python --quiet
+
+      - name: Add report to daily archive and upload to OBS
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os
+          import shutil
+          import tarfile
+          import unicodedata
+          from datetime import datetime
+          from pathlib import Path
+          from zoneinfo import ZoneInfo
+
+          from obs import ObsClient
+
+          OBS_BUCKET = "vllm-ascend"
+          OBS_PREFIX = "ci/failure-analysis"
+          OBS_SERVER = "https://obs.cn-north-4.myhuaweicloud.com"
+          REPORT_PATH = Path("failure-analysis-report/failure_report.md")
+          WORK_DIR = Path("failure-analysis-archive")
+          CONTENT_DIR = WORK_DIR / "contents"
+
+
+          def sanitize_filename(value):
+              normalized = unicodedata.normalize("NFKC", value)
+              sanitized = "".join(
+                  char if char.isalnum() or char in ".-_" else "_"
+                  for char in normalized
+              )
+              while "__" in sanitized:
+                  sanitized = sanitized.replace("__", "_")
+              return sanitized.strip("._-")[:80] or "untitled"
+
+
+          def extract_archive(archive_path, destination):
+              destination_root = destination.resolve()
+              with tarfile.open(archive_path, "r:gz") as archive:
+                  for member in archive.getmembers():
+                      target = (destination / member.name).resolve()
+                      if target != destination_root and destination_root not in target.parents:
+                          raise RuntimeError(f"Unsafe archive path: {member.name}")
+                      if not (member.isfile() or member.isdir()):
+                          raise RuntimeError(f"Unsupported archive entry: {member.name}")
+                  archive.extractall(destination)
+
+
+          if not REPORT_PATH.is_file() or REPORT_PATH.stat().st_size == 0:
+              print("::notice::No failure analysis report was produced; skipping OBS upload.")
+              raise SystemExit(0)
+
+          access_key = os.environ.get("OBS_ACCESS_KEY", "")
+          secret_key = os.environ.get("OBS_SECRET_KEY", "")
+          if not access_key or not secret_key:
+              raise RuntimeError("OBS failure-analysis credentials are not configured")
+
+          now = datetime.now(ZoneInfo("Asia/Shanghai"))
+          archive_date = now.strftime("%Y-%m-%d")
+          timestamp = now.strftime("%Y%m%dT%H%M%S%z")
+          pr_number = os.environ.get("PR_NUMBER") or "unknown"
+          pr_title = sanitize_filename(os.environ.get("PR_TITLE", "untitled"))
+          run_id = os.environ.get("RUN_ID") or "unknown"
+          run_attempt = os.environ.get("RUN_ATTEMPT") or "1"
+          report_name = (
+              f"PR-{pr_number}_{pr_title}_{timestamp}_"
+              f"run-{run_id}-{run_attempt}.md"
+          )
+          archive_name = f"{archive_date}.tar.gz"
+          obs_key = f"{OBS_PREFIX}/{archive_name}"
+          archive_path = WORK_DIR / archive_name
+          new_archive_path = WORK_DIR / f"new-{archive_name}"
+
+          CONTENT_DIR.mkdir(parents=True, exist_ok=True)
+          client = ObsClient(
+              access_key_id=access_key,
+              secret_access_key=secret_key,
+              server=OBS_SERVER,
+          )
+          try:
+              response = client.getObject(
+                  OBS_BUCKET,
+                  obs_key,
+                  downloadPath=str(archive_path),
+              )
+              if response.status < 300:
+                  print(f"Downloaded existing archive: {obs_key}")
+                  extract_archive(archive_path, CONTENT_DIR)
+              elif response.status == 404:
+                  print(f"No archive exists for {archive_date}; creating a new one")
+              else:
+                  raise RuntimeError(
+                      f"Failed to download {obs_key}: status={response.status}, "
+                      f"code={response.errorCode}, message={response.errorMessage}"
+                  )
+
+              shutil.copy2(REPORT_PATH, CONTENT_DIR / report_name)
+              with tarfile.open(new_archive_path, "w:gz") as archive:
+                  for report in sorted(CONTENT_DIR.rglob("*")):
+                      if report.is_file():
+                          archive.add(report, arcname=report.relative_to(CONTENT_DIR))
+
+              with tarfile.open(new_archive_path, "r:gz") as archive:
+                  if report_name not in archive.getnames():
+                      raise RuntimeError(f"New report is missing from {archive_name}")
+
+              response = client.putFile(OBS_BUCKET, obs_key, str(new_archive_path))
+              if response.status >= 300:
+                  raise RuntimeError(
+                      f"Failed to upload {obs_key}: status={response.status}, "
+                      f"code={response.errorCode}, message={response.errorMessage}"
+                  )
+              print(f"Uploaded: {report_name} -> {obs_key}")
+          finally:
+              client.close()
+
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as summary:
+                  summary.write("## Failure analysis OBS archive\n\n")
+                  summary.write(f"- Report: {report_name}\n")
+                  summary.write(f"- Object: {obs_key}\n")
+          PY
