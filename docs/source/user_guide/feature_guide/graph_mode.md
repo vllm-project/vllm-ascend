@@ -156,7 +156,7 @@ model = LLM(
         "ascend_compilation_config": {
             "enable_npugraph_ex": True,
         }
-    }
+    },
 )
 outputs = model.generate("Hello, how are you?")
 ```
@@ -195,7 +195,7 @@ model = LLM(
             "enable_npugraph_ex": True,
             "enable_static_kernel": True,
         }
-    }
+    },
 )
 outputs = model.generate("Hello, how are you?")
 ```

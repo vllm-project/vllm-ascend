@@ -43,9 +43,11 @@ Before writing a patch, following the principle above, we should patch the least
     ```python
     import vllm
 
+
     def patch_destroy_model_parallel():
         # your patch code
         ...
+
 
     vllm.distributed.parallel_state.destroy_model_parallel = patch_destroy_model_parallel
     ```

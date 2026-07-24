@@ -120,18 +120,20 @@ prompts = [
 # Set sampling parameters
 sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40)
 
-llm = LLM(model="/path/to/your/quantized_model",
-          max_model_len=4096,
-          trust_remote_code=True,
-          # Set appropriate TP and DP values
-          tensor_parallel_size=2,
-          data_parallel_size=1,
-          # Set an unused port
-          port=8000,
-          # Set serving model name
-          served_model_name="quantized_model",
-          # Specify `quantization="ascend"` to enable quantization for models quantized by ModelSlim
-          quantization="ascend")
+llm = LLM(
+    model="/path/to/your/quantized_model",
+    max_model_len=4096,
+    trust_remote_code=True,
+    # Set appropriate TP and DP values
+    tensor_parallel_size=2,
+    data_parallel_size=1,
+    # Set an unused port
+    port=8000,
+    # Set serving model name
+    served_model_name="quantized_model",
+    # Specify `quantization="ascend"` to enable quantization for models quantized by ModelSlim
+    quantization="ascend",
+)
 
 outputs = llm.generate(prompts, sampling_params)
 for output in outputs:

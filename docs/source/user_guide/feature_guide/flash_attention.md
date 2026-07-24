@@ -99,6 +99,7 @@ For offline batch inference with FA3:
 
 ```python
 import os
+
 os.environ["VLLM_BATCH_INVARIANT"] = "1"
 
 from vllm import LLM, SamplingParams

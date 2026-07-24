@@ -171,10 +171,10 @@ There are several factors that affect output determinism:
    from vllm import LLM, SamplingParams
 
    prompts = [
-      "Hello, my name is",
-      "The president of the United States is",
-      "The capital of France is",
-      "The future of AI is",
+       "Hello, my name is",
+       "The president of the United States is",
+       "The capital of France is",
+       "The future of AI is",
    ]
 
    # Create a sampling params object.
@@ -185,9 +185,9 @@ There are several factors that affect output determinism:
    # Generate texts from the prompts.
    outputs = llm.generate(prompts, sampling_params)
    for output in outputs:
-      prompt = output.prompt
-      generated_text = output.outputs[0].text
-      print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+       prompt = output.prompt
+       generated_text = output.outputs[0].text
+       print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
    ```
 
 2. Set the following environment parameters:

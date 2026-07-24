@@ -466,46 +466,47 @@ import sys
 
 target_keys = ["model.embed_tokens.weight", "lm_head.weight"]
 
+
 def get_tensor_info(file_path):
-   with safe_open(file_path, framework="pt", device="cpu") as f:
-         tensor_names = f.keys()
-         tensor_dict = {}
-         for name in tensor_names:
+    with safe_open(file_path, framework="pt", device="cpu") as f:
+        tensor_names = f.keys()
+        tensor_dict = {}
+        for name in tensor_names:
             tensor = f.get_tensor(name)
             tensor_dict[name] = tensor
-         return tensor_dict
+        return tensor_dict
 
 
 if __name__ == "__main__":
-   directory_path = sys.argv[1]
-   json_name = "model.safetensors.index.json"
-   json_path = os.path.join(directory_path, json_name)
-   with open(json_path, 'r', encoding='utf-8') as f:
-         json_data = json.load(f)
-   weight_map = json_data.get('weight_map', {})
-   file_list = []
-   for key in target_keys:
-         safetensor_file = weight_map.get(key)
-         file_list.append(directory_path + safetensor_file)
+    directory_path = sys.argv[1]
+    json_name = "model.safetensors.index.json"
+    json_path = os.path.join(directory_path, json_name)
+    with open(json_path, "r", encoding="utf-8") as f:
+        json_data = json.load(f)
+    weight_map = json_data.get("weight_map", {})
+    file_list = []
+    for key in target_keys:
+        safetensor_file = weight_map.get(key)
+        file_list.append(directory_path + safetensor_file)
 
-   new_dict = {}
-   for file_path in file_list:
-         tensor_dict = get_tensor_info(file_path)
-         for key in target_keys:
+    new_dict = {}
+    for file_path in file_list:
+        tensor_dict = get_tensor_info(file_path)
+        for key in target_keys:
             if key in tensor_dict:
-               if key == "model.embed_tokens.weight":
-                     new_key = "model.layers.78.embed_tokens.weight"
-               elif key == "lm_head.weight":
-                     new_key = "model.layers.78.shared_head.head.weight"
-               new_dict[new_key] = tensor_dict[key]
+                if key == "model.embed_tokens.weight":
+                    new_key = "model.layers.78.embed_tokens.weight"
+                elif key == "lm_head.weight":
+                    new_key = "model.layers.78.shared_head.head.weight"
+                new_dict[new_key] = tensor_dict[key]
 
-   new_file_name = os.path.join(directory_path, "mtp-others.safetensors")
-   new_keys = ["model.layers.78.embed_tokens.weight", "model.layers.78.shared_head.head.weight"]
-   save_file(tensors=new_dict, filename=new_file_name)
-   for key in new_keys:
-         json_data["weight_map"][key] = "mtp-others.safetensors"
-   with open(json_path, 'w', encoding='utf-8') as f:
-         json.dump(json_data, f, indent=2)
+    new_file_name = os.path.join(directory_path, "mtp-others.safetensors")
+    new_keys = ["model.layers.78.embed_tokens.weight", "model.layers.78.shared_head.head.weight"]
+    save_file(tensors=new_dict, filename=new_file_name)
+    for key in new_keys:
+        json_data["weight_map"][key] = "mtp-others.safetensors"
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(json_data, f, indent=2)
 ```
 
 - `glm-5-w8a8`: require 2 Atlas 800 A3 (64G × 16).
@@ -627,51 +628,18 @@ Before you start, please
     import subprocess
     import sys
 
+
     def parse_args():
         parser = argparse.ArgumentParser()
-        parser.add_argument(
-            "--dp-size",
-            type=int,
-            required=True,
-            help="Data parallel size."
-        )
-        parser.add_argument(
-            "--tp-size",
-            type=int,
-            default=1,
-            help="Tensor parallel size."
-        )
-        parser.add_argument(
-            "--dp-size-local",
-            type=int,
-            default=-1,
-            help="Local data parallel size."
-        )
-        parser.add_argument(
-            "--dp-rank-start",
-            type=int,
-            default=0,
-            help="Starting rank for data parallel."
-        )
-        parser.add_argument(
-            "--dp-address",
-            type=str,
-            required=True,
-            help="IP address for data parallel master node."
-        )
-        parser.add_argument(
-            "--dp-rpc-port",
-            type=str,
-            default=12345,
-            help="Port for data parallel master node."
-        )
-        parser.add_argument(
-            "--vllm-start-port",
-            type=int,
-            default=9000,
-            help="Starting port for the engine."
-        )
+        parser.add_argument("--dp-size", type=int, required=True, help="Data parallel size.")
+        parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallel size.")
+        parser.add_argument("--dp-size-local", type=int, default=-1, help="Local data parallel size.")
+        parser.add_argument("--dp-rank-start", type=int, default=0, help="Starting rank for data parallel.")
+        parser.add_argument("--dp-address", type=str, required=True, help="IP address for data parallel master node.")
+        parser.add_argument("--dp-rpc-port", type=str, default=12345, help="Port for data parallel master node.")
+        parser.add_argument("--vllm-start-port", type=int, default=9000, help="Starting port for the engine.")
         return parser.parse_args()
+
 
     args = parse_args()
     dp_size = args.dp_size
@@ -683,6 +651,7 @@ Before you start, please
     dp_address = args.dp_address
     dp_rpc_port = args.dp_rpc_port
     vllm_start_port = args.vllm_start_port
+
 
     def run_command(visible_devices, dp_rank, vllm_engine_port):
         command = [
@@ -698,6 +667,7 @@ Before you start, please
         ]
         subprocess.run(command, check=True)
 
+
     if __name__ == "__main__":
         template_path = "./run_dp_template.sh"
         if not os.path.exists(template_path):
@@ -710,15 +680,12 @@ Before you start, please
             dp_rank = dp_rank_start + i
             vllm_engine_port = vllm_start_port + i
             visible_devices = ",".join(str(x) for x in range(i * tp_size, (i + 1) * tp_size))
-            process = multiprocessing.Process(target=run_command,
-                                            args=(visible_devices, dp_rank,
-                                                    vllm_engine_port))
+            process = multiprocessing.Process(target=run_command, args=(visible_devices, dp_rank, vllm_engine_port))
             processes.append(process)
             process.start()
 
         for process in processes:
             process.join()
-
     ```
 
 2. prepare the script `run_dp_template.sh` on each node.

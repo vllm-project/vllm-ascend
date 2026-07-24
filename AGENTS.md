@@ -130,11 +130,13 @@ pytest -sv tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py::t
 
     ```python
     # Bad
-    if seq_len > 2048: ...
+    if seq_len > 2048:
+        ...
 
     # Good
     MAX_CONTEXT_LENGTH = 2048
-    if seq_len > MAX_CONTEXT_LENGTH: ...
+    if seq_len > MAX_CONTEXT_LENGTH:
+        ...
     ```
 
 - **Descriptive Naming**: Use names that describe functionality, not implementation details.

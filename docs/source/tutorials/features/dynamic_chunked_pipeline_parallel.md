@@ -132,12 +132,9 @@ You can use aisbench to generate fixed-length random datasets. Refer to [Using A
         "StringConfig": {
             "Input": {
                 "Method": "uniform",
-                "Params": {"MinValue": 131072, "MaxValue": 131072}  # Your max sequence length, max-model-len
+                "Params": {"MinValue": 131072, "MaxValue": 131072},  # Your max sequence length, max-model-len
             },
-            "Output": {
-                "Method": "uniform",
-                "Params": {"MinValue": 1, "MaxValue": 1}
-            }
+            "Output": {"Method": "uniform", "Params": {"MinValue": 1, "MaxValue": 1}},
         },
     }
     ```

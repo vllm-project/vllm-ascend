@@ -55,7 +55,7 @@ vllm serve Qwen/Qwen3-8B --additional-config='{"config_key":"config_value"}'
 ```python
 from vllm import LLM
 
-LLM(model="Qwen/Qwen3-8B", additional_config={"config_key":"config_value"})
+LLM(model="Qwen/Qwen3-8B", additional_config={"config_key": "config_value"})
 ```
 
 ### Configuration options
@@ -210,6 +210,6 @@ An example of additional configuration is as follows:
         "posterior_threshold": 0.95,
         "posterior_alpha": 0.4,
     },
-    "refresh": False
+    "refresh": False,
 }
 ```

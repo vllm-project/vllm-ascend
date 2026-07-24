@@ -89,6 +89,7 @@ Navigate to the `./vllm_profile` directory and locate the generated `*ascend_pt`
 
 ```python
 from torch_npu.profiler.profiler import analyse
+
 analyse("./vllm_profile/localhost.localdomain_*_ascend_pt/")
 ```
 

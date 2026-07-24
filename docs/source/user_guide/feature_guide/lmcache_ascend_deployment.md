@@ -87,8 +87,5 @@ python \
 #### Offline
 
 ```python
-ktc = KVTransferConfig(
-        kv_connector="LMCacheAscendConnector",
-        kv_role="kv_both"
-    )
+ktc = KVTransferConfig(kv_connector="LMCacheAscendConnector", kv_role="kv_both")
 ```

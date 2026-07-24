@@ -236,11 +236,13 @@ from paddleocr import PaddleOCRVL
 
 doclayout_model_path = "/path/to/your/PP-DocLayoutV2/"
 
-pipeline = PaddleOCRVL(vl_rec_backend="vllm-server", 
-                       vl_rec_server_url="http://localhost:8000/v1", 
-                       layout_detection_model_name="PP-DocLayoutV2",  
-                       layout_detection_model_dir=doclayout_model_path,
-                       device="npu")
+pipeline = PaddleOCRVL(
+    vl_rec_backend="vllm-server",
+    vl_rec_server_url="http://localhost:8000/v1",
+    layout_detection_model_name="PP-DocLayoutV2",
+    layout_detection_model_dir=doclayout_model_path,
+    device="npu",
+)
 
 output = pipeline.predict("https://paddle-model-ecology.bj.bcebos.com/paddlex/imgs/demo_image/paddleocr_vl_demo.png")
 
@@ -264,11 +266,7 @@ Once your server is started, you can use the OpenAI API client to make queries.
 ```python
 from openai import OpenAI
 
-client = OpenAI(
-    api_key="EMPTY",
-    base_url="http://localhost:8000/v1",
-    timeout=3600
-)
+client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1", timeout=3600)
 
 # Task-specific base prompts
 TASKS = {
@@ -286,13 +284,10 @@ messages = [
                 "type": "image_url",
                 "image_url": {
                     "url": "https://ofasys-multimodal-wlcb-3-toshanghai.oss-accelerate.aliyuncs.com/wpf272043/keepme/image/receipt.png"
-                }
+                },
             },
-            {
-                "type": "text",
-                "text": TASKS["ocr"]
-            }
-        ]
+            {"type": "text", "text": TASKS["ocr"]},
+        ],
     }
 ]
 

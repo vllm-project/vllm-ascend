@@ -288,6 +288,7 @@
     - vllm_ascend/models
   tests:
     - tests/e2e/pull_request/four_card/test_deepseek_v4.py
+    - tests/ut/models/a2/test_mistral_large3.py 
 
 # Ops
 - name: ops_basic
@@ -834,6 +835,7 @@ estimated_times:
   tests/ut/worker/a2/test_model_runner_v1_with_device.py: 70
   tests/ut/worker/a2/test_worker_multi_instance.py: 30
   tests/ut/worker/a2/test_worker_v1.py: 40
+  tests/ut/models/a2/test_mistral_large3.py: 20
 
 # === Runner Mapping ===
 # Maps test paths to runner types using regex patterns.

@@ -325,9 +325,7 @@ class BalanceScheduler(Scheduler):
     def _should_stop_admitting_waiting(self) -> bool:
         if super()._should_stop_admitting_waiting():
             return True
-        return self._balance_enabled and (
-            max(t.item() for t in self.balance_queue) >= self.max_num_running_reqs
-        )
+        return self._balance_enabled and (max(t.item() for t in self.balance_queue) >= self.max_num_running_reqs)
 ```
 
 (`>=` and `==` are equivalent here because no rank's `len(running)` can exceed

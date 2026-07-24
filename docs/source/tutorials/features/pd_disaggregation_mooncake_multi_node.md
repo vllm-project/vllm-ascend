@@ -849,21 +849,21 @@ models = [
     dict(
         attr="service",
         type=VLLMCustomAPIChatStream,
-        abbr='vllm-api-stream-chat',
+        abbr="vllm-api-stream-chat",
         path="/root/.cache/ds_r1",
         model="dsr1",
-        request_rate = 14,
-        retry = 2,
-        host_ip = "192.0.0.1", # Proxy service host IP
-        host_port = 8000,  # Proxy service Port
-        max_out_len = 10,
+        request_rate=14,
+        retry=2,
+        host_ip="192.0.0.1",  # Proxy service host IP
+        host_port=8000,  # Proxy service Port
+        max_out_len=10,
         batch_size=768,
         trust_remote_code=True,
-        generation_kwargs = dict(
-            temperature = 0,
-            seed = 1024,
+        generation_kwargs=dict(
+            temperature=0,
+            seed=1024,
             ignore_eos=False,
-        )
+        ),
     )
 ]
 ```

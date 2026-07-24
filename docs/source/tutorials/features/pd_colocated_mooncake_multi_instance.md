@@ -307,19 +307,19 @@ models = [
     dict(
         attr="service",
         type=VLLMCustomAPIChatStream,
-        abbr='vllm-api-stream-chat',
+        abbr="vllm-api-stream-chat",
         path="<path_to_your_model>/Qwen2.5-72B-Instruct",
         model="qwen",
-        request_rate = 0,
-        retry = 2,
-        host_ip = "<your_server_ip>",
-        host_port = 8002,
-        max_out_len = 10,
-        batch_size= 25,
+        request_rate=0,
+        retry=2,
+        host_ip="<your_server_ip>",
+        host_port=8002,
+        max_out_len=10,
+        batch_size=25,
         trust_remote_code=False,
-        generation_kwargs = dict(
-            temperature = 0,
-            ignore_eos = True,
+        generation_kwargs=dict(
+            temperature=0,
+            ignore_eos=True,
         ),
     )
 ]

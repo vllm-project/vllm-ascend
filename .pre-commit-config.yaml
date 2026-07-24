@@ -5,7 +5,7 @@ default_install_hook_types:
 default_stages:
   - pre-commit # Run locally
   - manual # Run in CI
-exclude: '^(\.agents|\.claude|\.gemini)/.*'
+exclude: '^((\.agents|\.claude|\.gemini)/.*|vllm_ascend/eplb/core/policy/policy_flashlb\.py)$'
 
 repos:
 - repo: https://github.com/astral-sh/ruff-pre-commit

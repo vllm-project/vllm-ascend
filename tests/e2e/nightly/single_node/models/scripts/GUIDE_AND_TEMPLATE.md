@@ -279,7 +279,7 @@ test_cases:
 ### Step 1: Write your test logic in `test_single_node.py`
 
 ```python
-async def run_video_test(config: SingleNodeConfig, server: 'RemoteOpenAIServer | DisaggEpdProxy') -> None:
+async def run_video_test(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> None:
     client = server.get_async_client()
     # Your custom logic here...
 ```

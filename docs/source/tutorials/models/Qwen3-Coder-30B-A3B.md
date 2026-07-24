@@ -278,7 +278,7 @@ models = [
     dict(
         attr="service",
         type=VLLMCustomAPIChat,
-        abbr='vllm-api-general-chat',
+        abbr="vllm-api-general-chat",
         path="your_model_path",
         model="qwen3-coder",
         request_rate=0,
@@ -349,7 +349,7 @@ models = [
     dict(
         attr="service",
         type=VLLMCustomAPIChat,
-        abbr='vllm-api-stream-chat',
+        abbr="vllm-api-stream-chat",
         path="your_model_path",
         model="qwen3-coder",
         stream=True,
@@ -378,15 +378,9 @@ synthetic_config = {
     "Type": "string",
     "RequestCount": 200,
     "StringConfig": {
-        "Input": {
-            "Method": "uniform",
-            "Params": {"MinValue": 3500, "MaxValue": 3500}
-        },
-        "Output": {
-            "Method": "uniform",
-            "Params": {"MinValue": 1500, "MaxValue": 1500}
-        }
-    }
+        "Input": {"Method": "uniform", "Params": {"MinValue": 3500, "MaxValue": 3500}},
+        "Output": {"Method": "uniform", "Params": {"MinValue": 1500, "MaxValue": 1500}},
+    },
 }
 ```
 

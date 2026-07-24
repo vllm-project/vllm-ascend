@@ -304,8 +304,8 @@ Currently, the key-value pool in PD Disaggregate only stores the kv cache genera
         "backend": "mooncake",
         "consumer_is_to_put": true,
         "prefill_pp_size": 2,
-        "prefill_pp_layer_partition": "30,31"
-    }
+        "prefill_pp_layer_partition": "30,31",
+    },
 }
 ```
 
