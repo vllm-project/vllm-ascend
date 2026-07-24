@@ -22,6 +22,7 @@ from vllm_ascend.attention.sfa_v1 import (
     DSACPContext,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 
 M = TypeVar("M", bound=AscendSFAMetadata)

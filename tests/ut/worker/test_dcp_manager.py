@@ -235,11 +235,13 @@ def test_update_spec_decode_drafting_metadata_requires_mla_decode() -> None:
     manager = object.__new__(DCPManager)
     attn_metadata = SimpleNamespace(decode=None)
 
-    with patch.object(DCPManager, "_is_mla_kv_cache_spec", return_value=True):
-        with pytest.raises(AssertionError, match="must be classified as decode"):
-            manager.update_spec_decode_drafting_cp_metadata(
-                attn_metadata=attn_metadata,
-                kv_cache_spec=object(),
-                seq_lens=torch.tensor([3]),
-                draft_index=1,
-            )
+    with (
+        patch.object(DCPManager, "_is_mla_kv_cache_spec", return_value=True),
+        pytest.raises(AssertionError, match="must be classified as decode"),
+    ):
+        manager.update_spec_decode_drafting_cp_metadata(
+            attn_metadata=attn_metadata,
+            kv_cache_spec=object(),
+            seq_lens=torch.tensor([3]),
+            draft_index=1,
+        )

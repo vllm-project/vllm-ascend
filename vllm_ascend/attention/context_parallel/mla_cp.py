@@ -324,13 +324,15 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             q_pe = q_pe.view(num_decodes, -1, q_pe.shape[1], q_pe.shape[-1])
             sparse_mode = 0
             spec_attn_mask = attn_metadata.decode.dcp_mtp_attn_mask  # type:ignore
-            decode_query_lens = attn_metadata.query_lens[:num_decodes]
+            query_lens = attn_metadata.query_lens
+            assert query_lens is not None
+            decode_query_lens = query_lens[:num_decodes]
             assert sum(decode_query_lens) == num_tokens
             # This function only runs the decode sub-batch. A mixed
             # decode/prefill batch still carries query lengths for every
             # request in the common metadata, but FIA requires the query-length
             # list to match the decode batch dimension and block table.
-            actual_seq_lengths = attn_metadata.query_lens[:num_decodes]
+            actual_seq_lengths = decode_query_lens
         else:
             q_nope = q_nope.view(num_tokens, num_heads, 1, -1).contiguous()
             q_pe = q_pe.view(num_tokens, num_heads, 1, -1)
