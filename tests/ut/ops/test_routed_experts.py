@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts, EplbExpertTensorList
 
 
 def _routed_experts(weight_views):
@@ -27,6 +27,22 @@ def test_get_expert_weights_flattens_layout_aware_views():
     assert views[0].untyped_storage().data_ptr() == weights[0].untyped_storage().data_ptr()
 
 
+def test_get_expert_weights_preserves_independent_expert_tensors():
+    expert_tensors = [torch.randn(3, 4), torch.randn(3, 4)]
+
+    views = list(_routed_experts([expert_tensors]).get_expert_weights())
+
+    assert len(views) == 1
+    assert isinstance(views[0], EplbExpertTensorList)
+    assert views[0].shape == torch.Size([2, 3, 4])
+    assert all(actual is expected for actual, expected in zip(views[0], expert_tensors))
+
+    buffer = torch.empty_like(views[0])
+    assert isinstance(buffer, EplbExpertTensorList)
+    assert buffer.shape == views[0].shape
+    assert all(tensor.storage_offset() == 0 for tensor in buffer)
+
+
 def test_get_expert_weights_rejects_unsupported_quantization():
     with pytest.raises(NotImplementedError, match="weight views are not defined"):
         list(_routed_experts([]).get_expert_weights())
@@ -44,6 +60,11 @@ def test_get_expert_weights_rejects_missing_weight_view_contract():
 def test_get_expert_weights_rejects_non_expert_first_dimension():
     with pytest.raises(ValueError, match="first dimension"):
         list(_routed_experts([torch.randn(3, 4)]).get_expert_weights())
+
+
+def test_get_expert_weights_rejects_wrong_expert_tensor_list_length():
+    with pytest.raises(ValueError, match="must contain local_num_experts"):
+        list(_routed_experts([[torch.randn(3, 4)]]).get_expert_weights())
 
 
 def test_get_expert_weights_rejects_non_contiguous_view():

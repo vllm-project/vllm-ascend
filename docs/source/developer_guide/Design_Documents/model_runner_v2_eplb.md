@@ -376,12 +376,12 @@ NPU token dispatcher 接收全局物理专家 ID。物理 slot 到本地 slot �
 
 ### 7.7 专家权重视图
 
-上游重排要求每层权重表示为 `Sequence[Tensor]`，每个 tensor 的第 0 维必须是 `num_local_physical_experts`。
+上游重排要求每层权重组可通过 `shape[0]` 获取本地物理专家数，并可通过整数下标取得单个专家 tensor。普通 ND 权重直接返回 expert-first tensor；常驻 tensor list 通过轻量 list 适配器满足同一契约。
 
 新增 `AscendRoutedExperts.get_expert_weights()`，按以下规则返回权重 view：
 
 1. 调用 quant method 的 `get_eplb_weight_views(layer)`；接口缺失或返回空集合时立即报错，不回退上游参数名枚举。
-2. view 在 `process_weights_after_loading()` 完成后创建并缓存，`set_eplb_state()` 只读取缓存。
+2. view 在 `process_weights_after_loading()` 完成后创建；`set_eplb_state()` 只读取实际计算存储。
 3. 每个 view 必须引用实际计算权重存储；不得为 EPLB 保留长期镜像。
 4. 每专家 weight、scale、offset、bias 必须同时迁移。
 5. 全专家共享的 activation scale、全局常量、路由 bias 和 hash table 必须排除。
@@ -393,10 +393,12 @@ NPU token dispatcher 接收全局物理专家 ID。物理 slot 到本地 slot �
 - 新增 `vllm_ascend/ops/fused_moe/routed_experts.py:AscendRoutedExperts`，覆盖 `get_expert_weights()`。
 - `patch_fused_moe._ascend_FusedMoE()` 在非 310P 路径默认传入 `routed_experts_cls=AscendRoutedExperts`；用户显式传入时不覆盖。
 - `AscendFusedMoEMethod.get_eplb_weight_views()` 转发到实际 `AscendMoEScheme`；未实现的 scheme 返回不支持，不以参数名猜测。
-- 第一期 BF16/FP16 返回 `w13_weight` 和 `w2_weight`；W8A8 Dynamic 返回实际计算使用的 `w13_weight`、`w2_weight`、`w13_weight_scale_fp32` 和 `w2_weight_scale`。启用 FUSED_MC2 时，额外返回按本地物理专家分行的 `fused_w1_scale` 和 `fused_w2_scale` view，保证融合 scale 与权重在同一重排事务中迁移。
-- W4A8 最终视图包含 `w13_weight`、`w2_weight`、`w13_weight_scale`、`w2_weight_scale` 以及存在时的 `w13_scale_bias/w2_scale_bias`；其余 scheme 以 `apply()` 实际读取的 per-expert tensor 为唯一依据。
-- W4A4 MXFP 和 W8A8 MXFP 返回 weight 与 scale 的零拷贝专家存储视图；权重处理后的内部维转置必须在 view 中反向表达，保证每个 view 可按专家连续展平。
-- 旧 `dynamic_eplb` 分支会把 batched Parameter 拆成 Python tensor list 并删除原 Parameter；MRV2 不进入该分支，否则无法满足上游“第 0 维为本地物理专家”契约。
+- BF16/FP16 返回 `w13_weight` 和 `w2_weight`。
+- W8A8 Dynamic 在 NZ 转换后，将 weight、scale 以及可选 FUSED_MC2 scale 按专家复制为常驻 tensor list，并删除对应 batched tensor；计算与 EPLB 重排读取同一组 list。
+- W4A8 在 NZ 转换后，将 weight、scale 和 scale bias 按专家复制为常驻 tensor list，并删除对应 batched tensor；ModelSlim 和 compressed-tensors 权重执行相同的最终布局收敛。
+- W4A4 MXFP 和 W8A8 MXFP 保持原生 ND batched tensor，不做 NZ 转换和 list 切分；其 EPLB view 以零拷贝方式反向表达内部维转置，并保证单专家切片连续。
+- W4A16、W4A16 MXFP 和 W4A8 MXFP 当前显式声明 `supports_eplb=False`；在对应权重布局和算子完成独立验证前，启动阶段拒绝 EPLB。
+- `dynamic_eplb` 仍只控制 V1 旧 EPLB；MRV2 是否构造常驻 tensor list 仅由上游 `enable_eplb` 决定。
 
 `VllmEplbAdaptor` 中按量化类型维护的 `EPLB_EXPERT_WEIGHT_NAMES` 不用于 MRV2。
 
@@ -446,6 +448,7 @@ sequenceDiagram
 - 类位于 `vllm_ascend/distributed/eplb_communicator.py`，内部维护当轮 `torch.distributed.P2POp` 队列，`execute()` 使用 `batch_isend_irecv()` 并等待所有 request。
 - 使用 `get_eplb_group().device_group`，不使用旧 `get_dynamic_eplb_group()`；
 - 每个专家的所有 weight view 使用相同顺序发送和接收；
+- W8A8/W4A8 传入的单专家 tensor 均为独立存储且 `storage_offset()==0`，HCCL 直接收发，不在重排热路径 clone 或 copy-back；
 - 空任务直接返回；
 - `execute()` 无论成功或失败都清空本轮 P2P 队列；
 - 同步模式使用当前计算流；
@@ -625,7 +628,7 @@ Ascend patch 只在 `_ascend_scope_matched=False` 时把当次 step 标记为 du
 3. 完成 NPU map-and-record 算子和同步 HCCL communicator。
 4. 完成 `load_scope=all/prefill/decode` 的 batch 级采集开关，覆盖纯 P、纯 D 和混合批次。
 5. 对齐上游 Router/RoutedExperts 调用链，保证每次 MoE forward 只路由一次。
-6. 支持主模型、eager、标准 all-to-all/非融合 MC2、BF16/FP16 和 W8A8。
+6. 支持主模型、eager、标准 all-to-all/非融合 MC2、BF16/FP16、W8A8、W4A8、W4A4 MXFP 和 W8A8 MXFP。
 7. 保持 V1 旧 EPLB 行为不变。
 
 退出条件：
@@ -646,7 +649,7 @@ Ascend patch 只在 `_ascend_scope_matched=False` 时把当次 step 标记为 du
 2. 支持 ACL Graph piecewise、full decode graph 和 graph 后多轮重排。
 3. 支持 MoE 草稿模型、MTP/Eagle/DFlash 中适用的组合，并验证主/草稿模型共享 batch scope 判定。
 4. 支持 PP 和多节点 EP。
-5. 补齐 W4A16、W4A16 MXFP、W4A8 MXFP 和其余 FP8 派生量化的权重 view。
+5. 评估并补齐当前显式关闭的 W4A16、W4A16 MXFP、W4A8 MXFP 和其余量化格式；未通过布局与算子验证的格式继续保持启动期拒绝。
 6. 完成标准 MC2、shared expert 多流及 LoRA MoE 的支持或启动期精确拒绝。
 7. 完成 `load_scope != all` 与 DBO、speculative decoding、graph replay 的组合验证。
 8. 若对应上游接口已进入依赖基线，删除可被接口直接替代的 patch；未合入时保留已验证 patch。
@@ -693,7 +696,7 @@ NPU 算子的 CPU reference 必须逐元素复现上游 CUDA map-and-record 语�
 |---|---|---|
 | 模型 | Qwen3 MoE | Qwen3 MoE、DeepSeek 系列、一个 MoE 草稿模型 |
 | 卡数 | 2、4 | 2、4、8，多节点至少一组 |
-| dtype/量化 | BF16、W8A8 | 最终支持的全部量化族 |
+| dtype/量化 | BF16/FP16、W8A8、W4A8、W4A4 MXFP、W8A8 MXFP | 最终支持矩阵；其余格式验证后再开启 |
 | MoE 通信 | all-to-all/all-gather、MC2、FUSED_MC2 | 第一期组合及多节点通信 |
 | 执行模式 | eager | eager、piecewise、full decode graph |
 | 重排 | sync，两轮 | sync/async，至少三轮 |
