@@ -173,8 +173,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     Startup Command:
 
     ```shell
-    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib64
-
     export HCCL_BUFFSIZE=512
     export HCCL_CONNECT_TIMEOUT=600
     export HCCL_EXEC_TIMEOUT=600
@@ -185,11 +183,8 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export TASK_QUEUE_ENABLE=1
 
     export VLLM_ASCEND_ENABLE_MLAPO=1
-    dir="$PWD/$(date +%Y%m%d_%H%M%S)/plog" && mkdir -p "$dir"
-    export ASCEND_PROCESS_LOG_PATH="$dir"
 
-
-    vllm serve /mnt/weight/A5-weights/dsk-v3.1-w4a4_mlp-w8a8c8_attn-0618-full \
+    vllm serve /weight/dsk-v3.1-w4a4_mlp-w8a8c8_attn-0618-full \
     --host 0.0.0.0 \
     --port 5030 \
     --max_model_len 135168 \
@@ -206,7 +201,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"num_speculative_tokens": 3,"method": "deepseek_mtp"}' \
     --quantization ascend \
-    --additional_config '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "dp_allreduce_on_npu":false, "enable_balance_scheduling": true}' \
+    --additional_config '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "enable_balance_scheduling": true}' \
     ```
 
 === "A3 series"
@@ -476,6 +471,7 @@ This architecture is recommended for production deployments with concurrent mult
 Take Atlas 800 A3 (64G × 16) for example, we recommend to deploy 2P1D (4 nodes) rather than 1P1D (2 nodes), because there is no enough NPU memory to serve high concurrency in 1P1D case.
 
 - `DeepSeek-V3.1-w8a8-mtp-QuaRot 2P1D Layerwise` require 4 Atlas 800 A3 (64G × 16).
+- `DeepSeek-V3.1-w8a8c8-mtp 2P1D` require 8 Ascend950DT (96G × 8).
 
 To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to deploy a `launch_online_dp.py` script and a `run_dp_template.sh` script on each node and deploy a `proxy.sh` script on prefill master node to forward requests.
 
@@ -800,19 +796,9 @@ Parameter descriptions:
 === "Prefill Node"
 
     ```shell
-    # 清除代理环境变量
-    unset ftp_proxy FTP_PROXY
-    unset https_proxy HTTPS_PROXY
-    unset http_proxy HTTP_PROXY
-    # 清除代理环境变量
-    unset ftp_proxy FTP_PROXY
-    unset https_proxy HTTPS_PROXY
-    unset http_proxy HTTP_PROXY
-    # 自动获取配置
-    nic_name=自动获取
-    local_ip=自动获取
+    nic_name="xxx"
+    local_ip="141.xx.xx.1"
 
-    # 以下环境变量无需修改
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
@@ -824,21 +810,16 @@ Parameter descriptions:
     export HCCL_CONNECT_TIMEOUT=120
     export HCCL_BUFFSIZE=1024
 
-    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib64
-
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export TASK_QUEUE_ENABLE=1
 
-    dir="$PWD/$(date +%Y%m%d_%H%M%S)/plog" && mkdir -p "$dir"
-    export ASCEND_PROCESS_LOG_PATH="$dir"
-
     export VLLM_ASCEND_ENABLE_MLAPO=1
     export DYNAMIC_EPLB="true"
 
     export ASCEND_RT_VISIBLE_DEVICES=$1
-    vllm serve /mnt/weight/A5-weights/dsk_v3.1-T-w8a8c8_attn-0506-full/  \
+    vllm serve /weight/dsk_v3.1-T-w8a8c8_attn-0506-full/  \
     --host 0.0.0.0 \
     --port $2 \
     --data-parallel-size $3 \
@@ -855,7 +836,6 @@ Parameter descriptions:
     --max-num-seqs 128 \
     --no-enable-prefix-caching \
     --trust-remote-code \
-    --profiler-config '{"profiler": "torch", "torch_profiler_dir": "/home/w00887678/ds_vllm/B070/profiling_0704_dt", "torch_profiler_with_stack": false}' \
     --enforce-eager \
     --speculative-config '{"num_speculative_tokens": 1,"method": "deepseek_mtp"}' \
     --quantization ascend \
@@ -876,25 +856,15 @@ Parameter descriptions:
                     "ascend_local_comm_res_path": "/etc/hixlep"
             }
         }' \
-    --additional-config '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":false,"dp_allreduce_on_npu":true,"enable_shared_expert_dp":true, "eplb_config":{"dynamic_eplb": true, "expert_heat_collection_interval": 50, "algorithm_execution_interval": 5, "eplb_policy_type": 2, "num_redundant_experts":16}}'
+    --additional-config '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":false,"enable_shared_expert_dp":true, "eplb_config":{"dynamic_eplb": true, "expert_heat_collection_interval": 50, "algorithm_execution_interval": 5, "eplb_policy_type": 2, "num_redundant_experts":16}}'
     ```
 
 === "Decode Node"
 
     ```shell
-    # 清除代理环境变量
-    unset ftp_proxy FTP_PROXY
-    unset https_proxy HTTPS_PROXY
-    unset http_proxy HTTP_PROXY
-    # 清除代理环境变量
-    unset ftp_proxy FTP_PROXY
-    unset https_proxy HTTPS_PROXY
-    unset http_proxy HTTP_PROXY
-    # 自动获取配置
-    nic_name=自动获取
-    local_ip=自动获取
+    nic_name="xxx"
+    local_ip="141.xx.xx.2"
 
-    # 以下环境变量无需修改
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
@@ -906,22 +876,14 @@ Parameter descriptions:
     export HCCL_CONNECT_TIMEOUT=120
     export HCCL_BUFFSIZE=1024
 
-    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib64
-
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
     export TASK_QUEUE_ENABLE=1
-
-    dir="$PWD/$(date +%Y%m%d_%H%M%S)/plog" && mkdir -p "$dir"
-    export ASCEND_PROCESS_LOG_PATH="$dir"
-
     export VLLM_ASCEND_ENABLE_MLAPO=1
-
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    vllm serve /mnt/weight/A5-weights/dsk_v3.1-T-w8a8c8_attn-0506-full/ \
+    vllm serve /weight/dsk_v3.1-T-w8a8c8_attn-0506-full/ \
     --host 0.0.0.0 \
     --port $2 \
     --data-parallel-size $3 \
@@ -938,7 +900,6 @@ Parameter descriptions:
     --max-num-seqs 96 \
     --no-enable-prefix-caching \
     --trust-remote-code \
-    --profiler-config '{"profiler": "torch", "torch_profiler_dir": "/home/w00887678/ds_vllm/B070/profiling_0704_dt", "torch_profiler_with_stack": false}' \
     --safetensors-load-strategy 'prefetch' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp"}' \
@@ -960,7 +921,7 @@ Parameter descriptions:
                     "ascend_local_comm_res_path": "/etc/hixlep"
             }
         }' \
-    --additional_config '{"enable_cpu_binding": "True", "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true, "enable_shared_expert_dp": false, "finegrained_tp_config": {"lmhead_tensor_parallel_size":8}}'
+    --additional_config '{"enable_cpu_binding": "True", "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true, "finegrained_tp_config": {"lmhead_tensor_parallel_size":8}}'
     ```
 
 Key Parameter Descriptions:
@@ -971,7 +932,9 @@ Key Parameter Descriptions:
 - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
 - `lmhead_tensor_parallel_size: 16`: When the Tensor Parallelism (TP) size of the decode node is 1, this parameter allows the TP size of the LMHead embedding layer to be greater than 1, which is used to reduce the computational load of each card on the LMHead embedding layer.
 
-3. run server for each node:
+3. run server for each node
+
+=== "A3 series"
 
     ```shell
     # p0
@@ -984,7 +947,28 @@ Key Parameter Descriptions:
     python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
     ```
 
-4. Run the `proxy.sh` script on the prefill master node
+=== "A5 series"
+
+    ```shell
+    # p0_0
+    python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 2 --dp-rank-start 0 --dp-address 141.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
+    # p0_1
+    python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 2 --dp-rank-start 2 --dp-address 141.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
+    # p1_0
+    python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 2 --dp-rank-start 0 --dp-address 141.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
+    # p1_1
+    python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 2 --dp-rank-start 2 --dp-address 141.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
+    # d0_0
+    python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 0 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
+    # d0_1
+    python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 8 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
+    # d0_2
+    python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 16 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
+    # d0_3
+    python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 24 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
+    ```
+
+4. Run the `proxy.sh` script on the prefill master node(The proxy.sh of the A5 is consistent with the A3)
 
     Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
