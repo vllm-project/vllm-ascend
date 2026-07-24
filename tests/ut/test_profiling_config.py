@@ -18,6 +18,10 @@ def test_service_profiling_symbols_yaml():
         "vllm_ascend.core.recompute_scheduler:RecomputeScheduler.schedule",
         "vllm_ascend.worker.model_runner_v1:NPUModelRunner._model_forward",
         "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector:MooncakeConnector.start_load_kv",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector:MooncakeConnectorScheduler.get_num_new_matched_tokens",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector:MooncakeConnectorScheduler.update_state_after_alloc",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector:KVCacheTaskTracker.get_and_clear_finished_requests",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector:KVCacheRecvingThread.get_and_clear_finished_requests",
     }.issubset(symbols)
     assert all(
         isinstance(entry[version_key], str)
