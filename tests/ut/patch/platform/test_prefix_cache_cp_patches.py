@@ -221,13 +221,13 @@ def test_get_effective_block_size(
     ("is_v0251", "expected_hash_scale", "expected_hit_length"),
     [
         pytest.param(True, 2, 256, id="v0.25.1-physical-block-contract"),
-        pytest.param(False, 8, 1024, id="main-effective-block-contract"),
+        pytest.param(False, None, 1024, id="main-reported-hit-length"),
     ],
 )
 def test_compressed_cache_hit_uses_versioned_block_contract(
     monkeypatch,
     is_v0251: bool,
-    expected_hash_scale: int,
+    expected_hash_scale: int | None,
     expected_hit_length: int,
 ) -> None:
     spec = MLAAttentionSpec(
@@ -239,7 +239,8 @@ def test_compressed_cache_hit_uses_versioned_block_contract(
         model_version="deepseek_v4",
     )
     manager_cls = MagicMock()
-    manager_cls.find_longest_cache_hit.return_value = ([object(), object()],)
+    hit_blocks = ([object(), object()],)
+    manager_cls.find_longest_cache_hit.return_value = hit_blocks if is_v0251 else (hit_blocks, 1024)
 
     coordinator = _make_coordinator_for_effective_block_size(
         dcp_world_size=1,
@@ -256,11 +257,16 @@ def test_compressed_cache_hit_uses_versioned_block_contract(
         lambda version: is_v0251 and version == "0.25.1",
     )
 
-    _, hit_length = coordinator.find_longest_cache_hit([MagicMock()] * 16, 1024)
+    request_block_hashes = [MagicMock()] * 16
+    hit_result = coordinator.find_longest_cache_hit(request_block_hashes, 1024)
+    hit_length = hit_result[1]
 
     block_hashes = manager_cls.find_longest_cache_hit.call_args.kwargs["block_hashes"]
-    assert isinstance(block_hashes, BlockHashListWithBlockSize)
-    assert block_hashes.scale_factor == expected_hash_scale
+    if expected_hash_scale is None:
+        assert block_hashes is request_block_hashes
+    else:
+        assert isinstance(block_hashes, BlockHashListWithBlockSize)
+        assert block_hashes.scale_factor == expected_hash_scale
     assert hit_length == expected_hit_length
 
 

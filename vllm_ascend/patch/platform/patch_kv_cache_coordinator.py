@@ -69,12 +69,8 @@ def _is_deepseek_v4_kv_cache_config(kv_cache_config: KVCacheConfig) -> bool:
 
 class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
     """
-    Ascend adaptation of upstream ``HybridKVCacheCoordinator``.
-
-    Keep this class structurally aligned with the pinned vLLM implementation.
-    Every intentional divergence must carry an ``ASCEND_ADAPTATION`` comment.
-    The primary reason for this patch is hybrid-cache support with DCP and PCP;
-    it also selects Ascend-specific per-spec managers needed by that support.
+    KV cache coordinator for hybrid models with multiple KV cache types, and
+    thus multiple KV cache groups.
     """
 
     def __init__(
@@ -93,18 +89,12 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         max_num_batched_tokens: int | None = None,
         scheduler_block_size: int | None = None,
     ):
-        # ASCEND_ADAPTATION: we cannot call upstream ``super().__init__``
-        # because it rejects hybrid PCP and constructs CUDA-oriented managers.
-        # Reproduce its initialization order here, then substitute the Ascend
-        # DCP/PCP-aware manager factory below.
         self.dcp_world_size = dcp_world_size
         self.pcp_world_size = pcp_world_size
         self.scheduler_block_size = scheduler_block_size
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
-        # ASCEND_ADAPTATION: support both pinned vLLM constructor spellings.
-        # Falling back to max_model_len preserves the old uncapped behavior.
         token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
         self.max_in_flight_tokens = token_budget
         self.max_num_batched_tokens = token_budget
@@ -128,16 +118,12 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             metrics_collector=metrics_collector,
         )
 
-        # ASCEND_ADAPTATION: this mirrors KVCacheCoordinator.__init__ because
-        # the upstream base constructor cannot be called for hybrid PCP.
         # KV cache group indices that get the EAGLE last-block drop.
         self.eagle_group_ids: set[int] = {i for i, g in enumerate(kv_cache_config.kv_cache_groups) if g.is_eagle_group}
         # Conservatively fall back to flag all groups when no group is flagged.
         if use_eagle and not self.eagle_group_ids:
             self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
 
-        # ASCEND_ADAPTATION: construct Ascend per-spec managers and pass both
-        # DCP and PCP topology. Upstream's factory does not support hybrid PCP.
         extra_mgr_kwargs: dict = {"scheduler_block_size": scheduler_block_size}
         if not vllm_version_is("0.25.1"):
             extra_mgr_kwargs["needs_kv_cache_zeroing"] = kv_cache_config.needs_kv_cache_zeroing
@@ -163,8 +149,6 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # can be a multiple of hash_block_size.
         self.hash_block_size = hash_block_size
         if enable_caching:
-            # ASCEND_ADAPTATION: validate the DCP/PCP/compression-aware block
-            # size instead of upstream manager.block_size assumptions.
             assert all(
                 self._get_effective_block_size(g.kv_cache_spec) % hash_block_size == 0
                 for g in kv_cache_config.kv_cache_groups
@@ -180,10 +164,6 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         )
         self.verify_and_split_kv_cache_groups()
 
-        # ASCEND_ADAPTATION: align the WRITE-path mask granularity
-        # (reachable_block_mask) with the DCP/PCP-aware READ-path LCM so
-        # SlidingWindowManager only retains blocks that can be matched later.
-        #
         # Align the WRITE-path mask granularity (reachable_block_mask) with the
         # READ-path hit granularity (find_longest_cache_hit) so SlidingWindowManager
         # only caches blocks that land on a boundary where future cache hits can
@@ -204,10 +184,6 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         return self.scheduler_block_size or self.lcm_block_size
 
     def _get_effective_block_size(self, kv_cache_spec: KVCacheSpec) -> int:
-        """Return the Ascend logical block size used for hybrid CP lookup."""
-        # ASCEND_ADAPTATION: upstream hybrid lookup can use manager.block_size
-        # because PCP is rejected. Ascend folds DCP * PCP and compression into
-        # the lookup unit, while cached Mamba state keeps its native block size.
         block_size = kv_cache_spec.block_size
         if isinstance(kv_cache_spec, MambaSpec) and self.enable_caching:
             return block_size
@@ -221,10 +197,6 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
     def _get_physical_hit_block_size(self, kv_cache_spec: KVCacheSpec) -> int:
         """Return the token span represented by one v0.25.1 hit block."""
-        # ASCEND_ADAPTATION: v0.25.1 single-type managers return physical
-        # blocks only. ``_get_effective_block_size`` also includes an Ascend
-        # compression ratio, so using it to count those blocks can inflate an
-        # MLA hit and make the scheduler skip tokens that are not cached.
         block_size = kv_cache_spec.block_size
         if not isinstance(kv_cache_spec, MambaSpec) and self.dcp_world_size * self.pcp_world_size > 1:
             block_size *= self.dcp_world_size * self.pcp_world_size
@@ -264,11 +236,6 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 for gid in group.group_ids:
                     self.single_type_managers[gid].use_eagle = True
 
-        # ASCEND_ADAPTATION: Ascend supports hybrid DCP/PCP and compressed
-        # attention groups with different effective block sizes. Cache hits
-        # must therefore converge on their LCM; upstream uses the scheduler
-        # block size because it currently rejects hybrid PCP and narrower CP
-        # combinations.
         block_sizes = [self._get_effective_block_size(group.spec) for group in self.attention_groups]
         self.lcm_block_size = lcm(*block_sizes)
 
