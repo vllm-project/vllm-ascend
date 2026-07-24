@@ -25,7 +25,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 - `DeepSeek-V4-Flash-w8a8-mtp` (Quantized version): requires 1 Atlas 800 A3 (128G × 8) node or 1 Atlas 800 A2 (64G × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp)
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/mnt/sfs_turbo/.cache/`.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
