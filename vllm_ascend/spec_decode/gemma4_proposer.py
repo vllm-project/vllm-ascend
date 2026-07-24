@@ -100,6 +100,22 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
             return model.get_top_tokens(hidden_states)
         return super()._greedy_sample(hidden_states)
 
+    def _patch_draft_attn_metadata(self, multi_steps_attn_metadata, attn_metadata_i) -> None:
+        """Patch attn_state for Gemma4 MTP multi-group KV cache.
+
+        During chunked prefill, build_draft_attn_metadata inherits the
+        target's ChunkedPrefill attn_state.  Patch every group's output
+        metadata to SpecDecoding so the FIA backend picks the decode
+        kernel path.  We patch outputs rather than mutating the shared
+        common_attn_metadata to avoid side effects on the target.
+        """
+        from vllm_ascend.attention.attention_v1 import AscendAttentionState
+
+        for layer_meta in multi_steps_attn_metadata[0].values():
+            layer_meta.attn_state = AscendAttentionState.SpecDecoding
+        if hasattr(attn_metadata_i, "causal") and not attn_metadata_i.causal:
+            attn_metadata_i.attn_mask = None
+
     # ---- _maybe_share_lm_head ----------------------------------------------
     # Gemma4 MTP's lm_head operates in draft hidden_size (e.g. 1024),
     # not the target's backbone hidden_size (e.g. 5376).  Sharing

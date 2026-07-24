@@ -3951,10 +3951,18 @@ class NPUModelRunner(GPUModelRunner):
                 # per kv_cache_group, e.g. [[128], [128]]), but upstream
                 # vLLM's initialize_attn_backend expects a flat list[int]
                 # indexed by kv_cache_group_id.  Flatten the inner lists.
-                kernel_block_sizes = [
-                    sz if isinstance(sz, int) else sz[0]
-                    for sz in self.kernel_block_sizes
-                ]
+                kernel_block_sizes = []
+                for gid, sz in enumerate(self.kernel_block_sizes):
+                    if isinstance(sz, int):
+                        kernel_block_sizes.append(sz)
+                    elif len(sz) == 1:
+                        kernel_block_sizes.append(sz[0])
+                    else:
+                        raise ValueError(
+                            f"kv_cache_group {gid} has unexpected multi-size "
+                            f"kernel_block_sizes {sz}; expected a single int "
+                            f"or [int]."
+                        )
                 self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
             else:
                 block_size = (self.kernel_block_sizes[0] if isinstance(

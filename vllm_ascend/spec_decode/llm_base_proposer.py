@@ -752,6 +752,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
             self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
 
+    def _patch_draft_attn_metadata(
+        self,
+        multi_steps_attn_metadata: list[dict[str, Any]],
+        attn_metadata_i: Any,
+    ) -> None:
+        """Hook for proposer-specific attn metadata patching after build.
+        Override in subclasses that need custom metadata adjustments
+        (e.g. Gemma4 MTP patches attn_state for multi-group KV cache)."""
+        pass
+
     def _propose(
         self,
         # [num_tokens]
@@ -937,21 +947,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
         self._pad_draft_buffers(num_tokens, num_input_tokens)
 
-        # Gemma4 MTP has multiple KV cache groups (sliding + full attention).
-        # During chunked prefill, build_draft_attn_metadata inherits the
-        # target's ChunkedPrefill attn_state.  Patch every group's output
-        # metadata to SpecDecoding so the FIA backend picks the decode
-        # kernel path.  We patch outputs rather than mutating the shared
-        # common_attn_metadata to avoid side effects on the target object.
-        # Deferred import avoids circular dependency.
-        if self.method == "mtp":
-            from vllm_ascend.spec_decode.gemma4_proposer import AscendGemma4Proposer
-
-            if isinstance(self, AscendGemma4Proposer):
-                for layer_meta in multi_steps_attn_metadata[0].values():
-                    layer_meta.attn_state = AscendAttentionState.SpecDecoding
-                if hasattr(attn_metadata_i, "causal") and not attn_metadata_i.causal:
-                    attn_metadata_i.attn_mask = None
+        # Proposer-specific attn metadata adjustments (e.g. Gemma4 MTP
+        # patches attn_state for multi-group KV cache).  No-op in the
+        # base; overridden by proposers that need it.
+        self._patch_draft_attn_metadata(multi_steps_attn_metadata, attn_metadata_i)
 
         if self.uses_mrope:
             used_update_positions = self.mrope_positions[:, token_indices_to_sample]
