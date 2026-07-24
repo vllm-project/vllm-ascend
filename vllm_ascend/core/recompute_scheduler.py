@@ -32,6 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import logger
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
@@ -43,6 +44,7 @@ from vllm.v1.core.sched.request_queue import (
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.sched.utils import remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs, FinishReason
+from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -99,6 +101,66 @@ class RecomputeScheduler(Scheduler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.is_kv_producer = self.vllm_config.kv_transfer_config and self.vllm_config.kv_transfer_config.is_kv_producer
+
+    def get_computed_blocks_for_connector(self, request: Request) -> tuple[KVCacheBlocks, int, bool]:
+        """Return local connector hits without collapsing FullAttention reuse.
+
+        ASCEND_ADAPTATION / MAIN_TO_MAIN_SUNSET:
+        This is a scheduler-local compatibility copy of the manager API from
+        vLLM PR #48425. During every vLLM main-to-main update, check whether
+        the pinned upstream commit provides
+        ``KVCacheManager.get_computed_blocks_for_connector``. Once every
+        supported vLLM baseline includes that API (in particular after the
+        v0.25.1 compatibility window is removed), delete this method and call
+        the upstream manager method directly from ``schedule``.
+        """
+        kv_cache_manager = self.kv_cache_manager
+        coordinator = kv_cache_manager.coordinator
+        full_attention_group_id = next(
+            (
+                group_ids[0]
+                for spec, group_ids, _manager_cls, _use_eagle in getattr(
+                    coordinator, "attention_groups", ()
+                )
+                if isinstance(spec, FullAttentionSpec)
+            ),
+            None,
+        )
+        if not (
+            kv_cache_manager.kv_cache_config.has_mamba_layers
+            and isinstance(coordinator, HybridKVCacheCoordinator)
+            and full_attention_group_id is not None
+        ):
+            return *kv_cache_manager.get_computed_blocks(request), False
+
+        # ASCEND_ADAPTATION: the inherited upstream per-group lookup does not
+        # forward PCP and only has partial DCP awareness. Under hybrid CP, use
+        # the reconciled coordinator lookup until upstream exposes CP topology
+        # through the connector-specific API.
+        if coordinator.dcp_world_size * getattr(coordinator, "pcp_world_size", 1) > 1:
+            return *kv_cache_manager.get_computed_blocks(request), False
+
+        if not kv_cache_manager.enable_caching or request.skip_reading_prefix_cache:
+            return kv_cache_manager.empty_kv_cache_blocks, 0, False
+
+        computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
+            request.block_hashes, request.num_tokens - 1
+        )
+        full_attention_hit = per_group_hits[full_attention_group_id]
+        if any(hit > full_attention_hit for hit in per_group_hits):
+            return *kv_cache_manager.get_computed_blocks(request), False
+
+        # A per-group lookup does not produce a Marconi shared-prefix boundary.
+        coordinator.num_uncached_common_prefix_tokens = 0
+        if kv_cache_manager.log_stats:
+            assert kv_cache_manager.prefix_cache_stats is not None
+            kv_cache_manager.prefix_cache_stats.record(
+                num_tokens=request.num_tokens,
+                num_hits=full_attention_hit,
+                preempted=request.num_preemptions > 0,
+            )
+        blocks = kv_cache_manager.create_kv_cache_blocks(computed)
+        return blocks, full_attention_hit, min(per_group_hits) < full_attention_hit
 
     def _update_waiting_for_remote_kv(self, request: Request) -> None:
         """
@@ -492,7 +554,7 @@ class RecomputeScheduler(Scheduler):
                             new_computed_blocks,
                             num_new_local_computed_tokens,
                             hit_diverged,
-                        ) = self.kv_cache_manager.get_computed_blocks_for_connector(request)
+                        ) = self.get_computed_blocks_for_connector(request)
                     else:
                         computed_result = self.kv_cache_manager.get_computed_blocks(request)
                         if vllm_version_is("0.25.1"):

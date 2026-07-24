@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM projectx
-import importlib
 from collections.abc import Mapping
 from math import lcm
 
@@ -464,59 +463,3 @@ def get_kv_cache_coordinator(
 
 
 vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator = get_kv_cache_coordinator  # type: ignore[attr-defined]
-
-_kv_cache_manager = importlib.import_module("vllm.v1.core.kv_cache_manager")
-
-
-def get_computed_blocks_for_connector(self, request):
-    """Backport vLLM PR #48425 to the pinned two-value KV manager API."""
-    coordinator = self.coordinator
-    full_attention_group_id = next(
-        (
-            group_ids[0]
-            for spec, group_ids, _manager_cls, _use_eagle in getattr(coordinator, "attention_groups", ())
-            if isinstance(spec, FullAttentionSpec)
-        ),
-        None,
-    )
-    if not (
-        self.kv_cache_config.has_mamba_layers
-        and isinstance(coordinator, HybridKVCacheCoordinator)
-        and full_attention_group_id is not None
-    ):
-        return *self.get_computed_blocks(request), False
-
-    # ASCEND_ADAPTATION: the inherited upstream per-group lookup does not
-    # forward PCP and only has partial DCP awareness. Under hybrid CP, use the
-    # reconciled Ascend lookup above until upstream exposes CP topology through
-    # get_computed_blocks_for_connector; correctness takes priority over the
-    # divergent per-group optimization in this configuration.
-    if coordinator.dcp_world_size * getattr(coordinator, "pcp_world_size", 1) > 1:
-        return *self.get_computed_blocks(request), False
-
-    if not self.enable_caching or request.skip_reading_prefix_cache:
-        return self.empty_kv_cache_blocks, 0, False
-
-    computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
-        request.block_hashes, request.num_tokens - 1
-    )
-    full_attention_hit = per_group_hits[full_attention_group_id]
-    if any(hit > full_attention_hit for hit in per_group_hits):
-        return *self.get_computed_blocks(request), False
-
-    # A per-group lookup does not produce a Marconi shared-prefix boundary.
-    coordinator.num_uncached_common_prefix_tokens = 0
-    if self.log_stats:
-        assert self.prefix_cache_stats is not None
-        self.prefix_cache_stats.record(
-            num_tokens=request.num_tokens,
-            num_hits=full_attention_hit,
-            preempted=request.num_preemptions > 0,
-        )
-    blocks = self.create_kv_cache_blocks(computed)
-    return blocks, full_attention_hit, min(per_group_hits) < full_attention_hit
-
-
-_kv_cache_manager.KVCacheManager.get_computed_blocks_for_connector = (  # type: ignore[attr-defined]
-    get_computed_blocks_for_connector
-)

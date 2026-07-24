@@ -5,14 +5,112 @@ from collections import defaultdict
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock
 
+import torch
 from vllm.sampling_params import SamplingParams
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.engine import EngineCoreOutput, FinishReason
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 from vllm.v1.request import Request, RequestStatus
 
 from vllm_ascend.core.recompute_scheduler import (
     RecomputeReqInfo,
     RecomputeScheduler,
 )
+
+
+def _make_connector_lookup_scheduler(
+    per_group_hits: tuple[int, int],
+) -> tuple[RecomputeScheduler, SimpleNamespace]:
+    scheduler = RecomputeScheduler.__new__(RecomputeScheduler)
+    coordinator = HybridKVCacheCoordinator.__new__(HybridKVCacheCoordinator)
+    full_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=torch.float16,
+    )
+    mamba_spec = MambaSpec(
+        block_size=16,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="none",
+    )
+    coordinator.attention_groups = [
+        (full_spec, [0], MagicMock(), False),
+        (mamba_spec, [1], MagicMock(), False),
+    ]
+    coordinator.dcp_world_size = 1
+    coordinator.pcp_world_size = 1
+    coordinator.find_longest_cache_hit_per_group = MagicMock(
+        return_value=((["fa"], ["mamba"]), per_group_hits)
+    )
+    scheduler.kv_cache_manager = SimpleNamespace(
+        coordinator=coordinator,
+        kv_cache_config=SimpleNamespace(has_mamba_layers=True),
+        enable_caching=True,
+        empty_kv_cache_blocks=(),
+        log_stats=False,
+        create_kv_cache_blocks=MagicMock(side_effect=lambda blocks: blocks),
+        get_computed_blocks=MagicMock(return_value=((["common"], []), 16)),
+    )
+    request = SimpleNamespace(
+        block_hashes=[],
+        num_tokens=129,
+        num_preemptions=0,
+        skip_reading_prefix_cache=False,
+    )
+    return scheduler, request
+
+
+def test_connector_lookup_uses_full_attention_boundary() -> None:
+    scheduler, request = _make_connector_lookup_scheduler((64, 32))
+
+    computed, local_tokens, hit_diverged = scheduler.get_computed_blocks_for_connector(request)
+
+    assert computed == (["fa"], ["mamba"])
+    assert local_tokens == 64
+    assert hit_diverged is True
+    assert scheduler.kv_cache_manager.coordinator.num_uncached_common_prefix_tokens == 0
+    scheduler.kv_cache_manager.get_computed_blocks.assert_not_called()
+
+
+def test_connector_lookup_reconciles_deeper_sparse_group() -> None:
+    scheduler, request = _make_connector_lookup_scheduler((32, 64))
+    scheduler.kv_cache_manager.get_computed_blocks.return_value = ((["common"], []), 32)
+
+    computed, local_tokens, hit_diverged = scheduler.get_computed_blocks_for_connector(request)
+
+    assert computed == (["common"], [])
+    assert local_tokens == 32
+    assert hit_diverged is False
+    scheduler.kv_cache_manager.get_computed_blocks.assert_called_once_with(request)
+
+
+def test_connector_lookup_falls_back_without_full_attention_group() -> None:
+    scheduler, request = _make_connector_lookup_scheduler((16, 16))
+    scheduler.kv_cache_manager.coordinator.attention_groups = [
+        scheduler.kv_cache_manager.coordinator.attention_groups[1]
+    ]
+
+    computed, local_tokens, hit_diverged = scheduler.get_computed_blocks_for_connector(request)
+
+    assert computed == (["common"], [])
+    assert local_tokens == 16
+    assert hit_diverged is False
+    scheduler.kv_cache_manager.get_computed_blocks.assert_called_once_with(request)
+
+
+def test_connector_lookup_falls_back_for_hybrid_context_parallelism() -> None:
+    scheduler, request = _make_connector_lookup_scheduler((64, 32))
+    scheduler.kv_cache_manager.coordinator.pcp_world_size = 2
+
+    computed, local_tokens, hit_diverged = scheduler.get_computed_blocks_for_connector(request)
+
+    assert computed == (["common"], [])
+    assert local_tokens == 16
+    assert hit_diverged is False
+    scheduler.kv_cache_manager.get_computed_blocks.assert_called_once_with(request)
+    scheduler.kv_cache_manager.coordinator.find_longest_cache_hit_per_group.assert_not_called()
 
 
 def test_add_request_does_not_inject_placeholder_spec_tokens():

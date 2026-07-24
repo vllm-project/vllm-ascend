@@ -124,24 +124,19 @@
 #
 # ** 6. File: platform/patch_kv_cache_coordinator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.kv_cache_manager.KVCacheManager.get_computed_blocks_for_connector`
+#   1. `vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator`
 #    Why:
-#       In PD disaggregation with hybrid Mamba models, the D side receives
-#       FullAttention KV blocks from the P side but has no local prefix-cache
-#       hit for Mamba groups. Upstream's min-reduction across all KV groups
-#       collapses the FullAttention hit length to 0, preventing partial
-#       FullAttention-only prefix cache reuse on the D side.
+#       Upstream's hybrid coordinator does not construct Ascend DCP/PCP-aware
+#       per-spec managers and rejects PCP hybrid-cache configurations.
 #    How:
-#       Backport the manager-level API introduced by vLLM PR #48425 and reuse
-#       upstream `find_longest_cache_hit_per_group` without an Ascend override.
-#       For Mamba hybrid models, report the FullAttention hit to the connector;
-#       fall back to the reconciled common boundary when another group hits
-#       deeper, or when a divergent hit has no external suffix.
+#       Keep the upstream factory for ordinary and caching-disabled configs,
+#       but select `AscendHybridKVCacheCoordinator` when Ascend hybrid DCP/PCP
+#       behavior is required.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/48425
+#       No, the coordinator selection is Ascend-specific DCP/PCP integration.
 #    Future Plan:
-#       Remove this backport when vLLM PR #48425 is included in the supported
-#       upstream vLLM version.
+#       Remove this factory patch once upstream exposes a plugin hook for
+#       constructing platform-specific hybrid coordinators and managers.
 #
 # ** 7. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

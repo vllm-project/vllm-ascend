@@ -26,7 +26,6 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
     _is_deepseek_v4_kv_cache_spec,
-    get_computed_blocks_for_connector,
     get_kv_cache_coordinator,
 )
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
@@ -521,96 +520,6 @@ def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
         f"expected {expected} cached blocks ({4}/{128} per segment), got {true_blocks}/{total_blocks}"
     )
     assert true_blocks > 0 and true_blocks < total_blocks, f"mask should be sparse, got {true_blocks}/{total_blocks}"
-
-
-def _make_connector_lookup_manager(
-    per_group_hits: tuple[int, int],
-) -> tuple[SimpleNamespace, SimpleNamespace]:
-    coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
-    full_spec = FullAttentionSpec(
-        block_size=16,
-        num_kv_heads=8,
-        head_size=64,
-        dtype=torch.float16,
-    )
-    mamba_spec = MambaSpec(
-        block_size=16,
-        shapes=((1,),),
-        dtypes=(torch.float32,),
-        mamba_cache_mode="none",
-    )
-    coordinator.attention_groups = [
-        (full_spec, [0], MagicMock(), False),
-        (mamba_spec, [1], MagicMock(), False),
-    ]
-    coordinator.dcp_world_size = 1
-    coordinator.pcp_world_size = 1
-    coordinator.find_longest_cache_hit_per_group = MagicMock(return_value=((["fa"], ["mamba"]), per_group_hits))
-    manager = SimpleNamespace(
-        coordinator=coordinator,
-        kv_cache_config=SimpleNamespace(has_mamba_layers=True),
-        enable_caching=True,
-        empty_kv_cache_blocks=(),
-        log_stats=False,
-        create_kv_cache_blocks=MagicMock(side_effect=lambda blocks: blocks),
-        get_computed_blocks=MagicMock(return_value=((["common"], []), 16)),
-    )
-    request = SimpleNamespace(
-        block_hashes=[],
-        num_tokens=129,
-        num_preemptions=0,
-        skip_reading_prefix_cache=False,
-    )
-    return manager, request
-
-
-def test_connector_lookup_uses_full_attention_boundary() -> None:
-    manager, request = _make_connector_lookup_manager((64, 32))
-
-    computed, local_tokens, hit_diverged = get_computed_blocks_for_connector(manager, request)
-
-    assert computed == (["fa"], ["mamba"])
-    assert local_tokens == 64
-    assert hit_diverged is True
-    assert manager.coordinator.num_uncached_common_prefix_tokens == 0
-    manager.get_computed_blocks.assert_not_called()
-
-
-def test_connector_lookup_reconciles_deeper_sparse_group() -> None:
-    manager, request = _make_connector_lookup_manager((32, 64))
-    manager.get_computed_blocks.return_value = ((["common"], []), 32)
-
-    computed, local_tokens, hit_diverged = get_computed_blocks_for_connector(manager, request)
-
-    assert computed == (["common"], [])
-    assert local_tokens == 32
-    assert hit_diverged is False
-    manager.get_computed_blocks.assert_called_once_with(request)
-
-
-def test_connector_lookup_falls_back_without_full_attention_group() -> None:
-    manager, request = _make_connector_lookup_manager((16, 16))
-    manager.coordinator.attention_groups = [manager.coordinator.attention_groups[1]]
-
-    computed, local_tokens, hit_diverged = get_computed_blocks_for_connector(manager, request)
-
-    assert computed == (["common"], [])
-    assert local_tokens == 16
-    assert hit_diverged is False
-    manager.get_computed_blocks.assert_called_once_with(request)
-
-
-def test_connector_lookup_falls_back_for_hybrid_context_parallelism() -> None:
-    manager, request = _make_connector_lookup_manager((64, 32))
-    manager.coordinator.pcp_world_size = 2
-
-    computed, local_tokens, hit_diverged = get_computed_blocks_for_connector(manager, request)
-
-    assert computed == (["common"], [])
-    assert local_tokens == 16
-    assert hit_diverged is False
-    manager.get_computed_blocks.assert_called_once_with(request)
-    manager.coordinator.find_longest_cache_hit_per_group.assert_not_called()
 
 
 def test_ascend_coordinator_inherits_upstream_per_group_lookup() -> None:
