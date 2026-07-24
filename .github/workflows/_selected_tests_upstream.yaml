@@ -119,7 +119,7 @@ jobs:
               pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
               apt-get update -y
               apt install git zstd -y
-              git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+              git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
           - name: Install system dependencies
             run: |
@@ -166,8 +166,17 @@ jobs:
           - name: Get csrc hash
             id: get_csrc_hash
             run: |
-              CSRC_HASH=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake \
-                | sha256sum | awk '{print $1}')
+              set -euo pipefail
+              git config --global --add safe.directory "$GITHUB_WORKSPACE"
+              cd "$GITHUB_WORKSPACE"
+
+              CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake)
+              if [ -z "$CSRC_MANIFEST" ]; then
+                echo "::error::No tracked csrc inputs found."
+                exit 1
+              fi
+
+              CSRC_HASH=$(printf '%s\n' "$CSRC_MANIFEST" | sha256sum | awk '{print $1}')
               echo "CSRC_HASH=$CSRC_HASH" >> "$GITHUB_OUTPUT"
 
           - name: Get architecture
@@ -193,12 +202,20 @@ jobs:
               fail-on-cache-miss: true
 
           - name: Install vllm-project/vllm-ascend with device
+            env:
+              CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
             run: |
               export MAX_JOBS=$(( ${{ matrix.num_npus }} * 23 ))
               pip install uc-manager
               uv pip install -r requirements-dev.txt
               uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-              COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
+              if [ "$CSRC_CACHE_HIT" = "true" ]; then
+                echo "csrc cache hit: skip kernel compilation"
+                COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
+              else
+                echo "csrc cache miss: compile kernels on the NPU runner"
+                uv pip install -e . --no-build-isolation
+              fi
               uv pip install tblib
 
           - name: Run vllm-project/vllm test
