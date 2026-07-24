@@ -14,7 +14,13 @@ import torch
 from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.fla.ops.utils import SUPPRESS_LEVEL
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.25.1"):
+    from vllm.model_executor.layers.fla.ops.utils import SUPPRESS_LEVEL  # type: ignore[import-not-found]
+else:
+    from vllm.third_party.flash_linear_attention.ops.utils import SUPPRESS_LEVEL
 
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h  # noqa: F401
 from .chunk_delta_hupdate import chunk_gated_delta_rule_fwd_hupdate

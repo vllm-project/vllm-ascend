@@ -21,6 +21,7 @@ from __future__ import annotations
 import time
 from collections import defaultdict
 from dataclasses import dataclass, fields
+from typing import cast
 
 from vllm.config import SchedulerConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
@@ -48,6 +49,8 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.utils import ConstantList, record_function_or_nullcontext
+
+from vllm_ascend.utils import vllm_version_is
 
 
 @dataclass
@@ -518,9 +521,17 @@ class RecomputeScheduler(Scheduler):
                                 preempted=request.num_preemptions > 0,
                             )
                     else:
-                        new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(
-                            request
-                        )
+                        computed_result = self.kv_cache_manager.get_computed_blocks(request)
+                        if vllm_version_is("0.25.1"):
+                            new_computed_blocks, num_new_local_computed_tokens = cast(
+                                tuple[KVCacheBlocks, int], computed_result
+                            )
+                        else:
+                            (
+                                new_computed_blocks,
+                                num_new_local_computed_tokens,
+                                request.shared_prefix_boundary,
+                            ) = cast(tuple[KVCacheBlocks, int, int], computed_result)
 
                     # In case of hybrid models, obtain a hint for the
                     # Marconi-style APC admission logic.
