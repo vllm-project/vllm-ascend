@@ -119,6 +119,10 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/entrypoints/multimodal/openai/chat_completion/test_vision.py
     estimated_time: 20
+  - name: tests/entrypoints/multimodal/openai/chat_completion/test_video.py
+    estimated_time: 20
+  - name: tests/entrypoints/multimodal/openai/chat_completion/test_default_mm_loras.py
+    estimated_time: 20
   - name: tests/entrypoints/multimodal/openai/chat_completion/test_chat_completion_with_mixed_image_embeds.py
     estimated_time: 20
   - name: tests/entrypoints/multimodal/openai/chat_completion/test_chat_completion_with_image_embeds.py
