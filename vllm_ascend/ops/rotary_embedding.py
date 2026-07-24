@@ -542,6 +542,11 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
                 query.dtype
             )  # type: ignore
 
+        # Use interleave (GPT-J) pairing for non-neox models (e.g. GLM-OCR).
+        # torch_npu.npu_mrope defaults to Neox chunk-half (rotary_mode="half").
+        # With rotary_mode="interleave" it uses the GPT-J even/odd pairing
+        # that GLM family models expect.
+        rotary_mode = "interleave" if self.mrope_interleaved else "half"
         query, key = torch_npu.npu_mrope(
             positions.contiguous(),
             query.contiguous(),
@@ -549,7 +554,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
             self.cos_sin_cache.contiguous(),
             self.head_size,
             mrope_section=mrope_section,
-            rotary_mode="half",
+            rotary_mode=rotary_mode,
         )
 
         return query, key
