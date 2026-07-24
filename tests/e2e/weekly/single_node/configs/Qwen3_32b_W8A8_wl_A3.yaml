@@ -1,0 +1,115 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+
+  VLLM_USE_V1: "1"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  LD_PRELOAD: "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD"
+  SERVER_PORT: "DEFAULT_PORT"
+
+_server_cmd: &server_cmd
+  - "--port"
+  - "$SERVER_PORT"
+  - "--tensor-parallel-size"
+  - "4"
+  - "--trust-remote-code"
+  - "--reasoning-parser"
+  - "qwen3"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--block-size"
+  - "128"
+  - "--no-enable-prefix-caching"
+
+
+_benchmarks_gsm8k_lite: &benchmarks_gsm8k_lite
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gsm8k_lite
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 10240
+    num_prompts: 32
+    batch_size: 32
+    baseline: 90
+    threshold: 0
+
+_benchmarks_aime: &benchmarks_aime
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gsm8k_lite
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 10240
+    num_prompts: 32
+    batch_size: 32
+    baseline: 90
+    threshold: 0
+_benchmarks_perf1: &benchmarks_perf1
+    perf:
+      case_type: performance
+      dataset_path: vllm-ascend/GSM8K-in3500-bs2800-qwen3
+      request_conf: vllm_api_stream_chat
+      dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+      num_prompts: 400
+      max_out_len: 1500
+      batch_size: 46
+      request_rate: 0
+      baseline: 942.23
+      threshold: 0.95
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "Qwen3_32b_accuracy_aime2024_A3"
+    model: "vllm-ascend/Qwen3-32B-W8A8-wl"
+    envs:
+      <<: *envs
+      OMP_PROC_BIND: "false"
+      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
+      TASK_QUEUE_ENABLE: "1"
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-model-len"
+      - "35840"
+      - "--max-num-batched-tokens"
+      - "40960"
+      - "--distributed_executor_backend"
+      - "mp"
+      - "--async-scheduling"
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY" }'
+    benchmarks:
+      <<: *benchmarks_aime
+  - name: "Qwen3_32B_w8a8_Accuracy_A3"
+    model: "vllm-ascend/Qwen3-32B-W8A8-wl"
+    envs:
+      <<: *envs
+      VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE: "1"
+      VLLM_ASCEND_ENABLE_PREFETCH_MLP: "1"
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-model-len"
+      - "36784"
+      - "--max-num-batched-tokens"
+      - "36784"
+      - "--quantization ascend"
+      - "--additional-config"
+      - '{"enable_weight_nz_layout":true}'
+    benchmarks:
+      <<: *benchmarks_gsm8k_lite
+  - name: "Qwen3_32B_w8a8_Performance_A3"
+    model: "vllm-ascend/Qwen3-32B-W8A8-wl"
+    envs:
+      <<: *envs
+      OMP_PROC_BIND: "false"
+      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
+      TASK_QUEUE_ENABLE: "1"
+    server_cmd: *server_perf_cmd
+    benchmarks:
+      <<: *benchmarks_perf1
+

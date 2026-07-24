@@ -119,6 +119,24 @@ a3:
       - name: MiniMax-M2.5-w8a8
         os: linux-aarch64-a3-16
         config_file_path: MiniMax-M2.5-W8A8-A3.yaml
+      - name: Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3
+        os: linux-aarch64-a3-16
+        config_file_path: Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3.yaml
+      - name: Deepseek_R1_W8A8_A3
+        os: linux-aarch64-a3-16
+        config_file_path: Deepseek_R1_W8A8_A3.yaml
+      - name: Deepseek_R1_W8A8_Reasoning_output_A3
+        os: linux-aarch64-a3-16
+        config_file_path: Deepseek_R1_W8A8_Reasoning_output_A3.yaml
+      - name: Qwen3_32b_w8a8_ml_A3
+        os: linux-aarch64-a3-16
+        config_file_path: Qwen3_32b_w8a8_ml_A3.yaml
+      - name: Qwen3_32b_W8A8_wl_A3
+        os: linux-aarch64-a3-16
+        config_file_path: Qwen3_32b_W8A8_wl_A3.yaml
+      - name: Qwq_32b_A3
+        os: linux-aarch64-a3-16
+        config_file_path: Qwq_32b_A3.yaml
 
 310p:
   single_node:
