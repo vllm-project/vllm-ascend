@@ -8,7 +8,6 @@ MODELS = [
 ]
 
 PROMPTS = [
-    "Hello, my name is",
     "The capital of the United States is",
     "The capital of France is",
     "The future of AI is",

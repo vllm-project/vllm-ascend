@@ -836,6 +836,13 @@ def get_ascend_device_type():
     return _ascend_device_type
 
 
+# Now Ascend910_9362 (A3 560T) is integrated in CI, and in some testcases the accuracy will be different
+# from Ascend910_9392. So we need to distinguish the two A3 devices.
+def get_ascend_specific_device_type() -> str:
+    specific_name = torch.npu.get_device_properties().name
+    return specific_name
+
+
 def lmhead_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size > 0
 

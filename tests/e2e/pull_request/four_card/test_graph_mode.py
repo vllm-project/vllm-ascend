@@ -337,6 +337,73 @@ DEEPSEEK_V2_LITE_PROMPTS_LONG_BASELINE = [
     },
 ]
 
+# For long prompts, A3 9362 has some token output, but the logprobs will be different from the A3 9392.
+DEEPSEEK_V2_LITE_PROMPTS_LONG_BASELINE_A3_9362 = [
+    {
+        "token_ids": [185, 185, 1679, 26430, 279, 16145, 285, 8204, 185, 185, 13483, 9890, 16982, 457, 17693, 829],
+        "logprobs": [
+            -0.22805017232894897,
+            -0.05592634901404381,
+            -2.2268128395080566,
+            -0.3691219091415405,
+            -0.0001323135511483997,
+            -4.768370445162873e-07,
+            -0.000115030343295075,
+            -3.2186455882765586e-06,
+            -0.000763244170229882,
+            -8.583031558373477e-06,
+            -1.1920928244535389e-07,
+            -6.508615479106084e-05,
+            -4.184158387943171e-05,
+            -2.7418097943154862e-06,
+            -1.5497195136049413e-06,
+            -8.583031558373477e-06,
+        ],
+    },
+    {
+        "token_ids": [185, 185, 1679, 26430, 279, 16145, 285, 8204, 185, 185, 13483, 9890, 16982, 457, 17693, 829],
+        "logprobs": [
+            -0.2529537081718445,
+            -0.09579266607761383,
+            -2.0096523761749268,
+            -1.1562764644622803,
+            -2.968267108371947e-05,
+            -5.960462772236497e-07,
+            -3.4450891689630225e-05,
+            -1.8715682017500512e-05,
+            -0.00024017786199692637,
+            -4.172316494077677e-06,
+            -1.3351351299206726e-05,
+            -6.41325386823155e-05,
+            -3.3854863431770355e-05,
+            -2.3841828351578442e-06,
+            -1.1920920996999484e-06,
+            -1.633153806324117e-05,
+        ],
+    },
+    {
+        "token_ids": [185, 185, 1679, 26430, 279, 16145, 285, 8204, 185, 185, 13483, 9890, 16982, 457, 17693, 829],
+        "logprobs": [
+            -0.19135114550590515,
+            -0.09532743692398071,
+            -1.7650374174118042,
+            -1.0637946128845215,
+            -8.11782301752828e-05,
+            -3.5762778338721546e-07,
+            -0.00019131260341964662,
+            -5.364403477869928e-06,
+            -0.0003734129713848233,
+            -2.9802276912960224e-06,
+            -1.0728830375228426e-06,
+            -5.4357955377781764e-05,
+            -5.4238753364188597e-05,
+            -3.5762778338721546e-07,
+            -2.145764938177308e-06,
+            -1.370897371089086e-05,
+        ],
+    },
+]
+
 CASE_QWEN_ACLGRAPH = {
     "model": QWEN3,
     "quantization": None,
@@ -372,6 +439,19 @@ CASE_DS_ACLGRAPH_ENPU = {
     "env_vars": {"ENPU_ENABLE": "true"},
 }
 
+CASE_DS_ACLGRAPH_A3_9362 = {
+    **CASE_DS_ACLGRAPH,
+    "golden_answers": {
+        "short": DEEPSEEK_V2_LITE_PROMPTS_SHORT_BASELINE,
+        "long": DEEPSEEK_V2_LITE_PROMPTS_LONG_BASELINE_A3_9362,
+    },
+}
+
+CASE_DS_ACLGRAPH_ENPU_A3_9362 = {
+    **CASE_DS_ACLGRAPH_A3_9362,
+    "env_vars": {"ENPU_ENABLE": "true"},
+}
+
 # inherit from tests/e2e/pull_request/utils.py::compare_logprobs
 ATOL = 0.0689
 
@@ -382,6 +462,41 @@ _SAMPLING_PARAMS = SamplingParams(
     top_k=0,
     logprobs=20,
 )
+
+
+def _probe_npu_device_name(q: multiprocessing.Queue) -> None:
+    """Entry point for the detection subprocess — must be module-level for pickling."""
+    try:
+        import torch
+
+        q.put(torch.npu.get_device_properties().name)
+    except Exception:
+        q.put("")
+
+
+def get_case_by_specific_device():
+    # Detect NPU device name in an isolated fork subprocess to avoid
+    # triggering torch.npu initialization in the main process, which would
+    # break forked multiprocessing subprocesses that use NPU later.
+    # Use "fork" instead of "spawn" because we are called during module
+    # import (pytest parametrize evaluation), and spawn would trigger
+    # _check_not_importing_main() since the main module is not fully loaded.
+    # Fork is safe here: the main process has never touched torch.npu, so
+    # the forked child starts clean, imports torch.npu to read the device
+    # name, and exits immediately.
+    ctx = multiprocessing.get_context("fork")
+    q: multiprocessing.Queue[str] = ctx.Queue()
+    p = ctx.Process(target=_probe_npu_device_name, args=(q,))
+    p.start()
+    p.join(timeout=10)
+    try:
+        device_name = q.get_nowait()
+    except queue.Empty:
+        device_name = ""
+
+    if "9362" in device_name:
+        return [CASE_QWEN_ACLGRAPH, CASE_DS_ACLGRAPH_A3_9362, CASE_DS_ACLGRAPH_ENPU_A3_9362]
+    return [CASE_QWEN_ACLGRAPH, CASE_DS_ACLGRAPH, CASE_DS_ACLGRAPH_ENPU]
 
 
 def _install_spies(metrics: dict[str, Any] | None):
@@ -604,7 +719,7 @@ def check_capture_mem(capture_mem, baseline_capture_mem=0.2, capture_mem_toleran
 
 
 @wait_until_npu_memory_free(0.7)
-@pytest.mark.parametrize("cur_case", [CASE_QWEN_ACLGRAPH, CASE_DS_ACLGRAPH, CASE_DS_ACLGRAPH_ENPU])
+@pytest.mark.parametrize("cur_case", get_case_by_specific_device())
 def test_aclgraph(cur_case: dict, monkeypatch: pytest.MonkeyPatch):
     # Counter doesn't work in default "spawn" mode
     metrics = None

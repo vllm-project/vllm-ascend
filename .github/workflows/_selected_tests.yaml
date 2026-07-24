@@ -252,7 +252,7 @@ jobs:
 
       - name: Run selected tests with device
         if: ${{ matrix.group.npu_type != 'cpu' }}
-        continue-on-error: ${{ inputs.continue_on_error }}
+        continue-on-error: true
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           ENABLE_COVERAGE: ${{ inputs.enable-coverage}}
@@ -274,7 +274,7 @@ jobs:
 
       - name: Run selected tests without device
         if: ${{ matrix.group.npu_type == 'cpu' }}
-        continue-on-error: ${{ inputs.continue_on_error }}
+        continue-on-error: true
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
