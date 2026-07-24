@@ -60,6 +60,15 @@ class AscendDflashProposer(AscendEagleProposer):
 
         self.parallel_drafting_hidden_state_tensor = None
 
+        # vllm PR #43445: DFlash defaults to non-causal cross-attention; setting
+        # `causal: true` in the draft model's `dflash_config` switches it to
+        # causal attention on the bonus + mask query tokens.
+        self.dflash_causal = self.dflash_config.get("causal", False)
+
+    @property
+    def dflash_config(self) -> dict:
+        return getattr(self.draft_model_config.hf_config, "dflash_config", None) or {}
+
     def set_inputs_first_pass(
         self,
         target_token_ids: torch.Tensor,
@@ -143,7 +152,7 @@ class AscendDflashProposer(AscendEagleProposer):
         cad.max_query_len = num_query_per_req
         cad.max_seq_len = cad.max_seq_len + num_query_per_req
         cad.slot_mapping = query_slot_mapping
-        cad.causal = False
+        cad.causal = self.dflash_causal
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
 
@@ -192,7 +201,7 @@ class AscendDflashProposer(AscendEagleProposer):
                 max_seq_len=0,
                 slot_mapping=self._slot_mapping_buffer[:num_query_total],
                 attn_state=AscendAttentionState.ChunkedPrefill,
-                causal=False,
+                causal=self.dflash_causal,
                 is_prefilling=torch.zeros(num_reqs, dtype=torch.bool),
                 block_table_tensor=self.runner.input_batch.block_table[self.kv_cache_gid].get_device_tensor()[
                     :num_reqs
@@ -204,7 +213,13 @@ class AscendDflashProposer(AscendEagleProposer):
                 AscendAttentionState.ChunkedPrefill,
             )
 
-            attn_metadata_dflash.attn_mask = None
+            # Mirror the post-build override done on the runtime path in
+            # ``_propose`` (llm_base_proposer.py): the non-causal kernel runs
+            # with ``atten_mask=None``, while the causal kernel keeps the
+            # builder-generated mask so graph capture stays consistent with
+            # replay for the new DFlash causal mode.
+            if not self.dflash_causal:
+                attn_metadata_dflash.attn_mask = None
             attn_metadata_dflash.attn_state = AscendAttentionState.ChunkedPrefill
 
             per_layer_attn_metadata = dict()
