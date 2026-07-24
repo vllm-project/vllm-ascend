@@ -130,24 +130,15 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
     def _fix_draft_kv_head_counts(self, target_model) -> None:
         from vllm.logger import logger
 
-        # Build a lookup from target layer name → (num_heads, num_kv_heads)
-        # using the already-computed target_attn_layer_names.
         target_attn_layers = get_layers_from_vllm_config(
             self.vllm_config,
             AttentionLayerBase,
         )
 
         draft_model = self.get_model()
-        if not (hasattr(draft_model, "model") and hasattr(draft_model.model, "layers")):
-            return
-
         for draft_idx, layer in enumerate(draft_model.model.layers):
-            if not hasattr(layer, "self_attn"):
-                continue
-            attn = getattr(layer.self_attn, "attn", None)
-            if attn is None:
-                continue
-            tgt_name = getattr(attn, "kv_sharing_target_layer_name", None)
+            attn = layer.self_attn.attn
+            tgt_name = attn.kv_sharing_target_layer_name
             if tgt_name is None:
                 continue
             target_module = target_attn_layers.get(tgt_name)
@@ -164,14 +155,12 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
             draft_nh = attn.num_heads
             tgt_nh = target_module.num_heads
 
-            # Always sync kv_sharing_target_layer_name to the backend
-            # (impl). _setup_gemma4_kv_sharing sets it on the Attention
-            # wrapper but the AscendAttention backend was already
-            # initialised with None.
-            kv_share_tgt = getattr(attn, "kv_sharing_target_layer_name", None)
-            impl = getattr(attn, "impl", None)
-            if impl is not None and kv_share_tgt is not None:
-                object.__setattr__(impl, "kv_sharing_target_layer_name", kv_share_tgt)
+            # Sync kv_sharing_target_layer_name to the backend impl.
+            # _setup_gemma4_kv_sharing sets it on the Attention wrapper
+            # but the AscendAttention backend was already initialised with None.
+            impl = attn.impl
+            if impl is not None:
+                object.__setattr__(impl, "kv_sharing_target_layer_name", tgt_name)
 
             if draft_nkv != tgt_nkv or draft_nh != tgt_nh:
                 logger.info(
@@ -187,9 +176,6 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
                 )
                 object.__setattr__(attn, "num_kv_heads", tgt_nkv)
                 object.__setattr__(attn, "num_heads", tgt_nh)
-                # Also fix the AscendAttention backend (impl) — it has
-                # its own copies that were initialised from Attention
-                # before _setup_gemma4_kv_sharing ran.
                 if impl is not None:
                     object.__setattr__(impl, "num_kv_heads", tgt_nkv)
                     object.__setattr__(impl, "num_heads", tgt_nh)
@@ -205,9 +191,9 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
                 # LARGE-HEAD FALLBACK PA path, missing the prefill-only
                 # KV gathering from the shared target cache.
                 mtp_attn = layer.self_attn
-                if getattr(mtp_attn, "num_kv_heads", None) != tgt_nkv:
+                if mtp_attn.num_kv_heads != tgt_nkv:
                     object.__setattr__(mtp_attn, "num_kv_heads", tgt_nkv)
-                if getattr(mtp_attn, "num_heads", None) != tgt_nh:
+                if mtp_attn.num_heads != tgt_nh:
                     object.__setattr__(mtp_attn, "num_heads", tgt_nh)
 
     # ---- load_model --------------------------------------------------------
