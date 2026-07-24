@@ -17,6 +17,14 @@ from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.ssd_chunking import (
+    DEFAULT_SSD_OBJECT_CHUNK_BYTES,
+    DEFAULT_SSD_READ_BATCH_BYTES,
+    aggregate_chunk_results,
+    iter_ssd_read_batches,
+    split_ssd_batch,
+    ssd_chunk_head_keys,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
 
@@ -41,9 +49,13 @@ def _mooncake_setup_supports_ssd_offload() -> bool:
         return "enable_ssd_offload" in doc
 
 
-def _ssd_setup_kwargs(config: "MooncakeStoreConfig") -> dict[str, object]:
+def _ssd_setup_kwargs(
+    config: "MooncakeStoreConfig",
+    *,
+    contribute_memory: bool = True,
+) -> dict[str, object]:
     """Keyword args for store.setup(); empty on old Mooncake or when SSD is off."""
-    if not config.enable_ssd_offload:
+    if not contribute_memory or not config.enable_ssd_offload:
         return {}
     if not _mooncake_setup_supports_ssd_offload():
         raise RuntimeError(
@@ -63,6 +75,15 @@ class MooncakeBackend(Backend):
     def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False, contribute_memory: bool = True):
         self.parallel_config = parallel_config
         self.config = MooncakeStoreConfig.load_from_env()
+        self._ssd_chunk_bytes = DEFAULT_SSD_OBJECT_CHUNK_BYTES
+        self._ssd_read_batch_bytes = min(
+            self.config.local_buffer_size,
+            DEFAULT_SSD_READ_BATCH_BYTES,
+        )
+        if self.config.enable_ssd_offload and self._ssd_read_batch_bytes < self._ssd_chunk_bytes:
+            raise ValueError(
+                f"Mooncake local_buffer_size must be at least {self._ssd_chunk_bytes} bytes when SSD offload is enabled"
+            )
         if self.config.protocol != "ascend":
             raise NotImplementedError(f"MooncakeBackend does not support protocol {self.config.protocol!r}.")
 
@@ -102,7 +123,12 @@ class MooncakeBackend(Backend):
 
         store = MooncakeDistributedStore()
         local_hostname = get_ip()
-        ssd_kwargs = _ssd_setup_kwargs(self.config)
+        # The scheduler only performs metadata lookup. Mounting FileStorage on
+        # it advertises capacity that cannot serve worker KV transfers.
+        ssd_kwargs = _ssd_setup_kwargs(
+            self.config,
+            contribute_memory=self._contribute_memory,
+        )
         # Each rank that contributes memory to the pool uses its own SSD
         # directory to avoid bucket file collisions. Key by the globally unique
         # rank so that DP/TP/PP/CP replicas never share a directory (dense and
@@ -184,39 +210,65 @@ class MooncakeBackend(Backend):
             )
             return [0] * len(keys)
         assert self.store is not None
-        return self.store.batch_is_exist(keys)
+        query_keys = ssd_chunk_head_keys(keys) if self.config.enable_ssd_offload else keys
+        return self.store.batch_is_exist(query_keys)
 
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         self.ensure_initialized()
         assert self.store is not None
+        logical_keys = keys
+        result_ranges = None
+        if self.config.enable_ssd_offload:
+            keys, addrs, sizes, result_ranges = split_ssd_batch(
+                keys,
+                addrs,
+                sizes,
+                self._ssd_chunk_bytes,
+            )
+            logger.debug(
+                "Mooncake SSD put split logical_keys=%d physical_keys=%d max_object_bytes=%d",
+                len(logical_keys),
+                len(keys),
+                self._ssd_chunk_bytes,
+            )
         try:
             config = ReplicateConfig()
             if self.config.preferred_segment:
                 config.preferred_segment = self.local_seg
             config.prefer_alloc_in_same_node = self.config.prefer_alloc_in_same_node
             res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes, config)
-            failed_codes = [int(value) for value in res if value < 0]
+            expanded_results = [int(value) for value in res]
+            res_list = (
+                aggregate_chunk_results(expanded_results, result_ranges)
+                if result_ranges is not None
+                else expanded_results
+            )
+            failed_codes = [value for value in res_list if value < 0]
             failed_count = len(failed_codes)
             if failed_count:
                 error_codes = sorted(set(failed_codes))
                 logger.error(
                     "Failed to put %d keys out of %d. error_codes=%s. Check memory and store capacity.",
                     failed_count,
-                    len(keys),
+                    len(logical_keys),
                     error_codes,
                 )
-                logger.debug("Failed to put key details. keys=%s, result=%s", keys, res)
+                logger.debug(
+                    "Failed to put key details. keys=%s, result=%s",
+                    logical_keys,
+                    res_list,
+                )
                 if self._lazy_init:
                     logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
         except Exception as e:
             logger.error(
                 "Failed to put %d keys out of %d. Check store state and memory.",
-                len(keys),
-                len(keys),
+                len(logical_keys),
+                len(logical_keys),
             )
             logger.debug(
                 "Failed to put key details. keys=%s, type=%s, error=%s",
-                keys,
+                logical_keys,
                 type(e).__name__,
                 e,
             )
@@ -224,6 +276,8 @@ class MooncakeBackend(Backend):
                 logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
 
     def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+        logical_keys = keys
+        result_ranges = None
         if self._lazy_init and not self._store_initialized:
             logger.error(
                 "Failed to get %d keys out of %d. Store is not initialized; "
@@ -234,14 +288,49 @@ class MooncakeBackend(Backend):
             logger.debug("Failed to get key details. keys=%s", keys)
             return
         assert self.store is not None
+        if self.config.enable_ssd_offload:
+            keys, addrs, sizes, result_ranges = split_ssd_batch(
+                keys,
+                addrs,
+                sizes,
+                self._ssd_chunk_bytes,
+            )
+            read_batches = list(
+                iter_ssd_read_batches(
+                    sizes,
+                    self._ssd_read_batch_bytes,
+                )
+            )
+            logger.debug(
+                "Mooncake SSD get split logical_keys=%d physical_keys=%d "
+                "read_batches=%d max_object_bytes=%d max_batch_bytes=%d",
+                len(logical_keys),
+                len(keys),
+                len(read_batches),
+                self._ssd_chunk_bytes,
+                self._ssd_read_batch_bytes,
+            )
+        else:
+            read_batches = [(0, len(keys))] if keys else []
         logger.debug(
             "MooncakeBackend.get enter keys=%d sample_keys=%s",
-            len(keys),
-            keys[:3],
+            len(logical_keys),
+            logical_keys[:3],
         )
         try:
-            res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
-            res_list = list(res)
+            expanded_results: list[int] = []
+            for start, end in read_batches:
+                res = self.store.batch_get_into_multi_buffers(
+                    keys[start:end],
+                    addrs[start:end],
+                    sizes[start:end],
+                )
+                expanded_results.extend(int(value) for value in res)
+            res_list = (
+                aggregate_chunk_results(expanded_results, result_ranges)
+                if result_ranges is not None
+                else [0 if value > 0 else value for value in expanded_results]
+            )
             failed_codes = [int(value) for value in res_list if value < 0]
             failed_count = len(failed_codes)
             error_codes = sorted(set(failed_codes))
@@ -249,23 +338,24 @@ class MooncakeBackend(Backend):
                 logger.error(
                     "Failed to get %d keys out of %d. error_codes=%s. Check key existence and memory state.",
                     failed_count,
-                    len(keys),
+                    len(logical_keys),
                     error_codes,
                 )
-                logger.debug("Failed to get key details. keys=%s, result=%s", keys, res_list)
-            for i, value in enumerate(res_list):
-                if value > 0:
-                    res_list[i] = 0
+                logger.debug(
+                    "Failed to get key details. keys=%s, result=%s",
+                    logical_keys,
+                    res_list,
+                )
             return res_list
         except Exception as e:
             logger.error(
                 "Failed to get %d keys out of %d. Check store state and network.",
-                len(keys),
-                len(keys),
+                len(logical_keys),
+                len(logical_keys),
             )
             logger.debug(
                 "Failed to get key details. keys=%s, type=%s, error=%s",
-                keys,
+                logical_keys,
                 type(e).__name__,
                 e,
             )
