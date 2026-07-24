@@ -459,6 +459,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         """Start the compact KV all-gather used by prefill/mixed DCP batches."""
         if not self._has_prefill(attn_metadata):
             return
+        assert isinstance(attn_metadata, AscendSFADCPMetadata)
         assert attn_metadata.dcp_context is not None, "DCP SFA requires attn_metadata.dcp_context."
         assert self.dcp_group is not None, "DCP SFA requires dcp_group when dcp_size > 1."
 
