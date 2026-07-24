@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from vllm import LLM
 
 model_name = "Qwen/Qwen3-Reranker-0.6B"
@@ -39,6 +40,8 @@ def get_llm() -> LLM:
     )
 
 
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_reranker_models_lora():
     # Load the Jinja template for formatting query-document pairs
     # The template ensures proper formatting for the reranker model

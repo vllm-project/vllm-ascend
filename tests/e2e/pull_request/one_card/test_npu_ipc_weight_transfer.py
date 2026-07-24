@@ -95,6 +95,8 @@ def _has_lifecycle_endpoints(server: RemoteOpenAIServer) -> bool:
     torch.npu.device_count() < 1,
     reason="NPU IPC weight transfer e2e test requires at least 1 NPU.",
 )
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_npu_ipc_weight_transfer_updates_server_weights():
     from vllm.utils.network_utils import get_open_port
 

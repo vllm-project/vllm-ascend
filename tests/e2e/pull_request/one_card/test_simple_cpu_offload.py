@@ -38,6 +38,8 @@ def _build_kv_transfer_config(
     )
 
 
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_simple_cpu_offload_accuracy() -> None:
     """Reset GPU prefix cache after a cold run; verify the CPU-loaded KV
     cache reproduces the cold-run output deterministically."""
@@ -78,6 +80,8 @@ def test_simple_cpu_offload_accuracy() -> None:
 
 
 @pytest.mark.parametrize("lazy", [False, True])
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_simple_cpu_offload_no_crash_on_repeat(lazy: bool) -> None:
     """Smoke test: many short generations exercise both eager and lazy
     offload paths without errors and yield non-empty outputs."""

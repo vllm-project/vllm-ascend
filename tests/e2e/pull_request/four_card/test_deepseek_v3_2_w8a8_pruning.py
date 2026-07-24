@@ -20,6 +20,7 @@ import json
 import os
 from unittest.mock import patch
 
+import pytest
 import requests
 from vllm.utils.network_utils import get_open_port
 
@@ -28,6 +29,8 @@ from tests.e2e.conftest import DisaggPDProxy, RemotePDServer, VllmRunner, wait_u
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @wait_until_npu_memory_free()
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(4)
 def test_moe_w8a8_tp_pp_ep_full_decode_only():
     """Verify W8A8 MoE generation with TP, PP, EP, and full decode only."""
     model = "vllm-ascend/DeepSeek-V3.2-W8A8-Pruning"
@@ -50,6 +53,8 @@ def test_moe_w8a8_tp_pp_ep_full_decode_only():
 
 
 @wait_until_npu_memory_free()
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(4)
 def test_pd_disaggregation_w8a8_sfa_dsa_full_decode_only():
     """Verify W8A8 1P1D PD disaggregation with full decode only."""
     prefiller_port = [get_open_port()]

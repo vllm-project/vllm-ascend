@@ -34,6 +34,8 @@ MODELS = [
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_models_with_multistream_overlap_shared_expert(
     model: str,
     max_tokens: int,

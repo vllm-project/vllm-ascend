@@ -7,6 +7,8 @@ from tests.e2e.conftest import HfRunner, VllmRunner
 
 
 @pytest.mark.skip("Probabilistic failure, need fix")
+@pytest.mark.requires_hardware("310P")
+@pytest.mark.requires_npus(1)
 def test_qwen_pooling_classify_correctness() -> None:
     model_name = snapshot_download("Howeee/Qwen2.5-1.5B-apeach")
 

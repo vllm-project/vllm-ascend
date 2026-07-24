@@ -192,6 +192,8 @@ def _has_lifecycle_endpoints(server: RemoteOpenAIServer) -> bool:
     torch.npu.device_count() < 2,
     reason="HCCL weight transfer e2e test requires at least 2 NPUs.",
 )
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(2)
 def test_hccl_weight_transfer_updates_server_weights():
     port = get_open_port()
     server_args = [

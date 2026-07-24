@@ -57,6 +57,8 @@ See ``test_config.yaml`` for details.
 from __future__ import annotations
 
 import argparse
+import ast
+import contextlib
 import json
 import os
 import subprocess
@@ -108,6 +110,27 @@ _BISECT_TOOL_SUPPORT_FILES = {
 # Populated by _load_runner_mapping(). Ordered list of (regex, {key: RunnerKey}).
 _RUNNER_MAPPING: list[tuple[re.Pattern, dict[str, RunnerKey]]] = []
 
+# Populated by _load_marker_routing(). E.g.:
+#   {"requires_hardware": {"A2": "a2", "A3": "a3"},
+#    "requires_npus": {"1": "x1", "2": "x2", "4": "x4"}}
+_MARKER_ROUTING: dict[str, dict[str, str]] = {}
+
+# Coarse hardware types that don't need a specific SOC runner.
+# Any requires_hardware value outside this set is treated as SOC-specific.
+_COARSE_HW_TYPES: frozenset = frozenset({"A2", "A3", "310P", "A5"})
+
+
+def _is_soc_specific_test(file_path: str) -> bool:
+    """Return True if the test file has a SOC-specific ``requires_hardware``
+    marker (e.g. ``ascend910_9392``) rather than a coarse type (``A3``)."""
+    markers = _parse_test_markers(file_path)
+    if markers is None:
+        return False
+    hw_values = markers.get("requires_hardware")
+    if not hw_values:
+        return False
+    return any(v not in _COARSE_HW_TYPES for v in hw_values)
+
 
 def _parse_runner_key(runner_key: str) -> RunnerKey:
     """Parse ``a2_x1`` → ``(1, NpuType.A2)``, ``310p_x4`` → ``(4, NpuType._310P)``."""
@@ -143,18 +166,47 @@ def _load_runner_mapping(meta: dict) -> None:
         _RUNNER_MAPPING.append((re.compile(pattern_str), runners))
 
 
+def _load_marker_routing(meta: dict) -> None:
+    """Load marker routing from the config meta dict into ``_MARKER_ROUTING``.
+
+    The marker_routing config maps pytest marker argument values to
+    runner-key components::
+
+        marker_routing:
+          requires_hardware:
+            A2: a2
+            A3: a3
+          requires_npus:
+            1: x1
+            2: x2
+            4: x4
+    """
+    global _MARKER_ROUTING
+    _MARKER_ROUTING = {}
+    raw = meta.get("marker_routing", {}) or {}
+    for marker_name, arg_map in raw.items():
+        _MARKER_ROUTING[marker_name] = {str(k): str(v) for k, v in (arg_map or {}).items()}
+
+
 def _resolve_runner(file_path: str) -> RunnerKey | None:
     """Match *file_path* against ``_RUNNER_MAPPING``.
 
     Returns the ``default`` runner for the first matching pattern.
-    If the filename contains ``_310p`` and the matched pattern has
-    a ``"310p"`` entry, that entry is returned instead.
+    Supports generic filename-based overrides: if the file name
+    contains ``_<suffix>`` (e.g. ``_a2``, ``_a3``, ``_310p``) and
+    the matched pattern has a matching entry, that entry is returned
+    instead of the default.
     """
     route_path = _as_posix_path(_pytest_node_file_path(file_path))
+    name = Path(route_path).name
     for pattern, runners in _RUNNER_MAPPING:
         if pattern.search(route_path):
-            if "_310p" in Path(route_path).name and "310p" in runners:
-                return runners["310p"]
+            # Try filename-based suffix override (e.g. _a2, _a3, _310p)
+            for suffix, runner_key in runners.items():
+                if suffix == "default":
+                    continue
+                if f"_{suffix}" in name:
+                    return runner_key
             return runners.get("default")
     return None
 
@@ -170,6 +222,165 @@ def _route_e2e_dir(dir_path: str) -> RunnerKey | None:
 
 def _route_e2e_file(file_path: str) -> RunnerKey | None:
     return _resolve_runner(file_path)
+
+
+def _parse_test_markers(file_path: str) -> dict[str, list[str]] | None:
+    """Parse ``@pytest.mark.requires_hardware`` and
+    ``@pytest.mark.requires_npus`` from a test file using AST.
+
+    Returns a dict like ``{"requires_hardware": ["A2", "A3"],
+    "requires_npus": ["1"]}``, or ``None`` if the file has no such
+    markers or cannot be parsed.
+
+    Only string literal arguments are extracted (no variable references).
+    """
+    try:
+        with open(file_path) as f:
+            tree = ast.parse(f.read())
+    except (SyntaxError, OSError):
+        return None
+
+    markers: dict[str, list[str]] = {}
+
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+
+        for decorator in node.decorator_list:
+            info = _extract_marker_arg(decorator, "requires_hardware", "requires_npus")
+            if info:
+                name, args = info
+                markers.setdefault(name, []).extend(args)
+
+    return markers if markers else None
+
+
+def _extract_marker_arg(
+    decorator: ast.AST,
+    *marker_names: str,
+) -> tuple[str, list[str]] | None:
+    """If *decorator* is a ``@pytest.mark.<name>(...)`` call with
+    *name* in *marker_names*, return ``(name, [str_args...])``.
+    """
+    if not isinstance(decorator, ast.Call):
+        return None
+    func = decorator.func
+    if not isinstance(func, ast.Attribute):
+        return None
+    if func.attr not in marker_names:
+        return None
+    if not isinstance(func.value, ast.Attribute):
+        return None
+    if func.value.attr != "mark":
+        return None
+
+    args: list[str] = []
+    for arg in decorator.args:
+        if isinstance(arg, ast.Constant):
+            if isinstance(arg.value, str):
+                args.append(arg.value)
+            elif isinstance(arg.value, int):
+                args.append(str(arg.value))
+    return (func.attr, args)
+
+
+def _resolve_runner_by_markers(
+    file_path: str,
+) -> list[RunnerKey] | None:
+    """Try to route *file_path* by its ``@pytest.mark.requires_*``
+    markers, using ``_MARKER_ROUTING`` config to map marker values to
+    runner-key components.
+
+    Returns a list of ``RunnerKey``\s if markers were found and
+    successfully resolved, or ``None`` if no markers exist (caller
+    should fall back to directory-based routing).
+    """
+    markers = _parse_test_markers(file_path)
+    if markers is None:
+        return None
+
+    hw_values = markers.get("requires_hardware")
+    npus_values = markers.get("requires_npus")
+
+    if hw_values is None and npus_values is None:
+        return None
+
+    # Map marker values to runner-key components
+    hw_routing = _MARKER_ROUTING.get("requires_hardware", {})
+    npus_routing = _MARKER_ROUTING.get("requires_npus", {})
+
+    chips: set[NpuType] = set()
+    npu_counts: set[int] = set()
+
+    if hw_values:
+        for hw in hw_values:
+            chip_key = hw_routing.get(hw)
+            if chip_key:
+                with contextlib.suppress(ValueError):
+                    chips.add(NpuType(chip_key))
+
+    if npus_values:
+        for n in npus_values:
+            card_key = npus_routing.get(str(n))
+            if card_key:
+                # card_key is e.g. "x1", "x2", "x4"
+                with contextlib.suppress(ValueError, IndexError):
+                    npu_counts.add(int(card_key[1:]))
+
+    # Only use marker-based routing when *both* chip and NPU count
+    # are explicitly specified.  An incomplete annotation (e.g. only
+    # requires_hardware without requires_npus) falls back to the
+    # original directory-based routing for backward compatibility.
+    if not chips or not npu_counts:
+        return None
+
+    result: list[RunnerKey] = []
+    for chip in chips:
+        for n in sorted(npu_counts):
+            result.append((n, chip))
+
+    return result
+
+
+def _test_routes_to_runner(file_path: str, target: RunnerKey) -> bool:
+    """Return True if *file_path* would be routed to *target* runner.
+
+    Priority:
+    1. If the file has complete markers (both ``requires_hardware`` and
+       ``requires_npus``), check compatibility with *target*.
+    2. Otherwise fall back to directory-based routing (``_route_e2e_file``).
+    """
+    marker_keys = _resolve_runner_by_markers(file_path)
+    if marker_keys is not None:
+        return target in marker_keys
+    return _route_e2e_file(file_path) == target
+
+
+def _discover_tests_for_runner(
+    test_paths: list[str],
+    target: RunnerKey,
+) -> list[str]:
+    """Discover test files in *test_paths* that route to *target* runner.
+
+    Each path may be a single file (``test_foo.py``) or a directory
+    (all ``test_*.py`` files under it are examined).  Returns a sorted
+    list of paths that would be routed to the given runner.
+    """
+    result: list[str] = []
+    for entry in test_paths:
+        path = Path(_pytest_node_file_path(entry))
+        if not path.exists():
+            continue
+        if path.is_file():
+            if _test_routes_to_runner(str(path), target):
+                result.append(str(path))
+        else:
+            for f in sorted(path.rglob("test_*.py")):
+                if "__pycache__" in f.parts:
+                    continue
+                if _test_routes_to_runner(str(f), target):
+                    result.append(str(f))
+    return result
 
 
 def _as_posix_path(path: str) -> str:
@@ -439,6 +650,13 @@ def _scan_e2e_test_dir(
         return
 
     if path.is_file():
+        # Try marker-based routing first
+        marker_keys = _resolve_runner_by_markers(dir_path)
+        if marker_keys is not None:
+            for key in marker_keys:
+                groups[key].append(dir_path)
+            return
+        # Fall back to directory-based routing
         key = _route_e2e_file(dir_path)
         if key is not None:
             groups[key].append(dir_path)
@@ -454,9 +672,15 @@ def _scan_e2e_test_dir(
         test_files = sorted(str(f) for f in path.rglob("test_*.py"))
         if test_files:
             for f in test_files:
-                f_key = _route_e2e_file(f)
-                if f_key is not None:
-                    groups[f_key].append(f)
+                # Try marker-based routing per file
+                marker_keys = _resolve_runner_by_markers(f)
+                if marker_keys is not None:
+                    for mk in marker_keys:
+                        groups[mk].append(f)
+                else:
+                    f_key = _route_e2e_file(f)
+                    if f_key is not None:
+                        groups[f_key].append(f)
         return
 
     for entry in sorted(path.iterdir()):
@@ -466,9 +690,15 @@ def _scan_e2e_test_dir(
                 test_files = sorted(str(f) for f in entry.rglob("test_*.py"))
                 if test_files:
                     for f in test_files:
-                        f_key = _route_e2e_file(f)
-                        if f_key is not None:
-                            groups[f_key].append(f)
+                        # Try marker-based routing per file
+                        marker_keys = _resolve_runner_by_markers(f)
+                        if marker_keys is not None:
+                            for mk in marker_keys:
+                                groups[mk].append(f)
+                        else:
+                            f_key = _route_e2e_file(f)
+                            if f_key is not None:
+                                groups[f_key].append(f)
             else:
                 _scan_e2e_test_dir(str(entry), groups)
 
@@ -488,11 +718,17 @@ def _find_runner(
     num_npus: int,
     npu_type: NpuType,
     runners: list[RunnerInfo],
+    label_suffix: str = "",
 ) -> RunnerInfo | None:
     if npu_type == NpuType.CPU:
         candidates = [r for r in runners if r.npu_type == NpuType.CPU]
     else:
         candidates = [r for r in runners if r.npu_type == npu_type and r.num_npus == num_npus]
+    if label_suffix:
+        # Prefer runners whose label ends with the given suffix
+        preferred = [r for r in candidates if r.label.endswith(label_suffix)]
+        if preferred:
+            return preferred[0]
     return candidates[0] if candidates else None
 
 
@@ -625,7 +861,49 @@ def _resolve_to_runners(
         partition_key = f"{npu_type.value}_x{num_npus}"
         psize = partition_config.get(partition_key, 1)
 
-        if psize > 1:
+        if npu_type == NpuType.A3 and psize > 1:
+            # Split A3 tests into SOC-specific (e.g. ascend910_9392) and
+            # generic, so they can be routed to different runner pools.
+            soc_specific: list[str] = []
+            generic: list[str] = []
+            for t in tests:
+                if _is_soc_specific_test(t):
+                    soc_specific.append(t)
+                else:
+                    generic.append(t)
+
+            # SOC-specific tests are few — no partition needed.
+            if soc_specific:
+                runner_soc = _find_runner(num_npus, npu_type, runners, label_suffix="")
+                if runner_soc is not None:
+                    result.append(
+                        _build_test_group(
+                            num_npus,
+                            npu_type,
+                            runner_soc,
+                            soc_specific,
+                            "1-1",
+                        )
+                    )
+
+            # Generic A3 tests use the full partition config.
+            if generic:
+                runner_gen = _find_runner(num_npus, npu_type, runners, label_suffix="-")
+                if runner_gen is not None:
+                    buckets = _partition_tests(sorted(generic), psize, estimated_times)
+                    for i, bucket in enumerate(buckets):
+                        if not bucket:
+                            continue
+                        result.append(
+                            _build_test_group(
+                                num_npus,
+                                npu_type,
+                                runner_gen,
+                                bucket,
+                                f"{i + 1}-{psize}",
+                            )
+                        )
+        elif psize > 1:
             buckets = _partition_tests(sorted(tests), psize, estimated_times)
             for i, bucket in enumerate(buckets):
                 if not bucket:
@@ -726,6 +1004,20 @@ def main():
         "Supports ``::nodeid`` suffix (e.g. ``test_foo.py::TestClass::test_method``) "
         "to run a single test method.",
     )
+    input_group.add_argument(
+        "--discover-for-runner",
+        type=str,
+        metavar="RUNNER_KEY",
+        help="Runner key (e.g. a2_x1) to discover tests for. "
+        "Scans TEST_PATHS and prints a JSON list of files that would be "
+        "routed to the specified runner. Implies --runner-discovery.",
+    )
+    parser.add_argument(
+        "test_paths",
+        nargs="*",
+        metavar="TEST_PATH",
+        help="Test directories or files to scan (only used with --discover-for-runner)",
+    )
     parser.add_argument(
         "--config",
         type=Path,
@@ -743,11 +1035,18 @@ def main():
     config = _resolve_config_inheritance(docs[0])
     meta = docs[1] if len(docs) >= 2 and docs[1] else {}
     _load_runner_mapping(meta)
+    _load_marker_routing(meta)
 
     skip_tests: set[str] = set()
     for module in config:
         for s in module.get("skip_tests", []):
             skip_tests.add(s.rstrip("/"))
+
+    if args.discover_for_runner:
+        target = _parse_runner_key(args.discover_for_runner)
+        discovered = _discover_tests_for_runner(args.test_paths, target)
+        print(json.dumps(discovered, separators=(",", ":")))
+        return
 
     if args.explicit_e2e_tests:
         matched_modules: list[str] = []

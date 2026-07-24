@@ -129,6 +129,8 @@ def _accuracy_test(llm: LLM, subscriber: MockSubscriber):
 
 
 @pytest.mark.skip(reason="cpu offload connector is deprecated.")
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_cpu_offloading() -> None:
     """
     Tests OffloadingConnector with CPUOffloadingSpec.

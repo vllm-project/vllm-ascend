@@ -29,6 +29,21 @@
         "npu_num": 8,
         "image_tag": "9.0.1-a3-ubuntu22.04-py3.12"
     },
+    "linux-aarch64-a3-2-": {
+        "chip": "a3",
+        "npu_num": 2,
+        "image_tag": "9.0.1-a3-ubuntu22.04-py3.12"
+    },
+    "linux-aarch64-a3-4-": {
+        "chip": "a3",
+        "npu_num": 4,
+        "image_tag": "9.0.1-a3-ubuntu22.04-py3.12"
+    },
+    "linux-aarch64-a3-8-": {
+        "chip": "a3",
+        "npu_num": 8,
+        "image_tag": "9.0.1-a3-ubuntu22.04-py3.12"
+    },
     "linux-amd64-cpu-8-hk": {
         "chip": "cpu",
         "npu_num": 0,

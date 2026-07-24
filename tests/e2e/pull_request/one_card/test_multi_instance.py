@@ -32,6 +32,8 @@ pre-fix negative-KV-cache condition.
 
 import os
 
+import pytest
+
 from tests.e2e.conftest import VllmRunner
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -45,6 +47,8 @@ _GPU_MEM_UTIL = 0.4
 _MAX_MODEL_LEN = 512
 
 
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_two_instances_on_single_card() -> None:
     """
     Regression test for PR #7427 (multi-instance OOM on single card).

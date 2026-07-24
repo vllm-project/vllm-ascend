@@ -46,6 +46,8 @@ _SKIP_V025_MRV2_SPEC_DECODE = pytest.mark.skipif(
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [True])
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_qwen3_dense_eager_mode(
     model: str,
     max_tokens: int,
@@ -95,6 +97,8 @@ def test_qwen3_dense_eager_mode(
     ],
 )
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_egale_spec_decoding(
     model: str,
     eagle_model: str,
@@ -154,6 +158,8 @@ def test_egale_spec_decoding(
 )
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.8)
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_dflash_spec_decoding(
     model: str,
     dflash_model: str,
@@ -214,6 +220,8 @@ def test_dflash_spec_decoding(
     ],
 )
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_dspark_spec_decoding(
     model: str,
     dspark_model: str,
@@ -268,6 +276,8 @@ def test_dspark_spec_decoding(
     ],
 )
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_qwen3_dense_graph_mode(
     model: str,
     max_tokens: int,

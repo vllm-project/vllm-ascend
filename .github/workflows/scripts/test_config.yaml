@@ -835,20 +835,45 @@ estimated_times:
   tests/ut/worker/a2/test_worker_multi_instance.py: 30
   tests/ut/worker/a2/test_worker_v1.py: 40
 
+# === Marker Routing ===
+# Maps ``@pytest.mark.requires_hardware`` / ``@pytest.mark.requires_npus``
+# marker argument values to runner-key components.
+# Used by select_tests.py's AST-based marker scanner to route test files
+# that carry these markers, as an alternative to directory-based routing.
+# When a test file has markers, marker routing takes priority over the
+# directory-based runner_mapping.
+marker_routing:
+  requires_hardware:
+    "310P": 310p
+    A2: a2
+    A3: a3
+    A5: a5
+  requires_npus:
+    1: x1
+    2: x2
+    4: x4
+    8: x8
+
 # === Runner Mapping ===
 # Maps test paths to runner types using regex patterns.
-# Each entry has a ``default`` runner and an optional ``310p`` override
-# for files whose name contains ``_310p``.
+# Each entry has a ``default`` runner and optional overrides for
+# filename conventions (``_310p``, ``_a2``, ``_a3``).
 # Patterns are evaluated longest first (most specific wins).
 runner_mapping:
   tests/e2e/pull_request/one_card:
     default: a2_x1
     310p: 310p_x1
+    a2: a2_x1
+    a3: a3_x1
   tests/e2e/pull_request/two_card:
     default: a3_x2
+    a2: a2_x2
+    a3: a3_x2
   tests/e2e/pull_request/four_card:
     default: a3_x4
     310p: 310p_x4
+    a2: a2_x4
+    a3: a3_x4
   tests/ut/.+/a3_2:
     default: a3_x2
   tests/ut/.+/a2:

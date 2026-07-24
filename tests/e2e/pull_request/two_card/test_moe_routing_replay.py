@@ -15,6 +15,8 @@ MODELS = [
 
 @pytest.mark.parametrize("model", MODELS)
 @patch.dict(os.environ, {"OMP_NUM_THREADS": "1"})
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(2)
 def test_qwen3_moe_routing_replay(model):
     prompts = [
         "Hello, please introduce yourself.",

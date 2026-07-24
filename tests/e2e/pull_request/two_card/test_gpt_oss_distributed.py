@@ -30,6 +30,8 @@ GPT_OSS_MODELS = [
 ]
 
 
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(2)
 @pytest.mark.parametrize("model", GPT_OSS_MODELS)
 def test_gpt_oss_distributed_tp2(model):
     example_prompts = [

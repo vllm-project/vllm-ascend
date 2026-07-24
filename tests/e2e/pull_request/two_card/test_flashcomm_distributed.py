@@ -35,6 +35,8 @@ QWEN_DENSE_MODELS = [
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(2)
 def test_deepseek_v2_lite_fc1_tp2() -> None:
     example_prompts = [
         "test" * 1001,
@@ -54,6 +56,8 @@ def test_deepseek_v2_lite_fc1_tp2() -> None:
 
 @pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(2)
 def test_qwen3_dense_fc1_tp2(model):
     example_prompts = [
         "Hello, my name is",
@@ -73,6 +77,8 @@ def test_qwen3_dense_fc1_tp2(model):
 
 @pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(2)
 def test_qwen3_dense_prefetch_mlp_weight_tp2(model):
     example_prompts = [
         "Hello, my name is",

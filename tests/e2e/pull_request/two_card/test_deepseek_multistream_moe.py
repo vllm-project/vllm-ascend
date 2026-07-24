@@ -16,9 +16,13 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import pytest
+
 from tests.e2e.conftest import VllmRunner
 
 
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(2)
 def test_deepseek_multistream_moe_tp2():
     example_prompts = [
         "Hello, my name is",

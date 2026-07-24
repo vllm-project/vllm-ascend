@@ -13,6 +13,8 @@ from tests.e2e.conftest import VllmRunner
 from tests.e2e.pull_request.one_card.spec_decode.utils import MODELS, calculate_acceptance_per_pos
 
 
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_qwen3_vl_eagle(
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
@@ -31,6 +33,8 @@ def test_qwen3_vl_eagle(
 @pytest.mark.parametrize("draft_tensor_parallel_size", [1])
 @pytest.mark.parametrize("disable_padded_drafter_batch", [False])
 @pytest.mark.parametrize("async_scheduling", [True])
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_qwen_eagle3_acceptance(
     method: str,
     num_speculative_tokens: int,

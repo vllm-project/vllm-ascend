@@ -102,6 +102,8 @@ GOLDEN = [
 @pytest.mark.parametrize("distributed_executor_backend", DIST_EXECUTOR_BACKEND)
 @patch.dict(os.environ, {"OMP_NUM_THREADS": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.6)
+@pytest.mark.requires_hardware("ascend910_9392")
+@pytest.mark.requires_npus(4)
 def test_models_pp2_tp2(model: str, tp_size: int, pp_size: int, distributed_executor_backend: str) -> None:
     with VllmRunner(
         model,
@@ -128,6 +130,8 @@ def test_models_pp2_tp2(model: str, tp_size: int, pp_size: int, distributed_exec
 @pytest.mark.parametrize("pp_size", PIPELINE_PARALLELS)
 @pytest.mark.parametrize("distributed_executor_backend", DIST_EXECUTOR_BACKEND)
 @wait_until_npu_memory_free(target_free_percentage=0.6)
+@pytest.mark.requires_hardware("ascend910_9392")
+@pytest.mark.requires_npus(4)
 def test_models_pp2_dp2(model: str, dp_size: int, pp_size: int, distributed_executor_backend: str) -> None:
     with DPVllmRunner(
         model,
@@ -153,6 +157,8 @@ def test_models_pp2_dp2(model: str, dp_size: int, pp_size: int, distributed_exec
 @pytest.mark.parametrize("pcp_size", PREFILL_CONTEXT_PARALLELS)
 @pytest.mark.parametrize("pp_size", PIPELINE_PARALLELS)
 @wait_until_npu_memory_free(target_free_percentage=0.6)
+@pytest.mark.requires_hardware("ascend910_9392")
+@pytest.mark.requires_npus(4)
 def test_models_pp2_pcp2(model: str, pcp_size: int, pp_size: int) -> None:
     with VllmRunner(
         model,

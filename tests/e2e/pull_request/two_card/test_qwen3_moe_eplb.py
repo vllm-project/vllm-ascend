@@ -25,6 +25,8 @@ from vllm.utils.network_utils import get_open_port
 from tests.e2e.conftest import RemoteOpenAIServer
 
 
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(2)
 @pytest.mark.asyncio
 async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
     model = "vllm-ascend/Qwen3-30B-A3B-W8A8"

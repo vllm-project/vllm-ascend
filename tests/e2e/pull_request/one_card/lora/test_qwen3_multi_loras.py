@@ -45,6 +45,8 @@ def format_chatml_messages(prompt: str):
     graph_mode="eager",
 )
 @patch.dict("os.environ", {"VLLM_USE_MODELSCOPE": "False"})
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_multi_loras_with_tp_sync():
     lora_name_id_map = {}
     increase_lora_id = 0

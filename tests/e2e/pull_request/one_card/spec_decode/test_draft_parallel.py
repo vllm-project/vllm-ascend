@@ -18,6 +18,8 @@ from tests.e2e.pull_request.one_card.spec_decode.utils import (
 @pytest.mark.parametrize("method", DRAFT_PARALLEL_MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [8])
 @pytest.mark.parametrize("draft_tensor_parallel_size", [1])
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_parallel_drafting_acceptance(
     method: str,
     num_speculative_tokens: int,

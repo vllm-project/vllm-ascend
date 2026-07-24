@@ -36,6 +36,8 @@ MODELS = ["stepfun-ai/Step-3.5-Flash", "stepfun-ai/Step-3.7-Flash"]
 
 
 @pytest.mark.parametrize("model_name", MODELS)
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(4)
 def test_step3p5_mtp_acceptance_tp8(model_name):
     golden = [0.85, 0.46, 0.19]
 

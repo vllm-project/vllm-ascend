@@ -17,6 +17,8 @@ PROMPTS = [
 
 @wait_until_npu_memory_free(0.7)
 @pytest.mark.parametrize("model", MODELS)
+@pytest.mark.requires_hardware("ascend910_9392")
+@pytest.mark.requires_npus(2)
 def test_deepseek_v2_lite_enable_shared_expert_dp_tp2(model: str, monkeypatch) -> None:
     # FlashComm v1 / shared-expert-DP require HCCL_OP_EXPANSION_MODE to be unset.
     monkeypatch.delenv("HCCL_OP_EXPANSION_MODE", raising=False)

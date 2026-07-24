@@ -37,6 +37,8 @@ MODELS = ["wemaster/deepseek_mtp_main_random_bf16"]
 @pytest.mark.parametrize("num_speculative_tokens", [3])
 @pytest.mark.parametrize("cudagraph_mode", ["FULL_DECODE_ONLY"])
 @pytest.mark.parametrize("disable_padded_drafter_batch", [False])
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_deepseek_mtp(
     model_name: str, num_speculative_tokens: int, cudagraph_mode: str, disable_padded_drafter_batch: bool
 ):

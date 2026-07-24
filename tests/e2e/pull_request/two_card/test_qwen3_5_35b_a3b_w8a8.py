@@ -19,6 +19,8 @@
 import os
 from unittest.mock import patch
 
+import pytest
+
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 EXAMPLE_PROMPTS = [
@@ -28,6 +30,8 @@ EXAMPLE_PROMPTS = [
 
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
 @wait_until_npu_memory_free()
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(2)
 def test_qwen3_5_35b_a3b_w8a8_tp2_without_ep():
     with VllmRunner(
         "Eco-Tech/Qwen3.5-35B-A3B-w8a8-mtp",

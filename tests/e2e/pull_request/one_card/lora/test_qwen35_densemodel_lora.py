@@ -1,3 +1,4 @@
+import pytest
 import vllm
 from transformers import AutoTokenizer
 from vllm.lora.request import LoRARequest
@@ -72,6 +73,8 @@ def _assert_qwen35_text_lora(
     _assert_exact_outputs(generated_texts, TEXT_EXPECTED_LORA_OUTPUT)
 
 
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_qwen35_text_lora(qwen35_text_lora_files):
     llm = vllm.LLM(
         model=MODEL_PATH,

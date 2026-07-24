@@ -165,6 +165,8 @@ def assert_qknorm_rope_fusion(after_gm, expect_fused=True, use_bias=False):
 @pytest.mark.parametrize("num_tokens", [257])
 @pytest.mark.parametrize("eps", [1e-5])
 @pytest.mark.parametrize("use_bias", [False, True])
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_rmsnorm_quant_fusion(
     dtype: torch.dtype,
     hidden_size: int,

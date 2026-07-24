@@ -25,10 +25,14 @@ full_dir = os.path.dirname(os.path.dirname(current_dir))
 sys.path.insert(0, full_dir)
 
 # ruff: noqa: E402
+import pytest
+
 from tests.e2e.pull_request.utils_310p import run_vl_model_test
 
 
 @wait_until_npu_memory_free(target_free_percentage=0.7)
+@pytest.mark.requires_hardware("310P")
+@pytest.mark.requires_npus(1)
 def test_qwen3_vl_8b_tp1_fp16():
     """Qwen3-VL-8B single-card FP16 test"""
     run_vl_model_test(model_name="Qwen/Qwen3-VL-8B-Instruct", tensor_parallel_size=1, max_tokens=5)
