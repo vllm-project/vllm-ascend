@@ -353,8 +353,6 @@ export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
 export TASK_QUEUE_ENABLE=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export PYTHONHASHSEED=0
 
 export ASCEND_RT_VISIBLE_DEVICES=$1
@@ -373,11 +371,14 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --max-num-batched-tokens 16384 \
     --max-num-seqs 64 \
     --trust-remote-code \
-    --gpu-memory-utilization 0.75 \
+    --gpu-memory-utilization 0.8 \
     --quantization ascend \
     --enforce-eager \
     --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 1}' \
-    --additional-config '{"enable_cpu_binding":true}' \
+    --additional-config '{"enable_cpu_binding":true,
+                          "enable_fused_mc2":true,
+                          "enable_flashcomm1":true,
+                          "weight_nz_mode":true}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
@@ -415,8 +416,6 @@ export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
 export TASK_QUEUE_ENABLE=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=0
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export PYTHONHASHSEED=0
 
 export ASCEND_RT_VISIBLE_DEVICES=$1
@@ -435,13 +434,15 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --max-num-batched-tokens 16384 \
     --max-num-seqs 16 \
     --trust-remote-code \
-    --no-enable-prefix-caching \
-    --gpu-memory-utilization 0.75 \
+    --gpu-memory-utilization 0.9 \
     --quantization ascend \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 3}' \
-    --additional-config '{"enable_cpu_binding":true}' \
+    --additional-config '{"enable_cpu_binding":true,
+                          "enable_fused_mc2":true,
+                          "enable_flashcomm1":false,
+                          "weight_nz_mode":true}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
@@ -628,7 +629,7 @@ vllm bench serve \
 
 ### 9.1 Recommended Configurations
 
-The following configurations are validated on the self-test report (AR20260326132822) and are categorized by use case.
+The following configurations are validated on the self-test report and are categorized by use case.
 
 | Scenario | Input/Output | Deployment | NPUs | P Config | D Config | Max Batched Tokens | Max Num Seqs (P/D) | Max Model Len | EAGLE3 | FUSED_MC2 | FlashComm1 | Async Scheduling |
 |----------|-------------|------------|------|----------|----------|-------------------|----------------|---------------|--------|-----------|------------|------------------|
