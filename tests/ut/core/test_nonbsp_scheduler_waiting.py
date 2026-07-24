@@ -1,12 +1,12 @@
 from vllm.v1.request import RequestStatus
 
+import vllm_ascend.core.nonbsp_scheduler as nonbsp_scheduler_module
 from tests.ut.kv_offload.utils import (
     create_model_runner_output,
     create_request,
     create_scheduler,
     create_vllm_config,
 )
-import vllm_ascend.core.nonbsp_scheduler as nonbsp_scheduler_module
 from vllm_ascend.core.nonbsp_scheduler import NonBSPScheduler
 
 

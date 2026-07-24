@@ -2393,9 +2393,7 @@ class NonBSPScheduler(Scheduler):
         should_fail = not self.recompute_kv_load_failures
 
         # handle async KV loads (not cached yet, evict_blocks=False)
-        async_load_reqs = (
-            req for req in self.skipped_waiting if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-        )
+        async_load_reqs = (req for req in self.skipped_waiting if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS)
         async_failed_req_ids, num_failed_tokens, _ = self._update_requests_with_invalid_blocks(
             async_load_reqs,
             invalid_block_ids,

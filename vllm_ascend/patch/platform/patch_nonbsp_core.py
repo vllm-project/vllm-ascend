@@ -138,10 +138,7 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
         max_iters: int = 1000,
         threshold: float = 5,
     ) -> list[_Modification]:
-        modifications: list[_Modification] = [
-            {"out_blk": [], "in_blk": [], "freeze": False}
-            for _ in range(dev_num)
-        ]
+        modifications: list[_Modification] = [{"out_blk": [], "in_blk": [], "freeze": False} for _ in range(dev_num)]
 
         def calc_bubble(cards_info: Sequence[_CardData]) -> float:
             tot_blks = [c["tot_blk"] for c in cards_info]
@@ -206,11 +203,7 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
                     new_avg = target_avg + delta / dev_num
                     new_dist = abs(new_tot - new_avg)
                     run_newly_added = run_item.get("newly_added", False)
-                    if new_dist < best_dist or (
-                        new_dist == best_dist
-                        and run_newly_added
-                        and not best_newly_added
-                    ):
+                    if new_dist < best_dist or (new_dist == best_dist and run_newly_added and not best_newly_added):
                         best_dist = new_dist
                         best_swap = (run_item, wait_item)
                         best_newly_added = run_newly_added
@@ -223,14 +216,7 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
                 return False
 
             max_blk = max_card["tot_blk"]
-            second_max_blk = max(
-                [
-                    c["tot_blk"]
-                    for c in cards_data
-                    if c["card_idx"] != max_card["card_idx"]
-                ]
-                + [0]
-            )
+            second_max_blk = max([c["tot_blk"] for c in cards_data if c["card_idx"] != max_card["card_idx"]] + [0])
             current_latency = 1200 + 19.2 * max_blk
             current_tp = total_reqs / current_latency
             best_drop: _RequestItem | None = None
@@ -245,11 +231,7 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
                 new_latency = 1200 + 19.2 * new_max_blk
                 new_tp = (total_reqs - 1) / new_latency
                 run_newly_added = run_item.get("newly_added", False)
-                if new_tp > best_tp or (
-                    new_tp == best_tp
-                    and run_newly_added
-                    and not best_newly_added
-                ):
+                if new_tp > best_tp or (new_tp == best_tp and run_newly_added and not best_newly_added):
                     best_tp = new_tp
                     best_drop = run_item
                     best_newly_added = run_newly_added
@@ -264,11 +246,7 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
 
         cards_data: list[_CardData] = []
         for rank in range(dev_num):
-            blks, split = (
-                requests_by_rank[rank]
-                if rank < len(requests_by_rank)
-                else ([], 0)
-            )
+            blks, split = requests_by_rank[rank] if rank < len(requests_by_rank) else ([], 0)
             running: list[_RequestItem] = []
             waiting: list[_RequestItem] = []
             tot_run_blk = 0
@@ -341,22 +319,12 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
                         cancelled_out[out_index] = True
                         cancelled_in[in_index] = True
                         break
-            mod["out_blk"] = [
-                block
-                for block, cancelled in zip(mod["out_blk"], cancelled_out)
-                if not cancelled
-            ]
-            mod["in_blk"] = [
-                block
-                for block, cancelled in zip(mod["in_blk"], cancelled_in)
-                if not cancelled
-            ]
+            mod["out_blk"] = [block for block, cancelled in zip(mod["out_blk"], cancelled_out) if not cancelled]
+            mod["in_blk"] = [block for block, cancelled in zip(mod["in_blk"], cancelled_in) if not cancelled]
 
         for card in cards_data:
             rank = card["card_idx"]
-            modifications[rank]["freeze"] = (
-                len(modifications[rank]["in_blk"]) == 0
-            )
+            modifications[rank]["freeze"] = len(modifications[rank]["in_blk"]) == 0
 
         return modifications
 
@@ -522,10 +490,7 @@ class NonBSPDPEngineCoreProc(DPEngineCoreProc):
 
         blk_size = self.scheduler.block_size
         running_blks = [(len(req.all_token_ids) + blk_size - 1) // blk_size for req in self.scheduler.running]
-        waiting_blks = [
-            (len(req.all_token_ids) + blk_size - 1) // blk_size
-            for req in admission_candidates
-        ]
+        waiting_blks = [(len(req.all_token_ids) + blk_size - 1) // blk_size for req in admission_candidates]
 
         arr = self._lb_data_np
         arr[:] = 0
