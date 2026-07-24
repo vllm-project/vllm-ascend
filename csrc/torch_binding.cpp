@@ -48,6 +48,7 @@
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
+#include "attention/sparse_kv_gather/sparse_kv_gather_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -2743,5 +2744,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "store_kv_block(Tensor key_in, Tensor key_cache_in, Tensor group_len, Tensor group_key_idx,Tensor group_key_cache_idx, int block_size=0) -> ()"
     );
     ops.impl("store_kv_block", torch::kPrivateUse1, &vllm_ascend::store_kv_block);
+    // sparse_kv_gather
+    ops.def(
+        "npu_sparse_kv_gather("
+            "Tensor paged_ctkv, Tensor paged_kpe,"
+            "Tensor block_table, Tensor topk_indices, Tensor cur_pos,"
+            "int block_size"
+        ") -> (Tensor out_ctkv, Tensor out_kpe)"
+    );
+    ops.impl("npu_sparse_kv_gather", torch::kPrivateUse1, &vllm_ascend::npu_sparse_kv_gather);
+
 }
 #endif
