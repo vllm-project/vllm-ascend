@@ -1241,7 +1241,7 @@ class KVPoolWorker:
                         )
                 all_group_load_keys.extend(valid_keys_for_lease)
 
-                logger.info(
+                logger.debug(
                     "load_gvas: req=%s group=%d eff_bs=%d load_blocks=[%d,%d) keys=%d valid_gvas=%d lease_fail=%d",
                     request.req_id,
                     group_id,
