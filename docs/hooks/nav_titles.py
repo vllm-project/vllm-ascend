@@ -141,6 +141,10 @@ TITLES = {
     "tutorials/models/Qwen3-235B-A22B.md": {"en": "Qwen3-235B-A22B", "zh": "Qwen3-235B-A22B"},
     "tutorials/models/Qwen3-30B-A3B.md": {"en": "Qwen3-30B-A3B", "zh": "Qwen3-30B-A3B"},
     "tutorials/models/Qwen3-ASR-1.7B.md": {"en": "Qwen3-ASR-1.7B", "zh": "Qwen3-ASR-1.7B"},
+    "tutorials/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign.md": {
+        "en": "Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+        "zh": "Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+    },
     "tutorials/models/Qwen3-Coder-30B-A3B.md": {"en": "Qwen3-Coder-30B-A3B", "zh": "Qwen3-Coder-30B-A3B"},
     "tutorials/models/Qwen3-Dense.md": {"en": "Qwen3-Dense", "zh": "Qwen3-Dense"},
     "tutorials/models/Qwen3-Next.md": {"en": "Qwen3-Next", "zh": "Qwen3-Next"},
