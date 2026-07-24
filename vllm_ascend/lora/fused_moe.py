@@ -58,6 +58,22 @@ _MOE_LORA_INDEX_FIELDS = (
 )
 
 
+def _moe_lora_projection_enabled(lora_b: list[torch.Tensor], w13_num_slices: int) -> tuple[bool, bool]:
+    """Return whether routed w13 and w2 have any non-zero B weights."""
+    if len(lora_b) == 2:
+        w13_lora_b, w2_lora_b = lora_b
+        return bool(torch.count_nonzero(w13_lora_b).item()), bool(torch.count_nonzero(w2_lora_b).item())
+
+    if len(lora_b) != 3:
+        raise ValueError(f"Expected 2 or 3 routed-expert LoRA B tensors, got {len(lora_b)}")
+
+    w1_lora_b, w2_lora_b, w3_lora_b = lora_b
+    w13_enabled = bool(torch.count_nonzero(w1_lora_b).item())
+    if w13_num_slices == 2:
+        w13_enabled = w13_enabled or bool(torch.count_nonzero(w3_lora_b).item())
+    return w13_enabled, bool(torch.count_nonzero(w2_lora_b).item())
+
+
 def reset_lora_indices(lora_context) -> None:
     for field in _MOE_LORA_INDEX_FIELDS:
         if hasattr(lora_context, field):
@@ -284,7 +300,7 @@ def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, lora_routing
         lora_a_stacked=lora_context.w13_lora_a_stacked,
         lora_b_stacked=lora_context.w13_lora_b_stacked,
         expert_ids=expert_per_row,
-        adapter_enabled=lora_context.adapter_enabled,
+        adapter_enabled=getattr(lora_context, "w13_adapter_enabled", lora_context.adapter_enabled),
         token_lora_mapping=lora_per_row,
     )
 
@@ -306,7 +322,7 @@ def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
         lora_a_stacked=lora_context.w2_lora_a_stacked,
         lora_b_stacked=lora_context.w2_lora_b_stacked,
         expert_ids=expert_per_row,
-        adapter_enabled=lora_context.adapter_enabled,
+        adapter_enabled=getattr(lora_context, "w2_adapter_enabled", lora_context.adapter_enabled),
         token_lora_mapping=lora_per_row,
     )
     # Clear per-forward intermediate indices now that the LoRA delta
@@ -354,6 +370,34 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         shared_experts = getattr(base_layer, "_shared_experts", None)
         if shared_experts is not None:
             self._shared_experts = shared_experts
+
+    def create_lora_weights(self, max_loras, lora_config, model_config=None) -> None:
+        super().create_lora_weights(max_loras, lora_config, model_config)
+        self.w13_adapter_enabled = torch.zeros_like(self.adapter_enabled)
+        self.w2_adapter_enabled = torch.zeros_like(self.adapter_enabled)
+
+    def reset_lora(self, index: int) -> None:
+        super().reset_lora(index)
+        self.w13_adapter_enabled[index] = 0
+        self.w2_adapter_enabled[index] = 0
+
+    def set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
+    ) -> None:
+        assert isinstance(lora_b, list)
+        w13_enabled, w2_enabled = _moe_lora_projection_enabled(lora_b, self._w13_slices)
+        super().set_lora(index, lora_a, lora_b)
+        self.w13_adapter_enabled[index] = int(w13_enabled)
+        self.w2_adapter_enabled[index] = int(w2_enabled)
+
+    def _build_lora_context(self):
+        lora_context = super()._build_lora_context()
+        lora_context.w13_adapter_enabled = self.w13_adapter_enabled
+        lora_context.w2_adapter_enabled = self.w2_adapter_enabled
+        return lora_context
 
     # ------------------------------------------------------------------
     # Mapping

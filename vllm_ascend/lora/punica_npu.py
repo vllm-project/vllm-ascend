@@ -83,7 +83,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
         refresh_all_lora_classes()
         self.lora_config = kwargs.get("lora_config")
-        if get_ascend_device_type() == AscendDeviceType._310P or (
+        ascend_device_type = get_ascend_device_type()
+        if ascend_device_type == AscendDeviceType._310P or (
             self.lora_config is not None and self.lora_config.max_lora_rank >= 128
         ):
             from vllm.lora.ops.torch_ops import (
@@ -110,6 +111,14 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.sgmv_expand_slice = sgmv_expand_slice
         self.sgmv_shrink = sgmv_shrink
         self._force_lora_bmm_expand_slice = False
+        # This flag is graph-static. Per-token indices below preserve base rows
+        # when the single adapter shares a compiled batch with base requests.
+        self._single_lora_slot = (
+            ascend_device_type == AscendDeviceType.A3
+            and self.lora_config is not None
+            and self.lora_config.max_loras == 1
+            and not self.lora_config.fully_sharded_loras
+        )
 
     def enable_compatible_lora_bmm_expand_slice(self) -> None:
         """Use the compatible expand-slice path for the language wrapper."""
@@ -425,6 +434,17 @@ class PunicaWrapperNPU(PunicaWrapperBase):
 
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
 
+        if self._apply_single_lora_linear(
+            y,
+            x,
+            lora_a_stacked,
+            lora_b_stacked,
+            scale,
+            output_slices,
+            add_inputs=kwargs.get("add_inputs", True),
+        ):
+            return
+
         if buffer is None:
             r = lora_b_stacked[0].size(-1)
             # We set the buffer to be float32 by default, consistent with the
@@ -434,6 +454,39 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             )
         self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
         self.add_expand(y, buffer, lora_b_stacked, output_slices, add_inputs=True, **kwargs)
+
+    def _apply_single_lora_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        scale: float,
+        output_slices: tuple[int, ...],
+        *,
+        add_inputs: bool,
+    ) -> bool:
+        """Use masked GEMM when the service has one runtime LoRA slot."""
+        if not self._single_lora_slot:
+            return False
+
+        x = x.view(-1, x.shape[-1])
+        y = y.view(-1, y.shape[-1])
+        adapter_mask = self._get_token_lora_indices(x).eq(0).unsqueeze(1)
+        offset = 0
+        for lora_a, lora_b, output_size in zip(lora_a_stacked, lora_b_stacked, output_slices, strict=True):
+            a_weight = lora_a[0, 0]
+            b_weight = lora_b[0, 0, :output_size]
+            shrink = torch.matmul(x, a_weight.transpose(0, 1))
+            delta = torch.matmul(shrink, b_weight.transpose(0, 1))
+            delta.mul_(adapter_mask)
+            y_slice = y.narrow(1, offset, output_size)
+            if add_inputs:
+                y_slice.add_(delta, alpha=scale)
+            else:
+                torch.mul(delta, scale, out=y_slice)
+            offset += output_size
+        return True
 
     def add_lora_fused_moe(
         self,
