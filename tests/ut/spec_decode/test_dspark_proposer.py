@@ -80,7 +80,7 @@ class _DSparkProposerTestBase:
         proposer._per_group_context_slot_mapping_buffers = {gid: slot.clone()}
         return proposer
 
-# fmt: off
+    # fmt: off
     @staticmethod
     def _invoke_set_inputs_first_pass(
         proposer,
@@ -126,6 +126,8 @@ class _DSparkProposerTestBase:
             num_rejected_tokens_gpu=num_rejected,
         )
         return num_query_total, token_indices, cad, extra, next_token_ids, target_hidden_states
+
+
 # fmt: on
 
 
