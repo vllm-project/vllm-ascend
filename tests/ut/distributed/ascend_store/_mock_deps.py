@@ -376,9 +376,20 @@ def _make_pkg(name, path=""):
     return mod
 
 
+_vllm_ascend_real_path = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "vllm_ascend")
+)
 for _pkg in ["vllm_ascend", "vllm_ascend.distributed"]:
     if _pkg not in sys.modules:
-        sys.modules[_pkg] = _make_pkg(_pkg)
+        _pkg_path = (
+            _vllm_ascend_real_path
+            if _pkg == "vllm_ascend"
+            else os.path.join(_vllm_ascend_real_path, "distributed")
+        )
+        sys.modules[_pkg] = _make_pkg(
+            _pkg,
+            _pkg_path,
+        )
 
 _distributed_utils = types.ModuleType("vllm_ascend.distributed.utils")
 _distributed_utils.get_decode_context_model_parallel_rank = MagicMock(  # type: ignore[attr-defined]
@@ -401,12 +412,7 @@ _kv_pool_pkg = _make_pkg("vllm_ascend.distributed.kv_transfer.kv_pool")
 sys.modules["vllm_ascend.distributed.kv_transfer.kv_pool"] = _kv_pool_pkg
 
 _ascend_store_real_path = os.path.join(
-    os.path.dirname(__file__),
-    "..",
-    "..",
-    "..",
-    "..",
-    "vllm_ascend",
+    _vllm_ascend_real_path,
     "distributed",
     "kv_transfer",
     "kv_pool",
@@ -456,3 +462,5 @@ if "vllm_ascend.utils" not in sys.modules or not hasattr(sys.modules["vllm_ascen
 # which collect after ascend_store and bind the polluted symbols at import).
 # These helpers are mocked per-test, scoped to the ascend_store tests only,
 # via the autouse fixture in tests/ut/conftest.py.
+# vllm_ascend.distributed.parallel_state follows the same rule; test_backend
+# supplies a scoped get_global_rank stub only while importing MooncakeBackend.

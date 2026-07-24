@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import queue
 import threading
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -13,7 +15,11 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
+from vllm_ascend import envs
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import (
+    Backend,
+    require_aligned_batch_results,
+)
 
 # isort: off
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
@@ -22,12 +28,91 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     LayerBlockRange,
     LayerLoadTask,
     LayerMultiBlockReqMeta,
+    LayerRangeReqMeta,
     LayerTransferTask,
     ReqMeta,
     SharedBlockData,
     get_block_hashes,
 )
 # isort: on
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mooncake_session_tracker import (
+    MooncakeSessionTracker,
+)
+
+_KVPOOL_RANGE_DEBUG_PREFIX = "[KVPOOL_RANGE_DEBUG]"
+
+
+def _build_range_debug_payload(
+    direction: str,
+    layer_id: int,
+    sizes: list[list[int]],
+    object_offsets: list[list[int]],
+    results: list[int],
+) -> dict[str, Any]:
+    nested_sizes = [[int(size) for size in key_sizes] for key_sizes in sizes]
+    return {
+        "event": "range",
+        "direction": direction,
+        "layer_id": int(layer_id),
+        "key_count": len(results),
+        "requested_bytes": [sum(key_sizes) for key_sizes in nested_sizes],
+        "sizes": nested_sizes,
+        "object_offsets": [
+            [int(offset) for offset in key_offsets]
+            for key_offsets in object_offsets
+        ],
+        "results": [int(result) for result in results],
+    }
+
+
+def _emit_range_debug_event(
+    direction: str,
+    layer_id: int,
+    sizes: list[list[int]],
+    object_offsets: list[list[int]],
+    results: list[int],
+) -> None:
+    try:
+        if not envs.VLLM_ASCEND_KVPOOL_RANGE_DEBUG:
+            return
+        payload = _build_range_debug_payload(
+            direction, layer_id, sizes, object_offsets, results
+        )
+        logger.info(
+            "%s %s",
+            _KVPOOL_RANGE_DEBUG_PREFIX,
+            json.dumps(payload, separators=(",", ":")),
+        )
+    except Exception:
+        pass
+
+
+def _emit_commit_debug_event(
+    layer_id: int,
+    key_count: int,
+    results: list[int],
+) -> None:
+    try:
+        if not envs.VLLM_ASCEND_KVPOOL_RANGE_DEBUG:
+            return
+        payload = {
+            "event": "commit",
+            "layer_id": int(layer_id),
+            "key_count": int(key_count),
+            "results": [int(result) for result in results],
+        }
+        logger.info(
+            "%s %s",
+            _KVPOOL_RANGE_DEBUG_PREFIX,
+            json.dumps(payload, separators=(",", ":")),
+        )
+    except Exception:
+        pass
+
+
+@dataclass(frozen=True)
+class _LayerRevokeTask:
+    keys: tuple[str, ...]
 
 
 def _circular_shift(lst: list, offset: int) -> list:
@@ -182,10 +267,112 @@ class LayerBatchBuilder:
             )
         return block_ids_np, block_gvas_np
 
+    @staticmethod
+    def _request_block_keys(
+        request: ReqMeta,
+        is_save: bool,
+    ) -> tuple[list[str | None], int, str | None]:
+        if is_save:
+            return (
+                request.save_block_keys,
+                request.save_key_block_offset,
+                request.save_last_block_key,
+            )
+        return (
+            request.load_block_keys,
+            request.load_key_block_offset,
+            request.load_last_block_key,
+        )
+
+    def _build_key_major_shared(
+        self,
+        task: LayerTransferTask,
+        is_save: bool,
+    ) -> SharedBlockData:
+        block_ids: list[int] = []
+        block_keys: list[str] = []
+        req_ids: list[str] = []
+        is_last_chunks: list[bool | None] = []
+        all_load_keys: list[str] = []
+        seen_save_keys: set[str] = set()
+
+        for block_range in task.block_ranges:
+            request = block_range.request
+            req_ids.append(request.req_id)
+            is_last_chunks.append(request.is_last_chunk)
+            all_load_keys.extend(request.load_keys)
+
+            request_block_ids = (
+                request.block_ids_np.tolist()
+                if request.block_ids_np is not None
+                else request.block_ids
+            )
+            if (
+                block_range.start_block < 0
+                or block_range.end_block < block_range.start_block
+                or block_range.end_block > len(request_block_ids)
+            ):
+                raise RuntimeError(
+                    f"ReqMeta block metadata does not cover requested block range "
+                    f"[{block_range.start_block}, {block_range.end_block})"
+                )
+
+            request_keys, key_block_offset, last_block_key = self._request_block_keys(
+                request,
+                is_save,
+            )
+            key_start = block_range.start_block - key_block_offset
+            key_end = block_range.end_block - key_block_offset
+            if key_start < 0 or key_end > len(request_keys):
+                raise RuntimeError(
+                    f"ReqMeta {'save' if is_save else 'load'} block key metadata "
+                    f"does not cover requested block range "
+                    f"[{block_range.start_block}, {block_range.end_block}) "
+                    f"with offset {key_block_offset}"
+                )
+
+            for block_id, key in zip(
+                request_block_ids[block_range.start_block : block_range.end_block],
+                request_keys[key_start:key_end],
+                strict=True,
+            ):
+                if key is not None and (not is_save or key not in seen_save_keys):
+                    block_ids.append(block_id)
+                    block_keys.append(key)
+                    if is_save:
+                        seen_save_keys.add(key)
+
+            if block_range.partial_block_index is not None:
+                partial_block_index = block_range.partial_block_index
+                if partial_block_index < 0 or partial_block_index >= len(request_block_ids):
+                    raise RuntimeError(
+                        f"ReqMeta block metadata does not cover partial block "
+                        f"index {partial_block_index}"
+                    )
+                if last_block_key is not None and (
+                    not is_save or last_block_key not in seen_save_keys
+                ):
+                    block_ids.append(request_block_ids[partial_block_index])
+                    block_keys.append(last_block_key)
+                    if is_save:
+                        seen_save_keys.add(last_block_key)
+
+        return SharedBlockData(
+            block_ids_arr=np.asarray(block_ids, dtype=np.int64),
+            block_gvas_arr=None,
+            block_keys=block_keys,
+            req_ids=req_ids,
+            is_last_chunks=is_last_chunks,
+            load_keys=all_load_keys,
+        )
+
     def build_shared(self, task: LayerTransferTask, is_save: bool = True) -> SharedBlockData | None:
         """Pre-compute shared block data that is identical across all layers."""
         if not task.block_ranges:
             return None
+
+        if task.use_key_major_ranges:
+            return self._build_key_major_shared(task, is_save)
 
         total = 0
         for block_range in task.block_ranges:
@@ -240,6 +427,7 @@ class LayerBatchBuilder:
         return SharedBlockData(
             block_ids_arr=block_ids_arr,
             block_gvas_arr=block_gvas_arr,
+            block_keys=None,
             req_ids=req_ids,
             is_last_chunks=is_last_chunks,
             load_keys=all_load_keys,
@@ -249,8 +437,40 @@ class LayerBatchBuilder:
         self,
         shared: SharedBlockData,
         layer_id: int,
-    ) -> LayerBatchReqMeta:
+    ) -> LayerBatchReqMeta | LayerRangeReqMeta:
         """Compute per-layer addresses from pre-computed shared block data."""
+        if shared.block_keys is not None:
+            base_offset = layer_id * self._caches_per_layer
+            layer_base_addrs = self._kv_caches_base_addr_np[
+                base_offset : base_offset + self._caches_per_layer
+            ]
+            layer_block_len = self._block_len_np[
+                base_offset : base_offset + self._caches_per_layer
+            ]
+            layer_block_stride = self._block_stride_np[
+                base_offset : base_offset + self._caches_per_layer
+            ]
+            layer_inner_offsets = np.concatenate(
+                (np.zeros(1, dtype=np.int64), np.cumsum(layer_block_len[:-1], dtype=np.int64))
+            )
+            offsets = (layer_id * self.page_size_bytes + layer_inner_offsets).tolist()
+            sizes = layer_block_len.tolist()
+            all_buffers = [
+                (layer_base_addrs + block_id * layer_block_stride).tolist()
+                for block_id in shared.block_ids_arr
+            ]
+            return LayerRangeReqMeta(
+                req_ids=shared.req_ids,
+                layer_id=layer_id,
+                block_ids=shared.block_ids_arr.tolist(),
+                keys=shared.block_keys,
+                all_buffers=all_buffers,
+                all_sizes=[sizes.copy() for _ in shared.block_ids_arr],
+                all_offsets=[offsets.copy() for _ in shared.block_ids_arr],
+                load_keys=shared.load_keys,
+            )
+
+        assert shared.block_gvas_arr is not None
         addr_array, size_array, gvas_array = self._build_transfer_arrays(
             shared.block_ids_arr, shared.block_gvas_arr, layer_id
         )
@@ -265,12 +485,17 @@ class LayerBatchBuilder:
             load_keys=shared.load_keys,
         )
 
-    def build(self, task: LayerTransferTask, is_save: bool = True) -> LayerBatchReqMeta | None:
+    def build(
+        self,
+        task: LayerTransferTask,
+        is_save: bool = True,
+    ) -> LayerBatchReqMeta | LayerRangeReqMeta | None:
         """Full build: shared data + per-layer addresses (backward compat)."""
         shared = self.build_shared(task, is_save)
         if shared is None:
             return None
-        return self.build_addrs(shared, task.layer_idx_in_group)
+        layer_index = task.layer_id if task.use_key_major_ranges else task.layer_idx_in_group
+        return self.build_addrs(shared, layer_index)
 
 
 class KVTransferThread(threading.Thread):
@@ -1271,6 +1496,9 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         max_transfer_blocks: int = 0,
         max_transfer_bytes: int = 0,
         group_builders: list[LayerBatchBuilder] | None = None,
+        put_started_keys: set[str] | None = None,
+        put_started_keys_lock: threading.Lock | None = None,
+        session_tracker: MooncakeSessionTracker | None = None,
     ):
         super().__init__(
             m_store,
@@ -1290,6 +1518,10 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self.sync_save_events = sync_save_events
         self.max_transfer_blocks = max_transfer_blocks
         self.max_transfer_bytes = max_transfer_bytes
+        self._put_started_keys = put_started_keys if put_started_keys is not None else set()
+        self._put_started_keys_lock = put_started_keys_lock or threading.Lock()
+        self._session_tracker = session_tracker
+        self._active_put_keys: set[str] | None = None
         self.group_builders: list[LayerBatchBuilder] | None = group_builders
         if group_builders is not None:
             self.layer_batch_builder = group_builders[0]
@@ -1330,33 +1562,182 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
     ) -> torch.Tensor:
         self.request_queue.put(req_meta)
 
-    def _handle_request(  # type: ignore[override]
-        self, transfer_tasks: list[LayerTransferTask]
-    ):
-        if len(transfer_tasks) == 0:
-            self.request_queue.task_done()
+    def add_revoke_request(self, keys: list[str]) -> None:
+        deduplicated_keys = tuple(dict.fromkeys(keys))
+        if deduplicated_keys:
+            self.request_queue.put(_LayerRevokeTask(deduplicated_keys))
+
+    def _remove_started_keys(self, keys: list[str]) -> None:
+        with self._put_started_keys_lock:
+            self._put_started_keys.difference_update(keys)
+
+    def _revoke_range_keys(self, keys: list[str]) -> None:
+        if not keys:
             return
-        physical_layer = transfer_tasks[0].layer_id
-        has_any_save = False
-        all_gvas = []
-        all_addrs = []
-        all_sizes = []
-        all_req_ids = []
-        for task in transfer_tasks:
-            shared = task.shared_block_data
-            if shared is None:
-                continue
-            has_any_save = True
-            builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
-            req_meta = builder.build_addrs(shared, task.layer_idx_in_group)
-            for req_id in req_meta.req_ids:
-                self.dec_stored_request(req_id)
-                all_req_ids.append(req_id)
-            all_gvas.append(req_meta.gvas_array)
-            all_addrs.append(req_meta.addr_array)
-            all_sizes.append(req_meta.size_array)
-        if has_any_save:
-            self.sync_save_events[physical_layer].synchronize()
+        try:
+            results = require_aligned_batch_results(
+                "batch_revoke", keys, self.m_store.batch_revoke(keys)
+            )
+            if any(result != 0 for result in results):
+                logger.error("Layerwise revoke failed keys=%s results=%s", keys, results)
+        except Exception as exc:
+            logger.error("Layerwise revoke raised keys=%s error=%s", keys, exc)
+        finally:
+            # This tracker only gates future put-start calls. Drop keys after a
+            # revoke attempt even when the remote cleanup fails; the Master TTL
+            # owns any remaining PROCESSING session.
+            self._remove_started_keys(keys)
+            if self._session_tracker is not None:
+                self._session_tracker.revoke_put_keys(keys)
+
+    def _handle_range_request(self, req_meta: LayerRangeReqMeta) -> None:
+        layer_id = req_meta.layer_id
+        if self._active_put_keys is None or layer_id == 0:
+            # This mutable set is scoped to one forward batch. Keep the shared
+            # metadata immutable so later layers can filter failed keys safely.
+            self._active_put_keys = set(req_meta.keys)
+        active_indices = [
+            index
+            for index, key in enumerate(req_meta.keys)
+            if key in self._active_put_keys
+        ]
+        active_keys = [req_meta.keys[index] for index in active_indices]
+        if active_keys:
+            if layer_id < len(self.sync_save_events):
+                self.sync_save_events[layer_id].synchronize()
+            active_buffers = [req_meta.all_buffers[index] for index in active_indices]
+            active_sizes = [req_meta.all_sizes[index] for index in active_indices]
+            active_offsets = [req_meta.all_offsets[index] for index in active_indices]
+            results = require_aligned_batch_results(
+                "batch_copy_put",
+                active_keys,
+                self.m_store.batch_copy_put(
+                    active_keys,
+                    active_buffers,
+                    active_sizes,
+                    active_offsets,
+                ),
+            )
+            _emit_range_debug_event(
+                "save", layer_id, active_sizes, active_offsets, results
+            )
+            failed_keys = [
+                key
+                for key, result in zip(active_keys, results, strict=True)
+                if result < 0
+            ]
+            if failed_keys:
+                # A ranged-write failure only invalidates this key; remaining
+                # active keys continue copying their later layer ranges.
+                self._revoke_range_keys(failed_keys)
+                self._active_put_keys.difference_update(failed_keys)
+
+        if layer_id == self.final_layer_id:
+            # Only keys that completed every layer range may publish COMPLETE.
+            active_keys = [
+                key for key in req_meta.keys if key in self._active_put_keys
+            ]
+            if active_keys:
+                try:
+                    commit_results = require_aligned_batch_results(
+                        "batch_commit",
+                        active_keys,
+                        self.m_store.batch_commit(active_keys),
+                    )
+                    _emit_commit_debug_event(
+                        layer_id, len(active_keys), commit_results
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Layerwise commit raised keys=%s error=%s",
+                        active_keys,
+                        exc,
+                    )
+                    self._revoke_range_keys(active_keys)
+                else:
+                    failed_commit_keys = [
+                        key
+                        for key, result in zip(
+                            active_keys, commit_results, strict=True
+                        )
+                        if result != 0
+                    ]
+                    if failed_commit_keys:
+                        self._revoke_range_keys(failed_commit_keys)
+                    committed_keys = [
+                        key
+                        for key, result in zip(
+                            active_keys, commit_results, strict=True
+                        )
+                        if result == 0
+                    ]
+                    if self._session_tracker is not None:
+                        self._session_tracker.commit_put_keys(committed_keys)
+                    self._remove_started_keys(active_keys)
+            self._active_put_keys = None
+
+    def _finish_layer_save_task(
+        self,
+        transfer_tasks: list[LayerTransferTask],
+        layer_id: int,
+    ) -> None:
+        req_ids = [
+            block_range.request.req_id
+            for task in transfer_tasks
+            for block_range in task.block_ranges
+        ]
+        for req_id in req_ids:
+            self.dec_stored_request(req_id)
+            if self.try_finish_and_delete_stored_request(req_id):
+                self.set_finished_request(req_id)
+        # Every dequeued layer task must release both waiters, including when
+        # metadata construction or transfer raised.
+        if not self.layer_save_finished_events[layer_id].is_set():
+            self.layer_save_finished_events[layer_id].set()
+        transfer_tasks.clear()
+        self.request_queue.task_done()
+
+    def _handle_request(  # type: ignore[override]
+        self, request: list[LayerTransferTask] | _LayerRevokeTask
+    ):
+        if isinstance(request, _LayerRevokeTask):
+            try:
+                self._revoke_range_keys(list(request.keys))
+            finally:
+                self.request_queue.task_done()
+            return
+
+        transfer_tasks = request
+        layer_id = transfer_tasks[0].layer_id if transfer_tasks else 0
+        shared: SharedBlockData | None = None
+        try:
+            if not transfer_tasks:
+                return
+            all_gvas = []
+            all_addrs = []
+            all_sizes = []
+            for task in transfer_tasks:
+                shared = task.shared_block_data
+                if shared is None:
+                    continue
+                builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
+                layer_index = task.layer_id if task.use_key_major_ranges else task.layer_idx_in_group
+                req_meta = builder.build_addrs(shared, layer_index)
+                if isinstance(req_meta, LayerRangeReqMeta):
+                    if len(transfer_tasks) > 1:
+                        raise ValueError(
+                            f"Expected one Mooncake range task, got {len(transfer_tasks)}"
+                        )
+                    self._handle_range_request(req_meta)
+                    return
+                if not isinstance(req_meta, LayerBatchReqMeta):
+                    raise TypeError(f"Expected GVA layer batch metadata, got {type(req_meta).__name__}")
+                all_gvas.append(req_meta.gvas_array)
+                all_addrs.append(req_meta.addr_array)
+                all_sizes.append(req_meta.size_array)
+            if not all_gvas:
+                return
+            self.sync_save_events[layer_id].synchronize()
             gvas_array = np.concatenate(all_gvas) if len(all_gvas) > 1 else all_gvas[0]
             addr_array = np.concatenate(all_addrs) if len(all_addrs) > 1 else all_addrs[0]
             size_array = np.concatenate(all_sizes) if len(all_sizes) > 1 else all_sizes[0]
@@ -1368,33 +1749,40 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 self.max_transfer_blocks,
                 self.max_transfer_bytes,
             )
-            if physical_layer <= 2 or res != 0:
+            if layer_id <= 2 or res != 0:
                 logger.info(
                     "save_thread: layer=%d groups=%d blocks=%d res=%d",
-                    physical_layer,
+                    layer_id,
                     len(all_gvas),
                     len(gvas_array),
                     res,
                 )
             if res != 0:
-                logger.error("Layerwise %d save batch_copy failed with return code %d", physical_layer, res)
-            for req_id in all_req_ids:
-                if self.try_finish_and_delete_stored_request(req_id):
-                    self.set_finished_request(req_id)
-        if not has_any_save:
-            assert not self.layer_save_finished_events[physical_layer].is_set(), (
-                f"thread: {physical_layer} save failed "
-            )
-            logger.debug("Layer save event set: layer %d", physical_layer)
-            self.layer_save_finished_events[physical_layer].set()
-            transfer_tasks.clear()
-            self.request_queue.task_done()
-            return
-        assert not self.layer_save_finished_events[physical_layer].is_set(), f"thread: {physical_layer} save failed "
-        logger.debug("Layer save event set: layer %d", physical_layer)
-        self.layer_save_finished_events[physical_layer].set()
-        transfer_tasks.clear()
-        self.request_queue.task_done()
+                logger.error("Layerwise %d save batch_copy failed with return code %d", layer_id, res)
+        except Exception as exc:
+            logger.error("Layerwise save handler failed layer=%d error=%s", layer_id, exc)
+            if self._active_put_keys is not None:
+                keys_to_revoke = (
+                    [
+                        key
+                        for key in shared.block_keys
+                        if key in self._active_put_keys
+                    ]
+                    if shared is not None and shared.block_keys is not None
+                    else sorted(self._active_put_keys)
+                )
+            elif shared is not None and shared.block_keys is not None:
+                # build_addrs may fail before the per-batch active set exists,
+                # but PutStart already reserved every shared key.
+                keys_to_revoke = list(dict.fromkeys(shared.block_keys))
+            else:
+                keys_to_revoke = []
+            self._revoke_range_keys(keys_to_revoke)
+            # Keep a failed batch inactive until its final layer is consumed;
+            # otherwise a later layer would repopulate the set from shared data.
+            self._active_put_keys = set()
+        finally:
+            self._finish_layer_save_task(transfer_tasks, layer_id)
 
 
 class KVCacheStoreLayerRecvingThread(KVTransferThread):
@@ -1418,6 +1806,10 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         max_transfer_blocks: int = 0,
         max_transfer_bytes: int = 0,
         group_builders: list[LayerBatchBuilder] | None = None,
+        *,
+        invalid_block_ids: set[int],
+        invalid_block_ids_lock: threading.Lock,
+        load_abort_event: threading.Event | None = None,
     ):
         super().__init__(
             m_store,
@@ -1436,6 +1828,10 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self.h2d_stagger_us = h2d_stagger_us
         self.max_transfer_blocks = max_transfer_blocks
         self.max_transfer_bytes = max_transfer_bytes
+        self._invalid_block_ids = invalid_block_ids
+        self._invalid_block_ids_lock = invalid_block_ids_lock
+        self._load_abort_event = load_abort_event or threading.Event()
+        self._active_load_indices: set[int] | None = None
         self.group_builders: list[LayerBatchBuilder] | None = group_builders
         if group_builders is not None:
             self.layer_batch_builder = group_builders[0]
@@ -1476,113 +1872,231 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         while time.perf_counter() < deadline:
             pass
 
+    def _mark_invalid_transfer_task_blocks(
+        self,
+        transfer_tasks: list[LayerTransferTask],
+    ) -> None:
+        block_ids: set[int] = set()
+        for task in transfer_tasks:
+            for block_range in task.block_ranges:
+                request_block_ids = block_range.request.block_ids
+                block_ids.update(
+                    request_block_ids[
+                        block_range.start_block : block_range.end_block
+                    ]
+                )
+                partial_block_index = block_range.partial_block_index
+                if partial_block_index is not None and 0 <= partial_block_index < len(request_block_ids):
+                    block_ids.add(request_block_ids[partial_block_index])
+        with self._invalid_block_ids_lock:
+            self._invalid_block_ids.update(block_ids)
+
+    def _mark_invalid_range_indices(
+        self,
+        req_meta: LayerRangeReqMeta,
+        indices: list[int],
+    ) -> None:
+        with self._invalid_block_ids_lock:
+            self._invalid_block_ids.update(
+                req_meta.block_ids[index] for index in indices
+            )
+
+    def _handle_range_request(
+        self,
+        req_meta: LayerRangeReqMeta,
+        shared: SharedBlockData,
+    ) -> None:
+        layer_id = req_meta.layer_id
+        # Every layer is built from the same SharedBlockData row order, so a
+        # row index identifies one key/local-block destination across layers.
+        if self._active_load_indices is None or layer_id == 0:
+            self._active_load_indices = set(range(len(req_meta.keys)))
+
+        assert self._active_load_indices is not None
+        active_indices = [
+            index
+            for index in range(len(req_meta.keys))
+            if not self._load_abort_event.is_set()
+            and index in self._active_load_indices
+        ]
+        active_keys = [req_meta.keys[index] for index in active_indices]
+        if active_keys:
+            self._stagger_h2d_submit(layer_id)
+            active_buffers = [req_meta.all_buffers[index] for index in active_indices]
+            active_sizes = [req_meta.all_sizes[index] for index in active_indices]
+            active_offsets = [req_meta.all_offsets[index] for index in active_indices]
+            results = require_aligned_batch_results(
+                "batch_copy_get",
+                active_keys,
+                self.m_store.batch_copy_get(
+                    active_keys,
+                    active_buffers,
+                    active_sizes,
+                    active_offsets,
+                ),
+            )
+            _emit_range_debug_event(
+                "load", layer_id, active_sizes, active_offsets, results
+            )
+            failed_indices = [
+                index
+                for index, result in zip(active_indices, results, strict=True)
+                if result < 0
+            ]
+            if failed_indices:
+                self._mark_invalid_range_indices(req_meta, failed_indices)
+                # A negative ranged result belongs to one destination row; it
+                # does not by itself invalidate every row sharing the key.
+                self._active_load_indices.difference_update(failed_indices)
+
+        if layer_id == self.final_layer_id:
+            for req_id, is_last_chunk in zip(
+                req_meta.req_ids, shared.is_last_chunks, strict=True
+            ):
+                if is_last_chunk:
+                    self.set_finished_request(req_id)
+            self._active_load_indices = None
+
+    def _finish_layer_load_task(self, data: LayerLoadTask, layer_id: int) -> None:
+        if not self.layer_load_finished_events[layer_id].is_set():
+            self.layer_load_finished_events[layer_id].set()
+        data.transfer_tasks.clear()
+        self.request_queue.task_done()
+        self.get_event.set()
+
     def _handle_request(  # type: ignore[override]
         self, data: LayerLoadTask
     ):
-        wait_for_save = data.wait_for_save_layer
-        transfer_tasks = data.transfer_tasks
         layer_id = data.layer_id
-        attention_start_gate = data.attention_start_gate
+        try:
+            wait_for_save = data.wait_for_save_layer
+            transfer_tasks = data.transfer_tasks
+            attention_start_gate = data.attention_start_gate
 
-        if len(transfer_tasks) == 0:
+            if len(transfer_tasks) == 0:
+                if wait_for_save is not None:
+                    while not self.layer_save_finished_events[wait_for_save].wait(timeout=10):
+                        logger.info("Layerwise %d save wait timed out, keep waiting before load", wait_for_save)
+                    logger.debug("Layer save event cleared: layer %d", wait_for_save)
+                    self.layer_save_finished_events[wait_for_save].clear()
+                return
+
+            # Build metadata for every cache group before waiting on the save
+            # dependency. A single physical layer may contain multiple groups.
+            task_metas: list[
+                tuple[
+                    LayerTransferTask,
+                    SharedBlockData | None,
+                    LayerBatchReqMeta | LayerRangeReqMeta,
+                ]
+            ] = []
+            for task in transfer_tasks:
+                shared = task.shared_block_data
+                builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
+                if shared is not None:
+                    layer_index = task.layer_id if task.use_key_major_ranges else task.layer_idx_in_group
+                    req_meta = builder.build_addrs(shared, layer_index)
+                else:
+                    req_meta = builder.build(task, is_save=False)
+                if req_meta is None:
+                    continue
+                if not isinstance(req_meta, (LayerBatchReqMeta, LayerRangeReqMeta)):
+                    raise TypeError(f"Expected GVA layer batch metadata, got {type(req_meta).__name__}")
+                task_metas.append((task, shared, req_meta))
+
+            if not task_metas:
+                return
+
             if wait_for_save is not None:
                 while not self.layer_save_finished_events[wait_for_save].wait(timeout=10):
                     logger.info("Layerwise %d save wait timed out, keep waiting before load", wait_for_save)
                 logger.debug("Layer save event cleared: layer %d", wait_for_save)
                 self.layer_save_finished_events[wait_for_save].clear()
-            assert not self.layer_load_finished_events[layer_id].is_set()
-            logger.debug("Layer load event set: layer %d", layer_id)
-            self.layer_load_finished_events[layer_id].set()
-            self.request_queue.task_done()
-            return
 
-        # Build req_meta for all tasks first; if all are None, early return
-        # before wait_for_save (matches original single-task behavior).
-        task_metas: list[tuple[LayerTransferTask, LayerBatchReqMeta]] = []
-        for task in transfer_tasks:
-            shared = task.shared_block_data
-            builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
-            if shared is not None:
-                req_meta: LayerBatchReqMeta | None = builder.build_addrs(shared, task.layer_idx_in_group)
-            else:
-                req_meta = builder.build(task, is_save=False)
-            if req_meta is not None:
-                task_metas.append((task, req_meta))
+            if attention_start_gate is not None:
+                while not attention_start_gate.wait(timeout=10):
+                    logger.info("Layerwise %d load waits for attention compute start", layer_id)
 
-        if not task_metas:
-            assert not self.layer_load_finished_events[layer_id].is_set()
-            logger.debug("Layer load event set: layer %d", layer_id)
-            self.layer_load_finished_events[layer_id].set()
-            self.request_queue.task_done()
-            return
+            range_metas = [
+                (shared, req_meta)
+                for _, shared, req_meta in task_metas
+                if isinstance(req_meta, LayerRangeReqMeta)
+            ]
+            if range_metas:
+                if len(task_metas) > 1:
+                    raise ValueError(
+                        f"Expected one Mooncake range task, got {len(task_metas)}"
+                    )
+                shared, range_meta = range_metas[0]
+                if shared is None:
+                    raise RuntimeError("Range batch metadata requires shared block data")
+                self._handle_range_request(range_meta, shared)
+                return
 
-        if wait_for_save is not None:
-            while not self.layer_save_finished_events[wait_for_save].wait(timeout=10):
-                logger.info("Layerwise %d save wait timed out, keep waiting before load", wait_for_save)
-            logger.debug("Layer save event cleared: layer %d", wait_for_save)
-            self.layer_save_finished_events[wait_for_save].clear()
-
-        if attention_start_gate is not None:
-            while not attention_start_gate.wait(timeout=10):
-                logger.info("Layerwise %d load waits for attention compute start", layer_id)
-
-        all_load_keys: list[str] = []
-        all_req_ids: set[str] = set()
-        last_chunk_req_ids: set[str] = set()
-        all_gvas = []
-        all_addrs = []
-        all_sizes = []
-        for task, req_meta in task_metas:
-            if req_meta.load_keys:
-                all_load_keys.extend(req_meta.load_keys)
-            for req_id, is_last_chunk in zip(req_meta.req_ids, req_meta.is_last_chunks):
-                all_req_ids.add(req_id)
-                if is_last_chunk:
-                    last_chunk_req_ids.add(req_id)
-            all_gvas.append(req_meta.gvas_array)
-            all_addrs.append(req_meta.addr_array)
-            all_sizes.append(req_meta.size_array)
-
-        self._stagger_h2d_submit(layer_id)
-        gvas_array = np.concatenate(all_gvas) if len(all_gvas) > 1 else all_gvas[0]
-        addr_array = np.concatenate(all_addrs) if len(all_addrs) > 1 else all_addrs[0]
-        size_array = np.concatenate(all_sizes) if len(all_sizes) > 1 else all_sizes[0]
-        res = self._batch_copy_with_limits(
-            gvas_array,
-            addr_array,
-            size_array,
-            1,
-            self.max_transfer_blocks,
-            self.max_transfer_bytes,
-        )
-        if layer_id <= 2 or res != 0:
-            logger.info(
-                "load_thread: layer=%d groups=%d blocks=%d res=%d",
-                layer_id,
-                len(all_gvas),
-                len(gvas_array),
-                res,
+            all_load_keys: list[str] = []
+            all_req_ids: set[str] = set()
+            last_chunk_req_ids: set[str] = set()
+            all_gvas = []
+            all_addrs = []
+            all_sizes = []
+            for _, _, req_meta in task_metas:
+                if not isinstance(req_meta, LayerBatchReqMeta):
+                    raise TypeError(f"Expected GVA layer batch metadata, got {type(req_meta).__name__}")
+                if req_meta.load_keys:
+                    all_load_keys.extend(req_meta.load_keys)
+                for req_id, is_last_chunk in zip(req_meta.req_ids, req_meta.is_last_chunks):
+                    all_req_ids.add(req_id)
+                    if is_last_chunk:
+                        last_chunk_req_ids.add(req_id)
+                all_gvas.append(req_meta.gvas_array)
+                all_addrs.append(req_meta.addr_array)
+                all_sizes.append(req_meta.size_array)
+            self._stagger_h2d_submit(layer_id)
+            gvas_array = np.concatenate(all_gvas) if len(all_gvas) > 1 else all_gvas[0]
+            addr_array = np.concatenate(all_addrs) if len(all_addrs) > 1 else all_addrs[0]
+            size_array = np.concatenate(all_sizes) if len(all_sizes) > 1 else all_sizes[0]
+            res = self._batch_copy_with_limits(
+                gvas_array,
+                addr_array,
+                size_array,
+                1,
+                self.max_transfer_blocks,
+                self.max_transfer_bytes,
             )
-        if res != 0:
-            logger.error("Layerwise %d load batch_copy failed with return code %d", layer_id, res)
+            if layer_id <= 2 or res != 0:
+                logger.info(
+                    "load_thread: layer=%d groups=%d blocks=%d res=%d",
+                    layer_id,
+                    len(all_gvas),
+                    len(gvas_array),
+                    res,
+                )
+            if res != 0:
+                logger.error("Layerwise %d load batch_copy failed with return code %d", layer_id, res)
 
-        if layer_id == self.final_layer_id and all_load_keys:
-            self.m_store.batch_remove_lease(all_load_keys)
-            logger.info(
-                "[KVPOOL] load_thread released %d leases after final layer %d",
-                len(all_load_keys),
-                layer_id,
-            )
-        if layer_id == self.final_layer_id:
-            for req_id in all_req_ids:
-                if req_id in last_chunk_req_ids:
-                    self.set_finished_request(req_id)
-        assert not self.layer_load_finished_events[layer_id].is_set(), f"thread: {layer_id} load failed "
-        logger.debug("Layer load event set: layer %d", layer_id)
-        self.layer_load_finished_events[layer_id].set()
-        transfer_tasks.clear()
-        self.request_queue.task_done()
-        self.get_event.set()
+            if layer_id == self.final_layer_id and all_load_keys:
+                self.m_store.batch_remove_lease(all_load_keys)
+                logger.info(
+                    "[KVPOOL] load_thread released %d leases after final layer %d",
+                    len(all_load_keys),
+                    layer_id,
+                )
+            if layer_id == self.final_layer_id:
+                for req_id in all_req_ids:
+                    if req_id in last_chunk_req_ids:
+                        self.set_finished_request(req_id)
+        except Exception as exc:
+            logger.error("Layerwise load handler failed layer=%d error=%s", layer_id, exc)
+            if self._active_load_indices is not None:
+                self._active_load_indices.clear()
+            # Publish invalid blocks before the finalizer releases the layer
+            # event, so the waiter cannot consume incomplete KV as a hit.
+            self._mark_invalid_transfer_task_blocks(data.transfer_tasks)
+            # The receiver only signals abort; KVPoolWorker owns the
+            # exactly-once batch_get_end cleanup for opened read sessions.
+            self._load_abort_event.set()
+        finally:
+            self._finish_layer_load_task(data, layer_id)
 
 
 def record_failed_blocks(
