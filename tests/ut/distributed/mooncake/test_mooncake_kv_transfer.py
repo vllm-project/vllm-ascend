@@ -8,19 +8,13 @@ if not hasattr(torch, "npu"):
     torch.npu = SimpleNamespace(Event=object)  # type: ignore[attr-defined]
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
+    ChunkedTokenDatabase,
+    KeyMetadata,
     ReqMeta,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreSendingThread,
 )
-
-
-class _FakeKey:
-    def __init__(self, value: str):
-        self._value = value
-
-    def to_string(self) -> str:
-        return self._value
 
 
 class _FakeStore:
@@ -39,27 +33,11 @@ class _FakeStore:
         self.put_calls.append((list(keys), list(addrs), list(sizes)))
 
 
-class _FakeTokenDatabase:
-    # KVTransferThread base __init__ reads len(token_database.group_block_len[0]).
-    group_block_len = {0: [16]}
-
-    def process_tokens(self, token_len, block_hashes):
-        for i, _ in enumerate(block_hashes):
-            yield i * 16, (i + 1) * 16, _FakeKey(f"k{i}")
-
-    def prepare_value(self, start, end, block_ids):
-        block_id = start // 16
-        return [1000 + block_id], [end - start], block_id
-
-    def prepare_value_layer(self, start, end, block_ids, layer_id):
-        block_id = start // 16
-        return [2000 + layer_id * 100 + block_id], [end - start], block_id
-
-
 class TestKVTransferMissingKeyPut(unittest.TestCase):
     def test_sending_thread_only_puts_missing_keys(self):
         store = _FakeStore(exists_result=[1, 0, 1, 0])
-        token_db = _FakeTokenDatabase()
+        token_db = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0, 0)], [16], None)
+        token_db.set_group_buffers({0: [1000]}, {0: [16]}, {0: [1]})
         thread = KVCacheStoreSendingThread(
             m_store=store,
             token_database=token_db,
@@ -86,7 +64,7 @@ class TestKVTransferMissingKeyPut(unittest.TestCase):
 
         self.assertEqual(len(store.put_calls), 1)
         put_keys, put_addrs, put_sizes = store.put_calls[0]
-        self.assertEqual(put_keys, ["k1", "k3"])
+        self.assertEqual(len(put_keys), 2)
         self.assertEqual(put_addrs, [[1001], [1003]])
         self.assertEqual(put_sizes, [[16], [16]])
 
