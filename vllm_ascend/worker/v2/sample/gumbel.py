@@ -166,40 +166,15 @@ def gumbel_sample(
 ) -> torch.Tensor:
     if use_fp64:
         raise NotImplementedError("FP64 Gumbel sampling is not supported on NPU.")
-    num_tokens, vocab_size = logits.shape
-    BLOCK_SIZE = 1024
-    num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
-    local_argmax = torch.empty(
-        num_tokens,
-        num_blocks,
-        dtype=torch.int64,
-        device=logits.device,
-    )
-    local_max = torch.empty(
-        num_tokens,
-        num_blocks,
-        dtype=torch.float32,
-        device=logits.device,
-    )
-    _gumbel_sample_kernel[(num_tokens, num_blocks)](
-        local_argmax,
-        local_argmax.stride(0),
-        local_max,
-        local_max.stride(0),
-        output_processed_logits,
-        output_processed_logits.stride(0) if output_processed_logits is not None else 0,
-        output_processed_logits_col,
+    logits = logits.to(torch.float32)
+    sampled = torch.ops._C_ascend.npu_gumbel_sample(
         logits,
-        logits.stride(0),
         expanded_idx_mapping,
+        temperature,
         seed,
         pos,
-        temperature,
-        vocab_size,
-        BLOCK_SIZE=BLOCK_SIZE,
-        APPLY_TEMPERATURE=apply_temperature,
+        apply_temperature,
+        output_processed_logits,
+        output_processed_logits_col,
     )
-    # NOTE(woosuk): Use int64 for later indexing.
-    max_block_idx = local_max.argmax(dim=-1, keepdim=True)
-    sampled = local_argmax.gather(dim=-1, index=max_block_idx).view(-1)
     return sampled
