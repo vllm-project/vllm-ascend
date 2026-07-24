@@ -599,6 +599,26 @@ def vllm_version_is(target_vllm_version: str):
         )
 
 
+def get_total_cp_world_size() -> int:
+    # Lazy import: vllm.distributed pulls in vllm.utils.system_utils which
+    # imports vllm.platforms.current_platform. Importing it at module top
+    # level creates a circular import because utils is imported during
+    # platform resolution (vllm_ascend.platform -> vllm_ascend.utils).
+    from vllm.distributed import get_dcp_group, get_pcp_group
+
+    try:
+        pcp_world_size = get_pcp_group().world_size
+    except AssertionError:
+        # PCP might not be initialized in testing
+        pcp_world_size = 1
+    try:
+        dcp_world_size = get_dcp_group().world_size
+    except AssertionError:
+        # DCP might not be initialized in testing
+        dcp_world_size = 1
+    return dcp_world_size * pcp_world_size
+
+
 def get_max_hidden_layers(hf_config) -> int:
     cfg_dict = hf_config.to_dict()
     layer_counts = []

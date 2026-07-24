@@ -108,7 +108,7 @@ class EagleAclGraphManager(SpeculatorCudaGraphManager):
                     block_tables,
                     attn_groups,
                     kv_cache_config,
-                    skip_attn=(desc.cg_mode == CUDAGraphMode.PIECEWISE),
+                    full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
                 )
                 return lambda cg_mode: forward_fn(
                     num_reqs,

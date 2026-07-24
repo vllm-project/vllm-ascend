@@ -263,6 +263,7 @@ class AscendEagleSpeculator(EagleSpeculator):
         skip_attn: bool,
         batch_desc: BatchExecutionDescriptor,
         num_tokens_across_dp: torch.Tensor | None,
+        seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     ) -> None:
         """Minimal override to handle the merged multi-step graph in FULL mode.
 
@@ -276,13 +277,19 @@ class AscendEagleSpeculator(EagleSpeculator):
             assert self.decode_cudagraph_manager is not None
             self.decode_cudagraph_manager.run_fullgraph(batch_desc)
             return
-        super()._multi_step_decode(num_reqs, skip_attn, batch_desc, num_tokens_across_dp)
+        # The cudagraph-capture forward_fn lambda does not pass
+        # seq_lens_cpu_upper_bound; fall back to the draft input buffers.
+        if seq_lens_cpu_upper_bound is None:
+            seq_lens_cpu_upper_bound = self.input_buffers.seq_lens_cpu[:num_reqs]
+        super()._multi_step_decode(num_reqs, skip_attn, batch_desc, num_tokens_across_dp, seq_lens_cpu_upper_bound)
 
     def _build_draft_attn_metadata(
         self,
         num_reqs: int,
         num_reqs_padded: int,
         num_tokens_padded: int,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+        step: int,
         num_query_per_req: int = 1,
         causal: bool = True,
     ) -> dict[str, Any] | None:
@@ -290,6 +297,8 @@ class AscendEagleSpeculator(EagleSpeculator):
             num_reqs,
             num_reqs_padded,
             num_tokens_padded,
+            seq_lens_cpu_upper_bound,
+            step,
             num_query_per_req,
             causal,
         )

@@ -92,9 +92,6 @@ from vllm.v1.spec_decode.ngram_proposer_gpu import copy_num_valid_draft_tokens
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
-from vllm.v1.worker.cp_utils import (
-    get_total_cp_world_size,
-)
 from vllm.v1.worker.gpu_model_runner import AsyncGPUModelRunnerOutput, GPUModelRunner
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
@@ -159,6 +156,7 @@ from vllm_ascend.utils import (
     enable_sp_by_pass,
     get_ascend_device_type,
     get_c_env,
+    get_total_cp_world_size,
     global_stream,
     is_hidden_state_cache_spec,
     kv_cache_spec_uses_sparse_c8,
