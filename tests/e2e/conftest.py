@@ -259,7 +259,6 @@ class RemoteOpenAIServer:
         # the current process might initialize npu,
         # to be safe, we should use spawn method
         env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-        env["VLLM_VERSION"] = "0.25.0"
         env["VLLM_USE_V2_MODEL_RUNNER"] = "1"
         if env_dict is not None:
             env.update(env_dict)
