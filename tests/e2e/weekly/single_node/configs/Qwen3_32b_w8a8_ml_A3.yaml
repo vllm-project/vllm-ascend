@@ -53,7 +53,7 @@ test_cases:
       - "--enforce-eager"
       - "--additional-config"
       - '{"ascend_scheduler_config":{"enabled":false},"enable_weight_nz_layout":true}'
-  - name: "Qwen3_32B_w8a8_Perfermance_3500_1500_A3"
+  - name: "Qwen3_32B_w8a8_Performance_3500_1500_A3"
     model: "vllm-ascend/Qwen3-32B-W8A8-ml"
     envs:
       <<: *envs
