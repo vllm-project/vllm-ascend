@@ -20,6 +20,7 @@
 import copy
 import gc
 import logging
+import os
 from types import NoneType
 from typing import Any
 
@@ -758,6 +759,11 @@ class NPUWorker(WorkerBase):
         # worker process before migratepages/taskset run.
         if get_ascend_config().enable_cpu_binding:
             try:
+                # Fix: reset process affinity from CPU-0 to all available CPUs
+                # before binding, to avoid "Cpus_allowed_list conflict" error
+                cpu_count = os.cpu_count()
+                if cpu_count is not None and hasattr(os, "sched_setaffinity"):
+                    os.sched_setaffinity(0, range(cpu_count))
                 bind_cpus(self.local_rank)
             except Exception as e:
                 logger.warning("Bind cpus failed in rank%s: %s Skip binding cpu.", self.local_rank, e)
