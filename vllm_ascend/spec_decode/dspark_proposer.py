@@ -288,7 +288,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.max_query_len = block_size
         cad.max_seq_len = cad.max_seq_len + block_size
         cad.slot_mapping = self._per_group_query_slot_mapping_buffers[primary_gid][:num_query_total]
-        cad.positions = self.positions[:num_query_total]
+        cad.positions = self.positions  # this would be sliced in attention backend
         cad.causal = False
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
