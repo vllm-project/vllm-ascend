@@ -110,19 +110,43 @@ def test_clean_up_destroys_parallel_and_dist_env(worker):
 
 def test_rebuild_parallel_group_after_resume_updates_init_method(worker):
     worker.vllm_config.parallel_config.data_parallel_master_ip = "10.0.0.1"
+    tp_group = object()
+    dp_group = object()
+    ep_group = object()
+    mc2_group = object()
+    moe_config = SimpleNamespace(ep_size=2)
+    dispatcher = SimpleNamespace(refresh_hccl_group=MagicMock())
+    comm_method = SimpleNamespace(moe_config=moe_config, token_dispatcher=dispatcher)
 
     with (
         patch("torch.distributed.set_debug_level"),
-        patch.object(worker, "clean_up"),
+        patch.object(worker, "parallel_group_clean_up"),
         patch.object(worker, "_init_worker_distributed_environment") as mock_init,
         patch("vllm_ascend.worker.worker.set_current_vllm_config") as mock_ctx,
+        patch.dict(
+            "vllm_ascend.ops.fused_moe.moe_comm_method._MoECommMethods",
+            {"fused_mc2": comm_method},
+            clear=True,
+        ),
+        patch("vllm_ascend.worker.worker.get_tp_group", return_value=tp_group),
+        patch("vllm.distributed.parallel_state.get_dp_group", return_value=dp_group),
+        patch("vllm.distributed.parallel_state.get_ep_group", return_value=ep_group),
+        patch("vllm_ascend.distributed.parallel_state.get_mc2_group", return_value=mc2_group),
     ):
         mock_ctx.return_value.__enter__ = MagicMock()
         mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
+        calls = []
+        mock_init.side_effect = lambda: calls.append("init")
         worker.rebuild_parallel_group_after_resume()
 
     assert worker.distributed_init_method == "tcp://10.0.0.1:29501"
     mock_init.assert_called_once()
+    assert calls == ["init"]
+    assert moe_config.tp_group is tp_group
+    assert moe_config.dp_group is dp_group
+    assert moe_config.ep_group is ep_group
+    assert moe_config.mc2_group is mc2_group
+    dispatcher.refresh_hccl_group.assert_called_once_with()
 
 
 def test_update_worker_info_after_resume_updates_env_and_master_ip(worker, monkeypatch):
