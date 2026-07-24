@@ -219,6 +219,7 @@ nav:
         - tutorials/models/Qwen3-ASR-1.7B.md
         - tutorials/models/Qwen2.5-Math-RM-72B.md
         - tutorials/models/InternVL3.5.md
+        - tutorials/models/Molmo2-8B.md
     - Feature Tutorials:
         - tutorials/features/index.md
         - tutorials/features/pd_colocated_mooncake_multi_instance.md

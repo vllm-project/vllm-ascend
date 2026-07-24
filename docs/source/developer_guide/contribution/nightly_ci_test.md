@@ -121,7 +121,7 @@ tables below mirror the current contents of that file.
 | Test name | Description | Scope |
 |-----------|-------------|-------|
 | `accuracy-group-1` | Qwen3-VL-8B, Qwen3-8B, Qwen2-Audio-7B, etc. | nightly |
-| `accuracy-group-2` | ERNIE-4.5, Molmo-7B, Llama-3.2-3B, etc. | nightly |
+| `accuracy-group-2` | ERNIE-4.5, Molmo-7B, Molmo2-8B, Llama-3.2-3B, etc. | nightly |
 | `accuracy-group-3` | Qwen3-30B-A3B, Qwen3-VL-30B-A3B, etc. | nightly |
 | `accuracy-group-4` | Qwen3-Next-80B-A3B, Qwen3-Omni-30B-A3B, etc. | nightly |
 | `pr-accuracy-group-1` | gemma-3-4b-it, internlm3-8b-instruct, etc. | pr_only |
