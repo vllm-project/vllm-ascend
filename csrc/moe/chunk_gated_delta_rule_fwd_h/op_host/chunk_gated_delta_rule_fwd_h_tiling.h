@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2025 Tianjin University, Ltd.
+ * Copyright (c) 2026 Tianjin University, Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * the BSD 3-Clause License (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -28,7 +28,6 @@ TILING_DATA_FIELD_DEF(int64_t, vNumHead);
 TILING_DATA_FIELD_DEF(int64_t, kHeadDim);
 TILING_DATA_FIELD_DEF(int64_t, vHeadDim);
 TILING_DATA_FIELD_DEF(int64_t, chunkSize);
-TILING_DATA_FIELD_DEF(int64_t, initalStateStride0);
 TILING_DATA_FIELD_DEF(bool, useInitialState);
 TILING_DATA_FIELD_DEF(bool, storeFinalState);
 TILING_DATA_FIELD_DEF(int64_t, dataType);
