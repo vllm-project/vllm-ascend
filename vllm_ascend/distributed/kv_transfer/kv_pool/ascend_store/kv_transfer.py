@@ -660,8 +660,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
     def _handle_request(self, req_meta: ReqMeta):
         req_id = req_meta.req_id
         tracked_request = False
+        tp_mismatch = self.worker is not None and getattr(self.worker, "tp_mismatch", False)
         try:
-            if self.worker is not None and getattr(self.worker, "tp_mismatch", False):
+            if tp_mismatch:
+                with self.done_task_lock:
+                    tracked_request = req_id in self.stored_requests
                 self.worker._store_kv_tp_mismatch(req_meta)
                 return
             with self.done_task_lock:
@@ -672,7 +675,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
         except Exception:
             logger.exception("Failed to store KV cache for request %s", req_id)
         finally:
-            remaining = self.dec_stored_request(req_id) if tracked_request else None
+            # The TP-mismatch worker owns the decrement.
+            remaining = None
+            if tracked_request:
+                remaining = self.get_stored_request_count(req_id) if tp_mismatch else self.dec_stored_request(req_id)
             if tracked_request and remaining == 0:
                 self.delete_finished_stored_request(req_id)
                 self.set_finished_request(req_id)

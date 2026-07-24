@@ -653,16 +653,20 @@ class TestKVTransferTpMismatchDispatch(unittest.TestCase):
         )
         return t, store
 
-    def test_sending_dispatches_to_worker_when_tp_mismatch(self):
+    def test_sending_tp_mismatch_completes_request_lifecycle(self):
         worker = MagicMock()
         worker.tp_mismatch = True
         t, _ = self._make_sending(worker=worker)
+        worker._store_kv_tp_mismatch.side_effect = lambda req: t.dec_stored_request(req.req_id)
         req = ReqMeta(
             req_id="r1", token_len_chunk=16, block_ids_by_group=[[0]], block_hashes=[b"h0"], current_event=None
         )
+        t.add_stored_request("r1")
         t.request_queue.put(req)
         t._handle_request(req)
         worker._store_kv_tp_mismatch.assert_called_once_with(req)
+        self.assertIsNone(t.get_stored_request_count("r1"))
+        self.assertEqual(t.get_and_clear_finished_requests(), {"r1"})
 
     def test_sending_normal_path_when_worker_none(self):
         # worker=None -> tp_mismatch dispatch skipped, normal store path runs.
