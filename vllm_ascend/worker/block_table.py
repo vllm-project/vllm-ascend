@@ -285,7 +285,10 @@ class BlockTable:
             self.slot_mapping.cpu[: req_indices.shape[0]] = torch.where(mask, slot_mapping, -1)
 
     def commit_block_table(self, num_reqs: int) -> None:
-        self.block_table.copy_to_gpu(num_reqs)
+        self.block_table.gpu[:num_reqs].copy_(
+            self.block_table.cpu[:num_reqs].clone().pin_memory(),
+            non_blocking=True,
+        )
 
     def clear(self) -> None:
         self.block_table.fill_(0)
