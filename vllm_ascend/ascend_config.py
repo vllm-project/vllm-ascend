@@ -167,6 +167,14 @@ class AscendConfig:
             ascend_envs.VLLM_ASCEND_ENABLE_FUSED_MC2,
         )
         assert self.enable_fused_mc2 in (0, 1), f"enable_fused_mc2 must be 0 or 1, got {self.enable_fused_mc2}"
+        assert not (
+            self.enable_fused_mc2 == 1
+            and vllm_config.model_config is not None
+            and any(architecture.startswith("MiniMaxM3") for architecture in vllm_config.model_config.architectures)
+        ), (
+            "MiniMax M3 does not support enable_fused_mc2=1. Please set "
+            "additional_config.enable_fused_mc2 to 0 or unset VLLM_ASCEND_ENABLE_FUSED_MC2."
+        )
         if self.enable_fused_mc2 == 1 and self.multistream_overlap_shared_expert:
             self.multistream_overlap_shared_expert = False
             logger.warning_once(
@@ -599,6 +607,18 @@ class AscendCompilationConfig:
                 Default: False
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
+        from vllm_ascend.utils import is_310p
+
+        if is_310p():
+            if enable_npugraph_ex:
+                logger.warning("npugraph_ex is not supported on Ascend 310P. Disabling it.")
+            if enable_static_kernel:
+                logger.warning(
+                    "static kernel requires npugraph_ex, which is not supported on Ascend 310P. Disabling it."
+                )
+            enable_npugraph_ex = False
+            enable_static_kernel = False
+
         self.fuse_norm_quant = fuse_norm_quant
         self.fuse_qknorm_rope = fuse_qknorm_rope
         self.fuse_allreduce_rms = fuse_allreduce_rms

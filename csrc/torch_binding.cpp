@@ -52,6 +52,7 @@
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include "attention/fused_gdn_gating/fused_gdn_gating_torch_adpt.h"
+#include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -2832,5 +2833,21 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                     float beta=1.0, "
         "                     float threshold=20.0) -> (Tensor g, Tensor beta_output)");
     ops.impl("npu_fused_gdn_gating", torch::kPrivateUse1, &vllm_ascend::npu_fused_gdn_gating);
+    
+    ops.def(
+        "npu_sparse_attention_score("
+        "Tensor query, Tensor key, Tensor value, Tensor select_idx, "
+        "Tensor block_table, *, "
+        "Tensor? select_num_idx=None, "
+        "Tensor? q_dequant_scale=None, Tensor? k_dequant_scale=None, "
+        "Tensor? v_dequant_scale=None, "
+        "Tensor? actual_seq_lengths=None, Tensor? actual_seq_lengths_kv=None, "
+        "str q_input_layout=\"TND\", str kv_input_layout=\"BNSD\", "
+        "int num_key_value_heads=1, float scale_value=1.0, "
+        "int block_size=128, int top_k=16, int inner_precise=0) -> Tensor"
+    );
+    ops.impl("npu_sparse_attention_score", torch::kPrivateUse1,
+             &vllm_ascend::npu_sparse_attention_score);
+
 }
 #endif

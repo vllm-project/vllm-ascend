@@ -38,7 +38,7 @@ Select an image based on your machine type and start the docker image on your no
     Start the docker image on your each node.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -78,7 +78,7 @@ Select an image based on your machine type and start the docker image on your no
     Start the docker image on your each node.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -146,7 +146,7 @@ export VLLM_ASCEND_ENABLE_MLAPO=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 
-vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
+vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
   --host 0.0.0.0 \
   --port 8088 \
   --quantization ascend \
@@ -276,7 +276,7 @@ Run the following scripts on two nodes respectively.
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export VLLM_ASCEND_BALANCE_SCHEDULING=1
 
-    vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
+    vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
     --host 0.0.0.0 \
     --port 8088 \
     --quantization ascend \
@@ -344,7 +344,7 @@ Run the following scripts on two nodes respectively.
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export VLLM_ASCEND_BALANCE_SCHEDULING=1
 
-    vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
+    vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
     --host 0.0.0.0 \
     --port 8088 \
     --quantization ascend \
@@ -481,7 +481,7 @@ Parameter descriptions:
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
+    vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
         --host 0.0.0.0 \
         --port $2 \
         --data-parallel-size $3 \
@@ -562,7 +562,7 @@ Parameter descriptions:
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
+    vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
         --host 0.0.0.0 \
         --port $2 \
         --data-parallel-size $3 \
@@ -643,7 +643,7 @@ Parameter descriptions:
     export VLLM_ASCEND_ENABLE_MLAPO=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
+    vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
         --host 0.0.0.0 \
         --port $2 \
         --data-parallel-size $3 \
@@ -723,7 +723,7 @@ Parameter descriptions:
     export VLLM_ASCEND_ENABLE_MLAPO=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
+    vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
         --host 0.0.0.0 \
         --port $2 \
         --data-parallel-size $3 \

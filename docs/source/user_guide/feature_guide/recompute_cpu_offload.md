@@ -87,7 +87,7 @@ the Docker style used by the DeepSeek-V4-Flash tutorial:
 
 ```bash
 
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
 docker run --rm \
     --name vllm-ascend \
     --shm-size=1024g \
