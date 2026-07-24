@@ -36,6 +36,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
+from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -85,6 +86,10 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         # so we need to set graph params before capture full graph.
         if super().needs_capture():
             set_graph_params(self.capture_sizes)
+
+    def init_breakable_cg_runner(self, model: nn.Module) -> None:
+        if self.breakable_cg_runner is None:
+            self.breakable_cg_runner = BreakableACLGraphWrapper(model, self.vllm_config)
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
