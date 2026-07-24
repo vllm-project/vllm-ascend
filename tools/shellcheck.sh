@@ -45,24 +45,29 @@ if [ -n "${SHELLCHECK_OPTS:-}" ]; then
     shellcheck_args+=("${extra_shellcheck_args[@]}")
 fi
 
-if [ "$#" -eq 0 ]; then
-    while IFS= read -r tracked_file; do
-        shellcheck "${shellcheck_args[@]}" "$tracked_file"
-    done < <(git ls-files "*.sh")
-    exit 0
-fi
-
-for file in "$@"; do
+lint_one() {
+    local file="$1"
     if git check-ignore -q "$file"; then
-        continue
+        return 0
     fi
 
     case "$file" in
         *.csh|*.tcsh)
             # Skip C shell scripts because this checker only supports sh-like shells.
-            continue
+            return 0
             ;;
     esac
 
     shellcheck "${shellcheck_args[@]}" "$file"
-done
+}
+
+if [ "$#" -gt 0 ]; then
+    for file in "$@"; do
+        lint_one "$file"
+    done
+    exit 0
+fi
+
+while IFS= read -r tracked_file; do
+    lint_one "$tracked_file"
+done < <(git ls-files "*.sh")

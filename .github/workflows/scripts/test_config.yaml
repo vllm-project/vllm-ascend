@@ -652,6 +652,17 @@
     - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
     - tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py
 
+# Agent skills and their script-level regression tests
+- name: agents
+  optional: false
+  cpu_only: true
+  source_file_dependencies:
+    - .agents/skills/ascend-vllm-serving-auto-benchmark
+    - .agents/skills/ascend-vllm-serving-tune-loop
+    - tests/ut/agents
+  tests:
+    - tests/ut/agents
+
 # === Features ===
 - name: quantization_gqa_mla_c8
   optional: false
