@@ -492,6 +492,7 @@ class KVTransferThread(threading.Thread):
                     type(e).__name__,
                     e,
                 )
+                self.request_queue.task_done()
 
     def _handle_request(self, req_meta: Any):
         pass
