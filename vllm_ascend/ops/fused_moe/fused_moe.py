@@ -605,6 +605,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
         return states[..., :trunc_size]
 
+    def maybe_all_reduce_tensor_model_parallel(
+        self,
+        states: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
+
     def set_lora_context(self, lora_context):
         self.routed_experts._ascend_moe_lora_context = lora_context
 

@@ -3872,6 +3872,28 @@ class NPUModelRunner(GPUModelRunner):
             load_model_total_time,
         )
 
+    def _get_eagle3_aux_layers_from_config(self) -> tuple[int, ...] | None:
+        # Keep Eagle3 aux layer selection aligned with the upstream drafter
+        # config. `target_layer_ids` has different semantics and can shrink
+        # the aux hidden states below what Eagle3's combine fc expects.
+        if not (self.speculative_config and self.speculative_config.draft_model_config):
+            return None
+        aux_layers = super()._get_eagle3_aux_layers_from_config()
+        if (
+            aux_layers
+            and get_pp_group().world_size > 1
+            and self.speculative_config.method == "eagle3"
+            and self._eagle3_uses_aux_hidden_state()
+            and len(aux_layers) != 3
+        ):
+            logger.warning(
+                "Ignoring Eagle3 aux layer config %s in PP because the "
+                "Ascend Eagle3 drafter expects 3 auxiliary hidden states.",
+                aux_layers,
+            )
+            return None
+        return aux_layers
+
     def _start_dump_data(self) -> None:
         if self.debugger is None or self._debugger_started:
             return

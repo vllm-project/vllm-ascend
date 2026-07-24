@@ -640,7 +640,7 @@ class NPUWorker(WorkerBase):
             all_gather_group=all_gather_group,
         )
 
-        kv_connector_output = output.kv_connector_output
+        kv_connector_output = getattr(output, "kv_connector_output", None)
         if not kv_connector_output:
             return None
 

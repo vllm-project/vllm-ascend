@@ -113,6 +113,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
 
         self.rank = torch.distributed.get_rank()
         self.local_rank = local_rank
+        self.torch_distributed_backend = torch_distributed_backend
         self.backend = _normalize_backend(torch_distributed_backend)
         self._acquired_hccl_keys: list[HcclPgKey] = []
         self._unshared_hccl_groups: list[object] = []
@@ -244,6 +245,26 @@ class GroupCoordinatorPatch(GroupCoordinator):
         assert self.device_group is not None
         self._init_device_communicator()
         return True
+
+    def make_sibling_device_group(self, group_desc: str | None = None):
+        """Create a sibling device process group with upstream-compatible fields.
+
+        vLLM 0.25 uses ``torch_distributed_backend`` in the inherited
+        implementation. Keep a fallback to ``backend`` so objects constructed by
+        older patch code still work when MRV2 PP initializes PPHandler.
+        """
+        sibling = None
+        backend = getattr(self, "torch_distributed_backend", self.backend)
+        for ranks in self.group_ranks:
+            pg = torch.distributed.new_group(
+                ranks,
+                backend=backend,
+                group_desc=group_desc,
+            )
+            if self.rank in ranks:
+                sibling = pg
+        assert sibling is not None
+        return sibling
 
     def all_to_all(
         self,

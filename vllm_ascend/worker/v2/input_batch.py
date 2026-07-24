@@ -123,6 +123,7 @@ def _post_update_kernel(
     all_token_ids_ptr,
     all_token_ids_stride,
     total_len_ptr,
+    update_output_bin_counts: tl.constexpr,
 ):
     pid = tl.program_id(0)
     n_programs = tl.num_programs(0)
@@ -144,10 +145,11 @@ def _post_update_kernel(
         for i in range(num_sampled):
             token_id = tl.load(sampled_tokens_ptr + row_idx * sampled_tokens_stride + i)
 
-            token_ptr = output_bin_counts_ptr + req_state_idx * output_bin_counts_stride + token_id
-            count = tl.load(token_ptr)
-            count += 1
-            tl.store(token_ptr, count)
+            if update_output_bin_counts:
+                token_ptr = output_bin_counts_ptr + req_state_idx * output_bin_counts_stride + token_id
+                count = tl.load(token_ptr)
+                count += 1
+                tl.store(token_ptr, count)
 
             tl.store(
                 all_token_ids_ptr + req_state_idx * all_token_ids_stride + total_len + i,
@@ -172,7 +174,7 @@ def post_update(
     # [max_num_reqs]
     last_sampled_tokens: torch.Tensor,
     # [max_num_reqs, vocab_size]
-    output_bin_counts: torch.Tensor,
+    output_bin_counts: torch.Tensor | None,
     # [num_reqs, num_speculative_steps + 1]
     sampled_tokens: torch.Tensor,
     # [num_reqs]
@@ -189,6 +191,13 @@ def post_update(
     num_rows = idx_mapping.shape[0]
 
     core_num = get_vectorcore_num()
+    update_output_bin_counts = output_bin_counts is not None
+    output_bin_counts_tensor = output_bin_counts
+    output_bin_counts_stride = 0
+    if output_bin_counts_tensor is None:
+        output_bin_counts_tensor = last_sampled_tokens
+    else:
+        output_bin_counts_stride = output_bin_counts_tensor.stride(0)
 
     grid = (min(num_rows, core_num),)
     _post_update_kernel[grid](
@@ -196,8 +205,8 @@ def post_update(
         idx_mapping.stride(0),
         num_computed_tokens,
         last_sampled_tokens,
-        output_bin_counts,
-        output_bin_counts.stride(0),
+        output_bin_counts_tensor,
+        output_bin_counts_stride,
         sampled_tokens,
         sampled_tokens.stride(0),
         num_rows,
@@ -207,4 +216,5 @@ def post_update(
         all_token_ids,
         all_token_ids.stride(0),
         total_len,
+        update_output_bin_counts,
     )

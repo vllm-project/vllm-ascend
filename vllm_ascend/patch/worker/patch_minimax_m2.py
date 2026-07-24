@@ -18,16 +18,21 @@
 #
 
 from collections.abc import Iterable
+from itertools import islice
 
 import torch
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.models.minimax_m2 import (
     MiniMaxM2Attention,
     MiniMaxM2Model,
     MiniMaxM2MoE,
 )
 from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_slice
+
+_AUX_KEY_PREFIX = "aux_layer_"
 
 FP8_DTYPES = tuple(
     getattr(torch, dtype_name)
@@ -90,6 +95,83 @@ def _patch_forward(
 
 
 MiniMaxM2Attention.forward = _patch_forward
+
+
+# ---------------------------------------------------------------------------
+# MiniMaxM2Model.forward: use global layer indices when collecting Eagle3 aux
+# hidden states under PP, and carry aux states through IntermediateTensors.
+# ---------------------------------------------------------------------------
+def _extract_aux_from_intermediate(
+    intermediate_tensors: IntermediateTensors | None,
+) -> list[torch.Tensor]:
+    if intermediate_tensors is None:
+        return []
+    aux_keys = sorted(
+        (
+            key
+            for key in intermediate_tensors.tensors
+            if key.startswith(_AUX_KEY_PREFIX)
+        ),
+        key=lambda key: int(key.split("_")[-1]),
+    )
+    return [intermediate_tensors.tensors[key] for key in aux_keys]
+
+
+def _patched_model_forward(
+    self,
+    input_ids: torch.Tensor | None,
+    positions: torch.Tensor,
+    intermediate_tensors: IntermediateTensors | None,
+    inputs_embeds: torch.Tensor | None = None,
+) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+    pp_group = get_pp_group()
+    prev_aux_list = _extract_aux_from_intermediate(intermediate_tensors)
+
+    if pp_group.is_first_rank:
+        if inputs_embeds is not None:
+            hidden_states = inputs_embeds
+        else:
+            hidden_states = self.embed_input_ids(input_ids)
+        residual = None
+    else:
+        assert intermediate_tensors is not None
+        hidden_states = intermediate_tensors["hidden_states"]
+        residual = intermediate_tensors["residual"]
+
+    aux_hidden_states = self._maybe_add_hidden_state(
+        list(prev_aux_list),
+        0,
+        hidden_states,
+        residual,
+    )
+    for idx, layer in enumerate(
+        islice(self.layers, self.start_layer, self.end_layer),
+        start=self.start_layer,
+    ):
+        hidden_states, residual = layer(positions, hidden_states, residual)
+        self._maybe_add_hidden_state(
+            aux_hidden_states,
+            idx + 1,
+            hidden_states,
+            residual,
+        )
+
+    if not pp_group.is_last_rank:
+        result = IntermediateTensors(
+            {"hidden_states": hidden_states, "residual": residual}
+        )
+        for i, tensor in enumerate(aux_hidden_states):
+            result.tensors[f"{_AUX_KEY_PREFIX}{i}"] = tensor
+        return result
+
+    hidden_states, _ = self.norm(hidden_states, residual)
+    if len(aux_hidden_states) > 0:
+        return hidden_states, aux_hidden_states
+
+    return hidden_states
+
+
+MiniMaxM2Model.forward = _patched_model_forward
 
 
 # ---------------------------------------------------------------------------
