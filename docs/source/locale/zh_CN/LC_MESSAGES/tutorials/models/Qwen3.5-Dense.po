@@ -1,0 +1,403 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-22 03:39+0000\n"
+"PO-Revision-Date: 2026-07-22 03:39+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "# Qwen3.5-Dense (Qwen3.5-2B/4B/9B)"
+msgstr "# Qwen3.5-Dense（Qwen3.5-2B/4B/9B）"
+
+msgid "## 1 Introduction"
+msgstr "## 1 简介"
+
+msgid ""
+"Qwen3.5-2B, Qwen3.5-4B, and Qwen3.5-9B are dense hybrid Mamba-Transformer "
+"language models in the Qwen3.5 family. They share the same hybrid attention "
+"design (GDN + full attention) and are suitable for general-purpose text "
+"generation tasks such as dialogue, content creation, and code generation."
+msgstr ""
+"Qwen3.5-2B、Qwen3.5-4B 和 Qwen3.5-9B 是 Qwen3.5 系列中的稠密混合 Mamba-Transformer "
+"语言模型。它们采用相同的混合注意力设计（GDN + 全注意力），适用于对话、内容创作和代码生成等通用文本生成任务。"
+
+msgid ""
+"This document describes deployment and verification of these models on "
+"**Atlas inference products** and **Atlas 200I Pro**, including environment "
+"preparation, Docker installation, single-node online deployment, functional "
+"verification, and tuning notes."
+msgstr ""
+"本文档描述了在 **Atlas 推理产品** 和 **Atlas 200I Pro** 上部署和验证这些模型的方法，包括环境准备、Docker "
+"安装、单节点在线部署、功能验证以及调优说明。"
+
+msgid ""
+"It is **strongly recommended to use the latest release candidate (rc) "
+"version or the latest official version** of `vllm-ascend`. Support for "
+"Qwen3.5-2B/4B/9B on Atlas inference products and Atlas 200I Pro starts from "
+"`vllm-ascend:v0.23.0rc1`."
+msgstr ""
+"**强烈建议使用 `vllm-ascend` 的最新候选发布（rc）版本或最新正式版本**。从 `vllm-ascend:v0.23.0rc1` "
+"开始，Atlas 推理产品和 Atlas 200I Pro 支持 Qwen3.5-2B/4B/9B。"
+
+msgid "## 2 Supported Features"
+msgstr "## 2 支持的特性"
+
+msgid ""
+"Please refer to the [Supported Features "
+"List](../../user_guide/support_matrix/supported_models.md) for the model "
+"support matrix."
+msgstr ""
+"模型支持矩阵请参考[支持特性列表](../../user_guide/support_matrix/supported_models.md)。"
+
+msgid ""
+"Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md)"
+" for feature configuration information."
+msgstr "特性配置信息请参考[特性指南](../../user_guide/feature_guide/index.md)。"
+
+msgid "## 3 Prerequisites"
+msgstr "## 3 前提条件"
+
+msgid "### 3.1 Model Weight"
+msgstr "### 3.1 模型权重"
+
+msgid "| Model | Version | Hardware Requirement | Download |"
+msgstr "| 模型 | 版本 | 硬件要求 | 下载地址 |"
+
+msgid ""
+"| Qwen3.5-2B | FP16 | Atlas inference products or Atlas 200I Pro | "
+"[Download](https://modelscope.cn/models/Qwen/Qwen3.5-2B) |"
+msgstr ""
+"| Qwen3.5-2B | FP16 | Atlas 推理产品或 Atlas 200I Pro | "
+"[下载](https://modelscope.cn/models/Qwen/Qwen3.5-2B) |"
+
+msgid ""
+"| Qwen3.5-4B | FP16 | Atlas inference products or Atlas 200I Pro | "
+"[Download](https://modelscope.cn/models/Qwen/Qwen3.5-4B) |"
+msgstr ""
+"| Qwen3.5-4B | FP16 | Atlas 推理产品或 Atlas 200I Pro | "
+"[下载](https://modelscope.cn/models/Qwen/Qwen3.5-4B) |"
+
+msgid ""
+"| Qwen3.5-9B | FP16 | Atlas inference products or Atlas 200I Pro | "
+"[Download](https://modelscope.cn/models/Qwen/Qwen3.5-9B) |"
+msgstr ""
+"| Qwen3.5-9B | FP16 | Atlas 推理产品或 Atlas 200I Pro | "
+"[下载](https://modelscope.cn/models/Qwen/Qwen3.5-9B) |"
+
+msgid ""
+"It is recommended to download the model weight to a local directory such as "
+"`/root/.cache/` or `/home/data/`."
+msgstr "建议将模型权重下载到本地目录，例如 `/root/.cache/` 或 `/home/data/`。"
+
+msgid "## 4 Installation"
+msgstr "## 4 安装"
+
+msgid "### 4.1 Docker Image Installation"
+msgstr "### 4.1 Docker 镜像安装"
+
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using docker](../../installation.md#set-up-using-"
+"docker)."
+msgstr ""
+"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker](../../installation.md#set-up-"
+"using-docker)。"
+
+msgid ""
+"It is **recommended to use the latest release candidate (rc) version or the "
+"latest official version** of the `vllm-ascend` image. As a minimum-version "
+"requirement, use `vllm-ascend:v0.23.0rc1-310p` (or a later `-310p`) image. "
+"For Atlas 200I Pro on openEuler, use the matching `-310p-openeuler` image."
+msgstr ""
+"**建议使用 `vllm-ascend` 镜像的最新候选发布（rc）版本或最新正式版本**。最低版本要求是使用 `vllm-"
+"ascend:v0.23.0rc1-310p`（或更新的 `-310p`）镜像。对于 openEuler 上的 Atlas 200I "
+"Pro，请使用对应的 `-310p-openeuler` 镜像。"
+
+msgid "=== \"Atlas inference products\""
+msgstr "=== \"Atlas 推理产品\""
+
+msgid "Start the docker image on your each node."
+msgstr "在每个节点上启动 Docker 镜像。"
+
+msgid "=== \"Atlas 200I Pro\""
+msgstr "=== \"Atlas 200I Pro\""
+
+msgid ""
+"Start the docker image on your each node. Adjust `--device=/dev/davinci0` "
+"according to the NPU ID you want to use."
+msgstr "在每个节点上启动 Docker 镜像。根据您要使用的 NPU ID 调整 `--device=/dev/davinci0`。"
+
+msgid "=== \"Ubuntu 24.04\""
+msgstr "=== \"Ubuntu 24.04\""
+
+msgid "=== \"openEuler 24.03\""
+msgstr "=== \"openEuler 24.03\""
+
+msgid ""
+"After a successful docker run, you can verify the running container service "
+"by executing the `docker ps` command. The expected result is that the "
+"container `vllm-ascend` is listed with status `Up`, confirming the docker "
+"installation is successful."
+msgstr ""
+"Docker 运行成功后，可以通过执行 `docker ps` 命令验证正在运行的容器服务。预期结果是容器 `vllm-ascend` 的状态为 "
+"`Up`，确认 Docker 安装成功。"
+
+msgid "### 4.2 Source Code Installation"
+msgstr "### 4.2 源码安装"
+
+msgid ""
+"If you don't want to use the docker image as above, you can also build all "
+"from source:"
+msgstr "如果您不想像上面那样使用 Docker 镜像，也可以从源码构建所有内容："
+
+msgid "1. Clone the repository and install `vllm-ascend` from source:"
+msgstr "1. 克隆仓库并从源码安装 `vllm-ascend`："
+
+msgid ""
+"For the complete installation steps, refer to "
+"[installation](../../installation.md)."
+msgstr "完整的安装步骤请参考[安装指南](../../installation.md)。"
+
+msgid ""
+"On Atlas inference products and Atlas 200I Pro, you may need to uninstall "
+"`triton-ascend` and `triton` to avoid dependency conflicts:"
+msgstr ""
+"在 Atlas 推理产品和 Atlas 200I Pro 上，您可能需要卸载 `triton-ascend` 和 `triton` 以避免依赖冲突："
+
+msgid ""
+"To verify the source code installation, run the following command and "
+"confirm the displayed version matches the one you installed:"
+msgstr "要验证源码安装，请运行以下命令并确认显示的版本与您安装的版本一致："
+
+msgid ""
+"Expected result: The version information of `vllm-ascend` is displayed, "
+"confirming a successful installation."
+msgstr "预期结果：显示 `vllm-ascend` 的版本信息，确认安装成功。"
+
+msgid "## 5 Online Service Deployment"
+msgstr "## 5 在线服务部署"
+
+msgid "### 5.1 Single-Node Online Deployment"
+msgstr "### 5.1 单节点在线部署"
+
+msgid ""
+"Single-node deployment completes both Prefill and Decode within the same "
+"node. `Qwen3.5-2B`, `Qwen3.5-4B`, and `Qwen3.5-9B` can be deployed on Atlas "
+"inference products or Atlas 200I Pro."
+msgstr ""
+"单节点部署在同一节点内完成 Prefill 和 Decode。`Qwen3.5-2B`、`Qwen3.5-4B` 和 `Qwen3.5-9B` "
+"可以部署在 Atlas 推理产品或 Atlas 200I Pro 上。"
+
+msgid ""
+"> **Parallelism note**: These platforms currently support the **TP** "
+"scenario. Choose **TP=1** or **TP=2** according to the available devices. On"
+" Atlas 200I Pro with a single visible NPU, use **TP=1**."
+msgstr ""
+"> **并行度说明**：这些平台当前支持 **TP** 场景。根据可用设备选择 **TP=1** 或 **TP=2**。在单个可见 NPU 的 "
+"Atlas 200I Pro 上，使用 **TP=1**。"
+
+msgid ""
+"The following examples use FP16 weights from ModelScope. Replace "
+"`MODEL_PATH` with your local directory if needed."
+msgstr "以下示例使用来自 ModelScope 的 FP16 权重。如有需要，请将 `MODEL_PATH` 替换为您的本地目录。"
+
+msgid "=== \"Qwen3.5-2B\""
+msgstr "=== \"Qwen3.5-2B\""
+
+msgid "Startup Command:"
+msgstr "启动命令："
+
+msgid "=== \"Qwen3.5-4B\""
+msgstr "=== \"Qwen3.5-4B\""
+
+msgid "Startup Command:"
+msgstr "启动命令："
+
+msgid "=== \"Qwen3.5-9B\""
+msgstr "=== \"Qwen3.5-9B\""
+
+msgid "Startup Command:"
+msgstr "启动命令："
+
+msgid "Key Parameter Descriptions:"
+msgstr "关键参数说明："
+
+msgid ""
+"- `--tensor-parallel-size` sets the tensor parallel size. Prefer **TP=1** on Atlas 200I Pro. On Atlas inference products, **TP=1** and **TP=2** are both supported; choose according to the available devices.\n"
+"- `--max-model-len` represents the context length (input plus output for a single request). On Atlas inference products and Atlas 200I Pro, configure this value according to the actual device memory; setting it too high may cause OOM.\n"
+"- `--max-num-seqs` indicates the maximum number of requests that can be processed concurrently. On Atlas inference products and Atlas 200I Pro, configure this value according to the actual device memory; setting it too high may cause OOM.\n"
+"- `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. On Atlas inference products and Atlas 200I Pro, configure this value according to the actual device memory; setting it too high may cause OOM. The default value is `0.9`.\n"
+"- `--dtype float16` must be set on Atlas inference products and Atlas 200I Pro. These devices only support the FP16 data type.\n"
+"- `--mamba-ssm-cache-dtype` sets the data type of the Mamba SSM cache. On Atlas inference products and Atlas 200I Pro, only `float16` is supported.\n"
+"- `--speculative-config` uses `qwen3_5_mtp` for Qwen3.5 Dense models that include an MTP head. It is recommended to set `num_speculative_tokens` to `1`.\n"
+"- `--compilation-config` contains configurations related to the aclgraph graph mode:\n"
+"    - `\"cudagraph_mode\"`: `\"FULL_DECODE_ONLY\"` is recommended.\n"
+"    - `\"cudagraph_capture_sizes\"`: when tensor parallelism (TP) is enabled, hardware event-id constraints allow at most two capture sizes (for example, `[1, 8]`).\n"
+"- `--additional-config` with `\"ascend_compilation_config\": {\"enable_npugraph_ex\": false}` is required because `enable_npugraph_ex` is not supported on these platforms."
+msgstr ""
+"- `--tensor-parallel-size` 设置张量并行大小。在 Atlas 200I Pro 上建议使用 **TP=1**。在 Atlas 推理产品上，**TP=1** 和 **TP=2** 均支持；请根据可用设备选择。\n"
+"- `--max-model-len` 表示上下文长度（单个请求的输入加输出）。在 Atlas 推理产品和 Atlas 200I Pro 上，请根据实际设备内存配置此值；设置过高可能导致 OOM。\n"
+"- `--max-num-seqs` 表示可以并发处理的最大请求数。在 Atlas 推理产品和 Atlas 200I Pro 上，请根据实际设备内存配置此值；设置过高可能导致 OOM。\n"
+"- `--gpu-memory-utilization` 表示 vLLM 将用于实际推理的 HBM 比例。在 Atlas 推理产品和 Atlas 200I Pro 上，请根据实际设备内存配置此值；设置过高可能导致 OOM。默认值为 `0.9`。\n"
+"- `--dtype float16` 必须在 Atlas 推理产品和 Atlas 200I Pro 上设置。这些设备仅支持 FP16 数据类型。\n"
+"- `--mamba-ssm-cache-dtype` 设置 Mamba SSM 缓存的数据类型。在 Atlas 推理产品和 Atlas 200I Pro 上，仅支持 `float16`。\n"
+"- `--speculative-config` 对包含 MTP 头的 Qwen3.5 Dense 模型使用 `qwen3_5_mtp`。建议将 `num_speculative_tokens` 设置为 `1`。\n"
+"- `--compilation-config` 包含与 aclgraph 图模式相关的配置：\n"
+"    - `\"cudagraph_mode\"`：建议使用 `\"FULL_DECODE_ONLY\"`。\n"
+"    - `\"cudagraph_capture_sizes\"`：当启用张量并行（TP）时，硬件事件 ID 约束最多允许两个捕获大小（例如 `[1, 8]`）。\n"
+"- `--additional-config` 需要包含 `\"ascend_compilation_config\": {\"enable_npugraph_ex\": false}`，因为这些平台不支持 `enable_npugraph_ex`。"
+
+msgid ""
+"Common Issues Tip: If you encounter issues, please refer to the [Public "
+"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for "
+"troubleshooting."
+msgstr ""
+"常见问题提示：如果遇到问题，请参考[公共 "
+"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) 进行故障排除。"
+
+msgid "Service Verification:"
+msgstr "服务验证："
+
+msgid ""
+"If the service starts successfully, the following startup log will be "
+"displayed:"
+msgstr "如果服务启动成功，将显示以下启动日志："
+
+msgid "## 6 Functional Verification"
+msgstr "## 6 功能验证"
+
+msgid ""
+"After the service is started, the model can be invoked by sending a prompt. "
+"Two API interfaces are supported: `completions` and `chat.completions`. Use "
+"the `--served-model-name` you configured (for example, `qwen3.5`). If you "
+"used `--port 1025` or `-p 8080:8080`, adjust the URL accordingly."
+msgstr ""
+"服务启动后，可以通过发送提示词来调用模型。支持两个 API 接口：`completions` 和 `chat.completions`。使用您配置的 "
+"`--served-model-name`（例如 `qwen3.5`）。如果您使用了 `--port 1025` 或 `-p "
+"8080:8080`，请相应调整 URL。"
+
+msgid "**Completions API:**"
+msgstr "**Completions API：**"
+
+msgid "**Chat Completions API:**"
+msgstr "**Chat Completions API：**"
+
+msgid ""
+"Expected Result: The service returns HTTP 200 OK. The JSON response contains"
+" the `choices` field with generated text."
+msgstr "预期结果：服务返回 HTTP 200 OK。JSON 响应中包含 `choices` 字段，其中包含生成的文本。"
+
+msgid "## 7 Accuracy Evaluation"
+msgstr "## 7 精度评估"
+
+msgid "### Using AISBench"
+msgstr "### 使用 AISBench"
+
+msgid ""
+"1. Refer to [Using "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr ""
+"1. 详细信息请参考[使用 "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
+
+msgid ""
+"2. After execution, you can get the result. Here are the accuracy results of"
+" `Qwen3.5-2B`, `Qwen3.5-4B`, and `Qwen3.5-9B` on Atlas inference products "
+"for reference only."
+msgstr ""
+"2. 执行后即可获得结果。以下是 `Qwen3.5-2B`、`Qwen3.5-4B` 和 `Qwen3.5-9B` 在 Atlas "
+"推理产品上的精度结果，仅供参考。"
+
+msgid "**Accuracy Evaluation Config File:**"
+msgstr "**精度评估配置文件：**"
+
+msgid "| Model | dataset | version | metric | mode | vllm-api-general-chat |"
+msgstr "| Model | dataset | version | metric | mode | vllm-api-general-chat |"
+
+msgid "| Qwen3.5-2B | gsm8k | - | accuracy | gen | 77.71 |"
+msgstr "| Qwen3.5-2B | gsm8k | - | accuracy | gen | 77.71 |"
+
+msgid "| Qwen3.5-2B | textvqa | - | accuracy | gen | 76.09 |"
+msgstr "| Qwen3.5-2B | textvqa | - | accuracy | gen | 76.09 |"
+
+msgid "| Qwen3.5-4B | gsm8k | - | accuracy | gen | 93.18 |"
+msgstr "| Qwen3.5-4B | gsm8k | - | accuracy | gen | 93.18 |"
+
+msgid "| Qwen3.5-4B | textvqa | - | accuracy | gen | 79.08 |"
+msgstr "| Qwen3.5-4B | textvqa | - | accuracy | gen | 79.08 |"
+
+msgid "| Qwen3.5-9B | gsm8k | - | accuracy | gen | 95.30 |"
+msgstr "| Qwen3.5-9B | gsm8k | - | accuracy | gen | 95.30 |"
+
+msgid "| Qwen3.5-9B | textvqa | - | accuracy | gen | 82.33 |"
+msgstr "| Qwen3.5-9B | textvqa | - | accuracy | gen | 82.33 |"
+
+msgid "## 8 Performance Evaluation"
+msgstr "## 8 性能评估"
+
+msgid "### Using AISBench"
+msgstr "### 使用 AISBench"
+
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+"详细信息请参考[使用 AISBench "
+"进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation)。"
+
+msgid "## 9 Performance Tuning"
+msgstr "## 9 性能调优"
+
+msgid "### 9.1 Recommended Configurations"
+msgstr "### 9.1 推荐配置"
+
+msgid ""
+"> **Note**: The following configurations are for reference only. The optimal configuration depends on model size, maximum input/output length, and actual device memory.\n"
+">\n"
+"> **Atlas inference products / Atlas 200I Pro**: Currently only the TP scenario is supported. Prefer **TP=1** on Atlas 200I Pro. On Atlas inference products, **TP=1** and **TP=2** are both supported; choose according to the available devices. Configure `--max-model-len`, `--max-num-seqs`, and `--gpu-memory-utilization` based on the actual device memory; setting them too high may cause OOM."
+msgstr ""
+"> **注意**：以下配置仅供参考。最佳配置取决于模型大小、最大输入/输出长度以及实际设备内存。\n"
+">\n"
+"> **Atlas 推理产品 / Atlas 200I Pro**：目前仅支持 TP 场景。在 Atlas 200I Pro 上建议使用 **TP=1**。在 Atlas 推理产品上，**TP=1** 和 **TP=2** 均支持；请根据可用设备选择。根据实际设备内存配置 `--max-model-len`、`--max-num-seqs` 和 `--gpu-memory-utilization`；设置过高可能导致 OOM。"
+
+msgid "### 9.2 Tuning Guidelines"
+msgstr "### 9.2 调优指南"
+
+msgid ""
+"Please refer to the [Public Performance Tuning "
+"Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md)"
+" for tuning methods."
+msgstr ""
+"请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)了解调优方法。"
+
+msgid ""
+"Please refer to the [Feature "
+"Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
+"feature descriptions."
+msgstr ""
+"请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)了解详细的功能描述。"
+
+msgid "## 10 FAQ"
+msgstr "## 10 常见问题"
+
+msgid ""
+"For common environment, installation, and general parameter issues, please "
+"refer to the [vLLM-Ascend Public "
+"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)."
+msgstr ""
+"关于常见的环境、安装和通用参数问题，请参考 [vLLM-Ascend 公共 "
+"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"

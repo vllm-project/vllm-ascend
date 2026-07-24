@@ -679,3 +679,18 @@ msgid ""
 "| version | Doc for historical released versions | `vX.Y.Z` --> "
 "`releases/vX.Y.Z` branch |"
 msgstr "| 版本 | 历史发布版本的文档 | `vX.Y.Z` --> `releases/vX.Y.Z` 分支 |"
+
+msgid ""
+"| v0.23.0rc1  | v0.23.0           | >= 3.10, < 3.13 | 9.0.1       | 2.10.0 /"
+" 2.10.0.post2           | 3.2.1             | v0.3.11.post1 |"
+msgstr ""
+"| v0.23.0rc1  | v0.23.0           | >= 3.10, < 3.13 | 9.0.1       | 2.10.0 /"
+" 2.10.0.post2           | 3.2.1             | v0.3.11.post1 |"
+
+msgid "| 2026.07.20 | Release candidates, v0.23.0rc1            |"
+msgstr "| 2026.07.20 | 发布候选版本，v0.23.0rc1            |"
+
+msgid ""
+"| releases/v0.23.0 | Maintained | CI commitment for vLLM 0.23.0 version"
+"                |"
+msgstr "| releases/v0.23.0 | 维护中 | 对 vLLM 0.23.0 版本的 CI 承诺                |"

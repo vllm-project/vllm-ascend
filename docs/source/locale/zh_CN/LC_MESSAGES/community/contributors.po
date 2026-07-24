@@ -36,11 +36,11 @@ msgid ""
 "following contributors:"
 msgstr "vLLM Ascend 的每个版本都离不开以下贡献者的支持："
 
-msgid "Updated on 2026-06-24:"
-msgstr "更新于 2026-06-24："
-
 msgid "| Name | GitHub ID | Date |"
 msgstr "| 姓名 | GitHub ID | 日期 |"
 
 msgid "| Number | Contributor | Date | Commit ID |"
 msgstr "| 序号 | 贡献者 | 日期 | 提交ID |"
+
+msgid "Updated on 2026-07-17:"
+msgstr "更新于 2026-07-17："

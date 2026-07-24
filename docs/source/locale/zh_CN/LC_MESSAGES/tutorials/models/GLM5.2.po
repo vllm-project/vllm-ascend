@@ -60,24 +60,12 @@ msgid "### Model Weight"
 msgstr "### 模型权重"
 
 msgid ""
-"- `GLM-5.2`(BF16 version): requires 2 Atlas 800 A3 (128G × 8) node or 4 Atlas 800 A2 (64G × 8) node.[Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2).\n"
-"- `GLM-5.2-w8a8`: requires 1 Atlas 800 A3 (128G × 8) node or 2 Atlas 800 A2 (64G × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8).\n"
-"- You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly."
-msgstr ""
-"- `GLM-5.2`（BF16版本）：需要2个Atlas 800 A3（128G × 8）节点或4个Atlas 800 A2（64G × 8）节点。[下载模型权重](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2)。\n"
-"- `GLM-5.2-w8a8`：需要1个Atlas 800 A3（128G × 8）节点或2个Atlas 800 A2（64G × 8）节点。[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8)。\n"
-"- 您可以使用[msmodelslim](https://gitcode.com/Ascend/msmodelslim)直接对模型进行量化。"
-
-msgid ""
 "It is recommended to download the model weight to the shared directory of "
 "multiple nodes, such as `/root/.cache/`"
 msgstr "建议将模型权重下载到多节点共享目录中，例如 `/root/.cache/`"
 
 msgid "### Installation"
 msgstr "### 安装"
-
-msgid "You can use our official docker image to run GLM-5.2 directly."
-msgstr "您可以直接使用官方Docker镜像运行GLM-5.2。"
 
 msgid "Start the docker image on your each node."
 msgstr "在每个节点上启动Docker镜像。"
@@ -95,11 +83,6 @@ msgstr "## 部署"
 
 msgid "### Single-node Deployment"
 msgstr "### 单节点部署"
-
-msgid ""
-"- Quantized model `glm-5.2-w8a8` can be deployed on 1 Atlas 800 A3 (64G × "
-"16) ."
-msgstr "- 量化模型 `glm-5.2-w8a8` 可部署在1个Atlas 800 A3（64G × 16）上。"
 
 msgid "Run the following script to execute online inference."
 msgstr "运行以下脚本执行在线推理。"
@@ -130,55 +113,17 @@ msgstr ""
 msgid "=== \"A3 series\""
 msgstr "=== \"A3系列\""
 
-msgid "- `glm-5.2-w8a8`: can be deployed on 2 Atlas 800 A3 (64G × 16)."
-msgstr "- `glm-5.2-w8a8`：可部署在2个Atlas 800 A3（64G × 16）上。"
-
 msgid "Run the following scripts on two nodes respectively."
 msgstr "分别在两个节点上运行以下脚本。"
 
 msgid "=== \"A2 series\""
 msgstr "=== \"A2系列\""
 
-msgid "- `glm-5.2-w8a8`: can be deployed on 2 Atlas 800 A2 (64G × 32)."
-msgstr "- `glm-5.2-w8a8`：可部署在2个Atlas 800 A2（64G × 32）上。"
-
 msgid "**node 0**"
 msgstr "**节点0**"
 
 msgid "**node 1**"
 msgstr "**节点1**"
-
-msgid "### Co-located Deployment on 4 Nodes (200k context)"
-msgstr "### 4节点共置部署（200k上下文）"
-
-msgid ""
-"In a co-located (mixed) deployment, prefill and decode run together on the "
-"same nodes, in contrast to the disaggregated setup below. The following "
-"templates deploy `GLM-5.2` across 4 nodes with `DP4 TP8` (`data-parallel-"
-"size-local=1` per node), a 200k context window, and MTP "
-"(`num_speculative_tokens=5`). Node 0 hosts the API server and is the DP "
-"master; Node 1 to Node 3 run with `--headless`. Prefix caching is disabled "
-"(`--no-enable-prefix-caching`) in this configuration. All IPs, NIC names, "
-"ports and weight paths are placeholders."
-msgstr ""
-"在共置（混合）部署中，prefill和decode在同一节点上共同运行，与下文分离式部署不同。以下模板在4个节点上以`DP4 "
-"TP8`（每节点`data-parallel-size-"
-"local=1`）、200k上下文窗口和MTP（`num_speculative_tokens=5`）部署`GLM-5.2`。节点0承载API服务器并作为DP主节点；节点1至节点3以`--headless`运行。此配置中禁用前缀缓存（`--no-"
-"enable-prefix-caching`）。所有IP、网卡名称、端口和权重路径均为占位符。"
-
-msgid "**Node 0** (API server / DP master):"
-msgstr "**节点0**（API服务器/DP主节点）："
-
-msgid "**Node 1** (headless, `--data-parallel-start-rank 1`):"
-msgstr "**节点1**（无头模式，`--data-parallel-start-rank 1`）："
-
-msgid ""
-"Node 2 and Node 3 use the same script as Node 1, with `--data-parallel-"
-"start-rank` set to `2` and `3` respectively (and `node0_ip` pointing to Node"
-" 0)."
-msgstr ""
-"节点2和节点3使用与节点1相同的脚本，分别设置`--data-parallel-start-"
-"rank`为`2`和`3`（并将`node0_ip`指向节点0）。"
 
 msgid "### Prefill-Decode Disaggregation"
 msgstr "### Prefill-Decode分离式部署"
@@ -426,3 +371,32 @@ msgstr "两个解码节点的推荐命令："
 
 msgid "Recommended proxy command:"
 msgstr "推荐代理命令："
+
+msgid ""
+"- `GLM-5.2`(BF16 version): requires 2 Atlas 800 A3 (128G × 8) node or 4 Atlas 800 A2 (64G × 8) node.[Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2).\n"
+"- `GLM-5.2-w8a8`: requires 1 Atlas 800 A3 (128G × 8) node or 2 Atlas 800 A2 (64G × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8).\n"
+"- `GLM-5.2-w4a8c8`: requires 1 Atlas 800 A3 (128G × 8) node or 2 Atlas 800 A2 (64G × 8) node.[Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8).\n"
+"- You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly."
+msgstr ""
+"- `GLM-5.2`（BF16版本）：需要2个Atlas 800 A3（128G × 8）节点或4个Atlas 800 A2（64G × 8）节点。[下载模型权重](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2)。\n"
+"- `GLM-5.2-w8a8`：需要1个Atlas 800 A3（128G × 8）节点或2个Atlas 800 A2（64G × 8）节点。[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8)。\n"
+"- `GLM-5.2-w4a8c8`：需要1个Atlas 800 A3（128G × 8）节点或2个Atlas 800 A2（64G × 8）节点。[下载模型权重](https://modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8)。\n"
+"- 您可以直接使用[msmodelslim](https://gitcode.com/Ascend/msmodelslim)对模型进行量化。"
+
+msgid ""
+"- You can use our official docker image to run GLM-5.2 directly.\n"
+"- [KV Cache Pool (Ascend Store) Deployment Guide](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/feature_guide/kv_pool.html)"
+msgstr ""
+"- 您可以直接使用我们的官方Docker镜像运行GLM-5.2。\n"
+"- [KV缓存池（Ascend存储）部署指南](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/feature_guide/kv_pool.html)"
+
+msgid ""
+"- Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (64G × "
+"16) ."
+msgstr "- 量化模型`GLM-5.2-w4a8c8`可部署在1个Atlas 800 A3（64G × 16）上。"
+
+msgid "- `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A3 (64G × 16)."
+msgstr "- `GLM-5.2-w4a8c8`：可部署在2个Atlas 800 A3（64G × 16）上。"
+
+msgid "- `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A2 (64G × 32)."
+msgstr "- `GLM-5.2-w4a8c8`：可部署在2个Atlas 800 A2（64G × 32）上。"
