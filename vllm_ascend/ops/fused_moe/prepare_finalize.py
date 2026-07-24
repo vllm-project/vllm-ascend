@@ -332,6 +332,17 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
     TP AG → Attn → TP RS → EP AG → MoE → EP RS
     """
 
+    def _use_ep_sequence_parallel(self) -> bool:
+        """Whether MoE itself must use the EP sequence-parallel path.
+
+        ``enable_sp_by_pass`` enables the compilation pass, which already
+        inserts a TP reduce-scatter/all-gather pair around RMSNorm.  It does
+        not mean that the MoE configuration owns sequence-parallel tokens.
+        When the MoE config has ``sp_size == 1``, selecting the EP path here
+        would gather the tokens a second time before routing.
+        """
+        return enable_sp() or (enable_sp_by_pass() and self.moe_config.is_sequence_parallel)
+
     def prepare(
         self,
         hidden_states: torch.Tensor,
@@ -347,7 +358,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         Returns:
             MoEPrepareOutput with global tensors.
         """
-        if enable_sp() or enable_sp_by_pass():
+        if self._use_ep_sequence_parallel():
             return self._prepare_with_ep_group(hidden_states, router_logits, quant_type)
 
         return self._prepare_with_dp_group(hidden_states, router_logits, enable_shared_expert_dp, replace_allreduce)
@@ -488,7 +499,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         Returns:
             Tensor with shape [local_num_tokens, hidden_size]
         """
-        if enable_sp() or enable_sp_by_pass():
+        if self._use_ep_sequence_parallel():
             return self._finalize_with_ep_group(hidden_states)
 
         return self._finalize_with_dp_group(hidden_states, reduce_results)
