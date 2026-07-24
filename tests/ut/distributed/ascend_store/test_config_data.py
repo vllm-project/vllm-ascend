@@ -155,7 +155,7 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         hashes = [bytes([idx % 251]) * 32 for idx in range(128)]
 
         result = list(
-            db.process_tokens_with_block_ids(
+            db.process_token_key_strings_with_block_ids(
                 128 * 128,
                 hashes,
                 [1000, 1001, 1002, 1003],
@@ -163,11 +163,11 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         )
 
         self.assertEqual(
-            [start for start, _, _, _ in result],
+            [start for start, _, _, _, _ in result],
             [124 * 128, 125 * 128, 126 * 128, 127 * 128],
         )
         self.assertEqual(
-            [block_id for _, _, _, block_id in result],
+            [block_id for _, _, _, _, block_id in result],
             [1000, 1001, 1002, 1003],
         )
 
@@ -184,26 +184,75 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(result[0][2].chunk_hash, _expected_grouped_hash("a", "b").hex())
         self.assertEqual(len(result[0][2].chunk_hash), 64)
 
-    def test_get_block_hashes_rehashes_grouped_str_hashes(self):
-        result = get_block_hashes(["a", "b", "c", "d"], group_block_size=32, hash_block_size=16)
+    def test_key_strings_match_pool_keys(self):
+        hashes = ["aaa", "bbb", "ccc"]
+        pool_keys = list(self.db.process_tokens(40, hashes))
         self.assertEqual(
-            result,
+            list(self.db.process_token_key_strings(40, hashes)),
             [
-                _expected_grouped_hash("a", "b"),
-                _expected_grouped_hash("c", "d"),
+                (start, end, key.to_string(), hash_val)
+                for (start, end, key), hash_val in zip(pool_keys, hashes, strict=True)
             ],
         )
 
-    def test_get_block_hashes_rehashes_grouped_bytes_hashes(self):
-        result = get_block_hashes([b"a", b"b", b"c", b"d"], group_block_size=32, hash_block_size=16)
+        block_ids = [5, 6]
         self.assertEqual(
-            result,
+            list(self.db.process_token_key_strings_with_block_ids(32, hashes, block_ids)),
             [
-                _expected_grouped_hash(b"a", b"b"),
-                _expected_grouped_hash(b"c", b"d"),
+                (start, end, key.to_string(), hash_val, block_id)
+                for (start, end, key), hash_val, block_id in zip(pool_keys[:2], hashes[:2], block_ids, strict=True)
             ],
         )
-        self.assertEqual(len(result[0]), 32)
+
+    def test_direct_keys_preserve_multigroup_layerwise_key_semantics(self):
+        group_metadata = [
+            KeyMetadata("llama", 0, 0, 0, 0),
+            KeyMetadata("llama", 1, 0, 0, 0),
+        ]
+        db = ChunkedTokenDatabase(group_metadata, block_size=[16, 32], partitions=None, hash_block_size=16)
+        db.set_group_buffers(
+            {0: [1000], 1: [2000]},
+            {0: [160], 1: [320]},
+            group_cache_families={0: "c1", 1: "c2"},
+            group_num_layers={0: 2, 1: 2},
+        )
+        hashes = ["a", "b", "c", "d"]
+
+        pool_key_result = list(db.process_tokens(64, hashes, kv_cache_group_id=1))
+        direct_key_result = list(db.process_token_key_strings(64, hashes, kv_cache_group_id=1))
+
+        self.assertEqual(len(pool_key_result), 1)
+        self.assertEqual(
+            direct_key_result[0][:3],
+            (pool_key_result[0][0], pool_key_result[0][1], pool_key_result[0][2].to_string()),
+        )
+        layer_key = pool_key_result[0][2].split_layers(2)[1]
+        self.assertIn("@group:1@cache_role:kv@cache_family:c2@layer_id:1", layer_key.to_string())
+
+    def test_key_strings_pre_shard_after_filtering(self):
+        hashes = ["a", "b", "c", "d"]
+        store_mask = [True, False, True, True]
+        result = list(
+            self.db.process_token_key_strings_with_block_ids(
+                64,
+                hashes,
+                [10, 11, 12, 13],
+                chunk_filter=lambda start: store_mask[start // 16],
+                shard_rank=1,
+                shard_size=2,
+            )
+        )
+        self.assertEqual([(start, end, block_id) for start, end, _, _, block_id in result], [(32, 48, 12)])
+
+    def test_get_block_hashes_rehashes_groups(self):
+        for hashes in (["a", "b", "c", "d"], [b"a", b"b", b"c", b"d"]):
+            with self.subTest(hash_type=type(hashes[0])):
+                result = get_block_hashes(hashes, group_block_size=32, hash_block_size=16)
+                expected = [
+                    _expected_grouped_hash(hashes[0], hashes[1]),
+                    _expected_grouped_hash(hashes[2], hashes[3]),
+                ]
+                self.assertEqual(list(result), expected)
 
     def test_prepare_value(self):
         addr, size, block_id = self.db.prepare_value(0, 16, [5, 6, 7])
