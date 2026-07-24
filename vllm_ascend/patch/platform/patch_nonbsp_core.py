@@ -101,8 +101,7 @@ def _print_modifications(modifications, dp_rank: int, enable_diagnostics: bool) 
 def _has_global_unfinished_reqs_with_diagnostics(self, local_unfinished: bool) -> bool:
     if diagnostics_enabled(self.vllm_config):
         print(
-            f"{datetime.datetime.now()} | _has_global_unfinished_reqs | "
-            f"step_counter: {self.step_counter}",
+            f"{datetime.datetime.now()} | _has_global_unfinished_reqs | step_counter: {self.step_counter}",
             flush=True,
         )
     return _ORIGINAL_HAS_GLOBAL_UNFINISHED_REQS(self, local_unfinished)
