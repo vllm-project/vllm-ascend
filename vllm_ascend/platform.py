@@ -666,6 +666,35 @@ class NPUPlatform(Platform):
                     "vllm_ascend.core.short_request_first_scheduler.ShortRequestFirstAsyncScheduler"
                 )
 
+        nonbsp_config = scheduler_extension_config.nonbsp_config
+        if nonbsp_config.enabled:
+            if scheduler_extension_config.enable_balance_scheduling:
+                raise ValueError("NonBSP cannot be used with enable_balance_scheduling.")
+            kv_transfer_config = vllm_config.kv_transfer_config
+            kv_role = getattr(kv_transfer_config, "kv_role", None)
+            if kv_transfer_config is None or kv_role != "kv_consumer":
+                raise ValueError(
+                    "NonBSP is only supported on PD-disaggregated D nodes "
+                    f"(kv_role='kv_consumer', but got kv_role={kv_role!r})."
+                )
+            if parallel_config.data_parallel_size <= 1:
+                raise ValueError("NonBSP requires data_parallel_size > 1.")
+            if parallel_config.nnodes_within_dp > 1:
+                raise ValueError(
+                    "NonBSP only supports decoder instances that run on a "
+                    "single node; got "
+                    f"nnodes_within_dp={parallel_config.nnodes_within_dp}."
+                )
+            if scheduler_extension_config.recompute_scheduler_enable:
+                raise ValueError(
+                    "NonBSP only supports the normal Scheduler and cannot be used with recompute_scheduler_enable."
+                )
+            if scheduler_extension_config.profiling_chunk_config.enabled:
+                raise ValueError(
+                    "NonBSP only supports the normal Scheduler and cannot be used with profiling_chunk_config."
+                )
+            vllm_config.scheduler_config.scheduler_cls = "vllm_ascend.core.nonbsp_scheduler.NonBSPScheduler"
+
         if scheduler_extension_config.recompute_scheduler_enable:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)

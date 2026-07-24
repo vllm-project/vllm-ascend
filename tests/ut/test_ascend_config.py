@@ -16,12 +16,14 @@
 import json
 import os
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 from vllm.config import KVTransferConfig, VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import (
+    NonBSPConfig,
     SchedulerConfig,
     ShortRequestFirstConfig,
     clear_ascend_config,
@@ -113,6 +115,16 @@ class TestAscendConfig(TestBase):
                 "recompute_scheduler_enable": True,
                 "short_request_first_config": {"enabled": True, "threshold": 512},
                 "profiling_chunk_config": {"enabled": False},
+                "nonbsp_config": {
+                    "enabled": True,
+                    "enable_diagnostics": True,
+                    "mode": "dynamic",
+                    "start_step": 100,
+                    "end_step": 500,
+                    "bubble_threshold": 3.0,
+                    "long_req_block_threshold": 512,
+                    "dynamic_max_step": 128,
+                },
             }
         }
 
@@ -123,6 +135,11 @@ class TestAscendConfig(TestBase):
         self.assertTrue(scheduler_config.short_request_first_config.enabled)
         self.assertEqual(scheduler_config.short_request_first_config.threshold, 512)
         self.assertFalse(scheduler_config.profiling_chunk_config.enabled)
+        self.assertTrue(scheduler_config.nonbsp_config.enabled)
+        self.assertTrue(scheduler_config.nonbsp_config.enable_diagnostics)
+        self.assertEqual(scheduler_config.nonbsp_config.mode, "dynamic")
+        self.assertEqual(scheduler_config.nonbsp_config.start_step, 100)
+        self.assertEqual(scheduler_config.nonbsp_config.end_step, 500)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -475,6 +492,61 @@ class TestShortRequestFirstConfig(TestBase):
         self.assertEqual(cfg.long_max_wait_ms, 0.0)
 
 
+class TestNonBSPConfig(TestBase):
+    def test_defaults(self):
+        config = NonBSPConfig()
+
+        self.assertFalse(config.enabled)
+        self.assertFalse(config.enable_diagnostics)
+        self.assertEqual(config.mode, "static")
+        self.assertEqual(config.start_step, 250)
+        self.assertEqual(config.end_step, -1)
+        self.assertEqual(config.bubble_threshold, 5.0)
+        self.assertEqual(config.long_req_block_threshold, 700)
+        self.assertEqual(config.dynamic_max_step, 256)
+
+    def test_configures_dynamic_mode(self):
+        config = NonBSPConfig(
+            {
+                "enabled": True,
+                "enable_diagnostics": True,
+                "mode": "dynamic",
+                "start_step": 100,
+                "end_step": 500,
+                "bubble_threshold": 3,
+                "long_req_block_threshold": 512,
+                "dynamic_max_step": 128,
+            }
+        )
+
+        self.assertTrue(config.enabled)
+        self.assertTrue(config.enable_diagnostics)
+        self.assertEqual(config.mode, "dynamic")
+        self.assertEqual(config.start_step, 100)
+        self.assertEqual(config.end_step, 500)
+        self.assertEqual(config.bubble_threshold, 3.0)
+        self.assertEqual(config.long_req_block_threshold, 512)
+        self.assertEqual(config.dynamic_max_step, 128)
+
+    def test_rejects_invalid_config(self):
+        invalid_configs: tuple[tuple[Any, str], ...] = (
+            ([], "must be a dict"),
+            ({"unknown": True}, "Unknown nonbsp_config keys"),
+            ({"enabled": 1}, "enabled must be a bool"),
+            ({"enable_diagnostics": 1}, "enable_diagnostics must be a bool"),
+            ({"mode": "invalid"}, "mode must be one of"),
+            ({"start_step": -1}, "start_step must be >= 0"),
+            ({"start_step": 10, "end_step": 10}, "end_step must be greater than start_step"),
+            ({"bubble_threshold": 0}, "bubble_threshold must be > 0"),
+            ({"long_req_block_threshold": 0}, "long_req_block_threshold must be > 0"),
+            ({"dynamic_max_step": 0}, "dynamic_max_step must be > 0"),
+        )
+
+        for user_config, message in invalid_configs:
+            with self.subTest(user_config=user_config), self.assertRaisesRegex(ValueError, message):
+                NonBSPConfig(user_config)
+
+
 class TestSchedulerConfig(TestBase):
     def test_defaults(self):
         config = SchedulerConfig({}, balance_env_value=False)
@@ -483,6 +555,7 @@ class TestSchedulerConfig(TestBase):
         self.assertFalse(config.recompute_scheduler_enable)
         self.assertFalse(config.short_request_first_config.enabled)
         self.assertFalse(config.profiling_chunk_config.enabled)
+        self.assertFalse(config.nonbsp_config.enabled)
 
     @patch("vllm_ascend.ascend_config.logger.warning_once")
     def test_none_config_uses_defaults_and_legacy_fallback(self, mock_warning_once):
@@ -513,6 +586,13 @@ class TestSchedulerConfig(TestBase):
                         "long_max_wait_ms": 2000,
                     },
                     "profiling_chunk_config": {"enabled": True, "need_timing": False},
+                    "nonbsp_config": {
+                        "enabled": True,
+                        "enable_diagnostics": True,
+                        "mode": "dynamic",
+                        "start_step": 100,
+                        "end_step": 500,
+                    },
                 }
             },
             balance_env_value=False,
@@ -525,6 +605,11 @@ class TestSchedulerConfig(TestBase):
         self.assertEqual(config.short_request_first_config.long_max_wait_ms, 2000.0)
         self.assertTrue(config.profiling_chunk_config.enabled)
         self.assertFalse(config.profiling_chunk_config.need_timing)
+        self.assertTrue(config.nonbsp_config.enabled)
+        self.assertTrue(config.nonbsp_config.enable_diagnostics)
+        self.assertEqual(config.nonbsp_config.mode, "dynamic")
+        self.assertEqual(config.nonbsp_config.start_step, 100)
+        self.assertEqual(config.nonbsp_config.end_step, 500)
 
     @patch("vllm_ascend.ascend_config.logger.warning_once")
     def test_legacy_top_level_config_warns_and_remains_supported(self, mock_warning_once):
