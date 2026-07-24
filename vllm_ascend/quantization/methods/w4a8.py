@@ -175,6 +175,16 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         antiquant_scale = (scale * per_group_scale).reshape(group_num, n)
         return antiquant_scale.npu(), bias
 
+    @staticmethod
+    def _prepare_bias(bias: torch.Tensor | None, x_dtype: torch.dtype) -> torch.Tensor | None:
+        if bias is None:
+            return None
+
+        expected_bias_dtype = torch.float32 if x_dtype == torch.bfloat16 else x_dtype
+        if bias.dtype != expected_bias_dtype:
+            bias = bias.to(expected_bias_dtype)
+        return bias.contiguous()
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -183,10 +193,12 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         tp_rank: int | None = None,
     ) -> torch.Tensor:
         # NOTE: activation `x` is not quantized
+        effective_bias = self._prepare_bias(bias, x.dtype)
         return torch_npu.npu_weight_quant_batchmatmul(
             x,
             layer.weight,
             antiquant_scale=layer.weight_scale_second.to(x.dtype),
+            bias=effective_bias,
             antiquant_group_size=self.group_size,
         )
 
