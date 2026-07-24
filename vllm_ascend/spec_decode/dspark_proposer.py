@@ -707,19 +707,22 @@ class AscendDSparkProposer(AscendDflashProposer):
                     runner_seeds.index_select(0, runner_idx_mapping).to(device=device, dtype=torch.int64).contiguous()
                 )
             return runner_seeds[:num_reqs].to(device=device, dtype=torch.int64).contiguous()
-        seeds = self._dspark_sampling_seed_buffer[:num_reqs]
         model_config = getattr(getattr(self, "vllm_config", None), "model_config", None)
         base_seed = int(getattr(model_config, "seed", 0) or 0)
         runner_idx_mapping = self._get_runner_idx_mapping(num_reqs, device)
         runner_idx_mapping_cpu = runner_idx_mapping.cpu().tolist() if runner_idx_mapping is not None else None
+        seed_values = []
         for req_idx in range(num_reqs):
             generator_idx = runner_idx_mapping_cpu[req_idx] if runner_idx_mapping_cpu is not None else req_idx
             generator = sampling_metadata.generators.get(generator_idx)
-            seeds[req_idx] = (
+            seed_values.append(
                 int(generator.initial_seed())
                 if generator is not None
                 else base_seed + req_idx * DSPARK_REQUEST_SEED_STRIDE
             )
+        seeds = self._dspark_sampling_seed_buffer[:num_reqs]
+        seed_values_cpu = torch.tensor(seed_values, dtype=torch.int64, device="cpu")
+        seeds.copy_(seed_values_cpu)
         return seeds.to(device=device, dtype=torch.int64).contiguous()
 
     def _sample_sequential(
