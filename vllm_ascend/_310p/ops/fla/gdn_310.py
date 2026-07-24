@@ -55,6 +55,26 @@ def _zero_padded_tokens(
     return tensor * valid_mask.reshape(mask_shape).to(dtype=tensor.dtype)
 
 
+def _clear_states_without_initial(
+    states: torch.Tensor,
+    has_initial_state: torch.Tensor,
+) -> torch.Tensor:
+    """Zero the rows of ``states`` whose sequence has no initial state.
+
+    A boolean-mask ``index_put_`` (``states[~has_initial_state] = 0``) lowers to
+    an aicpu ``IndexPut`` kernel that fails on 310P (error 0x2a -> 507018). Use
+    an elementwise mask multiply instead, mirroring the Triton ``clear_ssm_states``
+    helper used on the non-310P path.
+    """
+    if states.numel() == 0:
+        return states
+
+    keep = has_initial_state.to(device=states.device, dtype=torch.bool).reshape(-1)
+    mask_shape = [states.shape[0]] + [1] * (states.ndim - 1)
+    keep = keep.reshape(mask_shape).to(states.dtype)
+    return states * keep
+
+
 def _flatten_state_indices(
     ssm_state_indices: torch.Tensor,
     cu_seqlens: torch.Tensor,
@@ -352,7 +372,7 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
             # 2.2: Process the remaining part
             if attn_metadata.num_prefills > 0:
                 initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
-                initial_state[~has_initial_state, ...] = 0
+                initial_state = _clear_states_without_initial(initial_state, has_initial_state)
                 (
                     core_attn_out_non_spec,
                     last_recurrent_state,

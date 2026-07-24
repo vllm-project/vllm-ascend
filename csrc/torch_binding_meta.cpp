@@ -1494,6 +1494,32 @@ at::Tensor chunk_fwd_o_meta(
     return o;
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_compute_wy_meta(
+    const at::Tensor & q,
+    const at::Tensor & k,
+    const at::Tensor & v,
+    const at::Tensor & g,
+    const at::Tensor & beta,
+    c10::optional<int64_t> chunk_size)
+{
+    (void)k;
+    (void)beta;
+    (void)chunk_size;
+    const c10::SymInt B = q.sym_size(0);
+    const c10::SymInt T = q.sym_size(1);
+    const c10::SymInt Hk = q.sym_size(2);
+    const c10::SymInt K = q.sym_size(3);
+    const c10::SymInt Hv = v.sym_size(2);
+    const c10::SymInt V = v.sym_size(3);
+
+    at::Tensor q_kernel = at::empty_symint(c10::SymDimVector{B, Hk, T, K}, q.options());
+    at::Tensor k_kernel = at::empty_symint(c10::SymDimVector{B, Hk, T, K}, q.options());
+    at::Tensor w_kernel = at::empty_symint(c10::SymDimVector{B, Hv, T, K}, q.options());
+    at::Tensor u_kernel = at::empty_symint(c10::SymDimVector{B, Hv, T, V}, v.options());
+    at::Tensor g_kernel = at::empty_symint(c10::SymDimVector{B, Hv, T}, g.options().dtype(at::kFloat));
+    return std::make_tuple(q_kernel, k_kernel, w_kernel, u_kernel, g_kernel);
+}
+
 void store_kv_block_metadata(
     const at::Tensor &slot_mapping_npu,
     const at::Tensor &group_len,
@@ -1533,6 +1559,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
     // chunk_fwd_o
     ops.impl("chunk_fwd_o", &vllm_ascend::meta::chunk_fwd_o_meta);
+    // chunk_gated_delta_rule_compute_wy
+    ops.impl("chunk_gated_delta_rule_compute_wy", &vllm_ascend::meta::chunk_gated_delta_rule_compute_wy_meta);
 }
 }
 #else
