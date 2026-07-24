@@ -121,15 +121,15 @@ By predefining the maximum amount of KV cache processed per round, we sequential
 
 ![PCP-ChunkedPrefill](../../assets/cp/chunkedprefill.png)
 
-### SFA DSA-CP Mixed `o_proj` Path
+### SFA DSA-CP `o_proj` Path
 
-SFA DSA-CP mixed execution intentionally reuses the normal TP-sharded `o_proj`.
-This is part of the DSA-CP mixed data path, not a standalone user-facing `o_proj` TP switch.
-The mixed path is used when one instance may handle both decode-only and prefill/mixed batches, so `o_proj` must support two layouts at runtime:
+SFA DSA-CP execution intentionally reuses the normal TP-sharded `o_proj`.
+This applies both to a mixed-role instance and to a PD-disaggregated P node; it is not a standalone user-facing `o_proj` TP switch.
+The runtime path supports two layouts:
 
 - **Decode-only batches** keep the decode TP path.
   SFA outputs are exchanged with an all-to-all in the TP group, then the original TP-sharded `o_proj` runs normally.
-- **Prefill or mixed batches** produce SFA outputs that are not directly compatible with the TP-sharded `o_proj` input layout.
+- **Prefill or mixed batches**, including batches on a PD-disaggregated P node, produce SFA outputs that are not directly compatible with the TP-sharded `o_proj` input layout.
   Before `o_proj` forward, each rank all-gathers the TP-sharded `o_proj` weight and all input-sharded quantization parameters into temporary full-weight buffers.
   The full-weight `o_proj` forward runs once for that batch, and the module is then restored to the TP parameter aliases.
 
@@ -138,7 +138,7 @@ The storage invariant is that the original TP-sharded `o_proj` parameter remains
 `o_proj_full_*` tensors are reusable communication buffers for prefill/mixed full-gather execution only.
 They must not become a second persistent copy of the TP weight.
 
-This coupling preserves the existing decode TP behavior, supports prefill/mixed DSA-CP batches, and avoids adding an extra configuration path whose state can drift from DSA-CP mixed execution.
+This coupling preserves the existing decode TP behavior, supports prefill/mixed DSA-CP batches on both mixed-role and P-only instances, and avoids a persistent full-weight copy on every TP rank.
 
 ### Related Files
 

@@ -503,7 +503,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     understand this class
     """
 
-    # Supports forward using the all-gather o_proj weight for decode requests when Sharded CP is enabled.
+    # Reusable full-weight gather buffers for DSA-CP prefill/mixed requests.
     o_proj_full_pools: dict[tuple[str, int | None, torch.dtype, int, tuple[int, ...]], torch.Tensor] = {}
 
     # q_hadamard and k_hadamard tensor shared when dsa c8 enabled
@@ -638,12 +638,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.enable_dsa_cp = enable_dsa_cp()
         self.enable_sp = enable_sp()
 
-        # SFA DSA-CP mixed deployments keep o_proj in the existing TP layout.
-        # Decode can use the TP-sharded o_proj directly after an activation
-        # all-to-all, while prefill/mixed batches temporarily gather the TP
-        # shards into a full-weight buffer because their SFA output is not
-        # TP-sharded. This is part of the DSA-CP mixed-mode data path rather
-        # than an independent user-facing feature switch.
+        # SFA DSA-CP deployments keep o_proj in the existing TP layout. Decode
+        # can use the TP-sharded o_proj after an activation all-to-all, while
+        # prefill/mixed batches (including a PD-disaggregated P node)
+        # temporarily gather the TP shards into a full-weight buffer because
+        # their SFA output is not TP-sharded.
         self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp()
 
         if self.enable_dsa_cp:
@@ -968,8 +967,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         """
         Initialize TP-mode aliases and Full-mode buffers for DSA-CP o_proj.
 
-        In SFA DSA-CP mixed execution, the same model instance can run both
-        decode-only and prefill/mixed batches:
+        In SFA DSA-CP execution:
         - Decode-only batches all-to-all the SFA output in the TP group, then
           run the original TP-sharded o_proj.
         - Prefill/mixed batches produce SFA output that is not directly
@@ -1662,7 +1660,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         num_input_tokens = attn_metadata.num_input_tokens
         output_padded = output
 
-        # all-gather o_proj weight for prefill stage of PD mix node
+        # Asynchronously all-gather o_proj for DSA-CP prefill. This applies to
+        # both a mixed-role instance and a PD-disaggregated P node.
         o_proj_full_handle = None
         o_proj_full_param_handles = None
         # Prefill/mixed DSA-CP computes o_proj with a temporary full weight.
@@ -1954,7 +1953,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         attn_output = self._v_up_proj(attn_output)
 
         if self.enable_dsa_cp_with_o_proj_tp:
-            # SFA DSA-CP mixed mode keeps o_proj weight sharded in the TP domain:
+            # SFA DSA-CP keeps o_proj weight sharded in the TP domain:
             # 1. prefill/mixed: gather TP shards into a temporary full weight.
             # 2. decode-only: all-to-all hidden states, then run TP o_proj.
             result, require_o_proj_forward = self._handle_o_proj_weight_switch_and_forward(
@@ -1965,6 +1964,9 @@ class AscendSFAImpl(MLAAttentionImpl):
                 should_shard_weight=full_gather_o_proj_enabled,
             )
             if not require_o_proj_forward:
+                # The full-weight prefill path completes o_proj internally,
+                # but a pure P node must still publish this layer's KV cache.
+                maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
                 return result
             attn_output = result
 
