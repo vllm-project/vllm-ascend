@@ -264,6 +264,51 @@ def _create_nonbsp_scheduler(async_scheduling: bool):
     return vllm_config, scheduler
 
 
+def test_nonbsp_async_finished_lb_paused_request_is_removed_from_skipped_waiting():
+    vllm_config, scheduler = _create_nonbsp_scheduler(async_scheduling=True)
+    request = create_request(
+        request_id=1,
+        max_tokens=1,
+        block_size=vllm_config.cache_config.block_size,
+    )
+    scheduler.add_request(request)
+
+    # Schedule one token but deliberately delay its output.
+    first_output = scheduler.schedule()
+    assert request.status == RequestStatus.RUNNING
+    assert request.num_output_placeholders == 1
+
+    # Pause the running request through the NonBSP out_blk path.
+    scheduler.prepare_nonbsp_step()
+    block_num = (len(request.all_token_ids) + scheduler.block_size - 1) // scheduler.block_size
+    scheduler.modifications = {
+        "out_blk": [block_num],
+        "in_blk": [],
+        "freeze": False,
+    }
+
+    scheduler.schedule()
+
+    assert request.status == RequestStatus.PREEMPTED
+    assert request in scheduler.skipped_waiting
+    assert request not in scheduler.waiting
+
+    # The delayed token reaches max_tokens=1 and finishes the paused request.
+    scheduler.update_from_output(
+        first_output,
+        create_model_runner_output([request]),
+    )
+
+    assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
+    assert request not in scheduler.waiting
+    assert request not in scheduler.skipped_waiting
+
+    # Dynamic LB may become inactive on the following step. A stale finished
+    # request must not be picked up again.
+    scheduler.modifications = None
+    scheduler.schedule()
+
+
 def test_nonbsp_async_schedules_running_request_in_consecutive_steps():
     vllm_config, scheduler = _create_nonbsp_scheduler(async_scheduling=True)
     request = create_request(
