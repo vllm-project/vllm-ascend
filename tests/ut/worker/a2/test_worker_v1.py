@@ -1350,6 +1350,46 @@ class TestNPUWorker(TestBase):
                 weights_path="/tmp/weights", is_checkpoint_format=True
             )
 
+    @patch("vllm.model_executor.model_loader.ShardedStateLoader.save_model")
+    def test_save_sharded_state(self, mock_save_model):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+
+            worker.save_sharded_state(
+                path="/tmp/sharded-state",
+                pattern="model-rank-{rank}-part-{part}.safetensors",
+                max_size=1024,
+            )
+
+            mock_save_model.assert_called_once_with(
+                worker.model_runner.model,
+                "/tmp/sharded-state",
+                pattern="model-rank-{rank}-part-{part}.safetensors",
+                max_size=1024,
+            )
+
+    @patch("vllm.model_executor.model_loader.ShardedStateLoader.save_model")
+    def test_save_sharded_state_propagates_loader_error(self, mock_save_model):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        mock_save_model.side_effect = RuntimeError("failed to write shard")
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+
+            with self.assertRaisesRegex(RuntimeError, "failed to write shard"):
+                worker.save_sharded_state("/tmp/sharded-state")
+
+            mock_save_model.assert_called_once_with(
+                worker.model_runner.model,
+                "/tmp/sharded-state",
+                pattern=None,
+                max_size=None,
+            )
+
 
 class TestNPUWorkerWeightUpdate(TestBase):
     def _make_worker(self, engine=None):
