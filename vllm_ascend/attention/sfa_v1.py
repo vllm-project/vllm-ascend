@@ -1580,7 +1580,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         torch.Tensor | None,
         torch.Tensor | None,
         torch.Tensor | None,
-        torch.distributed.Work | None,
+        list[torch.distributed.Work | None] | None,
     ]:
         """Gather native-preprocess KV tensors when DSA context parallel is enabled."""
         if not self.enable_dsa_cp:
@@ -1612,6 +1612,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             get_tp_group(),
             async_op=async_op,
         )
+        kv_ag_handles = [kv_ag_handle]
 
         if self.has_indexer and self.use_sparse_c8_indexer:
             assert k_li is not None
@@ -1620,14 +1621,16 @@ class AscendSFAImpl(MLAAttentionImpl):
                 get_tp_group(),
                 async_op=async_op,
             )
+            kv_ag_handles.append(kv_ag_handle)
             assert k_li_scale is not None
             k_li_scale, kv_ag_handle = all_gather_async(
                 k_li_scale,
                 get_tp_group(),
                 async_op=async_op,
             )
+            kv_ag_handles.append(kv_ag_handle)
 
-        return k_li, k_li_scale, fused_kv_no_split, kv_ag_handle
+        return k_li, k_li_scale, fused_kv_no_split, kv_ag_handles
 
     def _maybe_store_kvcache_for_c8_n_dsacp(
         self,
@@ -1636,7 +1639,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         knope_scale: torch.Tensor | None,
         k_li: torch.Tensor | None,
         fused_kv_no_split: torch.Tensor | None,
-        kv_ag_handle: torch.distributed.Work | None,
+        kv_ag_handles: list[torch.distributed.Work | None] | None,
         kv_cache: tuple[torch.Tensor, ...] | None,
         slot_mapping_sfa: torch.Tensor,
         attn_metadata: M,
@@ -1674,8 +1677,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
 
         if self.enable_dsa_cp:
-            if kv_ag_handle is not None:
-                kv_ag_handle.wait()
+            for handle in kv_ag_handles or []:
+                if handle is not None:
+                    handle.wait()
 
             if full_gather_o_proj_enabled:
                 _, o_proj_full_handle = all_gather_async(
@@ -1915,7 +1919,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             kv_outputs = self.exec_kv(kv_no_split, cos, sin, kv_cache, kv_slots, attn_metadata)
             k_pe, k_nope = kv_outputs[:2]
             knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
-            k_li, k_li_scale, fused_kv_no_split, kv_ag_handle = self._maybe_gather_kv_for_dsacp(
+            k_li, k_li_scale, fused_kv_no_split, kv_ag_handles = self._maybe_gather_kv_for_dsacp(
                 k_pe,
                 k_nope,
                 knope_scale,
@@ -1938,7 +1942,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 knope_scale,
                 k_li,
                 fused_kv_no_split,
-                kv_ag_handle,
+                kv_ag_handles,
                 kv_cache,
                 slot_mapping_sfa,
                 attn_metadata,
