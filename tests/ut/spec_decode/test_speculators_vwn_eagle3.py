@@ -156,12 +156,15 @@ def _mock_npu_env():
             side_effect=_cpu_add_rms_norm_bias,
             create=True,
         ),
-        # enable_cp() reads parallel_config.*_context_parallel_size and runs `> 1`.
-        # On MagicMock these fields yield TypeError on Python 3.12, so short-circuit
-        # the check everywhere it's imported.
-        patch("vllm_ascend.attention.attention_v1.enable_cp", return_value=False),
-        patch("vllm_ascend.attention.sfa_v1.enable_cp", return_value=False, create=True),
-        patch("vllm_ascend.attention.mla_v1.enable_cp", return_value=False, create=True),
+        # DCP routing reads decode_context_parallel_size. On MagicMock this
+        # field can yield TypeError on Python 3.12, so short-circuit each
+        # backend's routing check.
+        patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=False),
+        patch(
+            "vllm_ascend.attention.sfa_v1.enable_sfa_dcp_replicated_indexer",
+            return_value=False,
+        ),
+        patch("vllm_ascend.attention.mla_v1.enable_dcp", return_value=False),
     ):
         yield
 

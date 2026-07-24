@@ -336,13 +336,11 @@ class NPUPlatform(Platform):
     @classmethod
     def _validate_parallel_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
-        if parallel_config.data_parallel_size > 1 and parallel_config.prefill_context_parallel_size > 1:
+        if not vllm_config.use_v2_model_runner and parallel_config.prefill_context_parallel_size > 1:
             raise ValueError(
-                "PCP (Prefill Context Parallelism) and DP (Data Parallelism) "
-                "cannot be enabled simultaneously in the current version of vLLM Ascend. "
-                f"Got data_parallel_size={parallel_config.data_parallel_size} and "
-                f"prefill_context_parallel_size={parallel_config.prefill_context_parallel_size}. "
-                "Please set either --data-parallel-size 1 or --prefill-context-parallel-size 1."
+                "PCP (Prefill Context Parallelism) is not supported by vLLM Ascend. "
+                "Please set --prefill-context-parallel-size to 1. "
+                f"Got prefill_context_parallel_size={parallel_config.prefill_context_parallel_size}."
             )
 
     @classmethod
@@ -706,7 +704,7 @@ class NPUPlatform(Platform):
                     "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareScheduler"
                 )
 
-        cp_size = parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size
+        cp_size = parallel_config.prefill_context_parallel_size * parallel_config.decode_context_parallel_size
         use_sparse = model_uses_sfa_sparse(model_config)
         sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(vllm_config)
         if sfa_dcp_replicated_indexer:
@@ -715,8 +713,12 @@ class NPUPlatform(Platform):
                     f"DCP for SFA is only supported when dcp_size({parallel_config.decode_context_parallel_size}) "
                     f"== tp_size({parallel_config.tensor_parallel_size})."
                 )
-            if get_ascend_device_type() == AscendDeviceType.A5:
-                raise NotImplementedError("SFA DCP with replicated indexer is not supported on A5 yet.")
+            enable_sparse_c8 = vllm_config.additional_config.get("enable_sparse_c8", False) and use_sparse
+            if enable_sparse_c8 and get_ascend_device_type() == AscendDeviceType.A5:
+                raise NotImplementedError(
+                    "SFA DCP with sparse C8 LightningIndexer cache is not supported on A5 yet. "
+                    "A5 uses the fused CKV quant sparse attention path, which needs a separate DCP LSE merge."
+                )
 
         if (
             vllm_config.kv_transfer_config is not None
@@ -726,12 +728,17 @@ class NPUPlatform(Platform):
             raise AssertionError(
                 f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size}) "
                 f"and block_size({cache_config.block_size}) "
-                "needs to be equal if use pcp or dcp > 1 in P/D disaggregate and kv pool scenario."
+                "needs to be equal if PCP or DCP is enabled in P/D disaggregate and kv pool scenario."
             )
 
-        if use_sparse and cp_size > 1 and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size:
+        if (
+            use_sparse
+            and cp_size > 1
+            and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size
+            and not sfa_dcp_replicated_indexer
+        ):
             logger.warning_once(
-                "The current SFA CP implementation requires "
+                "The current SFA context-parallel implementation requires "
                 f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size})"
                 f" == block_size({cache_config.block_size}). "
                 f"Override cp_kv_cache_interleave_size to {cache_config.block_size}."

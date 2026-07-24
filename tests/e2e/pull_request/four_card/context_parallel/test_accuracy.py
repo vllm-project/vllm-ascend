@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""PCP/DCP long-sequence accuracy guards.
+"""DCP and DSA-CP long-sequence accuracy guards.
 
 Run `pytest tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py`.
 """
@@ -116,7 +116,6 @@ FULL_FEATURE_MODEL_CASES = [
             "max_num_batched_tokens": 1024,
             "data_parallel_size": 2,
             "tensor_parallel_size": 2,
-            "prefill_context_parallel_size": 1,
             "decode_context_parallel_size": 2,
             "enable_expert_parallel": True,
             "enable_chunked_prefill": True,
@@ -150,7 +149,6 @@ FULL_FEATURE_MODEL_CASES = [
             "max_num_batched_tokens": 4096,
             "dtype": "auto",
             "tensor_parallel_size": 4,
-            "prefill_context_parallel_size": 1,
             "decode_context_parallel_size": 1,
             "enable_expert_parallel": True,
             "gpu_memory_utilization": 0.9,
@@ -178,5 +176,5 @@ FULL_FEATURE_MODEL_CASES = [
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 @pytest.mark.parametrize("case", FULL_FEATURE_MODEL_CASES, ids=lambda case: case.name)
-def test_models_pcp_dcp_full_feature_accuracy(case: AccuracyCase) -> None:
+def test_models_dcp_full_feature_accuracy(case: AccuracyCase) -> None:
     _run_accuracy_case(case)

@@ -118,6 +118,7 @@ class BaseDeviceAdaptor:
         quant_mode: int = -1,
         act_quant_type: torch.dtype | None = None,
     ):
+        input_dtype = act_quant_type or hidden_states.dtype
         return torch_npu.npu_moe_init_routing_v2(
             hidden_states,
             topk_ids,
@@ -128,6 +129,7 @@ class BaseDeviceAdaptor:
             expert_tokens_num_flag=expert_tokens_num_flag,
             active_expert_range=active_expert_range,
             quant_mode=quant_mode,
+            x_dtype=input_dtype if input_dtype in QUANT_DTYPES else None,
         )
 
     @staticmethod

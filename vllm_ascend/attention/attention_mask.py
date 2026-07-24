@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import torch
-from vllm.distributed import get_pcp_group
 
 from vllm_ascend.platform import ModelConfig
 from vllm_ascend.utils import singleton
@@ -39,7 +38,6 @@ class AttentionMaskBuilder:
         self.device = device
         self.mla_mask = None
         self.chunked_prefill_attn_mask = None
-        self.pcp_mla_mask = None
 
     def get_attn_mask(self, max_seq_len: int, dtype: torch.dtype):
         if self.attn_mask_cache is None or max_seq_len > self._seq_len_cached:
@@ -67,11 +65,6 @@ class AttentionMaskBuilder:
             self.mla_mask = torch.where(prefill_mask == 1, mask_value, 0).to(dtype)
         return self.mla_mask
 
-    def get_pcp_mla_mask(self, dtype: torch.dtype):
-        if self.pcp_mla_mask is None or self.pcp_mla_mask.dtype != dtype:
-            self.pcp_mla_mask = torch.triu(torch.ones(512, 512, device=self.device, dtype=dtype), 1)
-        return self.pcp_mla_mask
-
     def get_attention_mask(self, causal: bool, model_config: ModelConfig):
         if not causal:
             # FIA applies any provided mask as defaultMask (sparse_mode=0),
@@ -88,7 +81,5 @@ class AttentionMaskBuilder:
         return self.get_splitfuse_attn_mask()
 
     def get_final_mla_mask(self, model_config: ModelConfig):
-        if get_pcp_group().world_size > 1:
-            return self.get_pcp_mla_mask(model_config.dtype)
         # Prefill stages use 512x512 mask with appropriate dtype
         return self.get_mla_mask(model_config.dtype)

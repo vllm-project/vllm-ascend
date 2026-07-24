@@ -93,7 +93,7 @@ class AscendSpecDecodeBaseProposer310(AscendSpecDecodeBaseProposer):
 
             assert self.runner is not None
 
-            # 310P does not support PCP/DCP, so we skip all PCP handling.
+            # 310P does not support DCP, so skip context-parallel handling.
             ori_token_indices_to_sample = None
             query_lens_d = None
 

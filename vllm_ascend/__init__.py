@@ -70,11 +70,19 @@ def register_service_profiling():
 
 
 def register_model():
-    from vllm_ascend.patch.hunyuan_vl_processor_compat import (
-        install_hunyuan_vl_processor_compat,
-    )
+    # HunYuanVLProcessor is available only in newer Transformers releases.
+    # It is not needed by the other model registrations, so do not make their
+    # startup depend on this optional compatibility patch.
+    try:
+        from transformers import HunYuanVLProcessor  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        from vllm_ascend.patch.hunyuan_vl_processor_compat import (
+            install_hunyuan_vl_processor_compat,
+        )
 
-    install_hunyuan_vl_processor_compat()
+        install_hunyuan_vl_processor_compat()
     from .models import register_model
 
     register_model()

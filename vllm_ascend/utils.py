@@ -126,11 +126,7 @@ def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> 
         vllm_config = get_current_vllm_config()
 
     parallel_config = vllm_config.parallel_config
-    return (
-        model_uses_sfa_sparse(vllm_config.model_config)
-        and parallel_config.decode_context_parallel_size > 1
-        and parallel_config.prefill_context_parallel_size == 1
-    )
+    return model_uses_sfa_sparse(vllm_config.model_config) and parallel_config.decode_context_parallel_size > 1
 
 
 def clear_enable_sp():

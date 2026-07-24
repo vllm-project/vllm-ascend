@@ -861,9 +861,8 @@ vllm serve your_model_path \
     --host <host_ip> \
     --port <port> \
     --tensor-parallel-size 8 \
-    --data-parallel-size 1 \
+    --data-parallel-size 2 \
     --decode-context-parallel-size 2 \
-    --prefill-context-parallel-size 2 \
     --enable-expert-parallel \
     --cp-kv-cache-interleave-size 128 \
     --max-num-seqs 32 \
