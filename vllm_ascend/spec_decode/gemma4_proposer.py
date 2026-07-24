@@ -140,9 +140,15 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
     # number of KV heads than the target layer it shares with (e.g. draft
     # reports 16 KV heads from HuggingFace config but the target's
     # full_attention uses num_global_kv_heads=4), reading that cache under the
-    # draft's head counts would misinterpret the layout.  Align only
-    # num_kv_heads; query heads (num_heads) are tied to the draft's Q
-    # projection weight and must not change.
+    # draft's head counts would misinterpret the layout.
+    #
+    # We use object.__setattr__ to shadow the class-level descriptor (getter)
+    # on Attention / AscendAttention / Gemma4MTPAttention.  Without this,
+    # x.num_heads / x.num_kv_heads resolves through the class getter which
+    # reads from the draft's HF config, returning the draft's value at every
+    # runtime read point — even after this method returns.  The shadow writes
+    # directly to instance.__dict__, so subsequent lookups hit the instance
+    # value and never reach the class getter.
 
     def _fix_draft_kv_head_counts(self) -> None:
         target_attn_layers = get_layers_from_vllm_config(
@@ -170,9 +176,6 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
             draft_nh = attn.num_heads
             tgt_nh = target_module.num_heads
 
-            # Query heads are tied to the draft's Q projection weight
-            # ([num_heads * head_dim, hidden_size]) and must match the
-            # target's.  If they differ, KV sharing cannot be used safely.
             assert draft_nh == tgt_nh, (
                 f"Draft layer {draft_idx} has {draft_nh} query heads but "
                 f"target '{tgt_name}' has {tgt_nh}; query-head mismatch "
@@ -184,27 +187,31 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
             if impl is not None:
                 object.__setattr__(impl, "kv_sharing_target_layer_name", tgt_name)
 
-            if draft_nkv != tgt_nkv:
+            if draft_nkv != tgt_nkv or draft_nh != tgt_nh:
                 logger.info(
-                    "MTP KV-sharing head fix: draft layer %d (kv_heads=%d) -> target '%s' (kv_heads=%d)",
+                    "MTP KV-sharing head fix: draft layer %d "
+                    "(heads=%d, kv_heads=%d) -> target '%s' "
+                    "(heads=%d, kv_heads=%d)",
                     draft_idx,
+                    draft_nh,
                     draft_nkv,
                     tgt_name,
+                    tgt_nh,
                     tgt_nkv,
                 )
+                # Shadow class getters on all 3 objects so every runtime
+                # read of num_heads / num_kv_heads returns the target's value.
+                # See method docstring for why object.__setattr__ is required.
                 object.__setattr__(attn, "num_kv_heads", tgt_nkv)
+                object.__setattr__(attn, "num_heads", tgt_nh)
                 if impl is not None:
                     object.__setattr__(impl, "num_kv_heads", tgt_nkv)
-                # Also fix Gemma4MTPAttention's own num_kv_heads, used to
-                # create the dummy KV tensor in forward().  If this doesn't
-                # match Attention.num_kv_heads, the reshape inside
-                # Attention.forward produces a different batch dimension for
-                # key vs query, causing the KV-sharing prefill condition
-                #   query.shape[0] == key.shape[0]
-                # to fail.
+                    object.__setattr__(impl, "num_heads", tgt_nh)
                 mtp_attn = layer.self_attn
                 if mtp_attn.num_kv_heads != tgt_nkv:
                     object.__setattr__(mtp_attn, "num_kv_heads", tgt_nkv)
+                if mtp_attn.num_heads != tgt_nh:
+                    object.__setattr__(mtp_attn, "num_heads", tgt_nh)
 
     # ---- load_model --------------------------------------------------------
     # We need BOTH:
