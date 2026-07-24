@@ -290,7 +290,7 @@ class KVPoolWorker:
                 phys_to_layer_idx: dict[int, int] = {}
                 for layer_name in group_spec.layer_names:
                     physical_layer = self._extract_physical_layer_index(layer_name)
-                    if physical_layer >= self.num_layers:
+                    if physical_layer >= getattr(self.hf_config, "num_hidden_layers", self.num_layers):
                         continue
                     if physical_layer not in phys_to_layer_idx:
                         phys_to_layer_idx[physical_layer] = len(phys_to_layer_idx)
@@ -613,7 +613,7 @@ class KVPoolWorker:
         physical_layers = set()
         for layer_name in layer_names:
             phys = self._extract_physical_layer_index(layer_name)
-            if phys >= self.num_layers:
+            if phys >= getattr(self.hf_config, "num_hidden_layers", self.num_layers):
                 continue
             physical_layers.add(phys)
             cache_or_caches = self.kv_caches[layer_name]
@@ -737,8 +737,6 @@ class KVPoolWorker:
         )
         # Initialize store, register buffers, and start transfer threads
         # directly here (like main) — no separate init_backend handshake.
-        if hasattr(self.m_store, "init_store"):
-            self.m_store.init_store()
         self.m_store.register_buffer(ptrs, lengths)
         self._start_kv_transfer_threads()
 
@@ -1083,9 +1081,10 @@ class KVPoolWorker:
                             sum(1 for g in new_gvas if g <= 0),
                         )
                     for pos, key, gva in zip(new_positions, new_keys, new_gvas):
-                        block_gvas[pos] = gva
-                        self._allocated_gvas[key] = gva
-                    all_group_save_keys.extend(new_keys)
+                        if gva > 0:
+                            block_gvas[pos] = gva
+                            self._allocated_gvas[key] = gva
+                            all_group_save_keys.append(key)
 
                 logger.info(
                     "alloc_gvas: req=%s group=%d eff_bs=%d save_blocks=[%d,%d) "
@@ -1152,7 +1151,10 @@ class KVPoolWorker:
                     if (request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np))
                     else request.block_ids_np
                 )
-                full_len = len(block_ids_by_group) if block_ids_by_group is not None else 0
+                if block_ids_by_group is None:
+                    all_group_load_gvas.append(np.zeros(0, dtype=np.int64))
+                    continue
+                full_len = len(block_ids_by_group)
 
                 if load_start_block >= full_blocks:
                     all_group_load_gvas.append(np.zeros(full_len, dtype=np.int64))
@@ -1167,12 +1169,67 @@ class KVPoolWorker:
                     continue
 
                 key_infos = self.m_store.batch_get_key_info(keys)
-                lease_results = self.m_store.batch_add_lease(keys, LAYERWISE_READ_LEASE_TTL_MS)
                 gvas = []
-                for ki in key_infos:
+                valid_keys_for_lease = []
+                valid_block_ids = []
+                invalid_block_ids: list[int] = []
+                for idx, (ki, key) in enumerate(zip(key_infos, keys)):
                     sizes = ki.size()
-                    gvas.append(ki.gva_list()[0] if sizes and sizes > 0 else 0)
-                all_group_load_keys.extend(keys)
+                    gva = ki.gva_list()[0] if sizes and sizes > 0 else 0
+                    gvas.append(gva)
+                    if gva > 0:
+                        valid_keys_for_lease.append(key)
+                        block_idx = load_start_block + idx
+                        if block_idx < len(block_ids_by_group):
+                            valid_block_ids.append(int(block_ids_by_group[block_idx]))
+                    else:
+                        block_idx = load_start_block + idx
+                        if block_idx < len(block_ids_by_group):
+                            invalid_block_ids.append(int(block_ids_by_group[block_idx]))
+                        logger.warning(
+                            "load_gvas: req=%s group=%d got invalid gva=%d (size=%d), block_id=%s load failed",
+                            request.req_id,
+                            group_id,
+                            gva,
+                            sizes if sizes else 0,
+                            int(block_ids_by_group[block_idx]) if block_idx < len(block_ids_by_group) else "N/A",
+                        )
+
+                # Only call batch_add_lease for keys with valid size
+                if valid_keys_for_lease:
+                    lease_results = self.m_store.batch_add_lease(valid_keys_for_lease, LAYERWISE_READ_LEASE_TTL_MS)
+                    # Report lease failures as invalid blocks
+                    for i, lease_res in enumerate(lease_results):
+                        if lease_res != 0 and i < len(valid_block_ids):
+                            invalid_block_ids.append(valid_block_ids[i])
+                            logger.warning(
+                                "load_gvas: req=%s group=%d lease failed result=%d, block_id=%d load failed",
+                                request.req_id,
+                                group_id,
+                                lease_res,
+                                valid_block_ids[i],
+                            )
+                else:
+                    lease_results = []
+
+                # Report invalid blocks to scheduler for recompute.
+                # Single-group models can safely report individual block IDs.
+                # Multi-group (hybrid) models must not report partial group
+                # failures, as the scheduler cannot handle inconsistent KV
+                # cache state across groups (see PR #9701 for rationale).
+                if invalid_block_ids:
+                    if len(request.block_ids_by_group) == 1:
+                        with self._invalid_block_ids_lock:
+                            self._invalid_block_ids.update(invalid_block_ids)
+                    else:
+                        logger.error(
+                            "KV load failed for hybrid request %s. "
+                            "Skip invalid-block fallback to avoid scheduler crash. "
+                            "failed_blocks=%s",
+                            request.req_id,
+                            invalid_block_ids,
+                        )
+                all_group_load_keys.extend(valid_keys_for_lease)
 
                 logger.info(
                     "load_gvas: req=%s group=%d eff_bs=%d load_blocks=[%d,%d) keys=%d valid_gvas=%d lease_fail=%d",

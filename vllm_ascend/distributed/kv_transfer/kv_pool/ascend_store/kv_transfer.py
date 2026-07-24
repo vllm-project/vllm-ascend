@@ -115,6 +115,15 @@ class LayerBatchBuilder:
             (np.zeros(1, dtype=np.int64), np.cumsum(layer_block_len[:-1], dtype=np.int64))
         )
         rank_layer_offset = layer_id * self.page_size_bytes
+        if base_gvas_arr.size > 0 and np.any(base_gvas_arr <= 0):
+            zero_count = int(np.sum(base_gvas_arr <= 0))
+            logger.warning(
+                "[KVPOOL] build_transfer layer=%d detected %d zero/negative base_gvas "
+                "(base_gvas_sample=%s); these blocks will be skipped in batch_copy",
+                layer_id,
+                zero_count,
+                base_gvas_arr[:5].tolist(),
+            )
         logger.debug(
             "[KVPOOL] build_transfer layer=%d page_size=%d caches_per_layer=%d "
             "rank_layer_offset=%d layer_block_len=%s layer_inner_offsets=%s "
@@ -232,7 +241,19 @@ class LayerBatchBuilder:
                 block_gvas_arr[offset] = request.last_block_gva
                 offset += 1
 
-        block_ids_arr, block_gvas_arr = self._dedupe_transfer_blocks(block_ids_arr[:offset], block_gvas_arr[:offset])
+        block_ids_slice = block_ids_arr[:offset]
+        block_gvas_slice = block_gvas_arr[:offset]
+        valid_mask = block_gvas_slice > 0
+        if not np.all(valid_mask):
+            skip_count = int(np.sum(~valid_mask))
+            logger.warning(
+                "[KVPOOL] build_shared skipping %d blocks with invalid gva (gva<=0)",
+                skip_count,
+            )
+            block_ids_slice = block_ids_slice[valid_mask]
+            block_gvas_slice = block_gvas_slice[valid_mask]
+
+        block_ids_arr, block_gvas_arr = self._dedupe_transfer_blocks(block_ids_slice, block_gvas_slice)
 
         logger.debug(
             "[KVPOOL] build_shared req_ids=%s block_gvas_arr=%s block_ids_arr=%s",
