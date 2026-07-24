@@ -1411,6 +1411,7 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
+        self.multistream_dsv4_csa_compressor_overlap = ascend_config.multistream_dsv4_csa_compressor_overlap
         self.vllm_config = get_current_vllm_config()
 
         # indexer param
@@ -2292,50 +2293,96 @@ class AscendDSAImpl(DSAAttentionImpl):
                 compressor_decode_metadata,
             )
 
-            # Inline compressor + scatter (c128, c4 non-dual)
-            compressed_kv = torch.ops._C_ascend.compressor(
-                hidden_states,
-                self.compressor_wkv.weight,
-                self.compressor_wgate.weight,
-                state_cache.squeeze(-2),
-                self.compressor_ape,
-                self.compressor_norm.weight,
-                compress_sin.view(-1, compress_sin.shape[-1]),
-                compress_cos.view(-1, compress_cos.shape[-1]),
-                state_block_table=compressor_state_decode_metadata.block_table,
-                cu_seqlens=actual_seq_lengths_query,
-                seqused=None,
-                start_pos=common_decode_metadata.start_pos,
-                rope_head_dim=self.rope_head_dim,
-                cmp_ratio=self.compress_ratio,
-                coff=coff,
-                norm_eps=self.compressor_norm_eps,
-                rotary_mode=2,
-                cache_mode=1,
-            )
+            run_multistream_qli = self.multistream_dsv4_dsa_overlap and self.compress_ratio == 4 and not self.skip_topk
+            enable_csa_compressor_overlap = self.multistream_dsv4_csa_compressor_overlap and run_multistream_qli
 
-            # For multistream_dsv4_dsa_overlap with compress_ratio=4:
-            # aux_stream: indexer_weights_proj (parallel with main q_quant + kv_scatter)
-            # main stream: compressed_kv -> q_quant -> kv_scatter -> wait aux_stream -> lightning_indexer
-            if self.multistream_dsv4_dsa_overlap and self.compress_ratio == 4 and not self.skip_topk:
+            if enable_csa_compressor_overlap:
                 main_stream = torch.npu.current_stream()
                 aux_stream = dsv4_dsa_overlap_stream()
-                e_compressed_kv_done = main_stream.record_event()
+                e_compressor_inputs_ready = main_stream.record_event()
+                hidden_states.record_stream(aux_stream)
+                compress_cos.record_stream(aux_stream)
+                compress_sin.record_stream(aux_stream)
+                compress_slot_mapping.record_stream(aux_stream)
+
                 with npu_stream_switch(aux_stream, enabled=True):
-                    torch.npu.current_stream().wait_event(e_compressed_kv_done)
-                    weights_proj_output = self.weights_proj(hidden_states)
-                    weights_proj_output.record_stream(main_stream)
-                # Main stream: q_quant (between compressed_kv and kv_scatter)
+                    torch.npu.current_stream().wait_event(e_compressor_inputs_ready)
+                    compressed_kv = torch.ops._C_ascend.compressor(
+                        hidden_states,
+                        self.compressor_wkv.weight,
+                        self.compressor_wgate.weight,
+                        state_cache.squeeze(-2),
+                        self.compressor_ape,
+                        self.compressor_norm.weight,
+                        compress_sin.view(-1, compress_sin.shape[-1]),
+                        compress_cos.view(-1, compress_cos.shape[-1]),
+                        state_block_table=compressor_state_decode_metadata.block_table,
+                        cu_seqlens=actual_seq_lengths_query,
+                        seqused=None,
+                        start_pos=common_decode_metadata.start_pos,
+                        rope_head_dim=self.rope_head_dim,
+                        cmp_ratio=self.compress_ratio,
+                        coff=coff,
+                        norm_eps=self.compressor_norm_eps,
+                        rotary_mode=2,
+                        cache_mode=1,
+                    )
+                    # A zero-row compressor output has no KV writes. Skip
+                    # scatter instead of passing None; A5 scatter dereferences x.view().
+                    if compressed_kv.shape[0] > 0:
+                        DeviceOperator.dsa_kv_compress_scatter(
+                            compress_kv_cache, compressed_kv, compress_slot_mapping
+                        )
+
                 q_quant, q_scale = DeviceOperator.indexer_quantize_query(indexer_q)
+                weights_proj_output = self.weights_proj(hidden_states)
+            else:
+                # Inline compressor + scatter (c128, c4 non-dual)
+                compressed_kv = torch.ops._C_ascend.compressor(
+                    hidden_states,
+                    self.compressor_wkv.weight,
+                    self.compressor_wgate.weight,
+                    state_cache.squeeze(-2),
+                    self.compressor_ape,
+                    self.compressor_norm.weight,
+                    compress_sin.view(-1, compress_sin.shape[-1]),
+                    compress_cos.view(-1, compress_cos.shape[-1]),
+                    state_block_table=compressor_state_decode_metadata.block_table,
+                    cu_seqlens=actual_seq_lengths_query,
+                    seqused=None,
+                    start_pos=common_decode_metadata.start_pos,
+                    rope_head_dim=self.rope_head_dim,
+                    cmp_ratio=self.compress_ratio,
+                    coff=coff,
+                    norm_eps=self.compressor_norm_eps,
+                    rotary_mode=2,
+                    cache_mode=1,
+                )
 
-            # A zero-row compressor output has no KV writes. Skip scatter
-            # instead of passing None; A5 scatter dereferences x.view().
-            if compressed_kv.shape[0] > 0:
-                DeviceOperator.dsa_kv_compress_scatter(compress_kv_cache, compressed_kv, compress_slot_mapping)
+                # For multistream_dsv4_dsa_overlap with compress_ratio=4:
+                # aux_stream: indexer_weights_proj (parallel with main q_quant + kv_scatter)
+                # main stream: compressed_kv -> q_quant -> kv_scatter -> wait aux_stream -> lightning_indexer
+                if run_multistream_qli:
+                    main_stream = torch.npu.current_stream()
+                    aux_stream = dsv4_dsa_overlap_stream()
+                    e_compressed_kv_done = main_stream.record_event()
+                    with npu_stream_switch(aux_stream, enabled=True):
+                        torch.npu.current_stream().wait_event(e_compressed_kv_done)
+                        weights_proj_output = self.weights_proj(hidden_states)
+                        weights_proj_output.record_stream(main_stream)
+                    # Main stream: q_quant (between compressed_kv and kv_scatter)
+                    q_quant, q_scale = DeviceOperator.indexer_quantize_query(indexer_q)
 
-            if self.multistream_dsv4_dsa_overlap and self.compress_ratio == 4 and not self.skip_topk:
-                # Wait aux_stream weights_proj done
-                main_stream.wait_stream(aux_stream)
+                # A zero-row compressor output has no KV writes. Skip scatter
+                # instead of passing None; A5 scatter dereferences x.view().
+                if compressed_kv.shape[0] > 0:
+                    DeviceOperator.dsa_kv_compress_scatter(compress_kv_cache, compressed_kv, compress_slot_mapping)
+
+                if run_multistream_qli:
+                    # Wait aux_stream weights_proj done
+                    main_stream.wait_stream(aux_stream)
+
+            if run_multistream_qli:
                 weights = weights_proj_output * (self.indexer_softmax_scale * self.indexer_heads**-0.5)
                 # lightning_indexer
                 indexer_scale_decode_metadata = _require_decode_metadata(indexer_kv_scale_metadata)
@@ -2364,6 +2411,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                     cmp_ratio=4,
                     return_value=False,
                 )
+                if enable_csa_compressor_overlap:
+                    main_stream.wait_stream(aux_stream)
 
             if self.compress_ratio == 4 and self.use_index_cache:
                 self._update_indexcache_topk_indices(compress_topk_idxs, offset=0)
