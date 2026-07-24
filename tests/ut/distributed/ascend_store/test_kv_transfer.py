@@ -239,8 +239,8 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t._handle_request(req)
         events = t.get_kv_events()
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].block_hashes, [b"h1"])
-        self.assertEqual(events[0].parent_block_hash, b"h0")
+        self.assertEqual(events[0].block_hashes, [maybe_convert_block_hash(b"h1")])
+        self.assertEqual(events[0].parent_block_hash, maybe_convert_block_hash(b"h0"))
 
     def test_handle_request_consumer_role(self):
         t, store = self._make_thread([0], kv_role="kv_consumer")

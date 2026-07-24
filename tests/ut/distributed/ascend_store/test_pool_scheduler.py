@@ -444,7 +444,10 @@ class TestLookupKeyClient(unittest.TestCase):
         mock_socket.recv.return_value = (32).to_bytes(4, "big")
 
         client = LookupKeyClient(config)
-        client.encoder.encode.side_effect = [[b"hashes"], [b"groups"]]
+        # Replace the concrete encoder so multipart framing can be asserted deterministically.
+        mock_encoder = MagicMock()
+        mock_encoder.encode.side_effect = [[b"hashes"], [b"groups"]]
+        client.encoder = mock_encoder
         result = client.lookup(64, [b"\xaa\xbb"], hbm_hit_tokens=16)
         self.assertEqual(result, 32)
         mock_socket.send_multipart.assert_called_once()
