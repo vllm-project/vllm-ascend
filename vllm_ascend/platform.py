@@ -1222,10 +1222,7 @@ class NPUPlatform(Platform):
                 vllm_config.parallel_config.numa_bind_cpus = None
 
             if getattr(vllm_config.parallel_config, "enable_dbo", False):
-                logger.warning(
-                    "Parameter is currently ignored on Ascend. parameter=enable_dbo, action: resetting to False. "
-                )
-                vllm_config.parallel_config.enable_dbo = False
+                logger.info("'--enable-dbo' is enabled on Ascend NPU.")
 
             ubatch_size = getattr(vllm_config.parallel_config, "ubatch_size", 0)
             if ubatch_size != 0:
