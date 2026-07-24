@@ -46,6 +46,7 @@ jobs:
       dispatch_310p: ${{ steps.resolve.outputs.dispatch_310p }}
       vllm_ascend_ref: ${{ steps.resolve.outputs.vllm_ascend_ref }}
       aop_enabled: ${{ steps.resolve.outputs.aop_enabled }}
+      a3_560t_enabled: ${{ steps.resolve.outputs.a3_560t_enabled }}
       command: ${{ steps.resolve.outputs.command }}
     steps:
       - name: Install system dependencies
@@ -129,6 +130,7 @@ jobs:
           BRANCH="main"
           TEST_CASES=""
           AOP_ENABLED="false"
+          A3_560T_ENABLED="false"
           NEXT_IS_BRANCH=0
           for WORD in $ALL_ARGS; do
             if [ "$NEXT_IS_BRANCH" = "1" ]; then
@@ -138,6 +140,8 @@ jobs:
               NEXT_IS_BRANCH=1
             elif [ "$WORD" = "--aop_enabled" ]; then
               AOP_ENABLED="true"
+            elif [ "$WORD" = "--a3-560t" ]; then
+              A3_560T_ENABLED="true"
             else
               if [ -z "$TEST_CASES" ]; then
                 TEST_CASES="$WORD"
@@ -159,6 +163,7 @@ jobs:
             echo "test_cases=$TEST_CASES"
             echo "branch=$BRANCH"
             echo "aop_enabled=$AOP_ENABLED"
+            echo "a3_560t_enabled=$A3_560T_ENABLED"
           } >> "$GITHUB_OUTPUT"
 
           PR_SHA=$(gh api "$PR_URL" --jq '.head.sha')
@@ -268,7 +273,8 @@ jobs:
             -f request_id="$REQUEST_ID" \
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
-            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}'
+            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
+            -f a3_560t_enabled='${{ needs.authorize.outputs.a3_560t_enabled }}'
           sleep 8
           A3_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a3.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')

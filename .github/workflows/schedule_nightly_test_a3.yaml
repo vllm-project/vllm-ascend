@@ -53,6 +53,11 @@ on:
         required: false
         default: false
         type: boolean
+      a3_560t_enabled:
+        description: 'Enable additional A3 560T single-node tests'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -120,6 +125,7 @@ jobs:
       multi_node: ${{ steps.set-matrix.outputs.multi_node }}
       double_node: ${{ steps.set-matrix.outputs.double_node }}
       single_node: ${{ steps.set-matrix.outputs.single_node }}
+      single_node_560t: ${{ steps.set-matrix.outputs.single_node_560t }}
       multi_card: ${{ steps.set-matrix.outputs.multi_card }}
     steps:
       - id: export
@@ -153,7 +159,7 @@ jobs:
         id: set-matrix
         env:
           MATRIX_FILE: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != '' && './pr/.github/workflows/configs/nightly_config.yaml' || '.github/workflows/configs/nightly_config.yaml' }}
-          MATRIX_OUTPUTS: '{"multi_node":"a3.multi_node.test_config","double_node":"a3.double_node.test_config","single_node":"a3.single_node.test_config","multi_card":"a3.multi_card.test_config"}'
+          MATRIX_OUTPUTS: '{"multi_node":"a3.multi_node.test_config","double_node":"a3.double_node.test_config","single_node":"a3.single_node.test_config","single_node_560t":"a3.single_node_560t.test_config","multi_card":"a3.multi_card.test_config"}'
         run: |
           python3 -m pip install pyyaml -q
           python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
@@ -316,6 +322,41 @@ jobs:
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
 
+  single-node-560t-tests:
+    name: single-node-560t
+    needs: [setup-vars, parse-trigger, build-image, double-node-tests]
+    if: >-
+      always() &&
+      inputs.a3_560t_enabled &&
+      needs.parse-trigger.outputs.run == 'true' &&
+      needs.setup-vars.outputs.single_node_560t != '[]' &&
+      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
+    strategy:
+      fail-fast: false
+      max-parallel: 9
+      matrix:
+        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        test_config: ${{ fromJson(needs.setup-vars.outputs.single_node_560t) }}
+    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
+    with:
+      runner: ${{ matrix.test_config.os }}
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      config_file_path: ${{ matrix.test_config.config_file_path }}
+      name: ${{ matrix.test_config.name }}-560t
+      should_run: >-
+        ${{
+          needs.parse-trigger.outputs.run == 'true' && (
+            needs.parse-trigger.outputs.filter == 'all' ||
+            contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
+          )
+        }}
+      request_id: ${{ inputs.request_id || '' }}
+      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
+      aop_single_enabled: ${{ inputs.aop_enabled }}
+    secrets:
+      OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
+      OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
+
   clear-pre-logs:
     runs-on: linux-aarch64-a3-0
     needs: [multi-node-tests, double-node-tests]
@@ -328,7 +369,7 @@ jobs:
 
   merge-benchmark-artifacts:
     name: Merge benchmark artifacts into nightly-a3.zip
-    needs: [parse-trigger, single-node-tests, multi-node-tests, double-node-tests, multi-card-tests]
+    needs: [parse-trigger, single-node-tests, single-node-560t-tests, multi-node-tests, double-node-tests, multi-card-tests]
     if: >-
       always() &&
       github.event_name == 'workflow_dispatch' &&
