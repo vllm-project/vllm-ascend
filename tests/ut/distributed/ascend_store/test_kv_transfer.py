@@ -24,11 +24,11 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm.distributed.kv_events import BlockStored
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
+    ChunkedTokenDatabase,
     KeyMetadata,
     LayerMultiBlockReqMeta,
     LayerPoolKey,
     LoadSpec,
-    PoolKey,
     ReqMeta,
 )
 
@@ -61,42 +61,10 @@ class FakeStore:
         self.get_calls.append((list(keys), list(addrs), list(sizes)))
 
 
-class FakeKey:
-    def __init__(self, val):
-        self._val = val
-
-    def to_string(self):
-        return self._val
-
-
-class FakeTokenDatabase:
+class FakeTokenDatabase(ChunkedTokenDatabase):
     def __init__(self, block_size=16):
-        self.block_size = block_size
-        self.group_block_len = [[block_size, block_size]]
-        self.group_kv_caches_base_addr = [[0, block_size]]
-        self.group_block_stride = {0: [block_size, block_size]}
-
-    def process_tokens(self, token_len, block_hashes, mask_num=0):
-        meta = KeyMetadata("m", 0, 0, 0, 0)
-        for i, h in enumerate(block_hashes):
-            start = i * self.block_size
-            if start >= token_len:
-                break
-            end = min(start + self.block_size, token_len)
-            if start < mask_num:
-                continue
-            yield start, end, PoolKey(meta, f"k{i}")
-
-    def prepare_value(self, start, end, block_ids):
-        block_id = block_ids[start // self.block_size]
-        return [1000 + block_id], [end - start], block_id
-
-    def prepare_value_layer(self, start, end, block_ids, layer_id):
-        block_id = block_ids[start // self.block_size]
-        return [2000 + layer_id * 100 + block_id], [end - start], block_id
-
-    def decode_adaptor_prefill_pp(self, keys, addrs, sizes):
-        return keys, addrs, sizes
+        super().__init__([KeyMetadata("m", 0, 0, 0, 0)], [block_size], None)
+        self.set_group_buffers({0: [1000]}, {0: [block_size]}, {0: [1]}, group_num_layers={0: 1})
 
 
 class MaskedFakeTokenDatabase(FakeTokenDatabase):
@@ -113,7 +81,7 @@ class MaskedFakeTokenDatabase(FakeTokenDatabase):
     def mask_allows_chunk(self, masks, kv_cache_group_id, start):
         if masks is None:
             return True
-        block_idx = start // self.block_size
+        block_idx = start // self.get_block_size(kv_cache_group_id)
         return block_idx < len(masks[kv_cache_group_id]) and masks[kv_cache_group_id][block_idx]
 
 
@@ -372,6 +340,42 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t._handle_request(req)
         keys, _, _ = store.put_calls[0]
         self.assertEqual(len(keys), 1)
+
+    def test_handle_request_skips_known_kvpool_hit_prefix(self):
+        t, store = self._make_thread([0, 0])
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=64,
+            block_ids=[0, 1, 2, 3],
+            block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
+            load_spec=LoadSpec(
+                vllm_cached_tokens=0,
+                kvpool_cached_tokens=31,
+                kvpool_store_skip_tokens=32,
+                can_load=True,
+            ),
+        )
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+        t._handle_request(req)
+        keys, addrs, _ = store.put_calls[0]
+        self.assertEqual(len(keys), 2)
+        self.assertEqual(addrs, [[1002], [1003]])
+
+    def test_save_exception_cleans_queue_lifecycle(self):
+        t, store = self._make_thread([0])
+        store.put = MagicMock(side_effect=RuntimeError("put failed"))
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[0],
+            block_hashes=[b"h0"],  # type: ignore[arg-type]
+        )
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+        t._handle_request(req)
+        self.assertEqual(t.request_queue.unfinished_tasks, 0)
+        self.assertNotIn("r1", t.stored_requests)
 
 
 class TestKVCacheStoreRecvingThread(unittest.TestCase):
