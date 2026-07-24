@@ -10,6 +10,7 @@ import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -26,6 +27,7 @@ from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
+from vllm_ascend.quantization.methods.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
@@ -50,6 +52,9 @@ BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
 
 _DSV4_DSA_OVERLAP_STREAM = None
+_DSV4_DSA_MX_FUSION_GATE_LOGGED = False
+_DSV4_DSA_MX_FUSION_DISPATCH_LOGGED = False
+_DSV4_DSA_MX_FUSION_FALLBACK_LOGGED = False
 
 
 def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
@@ -119,6 +124,67 @@ def _is_w8a8_dynamic(linear) -> bool:
         return False
     inner = getattr(qm, "quant_method", None)
     return isinstance(inner, AscendW8A8DynamicLinearMethod)
+
+
+def _is_w8a8_mxfp8_dynamic(linear) -> bool:
+    """True iff ``linear`` is wired up with ``AscendW8A8MXFP8DynamicLinearMethod``."""
+    qm = getattr(linear, "quant_method", None)
+    if qm is None or isinstance(qm, AscendUnquantizedLinearMethod):
+        return False
+    inner = getattr(qm, "quant_method", None)
+    return isinstance(inner, AscendW8A8MXFP8DynamicLinearMethod)
+
+
+def _has_rms_norm_dynamic_mx_quant() -> bool:
+    ops_npu = getattr(torch.ops, "npu", None)
+    return (
+        (ops_npu is not None and hasattr(ops_npu, "npu_rms_norm_dynamic_mx_quant"))
+        or hasattr(torch_npu, "npu_rms_norm_dynamic_mx_quant")
+    )
+
+
+def _rms_norm_dynamic_mx_quant(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    global _DSV4_DSA_MX_FUSION_DISPATCH_LOGGED, _DSV4_DSA_MX_FUSION_FALLBACK_LOGGED
+    backend = "torch.ops.npu"
+    try:
+        out = torch.ops.npu.npu_rms_norm_dynamic_mx_quant(
+            x,
+            weight,
+            epsilon=eps,
+            dst_type=torch.float8_e4m3fn,
+        )
+    except (AttributeError, TypeError):
+        # Some torch_npu builds expose only a 2-argument wrapper; it still
+        # dispatches the fused operator but uses operator defaults.
+        backend = "torch_npu fallback"
+        out = torch_npu.npu_rms_norm_dynamic_mx_quant(x, weight)
+    output, scale = out[0], out[1]
+    if backend == "torch.ops.npu" and not _DSV4_DSA_MX_FUSION_DISPATCH_LOGGED:
+        logger.info(
+            "DSA RMSNormDynamicMXQuant fusion completed: backend=torch.ops.npu, input_shape=%s, "
+            "weight_shape=%s, output_shape=%s, scale_shape=%s, eps=%s",
+            tuple(x.shape),
+            tuple(weight.shape),
+            tuple(output.shape),
+            tuple(scale.shape),
+            eps,
+        )
+        _DSV4_DSA_MX_FUSION_DISPATCH_LOGGED = True
+    elif backend == "torch_npu fallback" and not _DSV4_DSA_MX_FUSION_FALLBACK_LOGGED:
+        logger.info(
+            "DSA RMSNormDynamicMXQuant fusion completed: backend=torch_npu fallback, input_shape=%s, "
+            "weight_shape=%s, output_shape=%s, scale_shape=%s",
+            tuple(x.shape),
+            tuple(weight.shape),
+            tuple(output.shape),
+            tuple(scale.shape),
+        )
+        _DSV4_DSA_MX_FUSION_FALLBACK_LOGGED = True
+    return output, scale
 
 
 def pad_to_blocks(x: torch.Tensor, length_list: torch.Tensor, block_size: int = 128):
@@ -1739,10 +1805,45 @@ class AscendDSAImpl(DSAAttentionImpl):
         Each stream's data is self-contained; no cross-stream sync is needed between blocks.
         Only the tail wait_stream ensures scatter is complete.
         """
+        global _DSV4_DSA_MX_FUSION_GATE_LOGGED
         main_stream = torch.npu.current_stream()
         aux_stream = dsv4_dsa_overlap_stream()
 
         is_w8a8 = _is_w8a8_dynamic(self.wq_b)
+        is_mxfp8 = _is_w8a8_mxfp8_dynamic(self.wq_b)
+        device_type = get_ascend_device_type()
+        is_a5 = device_type == AscendDeviceType.A5
+        has_fused_mx_op = _has_rms_norm_dynamic_mx_quant()
+        qr_consumed_by_topk = self.compress_ratio == 4 and not self.skip_topk
+        # compress_ratio=4 uses qr as BF16 input for indexer topk selection.
+        # The fused MX op returns quantized qr only, so keep the generic path
+        # whenever qr is still consumed downstream.
+        can_fuse_q_norm_mx_quant = (
+            is_mxfp8
+            and is_a5
+            and has_fused_mx_op
+            and not qr_consumed_by_topk
+        )
+        if not _DSV4_DSA_MX_FUSION_GATE_LOGGED:
+            ops_npu = getattr(torch.ops, "npu", None)
+            logger.info(
+                "DSA RMSNormDynamicMXQuant fusion gate: can_fuse=%s, is_mxfp8=%s, is_w8a8=%s, "
+                "device_type=%s, is_a5=%s, has_torch_ops_npu_op=%s, has_torch_npu_op=%s, "
+                "compress_ratio=%s, skip_topk=%s, qr_consumed_by_topk=%s, is_prefill=%s, hidden_shape=%s",
+                can_fuse_q_norm_mx_quant,
+                is_mxfp8,
+                is_w8a8,
+                device_type,
+                is_a5,
+                ops_npu is not None and hasattr(ops_npu, "npu_rms_norm_dynamic_mx_quant"),
+                hasattr(torch_npu, "npu_rms_norm_dynamic_mx_quant"),
+                self.compress_ratio,
+                self.skip_topk,
+                qr_consumed_by_topk,
+                is_prefill,
+                tuple(hidden_states.shape),
+            )
+            _DSV4_DSA_MX_FUSION_GATE_LOGGED = True
 
         # Part1: q_quant[V] -> q_a_down[C]  ||  kv_quant[V]
         q_quant, q_pertoken_scale = self.cv_wq_a.quantize(hidden_states)
@@ -1764,7 +1865,11 @@ class AscendDSAImpl(DSAAttentionImpl):
             torch.npu.current_stream().wait_event(e_part2_start)
             kv = self.cv_wkv.matmul(kv_quant, kv_pertoken_scale)
 
-        if is_prefill:
+        if can_fuse_q_norm_mx_quant:
+            q_b_quant, q_b_scale = _rms_norm_dynamic_mx_quant(wq_a_result, self.q_norm.weight, self.eps)
+            qr = None
+            qr_pertoken_scale = None
+        elif is_prefill:
             qr = self.q_norm(wq_a_result)
             q_b_quant, q_b_scale = self.cv_wq_b.quantize(qr)
             qr_pertoken_scale = None
@@ -1797,7 +1902,13 @@ class AscendDSAImpl(DSAAttentionImpl):
             )
             DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, slot_mapping)
 
-        if is_prefill:
+        if can_fuse_q_norm_mx_quant:
+            q = self.wq_b.quant_method.apply(
+                self.wq_b,
+                (q_b_quant, q_b_scale),
+                self.wq_b.bias,
+            ).unflatten(-1, (self.n_local_heads, self.head_dim))
+        elif is_prefill:
             q = self.cv_wq_b.matmul(q_b_quant, q_b_scale).unflatten(-1, (self.n_local_heads, self.head_dim))
         elif is_w8a8:
             q = torch_npu.npu_quant_matmul(
