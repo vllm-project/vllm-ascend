@@ -219,6 +219,7 @@
   tests:
     - tests/ut/distributed
     - tests/e2e/pull_request/two_card/test_data_parallel.py
+    - tests/e2e/pull_request/two_card/test_data_parallel_rank_header.py
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
     - tests/e2e/pull_request/two_card/test_shared_expert_dp.py
     - tests/e2e/pull_request/two_card/test_sequence_parallelism_moe.py
