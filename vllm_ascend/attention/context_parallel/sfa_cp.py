@@ -4,7 +4,6 @@ from typing import NamedTuple, TypeVar
 
 import torch
 import torch.distributed as dist
-import torch_npu
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import AttentionSpec

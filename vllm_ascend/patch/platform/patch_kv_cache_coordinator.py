@@ -463,6 +463,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             tuple(hit_length_by_group),
         )
 
+
 def get_kv_cache_coordinator(
     kv_cache_config: KVCacheConfig,
     max_model_len: int,
