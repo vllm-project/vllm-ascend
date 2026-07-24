@@ -224,8 +224,6 @@ nav:
         - tutorials/features/pd_colocated_mooncake_multi_instance.md
         - tutorials/features/pd_disaggregation_mooncake_single_node.md
         - tutorials/features/pd_disaggregation_mooncake_multi_node.md
-        - tutorials/features/long_sequence_context_parallel_single_node.md
-        - tutorials/features/long_sequence_context_parallel_multi_node.md
         - tutorials/features/dynamic_chunked_pipeline_parallel.md
         - tutorials/features/suffix_speculative_decoding.md
         - tutorials/features/ray.md
