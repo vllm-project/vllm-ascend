@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
+import os
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import replace
@@ -174,6 +175,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.use_compress = hasattr(self.vllm_config.model_config.hf_config, "compress_ratios")
         self.has_gdn = check_gdn_layer(self.vllm_config)
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
+        self._logits_outside_graph = False
         self.decode_threshold = 1 + self.num_speculative_tokens
         self.query_start_loc = self.runner._make_buffer(self.runner.max_num_reqs + 2, dtype=torch.int32)
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
@@ -525,21 +527,40 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if torch.equal(layer_module.shared_head.head.weight, model.lm_head.weight):
                     layer_module.shared_head.head = model.lm_head
 
+        _aiv_mode = os.environ.get("HCCL_OP_EXPANSION_MODE", "").upper() == "AIV"
+        self._logits_outside_graph = lmhead_tp_enable() and _aiv_mode
+        if self._logits_outside_graph:
+            logger.warning_once(
+                "[spec_decode/base] EXPERIMENT: run draft compute_logits outside ACL graph "
+                "when lmhead_tp + HCCL_OP_EXPANSION_MODE=AIV is enabled."
+            )
+
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
             logger.info(
                 "[spec_decode/base] Wrapping draft model with ACLGraphWrapper:"
-                " runtime_mode=FULL, use_eagle=%s, enable_enpu=%s",
+                " runtime_mode=FULL, use_eagle=%s, enable_enpu=%s, logits_outside_graph=%s",
                 self.use_eagle,
                 self.enable_enpu,
+                self._logits_outside_graph,
             )
             self.update_stream = torch.npu.Stream()
-            self._runnable = ACLGraphWrapper(
-                self._run_merged_draft,
-                self.vllm_config,
-                runtime_mode=CUDAGraphMode.FULL,
-                use_eagle=self.use_eagle,
-                enable_enpu=self.enable_enpu,
-            )
+            if self._logits_outside_graph:
+                self._draft_forward_aclgraph = ACLGraphWrapper(
+                    self._execute_draft_model_forward,
+                    self.vllm_config,
+                    runtime_mode=CUDAGraphMode.FULL,
+                    use_eagle=self.use_eagle,
+                    enable_enpu=self.enable_enpu,
+                )
+                self._runnable = self._run_merged_draft_logits_outside
+            else:
+                self._runnable = ACLGraphWrapper(
+                    self._run_merged_draft,
+                    self.vllm_config,
+                    runtime_mode=CUDAGraphMode.FULL,
+                    use_eagle=self.use_eagle,
+                    enable_enpu=self.enable_enpu,
+                )
 
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
         if hasattr(target_language_model.model, "topk_indices_buffer"):
@@ -759,9 +780,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         forward_context: ForwardContext,
         num_input_tokens: int,
         multi_steps_attn_metadata: list[dict[str, Any]],
+        draft_step: int | None = None,
     ) -> None:
-        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
+        if forward_context.cudagraph_runtime_mode != CUDAGraphMode.FULL:
+            return
+        if self._logits_outside_graph:
+            assert draft_step is not None
+            if draft_step >= len(multi_steps_attn_metadata):
+                return
+            multi_steps_attn_metadata = [multi_steps_attn_metadata[draft_step]]
+        self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
 
     def _propose(
         self,
@@ -1052,7 +1080,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             runnable = cast(Callable[..., Any], self._runnable)
             run_draft: Callable[[], Any] = partial(runnable, **model_inputs)
 
-            if self.enable_enpu:
+            if self._logits_outside_graph:
+                draft_token_ids = run_draft()
+            elif self.enable_enpu:
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
                 draft_token_ids = run_draft()
             else:
@@ -1074,6 +1104,235 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             logits = self.model.compute_logits(hidden_states)
             return greedy_sample(logits)
+
+    def _execute_draft_model_forward(
+        self,
+        num_input_tokens: int,
+        input_batch_size: int,
+        inputs_embeds: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+        del input_batch_size
+        model_input_ids = self.input_ids[:num_input_tokens]
+        model_positions = self._get_positions(num_input_tokens)
+
+        if self.method == "dflash":
+            model_kwargs = self.build_model_inputs_first_pass(num_input_tokens)
+        else:
+            model_kwargs = {
+                "input_ids": model_input_ids,
+                "positions": model_positions,
+                "inputs_embeds": inputs_embeds,
+            }
+            if self.pass_hidden_states_to_model:
+                model_hidden_states = self.hidden_states[:num_input_tokens]
+                model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
+                model_kwargs["hidden_states"] = model_hidden_states
+                if self.method == "mtp":
+                    model_kwargs["positions"] = model_positions
+
+        ret_hidden_states = self.model(**model_kwargs)
+        if not self.model_returns_tuple():
+            last_hidden_states = ret_hidden_states
+            hidden_states = last_hidden_states
+        else:
+            last_hidden_states, hidden_states = ret_hidden_states
+
+        if self.method != "dflash":
+            last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
+                last_hidden_states, model_positions, hidden_states
+            )
+        return last_hidden_states, hidden_states, model_positions
+
+    def _sample_draft_token_ids_from_hidden(
+        self,
+        last_hidden_states: torch.Tensor,
+        token_indices_to_sample: torch.Tensor,
+        num_indices: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if lmhead_tp_enable():
+            max_num_reqs_across_dp = (
+                self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
+            )
+            token_indices_to_sample = nn.functional.pad(
+                token_indices_to_sample, (0, max_num_reqs_across_dp - num_indices)
+            )
+
+        sample_hidden_states = last_hidden_states[token_indices_to_sample]
+
+        if get_ascend_config().enable_reduce_sample and self.method in ("eagle3", "dflash"):
+            draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
+            if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
+                draft_token_ids = draft_token_ids[:num_indices]
+                token_indices_to_sample = token_indices_to_sample[:num_indices]
+        elif get_ascend_config().enable_reduce_sample and self.method in ("mtp"):
+            if not hasattr(self.model.model, "compute_logits"):
+                draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
+                if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
+                    draft_token_ids = draft_token_ids[:num_indices]
+                    token_indices_to_sample = token_indices_to_sample[:num_indices]
+            else:
+                logits = self.model.compute_logits(sample_hidden_states)
+                if lmhead_tp_enable():
+                    logits = get_lmhead_tp_group().all_to_all(logits)
+                else:
+                    logits = self.model.model.logits_processor._gather_logits(logits)
+                if lmhead_tp_enable() and num_indices < logits.shape[0]:
+                    logits = logits[:num_indices]
+                    token_indices_to_sample = token_indices_to_sample[:num_indices]
+                draft_token_ids = logits.argmax(dim=-1)
+        else:
+            logits = self.model.compute_logits(sample_hidden_states)
+            if lmhead_tp_enable() and num_indices < logits.shape[0]:
+                logits = logits[:num_indices]
+                token_indices_to_sample = token_indices_to_sample[:num_indices]
+            draft_token_ids = logits.argmax(dim=-1)
+
+        return draft_token_ids, token_indices_to_sample
+
+    def _call_draft_forward_with_graph(
+        self,
+        forward_context: ForwardContext,
+        num_input_tokens: int,
+        input_batch_size: int,
+        inputs_embeds: torch.Tensor | None,
+        multi_steps_attn_metadata: list[dict[str, Any]],
+        draft_step: int,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+        if draft_step < len(multi_steps_attn_metadata):
+            forward_context.attn_metadata = multi_steps_attn_metadata[draft_step]
+        if self.enable_enpu:
+            self._update_full_graph_params_if_needed(
+                forward_context, num_input_tokens, multi_steps_attn_metadata, draft_step=draft_step
+            )
+        last_hidden_states, hidden_states, model_positions = self._draft_forward_aclgraph(
+            num_input_tokens=num_input_tokens,
+            input_batch_size=input_batch_size,
+            inputs_embeds=inputs_embeds,
+        )
+        if not self.enable_enpu:
+            self._update_full_graph_params_if_needed(
+                forward_context, num_input_tokens, multi_steps_attn_metadata, draft_step=draft_step
+            )
+        return last_hidden_states, hidden_states, model_positions
+
+    def _run_merged_draft_logits_outside(
+        self,
+        num_input_tokens,
+        batch_size,
+        token_indices_to_sample,
+        target_positions,
+        inputs_embeds,
+        multi_steps_attn_metadata,
+        num_tokens,
+        is_prefill=None,
+    ) -> torch.Tensor:
+        del target_positions, num_tokens
+        forward_context = get_forward_context()
+        input_batch_size = num_input_tokens if (self.method == "mtp" or self.use_cuda_graph) else batch_size
+
+        last_hidden_states, hidden_states, _ = self._call_draft_forward_with_graph(
+            forward_context,
+            num_input_tokens,
+            input_batch_size,
+            inputs_embeds,
+            multi_steps_attn_metadata,
+            draft_step=0,
+        )
+
+        num_indices = token_indices_to_sample.shape[0]
+        if self.pcp_size > 1:
+            hidden_states = hidden_states[:num_input_tokens]
+            hidden_states = get_pcp_group().all_gather(hidden_states, 0)
+            hidden_states = torch.index_select(
+                hidden_states,
+                0,
+                self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: num_input_tokens * self.pcp_size],
+            )
+            if self.method == "mtp":
+                last_hidden_states = hidden_states
+            else:
+                last_hidden_states = last_hidden_states[:num_input_tokens]
+                last_hidden_states = get_pcp_group().all_gather(last_hidden_states, 0)
+                last_hidden_states = torch.index_select(
+                    last_hidden_states,
+                    0,
+                    self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: num_input_tokens * self.pcp_size],
+                )
+
+        draft_token_ids, token_indices_to_sample = self._sample_draft_token_ids_from_hidden(
+            last_hidden_states, token_indices_to_sample, num_indices
+        )
+
+        if self.num_speculative_tokens == 1 or self.parallel_drafting:
+            return draft_token_ids.view(-1, self.num_speculative_tokens)
+
+        if self.pcp_size * self.dcp_size > 1 and is_prefill:
+            draft_token_ids_list = []
+            for _ in range(self.num_speculative_tokens):
+                draft_token_ids_list.append(draft_token_ids)
+            return torch.stack(draft_token_ids_list, dim=1)
+
+        if lmhead_tp_enable() and self.method == "mtp":
+            batch_size = draft_token_ids.shape[0]
+
+        draft_token_ids_tensor = torch.zeros(
+            (self.num_speculative_tokens, *draft_token_ids.shape), dtype=draft_token_ids.dtype, device=self.device
+        )
+        draft_token_ids_tensor[0] = draft_token_ids
+        if self.uses_mrope:
+            positions = self.mrope_positions[:, token_indices_to_sample]
+        else:
+            positions = self.positions[token_indices_to_sample]
+        hidden_states = hidden_states[token_indices_to_sample]
+        token_indices_to_sample = self.arange[:batch_size]
+
+        _EXTRA_CTX.num_tokens = input_batch_size
+        _EXTRA_CTX.num_accept_tokens = batch_size
+
+        for draft_step in range(self.num_speculative_tokens - 1):
+            forward_context = get_forward_context()
+            if forward_context is not None:
+                forward_context.moe_layer_index = 0
+
+            input_ids = draft_token_ids_tensor[draft_step]
+            positions += 1
+
+            if self.uses_mrope:
+                exceeds_max_model_len = positions[0] >= self.vllm_config.model_config.max_model_len
+                clamped_positions = torch.where(
+                    exceeds_max_model_len.unsqueeze(0), torch.zeros_like(positions), positions
+                )
+            else:
+                exceeds_max_model_len = positions >= self.vllm_config.model_config.max_model_len
+                clamped_positions = torch.where(exceeds_max_model_len, 0, positions)
+
+            self.input_ids[:batch_size] = input_ids
+            self._set_positions(batch_size, clamped_positions)
+            self.hidden_states[:batch_size] = hidden_states.view(batch_size, -1)
+            if self.supports_mm_inputs:
+                self.inputs_embeds[:batch_size] = self.model.embed_input_ids(input_ids)
+                loop_inputs_embeds = self.inputs_embeds[:input_batch_size]
+            else:
+                loop_inputs_embeds = None
+
+            last_hidden_states, hidden_states, _ = self._call_draft_forward_with_graph(
+                forward_context,
+                num_input_tokens,
+                input_batch_size,
+                loop_inputs_embeds,
+                multi_steps_attn_metadata,
+                draft_step=draft_step + 1,
+            )
+
+            num_indices = token_indices_to_sample.shape[0]
+            draft_token_ids, token_indices_to_sample = self._sample_draft_token_ids_from_hidden(
+                last_hidden_states, token_indices_to_sample, num_indices
+            )
+
+            hidden_states = hidden_states[:batch_size]
+            draft_token_ids_tensor[draft_step + 1] = draft_token_ids
+
+        return draft_token_ids_tensor.swapaxes(0, 1)
 
     def _run_merged_draft(
         self,
