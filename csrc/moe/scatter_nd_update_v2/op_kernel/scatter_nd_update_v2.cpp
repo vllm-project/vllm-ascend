@@ -30,7 +30,8 @@ extern "C" __global__ __aicore__ void scatter_nd_update_v2(GM_ADDR varRef, GM_AD
     AscendC::TPipe tpipe;
 #if (defined(DTYPE_VAR))
     // tilingKey: indexType * 10 + sortFlag
-    // indexType: 1=int32, 2=int64(cast), 3=int64(large); sortFlag: 0=非排序, 1=排序
+    // indexType: 1=int32, 2=int64(cast), 3=int64(large), 4=int32(large);
+    // sortFlag: 0=非排序, 1=排序
     if (TILING_KEY_IS(11)) {
         ScatterNdUpdateV2::LinearIndexKernel<true, int> op1(indices, workSpace, tilingData, tpipe);
         op1.Process();
@@ -64,7 +65,10 @@ extern "C" __global__ __aicore__ void scatter_nd_update_v2(GM_ADDR varRef, GM_AD
         ScatterNdUpdateV2::ScatterNdUpdateV2KernelNoSort<DTYPE_VAR> op2(updates, output, workSpace, tilingData, pipe);
         op2.Process();
     } else if (TILING_KEY_IS(30)) {
-        ScatterNdUpdateV2::LargeIndexKernel<DTYPE_VAR> op(indices, updates, output, tilingData, tpipe);
+        ScatterNdUpdateV2::LargeIndexKernel<DTYPE_VAR, int64_t> op(indices, updates, output, tilingData, tpipe);
+        op.Process();
+    } else if (TILING_KEY_IS(40)) {
+        ScatterNdUpdateV2::LargeIndexKernel<DTYPE_VAR, int32_t> op(indices, updates, output, tilingData, tpipe);
         op.Process();
     }
 #endif

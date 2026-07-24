@@ -92,16 +92,19 @@ private:
 
 inline void ScatterNdUpdateV2Tiling::SetTilingKeyMode()
 {
-    // tilingKey: indexType * 10 + sortFlag (indexType: 1=int32, 2=int64(cast), 3=int64(large))
+    // tilingKey: indexType * 10 + sortFlag
+    // indexType: 1=int32, 2=int64(cast), 3=int64(large), 4=int32(large)
     uint64_t indexType;
-    if (!isInt64Indices_) {
-        indexType = 1;
-    } else if (needLargeIndexKernel_) {
+    if (needLargeIndexKernel_ && isInt64Indices_) {
         indexType = 3;
+    } else if (needLargeIndexKernel_) {
+        indexType = 4;
+    } else if (!isInt64Indices_) {
+        indexType = 1;
     } else {
         indexType = 2;
     }
-    uint64_t sortFlag = (indexType == 3) ? 0 : (isSort_ ? 1 : 0);
+    uint64_t sortFlag = needLargeIndexKernel_ ? 0 : (isSort_ ? 1 : 0);
     tilingKey_ = indexType * 10 + sortFlag;
 
     tilingContext_->SetTilingKey(tilingKey_);
@@ -260,6 +263,9 @@ inline size_t ScatterNdUpdateV2Tiling::CalcWorkSpaceSize(uint64_t indexRow)
     if (isSort_) {
         totalWorkspace += sortWorkspace_ * SORT_USE_GM_NUM * sizeof(int);
     }
+    if (needLargeIndexKernel_) {
+        totalWorkspace += ALIGNED_SIZE;
+    }
     return totalWorkspace;
 }
 
@@ -350,8 +356,12 @@ ge::graphStatus ScatterNdUpdateV2Tiling::Init()
         maxPhysicalOffset += (varRefShape.GetDim(i) - 1) * indicesMask_[i];
     }
     uint64_t totalPhysicalRange = maxPhysicalOffset + scatterLength_;
+    needLargeIndexKernel_ = needLargeIndexKernel_ || !IsLinearIndex(totalPhysicalRange);
     if (!needLargeIndexKernel_) {
         isSort_ = IsSort(totalPhysicalRange, indexRow);
+    } else {
+        isSort_ = false;
+        isLinearIndex_ = false;
     }
     SetTilingKeyMode();
     tilingContext_->SetScheduleMode(1);
