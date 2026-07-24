@@ -511,8 +511,8 @@ class AscendSFAImpl(MLAAttentionImpl):
     q_hadamard: torch.Tensor | None = None
     k_hadamard: torch.Tensor | None = None
 
-    _prefetched_kv: torch.Tensor | None = None     # [3, max_num_seqs, index_topk, kv_lora_rank]
-    _prefetched_k_pe: torch.Tensor | None = None   # [3, max_num_seqs, index_topk, qk_rope_head_dim]
+    _prefetched_kv: torch.Tensor | None = None  # [3, max_num_seqs, index_topk, kv_lora_rank]
+    _prefetched_k_pe: torch.Tensor | None = None  # [3, max_num_seqs, index_topk, qk_rope_head_dim]
     _gather_stream: torch_npu.npu.Stream | None = None
     _gather_done_event: torch_npu.npu.Event | None = None
     DELAY_FIRST_GROUP_PREFETCH_TO_FIRST_SHARED: bool = True
@@ -1189,7 +1189,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Convert from (N, B, L) to (B, N, L)
         return ql_nope.transpose(0, 1), q_pe
 
-
     @staticmethod
     def _extract_layer_id(layer_name: str) -> int:
         parts = layer_name.split(".")
@@ -1233,13 +1232,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             return
         self.prefetch_enabled = True
 
-        indexer_types = (getattr(hf_text_config, "indexer_types", None)
-                         or getattr(hf_config, "indexer_types", None))
+        indexer_types = getattr(hf_text_config, "indexer_types", None) or getattr(hf_config, "indexer_types", None)
         if indexer_types is None:
             return
-        self._index_topk = int(
-            getattr(hf_text_config, "index_topk", 0)
-            or getattr(hf_config, "index_topk", 0) or 0)
+        self._index_topk = int(getattr(hf_text_config, "index_topk", 0) or getattr(hf_config, "index_topk", 0) or 0)
         layer_id = self._extract_layer_id(self.layer_name)
         if layer_id < 0 or layer_id >= len(indexer_types):
             return
@@ -1247,9 +1243,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         def followers_after(producer_id: int) -> list[int]:
             followers: list[int] = []
             next_id = producer_id + 1
-            while (next_id < len(indexer_types)
-                   and str(indexer_types[next_id]).lower() == "shared"
-                   and len(followers) < AscendSFAImpl.MAX_PREFETCH_LAYERS):
+            while (
+                next_id < len(indexer_types)
+                and str(indexer_types[next_id]).lower() == "shared"
+                and len(followers) < AscendSFAImpl.MAX_PREFETCH_LAYERS
+            ):
                 followers.append(next_id)
                 next_id += 1
             return followers
@@ -1257,8 +1255,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         my_type = str(indexer_types[layer_id]).lower()
         if my_type == "full" and self.has_indexer and not self.skip_topk:
             group_idx = self._full_layer_group_index(indexer_types, layer_id)
-            if not (group_idx == 0
-                    and AscendSFAImpl.DELAY_FIRST_GROUP_PREFETCH_TO_FIRST_SHARED):
+            if not (group_idx == 0 and AscendSFAImpl.DELAY_FIRST_GROUP_PREFETCH_TO_FIRST_SHARED):
                 self.shared_layer_ids = followers_after(layer_id)
                 self.is_prefetch_producer = bool(self.shared_layer_ids)
             return
@@ -1266,19 +1263,18 @@ class AscendSFAImpl(MLAAttentionImpl):
         if my_type != "shared":
             return
         owning_full = next(
-            (idx for idx in range(layer_id - 1, -1, -1)
-             if str(indexer_types[idx]).lower() == "full"),
+            (idx for idx in range(layer_id - 1, -1, -1) if str(indexer_types[idx]).lower() == "full"),
             None,
         )
         if owning_full is None:
             return
         shared_offset = layer_id - owning_full - 1
-        if not all(str(indexer_types[owning_full + 1 + offset]).lower() == "shared"
-                   for offset in range(shared_offset + 1)):
+        if not all(
+            str(indexer_types[owning_full + 1 + offset]).lower() == "shared" for offset in range(shared_offset + 1)
+        ):
             return
         group_idx = self._full_layer_group_index(indexer_types, owning_full)
-        if (group_idx == 0
-                and AscendSFAImpl.DELAY_FIRST_GROUP_PREFETCH_TO_FIRST_SHARED):
+        if group_idx == 0 and AscendSFAImpl.DELAY_FIRST_GROUP_PREFETCH_TO_FIRST_SHARED:
             delayed_producer = owning_full + 1
             if layer_id == delayed_producer:
                 self.shared_layer_ids = followers_after(layer_id)
@@ -1323,8 +1319,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             layer_context = context.get(self._layer_name_with_id(layer_id))
             if layer_context is None or layer_context.kv_cache is None:
                 logger.warning(
-                    "Grouped sparse-KV prefetch is disabled for %s because a "
-                    "shared-layer KV cache is unavailable.",
+                    "Grouped sparse-KV prefetch is disabled for %s because a shared-layer KV cache is unavailable.",
                     self.layer_name,
                 )
                 self.is_prefetch_producer = False
@@ -1344,7 +1339,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             if not cache:
                 logger.warning_once(
                     "[prefetch] npu_sparse_kv_gather_group_out is unavailable; "
-                    "fall back to the regular sparse-attention path.")
+                    "fall back to the regular sparse-attention path."
+                )
         return cache
 
     def _get_prefetch_slice(self, num_actual_tokens: int):
@@ -2171,38 +2167,24 @@ class AscendSFAImpl(MLAAttentionImpl):
             topk_num_tokens = num_input_tokens or hidden_states.shape[0]
         used_prefetch = False
         should_gather = False
-        prefetch_active = (
-            self.prefetch_enabled
-            and self._sparse_kv_gather_group_op_available()
-        )
+        prefetch_active = self.prefetch_enabled and self._sparse_kv_gather_group_op_available()
         if self.skip_topk:
             topk_indices = self._get_indexcache_topk_indices(topk_num_tokens)
-            if (
-                prefetch_active
-                and self.prefetch_buf_index >= 0
-                and AscendSFAImpl._prefetched_kv is not None
-            ):
+            if prefetch_active and self.prefetch_buf_index >= 0 and AscendSFAImpl._prefetched_kv is not None:
                 num_actual = attn_metadata.num_actual_tokens
                 if AscendSFAImpl._gather_done_event is not None:
-                    torch_npu.npu.current_stream().wait_event(
-                        AscendSFAImpl._gather_done_event
+                    torch_npu.npu.current_stream().wait_event(AscendSFAImpl._gather_done_event)
+                prefetched_kv, prefetched_k_pe = self._get_prefetch_slice(num_actual)
+                if prefetched_kv is not None and attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+                    topk_real = topk_indices[:num_actual].reshape(num_actual, -1)
+                    current_positions = (
+                        torch.as_tensor(
+                            attn_metadata.seq_lens[:num_actual],
+                            dtype=torch.int64,
+                            device=topk_real.device,
+                        )
+                        - 1
                     )
-                prefetched_kv, prefetched_k_pe = self._get_prefetch_slice(
-                    num_actual
-                )
-                if (
-                    prefetched_kv is not None
-                    and attn_metadata.attn_state
-                    == AscendAttentionState.DecodeOnly
-                ):
-                    topk_real = topk_indices[:num_actual].reshape(
-                        num_actual, -1
-                    )
-                    current_positions = torch.as_tensor(
-                        attn_metadata.seq_lens[:num_actual],
-                        dtype=torch.int64,
-                        device=topk_real.device,
-                    ) - 1
                     current_slots = topk_real == current_positions.unsqueeze(-1)
                     block_ids = attn_metadata.block_table[
                         torch.arange(num_actual, device=topk_real.device),
@@ -2228,9 +2210,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     )
 
                     kv_len = self._index_topk
-                    contiguous_kv = prefetched_kv.reshape(
-                        num_actual * kv_len, 1, self.kv_lora_rank
-                    ).contiguous()
+                    contiguous_kv = prefetched_kv.reshape(num_actual * kv_len, 1, self.kv_lora_rank).contiguous()
                     attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                         ql_nope[:num_actual],
                         contiguous_kv,
@@ -2239,9 +2219,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                         num_key_value_heads=1,
                         input_layout="TND",
                         query_rope=q_pe[:num_actual],
-                        key_rope=prefetched_k_pe.reshape(
-                            num_actual * kv_len, 1, self.qk_rope_head_dim
-                        ).contiguous(),
+                        key_rope=prefetched_k_pe.reshape(num_actual * kv_len, 1, self.qk_rope_head_dim).contiguous(),
                         atten_mask=None,
                         sparse_mode=0,
                         scale=self.scale,
@@ -2250,18 +2228,11 @@ class AscendSFAImpl(MLAAttentionImpl):
                         block_table=None,
                         block_size=0,
                         softmax_lse_flag=True,
-                        actual_seq_lengths=attn_metadata.cum_query_lens_list[
-                            :num_actual
-                        ],
-                        actual_seq_lengths_kv=[
-                            kv_len * (index + 1)
-                            for index in range(num_actual)
-                        ],
+                        actual_seq_lengths=attn_metadata.cum_query_lens_list[:num_actual],
+                        actual_seq_lengths_kv=[kv_len * (index + 1) for index in range(num_actual)],
                     )
                     if num_actual < num_input_tokens:
-                        padded = attn_output.new_zeros(
-                            num_input_tokens, *attn_output.shape[1:]
-                        )
+                        padded = attn_output.new_zeros(num_input_tokens, *attn_output.shape[1:])
                         padded[:num_actual] = attn_output
                         attn_output = padded
                     used_prefetch = True
@@ -2290,15 +2261,17 @@ class AscendSFAImpl(MLAAttentionImpl):
             num_actual = attn_metadata.num_actual_tokens
             self._ensure_prefetch_buffer(kv_cache, num_actual)
             self._ensure_group_shared_kv_caches()
-            if (attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-                    and self.group_shared_kv_caches is not None):
+            if attn_metadata.attn_state == AscendAttentionState.DecodeOnly and self.group_shared_kv_caches is not None:
                 prefetch_bt = attn_metadata.block_table
                 prefetch_topk = topk_indices[:num_actual].reshape(num_actual, -1)
-                prefetch_cur_pos = torch.as_tensor(
-                    attn_metadata.seq_lens[:num_actual],
-                    dtype=torch.int64,
-                    device=prefetch_topk.device,
-                ) - 1
+                prefetch_cur_pos = (
+                    torch.as_tensor(
+                        attn_metadata.seq_lens[:num_actual],
+                        dtype=torch.int64,
+                        device=prefetch_topk.device,
+                    )
+                    - 1
+                )
                 should_gather = True
 
         if not used_prefetch:
@@ -2349,8 +2322,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                 # when a cache layer is inactive. The fixed three-slot buffer
                 # provides harmless dummy destinations for those inactive slots.
                 outputs = [
-                    (AscendSFAImpl._prefetched_kv[index][:num_actual],
-                     AscendSFAImpl._prefetched_k_pe[index][:num_actual])
+                    (
+                        AscendSFAImpl._prefetched_kv[index][:num_actual],
+                        AscendSFAImpl._prefetched_k_pe[index][:num_actual],
+                    )
                     for index in range(AscendSFAImpl.MAX_PREFETCH_LAYERS)
                 ]
                 # The CANN ABI is fixed at three cache/output pairs. For a
@@ -2363,14 +2338,25 @@ class AscendSFAImpl(MLAAttentionImpl):
                 out_c2, out_k2 = outputs[1]
                 out_c3, out_k3 = outputs[2]
                 torch.ops._C_ascend.npu_sparse_kv_gather_group_out(
-                    c1, k1, c2, k2, c3, k3,
+                    c1,
+                    k1,
+                    c2,
+                    k2,
+                    c3,
+                    k3,
                     # The CANN package has distinct dtype-specialized paths:
                     # BF16 cache uses int64 indices while FP16 uses int32.
                     prefetch_bt.to(torch.int64 if c1.dtype == torch.bfloat16 else torch.int32).contiguous(),
                     prefetch_topk.to(torch.int64 if c1.dtype == torch.bfloat16 else torch.int32).contiguous(),
                     prefetch_cur_pos.to(torch.int64 if c1.dtype == torch.bfloat16 else torch.int32).contiguous(),
-                    out_c1, out_k1, out_c2, out_k2, out_c3, out_k3,
-                    128, layer_count,
+                    out_c1,
+                    out_k1,
+                    out_c2,
+                    out_k2,
+                    out_c3,
+                    out_k3,
+                    128,
+                    layer_count,
                 )
             AscendSFAImpl._gather_done_event = torch_npu.npu.Event()
             AscendSFAImpl._gather_done_event.record(gather_stream)
