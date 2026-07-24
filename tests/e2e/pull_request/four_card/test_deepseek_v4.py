@@ -190,10 +190,10 @@ def test_deepseek_v4_dsa_cp_mtp3_graph():
     ) as vllm_model:
         outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
-        token_ids_list = [output_ids for output_ids, _ in outputs]
-        print(f"\n[test_deepseek_v4_dsa_cp_mtp3_graph] token_ids: {token_ids_list}")
-
+        expected_token_ids = [
+            [19923, 14, 1026, 2329, 344, 680, 2852, 95, 305, 342],
+            [3085, 344, 270, 5281, 294, 1988, 33, 3955, 361, 582, 3085, 344],
+        ]
         assert len(outputs) == len(example_prompts)
-        for output_ids, output_str in outputs:
-            assert len(output_str) > 0
-            assert len(output_ids) > 0
+        for i, (output_ids, _) in enumerate(outputs):
+            assert output_ids == expected_token_ids[i]
