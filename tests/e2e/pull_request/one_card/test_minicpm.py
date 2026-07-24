@@ -32,6 +32,8 @@ MINICPM_MODELS = [
 
 
 @pytest.mark.parametrize("model", MINICPM_MODELS)
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_minicpm(model) -> None:
     example_prompts = [
         "Hello, my name is",

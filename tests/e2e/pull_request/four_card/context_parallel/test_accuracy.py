@@ -188,6 +188,8 @@ FULL_FEATURE_MODEL_CASES = [
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
+@pytest.mark.requires_hardware("ascend910_9392")
+@pytest.mark.requires_npus(4)
 @pytest.mark.parametrize("case", FULL_FEATURE_MODEL_CASES, ids=lambda case: case.name)
 def test_models_dcp_full_feature_accuracy(case: AccuracyCase) -> None:
     _run_accuracy_case(case)

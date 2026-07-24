@@ -35,6 +35,8 @@ MODELS = ["Qwen/Qwen3-Next-80B-A3B-Instruct"]
 
 
 @pytest.mark.parametrize("model_name", MODELS)
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(4)
 def test_qwen3_next_mtp_acceptance_tp4(model_name):
     golden = [0.85, 0.46, 0.19]
 

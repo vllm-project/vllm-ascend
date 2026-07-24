@@ -85,6 +85,8 @@ def sample_json_schema():
     compilation_config={"cudagraph_capture_sizes": [1, 2, 4, 8]},
     extra_kwargs={"seed": 0, "structured_outputs_config": {"backend": "xgrammar"}},
 )
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_guided_json_completion_xgrammar(sample_json_schema, request):
     sampling_params = SamplingParams(
         temperature=1.0, max_tokens=500, structured_outputs=StructuredOutputsParams(json=sample_json_schema)
@@ -115,6 +117,8 @@ def test_guided_json_completion_xgrammar(sample_json_schema, request):
     compilation_config={"cudagraph_capture_sizes": [1, 2, 4, 8]},
     extra_kwargs={"seed": 0, "structured_outputs_config": {"backend": "xgrammar"}},
 )
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_guided_regex_xgrammar(sample_regex, vllm_runner):
     sampling_params = SamplingParams(
         temperature=0.8, top_p=0.95, structured_outputs=StructuredOutputsParams(regex=sample_regex)
@@ -140,6 +144,8 @@ def test_guided_regex_xgrammar(sample_regex, vllm_runner):
     compilation_config={"cudagraph_capture_sizes": [1, 2, 4, 8]},
     extra_kwargs={"seed": 0, "structured_outputs_config": {"backend": "guidance"}},
 )
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_guided_json_completion_guidance(sample_json_schema, vllm_runner):
     sampling_params = SamplingParams(
         temperature=1.0, max_tokens=500, structured_outputs=StructuredOutputsParams(json=sample_json_schema)
@@ -166,6 +172,8 @@ def test_guided_json_completion_guidance(sample_json_schema, vllm_runner):
     compilation_config={"cudagraph_capture_sizes": [1, 2, 4, 8]},
     extra_kwargs={"seed": 0, "structured_outputs_config": {"backend": "guidance"}},
 )
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_guided_regex_guidance(sample_regex, vllm_runner):
     sampling_params = SamplingParams(
         temperature=0.8, top_p=0.95, structured_outputs=StructuredOutputsParams(regex=sample_regex)
@@ -191,6 +199,8 @@ def test_guided_regex_guidance(sample_regex, vllm_runner):
     compilation_config={"cudagraph_capture_sizes": [1, 2, 4, 8]},
     extra_kwargs={"seed": 0, "structured_outputs_config": {"backend": "auto"}},
 )
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_guided_auto_rejects_mixed_structured_output_backends(vllm_runner):
     xgrammar_schema = {
         "type": "object",
@@ -238,6 +248,8 @@ def test_guided_auto_rejects_mixed_structured_output_backends(vllm_runner):
     compilation_config={"cudagraph_capture_sizes": [1, 2, 4, 8]},
     extra_kwargs={"seed": 0, "structured_outputs_config": {"backend": "outlines"}},
 )
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_guided_json_completion_outlines(sample_json_schema, request):
     sampling_params = SamplingParams(
         temperature=1.0, max_tokens=500, structured_outputs=StructuredOutputsParams(json=sample_json_schema)

@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 
+import pytest
 import vllm
 from vllm.lora.request import LoRARequest
 
@@ -90,6 +91,8 @@ def generate_and_test(
         )
 
 
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_olmoe_lora(olmoe_lora_files):
     # We enable enforce_eager=True here to reduce VRAM usage for lora-test CI,
     # Otherwise, the lora-test will fail due to CUDA OOM.

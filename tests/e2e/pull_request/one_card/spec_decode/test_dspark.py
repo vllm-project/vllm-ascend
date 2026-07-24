@@ -12,6 +12,8 @@ from tests.e2e.pull_request.one_card.spec_decode.utils import BASELINES, DSPARK,
 
 @pytest.mark.parametrize("method", DSPARK.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [7])
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_dspark_acceptance(
     method: str,
     num_speculative_tokens: int,

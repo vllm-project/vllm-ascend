@@ -77,6 +77,8 @@ def _assert_outputs_match(fia_outputs, fa3_outputs, label=""):
 
 
 @pytest.mark.skipif(not _fa3_available(), reason="flash_attn_npu_v3 is not installed")
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_fa3_vs_fia_single_prompt():
     """Compare FA3 and FIA with a single prompt (minimal batch size).
 
@@ -91,6 +93,8 @@ def test_fa3_vs_fia_single_prompt():
 
 
 @pytest.mark.skipif(not _fa3_available(), reason="flash_attn_npu_v3 is not installed")
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_fa3_vs_fia_mixed_lengths():
     """Compare FA3 and FIA with mixed prompt lengths in the same batch.
 
@@ -110,6 +114,8 @@ def test_fa3_vs_fia_mixed_lengths():
 
 
 @pytest.mark.skipif(not _fa3_available(), reason="flash_attn_npu_v3 is not installed")
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_fa3_vs_fia_with_chunkprefill():
     """Compare FA3 and FIA with single token generation where chunkprefill is used."""
     fia_outputs = _generate_with_backend(SHORT_PROMPTS, max_tokens=2, max_num_seqs=2, max_num_batched_tokens=5)
@@ -120,6 +126,8 @@ def test_fa3_vs_fia_with_chunkprefill():
 
 
 @pytest.mark.skipif(not _fa3_available(), reason="flash_attn_npu_v3 is not installed")
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_fa3_vs_fia_logprobs():
     """Compare FA3 and FIA logprobs for fine-grained numerical verification."""
     fia_logprobs = _generate_logprobs_with_backend(SHORT_PROMPTS[:1])

@@ -81,6 +81,8 @@ def _assert_qwen35_text_lora(
 
 
 @wait_until_npu_memory_free(target_free_percentage=0.7)
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(2)
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2])
 @pytest.mark.parametrize("enforce_eager", [False, True])
 @pytest.mark.parametrize("fully_sharded_loras", [False, True])

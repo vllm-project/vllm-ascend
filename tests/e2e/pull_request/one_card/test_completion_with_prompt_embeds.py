@@ -41,6 +41,8 @@ def get_prompt_embeds(chat, tokenizer, embedding_layer):
     compilation_config={"cudagraph_capture_sizes": [1, 2, 4, 8]},
     extra_kwargs={"enable_prompt_embeds": True},
 )
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_mixed_prompt_embeds_and_text(vllm_runner):
     """Test mixed inputs with both prompt embeddings and text prompts."""
     # Prepare prompt embeddings for first request

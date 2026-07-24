@@ -62,6 +62,8 @@ INPUT_PROMPTS = [
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [50])
+@pytest.mark.requires_hardware("ascend910_9392")
+@pytest.mark.requires_npus(2)
 def test_models_prefix_cache_tp2(model: str, max_tokens: int) -> None:
     with VllmRunner(
         model,
