@@ -25,6 +25,15 @@ import regex as re
 PYF_PATH = os.path.dirname(os.path.realpath(__file__))
 
 
+def write_if_different(path: str, content: str):
+    if os.path.exists(path):
+        with open(path) as fd:
+            if fd.read() == content:
+                return
+    with os.fdopen(os.open(path, const_var.WFLAGS, const_var.WMODES), "w") as fd:
+        fd.write(content)
+
+
 class ParamInfo(NamedTuple):
     dtype_list: list
     format_list: list
@@ -331,8 +340,7 @@ class BinParamBuilder(opdesc_parser.OpDesc):
                 self._write_build_cmd(param_file, bin_file, index_value, auto_gen_path, True)
 
     def _write_build_json(self: any, param_file: str, param):
-        with os.fdopen(os.open(param_file, const_var.WFLAGS, const_var.WMODES), "w") as fd:
-            json.dump(param, fd, indent="  ")
+        write_if_different(param_file, json.dumps(param, indent="  "))
 
     def _generate_check_result(self: any, enable_tiling_keys: bool, bin_file: str):
         check_result = ""
@@ -367,7 +375,11 @@ grep -q "None of the given tiling keys are in the supported list"; then\n'
         bin_cmd_str = "res=$(opc $1 --main_func={fun} --input_param={param} --soc_version={soc} \
                 --output=$2 --impl_mode={impl} --simplified_key_mode=0 --op_mode=dynamic "
 
+        with open(param_file, "rb") as fd:
+            param_hash = hashlib.md5(fd.read()).hexdigest()
+
         build_cmd_var = "#!/bin/bash\n"
+        build_cmd_var += f"# param_hash={param_hash}\n"
         build_cmd_var += f'echo "[{self.soc}] Generating {bin_file} ..."\n'
         plog_level = os.environ.get("ASCEND_GLOBAL_LOG_LEVEL")
         plog_stdout = os.environ.get("ASCEND_SLOG_PRINT_TO_STDOUT")
@@ -403,8 +415,7 @@ grep -q "None of the given tiling keys are in the supported list"; then\n'
         build_cmd_var += check_result
         build_cmd_var += f'echo "[{self.soc}] Generating {bin_file} Done"\n'
 
-        with os.fdopen(os.open(compile_file, const_var.WFLAGS, const_var.WMODES), "w") as fd:
-            fd.write(build_cmd_var)
+        write_if_different(compile_file, build_cmd_var)
 
 
 def get_tiling_keys(tiling_keys: str) -> set:
