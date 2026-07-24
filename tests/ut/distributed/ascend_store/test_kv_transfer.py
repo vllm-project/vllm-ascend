@@ -341,17 +341,18 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         keys, _, _ = store.put_calls[0]
         self.assertEqual(len(keys), 1)
 
-    def test_handle_request_skips_known_kvpool_hit_prefix(self):
+    def test_handle_request_skips_compressed_hit_in_raw_token_domain(self):
         t, store = self._make_thread([0, 0])
+        t.token_database.group_cache_families["kv"][0] = "c4"
         req = ReqMeta(
             req_id="r1",
-            token_len_chunk=64,
-            block_ids=[0, 1, 2, 3],
-            block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
+            token_len_chunk=128,
+            block_ids=[0, 1],
+            block_hashes=[f"h{i}" for i in range(8)],
             load_spec=LoadSpec(
                 vllm_cached_tokens=0,
-                kvpool_cached_tokens=31,
-                kvpool_store_skip_tokens=32,
+                kvpool_cached_tokens=63,
+                kvpool_store_skip_tokens=64,
                 can_load=True,
             ),
         )
@@ -359,8 +360,8 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t.request_queue.put(req)
         t._handle_request(req)
         keys, addrs, _ = store.put_calls[0]
-        self.assertEqual(len(keys), 2)
-        self.assertEqual(addrs, [[1002], [1003]])
+        self.assertEqual(len(keys), 1)
+        self.assertEqual(addrs, [[1001]])
 
     def test_save_exception_cleans_queue_lifecycle(self):
         t, store = self._make_thread([0])

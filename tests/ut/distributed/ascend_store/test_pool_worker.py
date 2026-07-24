@@ -106,7 +106,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         hits = [[16, 32, 48], [32, 48], [16, 32], [32, 48, 64]]
         self.assertEqual(32, cls._max_intersection_hit_position(hits))
 
-    def test_external_coordinator_lookup_uses_reachable_masks(self):
+    def test_external_coordinator_lookup_uses_only_lookup_mask(self):
         cls = self._make_worker_class()
         worker = object.__new__(cls)
         worker.hash_block_size = 128
@@ -114,7 +114,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker.cache_coordinator = MagicMock()
         worker.cache_coordinator.lcm_block_size = 128
         worker.cache_coordinator.lookup_mask.return_value = ([True],)
-        worker.cache_coordinator.store_mask.return_value = ([True],)
+        worker.cache_coordinator.store_mask.return_value = ([False],)
         worker.cache_coordinator.find_longest_cache_hit.return_value = ((), 128)
         worker.m_store = MagicMock()
         worker.m_store.exists.return_value = [1]
@@ -122,7 +122,9 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker.token_database = MagicMock()
         worker.token_database.get_block_size.return_value = 128
         worker.token_database.group_cache_families = {"kv": {0: "default"}}
-        worker.token_database.process_token_key_strings.return_value = [(0, 128, "key", "ab" * 32)]
+        worker.token_database.process_token_key_strings.side_effect = (
+            lambda *args, chunk_filter, **kwargs: [(0, 128, "key", "ab" * 32)] if chunk_filter(0) else []
+        )
 
         hit = worker._lookup_with_coordinator(
             128,
@@ -134,7 +136,8 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
 
         self.assertEqual(hit, 128)
         worker.cache_coordinator.lookup_mask.assert_called_once_with(128)
-        worker.cache_coordinator.store_mask.assert_called_once_with(128, None)
+        worker.cache_coordinator.store_mask.assert_not_called()
+        worker.m_store.exists.assert_called_once_with(["key"])
         worker.cache_coordinator.find_longest_cache_hit.assert_called_once()
         self.assertFalse(worker.cache_coordinator.find_longest_cache_hit.call_args.kwargs["apply_eagle"])
         worker.token_database.process_tokens.assert_not_called()
