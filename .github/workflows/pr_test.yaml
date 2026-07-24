@@ -398,3 +398,6 @@ jobs:
       log_artifact_pattern: selected-test-logs-*
       recommendations_file: .github/workflows/scripts/recommended_pytest_paths.txt
       recommendations_content: ${{ needs.recommend-tests-from-coverage.outputs.coverage_paths || '' }}
+    secrets:
+      OBS_ACCESS_KEY_FAILURE_ANALYSIS: ${{ secrets.OBS_ACCESS_KEY_FAILURE_ANALYSIS }}
+      OBS_SECRET_ACCESS_KEY_FAILURE_ANALYSIS: ${{ secrets.OBS_SECRET_ACCESS_KEY_FAILURE_ANALYSIS }}
