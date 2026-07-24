@@ -91,6 +91,55 @@ class TestAscendW8A8DynamicLinearMethodWithNpu(TestBase):
         self.assertEqual(output.shape, (32, output_size))
 
 
+class TestAscendW8A8FusedMoEEplbWeights(TestBase):
+    num_experts = 8
+
+    def _create_layer(self):
+        layer = torch.nn.Module()
+        layer.w13_weight = torch.empty(self.num_experts, 2, 3)
+        layer.w2_weight = torch.empty(self.num_experts, 3, 2)
+        layer.w13_weight_scale_fp32 = torch.empty(self.num_experts, 6)
+        layer.w2_weight_scale = torch.empty(self.num_experts, 3)
+        return layer
+
+    def test_get_eplb_weight_views_include_fused_mc2_scales(self):
+        layer = self._create_layer()
+        layer.fused_w1_scale = torch.arange(self.num_experts * 6, dtype=torch.int64)
+        layer.fused_w2_scale = torch.arange(self.num_experts * 3, dtype=torch.int64)
+
+        weight_views = AscendW8A8DynamicFusedMoEMethod.get_eplb_weight_views(layer)
+
+        self.assertEqual(len(weight_views), 6)
+        self.assertEqual(weight_views[-2].shape, (self.num_experts, 6))
+        self.assertEqual(weight_views[-1].shape, (self.num_experts, 3))
+        self.assertEqual(weight_views[-2].data_ptr(), layer.fused_w1_scale.data_ptr())
+        self.assertEqual(weight_views[-1].data_ptr(), layer.fused_w2_scale.data_ptr())
+
+    def test_get_eplb_weight_views_reject_incomplete_fused_mc2_scales(self):
+        layer = self._create_layer()
+        layer.fused_w1_scale = torch.empty(self.num_experts * 6, dtype=torch.int64)
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "fused_w1_scale and fused_w2_scale to be present or absent together",
+        ):
+            AscendW8A8DynamicFusedMoEMethod.get_eplb_weight_views(layer)
+
+    def test_get_eplb_weight_views_reject_incomplete_fused_mc2_scale_lists(self):
+        layer = torch.nn.Module()
+        layer.w13_weight_list = [torch.empty(2, 3) for _ in range(self.num_experts)]
+        layer.w2_weight_list = [torch.empty(3, 2) for _ in range(self.num_experts)]
+        layer.w13_weight_scale_fp32_list = [torch.empty(6) for _ in range(self.num_experts)]
+        layer.w2_weight_scale_list = [torch.empty(3) for _ in range(self.num_experts)]
+        layer.fused_w1_scale_list = [torch.empty(6, dtype=torch.int64) for _ in range(self.num_experts)]
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "fused_w1_scale_list and fused_w2_scale_list to be present or absent together",
+        ):
+            AscendW8A8DynamicFusedMoEMethod.get_eplb_weight_views(layer)
+
+
 class TestAscendW8A8FusedMoEMethod(TestBase):
     num_experts = 8
     hidden_size = 128
@@ -186,13 +235,37 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         self.assertIs(fused_experts_input.topk_weights, topk_weights)
         self.assertIs(fused_experts_input.topk_ids, topk_ids)
 
+    @patch("vllm_ascend.quantization.methods.w8a8_dynamic._EXTRA_CTX")
+    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.select_experts")
+    def test_apply_routed_consumes_router_results_without_reselection(self, mock_select_experts, mock_extra_ctx):
+        layer = torch.nn.Module()
+        layer.w13_weight = torch.empty(self.num_experts, self.hidden_size, 2 * self.intermediate_size)
+        layer.w2_weight = torch.empty(self.num_experts, self.intermediate_size, self.hidden_size)
+        layer.w13_weight_scale_fp32 = torch.ones(self.num_experts, 2 * self.intermediate_size)
+        layer.w2_weight_scale = torch.ones(self.num_experts, self.hidden_size)
+        layer.swiglu_limit = 1000000
+        x = torch.randn(4, self.hidden_size)
+        topk_weights = torch.randn(4, 2)
+        topk_ids = torch.randint(0, self.num_experts, (4, 2), dtype=torch.int32)
+        routed_out = torch.randn_like(x)
+        mock_extra_ctx.moe_comm_type = MoECommType.ALLGATHER
+        mock_extra_ctx.moe_comm_method.fused_experts.return_value = routed_out
+        self.quant_method.dynamic_eplb = False
+
+        result = self.quant_method.apply_routed(layer, x, topk_weights, topk_ids)
+
+        self.assertIs(result, routed_out)
+        mock_select_experts.assert_not_called()
+        fused_input = mock_extra_ctx.moe_comm_method.fused_experts.call_args.kwargs["fused_experts_input"]
+        self.assertIs(fused_input.topk_ids, topk_ids)
+
     @patch("torch_npu.npu_format_cast")
     @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ascend_config")
     def test_process_weights_after_loading(self, mock_get_config, mock_format_cast):
         mock_config = MagicMock()
         mock_config.enable_fused_mc2 = 1
         mock_get_config.return_value = mock_config
-        self.quant_method.dynamic_eplb = True
+        self.quant_method.use_expert_weight_list = True
         mock_format_cast.return_value = torch.randint(
             -8, 8, (self.num_experts, self.hidden_size, 2 * self.intermediate_size), dtype=torch.int8
         )
@@ -202,3 +275,10 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         self.quant_method.process_weights_after_loading(layer)
         self.assertTrue(hasattr(layer, "w13_weight_list"))
         self.assertFalse(hasattr(layer, "w13_weight_scale_fp32"))
+        self.assertEqual(len(layer.w13_weight_list), self.num_experts)
+        self.assertTrue(all(weight.storage_offset() == 0 for weight in layer.w13_weight_list))
+        weight_views = self.quant_method.get_eplb_weight_views(layer)
+        self.assertIs(weight_views[0], layer.w13_weight_list)
+        self.assertIs(weight_views[1], layer.w2_weight_list)
+        self.assertIs(weight_views[-2], layer.fused_w1_scale_list)
+        self.assertIs(weight_views[-1], layer.fused_w2_scale_list)

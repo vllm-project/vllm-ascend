@@ -1027,12 +1027,59 @@ class NPUPlatform(Platform):
         }
 
     @staticmethod
+    def _validate_eplb_config(vllm_config: VllmConfig) -> None:
+        additional_config = vllm_config.additional_config or {}
+        eplb_config = additional_config.get("eplb_config", {})
+        if not isinstance(eplb_config, dict):
+            raise TypeError("additional_config.eplb_config must be a dictionary.")
+
+        use_v2_model_runner = bool(getattr(vllm_config, "use_v2_model_runner", False))
+        if use_v2_model_runner:
+            legacy_eplb_fields = sorted(set(eplb_config) - {"load_scope"})
+            if legacy_eplb_fields:
+                raise ValueError(
+                    "Model Runner V2 only accepts 'load_scope' in "
+                    "additional_config.eplb_config; legacy fields are not supported: "
+                    f"{', '.join(legacy_eplb_fields)}."
+                )
+            if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv(
+                "EXPERT_MAP_RECORD", "false"
+            ).lower() in ("true", "1"):
+                raise ValueError(
+                    "DYNAMIC_EPLB and EXPERT_MAP_RECORD are Model Runner V1 controls. "
+                    "Unset them and use --enable-eplb with Model Runner V2."
+                )
+            load_scope = eplb_config.get("load_scope", "all")
+            if load_scope != "all" and not vllm_config.parallel_config.enable_eplb:
+                raise ValueError("additional_config.eplb_config.load_scope requires --enable-eplb.")
+            if vllm_config.parallel_config.enable_eplb:
+                upstream_eplb_config = vllm_config.parallel_config.eplb_config
+                if upstream_eplb_config.use_async:
+                    raise ValueError(
+                        "Async EPLB is not supported by Model Runner V2 on Ascend yet; "
+                        "set eplb_config.use_async to false."
+                    )
+                if upstream_eplb_config.communicator not in (None, "torch_nccl"):
+                    raise ValueError(
+                        "Do not set eplb_config.communicator on Ascend; "
+                        "torch.distributed over HCCL is selected automatically."
+                    )
+        elif "load_scope" in eplb_config:
+            raise ValueError(
+                "additional_config.eplb_config.load_scope is only supported by Model Runner V2; "
+                "use eplb_heat_collection_stage with Model Runner V1."
+            )
+        elif vllm_config.parallel_config.enable_eplb:
+            raise ValueError("Upstream EPLB is only supported by Model Runner V2 on Ascend.")
+
+    @staticmethod
     def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
         """
         Check and correct parameters in VllmConfig that are incompatible with Ascend NPU.
         If GPU-specific or currently unsupported parameters are set by the user,
         log a warning and reset them to safe values.
         """
+        NPUPlatform._validate_eplb_config(vllm_config)
         model_config = vllm_config.model_config
         # ==================== 1. Model Config ====================
         if model_config:

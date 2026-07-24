@@ -50,6 +50,10 @@ TITLES = {
         "en": "EPLB Swift Balancer",
         "zh": "EPLB 快速均衡器",
     },
+    "developer_guide/Design_Documents/model_runner_v2_eplb.md": {
+        "en": "Model Runner V2 EPLB Upstream Integration",
+        "zh": "Model Runner V2 EPLB 上游化",
+    },
     "developer_guide/Design_Documents/npugraph_ex.md": {"en": "NPUGraph Ex", "zh": "NPUGraph 扩展"},
     "developer_guide/Design_Documents/patch.md": {"en": "Patch", "zh": "补丁"},
     "developer_guide/Design_Documents/quantization.md": {"en": "Quantization", "zh": "量化"},

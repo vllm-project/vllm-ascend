@@ -280,6 +280,45 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
             )
         return layer
 
+    def test_get_eplb_weight_views_matches_routed_compute_inputs(self):
+        layer = self.build_layer(is_new_quant_version=True)
+
+        weight_views = self.quant_method.get_eplb_weight_views(layer)
+
+        expected = [
+            layer.w13_weight,
+            layer.w2_weight,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+            layer.w13_scale_bias,
+            layer.w2_scale_bias,
+        ]
+        self.assertEqual(len(weight_views), len(expected))
+        for actual, expected_view in zip(weight_views, expected):
+            self.assertIs(actual, expected_view)
+
+    def test_get_eplb_weight_views_rejects_incomplete_scale_bias(self):
+        layer = self.build_layer(is_new_quant_version=True)
+        del layer.w2_scale_bias
+
+        with self.assertRaisesRegex(RuntimeError, "w13_scale_bias and w2_scale_bias to be present or absent together"):
+            self.quant_method.get_eplb_weight_views(layer)
+
+    def test_get_eplb_weight_views_rejects_incomplete_scale_bias_lists(self):
+        layer = torch.nn.Module()
+        layer.w13_weight_list = [torch.empty(2, 3) for _ in range(self.experts)]
+        layer.w2_weight_list = [torch.empty(3, 2) for _ in range(self.experts)]
+        layer.w13_weight_scale_list = [torch.empty(3) for _ in range(self.experts)]
+        layer.w2_weight_scale_list = [torch.empty(2) for _ in range(self.experts)]
+        layer.w13_scale_bias_list = [torch.empty(3) for _ in range(self.experts)]
+        layer.w2_scale_bias_list = None
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "w13_scale_bias_list and w2_scale_bias_list to be present or absent together",
+        ):
+            self.quant_method.get_eplb_weight_views(layer)
+
     @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz")
     @patch("torch_npu.npu_format_cast")
     @patch("torch_npu.npu_quantize")
@@ -310,6 +349,16 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.quant_method.process_weights_after_loading(per_channel_layer)
         self.assertEqual(new_layer.w13_scale_bias.data.shape, (self.experts, 2 * self.input_size))
         self.assertEqual(per_channel_layer.w13_weight_scale.data.shape, (self.experts, 2 * self.input_size))
+
+        self.quant_method.use_expert_weight_list = True
+        list_layer = self.build_layer(is_new_quant_version=True, is_per_channel_weight=True)
+        self.quant_method.process_weights_after_loading(list_layer)
+        self.assertFalse(hasattr(list_layer, "w13_weight"))
+        self.assertEqual(len(list_layer.w13_weight_list), self.experts)
+        self.assertTrue(all(weight.storage_offset() == 0 for weight in list_layer.w13_weight_list))
+        weight_views = self.quant_method.get_eplb_weight_views(list_layer)
+        self.assertIs(weight_views[0], list_layer.w13_weight_list)
+        self.assertIs(weight_views[-1], list_layer.w2_scale_bias_list)
 
     def test_pack_to_int32_asserts_new_quant_packed_dim(self):
         self.quant_method.new_quant_version = True
@@ -359,6 +408,16 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.quant_method.process_weights_after_loading(per_channel_layer)
         self.assertEqual(per_channel_layer.w13_weight_scale.data.shape, (self.experts, 2 * self.input_size))
         self.assertEqual(per_channel_layer.w2_weight_scale.data.shape, (self.experts, 1, self.output_size))
+
+        self.quant_method.is_per_channel_weight = False
+        self.quant_method.weight_strategy = "group"
+        self.quant_method.use_expert_weight_list = True
+        list_layer = self.build_layer(is_new_quant_version=False)
+        self.quant_method.process_weights_after_loading(list_layer)
+        self.assertFalse(hasattr(list_layer, "w13_weight"))
+        self.assertEqual(len(list_layer.w13_weight_list), self.experts)
+        self.assertEqual(list_layer.w13_weight_list[0].dtype, torch.int8)
+        self.assertTrue(all(weight.storage_offset() == 0 for weight in list_layer.w13_weight_list))
 
     @patch("vllm_ascend.quantization.methods.w4a8._EXTRA_CTX")
     @patch("vllm_ascend.quantization.methods.w4a8.select_experts")
