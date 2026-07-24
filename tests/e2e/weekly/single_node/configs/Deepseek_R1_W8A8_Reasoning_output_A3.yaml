@@ -25,7 +25,7 @@ _server_cmd: &server_cmd
   - "2"
   - "--seed"
   - "1024"
-  - "--enable-expert-paralle"
+  - "--enable-expert-parallel"
   - "--max-num-seqs"
   - "32"
   - "--max-num-batched-tokens"
