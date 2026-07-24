@@ -32,11 +32,14 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
     at::Tensor& out,
     at::Tensor& expert_token_nums,
     const c10::optional<at::Tensor>& x_active_mask,
-    double swiglu_limit
+    double swiglu_limit,
+    double swiglu_alpha = 0.0
 ) {
     char *group_ep_ptr = const_cast<char *>(group.data());
     bool is_int8 = weight1[0].dtype() == at::kChar;
     bool is_int4 = weight1[0].dtype() == at::kInt;
+    TORCH_CHECK(is_int8 || swiglu_alpha == 0.0,
+        "swiglu_alpha is only supported for int8 (W8A8) quantization path.");
     if (is_int8) {
         EXEC_NPU_CMD(aclnnDispatchFFNCombine,
                  x,
@@ -50,6 +53,7 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
                  group_ep_ptr,
                  max_output_size,
                  swiglu_limit,
+                 swiglu_alpha,
                  out,
                  expert_token_nums);
     } else if (is_int4){
