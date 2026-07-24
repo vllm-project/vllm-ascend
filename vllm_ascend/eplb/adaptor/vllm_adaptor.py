@@ -20,6 +20,7 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+import torch_npu
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -54,7 +55,30 @@ EPLB_EXPERT_WEIGHT_NAMES = {
     (QuantType.MXFP4, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
     (QuantType.MXFP8, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
     (QuantType.MXFP8, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
+    (QuantType.W4A8MXFP, False): (
+        "w13_weight_list",
+        "w2_weight_list",
+        "w13_weight_scale_list",
+        "w2_weight_scale_list",
+    ),
+    (QuantType.W4A8MXFP, True): (
+        "w13_weight_list",
+        "w2_weight_list",
+        "w13_weight_scale_list",
+        "w2_weight_scale_list",
+    ),
 }
+
+# W4A8MXFP expert weights are FRACTAL_NZ (mxfp C0_16). batch_isend_irecv carries the standalone
+# offset-0 NZ block directly, so their receive buffer must be a matching NZ tensor built with this
+# (customize_dtype, input_dtype) pair (torch.empty_like on NZ falls back to ND). Only the weight
+# lists are NZ; the scale lists stay ND.
+ACL_FORMAT_FRACTAL_NZ = 29
+_W4A8MXFP_NZ_CAST_KWARGS = {
+    "customize_dtype": torch.float8_e4m3fn,
+    "input_dtype": torch_npu.float4_e2m1fn_x2,
+}
+_W4A8MXFP_NZ_WEIGHT_NAMES = {"w13_weight_list", "w2_weight_list"}
 
 
 class VllmEplbAdaptor:
@@ -118,9 +142,15 @@ class VllmEplbAdaptor:
                 continue
             buffer_tensor_shapes[expert_weight_key] = expert_tensor_shapes
             self.buffer_tensor_list[expert_weight_key] = [[] for _ in range(num_buffer_tensor)]
+            quant_type = expert_weight_key[0]
             for buffer_id in range(num_buffer_tensor):
-                for expert_tensor in expert_tensors:
-                    buffer_tensor = torch.empty_like(expert_tensor)
+                for name, expert_tensor in zip(expert_weight_names, expert_tensors):
+                    if quant_type == QuantType.W4A8MXFP and name in _W4A8MXFP_NZ_WEIGHT_NAMES:
+                        # NZ weight is transferred as-is; build a matching C0_16 NZ receive buffer.
+                        nd = torch.empty(expert_tensor.shape, dtype=expert_tensor.dtype, device=expert_tensor.device)
+                        buffer_tensor = torch_npu.npu_format_cast(nd, ACL_FORMAT_FRACTAL_NZ, **_W4A8MXFP_NZ_CAST_KWARGS)
+                    else:
+                        buffer_tensor = torch.empty_like(expert_tensor)
                     self.buffer_tensor_list[expert_weight_key][buffer_id].append(buffer_tensor)
 
     def init_expert_param_per_layer(self):
