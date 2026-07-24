@@ -240,7 +240,7 @@ The service returns HTTP 200 OK with a JSON response containing the `relevance_s
         {
             "index": 1,
             "document": {
-                "text": "Nanjing is a city of China",
+                "text": "Nanjing is a city of China.",
                 "multi_modal": null
             },
             "relevance_score": 0.1250981241464615
