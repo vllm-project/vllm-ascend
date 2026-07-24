@@ -30,6 +30,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 
+from vllm_ascend.compilation.breakable_acl_graph import eager_break_during_capture
 from vllm_ascend.models.layer.attention.layer import DSAAttention
 from vllm_ascend.utils import (
     AscendDeviceType,
@@ -175,6 +176,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         return output
 
 
+@eager_break_during_capture
 def dsa_forward(
     hidden_states: torch.Tensor,
     need_gather_q_kv: bool,
