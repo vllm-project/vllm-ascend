@@ -78,7 +78,7 @@ sudo apt install libjemalloc2
 export LD_PRELOAD=/usr/lib/"$(uname -i)"-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 ```
 
-#### 1.2. Tcmalloc
+#### 1.2. TCMalloc
 
 **TCMalloc (Thread Caching Malloc)** is a universal memory allocator that improves overall performance while ensuring low latency by introducing a multi-level cache structure, reducing mutex contention and optimizing large object processing flow. Find more [details](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html).
 
@@ -155,9 +155,7 @@ This section describes operating system–level optimizations applied on the hos
 
     These settings must be applied on the host OS and with root privileges. Not inside containers.
 
-#### 4.1
-
-Set CPU Frequency Governor to `performance`
+#### 4.1 Set CPU Frequency Governor to `performance`
 
 ```shell
 echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor

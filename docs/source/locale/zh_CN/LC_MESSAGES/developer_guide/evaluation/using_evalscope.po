@@ -93,6 +93,3 @@ msgstr ""
 "更多详情请参见 [EvalScope 文档 - "
 "模型推理压力测试](https://evalscope.readthedocs.io/en/latest/user_guides/stress_test/quick_start.html#basic-"
 "usage)。"
-
-msgid "After 1 to 2 minutes, the output is shown below:"
-msgstr ""

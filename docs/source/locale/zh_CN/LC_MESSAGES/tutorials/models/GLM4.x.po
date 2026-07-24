@@ -21,9 +21,6 @@ msgstr ""
 msgid "# GLM-4.5/4.6/4.7"
 msgstr "# GLM-4.5/4.6/4.7"
 
-msgid "## Introduction"
-msgstr "## 简介"
-
 msgid ""
 "GLM-4.x series models use a Mixture-of-Experts (MoE) architecture and are "
 "foundational models specifically designed for agent applications."
@@ -38,9 +35,6 @@ msgid ""
 "node and multi-node deployment, accuracy and performance evaluation."
 msgstr "本文档将展示该模型的主要验证步骤，包括支持的特性、特性配置、环境准备、单节点和多节点部署、精度及性能评估。"
 
-msgid "## Supported Features"
-msgstr "## 支持的特性"
-
 msgid ""
 "Refer to [supported "
 "features](../../user_guide/support_matrix/supported_models.md) to get the "
@@ -52,12 +46,6 @@ msgid ""
 "Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the"
 " feature's configuration."
 msgstr "请参考[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
-
-msgid "## Environment Preparation"
-msgstr "## 环境准备"
-
-msgid "### Model Weight"
-msgstr "### 模型权重"
 
 msgid ""
 "- `GLM-4.5`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.5).\n"
@@ -80,9 +68,6 @@ msgid ""
 "It is recommended to download the model weight to the shared directory of "
 "multiple nodes, such as `/root/.cache/`."
 msgstr "建议将模型权重下载到多节点共享目录，例如 `/root/.cache/`。"
-
-msgid "### Installation"
-msgstr "### 安装"
 
 msgid "You can use our official docker image to run `GLM-4.x` directly."
 msgstr "您可以使用官方提供的Docker镜像直接运行 `GLM-4.x`。"
@@ -114,12 +99,6 @@ msgid ""
 " on each node."
 msgstr "如果您想部署多节点环境，需要在每个节点上配置环境。"
 
-msgid "## Deployment"
-msgstr "## 部署"
-
-msgid "### Single-node Deployment"
-msgstr "### 单节点部署"
-
 msgid ""
 "- In low-latency scenarios, we recommend a single-machine deployment.\n"
 "- Quantized model `glm4.7_w8a8_with_float_mtp` can be deployed on 1 Atlas 800 A3 (64G × 16) or 1 Atlas 800 A2 (64G × 8)."
@@ -144,9 +123,6 @@ msgstr ""
 "- `fusion_ops_gmmswigluquant`：当NPU总数 ≤ 16时，GmmSwigluQuant融合算子的性能可能会下降。\n"
 "- `VLLM_ASCEND_ENABLE_FLASHCOMM1`：由于该特性引入的填充数据会使FIA算子的FD特性失效，我们建议在长序列（≥16k）且低并发（≤8 batch size）场景下禁用 `flashcomm1` 特性。对于长序列且高并发场景，您可以启用此特性以获得更好的Prefill性能。"
 
-msgid "### Multi-node Deployment"
-msgstr "### 多节点部署"
-
 msgid ""
 "While the previous documentation advises against multi-node deployment on "
 "the Atlas 800 A2 (64G × 8) platform, this configuration can still be "
@@ -155,15 +131,6 @@ msgid ""
 msgstr ""
 "尽管之前的文档不建议在 Atlas 800 A2（64G × "
 "8）平台上进行多节点部署，但如有需要，仍可为GLM-4.x模型实施此配置。要进行双节点设置，请在各个节点上执行以下脚本。"
-
-msgid "**Node 0**"
-msgstr "**节点 0**"
-
-msgid "**Node 1**"
-msgstr "**节点 1**"
-
-msgid "### Prefill-Decode Disaggregation"
-msgstr "### Prefill-Decode分离部署"
 
 msgid ""
 "We'd like to show the deployment guide of `GLM-4.7` on multi-node "
@@ -184,21 +151,6 @@ msgid ""
 "command on each node:"
 msgstr "准备工作完成后，您可以在每个节点上使用以下命令启动服务器："
 
-msgid "1. Prefill node 0"
-msgstr "1. Prefill节点 0"
-
-msgid "2. Prefill node 1"
-msgstr "2. Prefill节点 1"
-
-msgid "3. Decode node 0"
-msgstr "3. Decode节点 0"
-
-msgid "4. Decode node 1"
-msgstr "4. Decode节点 1"
-
-msgid "### Request Forwarding"
-msgstr "### 请求转发"
-
 msgid ""
 "To set up request forwarding, run the following script on any machine. You "
 "can get the proxy program in the repository's examples: "
@@ -209,15 +161,9 @@ msgstr ""
 "project/vllm-"
 "ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
 
-msgid "## Functional Verification"
-msgstr "## 功能验证"
-
 msgid ""
 "Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示词查询模型："
-
-msgid "## Accuracy Evaluation"
-msgstr "## 精度评估"
 
 msgid "Here are two accuracy evaluation methods."
 msgstr "这里提供两种精度评估方法。"
@@ -235,25 +181,11 @@ msgstr ""
 "2. 执行后，您可以获得结果，以下是 `GLM-4.7` 在 `vllm-ascend:main`（`vllm-ascend:0.14.0rc1` "
 "之后）上的结果，仅供参考。"
 
-msgid ""
-"| dataset | version | metric | mode | vllm-api-general-chat | note |\n"
-"|----- | ----- | ----- | ----- | -----| ----- |\n"
-"| GPQA | - | accuracy | gen | 84.85 | 1 Atlas 800 A3 (64G × 16) |\n"
-"| MATH500 | - | accuracy | gen | 98.8 | 1 Atlas 800 A3 (64G × 16) |"
-msgstr ""
-"| 数据集 | 版本 | 指标 | 模式 | vllm-api-general-chat | 备注 |\n"
-"|----- | ----- | ----- | ----- | -----| ----- |\n"
-"| GPQA | - | 准确率 | 生成 | 84.85 | 1台 Atlas 800 A3 (64G × 16) |\n"
-"| MATH500 | - | 准确率 | 生成 | 98.8 | 1台 Atlas 800 A3 (64G × 16) |"
-
 msgid "### Using Language Model Evaluation Harness"
 msgstr "### 使用语言模型评估工具"
 
 msgid "Not tested yet."
 msgstr "尚未测试。"
-
-msgid "## Performance"
-msgstr "## 性能"
 
 msgid "### Using AISBench"
 msgstr "### 使用AISBench"
@@ -296,9 +228,6 @@ msgid ""
 "After about several minutes, you can get the performance evaluation result."
 msgstr "大约几分钟后，即可获得性能评估结果。"
 
-msgid "## Best Practices"
-msgstr "## 最佳实践"
-
 msgid "In this chapter, we recommend best practices for three scenarios:"
 msgstr "本章针对三种场景推荐最佳实践："
 
@@ -310,16 +239,6 @@ msgstr ""
 "- 长上下文：对于低并发（≤ 4）的长序列：设置`dp1 tp16`；对于高并发（> 4）的长序列：设置`dp2 tp8`\n"
 "- 低延迟：对于低延迟的短序列：建议设置`dp2 tp8`\n"
 "- 高吞吐量：对于高吞吐量的短序列：同样建议设置`dp2 tp8`"
-
-msgid ""
-"**Notice:**\n"
-"`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#deployment)** chapter."
-msgstr ""
-"**注意：**\n"
-"`max-model-len`和`max-num-seqs`需要根据实际使用场景进行设置。其他设置请参考**[部署](#deployment)**章节。"
-
-msgid "## FAQ"
-msgstr "## 常见问题"
 
 msgid ""
 "- **Q: Startup fails with HCCL port conflicts (address already bound). What "
@@ -340,17 +259,81 @@ msgstr ""
 "答：首先减小`--max-num-seqs`和`--max-model-len`。如有必要，降低并发度和负载测试压力（例如`max-"
 "concurrency` / `num-prompts`）。"
 
-msgid "1. Prefill node 0"
-msgstr "1. 预填充节点 0"
+msgid "| dataset | version | metric | mode | vllm-api-general-chat | note |"
+msgstr "| dataset | version | metric | mode | vllm-api-general-chat | note |"
 
-msgid "2. Prefill node 1"
-msgstr "2. 预填充节点 1"
+msgid "## 1 Introduction"
+msgstr "## 1 引言"
 
-msgid "3. Decode node 0"
-msgstr "3. 解码节点 0"
+msgid "## 2 Supported Features"
+msgstr "## 2 支持特性"
 
-msgid "4. Decode node 1"
-msgstr "4. 解码节点 1"
+msgid "## 3 Prerequisites"
+msgstr "## 3 前提条件"
 
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
+msgid "### 3.1 Model Weight"
+msgstr "### 3.1 模型权重"
+
+msgid "## 4 Installation"
+msgstr "## 4 安装"
+
+msgid "### 4.1 Docker Image Installation"
+msgstr "### 4.1 Docker镜像安装"
+
+msgid "### 4.2 Source Code Installation"
+msgstr "### 4.2 源码安装"
+
+msgid "## 5 Online Service Deployment"
+msgstr "## 5 在线服务部署"
+
+msgid "### 5.1 Single-node Deployment"
+msgstr "### 5.1 单节点部署"
+
+msgid "### 5.2 Multi-node Deployment"
+msgstr "### 5.2 多节点部署"
+
+msgid "=== \"Node 0\""
+msgstr "=== \"节点0\""
+
+msgid "=== \"Node 1\""
+msgstr "=== \"节点1\""
+
+msgid "### 5.3 Prefill-Decode Disaggregation"
+msgstr "### 5.3 预填充-解码分离"
+
+msgid "=== \"Prefill node 0\""
+msgstr "=== \"预填充节点0\""
+
+msgid "=== \"Prefill node 1\""
+msgstr "=== \"预填充节点1\""
+
+msgid "=== \"Decode node 0\""
+msgstr "=== \"解码节点0\""
+
+msgid "=== \"Decode node 1\""
+msgstr "=== \"解码节点1\""
+
+msgid "### 5.4 Request Forwarding"
+msgstr "### 5.4 请求转发"
+
+msgid "## 6 Functional Verification"
+msgstr "## 6 功能验证"
+
+msgid "## 7 Accuracy Evaluation"
+msgstr "## 7 精度评估"
+
+msgid "## 8 Performance Evaluation"
+msgstr "## 8 性能评估"
+
+msgid "## 9 Performance Tuning"
+msgstr "## 9 性能调优"
+
+msgid ""
+"**Notice:**\n"
+"`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Online Service Deployment](#5-online-service-deployment)** chapter."
+msgstr ""
+"**注意：**\n"
+"`max-model-len`和`max-num-seqs`需要根据实际使用场景进行设置。其他设置请参考**[在线服务部署](#5-online-service-deployment)**章节。"
+
+msgid "## 10 FAQ"
+msgstr "## 10 常见问题"

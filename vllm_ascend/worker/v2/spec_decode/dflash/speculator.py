@@ -2,12 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any
+import logging
+from typing import Any, cast
 
 import torch
-import vllm.v1.worker.gpu.spec_decode.dflash.speculator as vllm_dflash_speculator
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
     DFlashSpeculator,
@@ -15,11 +18,67 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
 
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 
+logger = logging.getLogger(__name__)
+
 
 class AscendDFlashSpeculator(DFlashSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
-        self.context_slot_mapping = torch.zeros(self.max_num_tokens, dtype=torch.int32, device=device)
+
+        # we need to update full graph params in run_fullgraph,
+        # so create a stream to update full graph params.
+        cudagraph_mode = self.vllm_config.compilation_config.cudagraph_mode
+        if cudagraph_mode.has_full_cudagraphs():
+            self.update_stream: torch.npu.Stream = torch.npu.Stream()
+
+    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        super().init_cudagraph_manager(cudagraph_mode)
+        # The Ascend graph manager is patched onto the upstream module and
+        # created by super().init_cudagraph_manager without a speculator ref.
+        # It needs this speculator to update full-graph params, so set it here.
+        self.query_cudagraph_manager.speculator = self
+
+    def set_attn(
+        self,
+        model_state: Any,
+        kv_cache_config: Any,
+        block_tables: Any,
+    ) -> None:
+        super().set_attn(model_state, kv_cache_config, block_tables)
+        self._context_slot_mappings = torch.zeros(
+            len(self.draft_kv_cache_group_ids),
+            self.max_num_tokens,
+            dtype=torch.int32,
+            device=self.device,
+        )
+        # npu needs attn_backends to update full graph params in run_fullgraph.
+        attn_backends: dict[str, type[AttentionBackend]] = {}
+        active_layer_names = self.draft_attn_layer_names
+        for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+            layer_names = kv_cache_group_spec.layer_names
+            if active_layer_names is not None:
+                layer_names = list(active_layer_names.intersection(layer_names))
+
+            layer_type = cast(type[Any], AttentionLayerBase)
+            attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type, layer_names)
+
+            for layer_name in layer_names:
+                attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
+
+        self.attn_backends = attn_backends
+
+    # NOTE: upstream vLLM named this to _build_draft_attn_metadatas;
+    # keep the current name for now as upstream may change it again.
+    def build_draft_attn_metadatas(self, num_reqs_padded):
+        num_tokens_padded = num_reqs_padded * self.num_query_per_req
+        with build_attn_metadata_wrapper():
+            attn_metadata = self._build_draft_attn_metadata(
+                num_reqs=num_reqs_padded,
+                num_reqs_padded=num_reqs_padded,
+                num_tokens_padded=num_tokens_padded,
+                causal=self.dflash_causal,
+            )
+        return [attn_metadata]
 
     def propose(
         self,
@@ -92,6 +151,8 @@ def _prepare_dflash_inputs_kernel_ascend(
     num_speculative_steps,
     max_num_reqs,
     max_num_tokens,
+    max_model_len,
+    SAMPLE_FROM_ANCHOR: tl.constexpr,
     PAD_SLOT_ID: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -147,16 +208,19 @@ def _prepare_dflash_inputs_kernel_ascend(
         q_slot = q_block_id * block_size + (query_pos % block_size)
 
         tl.store(out_input_ids_ptr + query_idx, input_id)
-        tl.store(out_query_positions_ptr + query_idx, query_pos)
+        clamped_query_pos = tl.minimum(query_pos, max_model_len - 1)
+        tl.store(out_query_positions_ptr + query_idx, clamped_query_pos)
         tl.store(out_query_slot_mapping_ptr + query_idx, q_slot)
 
-    # --- Sample indices / positions / idx_mapping (mask tokens only) ---
-    for s_off in range(1, num_query_per_req):
-        sample_idx = req_idx * num_speculative_steps + (s_off - 1)
+    sample_off = 0 if SAMPLE_FROM_ANCHOR else 1
+    # --- Sample indices / positions / idx_mapping ---
+    for s_off in range(sample_off, num_query_per_req):
+        sample_idx = req_idx * num_speculative_steps + (s_off - sample_off)
         query_idx = query_base + s_off
         query_pos = last_valid_pos + 1 + s_off
+        sample_pos = query_pos + 1 if SAMPLE_FROM_ANCHOR else query_pos
         tl.store(out_sample_indices_ptr + sample_idx, query_idx)
-        tl.store(out_sample_pos_ptr + sample_idx, query_pos)
+        tl.store(out_sample_pos_ptr + sample_idx, sample_pos)
         tl.store(out_sample_idx_mapping_ptr + sample_idx, req_state_idx)
 
     tl.store(out_query_start_loc_ptr + req_idx, query_base)
@@ -173,19 +237,17 @@ def _prepare_dflash_inputs_kernel_ascend(
         for i in range(num_reqs, max_num_reqs):
             tl.store(out_seq_lens_ptr + i, 0)
         # Padded sample slots point at query index 0 (a valid row in
-        # last_hidden_states) so CG replay never reads OOB.
+        # last_hidden_states) so CG replay never reads OOB. Padded sample
+        # idx mappings point to -1, which is ignored during sampling.
         pad_start = num_reqs * num_speculative_steps
         pad_end = max_num_reqs * num_speculative_steps
         for i in range(pad_start, pad_end):
             tl.store(out_sample_indices_ptr + i, 0)
             tl.store(out_sample_pos_ptr + i, 0)
-            tl.store(out_sample_idx_mapping_ptr + i, 0)
+            tl.store(out_sample_idx_mapping_ptr + i, -1)
         # Pad query slot mappings past num_query_tokens with PAD so the
         # captured CG sees PAD slots (no K/V write) for replay sizes
         # larger than the current request count.
         q_pad_start = num_reqs * num_query_per_req
         for i in range(q_pad_start, max_num_tokens):
             tl.store(out_query_slot_mapping_ptr + i, PAD_SLOT_ID)
-
-
-vllm_dflash_speculator._prepare_dflash_inputs_kernel = _prepare_dflash_inputs_kernel_ascend

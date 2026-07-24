@@ -30,6 +30,7 @@ from vllm_ascend.attention.utils import (
     enable_cp,
     enabling_mlapo,
     maybe_save_kv_layer_to_connector,
+    notify_kv_cache_written,
     split_decodes_and_prefills,
     trans_rope_weight,
     transdata,
@@ -44,12 +45,7 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.ops.layer_shard_linear import (
-    is_hidden_layer,
-    post_process_after_loading_for_shard_weight_series,
-    reach_layer_for_shard_weight_series,
-    register_all_layers_to_shard_weight_series,
-)
+from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.quantization.methods.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8_static import AscendW8A8LinearMethod
@@ -58,7 +54,6 @@ from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     AscendDeviceType,
     get_ascend_device_type,
-    get_weight_prefetch_method,
     maybe_trans_nz,
     weak_ref_tensors,
 )
@@ -68,7 +63,6 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
 
-MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
 # token count limits within the mlapo operator
@@ -756,31 +750,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.speculative_config = self.vllm_config.speculative_config
         self.enable_mlapo = enabling_mlapo(self.vllm_config)
 
-        self.is_kv_producer = (
-            self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
-        )
-        self.is_kv_both = (
-            self.vllm_config.kv_transfer_config is not None
-            and self.vllm_config.kv_transfer_config.is_kv_producer
-            and self.vllm_config.kv_transfer_config.is_kv_consumer
-        )
         self.layer_name = kwargs.get("layer_name")
         self.fa_quant_layer = enable_fa_quant(self.vllm_config, self.layer_name)
         if self.fa_quant_layer:
             self.dtype = torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
         else:
             self.dtype = self.vllm_config.model_config.dtype
-        self.layer_sharding_kwargs = []
-        for layer_name in get_ascend_config().layer_sharding or []:
-            if layer_name in kwargs:
-                self.layer_sharding_kwargs.append(kwargs[layer_name])
-            else:
-                logger.warning_once(
-                    f"Layer '{layer_name}' not found in kwargs, skipping sharding. "
-                    f"Check layer_sharding config and model layer names."
-                )
-        register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
-
         # For models whose num_heads is not a power of 2 (e.g., GLM-4.7-Flash
         # with 20 heads), ascend attention ops require padding heads to the
         # next power of 2.
@@ -991,10 +966,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         else:
             # if mlapo, W_UK_T can't trans nz
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
-
-        for layer in self.layer_sharding_kwargs or []:
-            if is_hidden_layer(layer):
-                post_process_after_loading_for_shard_weight_series(layer)
 
     def _process_weights_for_fused_fa_quant(self):
         if get_ascend_device_type() == AscendDeviceType.A5:
@@ -1229,11 +1200,13 @@ class AscendMLAImpl(MLAAttentionImpl):
                 key = torch.cat((k_nope, k_pe), dim=-1)
             else:
                 common_kwargs["query_rope"] = q_pe
-                common_kwargs["key_rope"] = k_pe
+                common_kwargs["key_rope"] = k_pe.contiguous()
                 query = q_nope
                 key = k_nope
 
-            chunk_out, chunk_lse = torch_npu.npu_fused_infer_attention_score(query, key, v, **common_kwargs)
+            chunk_out, chunk_lse = torch_npu.npu_fused_infer_attention_score(
+                query, key.contiguous(), v.contiguous(), **common_kwargs
+            )
 
             if chunk_lse.dim() == 2:
                 chunk_lse = chunk_lse.transpose(0, 1).unsqueeze(-1)
@@ -1291,16 +1264,19 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_lengths": actual_seq_lengths_q,
             "actual_seq_lengths_kv": actual_seq_lengths_kv,
         }
+        record_attention_compute_start()
 
         if self.head_padding > 0:
             query = torch.cat((q_nope, q_pe), dim=-1)
             key = torch.cat((k_nope, k_pe), dim=-1)
         else:
             common_kwargs["query_rope"] = q_pe
-            common_kwargs["key_rope"] = k_pe
+            common_kwargs["key_rope"] = k_pe.contiguous()
             query, key = q_nope, k_nope
 
-        attn_output, attn_lse = torch_npu.npu_fused_infer_attention_score(query, key, value, **common_kwargs)
+        attn_output, attn_lse = torch_npu.npu_fused_infer_attention_score(
+            query, key.contiguous(), value.contiguous(), **common_kwargs
+        )
 
         attn_output, attn_lse = self._compute_prefill_context(
             q_nope, q_pe, kv_c_and_k_pe_cache, self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse
@@ -1655,10 +1631,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0
         if self.fused_qkv_a_proj is not None:
-            weight_prefetch_method = get_weight_prefetch_method()
-            weight_prefetch_method.maybe_prefetch_mla_or_sla_weight_in_current_stream(
-                inputs=self.fused_qkv_a_proj.weight, dependency=hidden_states
-            )
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_no_split = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
@@ -1675,24 +1647,21 @@ class AscendMLAImpl(MLAAttentionImpl):
         q_c = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(q_c.contiguous(), need_gather_q_kv)
         kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(kv_no_split.contiguous(), need_gather_q_kv)
 
-        for layer in self.layer_sharding_kwargs or []:
-            if is_hidden_layer(layer):
-                reach_layer_for_shard_weight_series(layer)
-
         decode_preprocess_res = None
         prefill_preprocess_res = None
         if has_prefill:
             wait_for_kv_layer_from_connector(layer_name)
         # Preprocess for decode tokens
-        if self.is_kv_producer and not self.is_kv_both:
-            attn_metadata.reshape_cache_event = torch.npu.Event()
         if has_decode:
             decode_preprocess_res = self.mla_preprocess_decode(q_c, kv_no_split, kv_cache, attn_metadata)
         # Preprocess for prefill tokens
         if has_prefill:
             prefill_preprocess_res = self.mla_preprocess_prefill(q_c, kv_no_split, kv_cache, attn_metadata)
-        if self.is_kv_producer and not self.is_kv_both:
-            attn_metadata.reshape_cache_event.record()
+        # Let the connector record any sync primitive it needs once the paged KV
+        # cache for this layer has been written. No-op for connectors that don't
+        # implement on_kv_cache_written; the decision to actually transfer is made
+        # by the connector/scheduler, not here.
+        notify_kv_cache_written(layer_name)
         return decode_preprocess_res, prefill_preprocess_res
 
     def get_num_actual_tokens(self, attn_metadata: M):
@@ -1732,9 +1701,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
-            for layer in self.layer_sharding_kwargs or []:
-                if is_hidden_layer(layer):
-                    reach_layer_for_shard_weight_series(layer)
             return output.fill_(0)
 
         num_actual_tokens = self.get_num_actual_tokens(attn_metadata)
@@ -1794,16 +1760,8 @@ class AscendMLAImpl(MLAAttentionImpl):
 
             o_proj_input[num_decode_tokens:num_actual_tokens] = output_prefill
         # O proj
-        weight_prefetch_method = get_weight_prefetch_method()
-        weight_prefetch_method.maybe_prefetch_mla_or_sla_weight_in_current_stream(
-            inputs=self.o_proj.weight,
-            dependency=o_proj_input,
-            max_size=MAX_O_PROJ_PREFETCH_SIZE,
-            linear_layer=self.o_proj,
-        )
         output[...] = self.o_proj(o_proj_input, is_prefill=prefill_preprocess_res is not None)[0]
 
         del o_proj_input
-        if self.is_kv_producer and not self.is_kv_both:
-            maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+        maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
         return output_padded

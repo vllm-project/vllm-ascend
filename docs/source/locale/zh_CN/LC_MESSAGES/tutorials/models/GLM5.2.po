@@ -202,13 +202,6 @@ msgid "2. prepare the script `run_dp_template.sh` on each node."
 msgstr "2. 在每个节点上准备脚本 `run_dp_template.sh`。"
 
 msgid ""
-"To support a 200k context window on the stage of prefill, the parameter `\"layer_sharding\": [\"q_b_proj\"]` needs to be added to `--additional_config` on each prefill node.\n"
-"    1. Prefill node 0"
-msgstr ""
-"为在prefill阶段支持200k上下文窗口，需要在每个prefill节点的`--additional_config`中添加参数`\"layer_sharding\": [\"q_b_proj\"]`。\n"
-"    1. Prefill节点0"
-
-msgid ""
 "Once the preparation is done, you can start the server with the following "
 "command on each node:"
 msgstr "准备工作完成后，可在每个节点上使用以下命令启动服务器："
@@ -274,16 +267,6 @@ msgid ""
 msgstr ""
 "对于此 8 节点 A2 布局的请求转发，请在下面的请求转发命令中使用 4 个预填充主机（每个 1 个端点）和 4 个解码器主机（每个 2 个端点）。"
 
-msgid ""
-"To set up request forwarding, run the following script on any machine. You "
-"can get the proxy program in the repository's examples: "
-"[load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-"
-"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
-msgstr ""
-"要设置请求转发，请在任意机器上运行以下脚本。您可以在仓库的示例中获取代理程序：[load_balance_proxy_server_example.py](https://github.com/vllm-"
-"project/vllm-"
-"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
-
 msgid "**Notice:**"
 msgstr "**注意：**"
 
@@ -292,10 +275,10 @@ msgstr "以下是一些用于优化的配置："
 
 msgid ""
 "- `VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node. With FlashComm enabled, layer_sharding list cannot include o_proj as an element.\n"
-"- `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable following fused operators: dispatch_gmm_combine_decode and dispatch_ffn_combine operator."
+"- `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable the dispatch_ffn_combine fused operator."
 msgstr ""
 "- `VLLM_ASCEND_ENABLE_FLASHCOMM1`：启用 FlashComm 优化，以减少预填充节点上的通信和计算开销。启用 FlashComm 后，layer_sharding 列表不能包含 o_proj 作为元素。\n"
-"- `VLLM_ASCEND_ENABLE_FUSED_MC2`：启用以下融合算子：dispatch_gmm_combine_decode 和 dispatch_ffn_combine 算子。"
+"- `VLLM_ASCEND_ENABLE_FUSED_MC2`：启用 dispatch_ffn_combine 融合算子。"
 
 msgid ""
 "Please refer to the following python file for further explanation and "
@@ -338,9 +321,6 @@ msgstr "尚未测试。"
 msgid "## Performance"
 msgstr "## 性能"
 
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
-
 msgid ""
 "Refer to [Using AISBench for performance "
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
@@ -375,27 +355,6 @@ msgstr "- **问：如何为 GLM-5.2 启用函数调用？**"
 msgid "A: Please add following configurations in vLLM startup command"
 msgstr "答：请在 vLLM 启动命令中添加以下配置"
 
-msgid "=== \"A3 series\""
-msgstr "=== \"A3 系列\""
-
-msgid "=== \"A2 series\""
-msgstr "=== \"A2 系列\""
-
-msgid "**node 0**"
-msgstr "**节点 0**"
-
-msgid "**node 1**"
-msgstr "**节点 1**"
-
-msgid "2. Prefill node 1"
-msgstr "2. 预填充节点 1"
-
-msgid "3. Decode node 0"
-msgstr "3. 解码节点 0"
-
-msgid "4. Decode node 1"
-msgstr "4. 解码节点 1"
-
 msgid ""
 "To set up request forwarding, run the following script on any machine. You "
 "can get the proxy program in the repository's examples: "
@@ -408,3 +367,62 @@ msgstr ""
 
 msgid "### Using AISBench"
 msgstr "### 使用 AISBench"
+
+msgid "### 1M Context Configuration"
+msgstr "### 1M 上下文配置"
+
+msgid ""
+"Recommended configurations for serving `GLM-5.2` with a 1M context window on"
+" Atlas 800 A3 (64G x 16) and quantized GLM-5.2(W4A8C8) weights:"
+msgstr ""
+"在 Atlas 800 A3（64G x 16）上使用量化后的 GLM-5.2（W4A8C8）权重，为 `GLM-5.2` 提供 1M "
+"上下文窗口服务的推荐配置："
+
+msgid "| Mode | Hardware | Parallelism | Context |"
+msgstr "| 模式 | 硬件 | 并行配置 | 上下文长度 |"
+
+msgid ""
+"| Single-node co-located | 1 Atlas 800 A3 (64G x 16) | `DP1 PP1 TP16 PCP1 "
+"DCP16` | `1024000` |"
+msgstr ""
+"| 单节点共部署 | 1 台 Atlas 800 A3（64G x 16） | `DP1 PP1 TP16 PCP1 DCP16` | "
+"`1024000` |"
+
+msgid ""
+"| Dual-node co-located | 2 Atlas 800 A3 (64G x 16) | `DP4 PP1 TP8 PCP1 DCP8`"
+" | `1024000` |"
+msgstr ""
+"| 双节点共部署 | 2 台 Atlas 800 A3（64G x 16） | `DP4 PP1 TP8 PCP1 DCP8` | `1024000` "
+"|"
+
+msgid ""
+"| 1P1D PD disaggregation | 1 prefiller with 2 A3 nodes + 1 decoder with 2 A3"
+" nodes | Prefill `DP4 PP1 TP8 PCP1 DCP8`, Decode `DP4 PP1 TP8 PCP1 DCP8` | "
+"`1024000` |"
+msgstr ""
+"| 1P1D PD 分离部署 | 1 个预填充节点（2 台 A3）+ 1 个解码节点（2 台 A3） | 预填充 `DP4 PP1 TP8 PCP1 "
+"DCP8`，解码 `DP4 PP1 TP8 PCP1 DCP8` | `1024000` |"
+
+msgid "#### Single-Node 1M Deployment"
+msgstr "#### 单节点 1M 部署"
+
+msgid "Recommended command:"
+msgstr "推荐命令："
+
+msgid "#### Dual-Node Co-Located 1M Deployment"
+msgstr "#### 双节点共部署 1M 部署"
+
+msgid "Recommended command for both co-located nodes:"
+msgstr "两个共部署节点的推荐命令："
+
+msgid "#### PD Disaggregation 1M Deployment"
+msgstr "#### PD 分离部署 1M 部署"
+
+msgid "Recommended command for both prefiller nodes:"
+msgstr "两个预填充节点的推荐命令："
+
+msgid "Recommended command for both decoder nodes:"
+msgstr "两个解码节点的推荐命令："
+
+msgid "Recommended proxy command:"
+msgstr "推荐代理命令："

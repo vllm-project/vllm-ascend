@@ -14,8 +14,6 @@ env_common: &env_common
   VLLM_RPC_TIMEOUT: "600"
   SERVER_PORT: 8080
 
-special_dependencies:
-  transformers: "5.12.0"
 # TODO: need to identify why TP and mtp+1 divisibility rules break on dual-node case
 
 deployment:
@@ -39,7 +37,7 @@ deployment:
       --trust-remote-code
       --gpu-memory-utilization 0.95
       --quantization ascend
-      --additional-config '{"fuse_muls_add":true,"multistream_overlap_shared_expert":true}'
+      --additional-config '{"multistream_overlap_shared_expert":true}'
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager":true}'
   -
@@ -64,7 +62,7 @@ deployment:
       --trust-remote-code
       --gpu-memory-utilization 0.95
       --quantization ascend
-      --additional-config '{"fuse_muls_add":true,"multistream_overlap_shared_expert":true}'
+      --additional-config '{"multistream_overlap_shared_expert":true}'
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager":true}'
 benchmarks:

@@ -66,7 +66,7 @@ def prepare_inputs_padded_kernel(
 
 
 @triton.jit
-def copy_and_expand_dflash_inputs_kernel_single_grid(
+def copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid(
     # Inputs
     next_token_ids_ptr,  # [num_reqs]
     target_positions_ptr,  # [num_context]
@@ -93,6 +93,7 @@ def copy_and_expand_dflash_inputs_kernel_single_grid(
     total_input_tokens,  # tl.int32
     batch_size,  # tl.int32
     HAS_NUM_REJECTED: tl.constexpr = False,
+    SAMPLE_FROM_ANCHOR: tl.constexpr = False,
 ):
     for req_idx in range(0, batch_size):
         ctx_start = tl.load(query_start_loc_ptr + req_idx)
@@ -136,5 +137,10 @@ def copy_and_expand_dflash_inputs_kernel_single_grid(
             else:
                 tl.store(out_input_ids_ptr + query_out_idx, parallel_drafting_token_id)
 
-                sample_out_idx = req_idx * num_speculative_tokens + (q_idx - 1)
+            if SAMPLE_FROM_ANCHOR:
+                sample_out_idx = req_idx * num_speculative_tokens + q_idx
                 tl.store(out_token_indices_ptr + sample_out_idx, query_out_idx)
+            else:
+                if q_idx > 0:
+                    sample_out_idx = req_idx * num_speculative_tokens + (q_idx - 1)
+                    tl.store(out_token_indices_ptr + sample_out_idx, query_out_idx)

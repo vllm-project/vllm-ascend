@@ -16,6 +16,7 @@
 #
 # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this adaptor.
 import json
+from inspect import getattr_static
 from typing import Any
 
 import torch
@@ -27,7 +28,7 @@ from vllm_ascend.quantization.quant_type import QuantType
 
 EPLB_EXPERT_WEIGHT_NAMES = {
     (QuantType.NONE, False): ("w13_weight", "w2_weight"),
-    (QuantType.NONE, True): ("w13_weight", "w2_weight"),
+    (QuantType.NONE, True): ("w13_weight_list", "w2_weight_list"),
     (QuantType.W8A8, False): (
         "w13_weight_list",
         "w2_weight_list",
@@ -50,10 +51,10 @@ EPLB_EXPERT_WEIGHT_NAMES = {
         "w13_scale_bias_list",
         "w2_scale_bias_list",
     ),
-    (QuantType.MXFP4, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
-    (QuantType.MXFP4, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
-    (QuantType.MXFP8, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
-    (QuantType.MXFP8, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
+    (QuantType.W4A4MXFP, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
+    (QuantType.W4A4MXFP, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
+    (QuantType.W8A8MXFP, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
+    (QuantType.W8A8MXFP, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
 }
 
 
@@ -129,6 +130,8 @@ class VllmEplbAdaptor:
         for local_idx, layer in enumerate(self.moe_layers):
             quant_type = QuantType.NONE if self.model.quant_config is None else layer.quant_type
             expert_weight_key = (quant_type, get_ascend_config().enable_fused_mc2 == 1)
+            if expert_weight_key[0] == QuantType.W4A8MXFP:
+                raise RuntimeError(f"EPLB not support {quant_type}")
             if expert_weight_key not in EPLB_EXPERT_WEIGHT_NAMES:
                 raise ValueError(f"EPLB not support {quant_type} with fused MC2 {expert_weight_key[1]}")
             expert_weight_names = EPLB_EXPERT_WEIGHT_NAMES[expert_weight_key]
@@ -136,7 +139,16 @@ class VllmEplbAdaptor:
             self.expert_param_per_layer[local_idx] = list()
             for name in expert_weight_names:
                 param_key = f"{local_idx}.{name}"
-                self.param_dict[param_key] = getattr(layer, name)
+                # Inspect the attribute without invoking __getattr__. Besides
+                # avoiding side effects from dynamic proxies, this prevents an
+                # unspecced MagicMock from fabricating the optional accessor.
+                # The refactored MoERunner declares the accessor because its
+                # RoutedExperts child owns weights; legacy layers expose them
+                # directly.
+                get_parameter = (
+                    layer.get_eplb_parameter if getattr_static(layer, "get_eplb_parameter", None) is not None else None
+                )
+                self.param_dict[param_key] = get_parameter(name) if get_parameter is not None else getattr(layer, name)
             for local_expert_id in range(self.num_local_experts):
                 per_expert_param = list()
                 for name in expert_weight_names:

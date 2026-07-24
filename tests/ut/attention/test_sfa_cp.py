@@ -27,8 +27,12 @@ if "torch_npu._inductor" not in sys.modules:
     sys.modules["torch_npu._inductor"] = MagicMock()
 
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
-from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFACPImpl, AscendSFACPMetadataBuilder
-from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata
+from vllm_ascend.attention.context_parallel.sfa_cp import (
+    AscendSFACPImpl,
+    AscendSFACPMetadataBuilder,
+    AscendSFADCPImpl,
+)
+from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, DCPContext
 
 
 def _make_indexer_mock():
@@ -143,6 +147,7 @@ class TestAscendSFACPMetadataBuilder(TestBase):
 
     def _build_builder(self, pcp_size=2, dcp_size=2):
         kv_cache_spec = MagicMock()
+        kv_cache_spec.block_size = 128
         layer_names = ["layer1", "layer2"]
         vllm_config = self._make_vllm_config()
         device = torch.device("cpu")
@@ -535,7 +540,6 @@ class TestAscendSFACPImpl(TestBase):
     @patch("vllm_ascend.attention.context_parallel.sfa_cp.enabling_mlapo", return_value=False)
     @patch("vllm.distributed.parallel_state._TP", new_callable=lambda: MagicMock(spec=GroupCoordinator))
     @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp_with_o_proj_tp", return_value=False)
-    @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp_with_layer_shard", return_value=False)
     @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp", return_value=False)
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
@@ -543,7 +547,6 @@ class TestAscendSFACPImpl(TestBase):
         self,
         mock_get_current_vllm_config,
         _mock_enable_dsa_cp,
-        _mock_enable_dsa_cp_with_layer_shard,
         _mock_enable_dsa_cp_with_o_proj_tp,
         mock_tp,
         _mock_enabling_mlapo,
@@ -600,7 +603,6 @@ class TestAscendSFACPImpl(TestBase):
     @patch("vllm_ascend.attention.context_parallel.sfa_cp.enabling_mlapo", return_value=False)
     @patch("vllm.distributed.parallel_state._TP", new_callable=lambda: MagicMock(spec=GroupCoordinator))
     @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp_with_o_proj_tp", return_value=False)
-    @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp_with_layer_shard", return_value=False)
     @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp", return_value=False)
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch_distributed_groups(dcp_size=1, pcp_size=1, needs_mocks=False)
@@ -608,7 +610,6 @@ class TestAscendSFACPImpl(TestBase):
         self,
         mock_get_current_vllm_config,
         _e_dsa,
-        _e_layer_shard,
         _e_o_proj_tp,
         mock_tp,
         _e_mlapo,
@@ -880,9 +881,9 @@ class TestAscendSFACPImpl(TestBase):
         mock_super.assert_called_once()
         self.assertEqual(result, ("a", "b"))
 
-    @patch("vllm_ascend.attention.context_parallel.sfa_cp.torch_npu")
+    @patch("vllm_ascend.attention.context_parallel.sfa_cp.DeviceOperator.reshape_and_cache")
     @patch_distributed_groups(dcp_size=1, pcp_size=2, needs_mocks=False)
-    def test_exec_kv_with_pcp(self, mock_torch_npu):
+    def test_exec_kv_with_pcp(self, mock_reshape_and_cache):
         self.impl.pcp_size = 2
         # Configure dimensions
         self.impl.kv_lora_rank = 32
@@ -909,7 +910,7 @@ class TestAscendSFACPImpl(TestBase):
 
         result = self.impl.exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
         self.assertEqual(result, (None, None))
-        mock_torch_npu._npu_reshape_and_cache.assert_called_once()
+        mock_reshape_and_cache.assert_called_once()
 
     @patch_distributed_groups(dcp_size=1, pcp_size=1, needs_mocks=False)
     def test_execute_sparse_flash_attention_process_decode_only(self):
@@ -1481,3 +1482,69 @@ class TestAscendSFACPImpl(TestBase):
             )
         self.assertIsNotNone(result)
         self.assertEqual(result.shape[0], 5)
+
+
+class TestAscendSFADCPImpl(TestBase):
+    def test_execute_sparse_flash_attention_process_uses_c8_device_operator_lse(self):
+        impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
+        impl.dcp_group = MagicMock()
+        impl.dcp_size = 2
+        impl.enable_dsa_cp = False
+        impl.use_sparse_c8_sfa = True
+        impl.qk_rope_head_dim = 4
+        impl.sfa_qsfa_tile_size = 128
+        impl._remap_sparse_indices = MagicMock(side_effect=lambda x: x)
+        merged_output = torch.randn(2, 2, 8)
+        impl._merge_dcp_outputs = MagicMock(return_value=merged_output)
+
+        ql_nope = torch.randn(2, 2, 8)
+        q_pe = torch.randn(2, 2, 4)
+        impl._finish_all_gather_query_for_dcp = MagicMock(side_effect=lambda _ctx: (ql_nope, q_pe))
+        kv_cache = (torch.empty(4, 1, 1, 16, dtype=torch.int8),)
+        topk_indices = torch.zeros(2, 1, dtype=torch.int32)
+        actual_seq_lengths_query = torch.tensor([2], dtype=torch.int32)
+        actual_seq_lengths_key = torch.tensor([4], dtype=torch.int32)
+        dcp_seq_lens = torch.tensor([3], dtype=torch.int32)
+        dcp_block_table = torch.tensor([[0, 1]], dtype=torch.int32)
+
+        attn_metadata = MagicMock()
+        attn_metadata.dcp_context = DCPContext(
+            slot_mapping=torch.tensor([0, 1], dtype=torch.int32),
+            block_table=dcp_block_table,
+            seq_lens=dcp_seq_lens,
+            query_gather_context=MagicMock(),
+        )
+        sfa_output = torch.randn(2, 2, 8)
+        softmax_max = torch.randn(2, 2, 1)
+        softmax_sum = torch.rand(2, 2, 1)
+        softmax_lse = softmax_max + torch.log(softmax_sum)
+        softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
+
+        with patch(
+            "vllm_ascend.attention.context_parallel.sfa_cp.DeviceOperator.execute_sparse_flash_attention_process",
+            return_value=(sfa_output, softmax_max, softmax_sum),
+        ) as mock_execute_sfa:
+            result = impl._execute_sparse_flash_attention_process(
+                ql_nope,
+                q_pe,
+                kv_cache,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+            )
+
+        self.assertIs(result, merged_output)
+        call_args = mock_execute_sfa.call_args.args
+        call_kwargs = mock_execute_sfa.call_args.kwargs
+        self.assertTrue(call_args[0].use_sparse_c8_sfa)
+        self.assertEqual(len(call_args[3]), 1)
+        self.assertEqual(call_args[3][0].dtype, torch.int8)
+        self.assertIs(call_args[7], dcp_seq_lens)
+        self.assertIs(call_kwargs["block_table"], dcp_block_table)
+        self.assertEqual(call_kwargs["sparse_mode"], 0)
+        self.assertTrue(call_kwargs["return_lse"])
+        impl._merge_dcp_outputs.assert_called_once()
+        merge_args = impl._merge_dcp_outputs.call_args.args
+        self.assertIs(merge_args[0], sfa_output)
+        torch.testing.assert_close(merge_args[1], softmax_lse)

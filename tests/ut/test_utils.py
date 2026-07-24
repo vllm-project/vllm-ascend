@@ -32,7 +32,6 @@ class TestUtils(TestBase):
         from vllm_ascend import platform
 
         importlib.reload(platform)
-        utils.enable_dsa_cp_with_layer_shard.cache_clear()
         utils.enable_dsa_cp_with_o_proj_tp.cache_clear()
 
     def test_nd_to_nz_2d(self):
@@ -134,44 +133,6 @@ class TestUtils(TestBase):
         with mock.patch("torch.npu.current_stream") as mock_current_stream:
             self.assertEqual(utils.current_stream(), mock_current_stream())
 
-    def test_enable_dsa_cp_with_layer_shard_accepts_kv_producer(self):
-        mock_vllm_config = mock.MagicMock()
-        mock_vllm_config.kv_transfer_config = mock.MagicMock(
-            kv_role="kv_producer", is_kv_producer=True, is_kv_consumer=False
-        )
-
-        with (
-            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
-            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
-        ):
-            self.assertTrue(utils.enable_dsa_cp_with_layer_shard())
-
-    def test_enable_dsa_cp_with_layer_shard_rejects_kv_both(self):
-        mock_vllm_config = mock.MagicMock()
-        mock_vllm_config.kv_transfer_config = mock.MagicMock(
-            kv_role="kv_both", is_kv_producer=True, is_kv_consumer=True
-        )
-
-        with (
-            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
-            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
-        ):
-            self.assertFalse(utils.enable_dsa_cp_with_layer_shard())
-
-    def test_enable_dsa_cp_with_layer_shard_rejects_missing_kv_transfer(self):
-        mock_vllm_config = mock.MagicMock()
-        mock_vllm_config.kv_transfer_config = None
-
-        with (
-            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
-            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
-        ):
-            self.assertFalse(utils.enable_dsa_cp_with_layer_shard())
-
-    def test_enable_dsa_cp_with_layer_shard_rejects_when_dsa_cp_disabled(self):
-        with mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=False):
-            self.assertFalse(utils.enable_dsa_cp_with_layer_shard())
-
     def test_enable_dsa_cp_with_o_proj_tp_accepts_missing_kv_transfer(self):
         mock_vllm_config = mock.MagicMock()
         mock_vllm_config.kv_transfer_config = None
@@ -194,10 +155,22 @@ class TestUtils(TestBase):
         ):
             self.assertTrue(utils.enable_dsa_cp_with_o_proj_tp())
 
-    def test_enable_dsa_cp_with_o_proj_tp_rejects_single_role_pd(self):
+    def test_enable_dsa_cp_with_o_proj_tp_accepts_kv_producer(self):
         mock_vllm_config = mock.MagicMock()
         mock_vllm_config.kv_transfer_config = mock.MagicMock(
             kv_role="kv_producer", is_kv_producer=True, is_kv_consumer=False
+        )
+
+        with (
+            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
+            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
+        ):
+            self.assertTrue(utils.enable_dsa_cp_with_o_proj_tp())
+
+    def test_enable_dsa_cp_with_o_proj_tp_rejects_kv_consumer(self):
+        mock_vllm_config = mock.MagicMock()
+        mock_vllm_config.kv_transfer_config = mock.MagicMock(
+            kv_role="kv_consumer", is_kv_producer=False, is_kv_consumer=True
         )
 
         with (
@@ -436,7 +409,7 @@ def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer():
     vllm_config.kv_transfer_config.is_kv_consumer = True
     vllm_config.kv_transfer_config.is_kv_producer = False
     ascend_config = mock.MagicMock()
-    ascend_config.recompute_scheduler_enable = True
+    ascend_config.scheduler_config.recompute_scheduler_enable = True
     with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config):
         assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is True
 
@@ -482,6 +455,6 @@ def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer_disabled():
     vllm_config.kv_transfer_config.is_kv_consumer = True
     vllm_config.kv_transfer_config.is_kv_producer = False
     ascend_config = mock.MagicMock()
-    ascend_config.recompute_scheduler_enable = False
+    ascend_config.scheduler_config.recompute_scheduler_enable = False
     with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config):
         assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is False

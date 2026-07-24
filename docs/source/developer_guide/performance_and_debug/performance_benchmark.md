@@ -45,7 +45,7 @@ pip install -r benchmarks/requirements-bench.txt
 
 ## 3. Run basic benchmarks
 
-This section introduces how to perform performance testing using the benchmark suite built into VLLM.
+This section introduces how to perform performance testing using the benchmark suite built into vLLM.
 
 ### 3.1 Dataset
 
@@ -80,8 +80,8 @@ th {
 
 !!! note
 
-    The datasets mentioned above are all links to datasets on huggingface.
-    The dataset's `dataset-name` should be set to `hf`.
+    Most datasets mentioned above are links to datasets on huggingface.
+    For these datasets, the dataset's `dataset-name` should be set to `hf`.
     For local `dataset-path`, please set `hf-name` to its Hugging Face ID like
 
     ```bash

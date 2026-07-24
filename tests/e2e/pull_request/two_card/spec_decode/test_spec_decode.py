@@ -161,11 +161,7 @@ def test_eagle3_sp_acceptance(
     golden = BASELINES_SP[method]
 
     match = all(abs(a - b) < 0.06 for a, b in zip(acceptance_per_pos, golden))
-    if not match:
-        print(f"acceptance_per_pos: {acceptance_per_pos}")
-        print(f"golden: {golden}")
-
-    assert match
+    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
 def test_qwen3_eagle3_pcp2_tp1():
@@ -330,11 +326,7 @@ def test_p_eagle_acceptance(
     golden = BASELINES_SP[method]
 
     match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
-    if not match:
-        print(f"acceptance_per_pos: {acceptance_per_pos}")
-        print(f"golden: {golden}")
-
-    assert match
+    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
@@ -422,8 +414,84 @@ def test_qwen3_vwn_eagle3_tp2():
     golden = BASELINES_SP["vwn_eagle3"]
 
     match = all(abs(a - b) < 0.06 for a, b in zip(acceptance_per_pos, golden))
-    if not match:
-        print(f"acceptance_per_pos: {acceptance_per_pos}")
-        print(f"golden: {golden}")
+    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
-    assert match
+
+def test_eagle3_sliding_window():
+    method = "eagle3"
+    num_speculative_tokens = 3
+    draft_window_size = 512
+
+    main_model_name = MODELS[method]["main"]
+    spec_model_name = MODELS[method]["spec"]
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        main_model_name,
+        trust_remote_code=True,
+    )
+    sampling_params = SamplingParams(
+        temperature=0,
+        ignore_eos=False,
+        max_tokens=32,
+    )
+
+    # Build a prompt that exceeds draft_window_size (512) tokens so the
+    # sliding window actually crops the draft's attention.
+    filler = "This is a padding sentence for testing sliding window draft attention. " * 80
+    long_prompt = {
+        "role": "user",
+        "content": filler + " What is 2+2?",
+    }
+    prompt_text = tokenizer.apply_chat_template(
+        [long_prompt],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    prompt_tokens = tokenizer(prompt_text, return_tensors="pt")["input_ids"].shape[1]
+    assert prompt_tokens > draft_window_size, (
+        f"Prompt ({prompt_tokens} tokens) must exceed draft_window_size ({draft_window_size})"
+    )
+
+    speculative_config = {
+        "method": method,
+        "num_speculative_tokens": num_speculative_tokens,
+        "model": spec_model_name,
+    }
+    additional_config = {"draft_window_size": draft_window_size}
+
+    with VllmRunner(
+        main_model_name,
+        enforce_eager=True,
+        max_model_len=4096,
+        disable_log_stats=False,
+        tensor_parallel_size=2,
+        max_num_seqs=16,
+        distributed_executor_backend="mp",
+        gpu_memory_utilization=0.7,
+        speculative_config=speculative_config,
+        additional_config=additional_config,
+    ) as llm:
+        outputs = llm.model.generate([prompt_text], sampling_params)
+        metrics = llm.model.get_metrics()
+
+    # The model must not crash and must produce output.
+    assert len(outputs) == 1
+    assert len(outputs[0].outputs[0].token_ids) > 0
+    print(f"Generated: {outputs[0].outputs[0].text!r}")
+
+    # Sliding window should still give non-zero acceptance.
+    num_drafts = 0
+    num_accepted_tokens_per_pos = [0] * num_speculative_tokens
+    for metric in metrics:
+        if metric.name == "vllm:spec_decode_num_drafts":
+            assert isinstance(metric, Counter)
+            num_drafts += metric.value
+        elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
+            assert isinstance(metric, Vector)
+            for pos in range(len(metric.values)):
+                num_accepted_tokens_per_pos[pos] += metric.values[pos]
+
+    acceptance_per_pos = [n / num_drafts for n in num_accepted_tokens_per_pos]
+    golden = [0.7, 0.4, 0.3]
+    match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
+    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"

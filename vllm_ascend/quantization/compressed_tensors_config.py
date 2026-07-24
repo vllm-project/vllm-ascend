@@ -22,6 +22,7 @@ from typing import Any, Optional, cast
 import torch
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy, QuantizationType
 from vllm.logger import logger
+from vllm.model_executor.layers.fused_moe import MoERunner, RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS, register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig, QuantizeMethodBase
@@ -32,21 +33,13 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
 )
 from vllm.model_executor.models.utils import WeightsMapper
 
-from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD, vllm_version_is
+from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
 
 from .methods import AscendLinearScheme, AscendMoEScheme
 
-if vllm_version_is("0.23.0"):
-    from vllm.model_executor.layers.fused_moe import FusedMoE
-else:
-    from vllm.model_executor.layers.fused_moe import MoERunner
-
 
 def _is_fused_moe_layer(layer: torch.nn.Module) -> bool:
-    if vllm_version_is("0.23.0"):
-        return isinstance(layer, FusedMoE)
-    else:
-        return isinstance(layer, MoERunner)
+    return isinstance(layer, (MoERunner, RoutedExperts))
 
 
 # Remove the original compressed_tensors method to replace with our implementation
@@ -100,13 +93,13 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
     def _add_fused_moe_to_target_scheme_map(self):
         """
         Helper function to update target_scheme_map
-        since linear layers get fused into FusedMoE
+        since linear layers get fused into MoE modules
         targeting 'Linear' needs to also match
-        FusedMoE modules.
+        RoutedExperts modules.
         """
-        if "Linear" not in self.target_scheme_map or "FusedMoE" in self.target_scheme_map:
+        if "Linear" not in self.target_scheme_map or "RoutedExperts" in self.target_scheme_map:
             return
-        self.target_scheme_map["FusedMoE"] = self.target_scheme_map["Linear"]
+        self.target_scheme_map["RoutedExperts"] = self.target_scheme_map["Linear"]
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "AscendCompressedTensorsConfig":
@@ -299,7 +292,11 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
                 targets=self.target_scheme_map.keys(),
                 fused_mapping=self.packed_modules_mapping,
             )
+            if matched_target is None:
+                return None
             scheme_dict = self.target_scheme_map[matched_target]
+            if scheme_dict is None:
+                return None
             if scheme_dict.get("format") is None:
                 scheme_dict["format"] = self.quant_format
             return scheme_dict
