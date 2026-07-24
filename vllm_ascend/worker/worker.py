@@ -776,6 +776,30 @@ class NPUWorker(WorkerBase):
         with set_current_vllm_config(self.vllm_config):
             self._init_worker_distributed_environment()
 
+            from vllm.distributed.parallel_state import get_dp_group, get_ep_group
+
+            from vllm_ascend.distributed.parallel_state import get_mc2_group
+            from vllm_ascend.ops.fused_moe.moe_comm_method import _MoECommMethods
+
+            for comm_method in _MoECommMethods.values():
+                moe_config = getattr(comm_method, "moe_config", None)
+                if moe_config is not None:
+                    moe_config.tp_group = get_tp_group()
+                    moe_config.dp_group = get_dp_group()
+                    if moe_config.ep_size > 1:
+                        moe_config.ep_group = get_ep_group()
+                        moe_config.mc2_group = get_mc2_group()
+
+                dispatcher = getattr(comm_method, "token_dispatcher", None)
+                refresh_fn = getattr(dispatcher, "refresh_hccl_group", None)
+                if callable(refresh_fn):
+                    refresh_fn()
+
+            logger.info(
+                "[snapshot] [parallel] rank %s: refreshed cached MoE parallel and HCCL groups",
+                self.rank,
+            )
+
         logger.info(
             "[snapshot] [parallel] rank %s: rebuild_parallel_group cost %.2fs",
             self.rank, time.time() - rebuild_time_start,
