@@ -645,17 +645,6 @@ class DSparkMarkovHead(nn.Module):
         return self.logits_processor(self.markov_w2, markov_embed)
 
 
-class DSparkConfidenceHead(nn.Module):
-    def __init__(self, input_dim: int, prefix: str) -> None:
-        super().__init__()
-        self.proj = ReplicatedLinear(
-            input_dim, 1, bias=False, params_dtype=torch.float32, quant_config=None, prefix=f"{prefix}.proj"
-        )
-
-    def forward(self, hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
-        return _linear_output(self.proj, torch.cat([hidden, markov_embed], dim=-1).float()).squeeze(-1)
-
-
 class DeepseekV4DSparkModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -698,10 +687,6 @@ class DeepseekV4DSparkModel(nn.Module):
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         last_layer_idx = self.mtp_start_layer_idx + self.num_dspark_layers - 1
         self.markov_head = DSparkMarkovHead(config, maybe_prefix(prefix, f"layers.{last_layer_idx}.markov_head"))
-        self.confidence_head = DSparkConfidenceHead(
-            config.hidden_size + config.dspark_markov_rank,
-            maybe_prefix(prefix, f"layers.{last_layer_idx}.confidence_head"),
-        )
         hc_dim = self.hc_mult * config.hidden_size
         self.hc_head_fn = nn.Parameter(torch.empty(self.hc_mult, hc_dim, dtype=torch.float32), requires_grad=False)
         self.hc_head_base = nn.Parameter(torch.empty(self.hc_mult, dtype=torch.float32), requires_grad=False)
@@ -709,7 +694,6 @@ class DeepseekV4DSparkModel(nn.Module):
         last_layer = self.layers[str(last_layer_idx)]
         last_layer.norm = self.norm
         last_layer.markov_head = self.markov_head
-        last_layer.confidence_head = self.confidence_head
         last_layer.hc_head_fn = self.hc_head_fn
         last_layer.hc_head_base = self.hc_head_base
         last_layer.hc_head_scale = self.hc_head_scale
@@ -833,9 +817,6 @@ class DeepseekV4DSparkModel(nn.Module):
     def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
         return self.markov_head.bias(markov_embed)
 
-    def confidence(self, hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
-        return self.confidence_head(hidden, markov_embed)
-
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return _make_deepseek_v4_expert_params_mapping(self, num_experts=self.config.n_routed_experts)
 
@@ -912,9 +893,6 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
     def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
         return self.model.markov_bias(markov_embed)
 
-    def confidence(self, hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
-        return self.model.confidence(hidden, markov_embed)
-
     def precompute_and_store_context_kv(
         self, context_states, context_positions, context_slot_mapping=None, context_request_slots=None
     ) -> None:
@@ -944,6 +922,8 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
             if mapped_name is None:
                 continue
             name = mapped_name
+            if ".confidence_head." in name:
+                continue
 
             if name.startswith(f"model.layers.{last_layer_idx}.hc_head_"):
                 canonical_name = name.replace(f"model.layers.{last_layer_idx}.", "model.", 1)
@@ -1057,7 +1037,6 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
             "model.hc_head_scale",
             f"model.layers.{last_layer_idx}.markov_head.markov_w1.weight",
             f"model.layers.{last_layer_idx}.markov_head.markov_w2.weight",
-            f"model.layers.{last_layer_idx}.confidence_head.proj.weight",
         }
         missing_required = sorted(required_params - loaded_params)
         if missing_required:
