@@ -220,6 +220,7 @@ jobs:
           git fetch origin ${{ github.base_ref }}
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
+            --run-all-modules \
             --diff-base origin/${{ github.base_ref }}
 
       - name: Set no-tests output when source paths unchanged
