@@ -12,7 +12,7 @@ DeepSeek-V3.1 is a hybrid model that supports both thinking mode and non-thinkin
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-This document is validated and written based on **vLLM-Ascend v0.9.1rc3**. The current model (DeepSeek-V3.1) is first supported in this version.
+This document is validated and written based on **vLLM-Ascend v0.9.1rc3**. The current model (DeepSeek-V3.1) is first supported in this version(for Ascend950DT, the model is supported from **vllm-ascend:v0.23.0rc1**).
 
 ## 2 Supported Features
 
@@ -42,6 +42,43 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 You can use our official docker image to run `DeepSeek-V3.1` directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+
+=== "Ascend950DT series"
+
+    Start the docker image on your each node.
+
+    ```shell
+    export IMAGE=quay.io/ascend/vllm-ascend:{{vllm_ascend_version}}-#TODO
+    export NAME=vllm-ascend
+
+    docker run --rm \
+    --name $NAME \
+    --net=host \
+    --shm-size=1g \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci_manager \
+    --device /dev/hisi_hdc \
+    --device /dev/ummu \
+    --device /dev/uburma \
+    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
+    -v /etc/hixlep/:/etc/hixlep/ \
+    -v /root/.cache:/root/.cache \
+    -v /usr/local/sbin:/usr/local/sbin \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
+    -v /usr/lib64:/usr/lib64 \
+    -itd $IMAGE bash
+    ```
 
 === "A3 series"
 
@@ -131,47 +168,85 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 Single-node deployment completes both Prefill and Decode within the same node. The quantized model `DeepSeek-V3.1-w8a8-mtp-QuaRot` can be deployed on 1 Atlas 800 A3 (64G × 16).
 
-Startup Command:
+=== "Ascend950DT series"
 
-```shell
-#!/bin/sh
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxxx"
-local_ip="xxxx"
+    Startup Command:
 
-# [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-# export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    ```shell
+    export HCCL_BUFFSIZE=512
+    export HCCL_CONNECT_TIMEOUT=600
+    export HCCL_EXEC_TIMEOUT=600
 
-# AIV
-export HCCL_OP_EXPANSION_MODE="AIV"
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export TASK_QUEUE_ENABLE=1
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_ASCEND_ENABLE_MLAPO=1
 
-vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
---host 0.0.0.0 \
---port 8015 \
---data-parallel-size 4 \
---tensor-parallel-size 4 \
---quantization ascend \
---seed 1024 \
---served-model-name deepseek_v3 \
---enable-expert-parallel \
---max-num-seqs 16 \
---max-model-len 16384 \
---max-num-batched-tokens 4096 \
---trust-remote-code \
---no-enable-prefix-caching \
---gpu-memory-utilization 0.92 \
---speculative-config '{"num_speculative_tokens": 3, "method": "mtp"}' \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-```
+    vllm serve /weight/dsk-v3.1-w4a4_mlp-w8a8c8_attn-0618-full \
+    --host 0.0.0.0 \
+    --port 5030 \
+    --max_model_len 135168 \
+    --max-num-batched-tokens 16384 \
+    --served-model-name dsv3 \
+    --gpu-memory-utilization 0.9 \
+    --data-parallel-size 1 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --async-scheduling \
+    --max-num-seqs 96 \
+    --no-enable-prefix-caching \
+    --trust-remote-code \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --speculative-config '{"num_speculative_tokens": 3,"method": "deepseek_mtp"}' \
+    --quantization ascend \
+    --additional_config '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "enable_balance_scheduling": true}' \
+    ```
+
+=== "A3 series"
+
+    Startup Command:
+
+    ```shell
+    #!/bin/sh
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxxx"
+    local_ip="xxxx"
+
+    # [Optional] jemalloc
+    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
+    # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+
+    # AIV
+    export HCCL_OP_EXPANSION_MODE="AIV"
+
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export VLLM_ASCEND_BALANCE_SCHEDULING=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
+    --host 0.0.0.0 \
+    --port 8015 \
+    --data-parallel-size 4 \
+    --tensor-parallel-size 4 \
+    --quantization ascend \
+    --seed 1024 \
+    --served-model-name deepseek_v3 \
+    --enable-expert-parallel \
+    --max-num-seqs 16 \
+    --max-model-len 16384 \
+    --max-num-batched-tokens 4096 \
+    --trust-remote-code \
+    --no-enable-prefix-caching \
+    --gpu-memory-utilization 0.92 \
+    --speculative-config '{"num_speculative_tokens": 3, "method": "mtp"}' \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    ```
 
 Key Parameter Descriptions:
 
@@ -396,6 +471,7 @@ This architecture is recommended for production deployments with concurrent mult
 Take Atlas 800 A3 (64G × 16) for example, we recommend to deploy 2P1D (4 nodes) rather than 1P1D (2 nodes), because there is no enough NPU memory to serve high concurrency in 1P1D case.
 
 - `DeepSeek-V3.1-w8a8-mtp-QuaRot 2P1D Layerwise` require 4 Atlas 800 A3 (64G × 16).
+- `DeepSeek-V3.1-w8a8c8-mtp 2P1D` require 8 Ascend950DT (96G × 8).
 
 To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to deploy a `launch_online_dp.py` script and a `run_dp_template.sh` script on each node and deploy a `proxy.sh` script on prefill master node to forward requests.
 
@@ -413,7 +489,7 @@ Parameter descriptions:
 |`--dp-rpc-port`|str|No|12345|RPC port for data parallel master communication.|
 |`--vllm-start-port`|int|No|9000|Starting port for each vLLM engine instance on this node. Each DP rank's engine port = `vllm_start_port` + local rank index.|
 
-1. `run_dp_template.sh` script
+1. `run_dp_template.sh` script(A3)
 
 === "Node 0(Prefill)"
 
@@ -715,6 +791,139 @@ Parameter descriptions:
         }'
     ```
 
+2. `run_dp_template.sh` script(Ascend950DT)
+
+=== "Prefill Node"
+
+    ```shell
+    nic_name="xxx"
+    local_ip="141.xx.xx.1"
+
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+
+    export VLLM_RPC_TIMEOUT=3600000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_CONNECT_TIMEOUT=120
+    export HCCL_BUFFSIZE=1024
+
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export TASK_QUEUE_ENABLE=1
+
+    export VLLM_ASCEND_ENABLE_MLAPO=1
+    export DYNAMIC_EPLB="true"
+
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    vllm serve /weight/dsk_v3.1-T-w8a8c8_attn-0506-full/  \
+    --host 0.0.0.0 \
+    --port $2 \
+    --data-parallel-size $3 \
+    --data-parallel-rank $4 \
+    --data-parallel-address $5 \
+    --data-parallel-rpc-port $6 \
+    --tensor-parallel-size $7 \
+    --max_model_len 135168 \
+    --max-num-batched-tokens 16384 \
+    --served-model-name dsv3 \
+    --gpu-memory-utilization 0.9 \
+    --enable-expert-parallel \
+    --async-scheduling \
+    --max-num-seqs 128 \
+    --no-enable-prefix-caching \
+    --trust-remote-code \
+    --enforce-eager \
+    --speculative-config '{"num_speculative_tokens": 1,"method": "deepseek_mtp"}' \
+    --quantization ascend \
+    --kv-transfer-config \
+        '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_producer",
+        "kv_port": "30100",
+        "engine_id": "1",
+        "kv_connector_extra_config": {
+                    "prefill": {
+                            "dp_size": 4,
+                            "tp_size": 4
+                    },
+                    "decode": {
+                            "dp_size": 32,
+                            "tp_size": 1
+                    },
+                    "ascend_local_comm_res_path": "/etc/hixlep"
+            }
+        }' \
+    --additional-config '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":false,"enable_shared_expert_dp":true, "eplb_config":{"dynamic_eplb": true, "expert_heat_collection_interval": 50, "algorithm_execution_interval": 5, "eplb_policy_type": 2, "num_redundant_experts":16}}'
+    ```
+
+=== "Decode Node"
+
+    ```shell
+    nic_name="xxx"
+    local_ip="141.xx.xx.2"
+
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+
+    export VLLM_RPC_TIMEOUT=3600000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_CONNECT_TIMEOUT=120
+    export HCCL_BUFFSIZE=1024
+
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export TASK_QUEUE_ENABLE=1
+    export VLLM_ASCEND_ENABLE_MLAPO=1
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+
+    vllm serve /weight/dsk_v3.1-T-w8a8c8_attn-0506-full/ \
+    --host 0.0.0.0 \
+    --port $2 \
+    --data-parallel-size $3 \
+    --data-parallel-rank $4 \
+    --data-parallel-address $5 \
+    --data-parallel-rpc-port $6 \
+    --tensor-parallel-size $7 \
+    --max_model_len 135168 \
+    --max-num-batched-tokens 256 \
+    --served-model-name dsv3 \
+    --gpu-memory-utilization 0.9 \
+    --enable-expert-parallel \
+    --async-scheduling \
+    --max-num-seqs 96 \
+    --no-enable-prefix-caching \
+    --trust-remote-code \
+    --safetensors-load-strategy 'prefetch' \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp"}' \
+    --quantization ascend \
+    --kv-transfer-config \
+        '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_consumer",
+        "kv_port": "30300",
+        "engine_id": "3",
+        "kv_connector_extra_config": {
+                    "prefill": {
+                            "dp_size": 4,
+                            "tp_size": 4
+                    },
+                    "decode": {
+                            "dp_size": 32,
+                            "tp_size": 1
+                    },
+                    "ascend_local_comm_res_path": "/etc/hixlep"
+            }
+        }' \
+    --additional_config '{"enable_cpu_binding": "True", "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true, "finegrained_tp_config": {"lmhead_tensor_parallel_size":8}}'
+    ```
+
 Key Parameter Descriptions:
 
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
@@ -723,7 +932,9 @@ Key Parameter Descriptions:
 - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
 - `lmhead_tensor_parallel_size: 16`: When the Tensor Parallelism (TP) size of the decode node is 1, this parameter allows the TP size of the LMHead embedding layer to be greater than 1, which is used to reduce the computational load of each card on the LMHead embedding layer.
 
-2. run server for each node:
+3. run server for each node
+
+=== "A3 series"
 
     ```shell
     # p0
@@ -736,7 +947,28 @@ Key Parameter Descriptions:
     python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
     ```
 
-3. Run the `proxy.sh` script on the prefill master node
+=== "Ascend950DT series"
+
+    ```shell
+    # p0_0
+    python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 2 --dp-rank-start 0 --dp-address 141.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
+    # p0_1
+    python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 2 --dp-rank-start 2 --dp-address 141.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
+    # p1_0
+    python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 2 --dp-rank-start 0 --dp-address 141.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
+    # p1_1
+    python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 2 --dp-rank-start 2 --dp-address 141.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
+    # d0_0
+    python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 0 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
+    # d0_1
+    python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 8 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
+    # d0_2
+    python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 16 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
+    # d0_3
+    python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 24 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
+    ```
+
+4. Run the `proxy.sh` script on the prefill master node(The proxy.sh of the Ascend950DT is consistent with the A3)
 
     Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
