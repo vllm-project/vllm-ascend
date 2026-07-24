@@ -71,4 +71,8 @@ import vllm_ascend.patch.worker.patch_v2.patch_eagle_speculator  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa
 
 # only patch routed experts capture in main2main.
+
 import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
+import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
+import vllm_ascend.patch.worker.patch_bailing_moe_linear  # type: ignore # noqa
+import vllm_ascend.patch.worker.patch_glm4v  # noqa

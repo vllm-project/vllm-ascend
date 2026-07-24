@@ -290,8 +290,9 @@
       "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp",
       "Eco-Tech/DeepSeek-V3.1-Terminus-w8a8-mtp-QuaRot",
       "Eco-Tech/Kimi-K2.6-w4a8",
-      "lightseekorg/kimi-k2.6-eagle3"
-    ],
+      "lightseekorg/kimi-k2.6-eagle3",
+      "zai-org/GLM-4.1V-9B-Thinking"
+    ], 
     "datasets": [
       "vllm-ascend/GSM8K-in1024-bs210",
       "vllm-ascend/GSM8K-in3500-bs2800",
