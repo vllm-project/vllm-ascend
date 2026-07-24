@@ -445,6 +445,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 spec_sequence_masks_cpu = None
             else:
                 spec_sequence_masks = self.spec_sequence_masks[:num_reqs]
+                if spec_sequence_masks.numel() == 0 and num_reqs == spec_sequence_masks_cpu.numel():
+                    spec_sequence_masks = torch.zeros(num_reqs, dtype=torch.bool, device=spec_sequence_masks.device)
                 spec_sequence_masks.copy_(spec_sequence_masks_cpu, non_blocking=True)
                 spec_sequence_indices, non_spec_sequence_indices = self._copy_sequence_indices_to_device(
                     spec_sequence_masks_cpu,
