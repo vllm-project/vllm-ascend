@@ -23,10 +23,8 @@ from types import SimpleNamespace
 import pytest
 from vllm.config import CUDAGraphMode
 
-from vllm_ascend.spec_decode.llm_base_proposer import (
-    AscendSpecDecodeBaseProposer,
-    _disable_flash_comm_v1_context,
-)
+from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
+from vllm_ascend.spec_decode.utils import _disable_flash_comm_v1_context
 
 # CUDAGraphMode values whose ``has_full_cudagraphs()`` is True: FULL plus the
 # two composite modes that mix FULL with NONE / PIECEWISE.
@@ -127,7 +125,7 @@ class TestDisableFlashCommV1Context:
     def _patch_forward_context(monkeypatch, flash_comm_v1_enabled: bool):
         ctx = SimpleNamespace(flash_comm_v1_enabled=flash_comm_v1_enabled)
         monkeypatch.setattr(
-            "vllm_ascend.spec_decode.llm_base_proposer.get_forward_context",
+            "vllm_ascend.spec_decode.utils.get_forward_context",
             lambda: ctx,
         )
         return ctx

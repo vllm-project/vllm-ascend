@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
 from collections.abc import Callable
-from contextlib import AbstractContextManager, contextmanager, nullcontext
-from dataclasses import replace
+from contextlib import AbstractContextManager, nullcontext
 from functools import partial
 from typing import Any, cast
 
@@ -10,8 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import vllm.distributed.parallel_state as _ps  # type: ignore[import-not-found]
-from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tp_group,
@@ -54,60 +52,16 @@ from vllm_ascend.models.deepseek_v4_dspark import DSparkDeepseekV4ForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
+from vllm_ascend.spec_decode.utils import (
+    SlidingWindowAdapter,
+    _disable_flash_comm_v1_context,
+    _maybe_eager_context,
+    patch_tensor_parallel_group,
+)
 from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
-
-
-@contextmanager
-def patch_tensor_parallel_group(tp_group):
-    """Temporarily swap the global TP group for draft-model spec decode.
-
-    vllm-ascend local implementation for swapping the global TP group so the
-    draft model can run with a TP degree that differs from the target model.
-    """
-    old_tp_group = _ps.get_tp_group()
-    _ps._TP_STATE_PATCHED = True
-    _ps._TP = tp_group
-    try:
-        yield
-    finally:
-        _ps._TP_STATE_PATCHED = False
-        _ps._TP = old_tp_group
-
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
-
-
-# TODO: Remove it when the bug of fx-graph is solved
-# patch vllm_config to be in CompilationMode.NONE temporarily
-@contextmanager
-def _maybe_eager_context(vllm_config):
-    target_compilation_config = vllm_config.compilation_config
-    draft_compilation_config = replace(
-        target_compilation_config,
-        mode=CompilationMode.NONE,
-    )
-    # Model layers use these registries even when compilation is disabled.
-    draft_compilation_config.static_forward_context = target_compilation_config.static_forward_context
-    draft_compilation_config.static_all_moe_layers = target_compilation_config.static_all_moe_layers
-    vllm_config.compilation_config = draft_compilation_config
-    try:
-        yield
-    finally:
-        vllm_config.compilation_config = target_compilation_config
-
-
-# `sp` should be disabled when running MarkovHead
-@contextmanager
-def _disable_flash_comm_v1_context():
-    forward_context = get_forward_context()
-    _raw_flash_comm_v1 = forward_context.flash_comm_v1_enabled
-    try:
-        forward_context.flash_comm_v1_enabled = False
-        yield
-    finally:
-        forward_context.flash_comm_v1_enabled = _raw_flash_comm_v1
 
 
 # split hidden states along dimension of sequence
