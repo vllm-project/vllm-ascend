@@ -32,6 +32,7 @@ from inspect import signature
 import torch
 import vllm.model_executor.layers.fused_moe as _fused_moe_pkg
 import vllm.model_executor.layers.fused_moe.layer as _fused_moe_layer
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     FusedTopKBiasRouter,
 )
@@ -59,15 +60,16 @@ _ROUTER_COMPUTE_PARAMETERS = (
     "input_ids",
 )
 
+_DefaultAscendRoutedExperts: type[RoutedExperts] | None
 if is_310p():
     from vllm_ascend._310p.fused_moe.fused_moe import AscendMoERunner310 as _DefaultAscendMoERunner
 
     _DefaultAscendRoutedExperts = None
 else:
     from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner as _DefaultAscendMoERunner
-    from vllm_ascend.ops.fused_moe.routed_experts import (  # type: ignore[no-redef]
-        AscendRoutedExperts as _DefaultAscendRoutedExperts,
-    )
+    from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
+
+    _DefaultAscendRoutedExperts = AscendRoutedExperts
 
 
 def _ascend_FusedMoE(*args, runner_cls=None, runner_args=None, routed_experts_cls=None, **kwargs):
