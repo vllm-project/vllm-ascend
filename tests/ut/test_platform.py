@@ -695,11 +695,7 @@ class TestNPUPlatform(TestBase):
         mock_init_ascend.return_value = mock_ascend_config
 
         vllm_config = TestNPUPlatform.mock_vllm_config()
-        vllm_config.kv_transfer_config = (
-            None
-            if kv_role is None
-            else MagicMock(kv_role=kv_role, engine_id="engine0")
-        )
+        vllm_config.kv_transfer_config = None if kv_role is None else MagicMock(kv_role=kv_role, engine_id="engine0")
         vllm_config.parallel_config.data_parallel_size = 2
         vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
         vllm_config.cache_config.block_size = 1
@@ -731,9 +727,7 @@ class TestNPUPlatform(TestBase):
         mock_init_ascend.return_value = mock_ascend_config
 
         vllm_config = TestNPUPlatform.mock_vllm_config()
-        vllm_config.kv_transfer_config = MagicMock(
-            kv_role="kv_consumer", engine_id="engine0"
-        )
+        vllm_config.kv_transfer_config = MagicMock(kv_role="kv_consumer", engine_id="engine0")
         vllm_config.parallel_config.data_parallel_size = 2
         vllm_config.parallel_config.nnodes_within_dp = 2
         vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
