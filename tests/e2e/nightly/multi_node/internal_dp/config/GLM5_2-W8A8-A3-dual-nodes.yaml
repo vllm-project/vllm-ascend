@@ -71,7 +71,7 @@ benchmarks:
     dataset_path: vllm-ascend/aime2025
     request_conf: vllm_api_general_chat
     dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-    max_out_len: 72348
+    max_out_len: 72349
     batch_size: 32
     baseline: 90
     threshold: 10
