@@ -527,6 +527,8 @@ class TestEagleProposerDummyRun(TestBase):
         self.runner.dcp_size = 1
         self.runner.pcp_manager = None
         self.runner.pin_memory = False
+        self.runner.dynamic_eplb = True
+        self.runner.eplb_heat_collection_status = True
         self.runner._sync_metadata_across_dp.return_value = (8, torch.tensor([8]), CUDAGraphMode.NONE)
 
         self.vllm_config.cache_config.block_size = 16
@@ -626,6 +628,7 @@ class TestEagleProposerDummyRun(TestBase):
             self.proposer.dummy_run(num_tokens=num_tokens, with_prefill=with_prefill)
 
             self.assertTrue(self.proposer._runnable.call_count == 1)
+            self.assertTrue(mock_context.call_args.kwargs["eplb_heat_collection_status"])
 
     # cpu does not support parallel-group, let alone `sp`
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
@@ -4032,12 +4035,12 @@ class TestEagleProposerSetInputsFirstPass:
         Expected output layout:
         Request 0 (6 output slots = 4 - 1 + 3):
         - idx 0-2: shifted tokens [11, 12, 100]
-        - idx 3-4: parallel_drafting_tokens, is_masked=True
+        - idx 3-4: masked parallel drafting tokens
         - idx 5: padding_token, is_rejected=True
         Request 1 (6 output slots = 4 - 1 + 3):
         - idx 6-8: shifted tokens [21, 22, 23]
         - idx 9: bonus token 200
-        - idx 10-11: parallel_drafting_tokens, is_masked=True
+        - idx 10-11: masked parallel drafting tokens
         """
         num_speculative_tokens = 3
         block_size = BLOCK_SIZE
