@@ -377,6 +377,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self.model.config.image_token_index = model.config.vision_config.image_token_id
             elif self.get_model_name(model) == "KimiK25ForConditionalGeneration":
                 self.model.config.image_token_index = model.config.media_placeholder_token_id
+            elif self.get_model_name(model) == "Gemma4ForConditionalGeneration":
+                # Gemma4 target has image_token_id but no image_token_index;
+                # the draft (Gemma4MTP) receives hidden states from the target
+                # and does not handle multimodal inputs directly, so skip.
+                pass
             else:
                 self.model.config.image_token_index = model.config.image_token_index
             target_language_model = model.get_language_model()
@@ -763,6 +768,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
             self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
 
+    def _patch_draft_attn_metadata(
+        self,
+        multi_steps_attn_metadata: list[dict[str, Any]],
+        attn_metadata_i: Any,
+    ) -> None:
+        """Hook for proposer-specific attn metadata patching after build.
+        Override in subclasses that need custom metadata adjustments
+        (e.g. Gemma4 MTP patches attn_state for multi-group KV cache)."""
+        pass
+
     def _propose(
         self,
         # [num_tokens]
@@ -947,6 +962,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         multi_steps_attn_metadata, attn_metadata_i = self.build_draft_attn_metadata(
             common_attn_metadata, num_input_tokens, num_tokens
         )
+
+        # Proposer-specific attn metadata adjustments (e.g. Gemma4 MTP
+        # patches attn_state for multi-group KV cache).  No-op in the
+        # base; overridden by proposers that need it.
+        self._patch_draft_attn_metadata(multi_steps_attn_metadata, attn_metadata_i)
 
         if self.uses_mrope:
             used_update_positions = self.mrope_positions[:, token_indices_to_sample]

@@ -161,6 +161,7 @@ def rope_forward_oot(
     is_neox_style: bool,
     offsets: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    # Gemma4 MTP Q-only (key=None) is handled by the caller.
     query_shape, key_shape = query.shape, key.shape
     if offsets is not None:
         raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
@@ -235,13 +236,21 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: torch.Tensor | None,
         offsets: torch.Tensor | None = None,
         is_neox_style_override: bool | None = None,
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         is_neox_style = self.is_neox_style
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override
+        # Gemma4 MTP Q-only: key=None (K/V from target cache). Gate on key,
+        # not config — draft forward's config has no speculative_config.
+        # See ops.rope_q_only.gemma4_q_only_rope.
+        if key is None:
+            from vllm_ascend.ops.rope_q_only import gemma4_q_only_rope
+
+            q = gemma4_q_only_rope(positions, query, self.cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style)
+            return q, None
         is_draft_model = _EXTRA_CTX.is_draft_model if is_forward_context_available() else False
         flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled if is_forward_context_available() else False
         if is_draft_model and self.use_mtp and flash_comm_v1_enabled:

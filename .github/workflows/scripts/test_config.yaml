@@ -299,6 +299,7 @@
     - vllm_ascend/ops/linear.py
     - vllm_ascend/ops/linear_op.py
     - vllm_ascend/ops/rotary_embedding.py
+    - vllm_ascend/ops/rope_q_only.py
     - vllm_ascend/ops/vocab_parallel_embedding.py
     - vllm_ascend/ops/register_custom_ops.py
   tests:
@@ -456,9 +457,11 @@
   source_file_dependencies:
     - vllm_ascend/spec_decode/llm_base_proposer.py
     - vllm_ascend/spec_decode/eagle_proposer.py
+    - vllm_ascend/spec_decode/gemma4_proposer.py
     - vllm_ascend/models/llama_eagle3_vwn.py
   tests:
     - tests/e2e/pull_request/one_card/spec_decode/test_eagle.py
+    - tests/e2e/pull_request/one_card/spec_decode/test_gemma4_mtp.py
     - tests/e2e/pull_request/one_card/spec_decode/test_mtp_eagle_correctness.py
     - tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py
     - tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py
