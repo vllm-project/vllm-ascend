@@ -39,18 +39,18 @@ extern "C" __global__ __aicore__ void sparse_attention_score(
         TILING_KEY_IS(SASA_FP16_D128_TILING);
         TILING_KEY_IS(SASA_BF16_D128_TILING);
 
-#if TILING_KEY_VAR == SASA_FP8_D128_TILING
+#if TILING_KEY_VAR == SASA_FP8_D128_TILING  // gitleaks:allow
         SasaInferInterfaceFullQuant<fp8_e4m3fn_t, half, float, SasaKernelArch35::Format::TND>(
             query, key, value, selectIdx, blockTable, selectNumIdx,
             actualSeqLengths, actualSeqLengthsKv,
             qDequantScale, kDequantScale, vDequantScale,
             attentionOut, softmaxLse, user, tiling);
-#elif TILING_KEY_VAR == SASA_FP16_D128_TILING
+#elif TILING_KEY_VAR == SASA_FP16_D128_TILING  // gitleaks:allow
         SasaInferIntfRegular<half, half, float, SasaKernelArch35::Format::TND>(
             query, key, value, selectIdx, blockTable, selectNumIdx,
             actualSeqLengths, actualSeqLengthsKv,
             attentionOut, softmaxLse, user, tiling);
-#elif TILING_KEY_VAR == SASA_BF16_D128_TILING
+#elif TILING_KEY_VAR == SASA_BF16_D128_TILING  // gitleaks:allow
         SasaInferIntfRegular<bfloat16_t, bfloat16_t, float, SasaKernelArch35::Format::TND>(
             query, key, value, selectIdx, blockTable, selectNumIdx,
             actualSeqLengths, actualSeqLengthsKv,
