@@ -172,6 +172,69 @@ class TestBlockTableComputeSlotMapping(TestBase):
                     f"dcp_rank={dcp_rank}, pcp_rank={pcp_rank}",
                 )
 
+    def _run_slot_mapping_kernel_launch_case(
+        self,
+        num_reqs: int,
+        num_tokens: int,
+        max_num_batched_tokens: int,
+        expected_pad_blocks: int,
+    ):
+        old_max_num_batched_tokens = self.max_num_batched_tokens
+        self.max_num_batched_tokens = max_num_batched_tokens
+        try:
+            block_table = self.create_block_table(
+                dcp_world_size=1,
+                dcp_rank=0,
+                pcp_world_size=1,
+                pcp_rank=0,
+                cp_kv_cache_interleave_size=1,
+            )
+        finally:
+            self.max_num_batched_tokens = old_max_num_batched_tokens
+
+        self.setup_block_table_data(block_table, num_reqs=num_reqs)
+        counts = np.full(num_reqs, num_tokens // num_reqs, dtype=np.int32)
+        counts[: num_tokens % num_reqs] += 1
+        query_start_loc = torch.from_numpy(np.concatenate([[0], np.cumsum(counts)]).astype(np.int32))
+        positions = torch.arange(num_tokens, dtype=torch.int64)
+
+        from vllm_ascend.worker import block_table as block_table_module
+
+        kernel_mock = MagicMock()
+        launcher_mock = MagicMock()
+        kernel_mock.__getitem__.return_value = launcher_mock
+        with patch.object(block_table_module, "_compute_slot_mapping_kernel", kernel_mock):
+            block_table.compute_slot_mapping(num_reqs, query_start_loc, positions)
+
+        kernel_mock.__getitem__.assert_called_once_with((num_reqs + expected_pad_blocks,))
+        launcher_mock.assert_called_once()
+        args, kwargs = launcher_mock.call_args
+        self.assertEqual(args[0], num_tokens)
+        self.assertEqual(args[1], max_num_batched_tokens)
+        self.assertEqual(args[2], num_reqs)
+        self.assertEqual(kwargs["BLOCK_SIZE"], 1024)
+        self.assertEqual(kwargs["BLOCK_TABLE_WINDOW_SIZE"], 16)
+        self.assertEqual(kwargs["KV_CACHE_BLOCK_SIZE"], self.block_size)
+        self.assertEqual(kwargs["BLOCKS_PER_KV_BLOCK"], 1)
+
+    def test_compute_slot_mapping_small_num_tokens_large_max_num_batched_tokens_launch_grid(self):
+        """Small active token count should split padding across programs."""
+        self._run_slot_mapping_kernel_launch_case(
+            num_reqs=2,
+            num_tokens=3,
+            max_num_batched_tokens=4096,
+            expected_pad_blocks=4,
+        )
+
+    def test_compute_slot_mapping_normal_num_tokens_normal_max_num_batched_tokens_launch_grid(self):
+        """No padding programs are needed when active tokens fill the graph size."""
+        self._run_slot_mapping_kernel_launch_case(
+            num_reqs=2,
+            num_tokens=512,
+            max_num_batched_tokens=512,
+            expected_pad_blocks=0,
+        )
+
     def test_compute_slot_mapping_dcp1_pcp1_interleave1(self):
         """Test compute_slot_mapping with DCP=1, PCP=1, interleave_size=1
 
