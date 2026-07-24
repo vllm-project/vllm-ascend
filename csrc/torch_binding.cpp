@@ -1556,18 +1556,6 @@ std::tuple<at::Tensor, at::Tensor> npu_rms_norm_dynamic_quant_npu(
     return std::make_tuple(y_out, scale_out);
 }
 
-void indexer_compress_epilog_npu(
-    at::Tensor& indexer_compress_cache,
-    at::Tensor& indexer_compress_cache_scale,
-    const at::Tensor& x,
-    const at::Tensor& slot_mapping,
-    int64_t quant_mode = 1,
-    bool round_scale = true)
-{
-    EXEC_NPU_CMD(aclnnIndexerCompressEpilog, indexer_compress_cache, indexer_compress_cache_scale, x,
-                 slot_mapping, quant_mode, round_scale);
-}
-
 void validate_kv_compress_epilog_inputs(
     const at::Tensor& x,
     const at::Tensor& slot_mapping,
@@ -2555,18 +2543,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> (Tensor y_out, Tensor scale_out)"
         );
     ops.impl("npu_rms_norm_dynamic_quant", torch::kPrivateUse1, &vllm_ascend::npu_rms_norm_dynamic_quant_npu);
-
-    ops.def(
-        "indexer_compress_epilog("
-            "Tensor(a!) indexer_compress_cache, "
-            "Tensor(b!) indexer_compress_cache_scale, "
-            "Tensor x, "
-            "Tensor slot_mapping, "
-            "int quant_mode=1, "
-            "bool round_scale=True"
-        ") -> ()"
-    );
-    ops.impl("indexer_compress_epilog", torch::kPrivateUse1, &vllm_ascend::indexer_compress_epilog_npu);
 
     ops.def(
         "kv_compress_epilog("
