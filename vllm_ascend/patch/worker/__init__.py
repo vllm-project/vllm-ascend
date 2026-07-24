@@ -17,6 +17,7 @@
 
 from vllm.triton_utils import HAS_TRITON
 
+import vllm_ascend.patch.worker.patch_lora_compile_wrapper  # noqa
 from vllm_ascend.utils import is_310p, vllm_version_is
 
 if HAS_TRITON:
@@ -53,6 +54,7 @@ import vllm_ascend.patch.worker.patch_eagle3_init  # noqa
 import vllm_ascend.patch.worker.patch_cudagraph  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_mtp  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
+import vllm_ascend.patch.worker.patch_lora_vlm_prefix  # noqa
 
 # vLLM's use_v2_model_runner may enable the v2 runner without the
 # VLLM_USE_V2_MODEL_RUNNER env var (e.g. based on model architecture).

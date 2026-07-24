@@ -580,6 +580,26 @@
 # ===============
 # Entries are listed in alphabetical order by file name.
 #
+# ** 0. File: worker/patch_lora_compile_wrapper.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.compilation.wrapper.TorchCompileWithNoGuardsWrapper`
+#    Why:
+#       vLLM 54503ece drops non-shape Dynamo guards after the first trace, so a
+#       LoRA-specialized service cannot keep independent base and adapter full
+#       graphs. Reusing one callable either mixes graph resources or forces the
+#       base path back to eager execution.
+#    How:
+#       For the supported vLLM baseline, extend the existing wrapper before model loading
+#       and create separate LoRA, base, and one-token-base compiled callables.
+#       The vLLM wheel remains unmodified; the patch is active only when LoRA
+#       and `cudagraph_specialize_lora` are both enabled.
+#    Related PR (if no, explain why):
+#       No. This is a baseline-specific compatibility patch while the generic
+#       multi-variant compile-wrapper design is discussed upstream.
+#    Future Plan:
+#       Remove this patch after the supported vLLM version provides independent
+#       compile variants for base and LoRA graph specialization.
+#
 # ** 1. File: worker/patch_cudagraph.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.cudagraph_dispatcher.CudagraphDispatcher._create_padded_batch_descriptor`

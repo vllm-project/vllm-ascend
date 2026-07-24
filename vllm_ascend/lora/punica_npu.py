@@ -9,6 +9,67 @@ from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
+@torch.library.custom_op("vllm_ascend::moe_lora_bmm_expand_slice", mutates_args={"y"})
+def _moe_lora_bmm_expand_slice_op(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    w_t_all: torch.Tensor,
+    indices: torch.Tensor,
+    y_offset: int,
+    y_slice_size: int,
+    add_inputs: bool,
+) -> None:
+    rows = x.shape[0]
+    if indices.shape[0] != rows:
+        indices = indices[:rows]
+    safe_indices = indices.clamp(min=0).to(torch.long)
+    # w_t_all is (max_loras+1, 1, output_size_i, active_rank); [safe_indices, 0]
+    # collapses the legacy stacking dim 1. Cast to y.dtype to match upstream
+    # torch_ops.bgmv_expand_slice.
+    gathered = w_t_all[safe_indices, 0].to(y.dtype)
+
+    # The shrink buffer can be padded to the rank bucket while lora_b only
+    # carries the active rank. Slice x, not gathered, to preserve the loaded
+    # weight layout.
+    active_rank = gathered.shape[-1]
+    if x.shape[-1] != active_rank:
+        x_active = x[..., :active_rank].to(y.dtype).contiguous()
+    else:
+        x_active = x.to(y.dtype)
+
+    # profile_run / dummy_run can hand us empty tensors; downstream NPU ops
+    # trip index errors in that case.
+    if x_active.shape[0] == 0 or gathered.shape[1] == 0:
+        return
+
+    # Equivalent to einsum("br, bor -> bo"), rewritten to avoid the
+    # aclnnBatchMatMul path on NPU.
+    delta = (x_active.unsqueeze(1) * gathered).sum(dim=-1)
+    valid_mask = (indices >= 0).unsqueeze(-1)
+    delta = torch.where(valid_mask, delta, torch.zeros_like(delta))
+
+    y_slice = y.narrow(1, y_offset, y_slice_size)
+    if y_slice.shape[0] != delta.shape[0]:
+        y_slice = y_slice[: delta.shape[0]]
+    if add_inputs:
+        y_slice.add_(delta)
+    else:
+        y_slice.copy_(delta)
+
+
+@_moe_lora_bmm_expand_slice_op.register_fake
+def _moe_lora_bmm_expand_slice_fake(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    w_t_all: torch.Tensor,
+    indices: torch.Tensor,
+    y_offset: int,
+    y_slice_size: int,
+    add_inputs: bool,
+) -> None:
+    return None
+
+
 # The platforms that are compatible with the PyTorch-native implementation can
 # inherit this class
 class PunicaWrapperNPU(PunicaWrapperBase):
@@ -22,7 +83,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
         refresh_all_lora_classes()
         self.lora_config = kwargs.get("lora_config")
-        if get_ascend_device_type() == AscendDeviceType._310P or (
+        ascend_device_type = get_ascend_device_type()
+        if ascend_device_type == AscendDeviceType._310P or (
             self.lora_config is not None and self.lora_config.max_lora_rank >= 128
         ):
             from vllm.lora.ops.torch_ops import (
@@ -48,6 +110,26 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.sgmv_expand = sgmv_expand
         self.sgmv_expand_slice = sgmv_expand_slice
         self.sgmv_shrink = sgmv_shrink
+        self._force_lora_bmm_expand_slice = False
+        # This flag is graph-static. Per-token indices below preserve base rows
+        # when the single adapter shares a compiled batch with base requests.
+        self._single_lora_slot = (
+            ascend_device_type == AscendDeviceType.A3
+            and self.lora_config is not None
+            and self.lora_config.max_loras == 1
+            and not self.lora_config.fully_sharded_loras
+        )
+
+    def enable_compatible_lora_bmm_expand_slice(self) -> None:
+        """Use the compatible expand-slice path for the language wrapper."""
+        self._force_lora_bmm_expand_slice = True
+
+    def _requires_bmm_expand_slice(self, x: torch.Tensor, y_slice_size: int) -> bool:
+        # The fused Ascend expand op requires rank <= output slice size. Packed
+        # Qwen3.5 projections can contain narrower slices, so select the
+        # compatible implementation from the static tensor shape instead of a
+        # model-specific environment switch.
+        return self._force_lora_bmm_expand_slice or x.shape[-1] > y_slice_size
 
     def _shrink_prefill(
         self,
@@ -115,6 +197,9 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         # No LoRA request, so return directly
         if self.no_lora:
             return
+        if self._requires_bmm_expand_slice(x, y_slice_size):
+            self._bmm_expand_slice(y, x, w_t_all, y_offset, y_slice_size, add_inputs)
+            return
         self.sgmv_expand_slice(
             x,
             w_t_all,
@@ -134,10 +219,39 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         y_slice_size: int,
         add_inputs: bool,
     ):
+        if self._requires_bmm_expand_slice(x, y_slice_size):
+            self._bmm_expand_slice(y, x, w_t_all, y_offset, y_slice_size, add_inputs)
+            return
         self.bgmv_expand_slice(
             x,
             w_t_all,
             y,
+            self._get_token_lora_indices(x),
+            y_offset,
+            y_slice_size,
+            add_inputs,
+        )
+
+    def _bmm_expand_slice(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        w_t_all: torch.Tensor,
+        y_offset: int,
+        y_slice_size: int,
+        add_inputs: bool,
+    ):
+        """Drop-in expand-slice replacement for shared-experts LoRA.
+
+        Replaces both sgmv_expand_slice and bgmv_expand_slice when a wrapped
+        MoE layer has shared experts. It is dispatched through a mutating torch
+        custom op so Dynamo fullgraph keeps it opaque instead of tracing the
+        dynamic size nodes that trip vLLM graph splitting.
+        """
+        _moe_lora_bmm_expand_slice_op(
+            y,
+            x,
+            w_t_all,
             self._get_token_lora_indices(x),
             y_offset,
             y_slice_size,
@@ -205,6 +319,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             lora_a_stacked (Tuple[torch.Tensor, ...]): lora_a's weights
             scale (float): Scaling factor for the operation
         """
+        if self.no_lora:
+            return
 
         x = x.view(-1, x.shape[-1])
         # TODO fuse these kernels
@@ -238,6 +354,9 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             offset_start (int): The starting position of y, defaults to 0
             add_inputs (bool):  Defaults to True.
         """
+        if self.no_lora:
+            return
+
         y_org = y
         y = y.view(-1, y.shape[-1])
         offset_left = offset_start
@@ -268,6 +387,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             lora_b_stacked (torch.Tensor): lora_b's weights.
             add_inputs (bool): Default to True.
         """
+        if self.no_lora:
+            return
 
         # Embedding layer only need expand op
         expand_fun: Callable = self._expand_prefill if self.is_prefill else self._expand_decode
@@ -308,8 +429,21 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             output_slices (Tuple[int, ...]): Every slice's size.
             buffer (Optional[Tuple[torch.Tensor, ...]]): Defaults to None.
         """
+        if self.no_lora:
+            return
 
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
+
+        if self._apply_single_lora_linear(
+            y,
+            x,
+            lora_a_stacked,
+            lora_b_stacked,
+            scale,
+            output_slices,
+            add_inputs=kwargs.get("add_inputs", True),
+        ):
+            return
 
         if buffer is None:
             r = lora_b_stacked[0].size(-1)
@@ -320,6 +454,39 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             )
         self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
         self.add_expand(y, buffer, lora_b_stacked, output_slices, add_inputs=True, **kwargs)
+
+    def _apply_single_lora_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        scale: float,
+        output_slices: tuple[int, ...],
+        *,
+        add_inputs: bool,
+    ) -> bool:
+        """Use masked GEMM when the service has one runtime LoRA slot."""
+        if not self._single_lora_slot:
+            return False
+
+        x = x.view(-1, x.shape[-1])
+        y = y.view(-1, y.shape[-1])
+        adapter_mask = self._get_token_lora_indices(x).eq(0).unsqueeze(1)
+        offset = 0
+        for lora_a, lora_b, output_size in zip(lora_a_stacked, lora_b_stacked, output_slices, strict=True):
+            a_weight = lora_a[0, 0]
+            b_weight = lora_b[0, 0, :output_size]
+            shrink = torch.matmul(x, a_weight.transpose(0, 1))
+            delta = torch.matmul(shrink, b_weight.transpose(0, 1))
+            delta.mul_(adapter_mask)
+            y_slice = y.narrow(1, offset, output_size)
+            if add_inputs:
+                y_slice.add_(delta, alpha=scale)
+            else:
+                torch.mul(delta, scale, out=y_slice)
+            offset += output_size
+        return True
 
     def add_lora_fused_moe(
         self,
@@ -365,6 +532,9 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         inactive rows get a zero delta for free -- no Python-level branching
         needed.
         """
+        if self.no_lora:
+            return
+
         del sorted_token_ids, num_tokens_post_padded, max_lora_rank
         del shrink_config, expand_config, fully_sharded
         assert top_k_num == 1, "Ascend MoE LoRA v1 expects pre-expanded rows (top_k_num=1)."
@@ -435,6 +605,9 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             scale (float): Scaling factor.
             buffer (Optional[torch.Tensor]):Default to None.
         """
+        if self.no_lora:
+            return
+
         y_org = y
         y = y.view(-1, y.shape[-1])
         x = x.view(-1, x.shape[-1])
