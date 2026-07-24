@@ -131,7 +131,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         metadata: dict[tuple[int, int], "KVConnectorHandshakeMetadata"],
     ) -> None:
         """Ignore P/D handshake metadata because AscendStore handles PP via pool keys."""
-        return None
+        pass
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         assert self.connector_scheduler is not None
