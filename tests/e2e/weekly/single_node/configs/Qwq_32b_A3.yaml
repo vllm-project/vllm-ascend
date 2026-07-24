@@ -99,7 +99,7 @@ test_cases:
       - '{"cudagraph_mode": "FULL_DECODE_ONLY" }'
     benchmarks:
       <<: *benchmarks_gsm8k_lite
-  - name: "Qwq_Perfermance_A3_3500_1500_A3"
+  - name: "Qwq_Performance_A3_3500_1500_A3"
     model: "Qwen/QwQ-32B"
     envs:
       <<: *envs
