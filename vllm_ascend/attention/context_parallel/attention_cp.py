@@ -184,7 +184,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                             torch.float32
                         )
                     )
-                    cp_kv_recover_idx_for_chunk = torch.argsort(kv_inverse_idx_for_chunk)
+                    cp_kv_recover_idx_for_chunk = torch.argsort(kv_inverse_idx_for_chunk.to(torch.float32))
                 else:
                     kv_inverse_idx_for_chunk = None
                     cp_kv_recover_idx_for_chunk = None
@@ -227,6 +227,37 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 max_num_tokens_across_pcp=common_long_seq_metadata.max_num_tokens_across_pcp,
                 total_num_scheduled_tokens=common_long_seq_metadata.total_num_scheduled_tokens,
             )
+            # Assign after construction for compatibility with deployments
+            # whose AscendPCPMetadata dataclass predates this optimization.
+            pcp_metadata.pcp_allgather_inverse_idx = common_long_seq_metadata.pcp_allgather_inverse_idx
+
+            # Ring attention consumes the same query indices and slot mapping
+            # on every attention layer. Build the derived metadata once per
+            # model invocation instead of launching index kernels in every
+            # layer's ring loop.
+            ring_half_seqlens = attn_mask_seqlens
+            if isinstance(ring_half_seqlens, torch.Tensor):
+                if ring_half_seqlens.is_cuda or ring_half_seqlens.is_npu:
+                    ring_half_seqlens = ring_half_seqlens.cpu()
+                ring_half_seqlens = ring_half_seqlens.tolist()
+            else:
+                ring_half_seqlens = list(ring_half_seqlens)
+            pcp_metadata.ring_half_seqlens = ring_half_seqlens
+            pcp_metadata.ring_q_seqlens_full = [length * 2 for length in ring_half_seqlens]
+
+            pcp_metadata.ring_slot_mappings = None
+            if self.pcp_size > 1 and not common_long_seq_metadata.pcp_use_hybrid_attn:
+                local_tokens = num_actual_tokens_pcp_padded // self.pcp_size
+                decode_offset = num_decode_tokens * self.pcp_size
+                inverse_restore_idx = common_long_seq_metadata.pcp_allgather_inverse_idx
+                prefill_slot_mapping = slot_mapping[decode_offset:]
+                ring_slot_mappings = []
+                for source_rank in range(self.pcp_size):
+                    source_start = source_rank * local_tokens + num_decode_tokens
+                    source_end = (source_rank + 1) * local_tokens
+                    global_positions = inverse_restore_idx[source_start:source_end] - decode_offset
+                    ring_slot_mappings.append(torch.index_select(prefill_slot_mapping, 0, global_positions))
+                pcp_metadata.ring_slot_mappings = tuple(ring_slot_mappings)
 
             prefill_metadata = AscendMetadataForPrefill(
                 pcp_metadata=pcp_metadata,
@@ -312,6 +343,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         self.pcp_size = get_pcp_group().world_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         self.pcp_group = get_pcp_group().device_group if self.pcp_size > 1 else None
+        self.local_prefill_key = None
+        self.local_prefill_value = None
 
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
@@ -327,25 +360,12 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
     ):
-        if _EXTRA_CTX.is_draft_model:
-            graph_params = get_draft_graph_params()
-            attn_metadata = draft_attn_metadatas
-            attn_keys = list(attn_metadata[0].keys())
-        else:
-            graph_params = get_graph_params()
-            attn_metadata = forward_context.attn_metadata
-            attn_keys = list(attn_metadata.keys())
+        graph_params = get_graph_params()
         # FIXME: Behold! We are using a temporary hack here to update the args
         # for each layer's attention op in the graph.
-        num_layers = len(attn_keys)
-        if num_layers == 0:
-            return
-        if _EXTRA_CTX.is_draft_model:
-            attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
-        attn_count = 0
         with torch.npu.stream(update_stream):
             for key, param, handle, event in zip(
-                attn_keys,
+                forward_context.attn_metadata,
                 graph_params.attn_params[num_tokens],
                 graph_params.handles[num_tokens],
                 graph_params.events[num_tokens],
@@ -368,29 +388,14 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     dcp_rank,
                     attn_mask,
                 ) = param
+                attn_metadata = forward_context.attn_metadata[key]
+                actual_seq_lengths_kv = attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[:, pcp_rank, dcp_rank]
+                pad_length = num_tokens - len(actual_seq_lengths_kv)
+                if pad_length > 0:
+                    pad_tensor = np.zeros(pad_length, dtype=actual_seq_lengths_kv.dtype)
+                    actual_seq_lengths_kv = np.concatenate([actual_seq_lengths_kv, pad_tensor])
 
-                if _EXTRA_CTX.is_draft_model:
-                    draft_step = attn_count // num_layers
-                    actual_seq_lengths_kv = attn_metadata[draft_step][key].decode_meta.num_computed_tokens_of_pcp_dcp[
-                        :, pcp_rank, dcp_rank
-                    ]
-                    pad_length = num_tokens - len(actual_seq_lengths_kv)
-                    if pad_length > 0:
-                        pad_tensor = np.zeros(pad_length, dtype=actual_seq_lengths_kv.dtype)
-                        actual_seq_lengths_kv = np.concatenate([actual_seq_lengths_kv, pad_tensor])
-
-                    actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
-                    attn_count = attn_count + 1
-                else:
-                    actual_seq_lengths_kv = attn_metadata[key].decode_meta.num_computed_tokens_of_pcp_dcp[
-                        :, pcp_rank, dcp_rank
-                    ]
-                    pad_length = num_tokens - len(actual_seq_lengths_kv)
-                    if pad_length > 0:
-                        pad_tensor = np.zeros(pad_length, dtype=actual_seq_lengths_kv.dtype)
-                        actual_seq_lengths_kv = np.concatenate([actual_seq_lengths_kv, pad_tensor])
-
-                    actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
+                actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q[:attn_metadata.num_decodes]
 
                 if dcp_size > 1:
                     num_heads = num_heads * dcp_size
@@ -812,6 +817,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0
         output_padded = output
+        self.local_prefill_key = None
+        self.local_prefill_value = None
 
         if len(kv_cache) > 1:
             if self.key_cache is None:
@@ -831,12 +838,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 if self.pcp_size > 1:
                     assert attn_metadata.prefill is not None and attn_metadata.prefill.pcp_metadata is not None
                     if not attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn:
-                        kv = torch.cat([key, value], dim=-1)
-                        num_actual_tokens_pcp_padded = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
-                        all_kv = get_pcp_group().all_gather(kv[:num_actual_tokens_pcp_padded].contiguous(), dim=0)
-                        pcp_allgather_restore_idx = attn_metadata.prefill.pcp_metadata.pcp_allgather_restore_idx
-                        all_kv = torch.index_select(all_kv, 0, pcp_allgather_restore_idx)
-                        key, value = all_kv.split([self.head_size, self.head_size], dim=-1)
+                        self.local_prefill_key = key
+                        self.local_prefill_value = value
                     else:
                         query, key, value = self._gather_and_restore_pcp_qkv(query, key, value, attn_metadata)
                         output_local_padded_tokens_fa = (
@@ -847,19 +850,34 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                                 output, pad=(0, 0, 0, 0, 0, output_local_padded_tokens_fa), mode="constant", value=0
                             )
 
-                prefill_key = key[self.pcp_size * num_decode_tokens : attn_metadata.num_actual_tokens_pcp_padded]
-                prefill_value = value[self.pcp_size * num_decode_tokens : attn_metadata.num_actual_tokens_pcp_padded]
-                slot_mapping = attn_metadata.slot_mapping[
-                    self.pcp_size * num_decode_tokens : attn_metadata.num_actual_tokens_pcp_padded
-                ]
-                DeviceOperator.reshape_and_cache(
-                    key=prefill_key,
-                    value=prefill_value,
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
-                    slot_mapping=slot_mapping,
-                )
-            notify_kv_cache_written()
+                # Non-hybrid PCP writes each KV shard while it rotates in
+                # ring_attn, avoiding a restored full-KV intermediate.
+                if self.pcp_size == 1 or attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn:
+                    prefill_key = key[
+                        self.pcp_size * num_decode_tokens : attn_metadata.num_actual_tokens_pcp_padded
+                    ]
+                    prefill_value = value[
+                        self.pcp_size * num_decode_tokens : attn_metadata.num_actual_tokens_pcp_padded
+                    ]
+                    slot_mapping = attn_metadata.slot_mapping[
+                        self.pcp_size * num_decode_tokens : attn_metadata.num_actual_tokens_pcp_padded
+                    ]
+                    DeviceOperator.reshape_and_cache(
+                        key=prefill_key,
+                        value=prefill_value,
+                        key_cache=self.key_cache,
+                        value_cache=self.value_cache,
+                        slot_mapping=slot_mapping,
+                    )
+
+            # For non-hybrid PCP, notify only after ring_attn has written all
+            # rotating KV shards into the cache.
+            if not (
+                has_prefill
+                and self.pcp_size > 1
+                and not attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn
+            ):
+                notify_kv_cache_written()
         return query, key, value, output_padded
 
     def _gather_and_restore_pcp_qkv(
@@ -957,6 +975,210 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         context_output, context_lse = _update_out_and_lse(attn_out_allgather, attn_lse_allgather)
         return context_output, context_lse
 
+    @staticmethod
+    def _merge_ring_outputs(outputs, lses):
+        """Merge partial attention results without unnecessary full stacks.
+
+        The two-input path uses the same FP32 AttentionUpdate operator as the
+        non-chunked AllGather path. The LSE remains in the log domain, so this
+        is mathematically equivalent to ``_update_out_and_lse`` while avoiding
+        the large output Stack/Mul/ReduceSum sequence. Larger reductions keep
+        the existing implementation to preserve its established behavior.
+        """
+        num_partials = len(outputs)
+        assert num_partials == len(lses) and num_partials > 0
+        if num_partials == 1:
+            return outputs[0], lses[0]
+        if num_partials == 2:
+            output = _npu_attn_out_lse_update(lses[0], lses[1], outputs[0], outputs[1])
+            # Keep the established LSE reduction unchanged for numerical and
+            # operator compatibility; only the much larger output reduction
+            # is replaced by the fused AttentionUpdate kernel.
+            lse = torch.logsumexp(torch.stack(lses, dim=0), dim=0)
+            return output, lse
+        return _update_out_and_lse(torch.stack(outputs, dim=0), torch.stack(lses, dim=0))
+
+    def ring_attn(self, query, key, value, attn_metadata):
+        pcp_group = get_pcp_group()
+        pcp_size = pcp_group.world_size
+        pcp_rank = pcp_group.rank_in_group
+        device_group = pcp_group.device_group
+        group_ranks = pcp_group.ranks
+
+        send_rel_rank = (pcp_rank + 1) % pcp_size
+        recv_rel_rank = (pcp_rank - 1) % pcp_size
+        send_rank = group_ranks[send_rel_rank]
+        recv_rank = group_ranks[recv_rel_rank]
+
+        kv = torch.cat([key, value], dim=-1)
+        recv_buff = torch.empty_like(kv)
+        outputs_list, lses_list = [], []
+        tail_outputs, tail_lses = [], []
+
+        pcp_metadata = attn_metadata.prefill.pcp_metadata
+        cache_kv_during_ring = not pcp_metadata.pcp_use_hybrid_attn
+        ring_slot_mappings = getattr(pcp_metadata, "ring_slot_mappings", None)
+        if cache_kv_during_ring and ring_slot_mappings is None:
+            # inverse_restore_idx maps rank-major all-gather order to global
+            # token order. It is built once on CPU with restore_idx so every
+            # attention layer can pair rotating KV blocks with slot mappings.
+            # This fallback supports metadata produced by older builders.
+            local_tokens = attn_metadata.num_actual_tokens_pcp_padded // pcp_size
+            num_decode_tokens = attn_metadata.num_decode_tokens
+            decode_offset = num_decode_tokens * pcp_size
+            inverse_restore_idx = pcp_metadata.pcp_allgather_inverse_idx
+            prefill_slot_mapping = attn_metadata.slot_mapping[decode_offset:]
+            fallback_slot_mappings = []
+            for source_rank in range(pcp_size):
+                source_start = source_rank * local_tokens + num_decode_tokens
+                source_end = (source_rank + 1) * local_tokens
+                global_positions = inverse_restore_idx[source_start:source_end] - decode_offset
+                fallback_slot_mappings.append(torch.index_select(prefill_slot_mapping, 0, global_positions))
+            ring_slot_mappings = tuple(fallback_slot_mappings)
+
+        # half_seqlens: cumulative sum of head (or tail) lengths per request [H1, H1+H2, ...]
+        half_seqlens = getattr(pcp_metadata, "ring_half_seqlens", None)
+        if half_seqlens is None:
+            half_seqlens = pcp_metadata.attn_mask_seqlens
+            if isinstance(half_seqlens, torch.Tensor):
+                if half_seqlens.is_cuda or half_seqlens.is_npu:
+                    half_seqlens = half_seqlens.cpu()
+                half_seqlens = half_seqlens.tolist()
+
+        # q_seqlens_full: cumulative sum of total lengths per request in this rank [H1+T1, H1+T1+H2+T2, ...]
+        q_seqlens_full = getattr(pcp_metadata, "ring_q_seqlens_full", None)
+        if q_seqlens_full is None:
+            q_seqlens_full = [length * 2 for length in half_seqlens]
+
+        # These indices already describe the interleaved layout
+        # [H1, T1, H2, T2, ...] and are resident on the NPU.
+        local_head_idx = pcp_metadata.q_head_idx
+        local_tail_idx = pcp_metadata.q_tail_idx
+
+        # The last rank never attends to a future KV rank, so avoid launching
+        # an unused query gather on the rank that commonly gates completion.
+        q_tail = None
+        if pcp_rank < pcp_size - 1:
+            q_tail = torch.index_select(query, 0, local_tail_idx)
+
+        s = pcp_rank
+
+        for i in range(pcp_size):
+            if i < pcp_size - 1:
+                if pcp_rank % 2 == 0:
+                    send_req = torch.distributed.isend(kv, send_rank, group=device_group)
+                    recv_req = torch.distributed.irecv(recv_buff, recv_rank, group=device_group)
+                else:
+                    recv_req = torch.distributed.irecv(recv_buff, recv_rank, group=device_group)
+                    send_req = torch.distributed.isend(kv, send_rank, group=device_group)
+
+            current_k, current_v = kv.split([self.head_size, self.head_size], dim=-1)
+
+            if cache_kv_during_ring:
+                assert self.key_cache is not None and self.value_cache is not None
+                DeviceOperator.reshape_and_cache(
+                    key=current_k,
+                    value=current_v,
+                    key_cache=self.key_cache,
+                    value_cache=self.value_cache,
+                    slot_mapping=ring_slot_mappings[s],
+                )
+
+            if s == pcp_rank:
+                # Local Rank: Single Masked Attention call for precision and correctness
+                output_i, lse_i = torch.ops.npu.npu_fused_infer_attention_score(
+                    query,
+                    current_k,
+                    current_v,
+                    num_heads=self.num_heads,
+                    num_key_value_heads=self.num_kv_heads,
+                    input_layout="TND",
+                    atten_mask=attn_metadata.attn_mask,
+                    scale=self.scale,
+                    sparse_mode=3,
+                    antiquant_mode=0,
+                    antiquant_scale=None,
+                    softmax_lse_flag=True,
+                    actual_seq_lengths_kv=q_seqlens_full,
+                    actual_seq_lengths=q_seqlens_full,
+                )
+                outputs_list.append(output_i)
+                lses_list.append(lse_i)
+
+            elif s < pcp_rank:
+                # Past Rank: Full Q looks at Remote KV's Head portion [H1, H2, ...]
+                kv_head_k = torch.index_select(current_k, 0, local_head_idx)
+                kv_head_v = torch.index_select(current_v, 0, local_head_idx)
+
+                output_i, lse_i = torch.ops.npu.npu_fused_infer_attention_score(
+                    query,
+                    kv_head_k,
+                    kv_head_v,
+                    num_heads=self.num_heads,
+                    num_key_value_heads=self.num_kv_heads,
+                    input_layout="TND",
+                    atten_mask=None,
+                    scale=self.scale,
+                    sparse_mode=0,
+                    antiquant_mode=0,
+                    antiquant_scale=None,
+                    softmax_lse_flag=True,
+                    actual_seq_lengths_kv=half_seqlens,
+                    actual_seq_lengths=q_seqlens_full,
+                )
+                outputs_list.append(output_i)
+                lses_list.append(lse_i)
+
+            else:
+                # Future Rank: Local Q's Tail portion [T1, T2, ...] looks at Remote Rank's Full KV
+                assert q_tail is not None
+                out_tail, lse_tail = torch.ops.npu.npu_fused_infer_attention_score(
+                    q_tail,
+                    current_k,
+                    current_v,
+                    num_heads=self.num_heads,
+                    num_key_value_heads=self.num_kv_heads,
+                    input_layout="TND",
+                    atten_mask=None,
+                    scale=self.scale,
+                    sparse_mode=0,
+                    antiquant_mode=0,
+                    antiquant_scale=None,
+                    softmax_lse_flag=True,
+                    actual_seq_lengths_kv=q_seqlens_full,
+                    actual_seq_lengths=half_seqlens,
+                )
+                tail_outputs.append(out_tail)
+                tail_lses.append(lse_tail)
+
+            if i < pcp_size - 1:
+                send_req.wait()
+                recv_req.wait()
+                kv, recv_buff = recv_buff, kv
+                s = (s - 1 + pcp_size) % pcp_size
+
+        if cache_kv_during_ring:
+            notify_kv_cache_written()
+
+        if tail_outputs:
+            merged_tail_out, merged_tail_lse = self._merge_ring_outputs(tail_outputs, tail_lses)
+
+            output_i = torch.zeros_like(query)
+            lse_i = torch.full((query.shape[0], query.shape[1], 1),
+                               float("-inf"),
+                               dtype=merged_tail_lse.dtype,
+                               device=query.device)
+            # Use index_copy_ for precision with interleaved layout
+            output_i.index_copy_(0, local_tail_idx, merged_tail_out.to(query.dtype))
+            lse_i.index_copy_(0, local_tail_idx, merged_tail_lse)
+            outputs_list.append(output_i)
+            lses_list.append(lse_i)
+
+        # Final merge of all ranks' contributions. PCP=2 always uses the
+        # fused two-input path above.
+        output, lse = self._merge_ring_outputs(outputs_list, lses_list)
+        return output.to(query.dtype), lse
+
     def forward_impl(
         self,
         query: torch.Tensor,
@@ -990,11 +1212,35 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             # current_stream: -----                    -- context attn --                     -/
             # COMM_STREAM:         \-- all_gather Q --/                  \-- a2a ag output --/
 
-            # qkv init
             num_actual_tokens_pcp_padded = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
             prefill_query = query[num_decode_tokens:num_actual_tokens_pcp_padded].contiguous()
-            key = key[self.pcp_size * num_decode_tokens : attn_metadata.num_actual_tokens_pcp_padded].contiguous()
-            value = value[self.pcp_size * num_decode_tokens : attn_metadata.num_actual_tokens_pcp_padded].contiguous()
+
+            if self.pcp_size == 1:
+                key = key[num_decode_tokens:num_actual_tokens_pcp_padded].contiguous()
+                value = value[num_decode_tokens:num_actual_tokens_pcp_padded].contiguous()
+            elif not pcp_use_hybrid_attn:
+                assert self.local_prefill_key is not None and self.local_prefill_value is not None
+                key = self.local_prefill_key[num_decode_tokens:num_actual_tokens_pcp_padded].contiguous()
+                value = self.local_prefill_value[num_decode_tokens:num_actual_tokens_pcp_padded].contiguous()
+            else:
+                total_prefill_kv = attn_metadata.num_actual_tokens_pcp_padded - self.pcp_size * num_decode_tokens
+                kv_tokens_per_rank = total_prefill_kv // self.pcp_size
+                half_kv = kv_tokens_per_rank // 2          # 每个 rank 拿前半 + 后半各 half_kv 个 token
+                kv_base = self.pcp_size * num_decode_tokens # KV prefill 区域起点
+                kv_head_start = kv_base + self.pcp_rank * half_kv
+                kv_head_end   = kv_base + (self.pcp_rank + 1) * half_kv
+                kv_tail_start = kv_base + total_prefill_kv - (self.pcp_rank + 1) * half_kv
+                kv_tail_end   = kv_base + total_prefill_kv - self.pcp_rank * half_kv
+
+                key = torch.cat([
+                    key[kv_head_start:kv_head_end],
+                    key[kv_tail_start:kv_tail_end],
+                ], dim=0).contiguous()
+                value = torch.cat([
+                    value[kv_head_start:kv_head_end],
+                    value[kv_tail_start:kv_tail_end],
+                ], dim=0).contiguous()
+
 
             if has_chunked_context:
                 # all_gather q for chunked prefill // overlap the computation inner current chunk
@@ -1009,9 +1255,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
             if self.pcp_size > 1:
                 # Scenario of Enabling PCP or PCP&DCP
-                # prepare qkv and compute the head part // overlap the communication of all gather q
-                data_head, data_tail = self._forward_prefill_cp_pre(prefill_query, key, value, attn_metadata)
-                output_head, lse_head = self._forward_prefill_cp_attn(data_head, True, attn_metadata)
+                attn_output_prefill, attn_lse_prefill = self.ring_attn(prefill_query, key, value, attn_metadata)
             else:
                 # Scenario of Enabling DCP Individually
                 attn_output_prefill, attn_lse_prefill = torch.ops.npu.npu_fused_infer_attention_score(
@@ -1042,16 +1286,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 cp_chunkedprefill_comm_stream().wait_stream(torch.npu.current_stream())
                 with torch_npu.npu.stream(cp_chunkedprefill_comm_stream()):
                     global_context_output = self._gather_global_context_output(local_context_output)
-
-            if self.pcp_size > 1:
-                # compute the tail part and reorg output&lse // overlap the communication of output
-                output_tail, lse_tail = self._forward_prefill_cp_attn(data_tail, False, attn_metadata)
-
-                attn_output_prefill, attn_lse_prefill = self._forward_prefill_cp_post(
-                    [output_head, output_tail],
-                    [lse_head, lse_tail],
-                    attn_metadata,
-                )
 
             if has_chunked_context:
                 # update the output of current chunk with context part
