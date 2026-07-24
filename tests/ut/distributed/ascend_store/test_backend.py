@@ -31,7 +31,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_b
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend import (
     YuanrongConfig,
-    YuanrongHelper,
 )
 
 
@@ -246,91 +245,49 @@ class TestConvertToBytes(unittest.TestCase):
 # YuanrongConfig
 # =========================================================================
 class TestYuanrongConfig(unittest.TestCase):
-    def test_load_from_env(self):
-        with patch.dict(
-            os.environ,
-            {
-                "DS_WORKER_ADDR": "host:1234",
-                "DS_ENABLE_EXCLUSIVE_CONNECTION": "1",
-                "DS_ENABLE_REMOTE_H2D": "0",
-            },
-        ):
-            cfg = YuanrongConfig.load_from_env()
-            self.assertEqual(cfg.worker_addr, "host:1234")
-            self.assertTrue(cfg.enable_exclusive_connection)
-            self.assertFalse(cfg.enable_remote_h2d)
+    def _write_config(self, **overrides):
+        fd, path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w") as f:
+            json.dump(overrides, f)
+        self.addCleanup(os.remove, path)
+        return path
 
-    def test_load_from_env_missing(self):
-        with patch.dict(os.environ, {}, clear=True):
-            os.environ.pop("DS_WORKER_ADDR", None)
-            with self.assertRaises(ValueError):
-                YuanrongConfig.load_from_env()
+    def test_from_file(self):
+        path = self._write_config(
+            worker_addr="host:1234",
+            enable_remote_h2d=False,
+            remote_h2d_transport_backend="HIXL",
+            connect_timeout_ms=12000,
+            request_timeout_ms=8000,
+            get_sub_timeout_ms=3000,
+        )
+        cfg = YuanrongConfig.from_file(path)
+        self.assertEqual(cfg.worker_addr, "host:1234")
+        self.assertFalse(cfg.enable_remote_h2d)
+        self.assertEqual(cfg.remote_h2d_transport_backend, "HIXL")
+        self.assertFalse(cfg.enable_fabric_mem)
+        self.assertEqual(cfg.connect_timeout_ms, 12000)
+        self.assertEqual(cfg.request_timeout_ms, 8000)
+        self.assertEqual(cfg.get_sub_timeout_ms, 3000)
 
-    def test_load_from_env_defaults(self):
-        with patch.dict(os.environ, {"DS_WORKER_ADDR": "h:1"}):
-            cfg = YuanrongConfig.load_from_env()
-            self.assertFalse(cfg.enable_exclusive_connection)
-            self.assertFalse(cfg.enable_remote_h2d)
+    def test_from_file_defaults(self):
+        path = self._write_config(worker_addr="h:1")
+        cfg = YuanrongConfig.from_file(path)
+        self.assertFalse(cfg.enable_remote_h2d)
+        self.assertEqual(cfg.remote_h2d_transport_backend, "HIXL")
+        self.assertFalse(cfg.enable_fabric_mem)
+        self.assertEqual(cfg.connect_timeout_ms, 9000)
+        self.assertEqual(cfg.request_timeout_ms, 0)
+        self.assertEqual(cfg.get_sub_timeout_ms, 0)
 
-
-# =========================================================================
-# YuanrongHelper
-# =========================================================================
-class TestYuanrongHelper(unittest.TestCase):
-    def setUp(self):
-        self.blob_cls = MagicMock()
-        self.blob_list_cls = MagicMock()
-        self.helper = YuanrongHelper(self.blob_cls, self.blob_list_cls)
-
-    def test_normalize_keys_short_valid(self):
-        keys = ["abc-123", "key_2"]
-        result = self.helper.normalize_keys(keys)
-        self.assertEqual(result, keys)
-
-    def test_normalize_keys_with_invalid_chars(self):
-        keys = ["key with spaces/and.dots"]
-        result = self.helper.normalize_keys(keys)
-        self.assertEqual(len(result), 1)
-        # Should not contain the original invalid chars
-        self.assertNotIn(" ", result[0])
-        self.assertNotIn("/", result[0])
-        # Should have hash suffix
-        self.assertIn("__", result[0])
-
-    def test_normalize_keys_at_max_length(self):
-        max_length_key = "a" * 1024
-        result = self.helper.normalize_keys([max_length_key])
-        self.assertEqual(result, [max_length_key])
-
-    def test_normalize_keys_over_max_length(self):
-        long_key = "a" * 1025
-        result = self.helper.normalize_keys([long_key])
-        self.assertEqual(len(result), 1)
-        self.assertEqual(len(result[0]), 1024)
-        self.assertIn("__", result[0])
-
-    def test_make_blob_lists(self):
-        self.helper._device_id = 0
-        addrs = [[100, 200], [300, 400]]
-        sizes = [[10, 20], [30, 40]]
-        result = self.helper.make_blob_lists(addrs, sizes)
-        self.assertEqual(len(result), 2)
-        self.assertEqual(self.blob_cls.call_count, 4)
-
-    def test_make_blob_lists_length_mismatch(self):
-        self.helper._device_id = 0
-        with self.assertRaises(ValueError):
-            self.helper.make_blob_lists([[1]], [[1, 2], [3, 4]])
-
-    def test_make_blob_lists_inner_length_mismatch(self):
-        self.helper._device_id = 0
-        with self.assertRaises(ValueError):
-            self.helper.make_blob_lists([[1, 2]], [[1]])
-
-    def test_make_blob_lists_no_device(self):
-        self.helper._device_id = None
-        with self.assertRaises(RuntimeError):
-            self.helper.make_blob_lists([[1]], [[1]])
+    def test_from_file_fabric_mem_with_hixl(self):
+        path = self._write_config(
+            worker_addr="h:1",
+            remote_h2d_transport_backend="HIXL",
+            enable_fabric_mem=True,
+        )
+        cfg = YuanrongConfig.from_file(path)
+        self.assertTrue(cfg.enable_fabric_mem)
 
 
 # =========================================================================
@@ -414,147 +371,136 @@ class TestYuanrongBackendMethods(unittest.TestCase):
 
         with patch.object(YuanrongBackend, "__init__", lambda self, pc: None):
             backend = YuanrongBackend.__new__(YuanrongBackend)
-            backend._helper = MagicMock()
-            backend._helper._device_id = 0
-            backend._helper.normalize_keys = lambda keys: keys
-            backend._helper.make_blob_lists = lambda a, s: [MagicMock() for _ in a]
-            backend._hetero_client = MagicMock()
+            backend.store = MagicMock()
+            backend.store.mget_h2d_from_multi_buffers.return_value = []
+            backend.store.mset_d2h_from_multi_buffers.return_value = None
+            backend.store.batch_is_exist.return_value = [1, 0]
             backend._ds_set_param = MagicMock()
-            backend._is_a2 = False
+            backend._needs_dev_mem_pregister = False
             backend._registered_buffers = None
             backend._buffers_registered = False
             backend.config = YuanrongConfig(
                 worker_addr="127.0.0.1:0",
-                enable_exclusive_connection=False,
                 enable_remote_h2d=False,
+                remote_h2d_transport_backend="P2P_TRANSFER",
+                enable_fabric_mem=False,
+                get_sub_timeout_ms=1234,
             )
             backend.rank = 0
             return backend
 
-    def test_exists_empty(self):
-        b = self._make_backend()
-        result = b.exists([])
-        self.assertEqual(result, [])
-
     def test_exists(self):
         b = self._make_backend()
-        b._hetero_client.exist.return_value = [True, False]
+        b.store.batch_is_exist.return_value = [1, 0]
         result = b.exists(["k1", "k2"])
         self.assertEqual(result, [1, 0])
+        b.store.batch_is_exist.assert_called_once_with(["k1", "k2"])
 
     def test_exists_exception(self):
         b = self._make_backend()
-        b._hetero_client.exist.side_effect = Exception("fail")
+        b.store.batch_is_exist.side_effect = Exception("fail")
         result = b.exists(["k1"])
         self.assertEqual(result, [0])
 
-    def test_get_empty(self):
-        b = self._make_backend()
-        result = b.get([], [], [])
-        self.assertEqual(result, [])
-        b._hetero_client.mget_h2d.assert_not_called()
-
     def test_get(self):
         b = self._make_backend()
-        b._hetero_client.mget_h2d.return_value = []
+        b.store.mget_h2d_from_multi_buffers.return_value = []
         result = b.get(["k1"], [[100]], [[10]])
         self.assertEqual(result, [0])
-        b._hetero_client.mget_h2d.assert_called_once()
+        b.store.mget_h2d_from_multi_buffers.assert_called_once_with(["k1"], [[100]], [[10]], 1234)
 
     def test_get_partial_failure(self):
         b = self._make_backend()
-        b._hetero_client.mget_h2d.return_value = ["k2"]
+        b.store.mget_h2d_from_multi_buffers.return_value = ["k2"]
         result = b.get(["k1", "k2", "k3"], [[100], [200], [300]], [[10], [20], [30]])
         self.assertEqual(result, [0, 1, 0])
 
     def test_get_failed_keys(self):
         b = self._make_backend()
-        b._hetero_client.mget_h2d.return_value = ["k1"]
+        b.store.mget_h2d_from_multi_buffers.return_value = ["k1"]
         result = b.get(["k1"], [[100]], [[10]])  # Should log error
         self.assertEqual(result, [1])
 
     def test_get_exception(self):
         b = self._make_backend()
-        b._hetero_client.mget_h2d.side_effect = Exception("fail")
+        b.store.mget_h2d_from_multi_buffers.side_effect = Exception("fail")
         result = b.get(["k1"], [[100]], [[10]])
         self.assertIsNone(result)
-
-    def test_put_empty(self):
-        b = self._make_backend()
-        b.put([], [], [])
-        b._hetero_client.mset_d2h.assert_not_called()
 
     def test_put(self):
         b = self._make_backend()
         b.put(["k1"], [[100]], [[10]])
-        b._hetero_client.mset_d2h.assert_called_once()
+        b.store.mset_d2h_from_multi_buffers.assert_called_once_with(["k1"], [[100]], [[10]], b._ds_set_param)
 
     def test_put_exception(self):
         b = self._make_backend()
-        b._hetero_client.mset_d2h.side_effect = Exception("fail")
+        b.store.mset_d2h_from_multi_buffers.side_effect = Exception("fail")
         b.put(["k1"], [[100]], [[10]])
 
     def test_register_buffer_noop_when_remote_h2d_disabled(self):
         b = self._make_backend()
         b.register_buffer([100], [200])
-        b._hetero_client.pre_register_device_memory.assert_not_called()
+        b.store.pre_register_device_memory.assert_not_called()
 
-    def test_register_buffer_when_remote_h2d_enabled(self):
+    def test_register_buffer_when_remote_h2d_enabled_hixl(self):
+        b = self._make_backend()
+        b._needs_dev_mem_pregister = True
+        b.register_buffer([100], [200])
+        b.store.pre_register_device_memory.assert_called_once_with([100], [200])
+
+    def test_register_buffer_noop_when_p2p_transfer_link(self):
+        # P2P-Transfer RoCE transport backend does not use device memory pre-registration.
         b = self._make_backend()
         b.config.enable_remote_h2d = True
+        b.config.remote_h2d_transport_backend = "P2P_TRANSFER"
+        b._needs_dev_mem_pregister = False
         b.register_buffer([100], [200])
-        b._hetero_client.pre_register_device_memory.assert_called_once_with([100], [200])
+        b.store.pre_register_device_memory.assert_not_called()
 
-    def test_register_buffer_noop_on_a2(self):
-        # A2 must not register (opposite of memcache_backend's _is_a2 gating).
+    def test_register_buffer_noop_when_fabric_mem(self):
+        # FabricMem mode relies on HIXL OPTION_ENABLE_USE_FABRIC_MEM for
+        # automatic Fabric handle exchange; no client-side MEM_DEVICE
+        # pre-registration. Mirrors the __init__ gating expression.
         b = self._make_backend()
-        b._is_a2 = True
         b.config.enable_remote_h2d = True
+        b.config.remote_h2d_transport_backend = "HIXL"
+        b.config.enable_fabric_mem = True
+        b._needs_dev_mem_pregister = (
+            b.config.enable_remote_h2d
+            and b.config.remote_h2d_transport_backend == "HIXL"
+            and not b.config.enable_fabric_mem
+        )
         b.register_buffer([100], [200])
-        b._hetero_client.pre_register_device_memory.assert_not_called()
+        b.store.pre_register_device_memory.assert_not_called()
 
     def test_register_buffer_idempotent(self):
         b = self._make_backend()
-        b.config.enable_remote_h2d = True
+        b._needs_dev_mem_pregister = True
         b.register_buffer([100], [200])
         b.register_buffer([300], [400])
-        b._hetero_client.pre_register_device_memory.assert_called_once_with([100], [200])
+        b.store.pre_register_device_memory.assert_called_once_with([100], [200])
 
     def test_register_buffers_if_needed_no_buffers(self):
         b = self._make_backend()
-        b.config.enable_remote_h2d = True
+        b._needs_dev_mem_pregister = True
         b._registered_buffers = None
         b._register_buffers_if_needed()
-        b._hetero_client.pre_register_device_memory.assert_not_called()
+        b.store.pre_register_device_memory.assert_not_called()
 
     def test_register_buffers_if_needed_already_registered(self):
         b = self._make_backend()
-        b.config.enable_remote_h2d = True
+        b._needs_dev_mem_pregister = True
         b._registered_buffers = ([100], [200])
         b._buffers_registered = True
         b._register_buffers_if_needed()
-        b._hetero_client.pre_register_device_memory.assert_not_called()
+        b.store.pre_register_device_memory.assert_not_called()
 
     def test_register_buffers_if_needed_disabled(self):
         b = self._make_backend()
-        b.config.enable_remote_h2d = False
+        b._needs_dev_mem_pregister = False
         b._registered_buffers = ([100], [200])
         b._register_buffers_if_needed()
-        b._hetero_client.pre_register_device_memory.assert_not_called()
-
-    def test_ensure_device_ready(self):
-        b = self._make_backend()
-        b._helper._device_id = None
-        b.set_device = MagicMock()
-        b._ensure_device_ready()
-        b.set_device.assert_called_once()
-
-    def test_ensure_device_ready_already_set(self):
-        b = self._make_backend()
-        b._helper._device_id = 0
-        b.set_device = MagicMock()
-        b._ensure_device_ready()
-        b.set_device.assert_not_called()
+        b.store.pre_register_device_memory.assert_not_called()
 
 
 # =========================================================================

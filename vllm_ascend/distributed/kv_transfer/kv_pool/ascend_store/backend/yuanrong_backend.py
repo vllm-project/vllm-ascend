@@ -1,9 +1,7 @@
-import hashlib
+import json
 import os
 from dataclasses import dataclass
-from typing import Any
 
-import regex as re
 import torch
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_world_group
@@ -11,95 +9,53 @@ from vllm.logger import logger
 from vllm.utils.network_utils import split_host_port
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
-
-
-def _iter_slices(total: int, batch_size: int):
-    for start in range(0, total, batch_size):
-        end = min(start + batch_size, total)
-        yield start, end
 
 
 @dataclass
 class YuanrongConfig:
     worker_addr: str
-    enable_exclusive_connection: bool
     enable_remote_h2d: bool
+    remote_h2d_transport_backend: str
+    enable_fabric_mem: bool
+    connect_timeout_ms: int = 9000
+    request_timeout_ms: int = 0
+    get_sub_timeout_ms: int = 0
+
+    @staticmethod
+    def from_file(file_path: str) -> "YuanrongConfig":
+        with open(file_path) as f:
+            config = json.load(f)
+        return YuanrongConfig(
+            worker_addr=config.get("worker_addr", ""),
+            enable_remote_h2d=bool(config.get("enable_remote_h2d", False)),
+            remote_h2d_transport_backend=config.get("remote_h2d_transport_backend", "HIXL"),
+            enable_fabric_mem=bool(config.get("enable_fabric_mem", False)),
+            connect_timeout_ms=config.get("connect_timeout_ms", 9000),
+            request_timeout_ms=config.get("request_timeout_ms", 0),
+            get_sub_timeout_ms=config.get("get_sub_timeout_ms", 0),
+        )
 
     @staticmethod
     def load_from_env() -> "YuanrongConfig":
-        worker_addr = os.getenv("DS_WORKER_ADDR")
-        if not worker_addr:
-            raise ValueError("Environment variable DS_WORKER_ADDR is required, expected format '<host>:<port>'.")
-
-        return YuanrongConfig(
-            worker_addr=worker_addr,
-            enable_exclusive_connection=bool(int(os.getenv("DS_ENABLE_EXCLUSIVE_CONNECTION", "0"))),
-            enable_remote_h2d=bool(int(os.getenv("DS_ENABLE_REMOTE_H2D", "0"))),
-        )
-
-
-class YuanrongHelper:
-    _DS_KEY_MAX_LEN = 1024
-    _DS_KEY_ALLOWED_PATTERN = re.compile(r"^[a-zA-Z0-9\-_!@#%\^\*\(\)\+\=\:;]+$")
-    _DS_KEY_INVALID_CHAR_PATTERN = re.compile(r"[^a-zA-Z0-9\-_!@#%\^\*\(\)\+\=\:;]")
-    _DS_KEY_HASH_SUFFIX_LEN = 16
-
-    def __init__(self, blob_cls, blob_list_cls):
-        self._blob_cls = blob_cls
-        self._blob_list_cls = blob_list_cls
-        self._device_id: int | None = None
-
-    def normalize_keys(self, keys: list[str]) -> list[str]:
-        normalized: list[str] = []
-        for key in keys:
-            if len(key) <= self._DS_KEY_MAX_LEN and self._DS_KEY_ALLOWED_PATTERN.match(key):
-                normalized.append(key)
-                continue
-
-            sanitized = self._DS_KEY_INVALID_CHAR_PATTERN.sub("_", key)
-            hash_digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
-            suffix = f"__{hash_digest[: self._DS_KEY_HASH_SUFFIX_LEN]}"
-            max_prefix_len = self._DS_KEY_MAX_LEN - len(suffix)
-            normalized.append(sanitized[:max_prefix_len] + suffix)
-        return normalized
-
-    def make_blob_lists(self, addrs_list: list[list[int]], sizes_list: list[list[int]]) -> list[Any]:
-        total = len(addrs_list)
-        if total != len(sizes_list):
-            raise ValueError("Address list and size list length mismatch.")
-
-        device_id = self._device_id
-        if device_id is None:
-            logger.error("Device id is not set. Check device initialization and configuration.")
-            raise RuntimeError("Yuanrong backend device id is not initialized.")
-
-        blob_lists: list[Any] = []
-        for addrs, sizes in zip(addrs_list, sizes_list):
-            if len(addrs) != len(sizes):
-                raise ValueError("Address list and size list length mismatch.")
-            blobs = [
-                self._blob_cls(addr, size)  # type: ignore[misc]
-                for addr, size in zip(addrs, sizes)
-            ]
-            blob_lists.append(
-                self._blob_list_cls(device_id, blobs)  # type: ignore[misc]
-            )
-        return blob_lists
+        config_path = os.getenv("YR_CONFIG_PATH")
+        if not config_path:
+            raise ValueError("The environment variable 'YR_CONFIG_PATH' is not set.")
+        return YuanrongConfig.from_file(config_path)
 
 
 class YuanrongBackend(Backend):
-    _DS_MAX_BATCH_KEYS = 10000
-
     def __init__(self, parallel_config: ParallelConfig):
         try:
-            from yr.datasystem.hetero_client import Blob, DeviceBlobList, HeteroClient  # type: ignore[import-not-found]
+            from yr.datasystem.hetero_client import HeteroClient  # type: ignore[import-not-found]
             from yr.datasystem.kv_client import SetParam  # type: ignore[import-not-found]
             from yr.datasystem.object_client import WriteMode  # type: ignore[import-not-found]
         except ImportError as exc:
-            raise ImportError("Please install openyuanrong-datasystem to use the yuanrong backend.") from exc
+            raise ImportError(
+                "Please install openyuanrong-datasystem by following the instructions at "
+                "https://atomgit.com/openeuler/yuanrong-datasystem/blob/master/docs/source_zh_cn/installation/installation_linux.md "  # noqa: E501
+                "to run vLLM with AscendStoreConnector."
+            ) from exc
 
-        self._helper = YuanrongHelper(Blob, DeviceBlobList)
         self._ds_set_param = SetParam()
         self._ds_set_param.write_mode = WriteMode.NONE_L2_CACHE_EVICT
 
@@ -107,56 +63,48 @@ class YuanrongBackend(Backend):
         try:
             host, port = split_host_port(self.config.worker_addr)
         except Exception as exc:
-            raise ValueError(f"Invalid DS_WORKER_ADDR '{self.config.worker_addr}', expected '<host>:<port>'.") from exc
-        self._hetero_client = HeteroClient(
+            raise ValueError(
+                f"Invalid worker_addr {self.config.worker_addr} in yuanrong config, expected '<host>:<port>'."
+            ) from exc
+        self.store = HeteroClient(
             host,
             int(port),
-            enable_exclusive_connection=self.config.enable_exclusive_connection,
+            connect_timeout_ms=self.config.connect_timeout_ms,
+            req_timeout_ms=self.config.request_timeout_ms,
             enable_remote_h2d=self.config.enable_remote_h2d,
         )
-        self._hetero_client.init()
-        self._is_a2 = get_ascend_device_type() in {AscendDeviceType.A2}
+        self.store.init()
+        self._needs_dev_mem_pregister = (
+            self.config.enable_remote_h2d
+            and self.config.remote_h2d_transport_backend == "HIXL"
+            and not self.config.enable_fabric_mem
+        )
         self._registered_buffers: tuple[list[int], list[int]] | None = None
         self._buffers_registered = False
-
-    def _ensure_device_ready(self):
-        if self._helper._device_id is None:
-            self.set_device()
 
     def set_device(self):
         local_rank = get_world_group().local_rank
         device = torch.device(f"npu:{local_rank}")
         torch.npu.set_device(device)
-        self._helper._device_id = int(torch.npu.current_device())
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
         self._registered_buffers = (list(ptrs), list(lengths))
         self._register_buffers_if_needed()
 
     def _register_buffers_if_needed(self):
-        if self._is_a2:
-            return
-        if not self.config.enable_remote_h2d:
+        if not self._needs_dev_mem_pregister:
             return
         if self._registered_buffers is None or self._buffers_registered:
             return
         ptrs, lengths = self._registered_buffers
-        self._hetero_client.pre_register_device_memory(ptrs, lengths)  # type: ignore[union-attr]
+        assert self.store is not None
+        self.store.pre_register_device_memory(ptrs, lengths)
         self._buffers_registered = True
 
     def exists(self, keys: list[str]) -> list[int]:
-        if len(keys) == 0:
-            return []
+        assert self.store is not None
         try:
-            keys = self._helper.normalize_keys(keys)
-            if len(keys) <= self._DS_MAX_BATCH_KEYS:
-                exists = self._hetero_client.exist(keys)  # type: ignore[union-attr]
-                return [1 if value else 0 for value in exists]
-            results: list[int] = []
-            for start, end in _iter_slices(len(keys), self._DS_MAX_BATCH_KEYS):
-                exists = self._hetero_client.exist(keys[start:end])  # type: ignore[union-attr]
-                results.extend(1 if value else 0 for value in exists)
-            return results
+            return self.store.batch_is_exist(keys)
         except Exception as exc:
             logger.error(
                 "Failed to check keys. keys_count=%d, type=%s, error=%s. Check network and yuanrong service.",
@@ -167,27 +115,10 @@ class YuanrongBackend(Backend):
             return [0] * len(keys)
 
     def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> list[int] | None:
-        if len(keys) == 0:
-            return []
+        assert self.store is not None
         failed_keys_for_log = keys
         try:
-            self._ensure_device_ready()
-            keys = self._helper.normalize_keys(keys)
-            failed_keys_for_log = keys
-            blob_lists = self._helper.make_blob_lists(addrs, sizes)
-            failed_keys: list[str] = []
-            if len(keys) <= self._DS_MAX_BATCH_KEYS:
-                failed_keys = self._hetero_client.mget_h2d(  # type: ignore[union-attr]
-                    keys, blob_lists, 0
-                )
-            else:
-                for start, end in _iter_slices(len(keys), self._DS_MAX_BATCH_KEYS):
-                    failed_keys_for_log = keys[start:end]
-                    failed_keys.extend(
-                        self._hetero_client.mget_h2d(  # type: ignore[union-attr]
-                            keys[start:end], blob_lists[start:end], 0
-                        )
-                    )
+            failed_keys = self.store.mget_h2d_from_multi_buffers(keys, addrs, sizes, self.config.get_sub_timeout_ms)
             if failed_keys:
                 logger.error(
                     "Failed to get %d keys out of %d. Check key existence and memory state.",
@@ -212,24 +143,10 @@ class YuanrongBackend(Backend):
             return None
 
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
-        if len(keys) == 0:
-            return
+        assert self.store is not None
         failed_keys_for_log = keys
         try:
-            self._ensure_device_ready()
-            keys = self._helper.normalize_keys(keys)
-            failed_keys_for_log = keys
-            blob_lists = self._helper.make_blob_lists(addrs, sizes)
-            if len(keys) <= self._DS_MAX_BATCH_KEYS:
-                self._hetero_client.mset_d2h(  # type: ignore[union-attr]
-                    keys, blob_lists, self._ds_set_param
-                )
-            else:
-                for start, end in _iter_slices(len(keys), self._DS_MAX_BATCH_KEYS):
-                    failed_keys_for_log = keys[start:end]
-                    self._hetero_client.mset_d2h(  # type: ignore[union-attr]
-                        keys[start:end], blob_lists[start:end], self._ds_set_param
-                    )
+            self.store.mset_d2h_from_multi_buffers(keys, addrs, sizes, self._ds_set_param)
         except Exception as exc:
             logger.error(
                 "Failed to put %d keys out of %d. Check network and yuanrong service.",

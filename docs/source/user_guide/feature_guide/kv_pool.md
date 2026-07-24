@@ -888,8 +888,8 @@ dscli start -w \
   --sc_stream_socket_num 0
 ```
 
-The `--worker_address` value is consumed later by `DS_WORKER_ADDR`, so keep
-the host and port identical on the same node.
+The `--worker_address` value is consumed later as `worker_addr` in
+`yuanrong.json`, so keep the host and port identical on the same node.
 
 The tuning parameters above have the following effects:
 
@@ -938,17 +938,13 @@ Set the following environment variables on each node before starting vLLM:
 | Variable | Required | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `PYTHONHASHSEED` | Yes | `0` | Must be consistent across all nodes to guarantee uniform hash generation. |
-| `DS_WORKER_ADDR` | Yes | N/A | Datasystem worker address in `<host>:<port>` format. This must match the local `dscli start --worker_address` value. |
+| `YR_CONFIG_PATH` | Yes | N/A | Full path to the `yuanrong.json` config file described below. |
 | `DATASYSTEM_CLIENT_LOG_DIR` | No | `~/.datasystem/logs` | Directory for Yuanrong client SDK logs created by the vLLM process. Use a directory separate from the worker logs. |
-| `DS_ENABLE_EXCLUSIVE_CONNECTION` | No | `0` | Passed to Yuanrong `HeteroClient.enable_exclusive_connection`. Use `1` to enable the exclusive connection mode when required by your deployment. |
-| `DS_ENABLE_REMOTE_H2D` | No | `0` | Passed to Yuanrong `HeteroClient.enable_remote_h2d`. Use `1` only after the Remote H2D requirements below are met. |
 
 ```bash
 export PYTHONHASHSEED=0
-export DS_WORKER_ADDR="${WORKER_IP}:31501"
+export YR_CONFIG_PATH="/xxxxxx/yuanrong.json"
 export DATASYSTEM_CLIENT_LOG_DIR="/var/log/yuanrong/client"
-export DS_ENABLE_EXCLUSIVE_CONNECTION=0
-export DS_ENABLE_REMOTE_H2D=0
 
 mkdir -p "${DATASYSTEM_CLIENT_LOG_DIR}"
 ```
@@ -957,9 +953,61 @@ Set `DATASYSTEM_CLIENT_LOG_DIR` before starting vLLM because the Yuanrong
 client reads it during logging initialization. Client SDK logs, whose base
 name is normally `ds_client`, are written to this directory.
 
+#### Configure yuanrong.json
+
+The `yuanrong.json` file pointed to by `YR_CONFIG_PATH` carries the Yuanrong
+client connection options:
+
+```json
+{
+    "worker_addr": "1.2.3.4:31501",
+    "connect_timeout_ms": 9000,
+    "request_timeout_ms": 0,
+    "get_sub_timeout_ms": 0,
+    "enable_remote_h2d": false,
+    "remote_h2d_transport_backend": "HIXL",
+    "enable_fabric_mem": false
+}
+```
+
+**worker_addr**: Datasystem worker address in `<host>:<port>` format. This
+must match the local `dscli start --worker_address` value.
+**connect_timeout_ms**: Maximum time in milliseconds for the Yuanrong client
+to establish a connection. Yuanrong requires an integer greater than or equal
+to `500`. Defaults to `9000`.
+**request_timeout_ms**: Timeout in milliseconds for Yuanrong client requests.
+Defaults to `0`, which preserves the Yuanrong SDK behavior of using
+`connect_timeout_ms` as the request timeout. Set a positive value to control
+request timeout independently.
+**get_sub_timeout_ms**: Maximum time in milliseconds for each
+`mget_h2d_from_multi_buffers` request to wait for objects to become ready. `0`
+means that no waiting is allowed. Defaults to `0`. Yuanrong validates this
+value when the Get request runs. It may be greater than `request_timeout_ms`;
+the Yuanrong Get path expands that call's RPC timeout to accommodate the
+configured object-ready wait.
+**enable_remote_h2d**: Passed to Yuanrong `HeteroClient.enable_remote_h2d`.
+Use `true` only after the Remote H2D requirements below are met. Defaults to
+`false`.
+**remote_h2d_transport_backend**: vLLM-side transport name, used by the
+Yuanrong backend to decide whether to pre-register device memory. `HIXL`
+(default) for HIXL HCCS (covers buffer-pool, HIXL RoCE direct, and FabricMem
+sub-modes); `P2P_TRANSFER` for datasystem P2P-Transfer over RoCE. Must
+correspond to the worker-side `--remote_h2d_link_type` (see the
+[Remote H2D link parameters](#remote-h2d-link-parameters) table below for
+the `HIXL` ↔ `HCCS` / `P2P_TRANSFER` ↔ `ROCE` mapping). Under `HIXL` the
+backend pre-registers device memory unless `enable_fabric_mem` is `true`;
+under `P2P_TRANSFER` it skips pre-registration.
+**enable_fabric_mem**: Selects HIXL FabricMem mode, where HIXL
+`OPTION_ENABLE_USE_FABRIC_MEM` handles Fabric shareable handle exchange
+automatically and the backend skips client-side `pre_register_device_memory`.
+Only meaningful when `remote_h2d_transport_backend="HIXL"`. Defaults to `false`.
+FabricMem requires datasystem-side support (HIXL FabricMem build and the
+corresponding datasystem environment variable); check the datasystem
+documentation before enabling this flag.
+
 #### Remote H2D Requirements
 
-Set `DS_ENABLE_REMOTE_H2D=1` only when Remote Host-to-Device transfer is
+Set `enable_remote_h2d` to `true` only when Remote Host-to-Device transfer is
 enabled and verified in the Yuanrong Datasystem deployment:
 
 * Reserve enough 2MiB HugeTLB pages before starting the worker. For 40GiB
@@ -984,14 +1032,51 @@ dscli start -w \
   --enable_worker_worker_batch_get true \
   --sc_regular_socket_num 0 \
   --sc_stream_socket_num 0 \
-  --remote_h2d_device_ids "0,1,2,3,4,5,6,7"
+  --remote_h2d_device_ids "0,1,2,3,4,5,6,7" \
+  --remote_h2d_link_type "ROCE"
 ```
+
+For HIXL HCCS links (Atlas A3 with HCCS reachability), set
+`--remote_h2d_link_type "HCCS"` and the HIXL buffer-pool parameter. The IP in
+`--worker_address` is also used as the HIXL endpoint IP, so use a reachable
+address rather than `127.0.0.1` or `0.0.0.0`. HIXL RoCE direct mode is a
+sub-mode of HCCS selected by `HCCL_INTRA_ROCE_ENABLE=1` on both sides and
+additionally requires a reachable RoCE link:
+
+```bash
+dscli start -w \
+  --worker_address "${WORKER_IP}:31501" \
+  --etcd_address "${ETCD_IP}:2379" \
+  --log_dir "/var/log/yuanrong/worker" \
+  --shared_memory_size_mb 40960 \
+  --arena_per_tenant 1 \
+  --enable_huge_tlb true \
+  --enable_fallocate false \
+  --rpc_thread_num 64 \
+  --oc_thread_num 64 \
+  --enable_worker_worker_batch_get true \
+  --sc_regular_socket_num 0 \
+  --sc_stream_socket_num 0 \
+  --remote_h2d_device_ids "0,1,2,3,4,5,6,7" \
+  --remote_h2d_link_type "HCCS" \
+  --remote_h2d_hccs_buffer_pool "4:8"
+```
+
+#### Remote H2D link parameters
+
+| Parameter | Default | Description |
+| :--- | :--- | :--- |
+| `remote_h2d_device_ids` | empty | Non-empty enables worker-side RH2D. Comma-separated device IDs, e.g. `"0,1,2,3,4,5,6,7"`. |
+| `remote_h2d_link_type` | `ROCE` | Link type, case-sensitive. `ROCE` for P2P-Transfer over RoCE; `HCCS` for HIXL HCCS (covers buffer-pool, HIXL RoCE direct, and FabricMem sub-modes). Must correspond to the client-side `remote_h2d_transport_backend` in `yuanrong.json` (`ROCE` ↔ `P2P_TRANSFER`, `HCCS` ↔ `HIXL`). For `HCCS`, the client process must also export `DS_RH2D_LINK_TYPE=HCCS` before starting vLLM (the backend does not export it automatically); `ROCE` is the datasystem default and needs no env var. |
+| `remote_h2d_hccs_buffer_pool` | `4:8` | HIXL buffer-pool parameter `<count>:<size>`, only used when `remote_h2d_link_type=HCCS`. Ignored under HIXL RoCE direct mode (`HCCL_INTRA_ROCE_ENABLE=1`). |
 
 * Make sure the NPU driver, firmware, and CANN toolkit required by Yuanrong
   Remote H2D are installed and visible to the worker process. In containers,
   mount the Ascend driver path, `npu-smi`, `hccn_tool`, `/etc/hccn.conf`,
   `/etc/ascend_install.info`, and the required `/dev/davinci*` devices.
-* Verify the NPU and RoCE environment before enabling the client flag:
+* Verify the NPU environment before enabling the client flag. The RoCE
+  checks below apply to `P2P_TRANSFER` and HIXL RoCE direct mode; HCCS
+  buffer-pool mode does not require a reachable RoCE link:
 
 ```bash
 # Check the current 2MiB HugeTLB page size, total count, and free count.
@@ -1019,8 +1104,8 @@ hccn_tool -i <local_npu_id> -ip -g
 hccn_tool -i <local_npu_id> -ping -g address <remote_npu_ip>
 ```
 
-If these checks fail, keep `DS_ENABLE_REMOTE_H2D=0` and use the default
-Datasystem transfer path.
+If these checks fail, keep `enable_remote_h2d` at `false` in `yuanrong.json`
+and use the default Datasystem transfer path.
 
 ### Run AscendStoreConnector with Yuanrong backend
 
@@ -1055,13 +1140,14 @@ and the worker process. Each instance must use a unique port value.
 
 ### Notes
 
-* The Yuanrong backend normalizes KV keys before calling Datasystem. Supported
-  ASCII keys up to 1024 bytes are preserved. Longer keys or keys containing
-  unsupported characters are rewritten to a maximum of 1024 characters with a
-  hash suffix, so do not rely on the raw key string when debugging backend
-  storage.
-* No extra buffer pre-registration step is required for Yuanrong. The backend
-  uses device pointers directly when building blob lists.
+* The Yuanrong backend passes KV keys to the Datasystem SDK as-is, without
+  rewriting them. Ensure keys are valid Datasystem keys in production.
+* When `enable_remote_h2d` is `true` and `remote_h2d_transport_backend` is
+  `HIXL` (with `enable_fabric_mem` `false`), the backend pre-registers device
+  buffer pointers (`register_buffer`) with the Datasystem worker to enable
+  Remote H2D transfer. Under `P2P_TRANSFER` or FabricMem mode the backend
+  skips pre-registration and uses device pointers directly when building blob
+  lists.
 
 #### [2. Run Inference](#2-run-inference)
 
