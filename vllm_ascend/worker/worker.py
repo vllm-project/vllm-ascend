@@ -701,6 +701,15 @@ class NPUWorker(WorkerBase):
                 if not any(x in compile_range for x in all_sizes):
                     warmup_sizes.append(compile_range.end)
 
+        # When EP spans DP groups, MoE all-to-all in _dummy_run requires all
+        # ranks across DP groups to participate simultaneously. Barrier ensures
+        # both DP groups enter warmup together.
+        if (self.parallel_config.enable_expert_parallel
+                and self.parallel_config.data_parallel_size_local > 1):
+            from vllm_ascend.distributed.parallel_state import get_mc2_group
+            import torch.distributed as dist
+            dist.barrier(group=get_mc2_group().device_group)
+
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size)
