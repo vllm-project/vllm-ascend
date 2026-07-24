@@ -707,7 +707,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 assert graph_param_count % num_layers == 0, (
                     f"graph_param_count ({graph_param_count}) is not a multiple of "
                     f"num_layers ({num_layers}); block-wise key replication would "
-                    f"mis-pair captured ops with metadata. This is an unexpected "
+                    f"mismatch captured ops with metadata. This is an unexpected "
                     f"capture state under LoRA + TP graph mode."
                 )
                 attn_keys = attn_keys * (graph_param_count // num_layers)
