@@ -939,6 +939,7 @@ class KVCacheRecvingThread(threading.Thread):
                 ret,
             )
             raise RuntimeError(f"Mooncake transfer failed, ret: {ret}")
+        torch.npu.synchronize()
 
         req_end_time = time.perf_counter()
         req_transfer_elapsed = (req_end_time - req_start_time) * 1000
