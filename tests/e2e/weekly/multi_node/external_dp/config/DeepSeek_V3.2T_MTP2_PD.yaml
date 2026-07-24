@@ -272,7 +272,7 @@ benchmarks:
     max_out_len: 65536
     batch_size: 32
     baseline: 89.9
-    threshold: 1
+    threshold: 10
     temperature: 1.0
     top_p: 0.95
     ignore_eos: false

@@ -4035,12 +4035,12 @@ class TestEagleProposerSetInputsFirstPass:
         Expected output layout:
         Request 0 (6 output slots = 4 - 1 + 3):
         - idx 0-2: shifted tokens [11, 12, 100]
-        - idx 3-4: parallel_drafting_tokens, is_masked=True
+        - idx 3-4: masked parallel drafting tokens
         - idx 5: padding_token, is_rejected=True
         Request 1 (6 output slots = 4 - 1 + 3):
         - idx 6-8: shifted tokens [21, 22, 23]
         - idx 9: bonus token 200
-        - idx 10-11: parallel_drafting_tokens, is_masked=True
+        - idx 10-11: masked parallel drafting tokens
         """
         num_speculative_tokens = 3
         block_size = BLOCK_SIZE
