@@ -962,6 +962,7 @@ class NPUPlatform(Platform):
             num_tokens,
             vllm_config,
             is_draft_model=is_draft_model,
+            in_profile_run=in_profile_run,
         )
         moe_comm_method = get_moe_comm_method(moe_comm_type)
 
