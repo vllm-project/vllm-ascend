@@ -31,6 +31,7 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import AttentionStatePair, BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import AutoRegressiveSpeculator
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -40,11 +41,23 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 logger = logging.getLogger(__name__)
 
 
-class AscendEagleSpeculator(EagleSpeculator):
+class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
+    """Shared Ascend spec-decode loop for AscendEagle/AscendMTPSpeculator.
+
+    Subclasses AutoRegressiveSpeculator (the common base of EagleSpeculator and
+    MTPSpeculator) so the Ascend overrides are type-checked against a concrete
+    base. Each override keeps its ``super()`` call; on a combined subclass
+    (e.g. AscendEagleSpeculator) the cooperative MRO routes ``super()`` to the
+    concrete upstream speculator (Eagle/MTP) before reaching
+    AutoRegressiveSpeculator.
+    """
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        """Override GPU EagleSpeculator.__init__ for Ascend NPUs.
-        attnention metadata building in Ascend backend needs more information,
-        such as seq_lens_cpu from input_batch, so we need to override __init__.
+        """Override the upstream __init__ for Ascend NPUs.
+
+        Ascend attention-metadata building needs more information (e.g.
+        seq_lens_cpu from input_batch), so we replace input_buffers with
+        AscendInputBuffers after super().__init__.
         """
         super().__init__(vllm_config, device)
 
@@ -289,6 +302,15 @@ class AscendEagleSpeculator(EagleSpeculator):
                 metadata.attn_state = AscendAttentionState.DecodeOnly
         return attn_metadata
 
+    def get_draft_decode_num_reqs_padded(self, desc: BatchExecutionDescriptor) -> int:
+        """Padded request count for building draft decode attention metadata.
+
+        Eagle (flat attention) uses ``num_reqs``; MLA-aware subclasses override
+        to use padded ``num_tokens`` (FIA TND) so the decode aclgraph replays
+        with the right batch shape.
+        """
+        return desc.num_reqs
+
     def build_draft_attn_metadatas(self, num_reqs_padded, is_draft_model_prefill):
         """Build draft_attn_metadatas for partial-merged draft graph."""
         attn_metadata = self.model_state.attn_metadata
@@ -371,6 +393,13 @@ class AscendEagleSpeculator(EagleSpeculator):
         assert self.input_batch is not None
         seq_lens_cpu = torch.from_numpy(self.input_batch.seq_lens_np)
         return seq_lens_cpu
+
+
+class AscendEagleSpeculator(AscendAutoRegressiveSpeculator, EagleSpeculator):
+    """Ascend Eagle speculator: the NPU loop from AscendAutoRegressiveSpeculator
+    layered on upstream EagleSpeculator (flat/GQA attention)."""
+
+    pass
 
 
 # TODO Remove this patch when cann fix the gather bug.
