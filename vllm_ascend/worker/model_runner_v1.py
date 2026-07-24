@@ -143,6 +143,7 @@ from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
+from vllm_ascend.ops.triton.spec_decode.ngram import triton_ngram_spec_decode
 from vllm_ascend.spec_decode.step3p5 import AscendStep3p5MTPProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 from vllm_ascend.spec_decode.utils import (
@@ -1689,38 +1690,30 @@ class NPUModelRunner(GPUModelRunner):
                 num_speculative_tokens=scheduler_output.num_spec_tokens_to_schedule,
             )
         elif isinstance(self.drafter, AscendNgramProposerNPU):
-            batch_size = min(self.input_batch.num_reqs, self.token_ids_gpu_tensor.shape[0])
-
-            # prepare sampled_token_ids tensor（list → padded tensor）
-            sampled_token_ids = valid_sampled_token_ids
-            if isinstance(sampled_token_ids, list):
-                max_len = max((len(sublist) for sublist in sampled_token_ids), default=0)
-                max_len = max(max_len, 1)
-                padded_list = [
-                    sublist + [-1] * (max_len - len(sublist))
-                    for sublist in sampled_token_ids
-                ]
-                sampled_token_ids_tensor = torch.tensor(
-                    padded_list, dtype=torch.int32, device=self.device
-                )
-            else:
-                sampled_token_ids_tensor = sampled_token_ids
-
-            (_token_ids, next_token_ids, draft_token_ids,
-             num_valid_draft_tokens) = torch.ops._C_ascend.npu_ngram_spec_decode(
+            batch_size = min(self.input_batch.num_reqs,
+                             self.token_ids_gpu_tensor.shape[0])
+            vocab_size = self.model_config.get_vocab_size()
+            (next_token_ids, draft_token_ids,
+             num_valid_draft_tokens, valid_sampled_tokens_count
+             ) = triton_ngram_spec_decode(
                 self.token_ids_gpu_tensor[:batch_size],       # [B, max_seq_len], in-place
                 self.num_tokens_no_spec_gpu[:batch_size],      # [B]
-                sampled_token_ids_tensor[:batch_size],         # [B, max_new_tokens]
+                valid_sampled_token_ids,                       # list[list[int]] or [B, max_new_tokens]
                 self.discard_request_mask.gpu[:batch_size],    # [B]
-                vocab_size=self.model_config.get_vocab_size(),
+                vocab_size=vocab_size,
                 min_n=self.drafter.min_n,
                 max_n=self.drafter.max_n,
                 k=self.drafter.k,
             )
 
-            # only async scheduling, set prev_sampled_token_ids，
-            if self.use_async_scheduling:
-                self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
+            # # only async scheduling, set prev_sampled_token_ids，
+            # if self.use_async_scheduling:
+            #     self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
+
+            # Communicate verified token count to scheduler for async scheduling.
+            self._copy_valid_sampled_token_count(
+                next_token_ids, valid_sampled_tokens_count
+            )
 
             # save num_valid_draft_tokens for scheduler trim
             self._num_valid_draft_tokens = num_valid_draft_tokens
