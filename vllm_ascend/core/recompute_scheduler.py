@@ -44,6 +44,7 @@ from vllm.v1.core.sched.request_queue import (
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.sched.utils import remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs, FinishReason
+from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -100,6 +101,56 @@ class RecomputeScheduler(Scheduler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.is_kv_producer = self.vllm_config.kv_transfer_config and self.vllm_config.kv_transfer_config.is_kv_producer
+
+    def _get_reconciled_computed_blocks(self, request: Request) -> tuple[KVCacheBlocks, int, int]:
+        computed_result = self.kv_cache_manager.get_computed_blocks(request)
+        if vllm_version_is("0.25.1"):
+            blocks, num_computed_tokens = cast(tuple[KVCacheBlocks, int], computed_result)
+            return blocks, num_computed_tokens, 0
+        return cast(tuple[KVCacheBlocks, int, int], computed_result)
+
+    def get_computed_blocks_for_connector(self, request: Request) -> tuple[KVCacheBlocks, int, int, bool]:
+        """Return local connector hits without collapsing FullAttention reuse."""
+        kv_cache_manager = self.kv_cache_manager
+        coordinator = kv_cache_manager.coordinator
+        full_attention_group_id = next(
+            (
+                group_ids[0]
+                for spec, group_ids, _manager_cls, _use_eagle in getattr(coordinator, "attention_groups", ())
+                if isinstance(spec, FullAttentionSpec)
+            ),
+            None,
+        )
+        if not (
+            kv_cache_manager.kv_cache_config.has_mamba_layers
+            and isinstance(coordinator, HybridKVCacheCoordinator)
+            and full_attention_group_id is not None
+        ):
+            return *self._get_reconciled_computed_blocks(request), False
+
+        if coordinator.dcp_world_size * getattr(coordinator, "pcp_world_size", 1) > 1:
+            return *self._get_reconciled_computed_blocks(request), False
+
+        if not kv_cache_manager.enable_caching or request.skip_reading_prefix_cache:
+            return kv_cache_manager.empty_kv_cache_blocks, 0, 0, False
+
+        computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
+            request.block_hashes, request.num_tokens - 1
+        )
+        full_attention_hit = per_group_hits[full_attention_group_id]
+        if any(hit > full_attention_hit for hit in per_group_hits):
+            return *self._get_reconciled_computed_blocks(request), False
+
+        coordinator.num_uncached_common_prefix_tokens = 0
+        if kv_cache_manager.log_stats:
+            assert kv_cache_manager.prefix_cache_stats is not None
+            kv_cache_manager.prefix_cache_stats.record(
+                num_tokens=request.num_tokens,
+                num_hits=full_attention_hit,
+                preempted=request.num_preemptions > 0,
+            )
+        blocks = kv_cache_manager.create_kv_cache_blocks(computed)
+        return blocks, full_attention_hit, 0, min(per_group_hits) < full_attention_hit
 
     def _update_waiting_for_remote_kv(self, request: Request) -> None:
         """
@@ -486,43 +537,21 @@ class RecomputeScheduler(Scheduler):
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
+                    hit_diverged = False
                     # Get locally-cached tokens.
-                    if (
-                        self.connector is not None
-                        and not self.is_kv_producer
-                        and self.has_mamba_layers
-                        and isinstance(
-                            self.kv_cache_manager.coordinator,
-                            HybridKVCacheCoordinator,
-                        )
-                    ):
-                        computed_blocks, per_group_hits = (
-                            self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
-                                request.block_hashes,
-                                request.num_tokens - 1,
-                            )
-                        )
-                        new_computed_blocks = self.kv_cache_manager.create_kv_cache_blocks(computed_blocks)
-                        num_new_local_computed_tokens = max(per_group_hits)
-                        if self.kv_cache_manager.log_stats:
-                            assert self.kv_cache_manager.prefix_cache_stats is not None
-                            self.kv_cache_manager.prefix_cache_stats.record(
-                                num_tokens=request.num_tokens,
-                                num_hits=num_new_local_computed_tokens,
-                                preempted=request.num_preemptions > 0,
-                            )
+                    if self.connector is not None:
+                        (
+                            new_computed_blocks,
+                            num_new_local_computed_tokens,
+                            request.shared_prefix_boundary,
+                            hit_diverged,
+                        ) = self.get_computed_blocks_for_connector(request)
                     else:
-                        computed_result = self.kv_cache_manager.get_computed_blocks(request)
-                        if vllm_version_is("0.25.1"):
-                            new_computed_blocks, num_new_local_computed_tokens = cast(
-                                tuple[KVCacheBlocks, int], computed_result
-                            )
-                        else:
-                            (
-                                new_computed_blocks,
-                                num_new_local_computed_tokens,
-                                request.shared_prefix_boundary,
-                            ) = cast(tuple[KVCacheBlocks, int, int], computed_result)
+                        (
+                            new_computed_blocks,
+                            num_new_local_computed_tokens,
+                            request.shared_prefix_boundary,
+                        ) = self._get_reconciled_computed_blocks(request)
 
                     # In case of hybrid models, obtain a hint for the
                     # Marconi-style APC admission logic.
@@ -549,6 +578,23 @@ class RecomputeScheduler(Scheduler):
                         num_external_computed_tokens = ext_tokens
                         connector_prefix_cache_queries = request.num_tokens - num_new_local_computed_tokens
                         connector_prefix_cache_hits = num_external_computed_tokens
+
+                        if hit_diverged and num_external_computed_tokens == 0:
+                            # No external suffix backs the deeper local hit;
+                            # recompute from the boundary all groups share.
+                            (
+                                new_computed_blocks,
+                                num_new_local_computed_tokens,
+                                request.shared_prefix_boundary,
+                            ) = self._get_reconciled_computed_blocks(request)
+                            connector_prefix_cache_queries = request.num_tokens - num_new_local_computed_tokens
+
+                    if self.has_mamba_layers:
+                        num_uncached_common_prefix_tokens = getattr(
+                            self.kv_cache_manager.coordinator,
+                            "num_uncached_common_prefix_tokens",
+                            0,
+                        )
 
                     # Total computed tokens (local + external).
                     num_computed_tokens = num_new_local_computed_tokens + num_external_computed_tokens
