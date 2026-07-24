@@ -7,6 +7,8 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_coordinator import SpecGroup
+from vllm.v1.core.kv_cache_utils import BlockHashListWithBlockSize
 from vllm.v1.core.single_type_kv_cache_manager import (
     SlidingWindowManager,
 )
@@ -214,6 +216,53 @@ def test_get_effective_block_size(
     )
 
     assert coordinator._get_effective_block_size(spec_factory()) == expected
+
+
+@pytest.mark.parametrize(
+    ("is_v0251", "expected_hash_scale", "expected_hit_length"),
+    [
+        pytest.param(True, 2, 256, id="v0.25.1-physical-block-contract"),
+        pytest.param(False, 8, 1024, id="main-effective-block-contract"),
+    ],
+)
+def test_compressed_cache_hit_uses_versioned_block_contract(
+    monkeypatch,
+    is_v0251: bool,
+    expected_hash_scale: int,
+    expected_hit_length: int,
+) -> None:
+    spec = MLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        compress_ratio=4,
+        model_version="deepseek_v4",
+    )
+    manager_cls = MagicMock()
+    manager_cls.find_longest_cache_hit.return_value = ([object(), object()],)
+
+    coordinator = _make_coordinator_for_effective_block_size(
+        dcp_world_size=1,
+        pcp_world_size=1,
+        enable_caching=True,
+    )
+    coordinator.hash_block_size = 64
+    coordinator.lcm_block_size = 512
+    coordinator.block_pool = MagicMock()
+    coordinator.kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)])
+    coordinator.attention_groups = [SpecGroup(spec, [0], manager_cls, False)]
+    monkeypatch.setattr(
+        "vllm_ascend.patch.platform.patch_kv_cache_coordinator.vllm_version_is",
+        lambda version: is_v0251 and version == "0.25.1",
+    )
+
+    _, hit_length = coordinator.find_longest_cache_hit([MagicMock()] * 16, 1024)
+
+    block_hashes = manager_cls.find_longest_cache_hit.call_args.kwargs["block_hashes"]
+    assert isinstance(block_hashes, BlockHashListWithBlockSize)
+    assert block_hashes.scale_factor == expected_hash_scale
+    assert hit_length == expected_hit_length
 
 
 def test_get_kv_cache_coordinator_delegates_single_group(monkeypatch) -> None:

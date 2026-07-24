@@ -220,6 +220,17 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             block_size *= compress_ratio
         return block_size
 
+    def _get_physical_hit_block_size(self, kv_cache_spec: KVCacheSpec) -> int:
+        """Return the token span represented by one v0.25.1 hit block."""
+        # ASCEND_ADAPTATION: v0.25.1 single-type managers return physical
+        # blocks only. ``_get_effective_block_size`` also includes an Ascend
+        # compression ratio, so using it to count those blocks can inflate an
+        # MLA hit and make the scheduler skip tokens that are not cached.
+        block_size = kv_cache_spec.block_size
+        if not isinstance(kv_cache_spec, MambaSpec) and self.dcp_world_size * self.pcp_world_size > 1:
+            block_size *= self.dcp_world_size * self.pcp_world_size
+        return block_size
+
     def verify_and_split_kv_cache_groups(self) -> None:
         """
         Groups KV cache groups by their spec type for efficient batch processing
@@ -288,12 +299,10 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
             if not vllm_version_is("0.25.1"):
                 return block_hashes
-            target_block_size = kv_cache_spec.block_size
-            if not isinstance(kv_cache_spec, MambaSpec) and self.dcp_world_size * self.pcp_world_size > 1:
-                target_block_size *= self.dcp_world_size * self.pcp_world_size
-            if target_block_size == self.hash_block_size:
+            block_size = self._get_physical_hit_block_size(kv_cache_spec)
+            if block_size == self.hash_block_size:
                 return block_hashes
-            return BlockHashListWithBlockSize(block_hashes, self.hash_block_size, target_block_size)
+            return BlockHashListWithBlockSize(block_hashes, self.hash_block_size, block_size)
 
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_length = max_cache_hit_length
@@ -322,7 +331,10 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     # Full attention is downward-closed: we only need to look
                     # up cached blocks once; on subsequent iterations just trim
                     # to the (reduced) current hit length.
-                    curr_hit_length = curr_hit_length // group_block_size * group_block_size
+                    if vllm_version_is("0.25.1"):
+                        curr_hit_length = min(curr_hit_length, hit_length_by_group[group_ids[0]])
+                    else:
+                        curr_hit_length = curr_hit_length // group_block_size * group_block_size
                     continue
 
                 drop_eagle_block = use_eagle and idx not in eagle_verified
@@ -344,10 +356,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 )
                 if vllm_version_is("0.25.1"):
                     hit_blocks = hit_result
-                    block_size = spec.block_size
-                    if self.dcp_world_size * self.pcp_world_size > 1:
-                        block_size *= self.dcp_world_size * self.pcp_world_size
-                    _new_hit_length = len(hit_blocks[0]) * block_size
+                    _new_hit_length = len(hit_blocks[0]) * self._get_physical_hit_block_size(spec)
                 else:
                     hit_blocks, _new_hit_length = hit_result
                 if drop_eagle_block:
