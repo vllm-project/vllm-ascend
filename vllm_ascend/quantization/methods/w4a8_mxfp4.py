@@ -100,6 +100,7 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
 class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
     """FusedMoe method for Ascend W4A8_DYNAMIC."""
 
+    supports_eplb = False
     quant_type: QuantType = QuantType.W4A8MXFP
 
     def __init__(self):

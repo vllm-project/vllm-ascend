@@ -15,15 +15,11 @@ class HcclEplbCommunicator(EplbCommunicator):
         self._ep_group = ep_group
         self._npu_stream = None
         self._p2p_ops: list[P2POp] = []
-        self._recv_staging: list[tuple[torch.Tensor, torch.Tensor]] = []
         self._log_initialized()
 
-    @staticmethod
-    def _requires_staging(tensor: torch.Tensor) -> bool:
-        # HCCL rejects non-zero storage offsets for internal-format tensors.
-        # Expert rows are contiguous views, so contiguous() would not allocate
-        # independent storage; clone()/empty_like() are required here.
-        return tensor.storage_offset() != 0
+    @property
+    def needs_profile_buffer_reservation(self) -> bool:
+        return False
 
     def add_send(
         self,
@@ -33,11 +29,10 @@ class HcclEplbCommunicator(EplbCommunicator):
     ) -> None:
         del expert_id
         for tensor in tensors:
-            send_tensor = tensor.clone() if self._requires_staging(tensor) else tensor
             self._p2p_ops.append(
                 P2POp(
                     torch.distributed.isend,
-                    send_tensor,
+                    tensor,
                     dst_rank,
                     self._ep_group,
                 )
@@ -51,15 +46,10 @@ class HcclEplbCommunicator(EplbCommunicator):
     ) -> None:
         del expert_id
         for tensor in tensors:
-            if self._requires_staging(tensor):
-                recv_tensor = torch.empty_like(tensor)
-                self._recv_staging.append((tensor, recv_tensor))
-            else:
-                recv_tensor = tensor
             self._p2p_ops.append(
                 P2POp(
                     torch.distributed.irecv,
-                    recv_tensor,
+                    tensor,
                     src_rank,
                     self._ep_group,
                 )
@@ -74,11 +64,8 @@ class HcclEplbCommunicator(EplbCommunicator):
                 requests = batch_isend_irecv(self._p2p_ops)
                 for request in requests:
                     request.wait()
-                for target, staging in self._recv_staging:
-                    target.copy_(staging)
         finally:
             self._p2p_ops.clear()
-            self._recv_staging.clear()
 
     def set_stream(self, npu_stream) -> None:
         self._npu_stream = npu_stream

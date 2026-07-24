@@ -175,6 +175,8 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
       hidden_sizes]``.
     """
 
+    supports_eplb = False
+
     quant_type: QuantType = QuantType.W4A16
 
     def __init__(self) -> None:

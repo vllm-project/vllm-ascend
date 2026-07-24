@@ -248,7 +248,7 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         mock_config = MagicMock()
         mock_config.enable_fused_mc2 = 1
         mock_get_config.return_value = mock_config
-        self.quant_method.dynamic_eplb = True
+        self.quant_method.use_expert_weight_list = True
         mock_format_cast.return_value = torch.randint(
             -8, 8, (self.num_experts, self.hidden_size, 2 * self.intermediate_size), dtype=torch.int8
         )
@@ -258,3 +258,10 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         self.quant_method.process_weights_after_loading(layer)
         self.assertTrue(hasattr(layer, "w13_weight_list"))
         self.assertFalse(hasattr(layer, "w13_weight_scale_fp32"))
+        self.assertEqual(len(layer.w13_weight_list), self.num_experts)
+        self.assertTrue(all(weight.storage_offset() == 0 for weight in layer.w13_weight_list))
+        weight_views = self.quant_method.get_eplb_weight_views(layer)
+        self.assertIs(weight_views[0], layer.w13_weight_list)
+        self.assertIs(weight_views[1], layer.w2_weight_list)
+        self.assertIs(weight_views[-2], layer.fused_w1_scale_list)
+        self.assertIs(weight_views[-1], layer.fused_w2_scale_list)

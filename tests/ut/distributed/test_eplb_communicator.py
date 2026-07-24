@@ -46,24 +46,22 @@ def test_execute_waits_for_all_transfers_and_clears_queue(communicator, monkeypa
     assert communicator._p2p_ops == []
 
 
-def test_send_stages_nonzero_storage_offset(communicator, monkeypatch):
+def test_send_uses_persistent_expert_tensor_directly(communicator, monkeypatch):
     monkeypatch.setattr(
         communicator_module,
         "P2POp",
         lambda op, tensor, rank, group: (op, tensor, rank, group),
     )
-    tensor = torch.arange(6).view(3, 2)[1]
+    tensor = torch.arange(2)
 
     communicator.add_send([tensor], dst_rank=1, expert_id=3)
 
     send_tensor = communicator._p2p_ops[0][1]
-    assert tensor.storage_offset() != 0
+    assert send_tensor is tensor
     assert send_tensor.storage_offset() == 0
-    assert send_tensor.data_ptr() != tensor.data_ptr()
-    torch.testing.assert_close(send_tensor, tensor)
 
 
-def test_recv_stages_nonzero_storage_offset_and_copies_back(
+def test_recv_uses_persistent_expert_tensor_directly(
     communicator,
     monkeypatch,
 ):
@@ -78,10 +76,11 @@ def test_recv_stages_nonzero_storage_offset_and_copies_back(
         "batch_isend_irecv",
         MagicMock(return_value=[request]),
     )
-    tensor = torch.zeros(3, 2)[1]
+    tensor = torch.zeros(2)
 
     communicator.add_recv([tensor], src_rank=1, expert_id=3)
     recv_tensor = communicator._p2p_ops[0][1]
+    assert recv_tensor is tensor
     recv_tensor.fill_(7)
     communicator.execute()
 
@@ -89,12 +88,14 @@ def test_recv_stages_nonzero_storage_offset_and_copies_back(
     torch.testing.assert_close(tensor, torch.full_like(tensor, 7))
     request.wait.assert_called_once_with()
     assert communicator._p2p_ops == []
-    assert communicator._recv_staging == []
+
+
+def test_profile_does_not_reserve_collective_buffers(communicator):
+    assert communicator.needs_profile_buffer_reservation is False
 
 
 def test_execute_clears_queue_after_failure(communicator, monkeypatch):
     communicator._p2p_ops.append(object())
-    communicator._recv_staging.append((torch.empty(1), torch.empty(1)))
     monkeypatch.setattr(
         communicator_module,
         "batch_isend_irecv",
@@ -105,4 +106,3 @@ def test_execute_clears_queue_after_failure(communicator, monkeypatch):
         communicator.execute()
 
     assert communicator._p2p_ops == []
-    assert communicator._recv_staging == []
