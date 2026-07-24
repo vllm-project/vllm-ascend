@@ -856,6 +856,13 @@ class RecomputeScheduler(Scheduler):
         if self.dynamic_sd_lookup is not None and num_scheduled_tokens:
             num_spec_tokens_to_schedule = self.dynamic_sd_lookup[len(num_scheduled_tokens)]
 
+        # Dynamic speculative decoding: pick K for the next step from the
+        # batch-size schedule built by the base Scheduler. Defaults to the
+        # configured K when the feature is disabled.
+        num_spec_tokens_to_schedule = self.num_spec_tokens
+        if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
+            num_spec_tokens_to_schedule = self.dynamic_sd_lookup[len(num_scheduled_tokens)]
+
         scheduler_output = RecomputeSchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
