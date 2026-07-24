@@ -764,7 +764,6 @@ class NonBSPScheduler(Scheduler):
                 req_to_new_blocks[request_id] = self.kv_cache_manager.get_blocks(request_id)
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
-                self._lb_paused_req_ids.discard(request_id)
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 if pad_spec_decode:
@@ -896,8 +895,6 @@ class NonBSPScheduler(Scheduler):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
-        if self._enable_diagnostics:
-            print_scheduler_summary(self, scheduler_output)
         return scheduler_output
 
     def _preempt_request(self, request: Request, timestamp: float) -> None:
@@ -926,30 +923,34 @@ class NonBSPScheduler(Scheduler):
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         super()._update_after_schedule(scheduler_output)
 
-        if not self.scheduler_config.async_scheduling:
-            return
-
-        # Match vLLM's AsyncScheduler semantics. num_computed_tokens has
-        # already advanced above, while the model output has not necessarily
-        # arrived yet. Output placeholders keep decode requests schedulable in
-        # the next engine step instead of making them alternate between one
-        # scheduled step and one num_new_tokens == 0 step.
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
-        spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
-        self._spec_token_placeholders = [-1] * scheduler_output.num_spec_tokens_to_schedule
         for req_id in num_scheduled_tokens:
-            request = self.requests[req_id]
-            if request.is_prefill_chunk:
-                continue
+            self._lb_paused_req_ids.discard(req_id)
 
-            scheduler_output.pending_structured_output_tokens |= (
-                request.use_structured_output and request.num_output_placeholders > 0
-            )
-            cur_num_spec_tokens = len(spec_decode_tokens.get(req_id, ()))
-            request.num_output_placeholders += self.num_sampled_tokens_per_step + cur_num_spec_tokens
-            request.spec_token_ids = self._spec_token_placeholders
-            if self.use_v2_model_runner:
-                request.next_decode_eligible_step = self.current_step + self.pp_size
+        if self.scheduler_config.async_scheduling:
+            # Match vLLM's AsyncScheduler semantics. num_computed_tokens has
+            # already advanced above, while the model output has not necessarily
+            # arrived yet. Output placeholders keep decode requests schedulable in
+            # the next engine step instead of making them alternate between one
+            # scheduled step and one num_new_tokens == 0 step.
+            spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
+            self._spec_token_placeholders = [-1] * scheduler_output.num_spec_tokens_to_schedule
+            for req_id in num_scheduled_tokens:
+                request = self.requests[req_id]
+                if request.is_prefill_chunk:
+                    continue
+
+                scheduler_output.pending_structured_output_tokens |= (
+                    request.use_structured_output and request.num_output_placeholders > 0
+                )
+                cur_num_spec_tokens = len(spec_decode_tokens.get(req_id, ()))
+                request.num_output_placeholders += self.num_sampled_tokens_per_step + cur_num_spec_tokens
+                request.spec_token_ids = self._spec_token_placeholders
+                if self.use_v2_model_runner:
+                    request.next_decode_eligible_step = self.current_step + self.pp_size
+
+        if self._enable_diagnostics:
+            print_scheduler_summary(self, scheduler_output)
 
     def _update_request_with_output(self, request: Request, new_token_ids: list[int]) -> tuple[list[int], bool]:
         if self.scheduler_config.async_scheduling and request.async_tokens_to_discard > 0:
