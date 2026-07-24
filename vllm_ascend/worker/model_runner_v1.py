@@ -1102,8 +1102,38 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         # Record the index of requests that should not be sampled,
-        # so that we could clear the sampled tokens before returning
-        num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
+        # so that we could clear the sampled tokens before returning.
+        # For preempted-then-resumed requests, the scheduler's
+        # NewRequestData.prefill_token_ids carries the full _all_token_ids
+        # (prompt + old output tokens). Use that length as num_tokens
+        # so the discard decision aligns with the scheduler's is_prefill_chunk.
+        # Cache the value across scheduling steps because the request only
+        # appears in scheduled_new_reqs once (first chunk).
+        if not hasattr(self, "_sched_num_tokens_cache"):
+            self._sched_num_tokens_cache: dict[str, int] = {}
+        for new_req_data in scheduler_output.scheduled_new_reqs:
+            if new_req_data.prefill_token_ids:
+                self._sched_num_tokens_cache[new_req_data.req_id] = len(
+                    new_req_data.prefill_token_ids
+                )
+        # num_tokens = base + len(output_token_ids).
+        # - For normal requests: base = num_prompt_tokens (e.g. 63)
+        # - For preempted requests: base = len(prefill_token_ids) (e.g. 3685,
+        #   includes old output tokens). output_token_ids grows naturally
+        #   as new tokens are appended during resumption/decode.
+        num_tokens = [
+            self._sched_num_tokens_cache.get(r, self.requests[r].num_prompt_tokens)
+            + len(self.requests[r].output_token_ids)
+            for r in self.input_batch.req_ids
+        ]
+        # Prune cache to only keep active requests, preventing unbounded
+        # memory growth from completed/aborted requests.
+        active_req_ids = set(self.input_batch.req_ids)
+        self._sched_num_tokens_cache = {
+            req_id: val
+            for req_id, val in self._sched_num_tokens_cache.items()
+            if req_id in active_req_ids
+        }
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
         base_num_reqs = self.input_batch.num_reqs
         num_reqs = base_num_reqs
