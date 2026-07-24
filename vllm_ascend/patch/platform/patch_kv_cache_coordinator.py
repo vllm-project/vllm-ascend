@@ -314,8 +314,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 use_eagle = idx in self.eagle_attn_group_indices and idx not in eagle_verified
 
                 _max_length = curr_hit_length
-                if use_eagle:
-                    # Eagle needs to match one more block and then pop the last.
+                if use_eagle and not isinstance(spec, MambaSpec):
+                    # Mamba finders do not drop the EAGLE lookahead block, so
+                    # allowing a margin here could grow the hybrid hit length.
                     _max_length = min(curr_hit_length + spec.block_size, max_cache_hit_length)
                 eagle_kwarg = {"drop_eagle_block": use_eagle}
                 hit_blocks = manager_cls.find_longest_cache_hit(
@@ -416,8 +417,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 use_eagle = idx in self.eagle_attn_group_indices and idx not in eagle_verified
 
                 _max_length = curr_hit_length
-                if use_eagle:
-                    # Eagle needs to match one more block and then pop the last.
+                if use_eagle and not isinstance(spec, MambaSpec):
+                    # Mamba finders do not drop the EAGLE lookahead block, so
+                    # allowing a margin here could grow the hybrid hit length.
                     _max_length = min(curr_hit_length + spec.block_size, max_cache_hit_length)
                 eagle_kwarg = {"drop_eagle_block": use_eagle}
                 hit_blocks = manager_cls.find_longest_cache_hit(
