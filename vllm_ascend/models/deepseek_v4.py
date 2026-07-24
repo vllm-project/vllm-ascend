@@ -43,6 +43,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+from vllm.logger import logger
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import FusedMoE, fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -90,6 +91,11 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     get_dsv4_compress_ratio,
 )
+
+
+def _needs_mtp_target_hidden_states(vllm_config: VllmConfig) -> bool:
+    speculative_config = vllm_config.speculative_config
+    return speculative_config is not None and speculative_config.method == "mtp"
 
 
 def _get_ascend_dsa_backend():
@@ -988,13 +994,16 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        residual = hidden_states.clone()
+        # hc_pre and hc_post are out-of-place operators. Keep the input alive
+        # as the residual instead of copying the full mHC tensor twice per
+        # decoder layer.
+        residual = hidden_states
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
         hidden_states = self.input_layernorm(hidden_states)
         attn_kwargs = {"positions": positions, "hidden_states": hidden_states, "llama_4_scaling": llama_4_scaling}
         hidden_states = self.self_attn(**attn_kwargs)
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
-        residual = hidden_states.clone()
+        residual = hidden_states
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
@@ -1078,14 +1087,24 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_head_base = nn.Parameter(torch.empty(hc_mult, dtype=torch.float32))
         self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
 
-        # Pre-hc_head residual stream buffer for the MTP draft. Stable
-        # address (outside the cudagraph pool) so the copy_ in forward()
-        # refreshes it correctly across captured shapes.
-        self._mtp_hidden_buffer = torch.empty(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            hc_dim,
-            dtype=vllm_config.model_config.dtype,
-            device=self.device,
+        # The pre-hc_head residual is consumed only by the serial MTP
+        # proposer. Avoid reserving and refreshing this large buffer for
+        # normal serving and for speculative methods that never read it.
+        needs_mtp_hidden_states = _needs_mtp_target_hidden_states(vllm_config)
+        self._mtp_hidden_buffer: torch.Tensor | None = None
+        if needs_mtp_hidden_states:
+            # Keep a stable address outside the cudagraph pool. The captured
+            # copy_ in forward() refreshes it across graph shapes.
+            self._mtp_hidden_buffer = torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                hc_dim,
+                dtype=vllm_config.model_config.dtype,
+                device=self.device,
+            )
+
+        logger.info_once(
+            "[DSV4-PERF] zero-copy mHC residuals=enabled, mtp_hidden_capture=%s",
+            "enabled" if needs_mtp_hidden_states else "disabled",
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -1138,26 +1157,24 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             if layer.layer_idx + 1 in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states.mean(dim=1))
 
-        # Stash pre-hc_head residual for the MTP draft (captured copy_).
-        # When FlashComm1 (sequence parallelism) is enabled, tokens are
-        # partitioned across TP ranks via reduce_scatter in each layer's
-        # row-parallel output projection.  We must all_gather here so the
-        # MTP layers receive the full token set — otherwise only rank 0's
-        # partition is valid and the rest of the buffer holds stale data,
-        # leading to NaN values and low acceptance rate.
-        from vllm_ascend.ascend_forward_context import get_forward_context
+        mtp_hidden_buffer = self._mtp_hidden_buffer
+        if mtp_hidden_buffer is not None:
+            # Stash the pre-hc_head residual for the MTP draft. When
+            # FlashComm1 partitions tokens across TP ranks, reconstruct the
+            # full token set before refreshing the graph-stable buffer.
+            from vllm_ascend.ascend_forward_context import get_forward_context
 
-        forward_ctx = get_forward_context()
-        if forward_ctx is not None and forward_ctx.flash_comm_v1_enabled:
-            h_states_flat = tensor_model_parallel_all_gather(hidden_states.flatten(1), dim=0)
-            pad_size = forward_ctx.pad_size
-            if pad_size > 0:
-                h_states_flat = h_states_flat[:-pad_size]
-            num_tokens = h_states_flat.shape[0]
-            self._mtp_hidden_buffer[:num_tokens].copy_(h_states_flat)
-        else:
-            num_tokens = hidden_states.shape[0]
-            self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
+            forward_ctx = get_forward_context()
+            if forward_ctx is not None and forward_ctx.flash_comm_v1_enabled:
+                h_states_flat = tensor_model_parallel_all_gather(hidden_states.flatten(1), dim=0)
+                pad_size = forward_ctx.pad_size
+                if pad_size > 0:
+                    h_states_flat = h_states_flat[:-pad_size]
+                num_tokens = h_states_flat.shape[0]
+                mtp_hidden_buffer[:num_tokens].copy_(h_states_flat)
+            else:
+                num_tokens = hidden_states.shape[0]
+                mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
