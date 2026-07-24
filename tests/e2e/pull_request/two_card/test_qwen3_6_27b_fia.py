@@ -16,6 +16,7 @@
 import os
 from unittest.mock import patch
 
+import pytest
 from vllm.assets.image import ImageAsset
 
 from tests.e2e.conftest import VllmRunner, qwen_prompt, wait_until_npu_memory_free
@@ -25,6 +26,8 @@ MODEL = "Qwen/Qwen3.6-27B"
 
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
 @wait_until_npu_memory_free()
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(2)
 def test_qwen3_6_27b_multimodel_fia_eager():
     """Verify multimodal generation with FIA op and eager mode."""
     image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
@@ -63,6 +66,8 @@ def test_qwen3_6_27b_multimodel_fia_eager():
 
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
 @wait_until_npu_memory_free()
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(2)
 def test_qwen3_6_27b_multimodel_fia_acl_graph():
     """Verify multimodal generation with FIA op and FULL_AND_PIECEWISE graph mode."""
     image = ImageAsset("cherry_blossom").pil_image.convert("RGB")

@@ -20,6 +20,7 @@
 import os
 from unittest.mock import patch
 
+import pytest
 import torch
 from vllm import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
@@ -30,6 +31,8 @@ from tests.e2e.utils import fork_new_process_for_each_test
 
 @fork_new_process_for_each_test
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_end_to_end():
     free, total = torch.npu.mem_get_info()
     used_bytes_baseline = total - free  # in case other process is running

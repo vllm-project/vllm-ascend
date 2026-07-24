@@ -17,6 +17,7 @@
 #
 
 import huggingface_hub
+import pytest
 from huggingface_hub import snapshot_download as hf_snapshot_download
 from vllm.assets.image import ImageAsset
 
@@ -24,6 +25,8 @@ from tests.e2e.conftest import VllmRunner, qwen_prompt, wait_until_npu_memory_fr
 
 
 @wait_until_npu_memory_free()
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_mamba_ssm_multimodal_reasoning_mtp_full_decode_only():
     """Verify Mamba/SSM multimodal reasoning with MTP and full decode only."""
     image = ImageAsset("cherry_blossom").pil_image.convert("RGB")

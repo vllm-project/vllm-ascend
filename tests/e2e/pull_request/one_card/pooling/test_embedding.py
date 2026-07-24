@@ -30,6 +30,8 @@ MODELS = [
 
 
 @pytest.mark.parametrize("model", MODELS)
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_embed_models_correctness(model: str):
     queries = ["What is the capital of China?", "Explain gravity"]
 
@@ -61,6 +63,8 @@ def test_embed_models_correctness(model: str):
     )
 
 
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_causal_embed_models_using_prefix_caching_correctness():
     # This test is to verify the correctness of prefix caching for embedding models.
     # We compare the outputs of vLLM with and without prefix caching enabled, and check if they are close enough.
@@ -90,6 +94,8 @@ def test_causal_embed_models_using_prefix_caching_correctness():
     )
 
 
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_bge_m3_correctness():
     queries = ["What is the capital of China?", "Explain gravity"]
 

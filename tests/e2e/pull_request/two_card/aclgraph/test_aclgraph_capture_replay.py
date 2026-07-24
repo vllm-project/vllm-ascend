@@ -134,6 +134,8 @@ def _run_worker_process(
 @pytest.mark.parametrize("max_tokens", [4, 36])
 @patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})
 @wait_until_npu_memory_free(target_free_percentage=0.6)
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(2)
 def test_models_aclgraph_capture_replay_metrics_dp2(
     model: str,
     max_tokens: int,

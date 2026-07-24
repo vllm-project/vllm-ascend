@@ -37,6 +37,8 @@ WHISPER_MODELS = [
 
 
 @patch.dict(os.environ, {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_multimodal_vl(vl_config):
     image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
 
@@ -70,6 +72,8 @@ def test_multimodal_vl(vl_config):
 
 
 @patch.dict(os.environ, {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_multimodal_vl_language_model_only():
     example_prompts = [
         "Hello, my name is",
@@ -89,6 +93,8 @@ def test_multimodal_vl_language_model_only():
 
 
 @patch.dict(os.environ, {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_multimodal_audio():
     audio_prompt = "".join([f"Audio {idx + 1}: <|audio_bos|><|AUDIO|><|audio_eos|>\n" for idx in range(2)])
     question = "What sport and what nursery rhyme are referenced?"
@@ -122,6 +128,8 @@ def test_multimodal_audio():
 
 @pytest.mark.parametrize("model", WHISPER_MODELS)
 @patch.dict(os.environ, {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_whisper(model) -> None:
     prompts = ["<|startoftranscript|><|en|><|transcribe|><|notimestamps|>"]
     audios = [AudioAsset("mary_had_lamb").audio_and_sample_rate]

@@ -17,6 +17,8 @@ import statistics
 import time
 from unittest.mock import patch
 
+import pytest
+
 from tests.e2e.conftest import VllmRunner
 
 MODEL = "Qwen/Qwen3-30B-A3B"
@@ -40,6 +42,8 @@ BASELINE_TTFT_S = 5.2
         "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
     },
 )
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(4)
 def test_profiling_chunk_ttft_performance() -> None:
     with VllmRunner(
         MODEL,

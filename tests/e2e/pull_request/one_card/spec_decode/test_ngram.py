@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
 
 
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_ngram(
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
