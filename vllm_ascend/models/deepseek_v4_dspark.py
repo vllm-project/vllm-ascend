@@ -41,7 +41,6 @@ from .deepseek_v4 import (
 
 DSPARK_WO_A_DEQUANT_BLOCK_SIZE = 128
 DSPARK_DEFAULT_BLOCK_SIZE = 5
-DSPARK_DEFAULT_NUM_LAYERS = 3
 DSPARK_SAS_OP_NAMESPACES = ("_ascend_dsv4", "_ascend_v4", "custom")
 DSparkFusedAttentionMetadata = tuple[int, torch.Tensor, torch.Tensor, torch.Tensor]
 
@@ -76,12 +75,22 @@ def _dequant_dspark_wo_a_weight(weight: torch.Tensor, scale: torch.Tensor) -> to
     )
 
 
-def _get_dspark_num_layers(config: PretrainedConfig) -> int:
-    for attr in ("dspark_num_layers", "dspark_num_mtp_layers"):
-        value = getattr(config, attr, None)
-        if value not in (None, 0) and int(value) != DSPARK_DEFAULT_NUM_LAYERS:
-            raise ValueError(f"DSpark requires exactly {DSPARK_DEFAULT_NUM_LAYERS} draft layers, but {attr} is {value}")
-    return DSPARK_DEFAULT_NUM_LAYERS
+def get_dspark_num_layers(config: typing.Any) -> int:
+    """Read the number of DSpark draft layers from the model config."""
+    speculative_config = getattr(config, "speculative_config", None)
+    if speculative_config is not None:
+        config = speculative_config
+    draft_model_config = getattr(config, "draft_model_config", None)
+    if draft_model_config is not None:
+        config = draft_model_config
+    hf_config = getattr(config, "hf_config", None)
+    if hf_config is not None:
+        config = hf_config
+
+    target_layer_ids = getattr(config, "dspark_target_layer_ids", None)
+    if not isinstance(target_layer_ids, list) or not target_layer_ids:
+        raise ValueError("DSpark requires a non-empty dspark_target_layer_ids list.")
+    return len(target_layer_ids)
 
 
 def _make_deepseek_v4_expert_params_mapping(
@@ -242,7 +251,6 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         self.dspark_sparse_attn_op = _get_dspark_sas_op("npu_sparse_attn_sharedkv")
         self.dspark_sparse_attn_metadata_op = _get_dspark_sas_op("npu_sparse_attn_sharedkv_metadata")
         self._dspark_fused_attn_metadata_cache: dict[tuple[object, ...], DSparkFusedAttentionMetadata] = {}
-        self.compress_ratio = 0
         self.dsa_attn.compress_ratio = 0
         # DSpark uses the uncompressed SWA cache as its context cache. Disable
         # the unused compressed DSA cache so only the transferable cache is
@@ -663,7 +671,7 @@ class DeepseekV4DSparkModel(nn.Module):
         self.config = config
         self.hc_mult = config.hc_mult
         self.target_layer_ids = list(getattr(config, "dspark_target_layer_ids", []) or [])
-        self.num_dspark_layers = _get_dspark_num_layers(config)
+        self.num_dspark_layers = get_dspark_num_layers(config)
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.embed_tokens = None
         self.layers = nn.ModuleDict(

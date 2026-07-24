@@ -13,7 +13,6 @@ from vllm_ascend.distributed.parallel_state import get_p_tp_group
 
 MAX_HCCL_REGISTER_REGIONS = 256
 REGISTER_MERGE_GAP_BYTES = 4096
-DSPARK_NUM_KV_CACHE_LAYERS = 3
 
 
 def kv_alltoall_and_rearrange(pd_tp_ratio: int, key: torch.Tensor, value: torch.TensorType):

@@ -53,10 +53,8 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
-from vllm_ascend.distributed.kv_transfer.utils.utils import (
-    DSPARK_NUM_KV_CACHE_LAYERS,
-    get_transfer_timeout_value,
-)
+from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
+from vllm_ascend.models.deepseek_v4_dspark import get_dspark_num_layers
 from vllm_ascend.utils import enable_custom_op, is_dspark_config, is_vl_model
 
 # isort: off
@@ -441,7 +439,7 @@ class KVCacheRecvingThread(threading.Thread):
         self.kv_cache_specs = [g.kv_cache_spec for g in kv_cache_config.kv_cache_groups]
         self.block_size = self.vllm_config.cache_config.block_size
         self.num_layers = self.model_config.hf_text_config.num_hidden_layers
-        self.num_draft_layers = DSPARK_NUM_KV_CACHE_LAYERS if is_dspark_config(self.vllm_config) else None
+        self.num_draft_layers = get_dspark_num_layers(self.vllm_config) if is_dspark_config(self.vllm_config) else None
         self.pp_layer_indices = {
             rank: get_prefill_pp_indices(self.num_layers, rank, self._prefill_pp_size, prefill_pp_layer_partition)
             for rank in range(self._prefill_pp_size)

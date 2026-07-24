@@ -58,7 +58,6 @@ from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
-    DSPARK_NUM_KV_CACHE_LAYERS,
     RegisterRegions,
     collect_storage_merged_register_regions,
     get_transfer_timeout_value,
@@ -68,6 +67,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
+from vllm_ascend.models.deepseek_v4_dspark import get_dspark_num_layers
 from vllm_ascend.utils import enable_custom_op, is_dspark_config
 
 # isort: off
@@ -519,7 +519,7 @@ class KVCacheRecvingThread(threading.Thread):
         self.num_draft_layers = 0
         if self.vllm_config.speculative_config is not None:
             if is_dspark_config(self.vllm_config):
-                self.num_draft_layers = DSPARK_NUM_KV_CACHE_LAYERS
+                self.num_draft_layers = get_dspark_num_layers(self.vllm_config)
             elif self.vllm_config.speculative_config.method == "mtp":
                 # all MTP layer use the same kv cache layer, so only need to transfer once
                 self.num_draft_layers = 1
