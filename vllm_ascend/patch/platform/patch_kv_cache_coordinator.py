@@ -163,6 +163,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             )
         )
         self.verify_and_split_kv_cache_groups()
+        if vllm_version_is("0.25.1") and self.scheduler_block_size is None:
+            self.scheduler_block_size = self.lcm_block_size
 
         # Align the WRITE-path mask granularity (reachable_block_mask) with the
         # READ-path hit granularity (find_longest_cache_hit) so SlidingWindowManager

@@ -5,6 +5,7 @@ from collections import defaultdict
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
@@ -19,8 +20,15 @@ from vllm_ascend.core.recompute_scheduler import (
 
 
 def _make_connector_lookup_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
     per_group_hits: tuple[int, int],
+    *,
+    is_v0251: bool = False,
 ) -> tuple[RecomputeScheduler, SimpleNamespace]:
+    monkeypatch.setattr(
+        "vllm_ascend.core.recompute_scheduler.vllm_version_is",
+        lambda version: is_v0251 and version == "0.25.1",
+    )
     scheduler = RecomputeScheduler.__new__(RecomputeScheduler)
     coordinator = HybridKVCacheCoordinator.__new__(HybridKVCacheCoordinator)
     full_spec = FullAttentionSpec(
@@ -49,7 +57,7 @@ def _make_connector_lookup_scheduler(
         empty_kv_cache_blocks=(),
         log_stats=False,
         create_kv_cache_blocks=MagicMock(side_effect=lambda blocks: blocks),
-        get_computed_blocks=MagicMock(return_value=((["common"], []), 16, 8)),
+        get_computed_blocks=MagicMock(return_value=((["common"], []), 16) if is_v0251 else ((["common"], []), 16, 8)),
     )
     request = SimpleNamespace(
         block_hashes=[],
@@ -60,8 +68,8 @@ def _make_connector_lookup_scheduler(
     return scheduler, request
 
 
-def test_connector_lookup_uses_full_attention_boundary() -> None:
-    scheduler, request = _make_connector_lookup_scheduler((64, 32))
+def test_connector_lookup_uses_full_attention_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    scheduler, request = _make_connector_lookup_scheduler(monkeypatch, (64, 32))
 
     computed, local_tokens, shared_prefix_boundary, hit_diverged = scheduler.get_computed_blocks_for_connector(request)
 
@@ -73,8 +81,8 @@ def test_connector_lookup_uses_full_attention_boundary() -> None:
     scheduler.kv_cache_manager.get_computed_blocks.assert_not_called()
 
 
-def test_connector_lookup_reconciles_deeper_sparse_group() -> None:
-    scheduler, request = _make_connector_lookup_scheduler((32, 64))
+def test_connector_lookup_reconciles_deeper_sparse_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    scheduler, request = _make_connector_lookup_scheduler(monkeypatch, (32, 64))
     scheduler.kv_cache_manager.get_computed_blocks.return_value = ((["common"], []), 32, 24)
 
     computed, local_tokens, shared_prefix_boundary, hit_diverged = scheduler.get_computed_blocks_for_connector(request)
@@ -86,8 +94,8 @@ def test_connector_lookup_reconciles_deeper_sparse_group() -> None:
     scheduler.kv_cache_manager.get_computed_blocks.assert_called_once_with(request)
 
 
-def test_connector_lookup_falls_back_without_full_attention_group() -> None:
-    scheduler, request = _make_connector_lookup_scheduler((16, 16))
+def test_connector_lookup_falls_back_without_full_attention_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    scheduler, request = _make_connector_lookup_scheduler(monkeypatch, (16, 16))
     scheduler.kv_cache_manager.coordinator.attention_groups = [
         scheduler.kv_cache_manager.coordinator.attention_groups[1]
     ]
@@ -101,8 +109,8 @@ def test_connector_lookup_falls_back_without_full_attention_group() -> None:
     scheduler.kv_cache_manager.get_computed_blocks.assert_called_once_with(request)
 
 
-def test_connector_lookup_falls_back_for_hybrid_context_parallelism() -> None:
-    scheduler, request = _make_connector_lookup_scheduler((64, 32))
+def test_connector_lookup_falls_back_for_hybrid_context_parallelism(monkeypatch: pytest.MonkeyPatch) -> None:
+    scheduler, request = _make_connector_lookup_scheduler(monkeypatch, (64, 32))
     scheduler.kv_cache_manager.coordinator.pcp_world_size = 2
 
     computed, local_tokens, shared_prefix_boundary, hit_diverged = scheduler.get_computed_blocks_for_connector(request)
@@ -115,13 +123,8 @@ def test_connector_lookup_falls_back_for_hybrid_context_parallelism() -> None:
     scheduler.kv_cache_manager.coordinator.find_longest_cache_hit_per_group.assert_not_called()
 
 
-def test_reconciled_lookup_normalizes_v0251_result(monkeypatch) -> None:
-    scheduler, request = _make_connector_lookup_scheduler((16, 16))
-    scheduler.kv_cache_manager.get_computed_blocks.return_value = ((["common"], []), 16)
-    monkeypatch.setattr(
-        "vllm_ascend.core.recompute_scheduler.vllm_version_is",
-        lambda version: version == "0.25.1",
-    )
+def test_reconciled_lookup_normalizes_v0251_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    scheduler, request = _make_connector_lookup_scheduler(monkeypatch, (16, 16), is_v0251=True)
 
     computed, local_tokens, shared_prefix_boundary = scheduler._get_reconciled_computed_blocks(request)
 
