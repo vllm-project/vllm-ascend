@@ -1648,13 +1648,13 @@ class KVPoolWorker:
             for layer_id in range(self.num_layers):
                 yield
 
-    def _make_sub_key_str(self, base_key, effective_rank: int) -> str:
-        """Rewrite ``@head_or_tp_rank:<local>`` in base_key.to_string() to ``<effective_rank>``.
+    def _make_sub_key_str(self, base_key: str, effective_rank: int) -> str:
+        """Rewrite ``@head_or_tp_rank:<local>`` in base_key to ``<effective_rank>``.
 
         Under TP mismatch, both sides address the pool at the effective_tp_size
         namespace rather than the local TP rank.
         """
-        return self._replace_key_field(base_key.to_string(), "head_or_tp_rank", effective_rank)
+        return self._replace_key_field(base_key, "head_or_tp_rank", effective_rank)
 
     def _build_strided_addrs(self, block_id: int, token_count: int, sub_idx: int) -> tuple[list[int], list[int]]:
         """Build per-token (addr, size) pairs into local KV cache memory for one
@@ -1699,7 +1699,7 @@ class KVPoolWorker:
         all_addrs: list[list[int]] = []
         all_sizes: list[list[int]] = []
         all_block_ids: list[int] = []
-        for start, end, base_key, block_id in self.token_database.process_tokens_with_block_ids(
+        for start, end, base_key, _, block_id in self.token_database.process_token_key_strings_with_block_ids(
             token_len,
             block_hashes,
             block_ids,
