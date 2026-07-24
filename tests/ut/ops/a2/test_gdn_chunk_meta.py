@@ -16,7 +16,8 @@
 import pytest
 import torch
 
-from vllm_ascend.ops.triton.fla import chunk, chunk_o, chunk_o_update
+from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.ops.triton.fla import chunk, chunk_o, chunk_o_update, chunk_scaled_dot_kkt
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
@@ -66,6 +67,9 @@ class _DummyTensor:
         return self
 
     def contiguous(self):
+        return self
+
+    def movedim(self, source, destination):
         return self
 
     def to(self, *args, **kwargs):
@@ -252,10 +256,10 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
         )
 
     run_case(1, non_pcp_calls)
-    assert non_pcp_calls == []
+    assert non_pcp_calls == [("o", chunk_offsets)]
 
     run_case(2, pcp_calls)
-    assert pcp_calls == [("o_update", chunk_offsets)]
+    assert pcp_calls == [("o_update", chunk_offsets), ("o", chunk_offsets)]
 
 
 def test_chunk_gated_delta_rule_fwd_uses_prebuilt_metadata_without_runtime_tolist(
@@ -437,3 +441,156 @@ def test_chunk_gated_delta_rule_fwd_pcp_chaining_subtracts_initial_state(
     # Sequential: Φ_1·(Φ_0·s0 + p_0) + p_1
     expected = torch.matmul(phi_1, torch.matmul(phi_0, s0) + p_0) + p_1
     torch.testing.assert_close(final_state, expected, rtol=1e-4, atol=1e-4)
+
+
+def test_chunk_ascendc_wrappers_preserve_bhtd_layout(monkeypatch: pytest.MonkeyPatch):
+    batch, qk_heads, value_heads, tokens, head_dim, chunk_size = 1, 2, 3, 5, 4, 2
+    k = torch.randn(batch, qk_heads, tokens, head_dim, dtype=torch.bfloat16)
+    v = torch.randn(batch, value_heads, tokens, head_dim, dtype=torch.bfloat16)
+    beta = torch.randn(batch, value_heads, tokens, dtype=torch.float32)
+    g = torch.randn(batch, value_heads, tokens, dtype=torch.float32)
+    A = torch.randn(batch, value_heads, tokens, chunk_size, dtype=torch.float32)
+    w = torch.randn_like(k)
+    u = torch.randn_like(v)
+    h = torch.randn(batch, value_heads, 3, head_dim, head_dim, dtype=torch.bfloat16)
+    captures: dict[str, tuple[torch.Tensor, ...]] = {}
+
+    def fake_recompute(*args, **kwargs):
+        captures["recompute"] = args
+        return w, u
+
+    def fake_fwd_h(*args, **kwargs):
+        captures["fwd_h"] = args
+        captures["fwd_h_g"] = kwargs["g"]
+        return h, v, torch.empty(0)
+
+    def fake_fwd_o(*args, **kwargs):
+        captures["fwd_o"] = args
+        captures["fwd_o_g"] = kwargs["g"]
+        return v
+
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_recompute_wu_fwd", fake_recompute, raising=False)
+    monkeypatch.setattr(torch.ops._C_ascend, "chunk_gated_delta_rule_fwd_h", fake_fwd_h, raising=False)
+    monkeypatch.setattr(torch.ops._C_ascend, "chunk_fwd_o", fake_fwd_o, raising=False)
+
+    assert chunk.recompute_w_u_fwd(k, v, beta, g, A) == (w, u)
+    assert chunk.chunk_gated_delta_rule_fwd_h(k, w, u, g=g)[0] is h
+    assert chunk.chunk_fwd_o(k, k, v, h, g=g) is v
+
+    assert captures["recompute"][0] is k
+    assert captures["recompute"][1] is v
+    assert captures["recompute"][2] is beta
+    assert captures["recompute"][3] is A
+    assert captures["recompute"][4] is g
+    assert captures["fwd_h"][0] is k
+    assert captures["fwd_h"][1] is w
+    assert captures["fwd_h"][2] is u
+    assert captures["fwd_h_g"] is g
+    assert captures["fwd_o"][0] is k
+    assert captures["fwd_o"][1] is k
+    assert captures["fwd_o"][2] is v
+    assert captures["fwd_o"][3] is h
+    assert captures["fwd_o"][4] == head_dim**-0.5
+    assert captures["fwd_o_g"] is g
+
+
+def test_chunk_fwd_preserves_head_major_k_for_kkt_and_ascendc_calls(monkeypatch: pytest.MonkeyPatch):
+    q = torch.randn(1, 2, 5, 4, dtype=torch.bfloat16)
+    k = torch.randn_like(q)
+    v = torch.randn(1, 3, 5, 4, dtype=torch.bfloat16)
+    g = torch.randn(1, 5, 3, dtype=torch.float32)
+    beta = torch.rand(1, 5, 3, dtype=torch.bfloat16)
+    initial_state = torch.randn(1, 3, 4, 4, dtype=torch.bfloat16)
+    captured: dict[str, tuple[torch.Tensor, ...] | torch.Tensor] = {}
+
+    monkeypatch.setattr(chunk, "get_forward_context", lambda: type("Ctx", (), {"attn_metadata": None})())
+    monkeypatch.setattr(
+        chunk,
+        "get_pcp_group",
+        lambda: type("Group", (), {"world_size": 1, "rank_in_group": 0})(),
+    )
+    monkeypatch.setattr(chunk, "chunk_local_cumsum", lambda value, **kwargs: value)
+
+    def fake_kkt(**kwargs):
+        captured["kkt_k"] = kwargs["k"]
+        return torch.empty(1, 3, 5, 2, dtype=torch.float32)
+
+    monkeypatch.setattr(chunk, "chunk_scaled_dot_kkt_fwd", fake_kkt)
+    monkeypatch.setattr(chunk, "solve_tril", lambda A, **kwargs: A)
+
+    def fake_recompute(**kwargs):
+        captured["recompute"] = tuple(kwargs[name] for name in ("k", "v", "beta", "A", "g_cumsum"))
+        return (
+            torch.empty(1, 3, 5, 4, dtype=torch.bfloat16),
+            torch.empty(1, 3, 5, 4, dtype=torch.bfloat16),
+        )
+
+    def fake_fwd_h(**kwargs):
+        captured["fwd_h"] = tuple(kwargs[name] for name in ("k", "w", "u", "g"))
+        return (
+            torch.empty(1, 3, 1, 4, 4, dtype=torch.bfloat16),
+            torch.empty(1, 3, 5, 4, dtype=torch.bfloat16),
+            initial_state,
+        )
+
+    def fake_fwd_o(**kwargs):
+        captured["fwd_o"] = tuple(kwargs[name] for name in ("q", "k", "v", "h", "g"))
+        return torch.empty(1, 3, 5, 4, dtype=torch.bfloat16)
+
+    monkeypatch.setattr(chunk, "recompute_w_u_fwd", fake_recompute)
+    monkeypatch.setattr(chunk, "chunk_gated_delta_rule_fwd_h", fake_fwd_h)
+    monkeypatch.setattr(chunk, "chunk_fwd_o", fake_fwd_o)
+
+    _, output, _, final_state, _, _, _ = chunk.chunk_gated_delta_rule_fwd(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        scale=0.5,
+        initial_state=initial_state,
+        output_final_state=True,
+    )
+
+    assert captured["kkt_k"] is k
+    assert captured["recompute"][0].shape == (1, 2, 5, 4)
+    assert captured["recompute"][1].shape == (1, 3, 5, 4)
+    assert captured["recompute"][2].shape == (1, 3, 5)
+    assert captured["recompute"][2].is_contiguous()
+    assert captured["recompute"][3].shape == (1, 3, 5, 2)
+    assert captured["recompute"][4].shape == (1, 3, 5)
+    assert captured["fwd_h"][0].shape == (1, 2, 5, 4)
+    assert captured["fwd_o"][0].shape == (1, 2, 5, 4)
+    assert captured["fwd_o"][2].shape == (1, 3, 5, 4)
+    assert output.shape == (1, 5, 3, 4)
+    assert final_state is initial_state
+
+
+def test_kkt_preserves_bth_gate_layout(monkeypatch: pytest.MonkeyPatch):
+    k = torch.randn(1, 2, 5, 4)
+    beta = torch.rand(1, 5, 3)
+    g_cumsum = torch.randn(1, 5, 3)
+    captured: dict[str, torch.Tensor] = {}
+
+    def fake_kkt(**kwargs):
+        captured["beta"] = kwargs["beta"]
+        captured["g_cumsum"] = kwargs["g_cumsum"]
+        return kwargs["A"]
+
+    monkeypatch.setattr(chunk_scaled_dot_kkt, "get_aicore_num", lambda: 1)
+    monkeypatch.setattr(
+        DeviceOperator,
+        "chunk_scaled_dot_kkt_fwd",
+        staticmethod(fake_kkt),
+    )
+
+    A = chunk_scaled_dot_kkt.chunk_scaled_dot_kkt_fwd(
+        k=k,
+        beta=beta,
+        g_cumsum=g_cumsum,
+        chunk_size=2,
+    )
+
+    assert captured["beta"] is beta
+    assert captured["g_cumsum"] is g_cumsum
+    assert A.shape == (1, 3, 5, 2)

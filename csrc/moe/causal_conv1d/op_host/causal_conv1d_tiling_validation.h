@@ -15,11 +15,11 @@
  #include "tiling_base/tiling_util.h"
  #include "causal_conv1d_tiling_utils.h"
  #include "../op_kernel/causal_conv1d_tiling_data.h"
- 
+
  namespace optiling::causal_conv1d_host {
- 
+
  using namespace Ops::Transformer::OpTiling;
- 
+
  inline ge::graphStatus GetPlatformInfo(gert::TilingContext *context, uint64_t &ubSize, uint32_t &coreNum)
  {
      fe::PlatFormInfos *platformInfoPtr = context->GetPlatformInfo();
@@ -31,7 +31,7 @@
      OP_CHECK_IF(ubSize == 0, OP_LOGE(context, "ubSize is 0"), return ge::GRAPH_FAILED);
      return ge::GRAPH_SUCCESS;
  }
- 
+
  inline ge::graphStatus SetWorkspaceSize(gert::TilingContext *context, size_t workspaceSize)
  {
      size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -39,30 +39,35 @@
      currentWorkspace[0] = workspaceSize;
      return ge::GRAPH_SUCCESS;
  }
- 
+
  inline ge::graphStatus GetAttrsInfo(gert::TilingContext *context, CausalConv1dAttrInfo &attrInfo)
  {
      auto attrs = context->GetAttrs();
      OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
- 
+
      const int64_t *activationModePtr = attrs->GetAttrPointer<int64_t>(ATTR_ACTIVATION_MODE_INDEX);
      OP_CHECK_NULL_WITH_CONTEXT(context, activationModePtr);
      attrInfo.activationMode = *activationModePtr;
      OP_CHECK_IF(attrInfo.activationMode != 0 && attrInfo.activationMode != 1,
                  OP_LOGE(context, "activationMode only supports 0/1"),
                  return ge::GRAPH_FAILED);
- 
+
      const int64_t *padSlotIdPtr = attrs->GetAttrPointer<int64_t>(ATTR_PAD_SLOT_ID_INDEX);
      OP_CHECK_NULL_WITH_CONTEXT(context, padSlotIdPtr);
      attrInfo.padSlotId = *padSlotIdPtr;
- 
+
      const int64_t *runModePtr = attrs->GetAttrPointer<int64_t>(ATTR_RUN_MODE_INDEX);
      attrInfo.runMode = (runModePtr == nullptr) ? 0 : *runModePtr;
      OP_CHECK_IF(attrInfo.runMode != 0 && attrInfo.runMode != 1, OP_LOGE(context, "runMode only supports 0/1"),
                  return ge::GRAPH_FAILED);
+
+     const int64_t *headNumPtr = attrs->GetAttrPointer<int64_t>(ATTR_HEAD_NUM_INDEX);
+     attrInfo.headNum = (headNumPtr == nullptr) ? 0 : *headNumPtr;
+     OP_CHECK_IF(attrInfo.headNum < 0, OP_LOGE(context, "headNum only supports larger than 0"),
+         return ge::GRAPH_FAILED);
      return ge::GRAPH_SUCCESS;
  }
- 
+
  inline ge::graphStatus ValidateAlignedDim(gert::TilingContext *context, int64_t dim)
  {
      OP_CHECK_IF(dim % DIM_ALIGN_ELEMS != 0,
@@ -74,24 +79,27 @@
                  return ge::GRAPH_FAILED);
      return ge::GRAPH_SUCCESS;
  }
- 
+
  inline ge::graphStatus GetShapeDtypeInfo(gert::TilingContext *context, const CausalConv1dAttrInfo &attrInfo,
                                           CausalConv1dTilingData &tiling, bool &hasBias)
  {
      const bool isDecodeMode = (attrInfo.runMode == 1);
      tiling.activationMode = attrInfo.activationMode;
      tiling.padSlotId = attrInfo.padSlotId;
- 
+     tiling.headNum = attrInfo.headNum;
+     tiling.isOutReshape = (tiling.headNum > 0);
+
      auto xShapePtr = context->GetInputShape(X_INDEX);
      OP_CHECK_NULL_WITH_CONTEXT(context, xShapePtr);
      auto xShape = EnsureNotScalar(xShapePtr->GetStorageShape());
- 
+
      int64_t dim = 0;
      int64_t cuSeqlen = 0;
      int64_t seqLen = 0;
      int64_t batch = 0;
      int64_t inputMode = 0;
- 
+     int64_t headNum = tiling.headNum;
+
      if (xShape.GetDimNum() == 2) {
          if (isDecodeMode) {
              inputMode = 2;
@@ -101,6 +109,12 @@
              cuSeqlen = batch;
              OP_CHECK_IF(batch <= 0 || dim <= 0, OP_LOGE(context, "invalid x shape for 2D decode mode"),
                          return ge::GRAPH_FAILED);
+             OP_CHECK_IF(headNum < 0 || headNum > dim || (headNum > 0 && dim % headNum != 0),
+                 OP_LOGE(context, "invalid headNum: headNum should be in [0, dim] and dim mod headNum = 0, actually headNum=%ld, dim=%ld.", headNum, dim),
+                 return ge::GRAPH_FAILED);
+             OP_CHECK_IF(headNum > 0 && (dim / headNum) % DIM_ALIGN_ELEMS != 0,
+                 OP_LOGE(context, "the headDim (= dim / headNum) should be multiple of 16, but actually headNum=%ld, dim=%ld.", headNum, dim),
+                 return ge::GRAPH_FAILED);
          } else {
              inputMode = 0;
              cuSeqlen = xShape.GetDim(0);
@@ -108,6 +122,12 @@
              seqLen = 0;
              OP_CHECK_IF(dim <= 0 || cuSeqlen < 0, OP_LOGE(context, "invalid x shape for 2D varlen mode"),
                          return ge::GRAPH_FAILED);
+             OP_CHECK_IF(headNum < 0 || headNum > dim || (headNum > 0 && dim % headNum != 0),
+                 OP_LOGE(context, "invalid headNum: headNum should be in [0, dim] and dim mod headNum = 0, actually headNum=%ld, dim=%ld.", headNum, dim),
+                 return ge::GRAPH_FAILED);
+             OP_CHECK_IF(headNum > 0 && (dim / headNum) % DIM_ALIGN_ELEMS != 0,
+                 OP_LOGE(context, "the headDim (= dim / headNum) should be multiple of 16, but actually headNum=%ld, dim=%ld.", headNum, dim),
+                 return ge::GRAPH_FAILED);
          }
      } else if (xShape.GetDimNum() == 3) {
          inputMode = 1;
@@ -117,6 +137,21 @@
          cuSeqlen = batch * seqLen;
          OP_CHECK_IF(batch <= 0 || dim <= 0 || seqLen <= 0, OP_LOGE(context, "invalid x shape for 3D batch mode"),
                      return ge::GRAPH_FAILED);
+         if (isDecodeMode) {
+             OP_CHECK_IF(headNum < 0 || headNum > dim || (headNum > 0 && dim % headNum != 0),
+                 OP_LOGE(context, "invalid headNum: headNum should be in [0, dim] and dim mod headNum = 0, actually headNum=%ld, dim=%ld.", headNum, dim),
+                 return ge::GRAPH_FAILED);
+             OP_CHECK_IF(headNum > 0 && (dim / headNum) % DIM_ALIGN_ELEMS != 0,
+                 OP_LOGE(context, "the headDim (= dim / headNum) should be multiple of 16, but actually headNum=%ld, dim=%ld.", headNum, dim),
+                 return ge::GRAPH_FAILED);
+         } else {
+             OP_CHECK_IF(headNum < 0 || headNum > dim || (headNum > 0 && dim % headNum != 0),
+                 OP_LOGE(context, "invalid headNum: headNum should be in [0, dim] and dim mod headNum = 0, actually headNum=%ld, dim=%ld.", headNum, dim),
+                 return ge::GRAPH_FAILED);
+             OP_CHECK_IF(headNum > 0 && (dim / headNum) % DIM_ALIGN_ELEMS != 0,
+                 OP_LOGE(context, "the headDim (= dim / headNum) should be multiple of 16, but actually headNum=%ld, dim=%ld.", headNum, dim),
+                 return ge::GRAPH_FAILED);
+         }
      } else {
          OP_LOGE(context, "x must be 2D (cu_seqlen, dim) or 3D (batch, seqlen, dim)");
          return ge::GRAPH_FAILED;
@@ -124,7 +159,7 @@
      OP_CHECK_IF(ValidateAlignedDim(context, dim) != ge::GRAPH_SUCCESS,
                  OP_LOGE(context, "dim alignment validation failed"),
                  return ge::GRAPH_FAILED);
- 
+
      auto wShapePtr = context->GetInputShape(WEIGHT_INDEX);
      OP_CHECK_NULL_WITH_CONTEXT(context, wShapePtr);
      auto wShape = EnsureNotScalar(wShapePtr->GetStorageShape());
@@ -134,7 +169,7 @@
      OP_CHECK_IF(wDim != dim, OP_LOGE(context, "weight.shape[1] must equal dim"), return ge::GRAPH_FAILED);
      OP_CHECK_IF(width < 2 || width > 4, OP_LOGE(context, "Only support width in [2,4] now, actually is %ld.", width),
                  return ge::GRAPH_FAILED);
- 
+
      auto sShapePtr = context->GetInputShape(CONV_STATES_INDEX);
      OP_CHECK_NULL_WITH_CONTEXT(context, sShapePtr);
      auto sShape = EnsureNotScalar(sShapePtr->GetStorageShape());
@@ -148,7 +183,7 @@
      OP_CHECK_IF(sDim != dim, OP_LOGE(context, "convStates.shape[2] must equal dim"), return ge::GRAPH_FAILED);
      OP_CHECK_IF(stateLen < (width - 1), OP_LOGE(context, "convStates.shape[1] must be >= width-1"),
                  return ge::GRAPH_FAILED);
- 
+
      auto qslShapePtr = context->GetOptionalInputShape(QUERY_START_LOC_INDEX);
      const gert::CompileTimeTensorDesc *qslDesc = context->GetOptionalInputDesc(QUERY_START_LOC_INDEX);
      bool qslAbsent = true;
@@ -176,11 +211,11 @@
          qslSize = batch + 1;
      }
      tiling.hasQueryStartLoc = qslAbsent ? 0 : 1;
- 
+
      OP_CHECK_IF(cuSeqlen > static_cast<int64_t>(std::numeric_limits<int32_t>::max()),
                  OP_LOGE(context, "cuSeqlen is too large for int32 indexing, got %ld", cuSeqlen),
                  return ge::GRAPH_FAILED);
- 
+
      if (!qslAbsent && isDecodeMode && inputMode == 2) {
          const int64_t batchFromQsl = qslSize - 1;
          if (batchFromQsl != batch) {
@@ -193,7 +228,7 @@
                          return ge::GRAPH_FAILED);
          }
      }
- 
+
      if (inputMode == 0) {
          batch = qslSize - 1;
      }
@@ -206,7 +241,7 @@
          OP_CHECK_IF(decodeSeqLen < 1, OP_LOGE(context, "decode mode requires seqlen >= 1, actual is %ld", decodeSeqLen),
                      return ge::GRAPH_FAILED);
      }
- 
+
      tiling.hasCacheIndices = 0;
      tiling.cacheIndicesStride = 1;
      bool ciAbsent = true;
@@ -239,7 +274,7 @@
                              numCacheLines, batch),
                      return ge::GRAPH_FAILED);
      }
- 
+
      tiling.hasInitialStateMode = 0;
      auto ismShapePtr = context->GetOptionalInputShape(INITIAL_STATE_MODE_INDEX);
      if (ismShapePtr != nullptr) {
@@ -255,11 +290,11 @@
                          return ge::GRAPH_FAILED);
              OP_CHECK_IF(ismShape.GetDim(0) != batch, OP_LOGE(context, "initialStateMode.size must equal batch"),
                          return ge::GRAPH_FAILED);
- 
+
              tiling.hasInitialStateMode = 1;
          }
      }
- 
+
      tiling.hasNumAcceptedTokens = 0;
      auto natShapePtr = context->GetOptionalInputShape(NUM_ACCEPTED_TOKENS_INDEX);
      if (natShapePtr != nullptr) {
@@ -275,7 +310,7 @@
                          return ge::GRAPH_FAILED);
              OP_CHECK_IF(natShape.GetDim(0) != batch, OP_LOGE(context, "numAcceptedTokens.size must equal batch"),
                          return ge::GRAPH_FAILED);
- 
+
              if (inputMode == 1) {
                  const int64_t reqStateLen = (width - 1) + (seqLen - 1);
                  OP_CHECK_IF(stateLen < reqStateLen,
@@ -284,11 +319,11 @@
                                      stateLen, reqStateLen),
                              return ge::GRAPH_FAILED);
              }
- 
+
              tiling.hasNumAcceptedTokens = 1;
          }
      }
- 
+
      tiling.hasBias = 0;
      hasBias = false;
      auto biasShapePtr = context->GetOptionalInputShape(BIAS_INDEX);
@@ -306,31 +341,31 @@
              hasBias = true;
          }
      }
- 
+
      auto xDesc = context->GetInputDesc(X_INDEX);
      OP_CHECK_NULL_WITH_CONTEXT(context, xDesc);
      const ge::DataType xDtype = xDesc->GetDataType();
      OP_CHECK_IF(xDtype != ge::DT_BF16 && xDtype != ge::DT_FLOAT16,
                  OP_LOGE(context, "x dtype only supports bf16/fp16"),
                  return ge::GRAPH_FAILED);
- 
+
      auto wDesc = context->GetInputDesc(WEIGHT_INDEX);
      OP_CHECK_NULL_WITH_CONTEXT(context, wDesc);
      OP_CHECK_IF(wDesc->GetDataType() != xDtype, OP_LOGE(context, "weight dtype must equal x dtype"),
                  return ge::GRAPH_FAILED);
- 
+
      if (hasBias) {
          auto biasDesc = context->GetOptionalInputDesc(BIAS_INDEX);
          OP_CHECK_NULL_WITH_CONTEXT(context, biasDesc);
          OP_CHECK_IF(biasDesc->GetDataType() != xDtype, OP_LOGE(context, "bias dtype must equal x dtype"),
                      return ge::GRAPH_FAILED);
      }
- 
+
      auto sDesc = context->GetInputDesc(CONV_STATES_INDEX);
      OP_CHECK_NULL_WITH_CONTEXT(context, sDesc);
      OP_CHECK_IF(sDesc->GetDataType() != xDtype, OP_LOGE(context, "convStates dtype must equal x dtype"),
                  return ge::GRAPH_FAILED);
- 
+
      if (!qslAbsent) {
          auto qslDesc2 = context->GetOptionalInputDesc(QUERY_START_LOC_INDEX);
          OP_CHECK_NULL_WITH_CONTEXT(context, qslDesc2);
@@ -368,7 +403,7 @@
                      OP_LOGE(context, "numAcceptedTokens dtype must be int32 or int64"), return ge::GRAPH_FAILED);
          tiling.numAcceptedTokensUseInt64 = (natDtype == ge::DT_INT64) ? 1 : 0;
      }
- 
+
      tiling.dim = dim;
      tiling.cuSeqlen = cuSeqlen;
      tiling.seqLen = seqLen;
@@ -379,7 +414,7 @@
      tiling.batch = batch;
      return ge::GRAPH_SUCCESS;
  }
- 
+
  }
- 
+
  #endif

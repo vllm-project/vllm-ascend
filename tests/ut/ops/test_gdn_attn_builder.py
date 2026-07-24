@@ -12,7 +12,13 @@ from vllm.v1.kv_cache_interface import MambaSpec
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.ops import gdn_attn_builder as ascend_gdn_attn_builder
-from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+from vllm_ascend.ops.gdn import (
+    AscendGatedDeltaNetAttention,
+    _allocate_conv_output,
+    _should_use_head_major_conv,
+    _split_head_major_qkv,
+    _to_token_major,
+)
 from vllm_ascend.ops.gdn_attn_builder import (
     AscendGDNAttentionBackend,
     AscendGDNAttentionMetadataBuilder,
@@ -246,6 +252,13 @@ def _assert_chunk_meta_matches_runtime(builder, chunk_meta, cu_seqlens: torch.Te
     )
     cumsum_chunk_size = 1 if cumsum_chunks <= 1 else 1 << (cumsum_chunks - 1).bit_length()
 
+    assert torch.equal(
+        chunk_meta.chunk_indices_chunk32,
+        runtime_prepare_chunk_indices(
+            cu_seqlens,
+            ascend_gdn_attn_builder._GDN_CHUNK_SIZE // 2,
+        ),
+    )
     assert torch.equal(
         chunk_meta.chunk_indices_chunk64,
         runtime_prepare_chunk_indices(cu_seqlens, ascend_gdn_attn_builder._GDN_CHUNK_SIZE),
@@ -799,3 +812,55 @@ def test_builder_skips_prebuilt_meta_without_non_spec_prefill(batch_spec: BatchS
             spec_decode_metadata.actual_seq_lengths,
             torch.tensor([0, 4, 4], dtype=torch.int32),
         )
+
+
+def test_head_major_conv_qkv_split_preserves_head_major_tensors():
+    num_k_heads, num_v_heads, num_tokens, head_dim = 2, 3, 4, 5
+    mixed_qkv = torch.arange(
+        (2 * num_k_heads + num_v_heads) * num_tokens * head_dim,
+        dtype=torch.float32,
+    ).view(2 * num_k_heads + num_v_heads, num_tokens, head_dim)
+
+    query, key, value = _split_head_major_qkv(
+        mixed_qkv,
+        num_k_heads=num_k_heads,
+        num_v_heads=num_v_heads,
+    )
+
+    assert query.shape == (1, num_k_heads, num_tokens, head_dim)
+    assert key.shape == (1, num_k_heads, num_tokens, head_dim)
+    assert value.shape == (1, num_v_heads, num_tokens, head_dim)
+    torch.testing.assert_close(query[0], mixed_qkv[:num_k_heads])
+    torch.testing.assert_close(key[0], mixed_qkv[num_k_heads : 2 * num_k_heads])
+    torch.testing.assert_close(value[0], mixed_qkv[2 * num_k_heads :])
+    assert query.untyped_storage().data_ptr() == mixed_qkv.untyped_storage().data_ptr()
+
+    output = _allocate_conv_output(mixed_qkv.movedim(0, 1).reshape(num_tokens, -1), 7, head_dim)
+    assert output.shape == (7, num_tokens, head_dim)
+
+
+@pytest.mark.parametrize(
+    ("num_prefills", "expected"),
+    [(0, False), (1, True)],
+)
+def test_head_major_conv_is_reserved_for_prefill(num_prefills, expected):
+    assert (
+        _should_use_head_major_conv(
+            SimpleNamespace(num_prefills=num_prefills),
+            pcp_world_size=1,
+            head_k_dim=128,
+            head_v_dim=128,
+        )
+        is expected
+    )
+
+
+def test_to_token_major_materializes_mixed_decode_head_major_slice():
+    mixed_qkv = torch.arange(1 * 4 * 6 * 5, dtype=torch.float32).view(1, 4, 6, 5)
+    decode_slice = mixed_qkv[:, :, :2]
+
+    token_major = _to_token_major(decode_slice, head_major=True)
+
+    assert token_major.shape == (2, 4, 5)
+    assert token_major.is_contiguous()
+    torch.testing.assert_close(token_major, decode_slice.squeeze(0).movedim(0, 1))

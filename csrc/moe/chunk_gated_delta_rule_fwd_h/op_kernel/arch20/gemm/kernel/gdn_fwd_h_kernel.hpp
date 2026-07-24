@@ -174,7 +174,8 @@ public:
         kHeadDim = gdnFwdHTilingData->kHeadDim;
         vHeadDim = gdnFwdHTilingData->vHeadDim;
         chunkSize = gdnFwdHTilingData->chunkSize;
-        initalStateStride0 = gdnFwdHTilingData->initalStateStride0;
+        // Initial states are contiguous [N, H, K, V] tensors.
+        initalStateStride0 = vHeadDim;
         useInitialState = gdnFwdHTilingData->useInitialState;
         storeFinalState = gdnFwdHTilingData->storeFinalState;
         isVariedLen = gdnFwdHTilingData->isVariedLen;
