@@ -720,16 +720,6 @@ class NPUModelRunner(GPUModelRunner):
     def _is_pd_prefill_worker(self) -> bool:
         return self.is_kv_producer and not self.is_kv_consumer
 
-    def _should_defer_kv_connector_finalize(self) -> bool:
-        if self.speculative_config is None:
-            return False
-
-        pp = get_pp_group()
-        # Non-last PP ranks return their intermediate tensors without running
-        # the draft model. Finalize their connector after the target forward so
-        # every PP rank stores its local layers in the external KV pool.
-        return pp.is_last_rank or self.broadcast_pp_output
-
     def _apply_pp_sampled_tokens_from_scheduler_output(
         self,
         scheduler_output: "SchedulerOutput",
@@ -2343,7 +2333,9 @@ class NPUModelRunner(GPUModelRunner):
         has_encoder_input = self.model_config.is_encoder_decoder and num_encoder_reqs > 0
 
         # Run forward pass
-        defer_kv_connector_finalize = self._should_defer_kv_connector_finalize()
+        defer_kv_connector_finalize = self.speculative_config is not None and (
+            get_pp_group().is_last_rank or self.broadcast_pp_output
+        )
         with (
             record_function_or_nullcontext("forward"),
             set_ascend_forward_context(
