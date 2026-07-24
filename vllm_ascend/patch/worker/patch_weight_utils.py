@@ -75,26 +75,6 @@ def patch_weight_utils(module):
         if not hasattr(module, "_original_maybe_remap_kv_scale_name"):
             module._original_maybe_remap_kv_scale_name = module.maybe_remap_kv_scale_name
 
-        def _ascend_c8_fp8_maybe_remap_kv_scale_name(name: str, params_dict: dict):
-            if "kv_cache_scale" in name:
-                if "k_proj" in name:
-                    new_name = name.replace("k_proj.kv_cache_scale", "attn.k_cache_scale")
-                    if new_name not in params_dict and f"model.{new_name}" in params_dict:
-                        new_name = f"model.{new_name}"
-                    if new_name in params_dict:
-                        return new_name
-                elif "v_proj" in name:
-                    new_name = name.replace("v_proj.kv_cache_scale", "attn.v_cache_scale")
-                    if new_name not in params_dict and f"model.{new_name}" in params_dict:
-                        new_name = f"model.{new_name}"
-                    if new_name in params_dict:
-                        return new_name
-
-            return module._original_maybe_remap_kv_scale_name(name, params_dict)
-
-        module.maybe_remap_kv_scale_name = _ascend_c8_fp8_maybe_remap_kv_scale_name
-
-
 original_import = __builtins__["__import__"]  # type: ignore
 
 
