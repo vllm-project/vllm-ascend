@@ -34,6 +34,7 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.parallel_config.pipeline_parallel_size = 1
         mock_vllm_config.parallel_config.context_parallel_size = 1
         mock_vllm_config.parallel_config.decode_context_parallel_size = 1
+        mock_vllm_config.parallel_config.nnodes_within_dp = 1
         mock_vllm_config.cache_config = MagicMock()
         mock_vllm_config.scheduler_config = MagicMock()
         mock_vllm_config.scheduler_config.max_num_seqs = None
@@ -681,6 +682,78 @@ class TestNPUPlatform(TestBase):
             vllm_config.scheduler_config.scheduler_cls,
             "vllm_ascend.core.nonbsp_scheduler.NonBSPScheduler",
         )
+
+    @pytest.mark.parametrize("kv_role", [None, "kv_both", "kv_producer"])
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    def test_check_and_update_config_rejects_nonbsp_outside_disaggregated_d_node(
+        self, mock_init_ascend, mock_soc_version, mock_auto_detect, kv_role
+    ):
+        mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        mock_ascend_config.scheduler_config.nonbsp_config.enabled = True
+        mock_init_ascend.return_value = mock_ascend_config
+
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.kv_transfer_config = (
+            None
+            if kv_role is None
+            else MagicMock(kv_role=kv_role, engine_id="engine0")
+        )
+        vllm_config.parallel_config.data_parallel_size = 2
+        vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
+        vllm_config.cache_config.block_size = 1
+        vllm_config.scheduler_config = MagicMock()
+
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
+
+        with (
+            pytest.raises(
+                ValueError,
+                match=r"NonBSP is only supported on PD-disaggregated D nodes",
+            ),
+            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+            patch.object(platform, "check_kv_extra_config"),
+        ):
+            self.platform.check_and_update_config(vllm_config)
+
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    def test_check_and_update_config_rejects_multinode_nonbsp_decoder(
+        self, mock_init_ascend, mock_soc_version, mock_auto_detect
+    ):
+        mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        mock_ascend_config.scheduler_config.nonbsp_config.enabled = True
+        mock_init_ascend.return_value = mock_ascend_config
+
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.kv_transfer_config = MagicMock(
+            kv_role="kv_consumer", engine_id="engine0"
+        )
+        vllm_config.parallel_config.data_parallel_size = 2
+        vllm_config.parallel_config.nnodes_within_dp = 2
+        vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
+        vllm_config.cache_config.block_size = 1
+        vllm_config.scheduler_config = MagicMock()
+
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
+
+        with (
+            pytest.raises(
+                ValueError,
+                match=r"NonBSP only supports decoder instances.*single node",
+            ),
+            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+            patch.object(platform, "check_kv_extra_config"),
+        ):
+            self.platform.check_and_update_config(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)

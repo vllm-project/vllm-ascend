@@ -658,6 +658,12 @@ class NPUPlatform(Platform):
                 )
             if parallel_config.data_parallel_size <= 1:
                 raise ValueError("NonBSP requires data_parallel_size > 1.")
+            if parallel_config.nnodes_within_dp > 1:
+                raise ValueError(
+                    "NonBSP only supports decoder instances that run on a "
+                    "single node; got "
+                    f"nnodes_within_dp={parallel_config.nnodes_within_dp}."
+                )
             if scheduler_extension_config.recompute_scheduler_enable:
                 raise ValueError(
                     "NonBSP only supports the normal Scheduler and cannot be used with recompute_scheduler_enable."
