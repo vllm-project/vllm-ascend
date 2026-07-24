@@ -788,6 +788,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
 
+        # Dynamic SD may schedule K == 0 draft tokens for the current batch
+        # size. Return an empty [batch_size, 0] draft so downstream copy/unpack
+        # paths (which key off ``draft_token_ids.shape[1]``) stay consistent.
+        # Mirrors vLLM's llm_base_proposer._propose empty-draft early return.
+        if self.num_speculative_tokens == 0:
+            return torch.empty(
+                batch_size,
+                0,
+                device=target_token_ids.device,
+                dtype=torch.int64,
+            )
+
         if token_indices_to_sample is None:
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
 
