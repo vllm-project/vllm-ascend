@@ -465,8 +465,8 @@ msgid "Qwen3-Embedding"
 msgstr "Qwen3-Embedding"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[Qwen3_embedding](../../tutorials/models/Qwen3_embedding.md)"
-msgstr "[Qwen3_embedding](../../tutorials/models/Qwen3_embedding.md)"
+msgid "[Qwen3-Embedding](../../tutorials/models/Qwen3-Embedding.md)"
+msgstr "[Qwen3-Embedding](../../tutorials/models/Qwen3-Embedding.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Qwen3-VL-Embedding"
@@ -481,8 +481,8 @@ msgid "Qwen3-Reranker"
 msgstr "Qwen3-Reranker"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[Qwen3_reranker](../../tutorials/models/Qwen3_reranker.md)"
-msgstr "[Qwen3_reranker](../../tutorials/models/Qwen3_reranker.md)"
+msgid "[Qwen3-Reranker](../../tutorials/models/Qwen3-Reranker.md)"
+msgstr "[Qwen3-Reranker](../../tutorials/models/Qwen3-Reranker.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Qwen3-VL-Reranker"

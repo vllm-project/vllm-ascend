@@ -1,8 +1,8 @@
-# Qwen3-VL-Embedding
+# Qwen3-Embedding
 
 ## 1 Introduction
 
-The Qwen3-VL-Embedding and Qwen3-VL-Reranker model series are the latest additions to the Qwen family, built upon the recently open-sourced and powerful Qwen3-VL foundation model. Specifically designed for multimodal information retrieval and cross-modal understanding, this suite accepts diverse inputs including text, images, screenshots, and videos, as well as inputs containing a mixture of these modalities. This guide describes how to run the model with vLLM Ascend.
+The Qwen3 Embedding model series is the latest proprietary model of the Qwen family, specifically designed for text embedding and ranking tasks. Building upon the dense foundational models of the Qwen3 series, it provides a comprehensive range of text embeddings and reranking models in various sizes (0.6B, 4B, and 8B). This guide describes how to run the model with vLLM Ascend. Note that only vLLM Ascend 0.9.2rc1 and higher versions support the model.
 
 ## 2 Supported Features
 
@@ -12,8 +12,9 @@ Refer to [supported features](../../user_guide/support_matrix/supported_models.m
 
 ### 3.1 Model Weight
 
-- `Qwen3-VL-Embedding-8B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-8B)
-- `Qwen3-VL-Embedding-2B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-2B)
+- `Qwen3-Embedding-8B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-8B)
+- `Qwen3-Embedding-4B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-4B)
+- `Qwen3-Embedding-0.6B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
@@ -21,7 +22,7 @@ It is recommended to download the model weight to the shared directory of multip
 
 ### 4.1 Docker Image Installation
 
-You can use our official docker image to run `Qwen3-VL-Embedding` model directly.
+You can use our official docker image to run `Qwen3-Embedding` model directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
@@ -31,9 +32,11 @@ Select an image based on your machine type and start the docker image on your no
 ::::{tab-item} A3 series
 :sync: A3 series
 
+Start the docker image on your each node.
+
 ```{code-block} bash
    :substitutions:
-
+   
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
 docker run --rm \
   --name vllm-ascend \
@@ -58,9 +61,11 @@ docker run --rm \
 ::::{tab-item} A2 series
 :sync: A2 series
 
+Start the docker image on your each node.
+
 ```{code-block} bash
    :substitutions:
-
+   
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
   --name vllm-ascend \
@@ -87,25 +92,25 @@ docker run --rm \
 
 ```{code-block} bash
    :substitutions:
-
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p
-docker run --rm \
-  --name vllm-ascend \
-  --shm-size=1g \
-  --net=host \
-  --privileged=true \
-  --device /dev/davinci0 \
-  --device /dev/davinci_manager \
-  --device /dev/devmm_svm \
-  --device /dev/hisi_hdc \
-  -v /usr/local/dcmi:/usr/local/dcmi \
-  -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-  -v /etc/ascend_install.info:/etc/ascend_install.info \
-  -v /root/.cache:/root/.cache \
-  -it $IMAGE bash
+   
+    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --net=host \
+        --privileged=true \
+        --device /dev/davinci0 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
 ```
 
 ::::
@@ -132,11 +137,11 @@ If you want to deploy multi-node environment, you need to set up environment on 
 ```{code-block} bash
    :substitutions:
 
-vllm serve Qwen/Qwen3-VL-Embedding-2B  \
-   --served-model-name Qwen/Qwen3-VL-Embedding-2B  \
-   --runner pooling \
-   --port 8000 \
-   --max-model-len 1024
+    vllm serve Qwen/Qwen3-Embedding-0.6B  \
+      --served-model-name Qwen/Qwen3-Embedding-0.6B  \
+      --runner pooling \
+      --port 8000 \
+      --max-model-len 1024
 ```
 
 ::::
@@ -146,14 +151,14 @@ vllm serve Qwen/Qwen3-VL-Embedding-2B  \
 ```{code-block} bash
    :substitutions:
 
-vllm serve Qwen/Qwen3-VL-Embedding-2B  \
-   --served-model-name Qwen/Qwen3-VL-Embedding-2B  \
-   --compilation-config '{"cudagraph_capture_sizes": [1024,512]}' \
-   --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
-   --runner pooling \
-   --dtype float16 \
-   --port 8000 \
-   --max-model-len 1024
+    vllm serve Qwen/Qwen3-Embedding-0.6B  \
+      --served-model-name Qwen/Qwen3-Embedding-0.6B  \
+      --compilation-config '{"cudagraph_capture_sizes": [1024,512]}' \
+      --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+      --runner pooling \
+      --dtype float16 \
+      --port 8000 \
+      --max-model-len 1024
 ```
 
     Required  Parameter Descriptions:
@@ -193,22 +198,20 @@ The service returns HTTP 200 OK with a JSON response containing the `embedding` 
   "id": "embd-8136155c01e8411d",
   "object": "list",
   "created": 1784538286,
-  "model": "Qwen/Qwen3-VL-Embedding-2B",
+  "model": "Qwen/Qwen3-Embedding-0.6B",
   "data": [
     {
       "index": 0,
       "object": "embedding",
       "embedding": [
-        -0.028474265709519386,
-        -0.02678542211651802
+      -0.04725276678800583,-0.021066857501864433
       ]
     },
     {
       "index": 1,
       "object": "embedding",
       "embedding": [
-        -0.016785264015197754,
-        -0.003787524998188019
+        -0.053165290504693985,-0.01480848714709282
       ]
     }
   ],
@@ -246,7 +249,7 @@ Here are two accuracy evaluation methods.
         os.environ["HF_DATASETS_CACHE"] = data_path
         os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
     
-        model = VllmEncoderWrapper(f"/root/.cache/Qwen3-VL-Embedding-2B",
+        model = VllmEncoderWrapper(f"/root/.cache/Qwen3-Embedding-0.6B",
                                     revision="norm",
                                     dtype="float16",
                                     max_model_len=10240,
@@ -265,13 +268,13 @@ Here are two accuracy evaluation methods.
 
 ### Using vLLM Benchmark
 
-Run performance of `Qwen3-VL-Embedding-2B` as an example.
+Run performance of `Qwen3-Embedding-0.6B` as an example.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/cli/) for more details.
 
 Take the `serve` as an example. Run the code as follows.
 
 ```bash
-vllm bench serve --model Qwen/Qwen3-VL-Embedding-2B --backend openai-embeddings --port 8000 --dataset-name random --endpoint /v1/embeddings --random-input 200 --save-result --result-dir ./
+vllm bench serve --model Qwen/Qwen3-Embedding-0.6B --backend openai-embeddings --port 8000 --dataset-name random --endpoint /v1/embeddings --random-input 200 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.
