@@ -1,3 +1,5 @@
+import operator
+
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import PatternMatcherPass
@@ -13,12 +15,21 @@ from vllm_ascend.utils import is_moe_model
 SP_MIN_TOKEN_NUM_DEFAULT = 1000
 
 
+# def get_sp_min_token_num(config: VllmConfig) -> int:
+#     if is_moe_model(config):
+#         return 1
+
+#     return SP_MIN_TOKEN_NUM_DEFAULT
+
 def get_sp_min_token_num(config: VllmConfig) -> int:
+    configured = config.compilation_config.pass_config.sp_min_token_num
+    if configured is not None:
+        return configured
+
     if is_moe_model(config):
         return 1
 
     return SP_MIN_TOKEN_NUM_DEFAULT
-
 
 class _SequenceParallelPatternHelper:
     """Helper for sequence parallelism patterns.
@@ -43,11 +54,65 @@ class _SequenceParallelPatternHelper:
     def _all_reduce(self, x: torch.Tensor) -> torch.Tensor:
         return tensor_model_parallel_all_reduce(x)
 
+    def _maybe_all_reduce(self, x: torch.Tensor) -> torch.Tensor:
+        """Match the MoE output reduction wrapper before the next RMSNorm."""
+        return torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(x)
+
+    def _maybe_all_reduce_search_pattern(
+        self,
+        return_residual: bool,
+        add_deepstack: bool = False,
+        eps: float = 1e-6,
+    ):
+        """Build the MoE output pattern while preserving the alias node."""
+        maybe_all_reduce = pm.CallFunction(
+            torch.ops.vllm.maybe_all_reduce_tensor_model_parallel.default,
+            pm.KeywordArg("input"),
+        )
+        alias = pm.CallFunction(torch.ops.aten.alias.default, maybe_all_reduce, _users=2)
+        residual = pm.CallFunction(
+            torch.ops.vllm.maybe_chunk_residual.default,
+            alias,
+            pm.KeywordArg("residual"),
+        )
+        norm_input = alias
+        if add_deepstack:
+            norm_input = pm.CallFunction(
+                torch.ops.aten.add.Tensor,
+                alias,
+                pm.KeywordArg("deepstack_input_embeds"),
+            )
+        norm_args = [norm_input, residual, pm.KeywordArg("weight")]
+        if eps != 1e-6:
+            norm_args.extend([None, pm.Ignored()])
+        norm = pm.CallFunction(
+            torch.ops._C_ascend.npu_add_rms_norm_bias.default,
+            *norm_args,
+            _users=2 if return_residual else 1,
+        )
+        output = pm.CallFunction(operator.getitem, norm, 0)
+        if not return_residual:
+            return output
+        return pm.MultiOutputPattern(
+            [output, pm.CallFunction(operator.getitem, norm, 2)]
+        )
+
     def _reduce_scatter(self, x: torch.Tensor) -> torch.Tensor:
         return torch.ops.vllm.reduce_scatter(x, dim=0, world_size=self.tp_size, group_name=self.tp_group.unique_name)
 
     def _all_gather(self, x: torch.Tensor) -> torch.Tensor:
         return torch.ops.vllm.all_gather(x, dim=0, world_size=self.tp_size, group_name=self.tp_group.unique_name)
+
+    def _add_rms_norm_bias(
+        self,
+        input: torch.Tensor,
+        residual: torch.Tensor,
+        weight: torch.Tensor,
+    ):
+        """Call the norm op with the same arity Dynamo emits for its defaults."""
+        if self.eps == 1e-6:
+            return torch.ops._C_ascend.npu_add_rms_norm_bias(input, residual, weight)
+        return torch.ops._C_ascend.npu_add_rms_norm_bias(input, residual, weight, None, self.eps)
 
     def empty(self, *args, **kws):
         return torch.empty(*args, dtype=self.dtype, device="npu", **kws)
@@ -79,7 +144,8 @@ class MiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             residual: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             x = self._all_reduce(input)
-            result, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(x, residual, weight, None, self.eps)
+            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
+            result, _, residual = self._add_rms_norm_bias(x, residual, weight)
 
             return result, residual
 
@@ -90,13 +156,34 @@ class MiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             reduce_scatter = self._reduce_scatter(input)
             residual = torch.ops.vllm.maybe_chunk_residual(reduce_scatter, residual)
-            result, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
-                reduce_scatter, residual, weight, None, self.eps
-            )
+            result, _, residual = self._add_rms_norm_bias(reduce_scatter, residual, weight)
             all_gather = self._all_gather(result)
             return all_gather, residual
 
         pm.register_replacement(pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass)
+
+        def maybe_all_reduce_pattern(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            residual: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            x = self._maybe_all_reduce(input)
+            x = torch.ops.aten.alias(x)
+            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
+            result, _, residual = self._add_rms_norm_bias(x, residual, weight)
+            return result, residual
+
+        pm.register_replacement(
+            maybe_all_reduce_pattern,
+            replacement,
+            self.get_inputs(),
+            pm.fwd_only,
+            pm_pass,
+            search_fn_pattern=self._maybe_all_reduce_search_pattern(
+                return_residual=True,
+                eps=self.eps,
+            ),
+        )
 
 
 class LastAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
@@ -119,7 +206,8 @@ class LastAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             residual: torch.Tensor,
         ) -> torch.Tensor:
             x = self._all_reduce(input)
-            result, _, _ = torch.ops._C_ascend.npu_add_rms_norm_bias(x, residual, weight, None, self.eps)
+            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
+            result, _, _ = self._add_rms_norm_bias(x, residual, weight)
 
             return result
 
@@ -130,11 +218,34 @@ class LastAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
         ) -> torch.Tensor:
             reduce_scatter = self._reduce_scatter(input)
             residual = torch.ops.vllm.maybe_chunk_residual(reduce_scatter, residual)
-            result, _, _ = torch.ops._C_ascend.npu_add_rms_norm_bias(reduce_scatter, residual, weight, None, self.eps)
+            result, _, _ = self._add_rms_norm_bias(reduce_scatter, residual, weight)
             all_gather = self._all_gather(result)
             return all_gather
 
         pm.register_replacement(pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass)
+
+        def maybe_all_reduce_pattern(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            residual: torch.Tensor,
+        ) -> torch.Tensor:
+            x = self._maybe_all_reduce(input)
+            x = torch.ops.aten.alias(x)
+            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
+            result, _, _ = self._add_rms_norm_bias(x, residual, weight)
+            return result
+
+        pm.register_replacement(
+            maybe_all_reduce_pattern,
+            replacement,
+            self.get_inputs(),
+            pm.fwd_only,
+            pm_pass,
+            search_fn_pattern=self._maybe_all_reduce_search_pattern(
+                return_residual=False,
+                eps=self.eps,
+            ),
+        )
 
 
 class Qwen3VLMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
@@ -163,7 +274,8 @@ class Qwen3VLMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             x = self._all_reduce(input)
             add_ = x + deepstack_input_embeds
-            result, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(add_, residual, weight, None, self.eps)
+            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
+            result, _, residual = self._add_rms_norm_bias(add_, residual, weight)
 
             return result, residual
 
@@ -177,11 +289,37 @@ class Qwen3VLMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             chunk = deepstack_input_embeds.chunk(self.tp_size)[self.tp_rank]
             add_ = reduce_scatter + chunk
             residual = torch.ops.vllm.maybe_chunk_residual(reduce_scatter, residual)
-            result, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(add_, residual, weight, None, self.eps)
+            result, _, residual = self._add_rms_norm_bias(add_, residual, weight)
             all_gather = self._all_gather(result)
             return all_gather, residual
 
         pm.register_replacement(pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass)
+
+        def maybe_all_reduce_pattern(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            residual: torch.Tensor,
+            deepstack_input_embeds: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            x = self._maybe_all_reduce(input)
+            x = torch.ops.aten.alias(x)
+            add_ = x + deepstack_input_embeds
+            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
+            result, _, residual = self._add_rms_norm_bias(add_, residual, weight)
+            return result, residual
+
+        pm.register_replacement(
+            maybe_all_reduce_pattern,
+            replacement,
+            self.get_inputs(),
+            pm.fwd_only,
+            pm_pass,
+            search_fn_pattern=self._maybe_all_reduce_search_pattern(
+                return_residual=True,
+                add_deepstack=True,
+                eps=self.eps,
+            ),
+        )
 
 
 class SequenceParallelismPass(VllmInductorPass):
@@ -209,7 +347,7 @@ class SequenceParallelismPass(VllmInductorPass):
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
         self.noop_cleanup(graph)  # Eliminate redundant view-like operations
-        logger.debug("after noop_cleanup %s", graph.graph)
+        logger.debug("before apply replacement %s", graph.graph)
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
         logger.debug("after apply replacement %s", graph.graph)
