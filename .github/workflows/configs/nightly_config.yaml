@@ -79,6 +79,7 @@ a2:
         model_list:
           - Qwen2.5-Math-RM-72B
           - Hunyuan-A13B-Instruct
+          - NVLM-D-72B
 
 a3:
   multi_node:
