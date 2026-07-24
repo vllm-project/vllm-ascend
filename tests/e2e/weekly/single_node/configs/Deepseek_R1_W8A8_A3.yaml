@@ -17,7 +17,7 @@ _server_cmd: &server_cmd
   - "$SERVER_PORT"
   - "--data-parallel-size"
   - "2"
-  - "--enable-expert-paralle"
+  - "--enable-expert-parallel"
   - "--seed"
   - "1024"
   - "--max-num-batched-tokens"
@@ -55,7 +55,7 @@ _benchmarks: &benchmarks
 # ==========================================
 
 test_cases:
-  - name: "Deepseek_R1_W8A8_Perfermance_0006"
+  - name: "Deepseek_R1_W8A8_Performance_0006"
     model: "vllm-ascend/DeepSeek-R1-0528_w8a8_mtpmix_rot_final_vllm"
     envs:
       <<: *envs
