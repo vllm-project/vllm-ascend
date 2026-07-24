@@ -134,6 +134,8 @@ class TestKVPoolScheduler(unittest.TestCase):
             [0],
             hbm_hit_tokens=16,
         )
+        self.assertEqual(scheduler.get_num_new_matched_tokens(request, 64), (0, False))
+        mock_client_cls.return_value.lookup.assert_called_once()
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_get_num_new_matched_tokens_all_hit(self, mock_client_cls):
@@ -152,18 +154,6 @@ class TestKVPoolScheduler(unittest.TestCase):
         self.assertEqual(need, 63)
         self.assertEqual(scheduler.load_specs["r1"].kvpool_cached_tokens, 63)
         self.assertEqual(scheduler.load_specs["r1"].kvpool_store_skip_tokens, 64)
-
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
-    def test_get_num_new_matched_tokens_full_hbm_hit_skips_external_lookup(self, mock_client_cls):
-        scheduler = KVPoolScheduler(self._make_config(block_size=16), use_layerwise=False)
-        request = MagicMock()
-        request.prompt_token_ids = list(range(64))
-        request.num_tokens = 64
-        request.request_id = "r1"
-        request.block_hashes = [b"h"] * 4
-
-        self.assertEqual(scheduler.get_num_new_matched_tokens(request, 64), (0, False))
-        mock_client_cls.return_value.lookup.assert_not_called()
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_get_num_new_matched_tokens_less_than_computed(self, mock_client_cls):

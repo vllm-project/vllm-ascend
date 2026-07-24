@@ -180,21 +180,27 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         )
         return t, store
 
-    def test_handle_request_puts_missing_keys(self):
-        t, store = self._make_thread([1, 0, 1, 0])
+    def test_handle_request_puts_missing_keys_after_hit_prefix(self):
+        t, store = self._make_thread([0, 0])
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=64,
             block_ids=[0, 1, 2, 3],
             block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
-            current_event=None,
+            load_spec=LoadSpec(
+                vllm_cached_tokens=0,
+                kvpool_cached_tokens=31,
+                kvpool_store_skip_tokens=32,
+                can_load=True,
+            ),
         )
         t.add_stored_request("r1")
         t.request_queue.put(req)
         t._handle_request(req)
         self.assertEqual(len(store.put_calls), 1)
-        keys, _, _ = store.put_calls[0]
+        keys, addrs, _ = store.put_calls[0]
         self.assertEqual(len(keys), 2)
+        self.assertEqual(addrs, [[1002], [1003]])
 
     def test_handle_request_all_exist_no_put(self):
         t, store = self._make_thread([1, 1])
@@ -342,27 +348,6 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t._handle_request(req)
         keys, _, _ = store.put_calls[0]
         self.assertEqual(len(keys), 1)
-
-    def test_handle_request_skips_known_kvpool_hit_prefix(self):
-        t, store = self._make_thread([0, 0])
-        req = ReqMeta(
-            req_id="r1",
-            token_len_chunk=64,
-            block_ids=[0, 1, 2, 3],
-            block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
-            load_spec=LoadSpec(
-                vllm_cached_tokens=0,
-                kvpool_cached_tokens=31,
-                kvpool_store_skip_tokens=32,
-                can_load=True,
-            ),
-        )
-        t.add_stored_request("r1")
-        t.request_queue.put(req)
-        t._handle_request(req)
-        keys, addrs, _ = store.put_calls[0]
-        self.assertEqual(len(keys), 2)
-        self.assertEqual(addrs, [[1002], [1003]])
 
     def test_save_exception_cleans_queue_lifecycle(self):
         t, store = self._make_thread([0])

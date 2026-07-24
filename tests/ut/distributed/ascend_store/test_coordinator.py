@@ -156,24 +156,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
 
         self.assertEqual(hit_length, 0)
 
-    def test_store_mask_uses_manager_reachability(self):
-        coord = AscendStoreCoordinator(
-            [KVCacheGroupSpec(["layer.0"], _sliding_spec(block_size=128, sliding_window=256))],
-            scheduler_block_size=512,
-            hash_block_size=128,
-            group_block_sizes=[128],
-            group_cache_families=["c1"],
-        )
-
-        with patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._reachable_block_mask",
-            return_value=[False, False, False, True],
-        ):
-            masks = coord.store_mask(512)
-
-        self.assertEqual(masks, ([False, False, False, True],))
-
-    def test_lookup_mask_uses_reachability_without_retention(self):
+    def test_store_and_lookup_masks_use_expected_reachability(self):
         coord = AscendStoreCoordinator(
             [KVCacheGroupSpec(["layer.0"], _sliding_spec(block_size=128, sliding_window=256))],
             scheduler_block_size=512,
@@ -182,14 +165,20 @@ class TestAscendStoreCoordinator(unittest.TestCase):
             group_cache_families=["c1"],
             retention_interval=256,
         )
+
         with patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._reachable_block_mask",
             return_value=[False, False, False, True],
         ) as reachable:
-            masks = coord.lookup_mask(512)
+            store_masks = coord.store_mask(512)
+            lookup_masks = coord.lookup_mask(512)
 
-        self.assertEqual(masks, ([False, False, False, True],))
-        self.assertIsNone(reachable.call_args.kwargs["retention_interval"])
+        self.assertEqual(store_masks, ([False, False, False, True],))
+        self.assertEqual(lookup_masks, store_masks)
+        self.assertEqual(
+            [call.kwargs["retention_interval"] for call in reachable.call_args_list],
+            [256, None],
+        )
 
     def test_store_mask_propagates_eagle_to_same_spec_siblings(self):
         calls = []

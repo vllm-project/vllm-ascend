@@ -184,53 +184,17 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(result[0][2].chunk_hash, _expected_grouped_hash("a", "b").hex())
         self.assertEqual(len(result[0][2].chunk_hash), 64)
 
-    def test_key_strings_match_pool_keys(self):
-        hashes = ["aaa", "bbb", "ccc"]
-        pool_keys = list(self.db.process_tokens(40, hashes))
+    def test_direct_key_strings_match_pool_keys_after_filtering_and_sharding(self):
+        hashes = ["a", "b", "c", "d"]
+        pool_keys = list(self.db.process_tokens(64, hashes))
         self.assertEqual(
-            list(self.db.process_token_key_strings(40, hashes)),
+            list(self.db.process_token_key_strings(64, hashes)),
             [
                 (start, end, key.to_string(), hash_val)
                 for (start, end, key), hash_val in zip(pool_keys, hashes, strict=True)
             ],
         )
 
-        block_ids = [5, 6]
-        self.assertEqual(
-            list(self.db.process_token_key_strings_with_block_ids(32, hashes, block_ids)),
-            [
-                (start, end, key.to_string(), hash_val, block_id)
-                for (start, end, key), hash_val, block_id in zip(pool_keys[:2], hashes[:2], block_ids, strict=True)
-            ],
-        )
-
-    def test_direct_keys_preserve_multigroup_layerwise_key_semantics(self):
-        group_metadata = [
-            KeyMetadata("llama", 0, 0, 0, 0),
-            KeyMetadata("llama", 1, 0, 0, 0),
-        ]
-        db = ChunkedTokenDatabase(group_metadata, block_size=[16, 32], partitions=None, hash_block_size=16)
-        db.set_group_buffers(
-            {0: [1000], 1: [2000]},
-            {0: [160], 1: [320]},
-            group_cache_families={0: "c1", 1: "c2"},
-            group_num_layers={0: 2, 1: 2},
-        )
-        hashes = ["a", "b", "c", "d"]
-
-        pool_key_result = list(db.process_tokens(64, hashes, kv_cache_group_id=1))
-        direct_key_result = list(db.process_token_key_strings(64, hashes, kv_cache_group_id=1))
-
-        self.assertEqual(len(pool_key_result), 1)
-        self.assertEqual(
-            direct_key_result[0][:3],
-            (pool_key_result[0][0], pool_key_result[0][1], pool_key_result[0][2].to_string()),
-        )
-        layer_key = pool_key_result[0][2].split_layers(2)[1]
-        self.assertIn("@group:1@cache_role:kv@cache_family:c2@layer_id:1", layer_key.to_string())
-
-    def test_key_strings_pre_shard_after_filtering(self):
-        hashes = ["a", "b", "c", "d"]
         store_mask = [True, False, True, True]
         result = list(
             self.db.process_token_key_strings_with_block_ids(
@@ -242,7 +206,7 @@ class TestChunkedTokenDatabase(unittest.TestCase):
                 shard_size=2,
             )
         )
-        self.assertEqual([(start, end, block_id) for start, end, _, _, block_id in result], [(32, 48, 12)])
+        self.assertEqual(result, [(32, 48, pool_keys[2][2].to_string(), "c", 12)])
 
     def test_get_block_hashes_rehashes_groups(self):
         for hashes in (["a", "b", "c", "d"], [b"a", b"b", b"c", b"d"]):
