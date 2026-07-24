@@ -106,6 +106,7 @@ class AscendMetadataForDecode:
     num_computed_tokens_of_pcp_dcp: list[list[list[int]]] | None = None
     block_tables: torch.Tensor = None
     dcp_mtp_attn_mask: torch.Tensor = None
+    query_lens: list[int] | None = None
 
 
 def _process_attn_out_lse(attn_output: torch.Tensor, softmax_lse: torch.Tensor) -> torch.Tensor:

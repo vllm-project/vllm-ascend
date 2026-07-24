@@ -4,6 +4,7 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.spec_decode.utils import PADDING_SLOT_ID
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -35,7 +36,7 @@ class AscendDflashProposer(AscendEagleProposer):
         )
 
         self._slot_mapping_buffer = torch.zeros(
-            self.max_query_tokens,
+            self.max_query_tokens * self.pcp_size,
             dtype=torch.int32,
             device=device,
         )
@@ -91,6 +92,9 @@ class AscendDflashProposer(AscendEagleProposer):
         )
 
         has_num_rejected = num_rejected_tokens_gpu is not None
+        total_cp_world_size = self.dcp_size
+        current_cp_rank = self.dcp_rank
+        cp_kv_cache_interleave_size = self.runner.parallel_config.cp_kv_cache_interleave_size
 
         copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid[1,](
             # Inputs
@@ -119,6 +123,10 @@ class AscendDflashProposer(AscendEagleProposer):
             total_input_tokens=num_context,
             batch_size=batch_size,
             HAS_NUM_REJECTED=has_num_rejected,
+            total_cp_world_size=total_cp_world_size,
+            current_cp_rank=current_cp_rank,
+            cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+            PAD_ID=PADDING_SLOT_ID,
         )
 
         query_slot_mapping = self._slot_mapping_buffer[:num_query_total]
@@ -147,7 +155,27 @@ class AscendDflashProposer(AscendEagleProposer):
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
 
-        return num_query_total, token_indices_to_sample, cad, None
+        long_seq_args = None
+        if self.dcp_size > 1:
+            from vllm_ascend.attention.utils import AscendPrefillContextParallelMetadata
+            seq_lens_cpu = cad.seq_lens.cpu()
+            cad.seq_lens_cpu = seq_lens_cpu
+            if getattr(cad,"_seq_lens_cpu", None) is not None:
+                cad._seq_lens_cpu = seq_lens_cpu
+            cad.max_seq_len = int(seq_lens_cpu.max())
+            local = self.runner.pcp_manager._get_cp_local_seq_lens(
+                cad.seq_lens.cpu(),
+                1, self.dcp_size,
+                self.runner.parallel_config.cp_kv_cache_interleave_size,
+            )                                              # [num_reqs, pcp, dcp]
+            cad.prefill_context_parallel_metadata = AscendPrefillContextParallelMetadata(
+                num_computed_tokens_of_pcp_dcp=local.numpy(),      # builder 必读，含 1+N query
+                num_actual_tokens_pcp_padded=num_query_total,
+                dcp_mtp_attn_mask=None,                            # 置 None → 全注意力（不复用 MTP 因果 mask）
+            )
+            long_seq_args = (None, None)  
+
+        return num_query_total, token_indices_to_sample, cad, long_seq_args
 
     @torch.inference_mode()
     def dummy_run(
@@ -171,6 +199,21 @@ class AscendDflashProposer(AscendEagleProposer):
 
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
+        if (
+            self.dcp_size > 1
+            and self.use_cuda_graph
+            and not is_profile
+            and self.block_table_tensor_clone is None
+        ):
+            self.block_table_tensor_clone = torch.zeros(
+                (
+                    self.runner.max_num_tokens + 2 * self.runner.max_num_reqs,
+                    self.runner.input_batch.block_table[0].get_device_tensor().shape[1],
+                ),
+                dtype=torch.int32,
+                device=self.device,
+                pin_memory=self.runner.pin_memory,
+            )
         num_query_per_req = 1 + self.num_speculative_tokens
         num_query_total = num_reqs * num_query_per_req
 
@@ -180,6 +223,19 @@ class AscendDflashProposer(AscendEagleProposer):
         multi_steps_attn_metadata = []
         if aclgraph_runtime_mode == CUDAGraphMode.FULL and len(self.runner.attn_groups) > 0:
             builder = self.draft_attn_groups[0].get_metadata_builder()
+            cp_meta = None
+            if self.dcp_size > 1:
+                from vllm_ascend.attention.utils import AscendPrefillContextParallelMetadata
+                local = self.runner.pcp_manager._get_cp_local_seq_lens(
+                    self.runner.optimistic_seq_lens_cpu[:num_reqs],
+                    1, self.dcp_size,
+                    self.runner.parallel_config.cp_kv_cache_interleave_size,
+                )                                              # [num_reqs, pcp, dcp]
+                cp_meta = AscendPrefillContextParallelMetadata(
+                    num_computed_tokens_of_pcp_dcp=local.numpy(),      # builder 必读，含 1+N query
+                    num_actual_tokens_pcp_padded=num_query_total,
+                    dcp_mtp_attn_mask=None,                            # 置 None → 全注意力（不复用 MTP 因果 mask）
+                )
             common_attn_metadata = AscendCommonAttentionMetadata(
                 query_start_loc=self.arange_dflash[: num_reqs + 1] * num_query_per_req,
                 query_start_loc_cpu=torch.from_numpy(self.token_arange_np[: num_reqs + 1]).clone() * num_query_per_req,
@@ -197,6 +253,7 @@ class AscendDflashProposer(AscendEagleProposer):
                 block_table_tensor=self.runner.input_batch.block_table[self.kv_cache_gid].get_device_tensor()[
                     :num_reqs
                 ],
+                prefill_context_parallel_metadata=cp_meta,
             )
 
             attn_metadata_dflash = builder.build_for_graph_capture(

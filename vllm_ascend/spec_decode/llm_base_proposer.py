@@ -897,7 +897,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     common_attn_metadata.num_computed_tokens_cpu, num_reqs_padded
                 )
 
-            if pcp_manager is not None and self.pcp_size > 1:
+            if pcp_manager is not None and self.pcp_size > 1 and self.method != "dflash":
                 pcp_manager.mask_spec_decode_restore_idx_for_graph(
                     common_attn_metadata.prefill_context_parallel_metadata.pcp_allgather_restore_idx
                 )
@@ -1138,7 +1138,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 ori_token_indices_to_sample = None
 
         pcp_manager = getattr(self.runner, "pcp_manager", None)
-        if pcp_manager is not None and self.pcp_size > 1:
+        if pcp_manager is not None and self.pcp_size > 1 and self.method != "dflash":
             # remove graph padding before all_gather
             hidden_states = pcp_manager.get_restore_hidden_states(
                 hidden_states,
