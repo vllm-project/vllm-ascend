@@ -24,7 +24,7 @@ def diagnostics_enabled(vllm_config: Any) -> bool:
 
 def print_scheduler_summary(scheduler: Any, scheduler_output: Any) -> None:
     waiting_reqs = list(itertools.chain(scheduler.waiting, scheduler.skipped_waiting))
-    lb_paused_req_ids = getattr(scheduler, "_lb_paused_req_ids", set())
+    lb_paused_req_ids: set[str] = getattr(scheduler, "_lb_paused_req_ids", set())
 
     waiting_num = sum(
         request.status == RequestStatus.WAITING or request.request_id in lb_paused_req_ids for request in waiting_reqs

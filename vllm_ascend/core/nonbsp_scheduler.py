@@ -51,6 +51,12 @@ from vllm_ascend.core.scheduler_diagnostics import print_scheduler_summary
 
 
 class NonBSPScheduler(Scheduler):
+    running: list[Request]
+    prefill_capacity_bound: bool
+    connector_prefix_cache_stats: PrefixCacheStats | None
+    finished_req_ids: set[str]
+    reset_preempted_req_ids: set[str]
+
     def __init__(
         self,
         vllm_config: VllmConfig,
