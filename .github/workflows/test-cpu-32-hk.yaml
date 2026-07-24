@@ -1,0 +1,222 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Test CPU-32-HK Runner
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+  push:
+    branches:
+      - 'test-cpu-32-hk*'
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+jobs:
+  test-cpu-32-hk:
+    runs-on: linux-amd64-cpu-32-hk
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: System Info
+        run: |
+          echo "=========================================="
+          echo "🔍 CPU-32-HK Runner Diagnostic Info"
+          echo "=========================================="
+          echo ""
+          echo "System Information:"
+          uname -a
+          echo ""
+          echo "CPU Cores: $(nproc)"
+          echo "Memory: $(free -h | grep Mem | awk '{print $2}')"
+          echo ""
+          echo "Current User: $(whoami)"
+          echo "Current Directory: $(pwd)"
+          echo ""
+          echo "Environment Variables:"
+          env | grep -E "(BUILDKITD|DOCKER|HOME)" || echo "No buildkitd vars found"
+          echo ""
+
+      - name: Verify Vault Certificates
+        run: |
+          echo "=========================================="
+          echo "🔐 Checking Vault Certificate Injection"
+          echo "=========================================="
+          DOCKER_CONFIG="${DOCKER_CONFIG:-.docker}"
+          echo "DOCKER_CONFIG path: $DOCKER_CONFIG"
+          echo ""
+
+          if [ -f "$HOME/$DOCKER_CONFIG/ca.pem" ]; then
+            echo "✅ ca.pem exists: $(ls -lh $HOME/$DOCKER_CONFIG/ca.pem)"
+          else
+            echo "⚠️ ca.pem NOT found at $HOME/$DOCKER_CONFIG/ca.pem"
+          fi
+
+          if [ -f "$HOME/$DOCKER_CONFIG/cert.pem" ]; then
+            echo "✅ cert.pem exists: $(ls -lh $HOME/$DOCKER_CONFIG/cert.pem)"
+          else
+            echo "⚠️ cert.pem NOT found at $HOME/$DOCKER_CONFIG/cert.pem"
+          fi
+
+          if [ -f "$HOME/$DOCKER_CONFIG/key.pem" ]; then
+            echo "✅ key.pem exists: $(ls -lh $HOME/$DOCKER_CONFIG/key.pem)"
+          else
+            echo "⚠️ key.pem NOT found at $HOME/$DOCKER_CONFIG/key.pem"
+          fi
+
+          if [ -f "$HOME/$DOCKER_CONFIG/config.json" ]; then
+            echo "✅ config.json exists: $(ls -lh $HOME/$DOCKER_CONFIG/config.json)"
+          else
+            echo "⚠️ config.json NOT found at $HOME/$DOCKER_CONFIG/config.json"
+          fi
+
+          echo ""
+          if [ -d "$HOME/$DOCKER_CONFIG" ]; then
+            echo "Docker config directory contents:"
+            ls -la "$HOME/$DOCKER_CONFIG/" || echo "Failed to list directory"
+          else
+            echo "❌ Docker config directory does not exist"
+          fi
+          echo ""
+
+      - name: Verify buildctl Installation
+        run: |
+          echo "=========================================="
+          echo "🔨 Checking buildctl Installation"
+          echo "=========================================="
+
+          if command -v buildctl &> /dev/null; then
+            echo "✅ buildctl found in PATH"
+            buildctl --version
+            echo ""
+            echo "buildctl location: $(which buildctl)"
+          else
+            echo "❌ buildctl NOT found in PATH"
+            echo ""
+            echo "Attempting to find buildctl in common locations:"
+            find /usr/local/bin -name "buildctl*" 2>/dev/null || echo "Not in /usr/local/bin"
+            find /usr/bin -name "buildctl*" 2>/dev/null || echo "Not in /usr/bin"
+            find /home -name "buildctl*" 2>/dev/null -o -name "*buildkit*" 2>/dev/null | head -10 || echo "Not found in home"
+          fi
+          echo ""
+
+      - name: Verify Token Volume Mount
+        run: |
+          echo "=========================================="
+          echo "🔑 Checking Token Volume Mount"
+          echo "=========================================="
+
+          TOKEN_PATH="/var/run/secrets/tokens"
+
+          if [ -d "$TOKEN_PATH" ]; then
+            echo "✅ Token directory exists: $TOKEN_PATH"
+            echo ""
+            echo "Directory contents:"
+            ls -la "$TOKEN_PATH" || echo "Failed to list directory"
+
+            if [ -f "$TOKEN_PATH/token" ]; then
+              echo ""
+              echo "✅ Token file exists"
+              echo "Token size: $(wc -c < $TOKEN_PATH/token) bytes"
+            else
+              echo ""
+              echo "⚠️ Token file NOT found at $TOKEN_PATH/token"
+            fi
+          else
+            echo "❌ Token directory does not exist: $TOKEN_PATH"
+          fi
+          echo ""
+
+      - name: Test buildkitd Connectivity
+        continue-on-error: true
+        run: |
+          echo "=========================================="
+          echo "🌐 Testing buildkitd Service Connectivity"
+          echo "=========================================="
+
+          BUILDKITD_ADDR="${BUILDKITD_ADDR:-tcp://buildkitd-service.buildkitd:1234}"
+          echo "BUILDKITD_ADDR: $BUILDKITD_ADDR"
+          echo ""
+
+          if command -v buildctl &> /dev/null; then
+            echo "Testing buildctl connection..."
+            buildctl du || echo "buildctl du failed (expected if service not ready)"
+          else
+            echo "⚠️ buildctl not available, skipping connectivity test"
+          fi
+          echo ""
+
+      - name: Verify Cache Volumes
+        run: |
+          echo "=========================================="
+          echo "💾 Checking Cache Volumes"
+          echo "=========================================="
+
+          CACHE_DIR="/root/.cache"
+
+          if [ -d "$CACHE_DIR" ]; then
+            echo "✅ Cache directory exists: $CACHE_DIR"
+            echo "Directory size: $(du -sh $CACHE_DIR 2>/dev/null | cut -f1)"
+          else
+            echo "❌ Cache directory does not exist: $CACHE_DIR"
+          fi
+          echo ""
+
+      - name: Keep pod running for manual debugging (15 minutes)
+        run: |
+          echo "=========================================="
+          echo "🛌 Pod Debug Session"
+          echo "=========================================="
+          echo ""
+          echo "Pod is running for manual inspection."
+          echo "Debug time limit: 15 minutes (900 seconds)"
+          echo "Started: $(date)"
+          echo ""
+          echo "You can verify setup by running:"
+          echo "  - buildctl --version"
+          echo "  - ls ~/.docker/"
+          echo "  - cat /var/run/secrets/tokens/token"
+          echo ""
+          sleep 900
+          echo "Debug session ended: $(date)"
+          echo "=========================================="
+
+      - name: Final Summary
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "✅ CPU-32-HK Runner Test Complete"
+          echo "=========================================="
+          echo ""
+          echo "If this job reached this point, the runner"
+          echo "successfully picked up the workflow and"
+          echo "created the job pod."
+          echo ""
+          echo "Check the logs above for:"
+          echo "  ✓ Vault certificates injected"
+          echo "  ✓ buildctl installed and available"
+          echo "  ✓ Token volume mounted"
+          echo "  ✓ Cache volumes accessible"
+          echo "=========================================="
