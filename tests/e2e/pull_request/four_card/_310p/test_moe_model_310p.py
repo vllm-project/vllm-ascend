@@ -16,9 +16,13 @@
 # This file is a part of the vllm-ascend project.
 
 
+import pytest
+
 from tests.e2e.conftest import VllmRunner
 
 
+@pytest.mark.requires_hardware("310P")
+@pytest.mark.requires_npus(4)
 def test_qwen3_moe_tp2_w8a8():
     example_prompts = [
         "Hello, my name is",
@@ -37,6 +41,8 @@ def test_qwen3_moe_tp2_w8a8():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
+@pytest.mark.requires_hardware("310P")
+@pytest.mark.requires_npus(4)
 def test_qwen3_5_moe_tp4_fp16():
     example_prompts = [
         "Hello, my name is",

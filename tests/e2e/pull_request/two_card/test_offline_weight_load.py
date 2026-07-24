@@ -37,6 +37,8 @@ EXTERNAL_LAUNCHER_SCRIPT = REPO_ROOT / "examples" / "offline_external_launcher.p
 @pytest.mark.parametrize("model", MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
 @wait_until_npu_memory_free(0.7)
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(2)
 def test_qwen3_offline_load_and_sleepmode_tp2(model):
     env = os.environ.copy()
     cmd = [

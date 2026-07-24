@@ -28,6 +28,8 @@ SHARED_STORAGE_PATH = "/dev/shm/epd/storage"
 TENSOR_PARALLELS = [1]
 
 
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(2)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)

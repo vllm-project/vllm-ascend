@@ -5,6 +5,8 @@ from tests.e2e.pull_request.one_card.lora.test_ilama_lora import EXPECTED_LORA_O
 
 
 @pytest.mark.parametrize("distributed_executor_backend", ["mp"])
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(2)
 def test_ilama_lora_tp2(distributed_executor_backend, ilama_lora_files):
     with VllmRunner(
         MODEL_PATH,

@@ -12,6 +12,8 @@ from tests.e2e.pull_request.one_card.spec_decode.utils import calculate_acceptan
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [3])
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_ngram_npu_async_acceptance(
     test_prompts: list[list[dict[str, Any]]],
     num_speculative_tokens: int,

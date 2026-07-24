@@ -467,6 +467,8 @@ def sequence_parallelism_moe_workers() -> Generator[Callable[[str], None], None,
 
 
 @pytest.mark.parametrize("case_name", tuple(PATTERN_TEST_CASES), ids=tuple(PATTERN_TEST_CASES))
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(2)
 def test_sequence_parallelism_moe_patterns(
     sequence_parallelism_moe_workers: Callable[[str], None], case_name: str
 ) -> None:

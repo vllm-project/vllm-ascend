@@ -3,6 +3,7 @@
 
 from unittest.mock import patch
 
+import pytest
 import vllm
 import vllm.config
 from vllm.lora.request import LoRARequest
@@ -126,6 +127,8 @@ def generate_and_test(llm, llama32_lora_files, tensorizer_config_dict: dict | No
 
 
 @patch.dict("os.environ", {"VLLM_USE_MODELSCOPE": "False"})
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_llama_lora(llama32_lora_files):
     vllm_model = VllmRunner(
         MODEL_PATH,

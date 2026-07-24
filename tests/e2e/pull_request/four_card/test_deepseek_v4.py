@@ -44,6 +44,8 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     },
 )
 @wait_until_npu_memory_free()
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(4)
 def test_deepseek_v4_w4a8_tp4_basic_greedy():
     """Verify DeepSeek V4 W4A8 basic greedy generation with TP4 and EP."""
     example_prompts = [
@@ -98,6 +100,8 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
     },
 )
 @wait_until_npu_memory_free()
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(4)
 def test_deepseek_v4_w4a8_tp4_index_cache_freq4():
     """IndexCache freq=4 must produce non-empty greedy outputs identical in
     shape to the baseline test, verifying skip_topk/topk_indices_buffer

@@ -33,6 +33,8 @@ MODELS = ["vllm-ascend/DeepSeek-V2-Lite-W8A8"]
 
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.7)
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(2)
 def test_dsv2_w8a8_dp_eager_mode():
     example_prompts = [
         "Hello, my name is",
@@ -67,6 +69,8 @@ def test_dsv2_w8a8_dp_eager_mode():
 )
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.7)
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(2)
 def test_dsv2_w8a8_dp_graph_mode(compilation_config: dict):
     example_prompts = [
         "Hello, my name is",

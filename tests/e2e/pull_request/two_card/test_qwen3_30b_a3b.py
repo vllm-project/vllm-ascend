@@ -36,6 +36,8 @@ from tests.e2e.conftest import RemoteOpenAIServer, wait_until_npu_memory_free
     graph_mode="full_decode_only",
 )
 @wait_until_npu_memory_free()
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(2)
 def test_moe_tp_ep_eplb_full_decode_only():
     """Verify MoE serving with TP, EP, EPLB, and full decode only."""
     model = "Qwen/Qwen3-30B-A3B"

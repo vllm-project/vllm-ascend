@@ -16,6 +16,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import pytest
 from vllm import SamplingParams
 from vllm.config import CompilationConfig
 
@@ -24,6 +25,8 @@ from tests.e2e.pull_request.utils import PROMPTS_SHORT
 
 
 @wait_until_npu_memory_free()
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_dense_w8a8_eagle3_full_graph():
     """Verify dense W8A8 inference with Eagle-3 speculative decoding."""
     example_prompts = PROMPTS_SHORT

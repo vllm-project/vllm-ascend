@@ -45,6 +45,8 @@ MODELS: list[str] = ["Qwen/Qwen3-0.6B"]
     quantization="BF16",
     graph_mode="xlite_decode_only",
 )
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 @pytest.mark.parametrize("model", MODELS)
 @wait_until_npu_memory_free()
 def test_models_with_xlite_decode_only(model: str):
@@ -67,6 +69,8 @@ def test_models_with_xlite_decode_only(model: str):
     quantization="BF16",
     graph_mode="xlite_full",
 )
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 @pytest.mark.parametrize("model", MODELS)
 @wait_until_npu_memory_free()
 def test_models_with_xlite_full_mode(model: str):

@@ -15,9 +15,13 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+import pytest
+
 from tests.e2e.conftest import VllmRunner
 
 
+@pytest.mark.requires_hardware("310P")
+@pytest.mark.requires_npus(1)
 def test_qwen3_5_mtp_tp1_eager():
     example_prompts = ["Hello, my name is"]
     with VllmRunner(

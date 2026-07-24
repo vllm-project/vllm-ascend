@@ -17,6 +17,7 @@
 #
 
 import huggingface_hub
+import pytest
 from modelscope import snapshot_download as modelscope_snapshot_download  # type: ignore[import-untyped]
 
 from tests.e2e.conftest import HfRunner, VllmRunner, cleanup_dist_env_and_memory, wait_until_npu_memory_free
@@ -24,6 +25,8 @@ from tests.e2e.utils import check_embeddings_close
 
 
 @wait_until_npu_memory_free()
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_embedding_full_decode_only():
     """Verify embedding outputs with full decode only."""
     queries = ["What is the capital of China?", "Explain gravity"]

@@ -16,12 +16,15 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import pytest
 from vllm.assets.image import ImageAsset
 
 from tests.e2e.conftest import VllmRunner, qwen_prompt, wait_until_npu_memory_free
 
 
 @wait_until_npu_memory_free()
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(2)
 def test_multimodal_reasoning_pp_full_decode_only():
     """Verify multimodal generation with PP and full decode only."""
     image = ImageAsset("cherry_blossom").pil_image.convert("RGB")

@@ -16,6 +16,8 @@
 # This file is a part of the vllm-ascend project.
 
 
+import pytest
+
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.model_utils import check_outputs_equal
 
@@ -69,6 +71,8 @@ def _generate_qwen3_5_prefix_mamba_outputs(enable_prefix_caching: bool) -> list[
 
 
 @wait_until_npu_memory_free(0.7)
+@pytest.mark.requires_hardware("310P")
+@pytest.mark.requires_npus(1)
 def test_qwen3_dense_tp1_w8a8_aclgraph():
     example_prompts = [
         "Hello, my name is",
@@ -92,6 +96,8 @@ def test_qwen3_dense_tp1_w8a8_aclgraph():
 
 
 @wait_until_npu_memory_free(0.7)
+@pytest.mark.requires_hardware("310P")
+@pytest.mark.requires_npus(1)
 def test_qwen3_5_dense_prefix_mamba_cache_tp1_fp16():
     prefix_cache_outputs = _generate_qwen3_5_prefix_mamba_outputs(enable_prefix_caching=True)
     no_prefix_cache_outputs = _generate_qwen3_5_prefix_mamba_outputs(enable_prefix_caching=False)
@@ -106,6 +112,8 @@ def test_qwen3_5_dense_prefix_mamba_cache_tp1_fp16():
 
 
 @wait_until_npu_memory_free(0.7)
+@pytest.mark.requires_hardware("310P")
+@pytest.mark.requires_npus(1)
 def test_qwen3_5_dense_tp1_fp16_aclgraph():
     example_prompts = [
         "Hello, my name is",
