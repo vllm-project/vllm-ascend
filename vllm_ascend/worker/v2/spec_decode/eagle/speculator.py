@@ -28,7 +28,14 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cudagraph_utils import AttentionStatePair, BatchExecutionDescriptor
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+
+try:
+    from vllm.v1.worker.gpu.cudagraph_utils import (  # type: ignore[import-not-found]
+        AttentionStatePair,
+    )
+except ImportError:
+    AttentionStatePair = Any  # type: ignore[assignment,misc]
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
