@@ -89,7 +89,7 @@ AGE_DAYS=$(( (NOW - LAST_TS) / 86400 ))
 
 echo "commit_age_days=${AGE_DAYS}" >> "$GITHUB_OUTPUT"
 
-if [ "$AGE_DAYS" -gt 3 ]; then
+if [ "$AGE_DAYS" -gt 30 ]; then
   echo "is_old=true" >> "$GITHUB_OUTPUT"
   echo ">>> ${CONFIG_NAME} last_status=${LAST_STATUS} date=${LAST_DATE} age=${AGE_DAYS}d (> 3 days) → old"
 else
