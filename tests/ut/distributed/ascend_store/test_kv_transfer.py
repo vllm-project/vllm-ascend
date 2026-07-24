@@ -62,15 +62,9 @@ class FakeStore:
 
 
 class FakeTokenDatabase(ChunkedTokenDatabase):
-    def __init__(self, block_size=16, cache_family="default"):
+    def __init__(self, block_size=16):
         super().__init__([KeyMetadata("m", 0, 0, 0, 0)], [block_size], None)
-        self.set_group_buffers(
-            {0: [1000]},
-            {0: [block_size]},
-            {0: [1]},
-            group_cache_families={0: cache_family},
-            group_num_layers={0: 1},
-        )
+        self.set_group_buffers({0: [1000]}, {0: [block_size]}, {0: [1]}, group_num_layers={0: 1})
 
 
 class MaskedFakeTokenDatabase(FakeTokenDatabase):
@@ -169,15 +163,9 @@ class TestKVTransferThread(unittest.TestCase):
 
 
 class TestKVCacheStoreSendingThread(unittest.TestCase):
-    def _make_thread(
-        self,
-        exists_result=None,
-        kv_role="kv_producer",
-        enable_kv_event=False,
-        cache_family="default",
-    ):
+    def _make_thread(self, exists_result=None, kv_role="kv_producer", enable_kv_event=False):
         store = FakeStore(exists_result or [0, 0, 0, 0])
-        db = FakeTokenDatabase(cache_family=cache_family)
+        db = FakeTokenDatabase()
         t = KVCacheStoreSendingThread(
             m_store=store,
             token_database=db,
@@ -355,29 +343,9 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         keys, _, _ = store.put_calls[0]
         self.assertEqual(len(keys), 1)
 
-    def test_handle_request_skips_known_kvpool_hit_prefix(self):
-        t, store = self._make_thread([0, 0])
-        req = ReqMeta(
-            req_id="r1",
-            token_len_chunk=64,
-            block_ids=[0, 1, 2, 3],
-            block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
-            load_spec=LoadSpec(
-                vllm_cached_tokens=0,
-                kvpool_cached_tokens=31,
-                kvpool_store_skip_tokens=32,
-                can_load=True,
-            ),
-        )
-        t.add_stored_request("r1")
-        t.request_queue.put(req)
-        t._handle_request(req)
-        keys, addrs, _ = store.put_calls[0]
-        self.assertEqual(len(keys), 2)
-        self.assertEqual(addrs, [[1002], [1003]])
-
     def test_handle_request_skips_compressed_hit_in_raw_token_domain(self):
-        t, store = self._make_thread([0, 0], cache_family="c4")
+        t, store = self._make_thread([0, 0])
+        t.token_database.group_cache_families["kv"][0] = "c4"
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=128,
@@ -396,27 +364,6 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         keys, addrs, _ = store.put_calls[0]
         self.assertEqual(len(keys), 1)
         self.assertEqual(addrs, [[1001]])
-
-    def test_handle_request_skips_compressed_hit_after_local_prefix(self):
-        t, store = self._make_thread([0, 0, 0], cache_family="c4")
-        req = ReqMeta(
-            req_id="r1",
-            token_len_chunk=192,
-            block_ids=[0, 1, 2],
-            block_hashes=[f"h{i}" for i in range(12)],
-            load_spec=LoadSpec(
-                vllm_cached_tokens=64,
-                kvpool_cached_tokens=127,
-                kvpool_store_skip_tokens=128,
-                can_load=True,
-            ),
-        )
-        t.add_stored_request("r1")
-        t.request_queue.put(req)
-        t._handle_request(req)
-        keys, addrs, _ = store.put_calls[0]
-        self.assertEqual(len(keys), 2)
-        self.assertEqual(addrs, [[1000], [1002]])
 
     def test_save_exception_cleans_queue_lifecycle(self):
         t, store = self._make_thread([0])
