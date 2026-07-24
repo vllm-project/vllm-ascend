@@ -102,6 +102,8 @@ from vllm.v1.worker.ubatch_utils import (
 )
 from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
+import vllm_ascend.envs as envs_ascend
+
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
@@ -2869,6 +2871,19 @@ class NPUModelRunner(GPUModelRunner):
         ):
             if self.enable_enpu:
                 torch.npu.current_stream().synchronize()
+            elif envs_ascend.VLLM_ASCEND_FINE_GRAIN_REPLAY_SYNC and isinstance(
+                self.model, ACLGraphWrapper
+            ):
+                # Fine-grained cross-iteration sync: make update_stream wait
+                # the PREVIOUS step's replay-done event before writing the
+                # shared param slot. This replaces the host current_stream
+                # drain with a device-side wait, so the host is not blocked and
+                # update[i+1] still cannot clobber the slot while replay[i] is
+                # reading it. Same-step update[i]/replay[i] concurrency is
+                # untouched (the ExternalEvent value-rendezvous still drives it).
+                wait_ev = self.model.consume_fg_pending_wait_event()
+                if wait_ev is not None:
+                    self.update_stream.wait_event(wait_ev)
 
             assert positions is not None
             update_full_graph_params(

@@ -99,6 +99,19 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # EXPERIMENTAL: replace the pre-replay host current_stream().synchronize()
+    # with a fine-grained, device-side cross-iteration dependency. The baseline
+    # barrier drains the whole current_stream every step to prevent update[i+1]
+    # from clobbering the param slot while replay[i] is still reading it (same
+    # task-group handle, single slot). This opt-in instead: after each replay,
+    # records a reusable torch.npu.Event on current_stream (double-buffered,
+    # cycled per step); before the NEXT step's graph-param update, makes
+    # update_stream wait the PREVIOUS step's replay-done event. That protects
+    # the cross-iteration slot race (update[i+1] vs replay[i] read) on the
+    # device side WITHOUT blocking the host and WITHOUT touching the same-step
+    # update[i]/replay[i] value-rendezvous (which must stay concurrent, see
+    # optimization-record doc 12.3.1). Default 0 = baseline barrier.
+    "VLLM_ASCEND_FINE_GRAIN_REPLAY_SYNC": lambda: bool(int(os.getenv("VLLM_ASCEND_FINE_GRAIN_REPLAY_SYNC", "0"))),
 }
 
 # end-env-vars-definition
