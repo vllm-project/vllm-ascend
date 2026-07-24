@@ -166,7 +166,7 @@ Usually, each minor version of vLLM (such as 0.7) corresponds to a vLLM Ascend v
 
 | Branch     | State       | RFC Link                             | Scheduled Merge Time | Mentor |
 |------------|--------------|---------------------------------------|------------|--------|
-|rfc/long_seq_optimization|Maintained|<https://github.com/vllm-project/vllm/issues/22693>|930|wangxiyuan|
+|rfc/long_seq_optimization|Maintained|[RFC: long sequence optimization #22693](https://github.com/vllm-project/vllm/issues/22693)|930|wangxiyuan|
 
 - Branch: The feature branch should be created with a prefix `rfc/` followed by the feature name, such as `rfc/feature-name`.
 - State: The state of the feature branch is `Maintained` until it is merged into the main branch or deleted.
