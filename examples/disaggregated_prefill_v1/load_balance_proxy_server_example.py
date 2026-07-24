@@ -1121,7 +1121,7 @@ async def handle_completions_impl(api: str, request: Request):
 
         media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
         return StreamingResponse(generate_stream(), media_type=media_type)
-    except Exception:
+    except Exception as e:
         import traceback
 
         exc_info = sys.exc_info()
@@ -1130,6 +1130,12 @@ async def handle_completions_impl(api: str, request: Request):
         if not request_released and "instance_info" in locals():
             await _finish_instance(runtime, instance_info, release_prefill_kv=True)
             request_released = True
+        if isinstance(e, httpx.HTTPStatusError) and e.response is not None:
+            try:
+                err_body = e.response.json()
+            except Exception:
+                err_body = {"error": {"message": e.response.text or "upstream error"}}
+            return JSONResponse(err_body, status_code=e.response.status_code)
         raise
 
 
