@@ -45,7 +45,7 @@ You can use our official docker image to run GLM-5/5.1 directly.
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     export NAME=vllm-ascend
 
     # Run the container using the defined variables
@@ -89,7 +89,7 @@ You can use our official docker image to run GLM-5/5.1 directly.
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -771,7 +771,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
-            --additional-config '{"multistream_overlap_shared_expert": true, "enable_dsa_cp": true}' \
+            --additional-config '{"enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -851,7 +851,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
-            --additional-config '{"multistream_overlap_shared_expert": true, "enable_dsa_cp": true}' \
+            --additional-config '{"enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -935,7 +935,7 @@ Before you start, please
             --max-model-len 200000 \
             --max-num-batched-tokens 32 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-            --additional-config '{"multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
+            --additional-config '{"recompute_scheduler_enable": true}' \
             --trust-remote-code \
             --max-num-seqs 8 \
             --gpu-memory-utilization 0.92 \
@@ -1015,7 +1015,7 @@ Before you start, please
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-             --additional-config '{"multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
+             --additional-config '{"recompute_scheduler_enable": true}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
@@ -1095,7 +1095,7 @@ Before you start, please
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-             --additional-config '{"multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
+             --additional-config '{"recompute_scheduler_enable": true}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
@@ -1175,7 +1175,7 @@ Before you start, please
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-             --additional-config '{"multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
+             --additional-config '{"recompute_scheduler_enable": true}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \

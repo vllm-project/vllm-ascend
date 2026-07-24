@@ -205,9 +205,21 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
       --async-scheduling
     ```
 
-=== "Atlas inference products"
+    **Key parameters:**
 
-    The following example follows the [hardware tutorial](../hardwares/310p.md#online-inference-on-npu) serving constraints for Atlas inference products and uses the same model variant as the Atlas A2 inference products / Atlas A3 inference products example. It uses port 8080 to match the Atlas inference products Docker port mapping in Section 4.1. Set `--dtype float16` and keep an explicit, conservative `--max-model-len`.
+    - `--data-parallel-size 1` and `--tensor-parallel-size 2` set DP and TP for the default single-node serving example.
+    - `--enable-expert-parallel` enables expert parallelism for MoE layers. Do not mix MoE tensor parallelism and expert parallelism in the same MoE layer.
+    - `--max-model-len` is the maximum input plus output length for a single request. Increase it only when enough KV cache is available.
+    - `--max-num-seqs` is the maximum number of active requests scheduled by each DP group. For performance tests, set `--max-num-seqs * --data-parallel-size` greater than or equal to the test concurrency.
+    - `--max-num-batched-tokens` is the maximum number of tokens processed in one scheduler step. A larger value can improve prefill efficiency but consumes more activation memory.
+    - `--gpu-memory-utilization` controls how much HBM vLLM can use to calculate KV cache capacity. A higher value increases KV cache size but can trigger OOM if runtime memory is higher than the profile run.
+    - `--enable-prefix-caching` enables prefix caching. For long-context serving, monitor memory usage because prefix caching can increase KV cache pressure.
+    - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
+    - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode ACLGraph replay to reduce dispatch overhead.
+    - `--additional-config` enables Ascend-specific optimizations. `enable_flashcomm1` enables FlashComm1, `multistream_overlap_shared_expert` overlaps shared expert computation, and `enable_cpu_binding` enables Ascend-native CPU binding.
+    - `--async-scheduling` enables asynchronous scheduling, which can improve high-concurrency throughput.
+
+=== "Atlas inference products"
 
     ```shell
     export VLLM_USE_MODELSCOPE=True
@@ -221,28 +233,26 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
       --max-num-seqs 16 \
       --served-model-name qwen3.6 \
       --dtype float16 \
-      --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
-      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}' \
+      --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}' \
       --quantization ascend \
-      --max-model-len 16384 \
+      --max-model-len 20480 \
       --no-enable-prefix-caching
     ```
 
+    **Key parameters:**
+
+    - `--tensor-parallel-size 2` maps the model across two Atlas inference devices. Adjust it together with `ASCEND_RT_VISIBLE_DEVICES` according to the available devices and memory.
+    - `--dtype float16` is used for Atlas inference products to match the Atlas inference execution path.
+    - `--max-num-seqs 16` limits concurrent active requests to reduce KV cache and graph capture pressure on Atlas inference products.
+    - `--gpu-memory-utilization` controls KV cache capacity. Reduce it if startup or runtime requests report OOM.
+    - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required because `enable_npugraph_ex` is not supported on Atlas inference products.
+    - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}'` enables decode ACLGraph replay and explicitly limits capture sizes for Atlas inference products.
+    - `--no-enable-prefix-caching` is the default recommendation for this Atlas inference products example to reduce memory pressure.
+    - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
+    - To enable MTP speculative decoding, use --speculative_config '{"method": "mtp", "num_speculative_tokens": 1}'. We recommend setting num_speculative_tokens to 1.
+
 Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
-
-**Key parameters:**
-
-- `--data-parallel-size 1` and `--tensor-parallel-size 2` set DP and TP for the default single-node serving example.
-- `--enable-expert-parallel` enables expert parallelism for MoE layers. Do not mix MoE tensor parallelism and expert parallelism in the same MoE layer.
-- `--max-model-len` is the maximum input plus output length for a single request. Increase it only when enough KV cache is available.
-- `--max-num-seqs` is the maximum number of active requests scheduled by each DP group. For performance tests, set `--max-num-seqs * --data-parallel-size` greater than or equal to the test concurrency.
-- `--max-num-batched-tokens` is the maximum number of tokens processed in one scheduler step. A larger value can improve prefill efficiency but consumes more activation memory.
-- `--gpu-memory-utilization` controls how much HBM vLLM can use to calculate KV cache capacity. A higher value increases KV cache size but can trigger OOM if runtime memory is higher than the profile run.
-- `--enable-prefix-caching` enables prefix caching. For long-context serving, monitor memory usage because prefix caching can increase KV cache pressure.
-- `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
-- `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode ACLGraph replay to reduce dispatch overhead.
-- `--additional-config` enables Ascend-specific optimizations. `enable_flashcomm1` enables FlashComm1, `multistream_overlap_shared_expert` overlaps shared expert computation, and `enable_cpu_binding` enables Ascend-native CPU binding.
-- `--async-scheduling` enables asynchronous scheduling, which can improve high-concurrency throughput.
 
 ## 6 Functional Verification
 

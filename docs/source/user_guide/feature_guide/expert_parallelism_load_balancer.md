@@ -137,6 +137,7 @@ vllm serve Qwen/Qwen3-235B-A22 \
 2. Hardware Requirements:
    - Ensure that all NPUs have identical memory capacity and compute capabilities.
    - Network bandwidth must support expert redistribution traffic (≥ 10 Gbps recommended).
+   - shm needs to be mounted for container
 
 3. Monitoring & Validation:
    - Track metrics: Search for [Expert Hotness] in log, we will calculate the peak-to-average ratio of the load for each layer at different ranks, and then find their mean and maximum values. Current means actual peak-to-average ratio, update means estimated peak-to-average ratio after algorithm adjustment.

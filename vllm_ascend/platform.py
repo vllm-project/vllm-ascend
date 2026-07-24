@@ -45,7 +45,6 @@ from vllm_ascend.utils import (
     bootstrap_custom_op_env,
     check_kv_extra_config,
     enable_sfa_dcp_replicated_indexer,
-    flashcomm2_enable,
     get_ascend_device_type,
     is_moe_model,
     model_uses_sfa_sparse,
@@ -507,6 +506,7 @@ class NPUPlatform(Platform):
         # is supported by vllm-ascend.
         if (
             vllm_config.parallel_config.tensor_parallel_size > 1
+            and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             and not vllm_config.model_config.enforce_eager
             and enable_sp(vllm_config)
         ):
@@ -688,6 +688,17 @@ class NPUPlatform(Platform):
                 "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler"
             )
             import vllm_ascend.patch.platform.patch_profiling_chunk  # noqa
+
+        # Extend original scheduler_config to use BatchJobAwareScheduler.
+        if scheduler_extension_config.batch_job_sched_config.enabled:
+            if vllm_config.scheduler_config.async_scheduling:
+                vllm_config.scheduler_config.scheduler_cls = (
+                    "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareAsyncScheduler"
+                )
+            else:
+                vllm_config.scheduler_config.scheduler_cls = (
+                    "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareScheduler"
+                )
 
         cp_size = parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size
         use_sparse = model_uses_sfa_sparse(model_config)
@@ -974,12 +985,9 @@ class NPUPlatform(Platform):
             mmrs_fusion = False
         else:
             flash_comm_v1_enabled = enable_sp(vllm_config) and num_tokens is not None and num_tokens > 1000
-
-        # TODO(Levi-JQ): another PR to normalize the enabling logic for sp/fc2
-        flashcomm_v2_enabled = flashcomm2_enable() and tp_world_size > 1 and num_tokens is not None
         pad_size = 0
         padded_length = None
-        if flash_comm_v1_enabled or flashcomm_v2_enabled:
+        if flash_comm_v1_enabled:
             pad_size = (tp_world_size - (num_tokens % tp_world_size)) % tp_world_size
 
         if num_tokens is None and attn_metadata is not None:
@@ -987,7 +995,7 @@ class NPUPlatform(Platform):
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and dp_metadata is not None:
             max_tokens_across_dp = dp_metadata.num_tokens_across_dp_cpu.max().item()
-            if flash_comm_v1_enabled or flashcomm_v2_enabled:
+            if flash_comm_v1_enabled:
                 padded_length = (max_tokens_across_dp + tp_world_size - 1) // tp_world_size * tp_world_size
                 pad_size = padded_length - num_tokens
         else:
@@ -1010,7 +1018,6 @@ class NPUPlatform(Platform):
             "mmrs_fusion": mmrs_fusion,
             "num_tokens": num_tokens,
             "flash_comm_v1_enabled": flash_comm_v1_enabled,
-            "flashcomm_v2_enabled": flashcomm_v2_enabled,
             "pad_size": pad_size,
             "padded_length": padded_length,
             "max_tokens_across_dp": max_tokens_across_dp,

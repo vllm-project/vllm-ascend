@@ -406,10 +406,8 @@ class TestEagleProposerLoadModel(TestBase):
         self.mock_get_ascend_config = patch("vllm_ascend.utils.get_ascend_config")
         mock_config = self.mock_get_ascend_config.start()
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_flashcomm2_parallel_size = 0
         mock_ascend_config.enable_context_parallel = False
         mock_ascend_config.enable_flashcomm1 = False
-        mock_ascend_config.enable_matmul_allreduce = False
         mock_ascend_config.weight_nz_mode = 1
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_fused_mc2 = 0
@@ -529,6 +527,8 @@ class TestEagleProposerDummyRun(TestBase):
         self.runner.dcp_size = 1
         self.runner.pcp_manager = None
         self.runner.pin_memory = False
+        self.runner.dynamic_eplb = True
+        self.runner.eplb_heat_collection_status = True
         self.runner._sync_metadata_across_dp.return_value = (8, torch.tensor([8]), CUDAGraphMode.NONE)
 
         self.vllm_config.cache_config.block_size = 16
@@ -569,10 +569,8 @@ class TestEagleProposerDummyRun(TestBase):
         self.mock_get_ascend_config = patch("vllm_ascend.utils.get_ascend_config")
         mock_config = self.mock_get_ascend_config.start()
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_flashcomm2_parallel_size = 0
         mock_ascend_config.enable_context_parallel = False
         mock_ascend_config.enable_flashcomm1 = False
-        mock_ascend_config.enable_matmul_allreduce = False
         mock_ascend_config.weight_nz_mode = 1
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_fused_mc2 = 0
@@ -630,6 +628,7 @@ class TestEagleProposerDummyRun(TestBase):
             self.proposer.dummy_run(num_tokens=num_tokens, with_prefill=with_prefill)
 
             self.assertTrue(self.proposer._runnable.call_count == 1)
+            self.assertTrue(mock_context.call_args.kwargs["eplb_heat_collection_status"])
 
     # cpu does not support parallel-group, let alone `sp`
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
@@ -1004,10 +1003,8 @@ class TestEagleProposerPropose:
         self.mock_get_ascend_config = patch("vllm_ascend.utils.get_ascend_config")
         mock_get_ascend_config = self.mock_get_ascend_config.start()
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_flashcomm2_parallel_size = 0
         mock_ascend_config.enable_context_parallel = False
         mock_ascend_config.enable_flashcomm1 = False
-        mock_ascend_config.enable_matmul_allreduce = False
         mock_ascend_config.weight_nz_mode = 1
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_fused_mc2 = 0
@@ -1058,7 +1055,6 @@ class TestEagleProposerPropose:
         self.vllm_config.speculative_config.disable_padded_drafter_batch = False
         self.vllm_config.additional_config = None
         self.ascend_config = init_ascend_config(self.vllm_config)
-        self.ascend_config.enable_flashcomm2_parallel_size = 0
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
@@ -1192,6 +1188,7 @@ class TestEagleProposerPropose:
         mock_attn_metadata = MagicMock()
         mock_builder.build.return_value = mock_attn_metadata
         mock_attn_group.get_metadata_builder.return_value = mock_builder
+        mock_attn_group.layer_names = ['model.layers.36.self_attn.attn']
         self.proposer.draft_attn_groups = [mock_attn_group]
         self.proposer.attn_layer_names = ['model.layers.36.self_attn.attn']
         self.proposer.kernel_block_size = 128
@@ -2556,7 +2553,7 @@ class TestRunMergedDraft(TestBase):
         assert hasattr(RunnerCls, "build_model_inputs_first_pass")
         sig = inspect.signature(RunnerCls.build_model_inputs_first_pass)
         sig_name = self.get_param_names(sig)
-        assert sig_name == ["self", "num_input_tokens"]
+        assert sig_name == ["self", "num_input_tokens", "_context_slots"]
 
         import vllm_ascend.worker.model_runner_v1
 
@@ -2679,14 +2676,12 @@ class TestRunMergedDraft(TestBase):
         self.proposer.num_speculative_tokens = 1
         self.proposer.pass_hidden_states_to_model = False
         self.proposer.model = MockDraftModel(returns_tuple=False)
-        self.proposer.build_model_inputs_first_pass = MagicMock(
-            return_value={
-                "input_ids": torch.tensor([151667, 32313], dtype=torch.int32),
-                "positions": torch.tensor([20, 16], dtype=torch.int64),
-                "inputs_embeds": torch.ones(2, 4, dtype=torch.float32),
-            }
+        self.proposer._context_slot_mapping_buffers = MagicMock()
+        self.proposer.build_model_inputs_first_pass = MagicMock()
+        initial_input_ids = torch.tensor(
+            [151667, 32313, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=torch.int32
         )
-
+        self.proposer.input_ids[:12] = initial_input_ids
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_reduce_sample = False
         with (
@@ -2704,13 +2699,15 @@ class TestRunMergedDraft(TestBase):
                 is_prefill=False,
             )
 
-        self.proposer.build_model_inputs_first_pass.assert_called_once_with(12)
+        self.proposer.build_model_inputs_first_pass.assert_called_once_with(
+            12, self.proposer._context_slot_mapping_buffers
+        )
         self.proposer.maybe_all_gather_and_unpad.assert_not_called()
         self.assertNotIn("hidden_states", self.proposer.model.calls[0])
         self.assertTrue(
             torch.equal(
                 self.proposer.model.calls[0]["input_ids"],
-                torch.tensor([151667, 32313], dtype=torch.int32),
+                initial_input_ids,
             )
         )
         self.assertEqual(draft_token_ids.tolist(), [[151667], [32313]])

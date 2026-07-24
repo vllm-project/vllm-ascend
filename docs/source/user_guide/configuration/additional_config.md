@@ -18,8 +18,6 @@ Starting from [PR #9064](https://github.com/vllm-project/vllm-ascend/pull/9064),
 |---------------------|------------|-----------------|
 | `VLLM_ASCEND_BALANCE_SCHEDULING` | `scheduler_config.enable_balance_scheduling` | `"1"` → `true`, `"0"` → `false` |
 | `VLLM_ASCEND_ENABLE_FLASHCOMM1` | `enable_flashcomm1` | `"1"` → `true`, `"0"` → `false` |
-| `VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE` | `enable_matmul_allreduce` | `"1"` → `true`, `"0"` → `false` |
-| `VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE` | `enable_flashcomm2_parallel_size` | Integer (unchanged) |
 | `MSMONITOR_USE_DAEMON` | `msmonitor_use_daemon` | `"1"` → `true`, `"0"` → `false` |
 | `VLLM_ASCEND_ENABLE_MLAPO` | `enable_mlapo` | `"1"` → `true`, `"0"` → `false` |
 | `VLLM_ASCEND_ENABLE_NZ` | `weight_nz_mode` | Integer (unchanged, field name changed) |
@@ -74,7 +72,6 @@ The following table lists additional configuration options available in vLLM Asc
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
 | `dump_config`                       | dict | `None`  | Inline msprobe dump configuration. vLLM-Ascend will materialize it to a temporary JSON file and pass that file to the debugger. |
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump (compatible legacy option).                                      |
-| `enable_async_exponential`          | bool | `False` | Whether to enable asynchronous exponential overlap. To enable asynchronous exponential, set this config to True.        |
 | `enable_shared_expert_dp`           | bool | `False` | When the expert is shared in DP, it delivers better performance but consumes more memory. Currently only DeepSeek series models are supported. |
 | `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multi-stream shared expert. This option only takes effect on MoE models with shared experts. |
 | `enable_cpu_binding`                | bool | `True`  | Enables Ascend-native CPU binding on ARM servers. Set to `False` to disable. See [CPU Binding](../feature_guide/cpu_binding.md). |
@@ -87,8 +84,6 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_prefill_mc2`                | bool | `False` | Whether to reserve mc2_token_capacity for prefill batches. When enabled, `max_num_batched_tokens` is used to calculate the mc2_token_capacity instead of the decode-only capacity. In this scenario, the recommended maximum value of `max_num_batched_tokens` is `tp_size * 512`. This is a temporary switch; once MC2 operators are complete for all scenarios, this switch will be removed and MC2 will be enabled by default. |
 | `mega_moe_max_tokens`               | int  | `65536` | Per-rank token capacity after dispatch in the mega moe (dispatch_ffn_combine) fused operator. When load imbalance causes a rank to receive more tokens than this limit, the excess tokens are dropped and skipped from computation, degrading accuracy. Do not set this too large: workspace memory scales linearly with this value. |
 | `enable_flashcomm1`                 | bool | `False` | Whether to enable FlashComm1 optimization. Can also be configured via the `VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable during the migration period. |
-| `enable_matmul_allreduce`           | bool | `False` | Whether to enable matmul allreduce optimization. Can also be configured via the `VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE` environment variable during the migration period. |
-| `flashcomm2_parallel_size`          | int  | `0`     | FlashComm2 parallel size. Can also be configured via the `VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE` environment variable during the migration period. |
 | `msmonitor_use_daemon`              | bool | `False` | Whether to use daemon mode for msmonitor. Can also be configured via the `MSMONITOR_USE_DAEMON` environment variable during the migration period. |
 | `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). Can also be configured via the `VLLM_ASCEND_ENABLE_MLAPO` environment variable during the migration period. |
 | `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. Can also be configured via the `VLLM_ASCEND_ENABLE_NZ` environment variable during the migration period. |
@@ -126,7 +121,6 @@ The details of each configuration option are as follows:
 | `enable_static_kernel` | bool | `False` | Whether to enable static kernel. Suitable for scenarios where shape changes are minimal and some time is available for static kernel compilation. |
 | `fuse_norm_quant`  | bool | `True` | Whether to enable fuse_norm_quant pass. |
 | `fuse_qknorm_rope` | bool | `True` | Whether to enable fuse_qknorm_rope pass. If Triton is not in the environment, set it to False. |
-| `fuse_allreduce_rms` | bool | `False` | Whether to enable fuse_allreduce_rms pass. It's set to False because of conflict with SP. |
 | `fuse_muls_add` | bool | `True` | Whether to enable fuse_muls_add pass.|
 
 **eplb_config**
@@ -152,6 +146,7 @@ The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, 
 | `recompute_scheduler_enable` | bool | `False` | Whether to enable the recompute scheduler. **Only valid on PD-disaggregated D nodes** (`kv_role` is `kv_consumer`). **Do not enable on P nodes or in PD-mixed mode** (no `kv_transfer_config`, `kv_role` is `kv_producer`, or `kv_role` is `kv_both`); startup will fail with a clear error. |
 | `profiling_chunk_config` | dict | `{}` | Configuration options for dynamic chunked pipeline parallel. See [Dynamic Chunked Pipeline Parallel](../feature_guide/dynamic_chunk_pipeline_parallel.md) for details. |
 | `short_request_first_config` | dict | `{}` | Configuration options for ShortRequestFirst prefill scheduling on the PD prefill (P) node. Used with `recompute_scheduler_enable=true`. |
+| `batch_job_sched_config` | dict | `{}` | Configuration options for the batch-job-aware scheduler. See [Batch-Job-Aware Scheduler](../feature_guide/batch_job_aware_scheduler.md) for details. |
 
 **scheduler_config.profiling_chunk_config**
 
@@ -183,6 +178,17 @@ ShortRequestFirst is a waiting-queue policy wired through the recompute schedule
 | `enabled`                | bool  | `False` | Whether to enable ShortRequestFirst scheduling. |
 | `threshold`              | int   | `256`   | Prompt-length threshold (tokens). Requests with `num_prompt_tokens <= threshold` are treated as short prefills and prioritized over long prefills. |
 | `long_max_wait_ms`       | float | `0.0`   | Maximum time a long prefill may wait behind short prefills before it can be promoted ahead of them. `0` disables long-request promotion and keeps strict short-request priority. |
+
+**scheduler_config.batch_job_sched_config**
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enabled` | bool | `false` | Enable the batch-job-aware scheduler. |
+| `max_jobs` | int | `20` | Maximum number of tracked jobs. `0` means unlimited. |
+| `reserve_margin_blocks` | int | `2` | Extra block margin added to the KV cache reserve as safety buffer. |
+| `reserve_max_blocks` | int | `8` | Maximum number of blocks that can be reserved. |
+| `low_available_tokens_threshold` | int | `4096` | Threshold for prioritising long vs short decode jobs. When available tokens > threshold, long decode jobs are prioritised; when ≤ threshold, short decode jobs are prioritised. |
+| `short_decode_token_threshold` | int | `32` | Threshold for classifying a job as "short decode". |
 
 ### Example
 

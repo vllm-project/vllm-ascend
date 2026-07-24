@@ -48,7 +48,7 @@ FP8_DTYPES = tuple(
 
 
 # ---------------------------------------------------------------------------
-# MiniMaxM2MoE.forward: use maybe_all_reduce_tensor_model_parallel
+# MiniMaxM2MoE.forward: keep router logits in fp32 on NPU.
 # ---------------------------------------------------------------------------
 def _patched_moe_forward(
     self,
@@ -60,8 +60,6 @@ def _patched_moe_forward(
     # router_logits: (num_tokens, n_experts)
     router_logits, _ = self.gate(hidden_states.to(torch.float32))
     final_hidden_states = self.experts(hidden_states=hidden_states, router_logits=router_logits)
-    if self.tp_size > 1:
-        final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
     return final_hidden_states.view(num_tokens, hidden_dim)
 
 
