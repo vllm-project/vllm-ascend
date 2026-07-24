@@ -15,13 +15,14 @@ This section guides you through container-based environment setup and large mode
 - Atlas 800I A2 inference series (Atlas 800I A2)
 - Atlas A3 training series (Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD)
 - Atlas 800I A3 inference series (Atlas 800I A3)
+- Ascend 950DT series
 - [Experimental] Atlas inference products
 
 ## Requirements
 
 - OS: Linux
 - Python: >= 3.10, < 3.13
-- Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series.
+- Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series, Ascend 950DT series.
 - Software:
 
     | Software      | Supported version                | Note                                      |
@@ -90,6 +91,35 @@ Before using containers, make sure Docker is installed on your system. If Docker
     --shm-size=1g \
     --device $DEVICE0 \
     --device $DEVICE1 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -p 8000:8000 \
+    -it $IMAGE bash
+    # Install curl
+    apt-get update -y && apt-get install -y curl
+    ```
+
+=== "Ubuntu (Ascend 950DT)"
+
+    ```bash
+
+    # Update DEVICE according to your device (/dev/davinci[0-7])
+    export DEVICE=/dev/davinci0
+    # Update the vllm-ascend image
+    # Ascend 950DT:
+    # export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
+    docker run --rm \
+    --name vllm-ascend \
+    --shm-size=1g \
+    --device $DEVICE \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
     --device /dev/hisi_hdc \
@@ -180,6 +210,35 @@ Before using containers, make sure Docker is installed on your system. If Docker
     --shm-size=1g \
     --device $DEVICE0 \
     --device $DEVICE1 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -p 8000:8000 \
+    -it $IMAGE bash
+    # Install curl
+    yum update -y && yum install -y curl
+    ```
+
+=== "openEuler (Ascend 950DT)"
+
+    ```bash
+
+    # Update DEVICE according to your device (/dev/davinci[0-7])
+    export DEVICE=/dev/davinci0
+    # Update the vllm-ascend image
+    # Ascend 950DT:
+    # export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5-openeuler
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5-openeuler
+    docker run --rm \
+    --name vllm-ascend \
+    --shm-size=1g \
+    --device $DEVICE \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
     --device /dev/hisi_hdc \
