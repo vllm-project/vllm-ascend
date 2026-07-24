@@ -1,4 +1,4 @@
-# Qwen3.6-35B-A3B Deployment Tutorial
+# Qwen3.6-35B-A3B
 
 ## 1 Introduction
 
@@ -10,7 +10,7 @@ The `Qwen3.6-35B-A3B` model is first supported in `vllm-ascend:v0.18.0rc1`. Use 
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix, including BF16, W8A8 quantization, chunked prefill, automatic prefix caching, asynchronous scheduling, tensor parallelism, expert parallelism, and ACLGraph support.
+Refer to [supported features](../../user_guide/support_matrix/supported_features.md) to get the model's supported feature matrix, including BF16, W8A8 quantization, chunked prefill, automatic prefix caching, asynchronous scheduling, tensor parallelism, expert parallelism, and ACLGraph support.
 
 Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
@@ -293,6 +293,11 @@ Here are two accuracy evaluation methods.
 ### 7.1 Using AISBench
 
 Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details. After execution, you can get the accuracy result of `Qwen3.6-35B-A3B-w8a8`.
+
+| dataset | version | metric | mode | vllm-api-general-chat |
+| ------- | ------- | ------ | ---- | --------------------- |
+| mmmu | - | accuracy | gen | 83.3 |
+| gpqa | - | accuracy | gen | 83.3 |
 
 ### 7.2 Using Language Model Evaluation Harness
 
