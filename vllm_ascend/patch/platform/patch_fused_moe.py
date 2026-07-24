@@ -33,6 +33,7 @@ from typing import Any
 import torch
 import vllm.model_executor.layers.fused_moe as _fused_moe_pkg
 import vllm.model_executor.layers.fused_moe.layer as _fused_moe_layer
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -42,7 +43,7 @@ from vllm_ascend.utils import is_310p
 # Capture the real original before fused_moe.py's module-level code runs.
 _original_FusedMoE = _fused_moe_layer.FusedMoE
 _DefaultAscendMoERunner: Any
-_DefaultAscendRoutedExperts: Any
+_DefaultAscendRoutedExperts: type[RoutedExperts]
 _IS_310P = is_310p()
 
 if _IS_310P:
