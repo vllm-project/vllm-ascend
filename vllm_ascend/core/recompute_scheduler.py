@@ -439,8 +439,8 @@ class RecomputeScheduler(Scheduler):
             step_skipped_waiting = create_request_queue(self.policy)
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
-                # Paused streaming sessions are not in `running`, but still
-                # hold a model-runner request slot.
+                # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
+                # in `running` but still hold a model-runner request slot.
                 num_running = len(self.running) + self.num_waiting_for_streaming_input
                 if num_running >= self.max_num_running_reqs:
                     break
@@ -503,6 +503,15 @@ class RecomputeScheduler(Scheduler):
                             )
                         )
                         new_computed_blocks = self.kv_cache_manager.create_kv_cache_blocks(computed_blocks)
+                        # NOTE(ZhanqiuHu): For Mamba hybrid models,
+                        # num_new_local_computed_tokens should be the FA hit
+                        # length. This value is passed to the connector's
+                        # get_num_new_matched_tokens which computes:
+                        # external = total - local_computed.
+                        # Using the FA hit skips re-transferring FA blocks
+                        # already cached on D-side. The Mamba state (always
+                        # the last block) is transferred unconditionally by
+                        # _apply_prefix_caching in nixl/worker.py.
                         num_new_local_computed_tokens = max(per_group_hits)
                         if self.kv_cache_manager.log_stats:
                             assert self.kv_cache_manager.prefix_cache_stats is not None
@@ -564,7 +573,9 @@ class RecomputeScheduler(Scheduler):
                         step_skipped_waiting.prepend_request(request)
                         continue
 
+                    # Track first scheduled prefill, not post-preemption repeat prefills
                     if request.prefill_stats is not None:
+                        assert num_computed_tokens <= request.num_prompt_tokens
                         request.prefill_stats.set(
                             num_prompt_tokens=request.num_prompt_tokens,
                             num_local_cached_tokens=num_new_local_computed_tokens,
@@ -599,8 +610,10 @@ class RecomputeScheduler(Scheduler):
 
                     # Pad new decode requests to uniform spec decoding size to
                     # preserve full cudagraph for this step.
+                    # Not for diffusion where draft tokens can't be padded.
                     if (
                         (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
+                        and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
                         and (scheduled_running_reqs and not prefill_scheduled)
                     ):
@@ -641,6 +654,7 @@ class RecomputeScheduler(Scheduler):
                             # The request cannot be scheduled.
                             break
 
+                # Skip block alignment when setting up async receive (no local work).
                 if self.need_mamba_block_aligned_split and not load_kv_async:
                     num_new_tokens = self._mamba_block_aligned_split(
                         request,
@@ -665,7 +679,10 @@ class RecomputeScheduler(Scheduler):
 
                 reserved_blocks = 0
                 if load_kv_async:
-                    # Async loads hold their blocks without forward progress.
+                    # An async load holds its blocks for the whole transfer with
+                    # no forward progress and isn't preemptible here. Admit it
+                    # only if it fits in (free - other in-flight reservations), to
+                    # avoid deadlock and predictable preemptions.
                     reserved_blocks = self._inflight_prefill_reserved_blocks()
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
@@ -773,8 +790,8 @@ class RecomputeScheduler(Scheduler):
             if step_skipped_waiting:
                 self.skipped_waiting.prepend_requests(step_skipped_waiting)
 
-            # On a step that admitted prefills, record whether it was
-            # capacity-bound for DP prefill balancing.
+            # DP prefill balancing: on a step that admitted prefills (release),
+            # record whether it was capacity-bound.
             if not defer_prefills:
                 self.prefill_capacity_bound = bool(self.waiting)
 
@@ -829,9 +846,10 @@ class RecomputeScheduler(Scheduler):
             self.prev_step_scheduled_req_ids.clear()
             self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
-        new_block_ids_to_zero = (
-            (self.kv_cache_manager.take_new_block_ids() or None) if self.needs_kv_cache_zeroing else None
-        )
+        # Drain new attention block ids every step so the manager-side list
+        # does not grow unbounded; only kv-cache zeroing consumes them.
+        new_attn_block_ids = self.kv_cache_manager.take_new_block_ids()
+        new_block_ids_to_zero = (new_attn_block_ids or None) if self.needs_kv_cache_zeroing else None
 
         # Dynamic speculative decoding: compute optimal K.
         num_spec_tokens_to_schedule = self.num_spec_tokens
@@ -974,10 +992,12 @@ class RecomputeScheduler(Scheduler):
         stopped_preempted_reqs: set[Request] = set()
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
+            request = self.requests.get(req_id)
+            if request is not None:
+                request.num_in_flight_tokens -= num_tokens_scheduled
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
                 # skip failed or rescheduled requests from KV load failure
                 continue
-            request = self.requests.get(req_id)
             if request is None or request.is_finished():
                 # The request is already finished. This can happen if the
                 # request is aborted while the model is executing it (e.g.,
