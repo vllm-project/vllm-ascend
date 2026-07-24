@@ -106,20 +106,22 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         hits = [[16, 32, 48], [32, 48], [16, 32], [32, 48, 64]]
         self.assertEqual(32, cls._max_intersection_hit_position(hits))
 
-    def test_external_coordinator_lookup_disables_eagle_drop(self):
+    def test_external_coordinator_lookup_uses_reachable_masks(self):
         cls = self._make_worker_class()
         worker = object.__new__(cls)
         worker.num_kv_cache_groups = 1
         worker.cache_coordinator = MagicMock()
+        worker.cache_coordinator.lcm_block_size = 128
+        worker.cache_coordinator.lookup_mask.return_value = ([True],)
+        worker.cache_coordinator.store_mask.return_value = ([True],)
         worker.cache_coordinator.find_longest_cache_hit.return_value = ((), 128)
         worker.m_store = MagicMock()
         worker.m_store.exists.return_value = [1]
 
-        key = MagicMock()
-        key.chunk_hash = "ab" * 32
-        key.to_string.return_value = "key"
         worker.token_database = MagicMock()
-        worker.token_database.process_tokens.return_value = [(0, 128, key)]
+        worker.token_database.get_block_size.return_value = 128
+        worker.token_database.group_cache_families = {"kv": {0: "default"}}
+        worker.token_database.process_token_key_strings.return_value = [(0, 128, "key", "ab" * 32)]
 
         hit = worker._lookup_with_coordinator(
             128,
@@ -130,8 +132,11 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         )
 
         self.assertEqual(hit, 128)
+        worker.cache_coordinator.lookup_mask.assert_called_once_with(128)
+        worker.cache_coordinator.store_mask.assert_called_once_with(128, None)
         worker.cache_coordinator.find_longest_cache_hit.assert_called_once()
         self.assertFalse(worker.cache_coordinator.find_longest_cache_hit.call_args.kwargs["apply_eagle"])
+        worker.token_database.process_tokens.assert_not_called()
 
 
 class TestKVPoolWorkerInit(unittest.TestCase):
@@ -577,7 +582,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.start_load_kv(meta)
         # No get called since no load_spec
 
-    def test_wait_for_save(self):
+    def test_wait_for_save_enqueues_async(self):
         worker = self._make_worker()
         worker.kv_send_thread = MagicMock()
 
@@ -593,6 +598,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.wait_for_save(meta)
         worker.kv_send_thread.add_stored_request.assert_called_with("r1")
         worker.kv_send_thread.add_request.assert_called_once()
+        worker.kv_send_thread.request_queue.join.assert_not_called()
 
     def test_wait_for_save_skip_non_save(self):
         worker = self._make_worker()
@@ -1571,12 +1577,8 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
             tp_rank=1, tp_size=2, extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8
         )
         rank = worker.metadata[0].head_or_tp_rank  # = 1 for tp_rank=1
-
-        class FakeKey:
-            def to_string(self):
-                return f"model@head_or_tp_rank:{rank}@pp_rank:0@k0"
-
-        out = worker._make_sub_key_str(FakeKey(), effective_rank=3)
+        key = f"model@head_or_tp_rank:{rank}@pp_rank:0@k0"
+        out = worker._make_sub_key_str(key, effective_rank=3)
         self.assertIn("@head_or_tp_rank:3", out)
         self.assertNotIn(f"@head_or_tp_rank:{rank}", out)
 
@@ -1605,19 +1607,15 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         worker.group_block_stride = {0: [16]}
         worker.sub_size_bytes = 2
 
-        class FakeKey:
-            def __init__(self, i):
-                self.i = i
-
-            def to_string(self):
-                return f"m@head_or_tp_rank:{worker.metadata[0].head_or_tp_rank}@pp_rank:0@k{self.i}"
-
-        def fake_process_tokens_with_block_ids(token_len, block_hashes, block_ids, mask_num=0):
-            yield 0, 4, FakeKey(0), block_ids[0]
-            yield 4, 8, FakeKey(1), block_ids[1]
+        def fake_process_token_key_strings_with_block_ids(token_len, block_hashes, block_ids, mask_num=0):
+            prefix = f"m@head_or_tp_rank:{worker.metadata[0].head_or_tp_rank}@pp_rank:0@"
+            yield 0, 4, f"{prefix}k0", block_hashes[0], block_ids[0]
+            yield 4, 8, f"{prefix}k1", block_hashes[1], block_ids[1]
 
         worker.token_database = MagicMock()
-        worker.token_database.process_tokens_with_block_ids.side_effect = fake_process_tokens_with_block_ids
+        worker.token_database.process_token_key_strings_with_block_ids.side_effect = (
+            fake_process_token_key_strings_with_block_ids
+        )
 
         keys, addrs, sizes, block_ids = worker._build_tp_mismatch_keys_and_addrs(
             block_hashes=[b"h0", b"h1"], block_ids=[10, 11], token_len=8, mask_num=0
@@ -1639,16 +1637,10 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         worker.group_block_stride = {0: [16]}
         worker.sub_size_bytes = 2
 
-        class FakeKey:
-            def __init__(self, i):
-                self.i = i
-
-            def to_string(self):
-                return f"m@head_or_tp_rank:{worker.metadata[0].head_or_tp_rank}@pp_rank:0@k{self.i}"
-
         worker.token_database = MagicMock()
-        worker.token_database.process_tokens_with_block_ids.return_value = [
-            (4, 8, FakeKey(1), 10),
+        key = f"m@head_or_tp_rank:{worker.metadata[0].head_or_tp_rank}@pp_rank:0@k1"
+        worker.token_database.process_token_key_strings_with_block_ids.return_value = [
+            (4, 8, key, b"h1", 10),
         ]
 
         keys, addrs, sizes, block_ids = worker._build_tp_mismatch_keys_and_addrs(
@@ -1671,12 +1663,11 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         worker.m_store = MagicMock()
         worker.m_store.get.return_value = [0]  # success
 
-        class FakeKey:
-            def to_string(self):
-                return f"m@head_or_tp_rank:{worker.metadata[0].head_or_tp_rank}@pp_rank:0@k0"
-
         worker.token_database = MagicMock()
-        worker.token_database.process_tokens_with_block_ids.side_effect = lambda *a, **kw: iter([(0, 4, FakeKey(), 5)])
+        key = f"m@head_or_tp_rank:{worker.metadata[0].head_or_tp_rank}@pp_rank:0@k0"
+        worker.token_database.process_token_key_strings_with_block_ids.side_effect = lambda *a, **kw: iter(
+            [(0, 4, key, b"h0", 5)]
+        )
 
         worker._load_kv_tp_mismatch(block_hashes=[b"h0"], block_ids=[5], token_len=4, mask_num=0)
         worker.m_store.get.assert_called_once()
@@ -1701,12 +1692,11 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         worker.m_store = MagicMock()
         worker.enable_kv_events = False
 
-        class FakeKey:
-            def to_string(self):
-                return f"m@head_or_tp_rank:{worker.metadata[0].head_or_tp_rank}@pp_rank:0@k0"
-
         worker.token_database = MagicMock()
-        worker.token_database.process_tokens_with_block_ids.side_effect = lambda *a, **kw: iter([(0, 4, FakeKey(), 5)])
+        key = f"m@head_or_tp_rank:{worker.metadata[0].head_or_tp_rank}@pp_rank:0@k0"
+        worker.token_database.process_token_key_strings_with_block_ids.side_effect = lambda *a, **kw: iter(
+            [(0, 4, key, b"h0", 5)]
+        )
 
         send_thread = MagicMock()
         send_thread.is_stored_request.return_value = True
@@ -1734,12 +1724,11 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         worker.m_store.put.side_effect = RuntimeError("put failed")
         worker.enable_kv_events = False
 
-        class FakeKey:
-            def to_string(self):
-                return f"m@head_or_tp_rank:{worker.metadata[0].head_or_tp_rank}@pp_rank:0@k0"
-
         worker.token_database = MagicMock()
-        worker.token_database.process_tokens_with_block_ids.side_effect = lambda *a, **kw: iter([(0, 4, FakeKey(), 5)])
+        key = f"m@head_or_tp_rank:{worker.metadata[0].head_or_tp_rank}@pp_rank:0@k0"
+        worker.token_database.process_token_key_strings_with_block_ids.side_effect = lambda *a, **kw: iter(
+            [(0, 4, key, b"h0", 5)]
+        )
 
         send_thread = MagicMock()
         send_thread.is_stored_request.return_value = True
