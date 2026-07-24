@@ -24,13 +24,13 @@ The following model variants are available. It is recommended to download the mo
 
 | Model | Hardware Requirement | Download |
 |-------|---------------------|----------|
-| Qwen3-235B-A22B (BF16) | 1 Atlas 800I A3 (64G × 16), 1 Atlas 800I A2 (64G × 8)| [Download](https://www.modelscope.cn/models/Qwen/Qwen3-235B-A22B) |
+| Qwen3-235B-A22B (BF16) | 1 Atlas 800I A3 (64GB × 16), 1 Atlas 800I A2 (64GB × 8) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-235B-A22B) |
 
 **Quantized Version (Pre-converted):**
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
-| Qwen3-235B-A22B-W8A8 | W8A8 | 1 Atlas 800I A3 (64G × 16), 1 Atlas 800I A2 (64G × 8)| [Download](https://modelers.cn/models/Modelers_Park/Qwen3-235B-A22B-w8a8) |
+| Qwen3-235B-A22B-W8A8 | W8A8 | 1 Atlas 800I A3 (64GB × 16), 1 Atlas 800I A2 (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-235B-A22B-w8a8) |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -233,8 +233,9 @@ vllm serve your_model_path \
 
 !!! note
 
-    - [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments) — Additional parameter details for vLLM serve commands.
-    - [Environment Variables](../../user_guide/configuration/env_vars.md) — Ascend-specific environment variables (`HCCL_*`, etc.).
+- [vLLM Serving Arguments documentation](https://docs.vllm.ai/en/latest/cli/serve/#arguments) — Additional parameter details for vLLM serve commands.
+- [Environment Variables](../../user_guide/configuration/env_vars.md) — Ascend-specific environment variables (`HCCL_*`, etc.).
+:::
 
 **Service Verification:**
 
@@ -252,7 +253,7 @@ PD (Prefill-Decode) separation splits the Prefill and Decode phases across diffe
 
 For the detailed deployment guide, please refer to [Prefill-Decode Disaggregation Mooncake Verification](../features/pd_disaggregation_mooncake_multi_node.md).
 
-**Hardware**: 3 × Atlas 800 A3 (64G × 16), one for Prefill, two for Decode.
+**Hardware**: 3 × Atlas 800 A3 (64GB × 16), one for Prefill, two for Decode.
 
 First, prepare `launch_online_dp.py` on each node:
 
@@ -654,7 +655,7 @@ ais_bench --models vllm_api_general_chat --datasets aime2024_gen_0_shot_chat_pro
 
 For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-The following is an example configuration for the accuracy evaluation config file:
+The following is an example configuration for the performance evaluation config file:
 
 ```bash
 # Example configuration: benchmarks/ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat.py
@@ -729,7 +730,7 @@ After several minutes, you will get the performance evaluation result.
 | High Throughput | Single-Node (TP4, DP4) | 16 (A3) | W8A8 | DP and TP distribute MoE experts across 16 NPUs for maximum throughput |
 | High Throughput | PD Disaggregation (3 nodes) | 48 (3×A3) | W8A8 | 3-node PD separation balances prefill and decode resources for high throughput |
 | Low Latency | Single-Node (TP16) | 16 (A3) | W8A8 | 16-NPU TP minimizes per-token latency with speculative decoding |
-| Long Context | Single-Node (TP8, CP2) | 16 (A3) | W8A8 | 16-NPU TP with Context Parallelism extends context to 135K tokens |
+| Long Context | Single-Node (TP8, CP2) | 16 (A3) | W8A8 | 16-NPU TP with Context Parallelism extends context to 135k tokens |
 
 > `*Total NPUs` indicates the total number of NPUs used across all nodes.
 
@@ -745,7 +746,7 @@ After several minutes, you will get the performance evaluation result.
 
 <u>Single-node PD Hybrid — High Throughput:</u>
 
-Single-node PD hybrid deployment optimized for maximum throughput on Atlas 800I A3 (64G × 16):
+Single-node PD hybrid deployment optimized for maximum throughput on Atlas 800I A3 (64GB × 16):
 
 ```bash
 export HCCL_IF_IP=<node_ip>
@@ -891,9 +892,9 @@ For common environment, installation, and general parameter issues, please refer
 
 ### Q: What hardware is required for Qwen3-235B-A22B?
 
-For BF16: 1 Atlas 800I A3 (64G × 16) node, 1 Atlas 800I A2 (64G × 8) node, or 2 Atlas 800I A2 (32G × 8) nodes. For W8A8 quantized version, the hardware requirements are similar.
+For BF16: 1 Atlas 800I A3 (64GB × 16) node, 1 Atlas 800I A2 (64GB × 8) node, or 2 Atlas 800I A2 (32G × 8) nodes. For W8A8 quantized version, the hardware requirements are similar.
 
-### Q: How do I enable long context beyond 40K?
+### Q: How do I enable long context beyond 40k?
 
 Use yarn rope-scaling. For vLLM >= v0.12.0: `--hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}'`. For older versions, use `--rope_scaling`. Model variants like Qwen3-235B-A22B-Instruct-2507 natively support long contexts and don't need this parameter.
 

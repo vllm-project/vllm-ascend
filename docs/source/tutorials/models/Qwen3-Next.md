@@ -18,7 +18,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-`Qwen3-Next-80B-A3B-Instruct`: requires **8 cards in 1 Atlas 800 A3 (64G × 16) node** or **8 cards in 1 Atlas 800 A2 (64G × 8) node**. [Model Weight](https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)
+`Qwen3-Next-80B-A3B-Instruct`: requires **8 cards in 1 Atlas 800 A3 (64GB × 16) node** or **8 cards in 1 Atlas 800 A2 (64GB × 8) node**. [Model Weight](https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)
 
 ## 4 Installation
 
@@ -125,7 +125,7 @@ For more details, please refer to the [Installation Guide](../../installation.md
 
 Single-node deployment completes both Prefill and Decode within the same node. The model `Qwen3-Next-80B-A3B-Instruct` can be deployed on 1 Atlas 800 A3 (64G × 16).
 
-While a single-node setup supports all input/output scenarios, consider deploying multinodes for optimal performance.
+While a single-node setup supports all input/output scenarios, consider deploying multi-node clusters for optimal performance.
 
 Startup Command:
 
@@ -252,10 +252,10 @@ Performance: 580tps, TPOT 54ms
 
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
-|High Throughput<br>(16K context)|Single-Node Mixed|2 (A3)|Qwen3-Next|Use tp2 for high-resolution text inputs|
-|Long Context<br>(128K, no prefix cache)|Single-Node Mixed|2 (A3)|Qwen3-Next|tp2 for high-resolution text inputs|
-|Long Context<br>(128K, with prefix cache)|Single-Node Mixed|2 (A3)|Qwen3-Next|tp2 for high-resolution text inputs|
-|Multimodal<br>(1080P)|Single-Node Mixed|2 (A3)|Qwen3-Next|tp2 for high-resolution visual inputs|
+|High Throughput<br>(16k context)|Single-Node Mixed|2 (A3)|Qwen3-Next|Use tp2 for high-resolution text inputs|
+|Long Context<br>(128k, no prefix cache)|Single-Node Mixed|2 (A3)|Qwen3-Next|tp2 for high-resolution text inputs|
+|Long Context<br>(128k, with prefix cache)|Single-Node Mixed|2 (A3)|Qwen3-Next|tp2 for high-resolution text inputs|
+|Multimodal<br>(1080p)|Single-Node Mixed|2 (A3)|Qwen3-Next|tp2 for high-resolution visual inputs|
 
 > `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs).
 
@@ -263,10 +263,10 @@ Performance: 580tps, TPOT 54ms
 
 |Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|
 |--------|-------------|-----|--|--|-------------------|--------------------|
-|High Throughput / Low Latency (16K)|Server / Single Machine|2|1|1|~16K|3|
-|Long Context (128K, no cache)|Server / Single Machine|2|1|1|128K|3|
-|Long Context (128K, with cache)|Server / Single Machine|2|1|1|128K|3|
-|Multimodal (1080P)|Server / Single Machine|2|1|1|~16K|3|
+|High Throughput / Low Latency (16k)|Server / Single Machine|2|1|1|~16k|3|
+|Long Context (128k, no cache)|Server / Single Machine|2|1|1|128k|3|
+|Long Context (128k, with cache)|Server / Single Machine|2|1|1|128k|3|
+|Multimodal (1080p)|Server / Single Machine|2|1|1|~16k|3|
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
 
@@ -276,7 +276,7 @@ Performance: 580tps, TPOT 54ms
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
