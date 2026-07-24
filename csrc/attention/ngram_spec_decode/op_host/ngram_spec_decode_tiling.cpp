@@ -50,19 +50,46 @@ static ge::graphStatus NgramSpecDecodeTilingFunc(gert::TilingContext *context)
     int64_t max_n = *maxNPtr;
     int64_t k = *kPtr;
 
+    OPS_CHECK(vocab_size <= 0,
+        OPS_LOG_E(nodeName, "vocab_size must be positive, got %ld.", vocab_size), return ge::GRAPH_FAILED);
+    OPS_CHECK(min_n < 1,
+        OPS_LOG_E(nodeName, "min_n must be >= 1, got %ld.", min_n), return ge::GRAPH_FAILED);
+    OPS_CHECK(max_n < min_n,
+        OPS_LOG_E(nodeName, "max_n(%ld) must be >= min_n(%ld).", max_n, min_n), return ge::GRAPH_FAILED);
+    OPS_CHECK(k <= 0,
+        OPS_LOG_E(nodeName, "k must be positive, got %ld.", k), return ge::GRAPH_FAILED);
+
     const gert::StorageShape *tokenIdsShape = context->GetInputShape(INPUT_TOKEN_IDS_INDEX);
     const gert::StorageShape *sampledShape = context->GetInputShape(INPUT_SAMPLED_INDEX);
     OPS_CHECK(tokenIdsShape == nullptr, OPS_LOG_E(nodeName, "tokenIdsShape is null."), return ge::GRAPH_FAILED);
     OPS_CHECK(sampledShape == nullptr, OPS_LOG_E(nodeName, "sampledShape is null."), return ge::GRAPH_FAILED);
 
-    int64_t batch_size = tokenIdsShape->GetStorageShape().GetDim(0);
-    int64_t max_seq_len = tokenIdsShape->GetStorageShape().GetDim(1);
-    int64_t max_new_tokens = sampledShape->GetStorageShape().GetDim(1);
+    auto tokenStorageShape = tokenIdsShape->GetStorageShape();
+    auto sampledStorageShape = sampledShape->GetStorageShape();
+    OPS_CHECK(tokenStorageShape.GetDimNum() < 2,
+        OPS_LOG_E(nodeName, "tokenIds shape dim num must be >= 2, got %lu.",
+            tokenStorageShape.GetDimNum()), return ge::GRAPH_FAILED);
+    OPS_CHECK(sampledStorageShape.GetDimNum() < 2,
+        OPS_LOG_E(nodeName, "sampled shape dim num must be >= 2, got %lu.",
+            sampledStorageShape.GetDimNum()), return ge::GRAPH_FAILED);
+
+    int64_t batch_size = tokenStorageShape.GetDim(0);
+    int64_t max_seq_len = tokenStorageShape.GetDim(1);
+    int64_t max_new_tokens = sampledStorageShape.GetDim(1);
+
+    OPS_CHECK(batch_size <= 0,
+        OPS_LOG_E(nodeName, "batch_size must be positive, got %ld.", batch_size), return ge::GRAPH_FAILED);
+    OPS_CHECK(max_seq_len <= 0,
+        OPS_LOG_E(nodeName, "max_seq_len must be positive, got %ld.", max_seq_len), return ge::GRAPH_FAILED);
+    OPS_CHECK(max_new_tokens <= 0,
+        OPS_LOG_E(nodeName, "max_new_tokens must be positive, got %ld.", max_new_tokens), return ge::GRAPH_FAILED);
 
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     uint32_t aivNum = ascendcPlatform.GetCoreNumAiv();
     uint64_t ubSize = 0UL;
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
+    OPS_CHECK(ubSize == 0,
+        OPS_LOG_E(nodeName, "UB size is 0, platform info may be invalid."), return ge::GRAPH_FAILED);
     int64_t ub_size_limit = static_cast<int64_t>(ubSize);
 
     int64_t align_elems = 32 / ELEM_SIZE;
@@ -70,9 +97,20 @@ static ge::graphStatus NgramSpecDecodeTilingFunc(gert::TilingContext *context)
     int64_t max_new_tokens_align = ((max_new_tokens + align_elems - 1) / align_elems) * align_elems;
     int64_t k_align = ((k + align_elems - 1) / align_elems) * align_elems;
 
-    int64_t ub_per_row = (max_seq_len_align + max_new_tokens_align + k_align) * ELEM_SIZE;
-    int64_t ub_overhead = 4 * 32 + static_cast<int64_t>(max_n) * ELEM_SIZE
-        + ((max_seq_len_align + 7) / 8);  // maskBuf
+    int64_t sum_align = max_seq_len_align + max_new_tokens_align + k_align;
+    OPS_CHECK(sum_align < 0 || sum_align < max_seq_len_align,
+        OPS_LOG_E(nodeName, "UB row size overflow in align sum."), return ge::GRAPH_FAILED);
+    OPS_CHECK(sum_align > INT64_MAX / ELEM_SIZE,
+        OPS_LOG_E(nodeName, "UB row size overflow in per-row calc."), return ge::GRAPH_FAILED);
+    int64_t ub_per_row = sum_align * ELEM_SIZE;
+
+    OPS_CHECK(max_n_bytes / ELEM_SIZE != max_n,
+        OPS_LOG_E(nodeName, "max_n * ELEM_SIZE overflow."), return ge::GRAPH_FAILED);
+    int64_t max_n_bytes = static_cast<int64_t>(max_n) * ELEM_SIZE;
+    int64_t mask_bytes = (max_seq_len_align + 7) / 8;
+    int64_t ub_overhead = 4 * 32 + max_n_bytes + mask_bytes;
+    OPS_CHECK(ub_overhead < 0,
+        OPS_LOG_E(nodeName, "UB overhead overflow."), return ge::GRAPH_FAILED);
     int64_t ub_available = ub_size_limit - ub_overhead;
     int64_t max_block_rows = (ub_available > 0) ? (ub_available / ub_per_row) : 1;
     max_block_rows = std::max(max_block_rows, static_cast<int64_t>(1));
