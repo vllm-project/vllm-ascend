@@ -77,9 +77,9 @@ jobs:
       fail-fast: false
       matrix:
         group: ${{ fromJSON(inputs.test_groups) }}
-    runs-on: ${{ matrix.group.runner }}
+    runs-on: linux-aarch64-a5-8
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-950-openeuler24.03-py3.12
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
