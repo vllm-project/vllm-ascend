@@ -1234,6 +1234,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
             block_table = attn_metadata.block_tables
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
+        # EAGLE3 speculative decoding inflates the number of query tokens
+        # beyond the number of sequences. The FIA kernel requires
+        # len(actual_seq_lengths_kv) >= num_tokens (or == 1).
+        # Expand per-sequence KV lengths to per-token when needed.
+        if attn_metadata.attn_state != AscendAttentionState.PrefillNoCache:
+            num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+            kv_len = len(actual_seq_lengths_kv) if isinstance(actual_seq_lengths_kv, list) else actual_seq_lengths_kv.shape[0]
+            if kv_len > 1 and kv_len < num_tokens:
+                qsl = attn_metadata.query_start_loc[:kv_len + 1]
+                token_counts = qsl[1:] - qsl[:-1]
+                kv_tensor = torch.tensor(actual_seq_lengths_kv, dtype=torch.int32, device=qsl.device)
+                actual_seq_lengths_kv = torch.repeat_interleave(kv_tensor, token_counts).tolist()
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
     def forward_fused_infer_attention(
