@@ -348,6 +348,19 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         self._last_draft_probs = None
         batch_size = common_attn_metadata.batch_size()
 
+        # Dynamic speculative decoding (DSD): honor the per-step K chosen by
+        # the scheduler. This override of ``_propose`` does not call
+        # ``super()._propose``, so it must replicate the per-step K refresh that
+        # the base class does at its entry (see llm_base_proposer.py).
+        if scheduler_output is not None:
+            self.num_speculative_tokens = scheduler_output.num_spec_tokens_to_schedule
+            self.decode_threshold = 1 + self.num_speculative_tokens
+
+        # No draft tokens requested for this batch size (e.g. Dynamic SD chose
+        # K=0). Return an empty draft so the target model runs a plain decode.
+        if self.num_speculative_tokens == 0:
+            return torch.empty(batch_size, 0, device=self.device, dtype=torch.int64)
+
         if token_indices_to_sample is None:
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
 

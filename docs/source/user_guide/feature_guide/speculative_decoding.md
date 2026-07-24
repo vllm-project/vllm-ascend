@@ -337,3 +337,80 @@ This entropy-aware threshold is controlled by two parameters:
     ```
 
 Both features can be enabled independently or together. When used together, the cumulative acceptance from Block Verify is combined with the entropy-adjusted threshold from Entropy Verify.
+
+## Dynamic Speculative Decoding
+
+**Dynamic Speculative Decoding (DSD)** lets the number of speculative tokens (K) vary **per scheduling step** based on the current batch size (concurrency), instead of using a single fixed K for the whole run.
+
+### Why Dynamic SD?
+
+During verification, the target model must process `K` draft tokens for each sequence, so the effective batch size becomes `BS * K`. At low concurrency, speculative decoding speeds up decode (which is memory-bound). But as concurrency grows, `BS * K` pushes verification into the compute-bound regime, and the extra draft verification overhead actually **slows down** decoding (increases TPOT). DSD keeps SD beneficial by tuning K to an optimal value for the current batch size — a larger K when concurrency is low, and a smaller K (down to 0, i.e. a plain decode) when it is high.
+
+### Use cases
+
+- **Variable-concurrency workloads** on a single deployment: K decreases as concurrency increases.
+- **RL rollouts**: a rollout often starts with a high batch size but dwindles to a few long-tail requests that generate many tokens. DSD raises K toward the end of the rollout to accelerate those stragglers.
+
+### Configuration
+
+DSD is not a separate `method` — it is an option layered on top of any existing speculative decoding method (`eagle`, `eagle3`, `mtp`, `ngram`, `suffix`, `dflash`, ...). Add the **`num_speculative_tokens_per_batch_size`** key to `speculative_config`. It is a list of `[start_bs, end_bs, optimal_K]` entries, where `optimal_K` draft tokens are used when the running concurrency falls within the inclusive range `[start_bs, end_bs]`.
+
+- **`num_speculative_tokens_per_batch_size`** (list of `[int, int, int]`, optional): the batch-size schedule, e.g. `[[1, 64, 3], [65, 128, 1], [129, 512, 0]]`.
+- **`num_speculative_tokens`** now acts as the **maximum** K. Each schedule entry's K is clamped to it via `min(num_speculative_tokens, optimal_K)`, so set it to the largest K you ever want.
+
+Validation rules:
+
+- The list must be non-empty; each entry is a 3-item sequence `[start_bs, end_bs, optimal_K]`.
+- Ranges must be positive, non-overlapping, and sorted (`start_bs <= end_bs`).
+- **The first range must start at batch size 1** so every runtime batch size has a defined schedule.
+- Gaps between ranges (and the tail beyond the last range, up to `max_num_seqs`) are filled by carrying forward the previous K.
+- `optimal_K >= 0` is allowed. **K=0 means no draft tokens are produced** — the target model runs a plain decode for that batch size.
+
+### Usage
+
+- Online inference
+
+    ```shell
+    vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
+      --speculative-config '{
+        "method": "eagle",
+        "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
+        "num_speculative_tokens": 3,
+        "num_speculative_tokens_per_batch_size": [
+          [1, 64, 3],
+          [65, 128, 1],
+          [129, 512, 0]
+        ]
+      }'
+    ```
+
+    This means: K=3 for concurrency 1–64, K=1 for 65–128, and K=0 (plain decode) for 129–512.
+
+- Offline inference
+
+    ```python
+    from vllm import LLM
+
+    llm = LLM(
+        model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+        speculative_config={
+            "method": "eagle",
+            "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
+            "num_speculative_tokens": 3,
+            "num_speculative_tokens_per_batch_size": [
+                [1, 64, 3],
+                [65, 128, 1],
+                [129, 512, 0],
+            ],
+        },
+    )
+    ```
+
+> [!NOTE]
+> On Ascend NPUs, the `npu_fused_infer_attention_score` operator supports at most 16 tokens per decode round, so the configured maximum `num_speculative_tokens` must still satisfy `(num_speculative_tokens + 1) <= 16`. Since DSD clamps each step's K to this maximum, the constraint holds for every step.
+
+### Limitations
+
+- **Tested methods**: Eagle, Eagle-3, and DFlash. Other SD methods may or may not work out of the box. On Ascend, the `ngram`, `suffix`, EAGLE, EAGLE3, and MTP proposers honor the per-step K.
+- **Not compatible with data parallelism** (`--data-parallel-size > 1`). Each DP rank schedules independently and could pick different K values, causing collective divergence and deadlocks. When DP is enabled, vLLM automatically disables `num_speculative_tokens_per_batch_size` and falls back to the static `num_speculative_tokens`.
+- **PD separation**: DSD is a general speculative-decoding enhancement and can be combined with Prefill-Decode separation on the decode node. The PD-separation rules for `num_speculative_tokens` described in [Common Configuration](#common-configuration) apply to the configured maximum.
