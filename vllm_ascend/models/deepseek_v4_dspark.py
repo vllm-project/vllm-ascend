@@ -93,26 +93,6 @@ def get_dspark_num_layers(config: typing.Any) -> int:
     return len(target_layer_ids)
 
 
-def _make_deepseek_v4_expert_params_mapping(
-    model: nn.Module,
-    num_experts: int,
-    num_redundant_experts: int = 0,
-) -> list[tuple[str, str, int, str]]:
-    return fused_moe_make_expert_params_mapping(
-        model,
-        ckpt_gate_proj_name="gate_proj",
-        ckpt_down_proj_name="down_proj",
-        ckpt_up_proj_name="up_proj",
-        num_experts=num_experts,
-        num_redundant_experts=num_redundant_experts,
-    )
-
-
-def _linear_output(layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
-    out = layer(x)
-    return out[0] if isinstance(out, tuple) else out
-
-
 def _apply_dsv4_rope(
     rotary_emb: nn.Module,
     positions: torch.Tensor,
@@ -304,7 +284,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         positions: torch.Tensor,
         rope_cos_sin: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        kv = self.kv_norm(_linear_output(self.wkv, hidden_states))
+        kv = self.kv_norm(self.wkv(hidden_states))
         return _apply_dsv4_rope(
             self.rotary_emb,
             positions,
@@ -511,8 +491,8 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             context_cache_indices = dspark_metadata.context_cache_indices
             context_cache_valid = dspark_metadata.context_cache_valid
             context_request_slots = dspark_metadata.context_request_slots
-        qr = self.q_norm(_linear_output(self.wq_a, hidden_states))
-        q = _linear_output(self.wq_b, qr).view(-1, self.n_local_heads, self.head_dim)
+        qr = self.q_norm(self.wq_a(hidden_states))
+        q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
         q = self.q_norm_without_weight(q)
         q = _apply_dsv4_rope(
             self.rotary_emb,
@@ -574,7 +554,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         else:
             wo_a = _wo_a_weight_for_eager_projection(self.wo_a.weight, self.n_local_groups, self.o_lora_rank, group_dim)
             z = _grouped_wo_a_projection(out, wo_a).flatten(1)
-        return _linear_output(self.wo_b, z)
+        return self.wo_b(z)
 
 
 class DeepseekV4DSparkDecoderLayer(DeepseekV2DecoderLayer):
@@ -707,7 +687,7 @@ class DeepseekV4DSparkModel(nn.Module):
     ) -> None:
         if context_states.numel() == 0:
             return
-        main_x = self.main_norm(_linear_output(self.main_proj, context_states))
+        main_x = self.main_norm(self.main_proj(context_states))
         safe_context_positions = torch.where(
             context_positions >= 0,
             context_positions,
@@ -810,7 +790,14 @@ class DeepseekV4DSparkModel(nn.Module):
         return self.markov_head.bias(markov_embed)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return _make_deepseek_v4_expert_params_mapping(self, num_experts=self.config.n_routed_experts)
+        return fused_moe_make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.n_routed_experts,
+            num_redundant_experts=0,
+        )
 
     def finalize_mega_moe_weights(self) -> None:
         for layer in self.layers.values():

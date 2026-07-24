@@ -17,9 +17,6 @@ from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.llm_base_proposer import greedy_sample
 from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample
 
-DSPARK_REQUEST_SEED_STRIDE = 9973
-
-
 class AscendDSparkProposer(AscendDflashProposer):
     """DeepSeek V4 DSpark block proposer.
 
@@ -699,7 +696,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             seed_values.append(
                 int(generator.initial_seed())
                 if generator is not None
-                else base_seed + req_idx * DSPARK_REQUEST_SEED_STRIDE
+                else base_seed + req_idx
             )
         seeds = self._dspark_sampling_seed_buffer[:num_reqs]
         seed_values_cpu = torch.tensor(seed_values, dtype=torch.int64, device="cpu")
