@@ -63,6 +63,7 @@ def _assert_compute_wy_close(out, ref):
     torch.testing.assert_close(out[0].cpu(), ref[0].cpu(), rtol=0, atol=0)
     torch.testing.assert_close(out[1].cpu(), ref[1].cpu(), rtol=0, atol=0)
     torch.testing.assert_close(out[4].cpu(), ref[4].cpu(), rtol=1e-5, atol=1e-5)
+    
     assert _cosine(out[2].cpu().float(), ref[2].cpu().float()) > 0.99
     assert _cosine(out[3].cpu().float(), ref[3].cpu().float()) > 0.99
 
