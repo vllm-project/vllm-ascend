@@ -19,7 +19,22 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend._310p.spec_decode.dflash_proposer_310 import _copy_and_expand_inputs_ascendc
+from vllm_ascend._310p.spec_decode.dflash_proposer_310 import (
+    _compute_slots_for_block_size_310,
+    _copy_and_expand_inputs_ascendc,
+)
+
+
+def test_compute_slots_supports_mixed_physical_block_sizes():
+    positions = torch.tensor([63, 64, 127, 128], dtype=torch.int32)
+    request_ids = torch.zeros(4, dtype=torch.long)
+    block_table = torch.tensor([[10, 11, 12]], dtype=torch.int32)
+
+    slots_64 = _compute_slots_for_block_size_310(positions, request_ids, block_table, 64)
+    slots_128 = _compute_slots_for_block_size_310(positions, request_ids, block_table, 128)
+
+    assert slots_64.tolist() == [703, 704, 767, 768]
+    assert slots_128.tolist() == [1343, 1344, 1407, 1408]
 
 
 class TestCopyAndExpandInputsAscendC(TestBase):

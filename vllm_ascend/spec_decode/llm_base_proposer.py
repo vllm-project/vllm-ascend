@@ -942,10 +942,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             used_update_positions = self.mrope_positions[:, token_indices_to_sample]
         else:
             used_update_positions = self.positions[token_indices_to_sample]
-        per_layer_attn_metadata = dict()
-        # The first step of speculative.
-        for layer_name in self.attn_layer_names:
-            per_layer_attn_metadata[layer_name] = attn_metadata
+        # The first step of speculative. Most drafters share one metadata
+        # object. 310P DFlash overrides this hook because hybrid draft layers
+        # can use different physical KV-cache block sizes and therefore require
+        # different slot mappings.
+        per_layer_attn_metadata = self._build_first_pass_per_layer_attn_metadata(
+            builder,
+            common_attn_metadata,
+            attn_metadata,
+            extra_attn_metadata_args,
+        )
         multi_steps_attn_metadata = [per_layer_attn_metadata]
 
         # Copy the old attn_metadata and update
@@ -1058,6 +1064,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 draft_token_ids = run_draft()
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
         return draft_token_ids
+
+    def _build_first_pass_per_layer_attn_metadata(
+        self,
+        builder,
+        common_attn_metadata: CommonAttentionMetadata,
+        attn_metadata,
+        extra_attn_metadata_args: dict,
+    ) -> dict[str, Any]:
+        """Allow platform/model proposers to specialize first-pass metadata."""
+        return {layer_name: attn_metadata for layer_name in self.attn_layer_names}
 
     def compute_draft_token_ids(self, hidden_states: torch.Tensor):
         if self.method in ("eagle3", "dflash", "dspark"):

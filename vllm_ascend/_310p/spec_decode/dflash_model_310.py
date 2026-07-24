@@ -107,7 +107,9 @@ def precompute_and_store_context_kv_310(
 
 def patch_dflash_read_mask_embedding_310() -> None:
     """Fallback when mask embedding weights are absent (same as generic patch)."""
-    if vllm_version_is("0.24.0"):
+    if vllm_version_is("0.24.0") or not hasattr(
+        DFlashQwen3ForCausalLM, "_read_mask_embedding"
+    ):
         return
 
     _orig_read_mask_embedding = DFlashQwen3ForCausalLM._read_mask_embedding

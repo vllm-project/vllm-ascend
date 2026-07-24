@@ -38,6 +38,7 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionState,
     AscendMetadata,
 )
+from vllm_ascend.spec_decode.dflash_debug import trace_dflash_tensors
 
 MASK_TYPE_NORM_COMPRESS_SELF_ATTENTION = 3
 MASK_TYPE_NORM_COMPRESS_PAGED_ATTENTION = 5
@@ -279,6 +280,23 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
                 non_blocking=True,
             )
 
+        trace_dflash_tensors(
+            self,
+            "splitfuse.pre",
+            message=(
+                f"causal={attn_metadata.causal} compressed={self.support_compressed_mask} "
+                f"actual_tokens={num_actual_tokens} heads={self.num_heads} "
+                f"kv_heads={self.num_kv_heads} scale={self.scale}"
+            ),
+            query=query,
+            query_lens=qlens,
+            context_lens=attn_metadata.seq_lens,
+            query_start_loc=attn_metadata.query_start_loc,
+            block_table=block_table,
+            key_cache=self.key_cache,
+            value_cache=self.value_cache,
+        )
+
         if self.support_compressed_mask:
             # splitfuse_v2 requires fixed ND [2048, 2048]; parent build() may set FRACTAL_NZ mask.
             if attn_metadata.causal:
@@ -299,6 +317,13 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
                 mask_type=MASK_TYPE_NORM_COMPRESS_PAGED_ATTENTION,
                 out=output_slice,
             )
+            trace_dflash_tensors(
+                self,
+                "splitfuse.post",
+                message=f"causal={attn_metadata.causal} compressed=True",
+                mask=mask,
+                output=output_slice,
+            )
             return output
 
         # Generate the specific mask for splitfuse
@@ -318,6 +343,14 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
             num_heads=self.num_heads,
             scale_value=self.scale,
             out=output_slice,
+        )
+
+        trace_dflash_tensors(
+            self,
+            "splitfuse.post",
+            message=f"causal={attn_metadata.causal} compressed=False",
+            mask=mask,
+            output=output_slice,
         )
 
         return output
