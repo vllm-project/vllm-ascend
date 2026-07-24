@@ -465,12 +465,7 @@ def get_kv_cache_coordinator(
 
 vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator = get_kv_cache_coordinator  # type: ignore[attr-defined]
 
-# `kv_cache_manager` imports `get_kv_cache_coordinator` with
-# `from ... import ...`, so if it was loaded before this patch runs
-# (for example through the recompute scheduler path), it keeps the
-# old function object. Update that cached binding as well.
 _kv_cache_manager = importlib.import_module("vllm.v1.core.kv_cache_manager")
-_kv_cache_manager.get_kv_cache_coordinator = get_kv_cache_coordinator  # type: ignore[attr-defined]
 
 
 def get_computed_blocks_for_connector(self, request):
