@@ -209,6 +209,11 @@ class AscendConfig:
 
             if self.pd_tp_ratio == 0:
                 raise AssertionError("Only support P node tp size lagger then D node tp size")
+        # We find that _npu_paged_attention still performs better than
+        # npu_fused_infer_attention_score in some cases. We allow to execute
+        # _npu_paged_attention in this cases. This should be removed once
+        # npu_fused_infer_attention_score performs better on all scenarios.
+        self.pa_shape_list = additional_config.get("pa_shape_list", [])
         # Weight NZ mode configuration.
         # 0: disabled, 1: only quant case enable nz (default), 2: BF16/FP16 also enable nz
         self.weight_nz_mode = self._get_config_value(
@@ -263,10 +268,6 @@ class AscendConfig:
             )
         if self.mega_moe_max_tokens <= 0:
             raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
-
-        # Whether to use NPU device group for DP metadata all_reduce.
-        # "True": use NPU device group, "False" (default): use CPU group.
-        self.dp_allreduce_on_npu = additional_config.get("dp_allreduce_on_npu", False)
 
         # Enable optimized reduce sampling scheme
         self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
@@ -528,6 +529,18 @@ class AscendCompilationConfig:
                 Default: True
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
+        from vllm_ascend.utils import is_310p
+
+        if is_310p():
+            if enable_npugraph_ex:
+                logger.warning("npugraph_ex is not supported on Ascend 310P. Disabling it.")
+            if enable_static_kernel:
+                logger.warning(
+                    "static kernel requires npugraph_ex, which is not supported on Ascend 310P. Disabling it."
+                )
+            enable_npugraph_ex = False
+            enable_static_kernel = False
+
         self.fuse_norm_quant = fuse_norm_quant
         self.fuse_qknorm_rope = fuse_qknorm_rope
         self.enable_npugraph_ex = enable_npugraph_ex

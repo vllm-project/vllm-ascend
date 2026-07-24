@@ -15,7 +15,7 @@ This section guides you through container-based environment setup and large mode
 - Atlas 800I A2 inference series (Atlas 800I A2)
 - Atlas A3 training series (Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD)
 - Atlas 800I A3 inference series (Atlas 800I A3)
-- [Experimental] Atlas 300I inference series (Atlas 300I Duo)
+- [Experimental] Atlas inference products
 
 ## Requirements
 
@@ -31,6 +31,14 @@ This section guides you through container-based environment setup and large mode
     | torch-npu     | == 2.10.0.post2                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
     | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
     | NNAL          | == 9.0.1                        | Required for libatb.so, enables advanced tensor operations |
+
+!!! note "Atlas inference products"
+
+    Atlas inference products use CANN 9.1.0 beta and `float16`. Use the `-310p` image suffix for Ubuntu or `-310p-openeuler` for openEuler. Atlas inference products do not support `triton` or `triton-ascend`.
+
+    Atlas inference products and Atlas 200I Pro do not support `enable_npugraph_ex`. Set --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}'.
+
+    Atlas 200I Pro requires additional device nodes and driver mounts. See [Set up using Docker](installation.md#set-up-using-docker) for the complete container commands.
 
 ## Setup environment using container
 
@@ -97,6 +105,35 @@ Before using containers, make sure Docker is installed on your system. If Docker
     apt-get update -y && apt-get install -y curl
     ```
 
+=== "Ubuntu (Atlas inference products)"
+
+    The following command applies to Atlas inference products. For Atlas 200I Pro, use the additional device nodes and driver mounts documented in [Installation](installation.md#set-up-using-docker).
+
+    ```bash
+
+    # Update DEVICE according to your device (/dev/davinci[0-7])
+    export DEVICE=/dev/davinci0
+    # Update the vllm-ascend image
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
+    docker run --rm \
+    --name vllm-ascend \
+    --shm-size=1g \
+    --device $DEVICE \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -p 8000:8000 \
+    -it $IMAGE bash
+    # Install curl
+    apt-get update -y && apt-get install -y curl
+    ```
+
 === "openEuler (A2)"
 
     ```bash
@@ -143,6 +180,35 @@ Before using containers, make sure Docker is installed on your system. If Docker
     --shm-size=1g \
     --device $DEVICE0 \
     --device $DEVICE1 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -p 8000:8000 \
+    -it $IMAGE bash
+    # Install curl
+    yum update -y && yum install -y curl
+    ```
+
+=== "openEuler (Atlas inference products)"
+
+    The following command applies to Atlas inference products. For Atlas 200I Pro, use the additional device nodes and driver mounts documented in [Installation](installation.md#set-up-using-docker).
+
+    ```bash
+
+    # Update DEVICE according to your device (/dev/davinci[0-7])
+    export DEVICE=/dev/davinci0
+    # Update the vllm-ascend image
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler
+    docker run --rm \
+    --name vllm-ascend \
+    --shm-size=1g \
+    --device $DEVICE \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
     --device /dev/hisi_hdc \
