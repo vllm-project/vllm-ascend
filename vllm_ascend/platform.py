@@ -364,7 +364,13 @@ class NPUPlatform(Platform):
             return
 
         # MLA draft models do not use the GQA/MQA DCP head-sharding rule.
-        if draft_model_config.use_mla:
+        hf_text_config = getattr(draft_model_config, "hf_text_config", None)
+        hf_model = getattr(hf_text_config, "model", None) if hf_text_config else None
+        model_type = getattr(hf_model, "model_type", None) if hf_model else None
+        target_models = {"AXK1", "deepseek_v2", "deepseek_v3", "deepseek_v32", "deepseek_mtp", "kimi_k2"}
+        is_target_model = model_type in target_models
+        has_kv_lora = getattr(hf_text_config, "kv_lora_rank", None) is not None if hf_text_config else False
+        if draft_model_config.use_mla or (is_target_model and has_kv_lora):
             return
 
         draft_parallel_config = speculative_config.draft_parallel_config
