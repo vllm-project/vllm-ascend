@@ -224,14 +224,14 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertEqual(len(store.put_calls), 0)
 
     def test_handle_request_with_kv_event(self):
-        t, store = self._make_thread([0], enable_kv_event=True)
+        t, store = self._make_thread([1, 0, 1], enable_kv_event=True)
         req = ReqMeta(
             req_id="r1",
-            token_len_chunk=16,
-            block_ids=[0],
-            block_hashes=[b"h0"],  # type: ignore[arg-type]
+            token_len_chunk=48,
+            block_ids=[0, 1, 2],
+            block_hashes=[b"h0", b"h1", b"h2"],  # type: ignore[arg-type]
             current_event=None,
-            token_ids=list(range(16)),
+            token_ids=list(range(48)),
             original_block_size=16,
         )
         t.add_stored_request("r1")
@@ -239,6 +239,8 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t._handle_request(req)
         events = t.get_kv_events()
         self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].block_hashes, [b"h1"])
+        self.assertEqual(events[0].parent_block_hash, b"h0")
 
     def test_handle_request_consumer_role(self):
         t, store = self._make_thread([0], kv_role="kv_consumer")

@@ -2,6 +2,7 @@
 import copy
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
+from dataclasses import replace
 from functools import partial
 from typing import Any, cast
 
@@ -80,12 +81,19 @@ _PREPARE_INPUTS_BLOCK_SIZE = 4
 # patch vllm_config to be in CompilationMode.NONE temporarily
 @contextmanager
 def _maybe_eager_context(vllm_config):
-    raw_compilation_config_mode = vllm_config.compilation_config.mode
-    vllm_config.compilation_config.mode = CompilationMode.NONE
+    target_compilation_config = vllm_config.compilation_config
+    draft_compilation_config = replace(
+        target_compilation_config,
+        mode=CompilationMode.NONE,
+    )
+    # Model layers use these registries even when compilation is disabled.
+    draft_compilation_config.static_forward_context = target_compilation_config.static_forward_context
+    draft_compilation_config.static_all_moe_layers = target_compilation_config.static_all_moe_layers
+    vllm_config.compilation_config = draft_compilation_config
     try:
         yield
     finally:
-        vllm_config.compilation_config.mode = raw_compilation_config_mode
+        vllm_config.compilation_config = target_compilation_config
 
 
 # split hidden states along dimension of sequence
@@ -604,9 +612,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 decode_token_per_req=self.runner.decode_token_per_req,
                 is_prefilling=torch.zeros(num_reqs, dtype=torch.bool),
                 max_seq_len=0,
-                group_len=self.runner.group_len.gpu[:num_reqs],
-                group_key_idx=self.runner.group_key_idx.gpu[:num_reqs],
-                group_key_cache_idx=self.runner.group_key_cache_idx.gpu[:num_reqs],
             )
             if pcp_manager is not None:
                 # update long_seq related params and flatten block_table
@@ -1880,9 +1885,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             decode_token_per_req=self.runner.decode_token_per_req,
             is_prefilling=common_attn_metadata.is_prefilling,
             max_seq_len=0,
-            group_len=common_attn_metadata.group_len,
-            group_key_idx=common_attn_metadata.group_key_idx,
-            group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
         )
         return spec_common_attn_metadata, token_indices
 
@@ -1975,9 +1977,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             seq_lens=common_attn_metadata.seq_lens,
             is_prefilling=common_attn_metadata.is_prefilling,
             max_seq_len=0,
-            group_len=common_attn_metadata.group_len,
-            group_key_idx=common_attn_metadata.group_key_idx,
-            group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
         )
 
         return spec_common_attn_metadata, token_indices, token_indices_to_sample, num_rejected_tokens_gpu

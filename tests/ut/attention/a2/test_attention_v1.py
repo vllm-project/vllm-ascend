@@ -16,9 +16,11 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     cache_graph_workspace,
     needs_layer_aware_fia_graph_replay,
+    using_paged_attention,
 )
 from vllm_ascend.device.device_op import A5DeviceAdaptor
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+from vllm_ascend.utils import AscendDeviceType
 
 LARGE_HEAD_PREFILL_PATH = "vllm_ascend.device.utils.npu_large_head_prefill_attention"
 
@@ -41,6 +43,12 @@ class TestAttentionGraphHelpers(TestBase):
 
         self.assertEqual(result.numel(), 8)
         self.assertEqual(graph_params.workspaces[1].numel(), 8)
+
+    def test_large_head_uses_paged_attention_on_a2(self):
+        vllm_config = MagicMock()
+        vllm_config.speculative_config = None
+        with patch("vllm_ascend.attention.utils.get_ascend_device_type", return_value=AscendDeviceType.A2):
+            self.assertTrue(using_paged_attention(1, vllm_config, head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE))
 
 
 class TestAscendAttentionBackend(TestBase):
@@ -317,18 +325,22 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.impl.forward_fused_infer_attention.assert_called_once()
         self.assertIs(result, output)
 
-    def test_large_head_decode_uses_fia(self):
+    @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=True)
+    def test_decode_uses_paged_attention(self, mock_using_pa):
         query = torch.randn(2, 8, FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)
         output = torch.empty_like(query)
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.DecodeOnly
 
+        self.impl_large_head.forward_paged_attention = MagicMock(return_value=output)
         self.impl_large_head.forward_fused_infer_attention = MagicMock(return_value=output)
 
         result = self.impl_large_head.forward_impl(query, None, None, (), metadata, output)
 
-        self.impl_large_head.forward_fused_infer_attention.assert_called_once()
+        self.impl_large_head.forward_paged_attention.assert_called_once()
+        self.impl_large_head.forward_fused_infer_attention.assert_not_called()
         self.assertIs(result, output)
+        mock_using_pa.assert_called_once()
 
     @patch("torch_npu.npu_fused_infer_attention_score")
     def test_a5_device_operator_uses_fia_for_large_head(self, mock_fia):
@@ -380,11 +392,11 @@ class TestAscendAttentionBackendImpl(TestBase):
 
         assert output.shape == (10, 8 * 64)
 
-    @patch("torch_npu.npu_scatter_pa_kv_cache")
+    @patch("torch_npu._npu_reshape_and_cache")
     @patch("torch_npu.npu_fused_infer_attention_score")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_forward_fused_infer_attention(
-        self, mock_get_forward_context, mock_npu_fused_infer_attention_score, mock_npu_scatter_pa_kv_cache
+        self, mock_get_forward_context, mock_npu_fused_infer_attention_score, mock_npu_reshape_and_cache
     ):
         """Test forward pass in PrefillCacheHit state"""
         query = torch.randn(10, 8, 64)
@@ -413,42 +425,43 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_npu_fused_infer_attention_score.assert_called_once()
         assert output.shape == (10, 8, 64)
 
-    @patch("torch_npu.npu_fused_infer_attention_score")
-    @patch("torch_npu.npu_scatter_pa_kv_cache")
+    @patch("vllm_ascend.attention.attention_v1.using_paged_attention")
+    @patch("torch_npu._npu_paged_attention")
+    @patch("torch_npu._npu_reshape_and_cache")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    def test_forward_decode_only_uses_fia(
-        self, mock_get_forward_context, mock_npu_scatter_pa_kv_cache, mock_fused_infer_attention_score
+    def test_forward_paged_attention(
+        self, mock_get_forward_context, mock_npu_reshape_and_cache, mock_paged_attention, mock_using_paged_attention
     ):
         """Test forward pass in DecodeOnly state"""
-        query = torch.randn(4, 8, 64)
-        key = torch.randn(4, 8, 64)
-        value = torch.randn(4, 8, 64)
+        query = torch.randn(4, 8 * 64)
+        key = torch.randn(4, 8 * 64)
+        value = torch.randn(4, 8 * 64)
         kv_cache = torch.empty(2, 5, 128, 8, 64)
         output = torch.empty_like(query)
 
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.DecodeOnly
         metadata.seq_lens = torch.tensor([4])
-        metadata.actual_seq_lengths_q = [4]
         metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
         metadata.num_actual_tokens = 4
         metadata.slot_mapping = torch.zeros(4, dtype=torch.long)
         metadata.num_decodes = 4
         metadata.num_prefills = 0
         layer = self.layer_no_quant
+        mock_using_paged_attention.return_value = True
+
         mock_get_forward_context.return_value = MagicMock(capturing=False)
-        mock_fused_infer_attention_score.return_value = (torch.ones(4, 8, 64), None)
 
         output = self.impl.forward(layer, query, key, value, kv_cache, metadata, output)
 
-        mock_fused_infer_attention_score.assert_called_once()
-        assert output.shape == (4, 8, 64)
+        mock_paged_attention.assert_called_once()
+        assert output.shape == (4, 8 * 64)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("torch_npu.npu_fused_infer_attention_score")
-    @patch("torch_npu.npu_scatter_pa_kv_cache")
+    @patch("torch_npu._npu_reshape_and_cache")
     def test_forward_decode_only_swa(
-        self, mock_npu_scatter_pa_kv_cache, mock_fused_infer_attention_score, mock_get_forward_context
+        self, mock_npu_reshape_and_cache, mock_fused_infer_attention_score, mock_get_forward_context
     ):
         """Test forward pass in DecodeOnly state"""
         query = torch.randn(10, 8 * 64)
@@ -477,9 +490,9 @@ class TestAscendAttentionBackendImpl(TestBase):
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("torch_npu.npu_fused_infer_attention_score_v2")
-    @patch("torch_npu.npu_scatter_pa_kv_cache")
+    @patch("torch_npu._npu_reshape_and_cache")
     def test_forward_decode_only_swa_sink(
-        self, mock_npu_scatter_pa_kv_cache, mock_fused_infer_attention_score, mock_get_forward_context
+        self, mock_npu_reshape_and_cache, mock_fused_infer_attention_score, mock_get_forward_context
     ):
         """Test forward pass in DecodeOnly state"""
         query = torch.randn(10, 8 * 64)
@@ -507,12 +520,14 @@ class TestAscendAttentionBackendImpl(TestBase):
         assert output.shape == (10, 8, 64)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    @patch("torch_npu._npu_paged_attention")
     @patch("torch_npu.npu_fused_infer_attention_score")
-    @patch("torch_npu.npu_scatter_pa_kv_cache")
+    @patch("torch_npu._npu_reshape_and_cache")
     def test_forward_decode_only_swa_seq_len_mismatch(
         self,
-        mock_npu_scatter_pa_kv_cache,
+        mock_npu_reshape_and_cache,
         mock_fused_infer_attention_score,
+        mock_paged_attention,
         mock_get_forward_context,
     ):
         """Test forward pass in DecodeOnly state when seq)len_mismatch"""
@@ -539,6 +554,7 @@ class TestAscendAttentionBackendImpl(TestBase):
 
         output = self.impl_swa.forward(layer, query, key, value, kv_cache, metadata, output)
 
+        mock_paged_attention.assert_not_called()
         mock_fused_infer_attention_score.assert_called_once()
 
         assert output.shape == (10, 8, 64)
@@ -712,11 +728,13 @@ class TestAscendAttentionBackendImpl(TestBase):
     @patch("torch_npu.npu_fused_infer_attention_score")
     @patch("vllm_ascend.attention.attention_v1.get_graph_params")
     @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
+    @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=False)
     @patch("vllm_ascend.attention.attention_v1.needs_layer_aware_fia_graph_replay", return_value=False)
     @patch("vllm_ascend.attention.attention_v1._ATTN_KEYS_BUFFER", new=[])
     def test_update_graph_params(
         self,
         mock_needs_layer_aware_fia_graph_replay,
+        mock_using_paged_attention,
         mock_EXTRA_CTX,
         mock_get_graph_params,
         mock_fia,

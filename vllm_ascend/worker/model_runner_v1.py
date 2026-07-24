@@ -111,6 +111,7 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
+    using_paged_attention,
 )
 
 # yapf conflicts with isort for this block
@@ -157,7 +158,8 @@ from vllm_ascend.utils import (
     get_c_env,
     global_stream,
     is_hidden_state_cache_spec,
-    kv_cache_spec_uses_sparse_c8,
+    kv_cache_spec_uses_sparse_li_c8,
+    kv_cache_spec_uses_sparse_sfa_c8,
     lmhead_tp_enable,
     oproj_tp_enable,
     set_potential_max_tokens,
@@ -200,6 +202,9 @@ torch.npu.config.allow_internal_format = True
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
+
+SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
+
 
 @dataclass
 class GraphCaptureContext:
@@ -305,15 +310,6 @@ class NPUModelRunner(GPUModelRunner):
             self.max_num_reqs + 2,  # type: ignore[has-type]
             dtype=torch.int32,
         )
-        self.group_len = self._make_buffer(
-            vllm_config.scheduler_config.max_num_batched_tokens , dtype=torch.int32
-        )        
-        self.group_key_idx = self._make_buffer(
-           vllm_config.scheduler_config.max_num_batched_tokens , dtype=torch.int32
-        )        
-        self.group_key_cache_idx = self._make_buffer(
-            vllm_config.scheduler_config.max_num_batched_tokens, dtype=torch.int32
-        )
 
         # Now, query_start_loc is padded.
         # But gdn needs an unpadded one.
@@ -372,9 +368,8 @@ class NPUModelRunner(GPUModelRunner):
             vllm_config.model_config.hf_text_config, "compress_ratios"
         )
         if self.use_sparse:
-            if get_ascend_device_type() == AscendDeviceType.A5 and self.ascend_config.enable_sparse_c8:
-                # A5 sparse C8 uses the same merged/packed KV layout as SFA QSFA.
-                # qk_rope_head_dim = 0 signals the merged layout.
+            if get_ascend_device_type() == AscendDeviceType.A5 and self.ascend_config.enable_sparse_sfa_c8:
+                # A5 SFA C8 uses the merged/packed KV layout.
                 packed_kv_head_dim = get_sfa_qsfa_packed_head_dim(
                     self.model_config.hf_text_config.kv_lora_rank,
                     self.model_config.hf_text_config.qk_rope_head_dim,
@@ -391,8 +386,9 @@ class NPUModelRunner(GPUModelRunner):
                     self.model_config.hf_text_config.index_head_dim,
                 )
         # dsa c8
-        self.use_sparse_c8 = self.ascend_config.enable_sparse_c8
-        if self.use_sparse_c8:
+        self.enable_sparse_sfa_c8 = self.ascend_config.enable_sparse_sfa_c8
+        self.enable_sparse_li_c8 = self.ascend_config.enable_sparse_li_c8
+        if self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8:
             if get_ascend_device_type() == AscendDeviceType.A5:
                 self.c8_k_cache_dtype = torch.float8_e4m3fn
                 self.c8_k_scale_cache_dtype = torch.float32
@@ -2894,6 +2890,8 @@ class NPUModelRunner(GPUModelRunner):
         num_encoder_reqs: int = 0,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
+        # A one-token chunk can still be a prefill, notably at a PD handoff.
+        # Dispatch a decode graph only after every prompt is fully computed.
         is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
         uniform_decode = (
             (
@@ -3133,9 +3131,6 @@ class NPUModelRunner(GPUModelRunner):
             attn_state=self.attn_state,
             decode_token_per_req=self.decode_token_per_req,
             prefill_context_parallel_metadata=self.long_seq_metadata,
-            group_len = self.group_len.gpu[:num_reqs_padded],
-            group_key_idx = self.group_key_idx.gpu[:num_reqs_padded],
-            group_key_cache_idx = self.group_key_cache_idx.gpu[:num_reqs_padded],
         )
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
@@ -3437,10 +3432,19 @@ class NPUModelRunner(GPUModelRunner):
                     self.attn_state = AscendAttentionState.SpecDecoding
                 else:
                     self.attn_state = AscendAttentionState.ChunkedPrefill
+            # The reason why we use a fixed seq_len rather than max_query_len is that
+            # _npu_paged_attention_get_workspace only returns max workspace with specific
+            # seq_lens. We use this seq_len only when capturing graph, and still use max_query_len
+            # in inference. This will be removed once npu_fused_infer_attention_score
+            # outperforms _npu_paged_attention on all cases.
             if profile_seq_lens is not None:
                 seq_lens = profile_seq_lens
             else:
-                seq_lens = max_query_len
+                seq_lens = (
+                    SEQ_LEN_WITH_MAX_PA_WORKSPACE
+                    if is_graph_capturing and using_paged_attention(num_tokens, self.vllm_config)
+                    else max_query_len
+                )  # type: ignore[assignment]
 
             self.optimistic_seq_lens_cpu[:num_reqs] = seq_lens
             self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
@@ -4090,54 +4094,62 @@ class NPUModelRunner(GPUModelRunner):
                     current_kv_cache_spec = layer_kv_cache_spec[layer_name]
                     assert isinstance(current_kv_cache_spec, AttentionSpec)
 
+                    current_sparse_sfa_c8 = False
+                    current_sparse_li_c8 = False
+                    has_indexer_cache = False
                     dsa_k_tensor_split_factor = None
+                    dsa_k_scale_tensor_split_factor = None
+                    dsa_k_tensor_size = None
+                    dsa_k_scale_tensor_size = None
                     if self.use_sparse:
-                        # for deepseek v3.2, we split the kv cache according to the corresponding ratio
                         kv_cache_spec = layer_kv_cache_spec[layer_name]
-                        current_sparse_c8 = kv_cache_spec_uses_sparse_c8(kv_cache_spec)
+                        current_sparse_sfa_c8 = kv_cache_spec_uses_sparse_sfa_c8(kv_cache_spec)
+                        current_sparse_li_c8 = kv_cache_spec_uses_sparse_li_c8(kv_cache_spec)
                         assert isinstance(kv_cache_spec, AscendMLAAttentionSpec)
                         assert kv_cache_spec.sparse_head_dim is not None
                         has_indexer_cache = sparse_kv_cache_has_indexer(kv_cache_spec)
+                        k_head_dim, v_head_dim, index_head_dim = kv_cache_spec.sparse_head_dim
 
-                        if current_sparse_c8:
+                        if current_sparse_sfa_c8:
+                            assert v_head_dim == 0
                             assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
                             num_blocks = kv_cache_tensor.size // kv_cache_spec.page_size_bytes
                             num_heads = kv_cache_spec.block_size * kv_cache_spec.num_kv_heads
-                            packed_kv_head_dim, _, index_head_dim = kv_cache_spec.sparse_head_dim
-                            k_tensor_split_factor = 1.0
                             k_tensor_size = (
                                 num_blocks
                                 * num_heads
-                                * packed_kv_head_dim
+                                * k_head_dim
                                 * get_dtype_size(kv_cache_spec.c8_k_cache_dtype)
                             )
                             v_tensor_size = None
                             if has_indexer_cache:
+                                indexer_dtype = (
+                                    kv_cache_spec.c8_k_cache_dtype
+                                    if current_sparse_li_c8
+                                    else kv_cache_spec.dtype
+                                )
                                 dsa_k_tensor_size = (
                                     num_blocks
                                     * num_heads
                                     * index_head_dim
                                     * kv_cache_spec.sfa_dcp_replicated_indexer_size
-                                    * get_dtype_size(kv_cache_spec.c8_k_cache_dtype)
+                                    * get_dtype_size(indexer_dtype)
                                 )
-                                dsa_k_scale_tensor_size = (
-                                    num_blocks
-                                    * num_heads
-                                    * kv_cache_spec.sfa_dcp_replicated_indexer_size
-                                    * get_dtype_size(kv_cache_spec.c8_k_scale_cache_dtype)
-                                )
-                            else:
-                                dsa_k_tensor_size = None
-                                dsa_k_scale_tensor_size = None
-                            dsa_k_tensor_split_factor = None
+                                if current_sparse_li_c8:
+                                    dsa_k_scale_tensor_size = (
+                                        num_blocks
+                                        * num_heads
+                                        * kv_cache_spec.sfa_dcp_replicated_indexer_size
+                                        * get_dtype_size(kv_cache_spec.c8_k_scale_cache_dtype)
+                                    )
                         elif has_indexer_cache:
                             sparse_kv_cache_ratio = kv_cache_spec.sparse_kv_cache_ratio
                             k_tensor_split_factor = sparse_kv_cache_ratio[0]
                             v_tensor_split_factor = sparse_kv_cache_ratio[1]
                             dsa_k_tensor_split_factor = sparse_kv_cache_ratio[2]
+                            dsa_k_scale_tensor_split_factor = sparse_kv_cache_ratio[3]
                         else:
-                            k_dim, v_dim, _ = kv_cache_spec.sparse_head_dim
-                            k_tensor_split_factor, v_tensor_split_factor = calc_split_factor([k_dim, v_dim])
+                            k_tensor_split_factor, v_tensor_split_factor = calc_split_factor([k_head_dim, v_head_dim])
                     else:
                         k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
                         assert k_dim > 0 and v_dim > 0
@@ -4152,7 +4164,7 @@ class NPUModelRunner(GPUModelRunner):
                         else:
                             k_tensor_split_factor, v_tensor_split_factor = calc_split_factor(kv_head_dim_list)
 
-                    if not (self.use_sparse and current_sparse_c8):
+                    if not (self.use_sparse and current_sparse_sfa_c8):
                         k_tensor_size = int(kv_cache_tensor.size // k_tensor_split_factor)
                         v_tensor_size = (
                             int(kv_cache_tensor.size // v_tensor_split_factor)
@@ -4161,10 +4173,14 @@ class NPUModelRunner(GPUModelRunner):
                         )
                         dsa_k_tensor_size = None
                         dsa_k_scale_tensor_size = None
-                    #### for deepseek sparse attention
-                    if self.use_sparse and has_indexer_cache and not current_sparse_c8:
-                        assert dsa_k_tensor_split_factor is not None
-                        dsa_k_tensor_size = int(kv_cache_tensor.size // dsa_k_tensor_split_factor)
+                        if self.use_sparse and has_indexer_cache:
+                            assert dsa_k_tensor_split_factor is not None
+                            dsa_k_tensor_size = int(kv_cache_tensor.size // dsa_k_tensor_split_factor)
+                            if current_sparse_li_c8:
+                                assert dsa_k_scale_tensor_split_factor is not None
+                                dsa_k_scale_tensor_size = int(
+                                    kv_cache_tensor.size // dsa_k_scale_tensor_split_factor
+                                )
                     # Allocate raw int8 tensors. Even bf16/fp16 KV cache entries
                     # are allocated as int8 raw bytes first and then viewed as
                     # the target dtype in _reshape_kv_cache_tensors.
@@ -4182,7 +4198,7 @@ class NPUModelRunner(GPUModelRunner):
                         )
 
                     if self.use_sparse and dsa_k_tensor_size is not None:
-                        if current_sparse_c8:
+                        if current_sparse_li_c8:
                             assert dsa_k_scale_tensor_size is not None
 
                             (
@@ -4204,23 +4220,30 @@ class NPUModelRunner(GPUModelRunner):
                         # shared the attn kvcache for all shared layers
                         if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
                             if self.use_sparse:
-                                if current_sparse_c8:
+                                if current_sparse_sfa_c8:
                                     if has_indexer_cache:
-                                        # Sparse C8 with indexer: packed KV, indexer K, and indexer K scale.
-                                        kv_cache_raw_tensors[layer_name_inner] = (
-                                            k_tensor, dsa_k_tensor, dsa_k_scale_tensor
-                                        )
+                                        assert dsa_k_tensor is not None
+                                        if current_sparse_li_c8:
+                                            assert dsa_k_scale_tensor is not None
+                                            kv_cache_raw_tensors[layer_name_inner] = (
+                                                k_tensor, dsa_k_tensor, dsa_k_scale_tensor
+                                            )
+                                        else:
+                                            kv_cache_raw_tensors[layer_name_inner] = (k_tensor, dsa_k_tensor)
                                     else:
-                                        # Sparse C8 without indexer: packed KV only.
                                         kv_cache_raw_tensors[layer_name_inner] = (k_tensor,)
                                 else:
+                                    assert v_tensor is not None
                                     if has_indexer_cache:
-                                        # Sparse non-C8 with indexer: regular K/V plus indexer K.
-                                        kv_cache_raw_tensors[layer_name_inner] = (
-                                            k_tensor, v_tensor, dsa_k_tensor
-                                        )
+                                        assert dsa_k_tensor is not None
+                                        if current_sparse_li_c8:
+                                            assert dsa_k_scale_tensor is not None
+                                            kv_cache_raw_tensors[layer_name_inner] = (
+                                                k_tensor, v_tensor, dsa_k_tensor, dsa_k_scale_tensor
+                                            )
+                                        else:
+                                            kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor, dsa_k_tensor)
                                     else:
-                                        # Sparse non-C8 without indexer: regular K/V only.
                                         kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor)
                             else:
                                 # Dense attention: regular K/V only.
@@ -4355,33 +4378,56 @@ class NPUModelRunner(GPUModelRunner):
                     # cache_only_layers (extract_hidden_states) are allocated
                     # as a single tensor by the branch at the top of
                     # _allocate_kv_cache_tensors; route them to the dedicated
-                    current_sparse_c8 = kv_cache_spec_uses_sparse_c8(current_kv_cache_spec)
+                    current_sparse_sfa_c8 = kv_cache_spec_uses_sparse_sfa_c8(current_kv_cache_spec)
+                    current_sparse_li_c8 = kv_cache_spec_uses_sparse_li_c8(current_kv_cache_spec)
                     has_indexer_cache = sparse_kv_cache_has_indexer(current_kv_cache_spec)
+                    raw_v_tensor = None
                     raw_dsa_k_tensor = None
                     raw_dsa_k_scale_tensor = None
                     if self.use_sparse and has_indexer_cache and "cache_only_layers" not in layer_name:
                         assert isinstance(current_kv_cache_spec, AscendMLAAttentionSpec)
                         assert current_kv_cache_spec.sparse_head_dim is not None
-                        if current_sparse_c8:
-                            raw_k_tensor, raw_dsa_k_tensor, raw_dsa_k_scale_tensor = (
-                                kv_cache_raw_tensors[layer_name]  # type: ignore
-                            )
-                            assert raw_dsa_k_tensor is not None
-                            assert raw_dsa_k_scale_tensor is not None
-                            sum_page_size_bytes = (
-                                raw_k_tensor.numel()
-                                + raw_dsa_k_tensor.numel()
-                                + raw_dsa_k_scale_tensor.numel()
-                            )
+                        if current_sparse_sfa_c8:
+                            if current_sparse_li_c8:
+                                (
+                                    raw_k_tensor,
+                                    raw_dsa_k_tensor,
+                                    raw_dsa_k_scale_tensor,
+                                ) = kv_cache_raw_tensors[layer_name]  # type: ignore
+                                sum_page_size_bytes = (
+                                    raw_k_tensor.numel()
+                                    + raw_dsa_k_tensor.numel()
+                                    + raw_dsa_k_scale_tensor.numel()
+                                )
+                            else:
+                                raw_k_tensor, raw_dsa_k_tensor = kv_cache_raw_tensors[  # type: ignore
+                                    layer_name
+                                ]
+                                sum_page_size_bytes = raw_k_tensor.numel() + raw_dsa_k_tensor.numel()
                         else:
-                            raw_k_tensor, raw_v_tensor, raw_dsa_k_tensor = kv_cache_raw_tensors[  # type: ignore
-                                layer_name]
-                            assert raw_dsa_k_tensor is not None
-                            sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel() + raw_dsa_k_tensor.numel()
+                            if current_sparse_li_c8:
+                                (
+                                    raw_k_tensor,
+                                    raw_v_tensor,
+                                    raw_dsa_k_tensor,
+                                    raw_dsa_k_scale_tensor,
+                                ) = kv_cache_raw_tensors[layer_name]  # type: ignore
+                                sum_page_size_bytes = (
+                                    raw_k_tensor.numel()
+                                    + raw_v_tensor.numel()
+                                    + raw_dsa_k_tensor.numel()
+                                    + raw_dsa_k_scale_tensor.numel()
+                                )
+                            else:
+                                raw_k_tensor, raw_v_tensor, raw_dsa_k_tensor = kv_cache_raw_tensors[  # type: ignore
+                                    layer_name
+                                ]
+                                sum_page_size_bytes = (
+                                    raw_k_tensor.numel() + raw_v_tensor.numel() + raw_dsa_k_tensor.numel()
+                                )
                     elif self.use_sparse and "cache_only_layers" not in layer_name:
                         assert isinstance(current_kv_cache_spec, AscendMLAAttentionSpec)
-                        assert current_kv_cache_spec.sparse_head_dim is not None
-                        if current_sparse_c8:
+                        if current_sparse_sfa_c8:
                             (raw_k_tensor,) = kv_cache_raw_tensors[layer_name]  # type: ignore
                             sum_page_size_bytes = raw_k_tensor.numel()
                         else:
@@ -4507,7 +4553,7 @@ class NPUModelRunner(GPUModelRunner):
                             num_kv_heads,
                             k_dim,
                         )
-                        if self.use_sparse and current_sparse_c8:
+                        if self.use_sparse and current_sparse_sfa_c8:
                             assert current_kv_cache_spec.sparse_head_dim is not None
                             k_shape = (
                                 mla_num_blocks,
@@ -4528,13 +4574,14 @@ class NPUModelRunner(GPUModelRunner):
                             layer_name, current_kv_cache_spec.dtype, self.model_config
                         )
 
-                    if self.use_sparse and current_sparse_c8:
+                    if self.use_sparse and current_sparse_sfa_c8:
                         k_cache_dtype = self.c8_k_cache_dtype
 
                     k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape)
-                    if self.use_sparse and current_sparse_c8:
+                    if self.use_sparse and current_sparse_sfa_c8:
                         v_cache = None
                     else:
+                        assert raw_v_tensor is not None
                         v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape)
 
                     if self.use_sparse and has_indexer_cache:
@@ -4545,10 +4592,8 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec.num_kv_heads,
                             self.model_config.hf_text_config.index_head_dim,
                         )
-                        if current_sparse_c8:
-                            # dsa_k
+                        if current_sparse_li_c8:
                             dsa_k_cache = raw_dsa_k_tensor.view(self.c8_k_cache_dtype).view(dsa_k_cache_shape)
-                            # dsa_k_scale
                             dsa_k_scale_cache_shape = (
                                 num_blocks * current_kv_cache_spec.sfa_dcp_replicated_indexer_size,
                                 current_kv_cache_spec.block_size,
@@ -4561,17 +4606,18 @@ class NPUModelRunner(GPUModelRunner):
                                 .view(self.c8_k_scale_cache_dtype)
                                 .view(dsa_k_scale_cache_shape)
                             )
-                            if get_ascend_device_type() == AscendDeviceType.A5:
+                            if current_sparse_sfa_c8:
                                 kv_caches[layer_name] = (k_cache, dsa_k_cache, dsa_k_scale_cache)
-                            elif v_cache is not None:
-                                kv_caches[layer_name] = (k_cache, v_cache, dsa_k_cache, dsa_k_scale_cache)
                             else:
-                                kv_caches[layer_name] = (k_cache, dsa_k_cache, dsa_k_scale_cache)
+                                assert v_cache is not None
+                                kv_caches[layer_name] = (k_cache, v_cache, dsa_k_cache, dsa_k_scale_cache)
                         else:
-                            # dsa_k
                             dsa_k_cache = raw_dsa_k_tensor.view(current_kv_cache_spec.dtype).view(dsa_k_cache_shape)
-                            kv_caches[layer_name] = (k_cache, v_cache, dsa_k_cache)
-                    elif self.use_sparse and current_sparse_c8:
+                            if current_sparse_sfa_c8:
+                                kv_caches[layer_name] = (k_cache, dsa_k_cache)
+                            else:
+                                kv_caches[layer_name] = (k_cache, v_cache, dsa_k_cache)
+                    elif self.use_sparse and current_sparse_sfa_c8:
                         kv_caches[layer_name] = (k_cache,)
                     else:
                         kv_caches[layer_name] = (k_cache, v_cache)
@@ -4844,10 +4890,10 @@ class NPUModelRunner(GPUModelRunner):
                 if self.use_sparse:
                     impl = attn_module.impl
                     has_indexer = bool(getattr(impl, "has_indexer", False))
-                    use_sparse_c8_sfa_for_layer = bool(getattr(impl, "use_sparse_c8_sfa", False))
-                    use_sparse_c8_indexer_for_layer = bool(getattr(impl, "use_sparse_c8_indexer", False))
+                    enable_sparse_sfa_c8_for_layer = bool(getattr(impl, "enable_sparse_sfa_c8", False))
+                    enable_sparse_li_c8_for_layer = bool(getattr(impl, "enable_sparse_li_c8", False))
 
-                    if use_sparse_c8_sfa_for_layer:
+                    if enable_sparse_sfa_c8_for_layer:
                         packed_kv_head_dim = get_sfa_qsfa_packed_head_dim(
                             self.model_config.hf_text_config.kv_lora_rank,
                             self.model_config.hf_text_config.qk_rope_head_dim,
@@ -4855,11 +4901,7 @@ class NPUModelRunner(GPUModelRunner):
                         sparse_head_dim = (
                             packed_kv_head_dim,
                             0,
-                            (
-                                self.model_config.hf_text_config.index_head_dim
-                                if use_sparse_c8_indexer_for_layer
-                                else 0
-                            ),
+                            self.model_config.hf_text_config.index_head_dim if has_indexer else 0,
                         )
                     elif has_indexer:
                         sparse_head_dim = self.sparse_head_dim
@@ -4879,7 +4921,8 @@ class NPUModelRunner(GPUModelRunner):
                         sparse_head_dim=sparse_head_dim,
                         dtype=self.kv_cache_dtype,
                         cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
-                        cache_sparse_c8=use_sparse_c8_sfa_for_layer,
+                        cache_sparse_sfa_c8=enable_sparse_sfa_c8_for_layer,
+                        cache_sparse_li_c8=enable_sparse_li_c8_for_layer,
                         sfa_dcp_replicated_indexer_size=self.sfa_dcp_replicated_indexer_size,
                     )
                 elif spec := attn_module.get_kv_cache_spec(self.vllm_config):

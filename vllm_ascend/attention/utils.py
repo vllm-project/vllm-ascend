@@ -10,6 +10,7 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
+from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_config,
@@ -98,6 +99,25 @@ def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
     )
 
     return chunked_prefill_workspace_size
+
+
+def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig, head_size: int | None = None) -> bool:
+    if vllm_config.speculative_config is not None:
+        return False
+    if get_ascend_device_type() == AscendDeviceType.A5:
+        return False
+    # TODO: Remove this fallback when A2/A3 FIA TND supports Gemma4's
+    # 512-dim global attention heads. Decode can use PA directly; prefill is
+    # handled by the device adaptor.
+    if head_size == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE:
+        return True
+    from vllm.config.compilation import CUDAGraphMode
+
+    cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+    if cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
+        return False
+
+    return runtime_shape in get_ascend_config().pa_shape_list
 
 
 @lru_cache(maxsize=1)
@@ -234,9 +254,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # Metadata for Prefill Context Parallelism (PCP) operations.
     prefill_context_parallel_metadata: AscendPrefillContextParallelMetadata | None = None
     kvcomp_metadata: KVCompMetaData | None = None
-    group_len: torch.Tensor = None
-    group_key_idx: torch.Tensor = None
-    group_key_cache_idx: torch.Tensor = None
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
@@ -289,9 +306,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             encoder_seq_lens_cpu=_slice_reqs(self.encoder_seq_lens_cpu),
             logits_indices_padded=self.logits_indices_padded,
             num_logits_indices=self.num_logits_indices,
-            group_len=self.group_len,
-            group_key_idx=self.group_key_idx,
-            group_key_cache_idx=self.group_key_cache_idx,
         )
 
 
