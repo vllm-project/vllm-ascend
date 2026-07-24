@@ -1,0 +1,272 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+# Reusable workflow that builds CI test images on CPU runners and pushes them
+# to the Quay temp repo.  Always builds all 4 npu_types x 2 vllm versions = 8
+# images.  Image tag format:
+#   vllm-ascend-pr<pr_number>-<vllm_label>-<npu_type>-<arch>
+#
+# The image contains vllm + vllm-ascend fully installed (source baked in at
+# /vllm-workspace/vllm-ascend) so that _selected_tests.yaml only needs to run
+# the tests — no checkout or install steps.
+
+name: Build Test Image
+
+on:
+  workflow_call:
+    inputs:
+      vllm_main_commit:
+        type: string
+        required: true
+        description: 'vLLM main commit hash (from .github/vllm-main-verified.commit).'
+      vllm_release_tag:
+        type: string
+        required: true
+        description: 'vLLM release tag (from .github/vllm-release-tag.commit).'
+      pr_number:
+        type: string
+        required: true
+        description: 'PR number for image tag construction.'
+      ascend_ref:
+        type: string
+        required: true
+        description: 'The vllm-ascend commit hash (PR head sha) to build from.'
+      quay_temp_username:
+        type: string
+        required: false
+        default: ''
+        description: 'Quay username for pushing temp images.'
+    secrets:
+      QUAY_TEMP_PASSWORD:
+        description: 'Quay password for pushing temp images.'
+        required: false
+
+env:
+  QUAY_TEMP_REPO: quay.io/atlas-ci/vllm-atlas-temp
+  CACHE_REPO: ghcr.io/vllm-project/vllm-ascend
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+permissions:
+  packages: write
+  contents: read
+
+jobs:
+  build-push:
+    name: build-${{ matrix.npu_type }}-${{ matrix.vllm_label }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # A2 (ARM64, device)
+          # - npu_type: a2
+          #   cann_tag: "9.0.0-910b-ubuntu22.04-py3.12"
+          #   soc: "ascend910b1"
+          #   arch: arm64
+          #   mode: device
+          #   runner: linux-amd64-cpu-32-hk
+          #   vllm_label: main
+          #   vllm_version: ${{ inputs.vllm_main_commit }}
+          # - npu_type: a2
+          #   cann_tag: "9.0.0-910b-ubuntu22.04-py3.12"
+          #   soc: "ascend910b1"
+          #   arch: arm64
+          #   mode: device
+          #   runner: linux-amd64-cpu-32-hk
+          #   vllm_label: release
+          #   vllm_version: ${{ inputs.vllm_release_tag }}
+          # A3 (ARM64, device)
+          - npu_type: a3
+            cann_tag: "9.0.0-a3-ubuntu22.04-py3.12"
+            soc: "ascend910_9391"
+            arch: arm64
+            mode: device
+            runner: linux-amd64-cpu-32-hk
+            vllm_label: main
+            vllm_version: ${{ inputs.vllm_main_commit }}
+          # - npu_type: a3
+          #   cann_tag: "9.0.0-a3-ubuntu22.04-py3.12"
+          #   soc: "ascend910_9391"
+          #   arch: arm64
+          #   mode: device
+          #   runner: linux-amd64-cpu-32-hk
+          #   vllm_label: release
+          #   vllm_version: ${{ inputs.vllm_release_tag }}
+          # 310P (ARM64, device)
+          # - npu_type: 310p
+          #   cann_tag: "9.1.0-beta.1-310p-ubuntu22.04-py3.12"
+          #   soc: "ascend310p1"
+          #   arch: arm64
+          #   mode: device
+          #   runner: linux-amd64-cpu-32-hk
+          #   vllm_label: main
+          #   vllm_version: ${{ inputs.vllm_main_commit }}
+          # - npu_type: 310p
+          #   cann_tag: "9.1.0-beta.1-310p-ubuntu22.04-py3.12"
+          #   soc: "ascend310p1"
+          #   arch: arm64
+          #   mode: device
+          #   runner: linux-amd64-cpu-32-hk
+          #   vllm_label: release
+          #   vllm_version: ${{ inputs.vllm_release_tag }}
+          # CPU (AMD64, nodevice)
+          # - npu_type: cpu
+          #   cann_tag: "9.0.0-910b-ubuntu22.04-py3.12"
+          #   soc: "ascend910b1"
+          #   arch: amd64
+          #   mode: nodevice
+          #   runner: linux-amd64-cpu-16-hk
+          #   vllm_label: main
+          #   vllm_version: ${{ inputs.vllm_main_commit }}
+          # - npu_type: cpu
+          #   cann_tag: "9.0.0-910b-ubuntu22.04-py3.12"
+          #   soc: "ascend910b1"
+          #   arch: amd64
+          #   mode: nodevice
+          #   runner: linux-amd64-cpu-16-hk
+          #   vllm_label: release
+          #   vllm_version: ${{ inputs.vllm_release_tag }}
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.11
+    steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ascend_ref }}
+          fetch-depth: 0
+          submodules: recursive
+
+      # - name: Rebase on latest main
+      #   run: |
+      #     git config user.name "vllm-ascend-ci"
+      #     git config user.email "vllm-ascend-ci@users.noreply.github.com"
+      #     git fetch origin main
+      #     git rebase origin/main
+
+      - name: Get csrc hash
+        id: get_csrc_hash
+        run: |
+          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+
+      - name: Get architecture
+        id: get_arch
+        run: |
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            x86_64) echo "arch=X64" >> $GITHUB_OUTPUT ;;
+            aarch64) echo "arch=ARM64" >> $GITHUB_OUTPUT ;;
+            *) echo "arch=$ARCH" >> $GITHUB_OUTPUT ;;
+          esac
+
+      - name: Restore vllm-ascend csrc cache
+        id: cache-csrc
+        uses: runs-on/cache/restore@v5
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.cann_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
+      # - name: Login to Quay Temp
+      #   uses: docker/login-action@v4
+      #   with:
+      #     registry: quay.io
+      #     username: ${{ inputs.quay_temp_username }}
+      #     password: ${{ secrets.QUAY_TEMP_PASSWORD }}
+
+      # - name: Set up Docker Buildx
+      #   uses: docker/setup-buildx-action@v4
+      #   with:
+      #     install: true
+      #     driver: docker-container
+      #     use: true
+
+      # - name: Login to GitHub Container Registry (for cache)
+      #   uses: docker/login-action@v4
+      #   with:
+      #     registry: ghcr.io
+      #     username: ${{ github.actor }}
+      #     password: ${{ secrets.GITHUB_TOKEN }}
+
+      # - name: Compute cache tag
+      #   id: cache_tag
+      #   run: |
+      #     echo "value=buildcache-ci-${{ matrix.npu_type }}-${{ matrix.arch }}" >> $GITHUB_OUTPUT
+
+      # - name: Build and push image
+      #   uses: docker/build-push-action@v7
+      #   id: build
+      #   with:
+      #     context: .
+      #     file: .github/workflows/dockerfiles/Dockerfile.ci_test
+      #     platforms: linux/${{ matrix.arch }}
+      #     push: true
+      #     tags: ${{ env.QUAY_TEMP_REPO }}:vllm-ascend-pr${{ inputs.pr_number }}-${{ matrix.vllm_label }}-${{ matrix.npu_type }}-${{ matrix.arch }}
+      #     build-args: |
+      #       CANN_TAG=${{ matrix.cann_tag }}
+      #       VLLM_COMMIT=${{ matrix.vllm_version }}
+      #       SOC_VERSION=${{ matrix.soc }}
+      #       INSTALL_MODE=${{ matrix.mode }}
+      #     provenance: false
+      #     cache-from: type=registry,ref=${{ env.CACHE_REPO }}:${{ steps.cache_tag.outputs.value }}
+      #     cache-to: type=registry,ref=${{ env.CACHE_REPO }}:${{ steps.cache_tag.outputs.value }},mode=max
+      
+      - name: Build and push image
+        id: build
+        run: |
+          set -ex
+          IMAGE_TAG="vllm-ascend-pr${{ inputs.pr_number }}-${{ matrix.vllm_label }}-${{ matrix.npu_type }}-${{ matrix.arch }}"
+          IMAGE_NAME="${{ env.QUAY_TEMP_REPO }}:${IMAGE_TAG}"
+
+          # 构造 buildkit 用的 docker config
+          mkdir -p /tmp/bk
+          QUAY_AUTH=$(printf "%s:%s" "${{ inputs.quay_temp_username }}" "${{ secrets.QUAY_TEMP_PASSWORD }}" | base64 -w0)
+          cat > /tmp/bk/config.json <<EOF
+          {
+            "auths": {
+              "quay.io": { "auth": "${QUAY_AUTH}" }
+            }
+          }
+          EOF
+          sleep 1
+          buildctl \
+            --addr="${BUILDKITD_ADDR}" \
+            --tlscacert="/home/user/.docker/ca.pem" \
+            --tlscert="/home/user/.docker/cert.pem" \
+            --tlskey="/home/user/.docker/key.pem" \
+            build \
+            --frontend dockerfile.v0 \
+            --local context=. \
+            --local dockerfile=.github/workflows/dockerfiles \
+            --opt filename=Dockerfile.ci_test \
+            --opt platform=linux/${{ matrix.arch }} \
+            --opt build-arg:CANN_TAG=${{ matrix.cann_tag }} \
+            --opt build-arg:VLLM_COMMIT=${{ matrix.vllm_version }} \
+            --opt build-arg:SOC_VERSION=${{ matrix.soc }} \
+            --opt build-arg:INSTALL_MODE=${{ matrix.mode }} \
+            --secret id=dockerconfig,src=/tmp/bk/config.json \
+            --output type=image,name="${IMAGE_NAME}",push=true \
+            --progress=plain
+
+          echo "Image pushed: ${IMAGE_NAME}"
