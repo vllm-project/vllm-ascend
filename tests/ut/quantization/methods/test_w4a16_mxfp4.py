@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_ascend_config, create_mock_vllm_config
-from vllm_ascend.quantization.methods.w4a16_mxfp4 import AscendW4A16MXFP4FusedMoEMethod
+from vllm_ascend.quantization.methods.wna16_mxfp import AscendW4A16MXFP4FusedMoEMethod
 
 
 class TestAscendW4A16MXFP4MoEMethod(TestBase):
