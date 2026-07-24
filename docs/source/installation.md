@@ -13,9 +13,9 @@ This document describes how to install vllm-ascend manually.
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
     | Ascend HDK    | Refer to the documentation [CANN 9.0.1](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html) | Required for CANN |
-    | CANN          | == 9.0.1                        | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | == 2.10.0.post2                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
-    | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
+    | CANN          | == 9.0.1                        | Required for vllm-ascend and TorchNPU    |
+    | TorchNPU     | == 2.10.0.post2                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | torch         | == 2.10.0                       | Required for TorchNPU and vllm, No need to install manually, it will be auto installed in below steps |
     | NNAL          | == 9.0.1                        | Required for libatb.so, enables advanced tensor operations |
 
 !!! note "Atlas inference products"
@@ -24,7 +24,7 @@ This document describes how to install vllm-ascend manually.
 
 !!! important "Install a matched software stack"
 
-    Treat vLLM Ascend, vLLM, PyTorch, torch-npu, CANN, and Triton Ascend as
+    Treat vLLM Ascend, vLLM, PyTorch, TorchNPU, CANN, and Triton Ascend as
     one compatibility set. For a release installation, select one complete
     row from the [release compatibility matrix](community/versioning_policy.md#release-compatibility-matrix).
     For main-branch development, use the exact vLLM commit recorded in
@@ -136,10 +136,10 @@ apt-get update -y && apt-get install -y gcc g++ cmake ninja-build libnuma-dev wg
 pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 ```
 
-**[Optional]** Then configure the extra-index of `pip` if you are working on an x86 machine or using torch-npu dev version:
+**[Optional]** Then configure the extra-index of `pip` if you are working on an x86 machine or using TorchNPU dev version:
 
 ```bash
-# For torch-npu dev version or x86 machine
+# For TorchNPU dev version or x86 machine
 pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"
 ```
 
@@ -282,14 +282,14 @@ python -m pip install \
 Together, the explicit build dependencies above and `requirements.txt` supply
 the complete build-system requirements before the non-isolated editable
 build. `--no-build-isolation` only reuses packages from the current build
-environment; it does not make incompatible vLLM, PyTorch, and torch-npu
+environment; it does not make incompatible vLLM, PyTorch, and TorchNPU
 versions compatible. Before treating an environment as runtime-capable, run
 `python -m pip check` and resolve every reported conflict. Skip inference
 examples and NPU-specific tests when no device is available.
 
 !!! note
 
-    To build custom operators, gcc/g++ higher than 8 and C++17 or higher are required. If you are using `pip install -e .` and encounter a torch-npu version conflict, please install with `pip install --no-build-isolation -e .` to build on system env.
+    To build custom operators, gcc/g++ higher than 8 and C++17 or higher are required. If you are using `pip install -e .` and encounter a TorchNPU version conflict, please install with `pip install --no-build-isolation -e .` to build on system env.
     If you encounter other problems during compiling, it is probably because an unexpected compiler is being used, you may export `CXX_COMPILER` and `C_COMPILER` in the environment to specify your g++ and gcc locations before compiling.
 
     If you are building in a CPU-only environment where `npu-smi` is unavailable, you need to set `SOC_VERSION` before `pip install -e .` so the build can target the correct chip. You can refer to `Dockerfile*` defaults, for example:
