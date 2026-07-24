@@ -118,7 +118,7 @@ They must not become a second persistent copy of the TP weight.
 
 This coupling preserves the existing decode TP behavior, supports prefill/mixed DSA-CP batches on both mixed-role and P-only instances, and avoids a persistent full-weight copy on every TP rank.
 
-## Related files
+## Related Files
 
 - Slot mapping: `vllm_ascend/worker/block_table.py`
 - Input and attention metadata: `vllm_ascend/worker/model_runner_v1.py`
