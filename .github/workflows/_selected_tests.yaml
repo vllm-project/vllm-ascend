@@ -305,7 +305,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: selected-test-coverage-vllm-${{ inputs.vllm }}-${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card-${{ matrix.group.partition }}
-          path: tests/outputs/**/covdata/**
+          path: |
+            tests/outputs/**/EXPECTED
+            tests/outputs/**/covdata/**
           if-no-files-found: ignore
           retention-days: 14
           compression-level: 0
@@ -341,6 +343,57 @@ jobs:
             path: all-coverage
             pattern: selected-test-coverage-*
             merge-multiple: true
+
+        - name: Check full coverage data completeness
+          id: coverage-completeness
+          env:
+            SELECTED_TEST_GROUPS: ${{ inputs.test_groups }}
+          run: |
+            python3 .github/workflows/scripts/assemble_coverage.py check \
+              --test-groups-json "${SELECTED_TEST_GROUPS}" \
+              --current-root all-coverage
+
+        - name: Download previous coverage data from OBS
+          if: steps.coverage-completeness.outputs.has_missing == 'true'
+          run: |
+            pip install esdk-obs-python --quiet
+            mkdir -p previous-coverage
+            # The OBS SDK calls os.makedirs(dirname(downloadPath)); a bare
+            # filename yields dirname='' and crashes with FileNotFoundError,
+            # so always hand it an absolute path with a real directory.
+            python3 - <<'EOF'
+            import os
+            from obs import ObsClient
+
+            client = ObsClient(
+                access_key_id=os.environ['OBS_ACCESS_KEY'],
+                secret_access_key=os.environ['OBS_SECRET_KEY'],
+                server='https://obs.cn-north-4.myhuaweicloud.com'
+            )
+            download_path = os.path.abspath('previous-coverage.tar')
+            response = client.getObject(
+                'vllm-ascend',
+                'ci/precision-test/coverage.tar',
+                downloadPath=download_path,
+            )
+            if response.status >= 300:
+                raise RuntimeError(
+                    f'Failed to download previous coverage: '
+                    f'{response.status} {response.errorMessage}'
+                )
+            print(f'Downloaded previous coverage data from OBS -> {download_path}')
+            EOF
+            tar xf previous-coverage.tar -C previous-coverage
+
+        - name: Backfill missing coverage data
+          if: steps.coverage-completeness.outputs.has_missing == 'true'
+          env:
+            SELECTED_TEST_GROUPS: ${{ inputs.test_groups }}
+          run: |
+            python3 .github/workflows/scripts/assemble_coverage.py backfill \
+              --test-groups-json "${SELECTED_TEST_GROUPS}" \
+              --current-root all-coverage \
+              --previous-root previous-coverage
 
         - name: Debug - List downloaded coverage files
           run: |
@@ -411,6 +464,16 @@ jobs:
               echo "TASK_DATE=${TASK_DATE}"
               echo "TASK_NAME=${TASK_NAME}"
             } >> "${GITHUB_ENV}"
+
+        - name: Upload coverage package artifact
+          uses: actions/upload-artifact@v7
+          with:
+            name: coverage-package-${{ env.TASK_NAME }}
+            path: |
+              coverage.tar
+              coverage_version.txt
+            retention-days: 7
+            compression-level: 0
 
         - name: Upload coverage to OBS
           run: |

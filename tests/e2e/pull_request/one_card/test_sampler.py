@@ -61,6 +61,7 @@ def test_qwen3_topk(vllm_runner) -> None:
     compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 32, 64]},
 )
 def test_qwen3_prompt_logprobs(vllm_runner) -> None:
+    # assert False, "手动标记该用例强制失败"
     example_prompts = [
         "Hello, my name is",
     ]
