@@ -62,7 +62,7 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
-from vllm_ascend.utils import weak_ref_tensors
+from vllm_ascend.utils import is_950, weak_ref_tensors
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -1331,6 +1331,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     sparse_mode=4,
                 )
             else:
+                # ChunkedPrefill mixing prefill+decode: split into a per-phase
+                # FIA call each (A5 only).
+                if (
+                    is_950()
+                    and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
+                    and attn_metadata.num_decodes > 0
+                    and attn_metadata.num_prefills > 0
+                ):
+                    return self._forward_fia_chunked_prefill_split(
+                        query, key, value, key, passed_value, block_size, block_table, attn_metadata, output
+                    )
                 attn_output, _ = DeviceOperator.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
@@ -1356,6 +1367,87 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output[:num_tokens]
+        return output
+
+    def _forward_fia_chunked_prefill_split(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        current_key: torch.Tensor,
+        current_value: torch.Tensor,
+        block_size: int,
+        block_table: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """ChunkedPrefill with mixed prefill/decode: run decode and prefill in
+        separate FIA calls. split_decodes_and_prefills has reordered the batch
+        so decodes occupy [0, num_decode_tokens) and prefills the rest.
+        """
+        num_decodes = attn_metadata.num_decodes
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        actual_seq_qlen = attn_metadata.actual_seq_lengths_q
+        seq_lens_list = attn_metadata.seq_lens_list
+        num_tokens = int(actual_seq_qlen[-1])
+
+        # decode part
+        if num_decode_tokens > 0:
+            decode_out, _ = DeviceOperator.npu_fused_infer_attention_score(
+                query=query[:num_decode_tokens],
+                key=key,
+                value=value,
+                atten_mask=attn_metadata.attn_mask,
+                block_table=block_table[:num_decodes],
+                input_layout="TND",
+                block_size=block_size,
+                # cumulative offset from 0; leading num_decodes entries used as-is
+                actual_seq_lengths=actual_seq_qlen[:num_decodes],
+                actual_seq_lengths_kv=seq_lens_list[:num_decodes],
+                num_key_value_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                head_size=self.head_size,
+                scale=self.scale,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                current_key=key,
+                current_value=value,
+                attn_metadata=attn_metadata,
+                is_prefill_no_cache=False,
+                sparse_mode=3,
+            )
+            output[:num_decode_tokens] = decode_out.view(num_decode_tokens, self.num_heads, self.head_size)
+
+        # prefill part
+        if attn_metadata.num_prefills > 0:
+            # rebase cumulative q offsets to start at 0 for the prefill slice
+            prefill_seq_qlen = [
+                actual_seq_qlen[i] - num_decode_tokens for i in range(num_decodes, len(actual_seq_qlen))
+            ]
+            prefill_out, _ = DeviceOperator.npu_fused_infer_attention_score(
+                query=query[num_decode_tokens:num_tokens],
+                key=key,
+                value=value,
+                atten_mask=attn_metadata.attn_mask,
+                block_table=block_table[num_decodes:],
+                input_layout="TND",
+                block_size=block_size,
+                actual_seq_lengths=prefill_seq_qlen,
+                actual_seq_lengths_kv=seq_lens_list[num_decodes:],
+                num_key_value_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                head_size=self.head_size,
+                scale=self.scale,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                current_key=key,
+                current_value=value,
+                attn_metadata=attn_metadata,
+                is_prefill_no_cache=False,
+                sparse_mode=3,
+            )
+            n_prefill = num_tokens - num_decode_tokens
+            output[num_decode_tokens:num_tokens] = prefill_out.view(n_prefill, self.num_heads, self.head_size)
         return output
 
     def forward_paged_attention(
