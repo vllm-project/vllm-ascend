@@ -22,7 +22,7 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.core.sched.utils import check_stop, remove_all
+from vllm.v1.core.sched.utils import remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import PerfStats
@@ -908,37 +908,8 @@ class NonBSPScheduler(Scheduler):
         return scheduler_output
 
     def _preempt_request(self, request: Request, timestamp: float) -> None:
-        """Preempt a request and put it back to the waiting queue.
-
-        NOTE: The request should be popped from the running queue outside of this
-        method.
-        """
-        assert request.status == RequestStatus.RUNNING, "Only running requests can be preempted"
         self._lb_paused_req_ids.discard(request.request_id)
-        if self._enable_diagnostics:
-            print(
-                f"[nonbsp] preempt | "
-                f"dp_rank={self.parallel_config.data_parallel_rank} | "
-                f"request_id_suffix={request.request_id[-12:]} | "
-                f"num_computed_tokens={request.num_computed_tokens} | "
-                f"num_tokens={request.num_tokens} | "
-                f"num_preemptions={request.num_preemptions + 1}",
-                flush=True,
-            )
-        self._free_request_blocks(request)
-        self.encoder_cache_manager.free(request)
-        self._inflight_prefills.discard(request)
-        request.status = RequestStatus.PREEMPTED
-        request.num_computed_tokens = 0
-        if request.spec_token_ids:
-            request.spec_token_ids = []
-        request.num_preemptions += 1
-        if self.log_stats:
-            request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
-
-        # Put the request back to the waiting queue.
-        self.waiting.prepend_request(request)
-        self.reset_preempted_req_ids.add(request.request_id)
+        super()._preempt_request(request, timestamp)
 
     def _lb_pause_request(self, request: Request, timestamp: float) -> None:
         """Pause a request for NonBSP load balancing without freeing KV."""
@@ -953,51 +924,7 @@ class NonBSPScheduler(Scheduler):
         return request.request_id in self._lb_paused_req_ids
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
-        # Advance the number of computed tokens for the request AFTER
-        # the request is scheduled.
-        # 1. The scheduler_output of the current step has to include the
-        #    original number of scheduled tokens to determine input IDs.
-        # 2. Advance the number of computed tokens here allowing us to
-        #    schedule the prefill request again immediately in the next
-        #    scheduling step.
-        # 3. If some tokens (e.g. spec tokens) are rejected later, the number of
-        #    computed tokens will be adjusted in update_from_output.
-        num_scheduled_tokens = scheduler_output.num_scheduled_tokens
-        for req_id, num_scheduled_token in num_scheduled_tokens.items():
-            request = self.requests[req_id]
-            request.num_computed_tokens += num_scheduled_token
-            request.num_in_flight_tokens += num_scheduled_token
-            if self.defer_block_free:
-                # Record the in-flight step, to fence deferred block freeing.
-                request.last_sched_seq = self.sched_step_seq
-            request.is_prefill_chunk = request.num_computed_tokens < (
-                request.num_tokens + request.num_output_placeholders
-            )
-            scheduler_output.has_structured_output_requests |= (
-                request.use_structured_output and not request.is_prefill_chunk
-            )
-            # Drop from the in-flight-prefill set once it's no longer prefilling.
-            if not request.is_prefill_chunk:
-                self._inflight_prefills.discard(request)
-
-        # Snapshot block IDs for routed experts before forward starts.
-        # A concurrent schedule() may preempt requests and free blocks
-        # before update_from_output runs; the snapshot survives that.
-        # Use update() to preserve entries from the previous step that
-        # have not yet been consumed by update_from_output (async
-        # scheduling may call _update_after_schedule again before the
-        # prior update_from_output runs).
-        if self.enable_return_routed_experts:
-            gid = self.routed_experts_mgr.attn_gid
-            self._re_block_ids.update(
-                {rid: self.kv_cache_manager.get_blocks(rid).get_block_ids()[gid] for rid in num_scheduled_tokens}
-            )
-
-        # Clear the finished and preempted request IDs.
-        # NOTE: We shouldn't just clear() here because it will also affect
-        # the scheduler output.
-        self.finished_req_ids = set()
-        self.reset_preempted_req_ids = set()
+        super()._update_after_schedule(scheduler_output)
 
         if not self.scheduler_config.async_scheduling:
             return
@@ -1007,6 +934,7 @@ class NonBSPScheduler(Scheduler):
         # arrived yet. Output placeholders keep decode requests schedulable in
         # the next engine step instead of making them alternate between one
         # scheduled step and one num_new_tokens == 0 step.
+        num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
         self._spec_token_placeholders = [-1] * scheduler_output.num_spec_tokens_to_schedule
         for req_id in num_scheduled_tokens:
@@ -1345,19 +1273,7 @@ class NonBSPScheduler(Scheduler):
             return [], False
 
         status_before_update = request.status
-        # Append generated tokens and check for stop. Note that if
-        # a request is still being prefilled, we expect the model runner
-        # to return empty token ids for the request.
-        stopped = False
-        for num_new, output_token_id in enumerate(new_token_ids, 1):
-            request.append_output_token_ids(output_token_id)
-
-            # Check for stop and update request state.
-            # This must be called before we make the EngineCoreOutput.
-            stopped = check_stop(request, self.max_model_len)
-            if stopped:
-                del new_token_ids[num_new:]  # Trim new tokens if needed.
-                break
+        new_token_ids, stopped = super()._update_request_with_output(request, new_token_ids)
 
         if self.scheduler_config.async_scheduling:
             request.num_output_placeholders -= len(new_token_ids)
@@ -1373,19 +1289,5 @@ class NonBSPScheduler(Scheduler):
         return new_token_ids, stopped
 
     def _free_request(self, request: Request, delay_free_blocks: bool = False) -> dict[str, Any] | None:
-        assert request.is_finished()
-
         self._lb_paused_req_ids.discard(request.request_id)
-        self._inflight_prefills.discard(request)
-        connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
-        self.encoder_cache_manager.free(request)
-        request_id = request.request_id
-        self.finished_req_ids.add(request_id)
-        if self.finished_req_ids_dict is not None:
-            self.finished_req_ids_dict[request.client_index].add(request_id)
-
-        delay_free_blocks |= connector_delay_free_blocks
-        if not delay_free_blocks:
-            self._free_blocks(request)
-
-        return kv_xfer_params
+        return super()._free_request(request, delay_free_blocks)
