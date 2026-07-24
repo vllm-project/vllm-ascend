@@ -634,7 +634,9 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             w13_scale_bias = layer.w13_scale_bias_list
             w2_scale_bias = layer.w2_scale_bias_list
             if (w13_scale_bias is None) != (w2_scale_bias is None):
-                raise RuntimeError("W4A8 EPLB requires both w13_scale_bias_list and w2_scale_bias_list.")
+                raise RuntimeError(
+                    "W4A8 EPLB requires w13_scale_bias_list and w2_scale_bias_list to be present or absent together."
+                )
             if w13_scale_bias is not None:
                 weights.extend([w13_scale_bias, w2_scale_bias])
             return weights
@@ -648,7 +650,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         w13_scale_bias = getattr(layer, "w13_scale_bias", None)
         w2_scale_bias = getattr(layer, "w2_scale_bias", None)
         if (w13_scale_bias is None) != (w2_scale_bias is None):
-            raise RuntimeError("W4A8 EPLB requires both w13_scale_bias and w2_scale_bias.")
+            raise RuntimeError("W4A8 EPLB requires w13_scale_bias and w2_scale_bias to be present or absent together.")
         if w13_scale_bias is not None:
             weights.extend([w13_scale_bias, w2_scale_bias])
         return weights

@@ -301,7 +301,22 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         layer = self.build_layer(is_new_quant_version=True)
         del layer.w2_scale_bias
 
-        with self.assertRaisesRegex(RuntimeError, "requires both w13_scale_bias and w2_scale_bias"):
+        with self.assertRaisesRegex(RuntimeError, "w13_scale_bias and w2_scale_bias to be present or absent together"):
+            self.quant_method.get_eplb_weight_views(layer)
+
+    def test_get_eplb_weight_views_rejects_incomplete_scale_bias_lists(self):
+        layer = torch.nn.Module()
+        layer.w13_weight_list = [torch.empty(2, 3) for _ in range(self.experts)]
+        layer.w2_weight_list = [torch.empty(3, 2) for _ in range(self.experts)]
+        layer.w13_weight_scale_list = [torch.empty(3) for _ in range(self.experts)]
+        layer.w2_weight_scale_list = [torch.empty(2) for _ in range(self.experts)]
+        layer.w13_scale_bias_list = [torch.empty(3) for _ in range(self.experts)]
+        layer.w2_scale_bias_list = None
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "w13_scale_bias_list and w2_scale_bias_list to be present or absent together",
+        ):
             self.quant_method.get_eplb_weight_views(layer)
 
     @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz")

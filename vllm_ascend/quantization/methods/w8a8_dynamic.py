@@ -384,7 +384,10 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             fused_w1_scale = getattr(layer, "fused_w1_scale_list", None)
             fused_w2_scale = getattr(layer, "fused_w2_scale_list", None)
             if (fused_w1_scale is None) != (fused_w2_scale is None):
-                raise RuntimeError("FUSED_MC2 requires both fused_w1_scale_list and fused_w2_scale_list.")
+                raise RuntimeError(
+                    "FUSED_MC2 EPLB requires fused_w1_scale_list and fused_w2_scale_list "
+                    "to be present or absent together."
+                )
             if fused_w1_scale is not None:
                 weights.extend([fused_w1_scale, fused_w2_scale])
             return weights
@@ -398,7 +401,9 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         fused_w1_scale = getattr(layer, "fused_w1_scale", None)
         fused_w2_scale = getattr(layer, "fused_w2_scale", None)
         if (fused_w1_scale is None) != (fused_w2_scale is None):
-            raise RuntimeError("FUSED_MC2 requires both fused_w1_scale and fused_w2_scale.")
+            raise RuntimeError(
+                "FUSED_MC2 EPLB requires fused_w1_scale and fused_w2_scale to be present or absent together."
+            )
         if fused_w1_scale is not None:
             assert fused_w2_scale is not None
             num_local_experts = layer.w13_weight.shape[0]
