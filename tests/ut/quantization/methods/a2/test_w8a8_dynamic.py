@@ -119,7 +119,24 @@ class TestAscendW8A8FusedMoEEplbWeights(TestBase):
         layer = self._create_layer()
         layer.fused_w1_scale = torch.empty(self.num_experts * 6, dtype=torch.int64)
 
-        with self.assertRaisesRegex(RuntimeError, "requires both fused_w1_scale and fused_w2_scale"):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "fused_w1_scale and fused_w2_scale to be present or absent together",
+        ):
+            AscendW8A8DynamicFusedMoEMethod.get_eplb_weight_views(layer)
+
+    def test_get_eplb_weight_views_reject_incomplete_fused_mc2_scale_lists(self):
+        layer = torch.nn.Module()
+        layer.w13_weight_list = [torch.empty(2, 3) for _ in range(self.num_experts)]
+        layer.w2_weight_list = [torch.empty(3, 2) for _ in range(self.num_experts)]
+        layer.w13_weight_scale_fp32_list = [torch.empty(6) for _ in range(self.num_experts)]
+        layer.w2_weight_scale_list = [torch.empty(3) for _ in range(self.num_experts)]
+        layer.fused_w1_scale_list = [torch.empty(6, dtype=torch.int64) for _ in range(self.num_experts)]
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "fused_w1_scale_list and fused_w2_scale_list to be present or absent together",
+        ):
             AscendW8A8DynamicFusedMoEMethod.get_eplb_weight_views(layer)
 
 
