@@ -71,7 +71,7 @@ jobs:
           image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
           env:
             VLLM_LOGGING_LEVEL: ERROR
-            HF_HUB_OFFLINE: 0
+            HF_HUB_OFFLINE: 1
         steps:
           - name: Checkout vllm-project/vllm-ascend repo
             uses: actions/checkout@v7
@@ -160,10 +160,9 @@ jobs:
               fi
               uv pip install tblib 
               uv pip install cohere_melody  "vllm[helion]"  "vllm[grpc]"
-              #uv pip install pqdm schemathesis==3.39.15 "vllm[helion]" 
-              #uv pip install "mteb[bm25s]" imagehash
-              #uv pip install "lm-eval[api]" num2words "vllm[grpc]"
-              #uv pip install --no-deps open_clip_torch terratorch==1.2.2 "vllm[audio]" timm "runai-model-streamer[s3,gcs]"
+              uv pip install pqdm timm imagehash num2words schemathesis==3.39.15
+              #uv pip install "mteb[bm25s]" "lm-eval[api]"
+              #uv pip install --no-deps open_clip_torch terratorch==1.2.2 "vllm[audio]" "runai-model-streamer[s3,gcs]"
 
           - name: Run vllm-project/vllm test
             working-directory: ./vllm-empty
