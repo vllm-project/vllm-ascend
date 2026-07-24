@@ -626,7 +626,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             else:
                 graph_params = get_graph_params()
                 attn_metadata = forward_context.attn_metadata
-                attn_keys = list(attn_metadata.keys())
+                # Only standard (FIA) attention layers have captured graph
+                # params here; linear/GDN layers (GDNAttentionMetadata) are
+                # updated separately by update_conv1d_graph_params. So we filter by `seq_lens_list`
+                attn_keys = [k for k in attn_metadata if hasattr(attn_metadata[k], "seq_lens_list")]
                 if not use_layer_aware_replay:
                     # In some speculative methods (such as DFlash), the order of
                     # attn_keys in the Target model will be disrupted instead of
@@ -695,6 +698,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 # layer-specific metadata lookup below prevents global/sliding
                 # window layers from accidentally sharing the same metadata.
                 attn_keys = [attn_keys[index % num_layers] for index in range(graph_param_count)]
+            elif graph_param_count > num_layers and num_layers:
+                # cudagraph_specialize_lora captures one full set of self-attn
+                # FIA ops per LoRA specialization, so graph_param_count is a
+                # multiple of the self-attn layer count. Replicate the keys
+                # block-wise (same scheme as the draft path above) so every
+                # captured op pairs with the correct layer's metadata.
+                assert graph_param_count % num_layers == 0, (
+                    f"graph_param_count ({graph_param_count}) is not a multiple of "
+                    f"num_layers ({num_layers}); block-wise key replication would "
+                    f"mismatch captured ops with metadata. This is an unexpected "
+                    f"capture state under LoRA + TP graph mode."
+                )
+                attn_keys = attn_keys * (graph_param_count // num_layers)
             attn_count = 0
             layer_count = 0
             with torch.npu.stream(update_stream):
