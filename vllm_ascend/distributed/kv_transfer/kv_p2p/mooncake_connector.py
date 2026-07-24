@@ -57,6 +57,7 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.distributed.kv_transfer.utils.async_transfer_poller import AsyncTransferPoller
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     RegisterRegions,
@@ -541,6 +542,30 @@ class KVCacheRecvingThread(threading.Thread):
                     self.vllm_config.speculative_config.draft_model_config.hf_config.num_hidden_layers
                 )
 
+        # === Async transfer support ===
+        self._use_async_transfer = ascend_envs.VLLM_MOONCAKE_ASYNC_TRANSFER
+        self._async_poll_interval = ascend_envs.VLLM_MOONCAKE_ASYNC_POLL_INTERVAL
+        logger.info("KVCacheRecvingThread: async transfer=%s, poll_interval=%.4fs (set via VLLM_MOONCAKE_ASYNC_TRANSFER)",
+                     self._use_async_transfer, self._async_poll_interval)
+        if self._use_async_transfer:
+            # Maps batch_id -> (request_id, remote_request_id, transfer_group_name, start_time)
+            self._pending_async_transfers: dict[int, tuple[str, str, str, float]] = {}
+            self._pending_async_lock = threading.Lock()
+            # Stores req_meta for post-transfer reformat/cleanup
+            self._pending_async_req_meta: dict[int, dict[str, Any]] = {}
+            self._pending_batch_to_signal: dict[int, dict[str, Any]] = {}
+
+            self._async_poller = AsyncTransferPoller(
+                engine=self.engine,
+                pending_async_transfers=self._pending_async_transfers,
+                pending_async_lock=self._pending_async_lock,
+                callback_map={
+                    "on_completed": lambda batch_id, info: self.executor.submit(self._complete_async_transfer, batch_id, False),
+                    "on_failed": lambda batch_id, info: self.executor.submit(self._complete_async_transfer, batch_id, True),
+                    "on_poll_error": lambda batch_id, info: self.executor.submit(self._complete_async_transfer, batch_id, True),
+                },
+            )
+
     def add_request(
         self,
         request_id: str,
@@ -611,14 +636,26 @@ class KVCacheRecvingThread(threading.Thread):
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
         self.ready_event.set()
+        last_poll_time = time.perf_counter()
         while True:
             try:
-                request_data = self.request_queue.get()
-                if request_data is None:
-                    logger.warning("Received a None request. ")
-                    self.request_queue.task_done()
-                    continue
-                self._submit_request(request_data)
+                # Poll async transfers periodically (every 1ms)
+                now = time.perf_counter()
+                if self._use_async_transfer and now - last_poll_time >= self._async_poll_interval:
+                    self._poll_and_complete_async()
+                    last_poll_time = now
+
+                # Try to get a new request from the queue (non-blocking with short timeout)
+                try:
+                    timeout = self._async_poll_interval if self._use_async_transfer else None
+                    request_data = self.request_queue.get(timeout=timeout)
+                    if request_data is None:
+                        logger.warning("Received a None request. ")
+                        self.request_queue.task_done()
+                        continue
+                    self._submit_request(request_data)
+                except queue.Empty:
+                    pass
             except Exception as e:
                 logger.error("Error in KVCacheTransferThread. error=%s. ", e)
 
@@ -699,32 +736,61 @@ class KVCacheRecvingThread(threading.Thread):
         remote_port_send_num = req_meta["remote_port_send_num"]
         all_task_done = req_meta["all_task_done"]
         transfer_failed = self._is_failed_recv_request(request_id)
+        has_blocks = sum(len(group_block_ids) for group_block_ids in req_meta["local_block_ids"]) > 0
+        is_async_path = False
 
         try:
             if transfer_failed:
                 self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
                 logger.warning("Skipping KV cache transfer for request. remote_request_id=%s. ", remote_request_id)
+            elif not has_blocks:
+                # No blocks to transfer (full prefix cache hit), complete immediately
+                logger.debug("No blocks to transfer for request %s.", remote_request_id)
             else:
                 try:
-                    logger.debug("Starting to transfer KV cache for request %s.", remote_request_id)
-                    self._transfer_kv_cache_all_groups(req_meta)
-                    logger.debug("Finished transferring KV cache for request %s.", remote_request_id)
+                    if self._use_async_transfer:
+                        logger.debug("Starting async KV cache transfer for request %s.", remote_request_id)
+                        batch_id = self._transfer_kv_cache_all_groups_async(req_meta)
+                        if batch_id is not None:
+                            is_async_path = True
+                            return
+                        # batch_id is None (no blocks), fallback to sync below
+                    else:
+                        logger.debug("Starting sync KV cache transfer for request %s.", remote_request_id)
+                        self._transfer_kv_cache_all_groups_sync(req_meta)
+                        logger.debug("Finished sync KV cache transfer for request %s.", remote_request_id)
                 except Exception as e:
                     transfer_failed = True
                     self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
                     logger.exception("Failed to transfer KV cache for request %s: %s", remote_request_id, e)
         finally:
-            if self._mark_request_task_done(request_id, all_task_done):
-                self.task_tracker.update_done_task_count(request_id)
-                with self.proc_not_transfer_request_lock:
-                    self.proc_not_transfer_request.pop(remote_request_id, None)
-                self._clear_failed_recv_request(request_id)
-            self.request_queue.task_done()
-            self._send_done_signal_to_free_remote_port(remote_request_id, remote_host, remote_port_send_num)
-            # Always send the done signal to the remote host to ensure proper
-            # resource cleanup. Failing to do so may cause a memory leak on the
-            # remote host.
-            self._send_done_recv_signal(remote_request_id, remote_host, remote_handshake_port, remote_port_send_num)
+            # For sync path: cleanup immediately.
+            # For async path: cleanup is deferred to _complete_async_transfer.
+            if not is_async_path:
+                self._cleanup_after_transfer(
+                    remote_request_id, remote_host, remote_handshake_port,
+                    remote_port_send_num, all_task_done, request_id,
+                    has_blocks, transfer_failed,
+                )
+
+    def _cleanup_after_transfer(
+        self, remote_request_id: str, remote_host: str,
+        remote_handshake_port: int, remote_port_send_num: dict,
+        all_task_done: bool, request_id: str,
+        has_blocks: bool, transfer_failed: bool,
+    ):
+        """Cleanup after a KV cache transfer completes."""
+        if self._mark_request_task_done(request_id, all_task_done):
+            self.task_tracker.update_done_task_count(request_id)
+            with self.proc_not_transfer_request_lock:
+                self.proc_not_transfer_request.pop(remote_request_id, None)
+            self._clear_failed_recv_request(request_id)
+        self.request_queue.task_done()
+        self._send_done_signal_to_free_remote_port(remote_request_id, remote_host, remote_port_send_num)
+        # Always send the done signal to the remote host to ensure proper
+        # resource cleanup. Failing to do so may cause a memory leak on the
+        # remote host.
+        self._send_done_recv_signal(remote_request_id, remote_host, remote_handshake_port, remote_port_send_num)
 
     def _send_done_signal_to_free_remote_port(
         self, request_id: str, remote_host: str, remote_port_send_num: dict[int, RemotePortInfo]
@@ -743,7 +809,124 @@ class KVCacheRecvingThread(threading.Thread):
                     remote_host_ = remote_port_send_num[remote_port]["host"]
                     self._send_done_recv_signal(request_id, remote_host_, remote_port, remote_port_send_num)
 
-    def _transfer_kv_cache_all_groups(self, req_meta: dict[str, Any]):
+    def _complete_async_transfer(self, batch_id: int, failed: bool = False):
+        """Process a completed async transfer: reformat KV cache and cleanup.
+
+        Args:
+            batch_id: The batch ID of the completed transfer.
+            failed: Whether the transfer failed.
+        """
+        with self._pending_async_lock:
+            if batch_id not in self._pending_async_req_meta:
+                logger.warning("No req_meta found for completed batch %s", batch_id)
+                return
+            req_meta = self._pending_async_req_meta.pop(batch_id)
+            signal_info = self._pending_batch_to_signal.pop(batch_id, {})
+
+        request_id = req_meta["request_id"]
+
+        if failed:
+            # Mark request as failed - skip reformatting
+            self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
+            logger.error("Async KV cache transfer failed for request %s", request_id)
+        else:
+            try:
+                # Reformat KV cache (this was previously done inside _transfer_kv_cache)
+                self._reformat_kv_cache_after_transfer(req_meta)
+            except Exception as e:
+                logger.exception("Failed to reformat KV cache after transfer for request %s: %s", request_id, e)
+                self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
+
+        # Cleanup
+        transfer_failed = self._is_failed_recv_request(request_id)
+        self._cleanup_after_transfer(
+            remote_request_id=signal_info.get("remote_request_id", ""),
+            remote_host=signal_info.get("remote_host", ""),
+            remote_handshake_port=signal_info.get("remote_handshake_port", 0),
+            remote_port_send_num=signal_info.get("remote_port_send_num", {}),
+            all_task_done=signal_info.get("all_task_done", False),
+            request_id=request_id,
+            has_blocks=sum(len(group_block_ids) for group_block_ids in req_meta.get("local_block_ids", [])) > 0,
+            transfer_failed=transfer_failed,
+        )
+
+    def _reformat_kv_cache_after_transfer(self, req_meta: dict[str, Any]):
+        """Reformat KV cache after transfer. Extracted from _transfer_kv_cache_all_groups_sync."""
+        # Extract attention_group_reformat_block_ids from req_meta
+        attention_group_reformat_block_ids = req_meta.get("attention_group_reformat_block_ids", [])
+        if not attention_group_reformat_block_ids:
+            return
+
+        ready_attention_group_reformat_block_ids = []
+        for reformat_group, is_group_transfer_end in attention_group_reformat_block_ids:
+            if is_group_transfer_end:
+                ready_attention_group_reformat_block_ids.append(reformat_group)
+
+        if not ready_attention_group_reformat_block_ids:
+            return
+
+        gqa_reformat_groups = [
+            (group_idx, grouped_local_block_ids, num_group_pulls, layer_indices)
+            for (
+                group_idx,
+                grouped_local_block_ids,
+                num_group_pulls,
+                layer_indices,
+            ) in ready_attention_group_reformat_block_ids
+            if num_group_pulls > 1
+        ]
+
+        if self.is_hma_required:
+            for group_idx, grouped_local_block_ids, num_group_pulls, layer_indices in gqa_reformat_groups:
+                num_reformat_blocks = sum(len(block_ids) for block_ids in grouped_local_block_ids)
+                logger.debug(
+                    "Reformat hybrid linear KV cache for GQA attention group. "
+                    "group_idx=%s, num_group_pulls=%s, num_block_groups=%s, num_reformat_blocks=%s, "
+                    "layer_indices=%s",
+                    group_idx,
+                    num_group_pulls,
+                    len(grouped_local_block_ids),
+                    num_reformat_blocks,
+                    layer_indices,
+                )
+                group_kv_caches = self._get_group_kv_caches(group_idx, layer_indices)
+                if not group_kv_caches:
+                    continue
+                self.reformat_kv_cache_hybrid_linear_torch(grouped_local_block_ids, num_group_pulls, group_kv_caches)
+            return
+
+        uniform_num_pulls = {num_group_pulls for _, _, num_group_pulls, _ in ready_attention_group_reformat_block_ids}
+        if len(uniform_num_pulls) != 1:
+            raise RuntimeError(
+                f"Non-hybrid Mooncake KV reformat expects uniform group pulls, but got {uniform_num_pulls}."
+            )
+
+        num_group_pulls = next(iter(uniform_num_pulls))
+        need_cat_cache = num_group_pulls > 1
+        need_nz_cache = get_ascend_config().enable_kv_nz
+        if not (need_cat_cache or need_nz_cache):
+            return
+
+        use_fused_op = ascend_envs.VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK
+        for group_idx, reformat_block_ids, _, layer_indices in ready_attention_group_reformat_block_ids:
+            group_kv_caches = self._get_group_kv_caches(group_idx, layer_indices)
+            if not group_kv_caches:
+                continue
+            if use_fused_op and enable_custom_op():
+                if need_cat_cache:
+                    self.reformat_kv_cache_with_fused_op(reformat_block_ids, num_group_pulls, group_kv_caches)
+                if need_nz_cache:
+                    self.reformat_kv_cache(reformat_block_ids, num_group_pulls, False, need_nz_cache, group_kv_caches)
+            else:
+                self.reformat_kv_cache(
+                    reformat_block_ids,
+                    num_group_pulls,
+                    need_cat_cache,
+                    need_nz_cache,
+                    group_kv_caches,
+                )
+
+    def _transfer_kv_cache_all_groups_sync(self, req_meta: dict[str, Any]):
         """Handle a KV cache transfer request."""
         remote_request_id = req_meta["remote_request_id"]
         local_block_ids: BlockIds = req_meta["local_block_ids"]
@@ -1018,6 +1201,240 @@ class KVCacheRecvingThread(threading.Thread):
                     need_nz_cache,
                     group_kv_caches,
                 )
+
+    def _transfer_kv_cache_all_groups_async(self, req_meta: dict[str, Any]) -> int | None:
+        """Submit KV cache transfer asynchronously. Returns batch_id if async, None if no-op."""
+        remote_request_id = req_meta["remote_request_id"]
+        local_block_ids: BlockIds = req_meta["local_block_ids"]
+        remote_block_ids: BlockIds = req_meta["remote_block_ids"]
+        group_pulls: list[GroupPull] = req_meta["group_pulls"]
+        remote_engine_id = req_meta["remote_engine_id"]
+        remote_host = req_meta["remote_host"]
+        remote_handshake_port = req_meta["remote_handshake_port"]
+        # Full prefix cache hit: do not need to read remote blocks, just notify
+        # P worker that we have the blocks we need.
+        num_local_blocks = sum(len(group_block_ids) for group_block_ids in local_block_ids)
+        if num_local_blocks == 0:
+            return None
+
+        # Check if we have the remote metadata cached.
+        with self.remote_metadata_lock:
+            has_remote_metadata = (
+                remote_engine_id in self.kv_caches_base_addr
+                and remote_handshake_port in self.kv_caches_base_addr[remote_engine_id]
+            )
+        if not has_remote_metadata:
+            self._get_remote_metadata(remote_host, remote_handshake_port)
+        with self.remote_metadata_lock:
+            remote_kv_caches_base_addrs = self.kv_caches_base_addr[remote_engine_id][remote_handshake_port]
+            local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port]
+            remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
+            remote_block_stride_per_addr = self.remote_block_stride_per_addr[remote_engine_id][remote_handshake_port]
+        session_id = f"{remote_host}:{remote_transfer_port}"
+
+        req_start_time = time.perf_counter()
+        src_list: list[int] = []
+        dst_list: list[int] = []
+        length_list: list[int] = []
+        attention_group_reformat_block_ids: list[tuple[tuple[int, list[list[int]], int, list[int]], bool]] = []
+
+        def pp_layer_indices(layer_indices: list[int], prefill_pp_rank: int) -> list[int]:
+            first_layer_index, end_layer_index = self.pp_layer_indices[prefill_pp_rank]
+            if self.vllm_config.speculative_config is not None and prefill_pp_rank == self._prefill_pp_size - 1:
+                end_layer_index += self.num_draft_layers
+            return [layer_idx for layer_idx in layer_indices if first_layer_index <= layer_idx < end_layer_index]
+
+        for group_pull in group_pulls:
+            group_idx = group_pull.group_id
+            group_spec, layer_indices = self.kv_group2layeridx[group_idx]
+            kv_cache_group_id = group_spec.get("kv_cache_group_id", group_idx)
+            layer_indices = pp_layer_indices(layer_indices, group_pull.prefill_pp_rank)
+            if not layer_indices:
+                continue
+            tp_num_need_pulls = group_pull.num_group_pulls
+            inner_offset = group_pull.remote_tp_offset
+            is_mamba_group = group_spec["kv_cache_spec_type"] == "MambaSpec"
+            local_group_block_ids = local_block_ids[kv_cache_group_id]
+            remote_group_block_ids = remote_block_ids[kv_cache_group_id]
+            if not local_group_block_ids:
+                continue
+            if not is_mamba_group:
+                is_group_transfer_end = group_pull.is_group_transfer_end
+                # Block ids are already expanded to kernel granularity and truncated in
+                # _get_kv_split_metadata, so consume them directly here.
+                kernel_remote_block_ids = remote_group_block_ids
+                kernel_local_block_ids = local_group_block_ids
+
+                if tp_num_need_pulls == 1:
+                    grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
+                        kernel_remote_block_ids, kernel_local_block_ids
+                    )
+                else:
+                    grouped_remote_block_ids = [[block_id] for block_id in kernel_remote_block_ids]
+                    grouped_local_block_ids = [[block_id] for block_id in kernel_local_block_ids]
+                attention_group_reformat_block_ids.append(
+                    (
+                        (group_idx, grouped_local_block_ids, tp_num_need_pulls, layer_indices),
+                        is_group_transfer_end,
+                    )
+                )
+            else:
+                # When Prefix Caching is enabled on both P and D nodes, num_block should not be forced to match,
+                # as the D-node requires dynamic allocation based on its specific cache hit rate.
+                transfer_block_idx = len(remote_group_block_ids) - self.num_speculative_tokens - 1
+                grouped_remote_block_ids = [[remote_group_block_ids[transfer_block_idx]]]
+                grouped_local_block_ids = [[local_group_block_ids[0]]]
+
+            if is_mamba_group:
+                for layer_idx in layer_indices:
+                    start_meta_idx = len(src_list)
+                    self._append_mamba_transfer_meta(
+                        src_list,
+                        dst_list,
+                        length_list,
+                        group_spec=group_spec,
+                        src_layer_base_addr=local_kv_caches_base_addrs[layer_idx],
+                        dst_layer_base_addr=remote_kv_caches_base_addrs[layer_idx],
+                        block_len=self.block_len_per_addr[layer_idx],
+                        block_stride=self.block_stride_per_addr[layer_idx],
+                        remote_block_stride=remote_block_stride_per_addr[layer_idx],
+                        remote_block_id=grouped_remote_block_ids[0][0],
+                        local_block_id=grouped_local_block_ids[0][0],
+                        tp_num_need_pulls=tp_num_need_pulls,
+                        remote_tp_offset=inner_offset,
+                    )
+                    if logger.isEnabledFor(logging.DEBUG):
+                        for src, dst, length in zip(
+                            src_list[start_meta_idx:], dst_list[start_meta_idx:], length_list[start_meta_idx:]
+                        ):
+                            logger.debug(
+                                "Mooncake mamba transfer meta: request_id=%s group_idx=%s layer_idx=%s "
+                                "local_block_id=%s remote_block_id=%s tp_num_need_pulls=%s "
+                                "remote_tp_offset=%s  session_id=%s",
+                                remote_request_id,
+                                group_idx,
+                                layer_idx,
+                                grouped_local_block_ids[0][0],
+                                grouped_remote_block_ids[0][0],
+                                tp_num_need_pulls,
+                                inner_offset,
+                                session_id,
+                            )
+                continue
+
+            for layer_idx in layer_indices:
+                for cache_idx in range(len(local_kv_caches_base_addrs[layer_idx])):
+                    src_layer_base_addr = local_kv_caches_base_addrs[layer_idx][cache_idx]
+                    dst_layer_base_addr = remote_kv_caches_base_addrs[layer_idx][cache_idx]
+                    block_len = self.block_len_per_addr[layer_idx][cache_idx]
+                    block_stride = self.block_stride_per_addr[layer_idx][cache_idx]
+                    remote_block_stride = remote_block_stride_per_addr[layer_idx][cache_idx]
+                    inner_block_len = block_len // tp_num_need_pulls
+                    transfer_remote_block_ids, transfer_local_block_ids = split_if_not_byte_contiguous(
+                        grouped_remote_block_ids,
+                        grouped_local_block_ids,
+                        src_block_stride=remote_block_stride,
+                        dst_block_stride=block_stride,
+                        block_len=inner_block_len,
+                    )
+                    for remote_block_id, local_block_id in zip(transfer_remote_block_ids, transfer_local_block_ids):
+                        src = src_layer_base_addr + local_block_id[0] * block_stride + inner_offset * inner_block_len
+                        dst = dst_layer_base_addr + remote_block_id[0] * remote_block_stride
+                        length = inner_block_len * len(local_block_id)
+                        src_list.append(src)
+                        dst_list.append(dst)
+                        length_list.append(length)
+                    logger.debug(
+                        "Mooncake kv transfer meta: request_id=%s group_idx=%s layer_idx=%s local_block_ids=%s "
+                        "remote_block_ids=%s tp_num_need_pulls=%s remote_tp_offset=%s session_id=%s",
+                        remote_request_id,
+                        group_idx,
+                        layer_idx,
+                        grouped_local_block_ids,
+                        grouped_remote_block_ids,
+                        tp_num_need_pulls,
+                        inner_offset,
+                        session_id,
+                    )
+        if not src_list:
+            return None
+
+        logger.debug(
+            "Mooncake transfer request=%s session id=%s src=%s dst=%s length=%s",
+            remote_request_id,
+            session_id,
+            src_list,
+            dst_list,
+            length_list,
+        )
+
+        # Submit async transfer
+        batch_id = self.engine.batch_transfer_async_read(session_id, src_list, dst_list, length_list)
+        if batch_id is None or batch_id <= 0:
+            logger.error("Mooncake async transfer failed for request %s, batch_id=%s",
+                         remote_request_id, batch_id)
+            raise RuntimeError(f"Mooncake async transfer failed, batch_id: {batch_id}")
+
+        # Store reformat metadata for async completion
+        req_meta["attention_group_reformat_block_ids"] = attention_group_reformat_block_ids
+
+        # Register the pending transfer
+        # Extract additional fields needed for cleanup
+        all_task_done = req_meta.get("all_task_done", False)
+        remote_port_send_num = req_meta.get("remote_port_send_num", {})
+        with self._pending_async_lock:
+            self._pending_async_transfers[batch_id] = (
+                req_meta["request_id"],
+                remote_request_id,
+                f"transfer_{remote_request_id}",
+                req_start_time,
+            )
+            # Store req_meta for post-transfer reformat
+            self._pending_async_req_meta[batch_id] = req_meta
+            self._pending_batch_to_signal[batch_id] = {
+                "remote_request_id": remote_request_id,
+                "remote_host": remote_host,
+                "remote_handshake_port": remote_handshake_port,
+                "remote_port_send_num": remote_port_send_num,
+                "all_task_done": all_task_done,
+                "request_id": req_meta["request_id"],
+            }
+
+        logger.info(
+            "KV cache async transfer submitted for request %s, batch_id=%s. "
+            "local_ip %s local_device_id %s remote_session_id %s",
+            remote_request_id,
+            batch_id,
+            get_ip(),
+            self.tp_rank,
+            session_id,
+        )
+
+        return batch_id
+
+    def _poll_and_complete_async(self) -> None:
+        """Poll all pending async transfers and complete any that are done."""
+        self._async_poller.poll_and_complete_async()
+
+    def _poll_async_transfers(self) -> list[int]:
+        """Poll all pending async transfers for completion.
+
+        Returns:
+            List of batch_ids that have completed.
+        """
+        return self._async_poller.poll_async_transfers()
+
+    def get_and_clear_async_finished(self) -> set[str]:
+        """Get and clear the set of requests that have completed async transfer."""
+        return set()
+
+    def get_and_clear_async_failed(self) -> set[str]:
+        """Get and clear the set of requests that have failed async transfer."""
+        return set()
+
+    def _transfer_kv_cache_all_groups(self, req_meta: dict[str, Any]):
+        """Handle a KV cache transfer request - deprecated, use sync/async versions."""
+        self._transfer_kv_cache_all_groups_sync(req_meta)
 
     @torch.no_grad()
     def reformat_kv_cache_hybrid_linear_torch(
@@ -3603,6 +4020,17 @@ def group_concurrent_contiguous(
     block_len: int = 1,
 ) -> tuple[list[list[int]], list[list[int]]]:
     """Group block ids that are contiguous in both id space and memory."""
+    # Truncate the longer list to ensure src and dst have equal lengths
+    min_len = min(len(src), len(dst))
+    if len(src) != len(dst):
+        logger.warning(
+            "group_concurrent_contiguous: src and dst length mismatch "
+            "(src=%d, dst=%d), truncating to %d",
+            len(src), len(dst), min_len,
+        )
+        src = src[:min_len]
+        dst = dst[:min_len]
+
     src_indices: npt.NDArray[np.int64] = np.array(src, dtype=np.int64)
     dst_indices: npt.NDArray[np.int64] = np.array(dst, dtype=np.int64)
 
