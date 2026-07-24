@@ -317,6 +317,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
         self.dcp_group = get_dcp_group().device_group if self.dcp_size > 1 else None
 
+        self.local_prefill_key = None
+        self.local_prefill_value = None
+
     @staticmethod
     def update_graph_params(
         update_stream,
@@ -812,6 +815,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0
         output_padded = output
+        self.local_prefill_key = None
+        self.local_prefill_value = None
 
         if len(kv_cache) > 1:
             if self.key_cache is None:
@@ -831,6 +836,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 if self.pcp_size > 1:
                     assert attn_metadata.prefill is not None and attn_metadata.prefill.pcp_metadata is not None
                     if not attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn:
+                        self.local_prefill_key = key
+                        self.local_prefill_value = value
                         kv = torch.cat([key, value], dim=-1)
                         num_actual_tokens_pcp_padded = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
                         all_kv = get_pcp_group().all_gather(kv[:num_actual_tokens_pcp_padded].contiguous(), dim=0)
@@ -957,6 +964,150 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         context_output, context_lse = _update_out_and_lse(attn_out_allgather, attn_lse_allgather)
         return context_output, context_lse
 
+    def ring_attn(self, query, key, value, attn_metadata):
+        pcp_group = get_pcp_group()
+        pcp_size = pcp_group.world_size
+        pcp_rank = pcp_group.rank_in_group
+        device_group = pcp_group.device_group
+        group_ranks = pcp_group.ranks
+
+        send_rel_rank = (pcp_rank + 1) % pcp_size
+        recv_rel_rank = (pcp_rank - 1) % pcp_size
+        send_rank = group_ranks[send_rel_rank]
+        recv_rank = group_ranks[recv_rel_rank]
+
+        kv = torch.cat([key, value], dim=-1)
+        recv_buff = torch.empty_like(kv)
+        outputs_list, lses_list = [], []
+        tail_outputs, tail_lses = [], []
+
+        pcp_metadata = attn_metadata.prefill.pcp_metadata
+        # half_seqlens: cumulative sum of head (or tail) lengths per request [H1, H1+H2, ...]
+        half_seqlens = pcp_metadata.attn_mask_seqlens
+        if isinstance(half_seqlens, torch.Tensor):
+            half_seqlens = half_seqlens.tolist()
+        # q_seqlens_full: cumulative sum of total lengths per request in this rank [H1+T1, H1+T1+H2+T2, ...]
+        q_seqlens_full = [length * 2 for length in half_seqlens]
+        # We need to construct local indices to separate [H1, T1, H2, T2] into [H1, H2] and [T1, T2]
+        # These are local to the current rank's 4k tokens, regardless of which rank we receive from.
+        local_head_indices = []
+        local_tail_indices = []
+        start = 0
+        for i in range(len(half_seqlens)):
+            h_len = half_seqlens[i] if i == 0 else half_seqlens[i] - half_seqlens[i-1]
+            local_head_indices.append(torch.arange(start, start + h_len))
+            local_tail_indices.append(torch.arange(start + h_len, start + 2 * h_len))
+            start += 2 * h_len
+        
+        local_head_idx = torch.cat(local_head_indices).to(query.device)
+        local_tail_idx = torch.cat(local_tail_indices).to(query.device)
+
+        s = pcp_rank
+
+        for i in range(pcp_size):
+            if i < pcp_size - 1:
+                if pcp_rank % 2 == 0:
+                    send_req = torch.distributed.isend(kv, send_rank, group=device_group)
+                    recv_req = torch.distributed.irecv(recv_buff, recv_rank, group=device_group)
+                else:
+                    recv_req = torch.distributed.irecv(recv_buff, recv_rank, group=device_group)
+                    send_req = torch.distributed.isend(kv, send_rank, group=device_group)
+
+            current_k, current_v = kv.split([self.head_size, self.head_size], dim=-1)
+
+            if s == pcp_rank:
+                # Local Rank: Full Q looks at Full Local KV [H, T]
+                output_i, lse_i = torch.ops.npu.npu_fused_infer_attention_score(
+                    query,
+                    current_k,
+                    current_v,
+                    num_heads=self.num_heads,
+                    num_key_value_heads=self.num_kv_heads,
+                    input_layout="TND",
+                    atten_mask=attn_metadata.attn_mask,
+                    scale=self.scale,
+                    sparse_mode=3,
+                    antiquant_mode=0,
+                    antiquant_scale=None,
+                    softmax_lse_flag=True,
+                    actual_seq_lengths_kv=q_seqlens_full,
+                    actual_seq_lengths=q_seqlens_full,
+                )
+                outputs_list.append(output_i)
+                lses_list.append(lse_i)
+
+            elif s < pcp_rank:
+                # Past Rank: Full Q looks at Remote KV's Head portion [H1, H2, ...]
+                kv_head_k = torch.index_select(current_k, 0, local_head_idx)
+                kv_head_v = torch.index_select(current_v, 0, local_head_idx)
+
+                output_i, lse_i = torch.ops.npu.npu_fused_infer_attention_score(
+                    query,
+                    kv_head_k,
+                    kv_head_v,
+                    num_heads=self.num_heads,
+                    num_key_value_heads=self.num_kv_heads,
+                    input_layout="TND",
+                    atten_mask=None,
+                    scale=self.scale,
+                    sparse_mode=0,
+                    antiquant_mode=0,
+                    antiquant_scale=None,
+                    softmax_lse_flag=True,
+                    actual_seq_lengths_kv=half_seqlens,
+                    actual_seq_lengths=q_seqlens_full,
+                )
+                outputs_list.append(output_i)
+                lses_list.append(lse_i)
+
+            else:
+                # Future Rank: Local Q's Tail portion [T1, T2, ...] looks at Remote Rank's Full KV
+                q_tail = torch.index_select(query, 0, local_tail_idx)
+
+                out_tail, lse_tail = torch.ops.npu.npu_fused_infer_attention_score(
+                    q_tail,
+                    current_k,
+                    current_v,
+                    num_heads=self.num_heads,
+                    num_key_value_heads=self.num_kv_heads,
+                    input_layout="TND",
+                    atten_mask=None,
+                    scale=self.scale,
+                    sparse_mode=0,
+                    antiquant_mode=0,
+                    antiquant_scale=None,
+                    softmax_lse_flag=True,
+                    actual_seq_lengths_kv=q_seqlens_full,
+                    actual_seq_lengths=half_seqlens,
+                )
+                tail_outputs.append(out_tail)
+                tail_lses.append(lse_tail)
+
+            if i < pcp_size - 1:
+                send_req.wait()
+                recv_req.wait()
+                kv, recv_buff = recv_buff, kv
+                s = (s - 1 + pcp_size) % pcp_size
+
+        if tail_outputs:
+            merged_tail_out, merged_tail_lse = _update_out_and_lse(
+                torch.stack(tail_outputs, dim=0),
+                torch.stack(tail_lses, dim=0))
+            output_i = torch.zeros_like(query)
+            lse_i = torch.full((query.shape[0], query.shape[1], 1),
+                               float("-inf"),
+                               dtype=merged_tail_lse.dtype,
+                               device=query.device)
+            output_i.index_copy_(0, local_tail_idx, merged_tail_out.to(query.dtype))
+            lse_i.index_copy_(0, local_tail_idx, merged_tail_lse)
+            outputs_list.append(output_i)
+            lses_list.append(lse_i)
+
+        all_outputs = torch.stack(outputs_list, dim=0)
+        all_lses = torch.stack(lses_list, dim=0)
+        output, lse = _update_out_and_lse(all_outputs, all_lses)
+        return output.to(query.dtype), lse
+
     def forward_impl(
         self,
         query: torch.Tensor,
@@ -982,19 +1133,35 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             assert attn_metadata.prefill is not None
             # chunked prefill vars init
             has_chunked_context = attn_metadata.prefill.chunked_context is not None
-            # Note(qcs): we use multi-stream for computation-communication overlap
-            # when enabling chunked prefill.
-            # current part
-            # current_stream: init -- pre -- head attn ------------------ tail attn -- post -- update
-            # context part                                                                     -/
-            # current_stream: -----                    -- context attn --                     -/
-            # COMM_STREAM:         \-- all_gather Q --/                  \-- a2a ag output --/
 
             # qkv init
             num_actual_tokens_pcp_padded = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
             prefill_query = query[num_decode_tokens:num_actual_tokens_pcp_padded].contiguous()
-            key = key[self.pcp_size * num_decode_tokens : attn_metadata.num_actual_tokens_pcp_padded].contiguous()
-            value = value[self.pcp_size * num_decode_tokens : attn_metadata.num_actual_tokens_pcp_padded].contiguous()
+
+            if self.pcp_size == 1:
+                key = key[num_decode_tokens:num_actual_tokens_pcp_padded].contiguous()
+                value = value[num_decode_tokens:num_actual_tokens_pcp_padded].contiguous()
+            elif not pcp_use_hybrid_attn:
+                assert self.local_prefill_key is not None and self.local_prefill_value is not None
+                key = self.local_prefill_key[num_decode_tokens:num_actual_tokens_pcp_padded].contiguous()
+                value = self.local_prefill_value[num_decode_tokens:num_actual_tokens_pcp_padded].contiguous()
+            else:
+                total_prefill_kv = attn_metadata.num_actual_tokens_pcp_padded - self.pcp_size * num_decode_tokens
+                kv_tokens_per_rank = total_prefill_kv // self.pcp_size
+                half_kv = kv_tokens_per_rank // 2          
+                kv_base = self.pcp_size * num_decode_tokens 
+                kv_head_start = kv_base + self.pcp_rank * half_kv
+                kv_head_end   = kv_base + (self.pcp_rank + 1) * half_kv
+                kv_tail_start = kv_base + total_prefill_kv - (self.pcp_rank + 1) * half_kv
+                kv_tail_end   = kv_base + total_prefill_kv - self.pcp_rank * half_kv
+                key = torch.cat([
+                    key[kv_head_start:kv_head_end],
+                    key[kv_tail_start:kv_tail_end],
+                ], dim=0).contiguous()
+                value = torch.cat([
+                    value[kv_head_start:kv_head_end],
+                    value[kv_tail_start:kv_tail_end],
+                ], dim=0).contiguous()
 
             if has_chunked_context:
                 # all_gather q for chunked prefill // overlap the computation inner current chunk
@@ -1008,10 +1175,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             record_attention_compute_start()
 
             if self.pcp_size > 1:
-                # Scenario of Enabling PCP or PCP&DCP
-                # prepare qkv and compute the head part // overlap the communication of all gather q
-                data_head, data_tail = self._forward_prefill_cp_pre(prefill_query, key, value, attn_metadata)
-                output_head, lse_head = self._forward_prefill_cp_attn(data_head, True, attn_metadata)
+                attn_output_prefill, attn_lse_prefill = self.ring_attn(prefill_query, key, value, attn_metadata)
             else:
                 # Scenario of Enabling DCP Individually
                 attn_output_prefill, attn_lse_prefill = torch.ops.npu.npu_fused_infer_attention_score(
@@ -1042,16 +1206,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 cp_chunkedprefill_comm_stream().wait_stream(torch.npu.current_stream())
                 with torch_npu.npu.stream(cp_chunkedprefill_comm_stream()):
                     global_context_output = self._gather_global_context_output(local_context_output)
-
-            if self.pcp_size > 1:
-                # compute the tail part and reorg output&lse // overlap the communication of output
-                output_tail, lse_tail = self._forward_prefill_cp_attn(data_tail, False, attn_metadata)
-
-                attn_output_prefill, attn_lse_prefill = self._forward_prefill_cp_post(
-                    [output_head, output_tail],
-                    [lse_head, lse_tail],
-                    attn_metadata,
-                )
 
             if has_chunked_context:
                 # update the output of current chunk with context part
