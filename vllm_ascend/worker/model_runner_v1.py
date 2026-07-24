@@ -1013,9 +1013,6 @@ class NPUModelRunner(GPUModelRunner):
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index
         self._compute_prev_positions(num_reqs)
 
-        # Fill unused with -1. Needed for reshape_and_cache in attention_cp
-        self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
-
         # Guard against empty _draft_token_ids tensor flowing into
         # upstream gpu_model_runner._prepare_input_ids which only
         # checks for None, not numel()==0.
@@ -2263,6 +2260,11 @@ class NPUModelRunner(GPUModelRunner):
                         cudagraph_mode,
                         batch_desc.num_reqs,
                     )
+
+                # Fill entries beyond the final padded request range with -1.
+                # This preserves valid FULL-graph/SP padding while keeping the
+                # unused tail safe for reshape_and_cache in attention_cp.
+                self.query_start_loc.gpu[num_reqs_padded + 1 :].fill_(-1)
 
                 (attn_metadata, spec_decode_common_attn_metadata) = self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded
