@@ -20,6 +20,11 @@ name: E2E-upstream
 on:
   schedule:
     - cron: '0 8 * * 0' # every Sunday at 8:00
+  pull_request:
+    branches:
+      - 'main'
+      - '*-dev'
+      - 'releases/v*'
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
 # It's used to activate ascend-toolkit environment variables.
@@ -107,6 +112,7 @@ jobs:
               pip uninstall -y triton
               pip install -e tests/plugins/bge_m3_sparse_plugin
               pip install -e tests/plugins/prithvi_io_processor_plugin
+              pip install -e tests/plugins/colbert_query_plugin
               sed -i '5i\import vllm_ascend.patch.platform\nimport vllm_ascend.patch.worker' tests/conftest.py
 
           - name: Get csrc hash
@@ -153,9 +159,10 @@ jobs:
                 uv pip install -e . --no-build-isolation
               fi
               uv pip install tblib 
-              uv pip install pqdm timm schemathesis==3.39.15 "vllm[helion]" "runai-model-streamer[s3,gcs]"
-              uv pip install "mteb[bm25s]" open_clip_torch terratorch==1.2.2 imagehash
-              uv pip install "lm-eval[api]" num2words "vllm[grpc]" "vllm[audio]"
+              uv pip install cohere_melody  "vllm[helion]"  "vllm[grpc]" "vllm[audio]"
+              uv pip install pqdm timm imagehash num2words schemathesis==3.39.15
+              uv pip install "mteb[bm25s]" "lm-eval[api]" "runai-model-streamer[s3,gcs]"
+              uv pip install --no-deps open_clip_torch terratorch==1.2.2
 
           - name: Run vllm-project/vllm test
             working-directory: ./vllm-empty
@@ -174,7 +181,8 @@ jobs:
                 --continue-on-error
 
     e2e-upstream_multicard:
-        runs-on: linux-aarch64-a2b3-${{ matrix.num_npus }}
+        runs-on: linux-aarch64-a2b3-0
+        #runs-on: linux-aarch64-a2b3-${{ matrix.num_npus }}
         needs: resolve-tag
         strategy:
           fail-fast: false
@@ -285,7 +293,8 @@ jobs:
                 --continue-on-error
               
     e2e-upstream_online:
-        runs-on: linux-aarch64-a2b3-${{ matrix.num_npus }}
+        runs-on: linux-aarch64-a2b3-0
+        #runs-on: linux-aarch64-a2b3-${{ matrix.num_npus }}
         needs: resolve-tag
         strategy:
           fail-fast: false
