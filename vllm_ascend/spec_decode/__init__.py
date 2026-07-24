@@ -20,6 +20,7 @@
 
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
+from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
@@ -29,6 +30,7 @@ from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.step3p5 import AscendStep3p5MTPProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
+from vllm_ascend.utils import is_dspark_config
 
 
 def get_spec_decode_method(method, vllm_config, device, runner):
@@ -40,6 +42,8 @@ def get_spec_decode_method(method, vllm_config, device, runner):
         return AscendSuffixDecodingProposer(vllm_config, runner)
     elif method == "medusa":
         return AscendMedusaProposer(vllm_config, device)
+    elif method == "mtp" and is_dspark_config(vllm_config):
+        return AscendDSparkProposer(vllm_config, device, runner)
     elif method in ("eagle", "eagle3", "mtp"):
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None and speculative_config.use_step3p5_mtp():

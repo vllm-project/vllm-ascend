@@ -137,11 +137,13 @@ from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
+from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.step3p5 import AscendStep3p5MTPProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
+from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.spec_decode.utils import (
     correct_optimistic_seq_lens_cpu,
     update_num_computed_tokens_for_batch_change,
@@ -622,10 +624,10 @@ class NPUModelRunner(GPUModelRunner):
             | AscendEagleProposer
             | AscendStep3p5MTPProposer
             | AscendDraftModelProposer
-            | AscendDflashProposer
             | AscendSuffixDecodingProposer
             | AscendMedusaProposer
             | AscendExtractHiddenStatesProposer
+            | AscendDSparkProposer
             | None
         ) = None
         self.actual_seq_lengths_q: list[int] = []
@@ -778,8 +780,12 @@ class NPUModelRunner(GPUModelRunner):
                 self.arange_np[1 : num_reqs_padded + 1 - num_reqs] * self.uniform_decode_query_len + last_loc
             )
         else:
-            # Mixed-batch case: num_reqs must equal num_reqs_padded
-            assert num_reqs == num_reqs_padded
+            # Mixed-batch case: with DSpark spec decode, batch_desc_num_reqs
+            # may exceed actual num_reqs. Fill padded entries with the
+            # current total to avoid stale values that could cause OOB.
+            if num_reqs < num_reqs_padded:
+                last_val = query_start_loc.np[num_reqs]
+                query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1] = last_val
 
             # Do not insert if the last value already equals the num_tokens
             if query_start_loc.np[num_reqs_padded] < num_tokens_padded:
@@ -1023,6 +1029,21 @@ class NPUModelRunner(GPUModelRunner):
 
         # Fill unused with -1. Needed for reshape_and_cache in attention_cp
         self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
+
+        # Build prev_positions mapping: current pos -> prev pos (-1 if new).
+        # Used for gathering from previous iteration's GPU tensors.
+        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+        self._compute_prev_positions(num_reqs)
+
+        # Guard against empty _draft_token_ids tensor flowing into
+        # upstream gpu_model_runner._prepare_input_ids which only
+        # checks for None, not numel()==0.
+        if (
+            hasattr(self, "_draft_token_ids")
+            and torch.is_tensor(self._draft_token_ids)
+            and self._draft_token_ids.numel() == 0
+        ):
+            self._draft_token_ids = None
 
         # Copy the tensors to the NPU.
         self._prepare_input_ids(scheduler_output, num_reqs, total_num_scheduled_tokens, cu_num_tokens)
@@ -1878,6 +1899,8 @@ class NPUModelRunner(GPUModelRunner):
         draft_token_ids: torch.Tensor = self._draft_token_ids  # type: ignore[has-type]
         if not torch.is_tensor(draft_token_ids):
             return
+        if draft_token_ids.numel() == 0:
+            return
         assert self.draft_token_ids_event is not None
         assert self.draft_token_ids_copy_stream is not None
         assert self.draft_token_ids_cpu is not None
@@ -2174,6 +2197,11 @@ class NPUModelRunner(GPUModelRunner):
                         cudagraph_mode,
                         batch_desc.num_reqs,
                     )
+
+                # Fill entries beyond the final padded request range with -1.
+                # This preserves valid FULL-graph/SP padding while keeping the
+                # unused tail safe for reshape_and_cache in attention_cp.
+                self.query_start_loc.gpu[num_reqs_padded + 1 :].fill_(-1)
 
                 (attn_metadata, spec_decode_common_attn_metadata) = self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded
@@ -2580,9 +2608,17 @@ class NPUModelRunner(GPUModelRunner):
         if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
             self.rejection_sampler.prepare_sampling(max_topk)
+        draft_probs = None
+        if isinstance(self.drafter, AscendSpecDecodeBaseProposer):
+            req_ids = list(
+                self.input_batch.req_ids[: len(spec_decode_metadata.num_draft_tokens)]
+            )
+            draft_probs = self.drafter.take_draft_probs(
+                spec_decode_metadata.num_draft_tokens, req_ids
+            )
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
-            None,  # draft_probs
+            draft_probs,
             logits,
             sampling_metadata,
         )
@@ -3246,7 +3282,13 @@ class NPUModelRunner(GPUModelRunner):
                 self.drafter.set_per_group_attn_metadata(
                     kv_cache_gid, cm.block_table_tensor, cm.slot_mapping)
             if self.speculative_config and spec_decode_common_attn_metadata is None:
-                if isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer | AscendDflashProposer):
+                if isinstance(self.drafter, AscendDSparkProposer):
+                    if self.drafter.kv_cache_gid == kv_cache_gid:
+                        spec_decode_common_attn_metadata = cm
+                elif isinstance(
+                    self.drafter,
+                    AscendEagleProposer | AscendDraftModelProposer,
+                ):
                     if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
                         spec_decode_common_attn_metadata = cm
                 else:
@@ -3815,7 +3857,7 @@ class NPUModelRunner(GPUModelRunner):
         ):
             assert isinstance(
                 self.drafter,
-                AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer,
+                AscendEagleProposer | AscendDraftModelProposer,
             )
             block_size = (self.kernel_block_sizes[0] if isinstance(
                 self.kernel_block_sizes, list) else self.kernel_block_sizes)
@@ -5017,11 +5059,12 @@ class NPUModelRunner(GPUModelRunner):
             and (
                 self.speculative_config.use_eagle()
                 or self.speculative_config.uses_extract_hidden_states()
+                or isinstance(self.drafter, AscendDSparkProposer)
             )
         ):
             assert isinstance(
                 self.drafter,
-                AscendEagleProposer | AscendDflashProposer | AscendExtractHiddenStatesProposer,
+                AscendEagleProposer | AscendExtractHiddenStatesProposer | AscendDSparkProposer,
             )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
@@ -5037,7 +5080,10 @@ class NPUModelRunner(GPUModelRunner):
         if self.use_aclgraph:
             set_graph_params(capture_sizes)
             if self.speculative_config:
-                set_draft_graph_params(capture_sizes)
+                draft_capture_sizes = capture_sizes
+                if isinstance(self.drafter, AscendSpecDecodeBaseProposer):
+                    draft_capture_sizes = self.drafter.get_aclgraph_capture_sizes(capture_sizes)
+                set_draft_graph_params(draft_capture_sizes)
 
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""
