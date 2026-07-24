@@ -9,6 +9,25 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 - ❌ = Not supported model/feature
 - 🟡 = Not tested or verified
 
+## Atlas 300I DUO Version Support History
+
+The Atlas inference products tables below are the current model support
+reference for Atlas 300I DUO / Ascend 310P. This history records the
+300I DUO / 310P support milestones explicitly documented in the
+[release notes](../release_notes.md); it is not an exhaustive compatibility
+matrix for every model checkpoint in every release.
+
+| Version | 300I DUO / 310P support notes | Model examples or scope |
+| --------- | ------------------------------- | ------------------------- |
+| v0.9.1rc1 | Added experimental Atlas 300I series support and the Atlas 300I container image. | `Qwen2.5-7b-instruct`, `Qwen2.5-0.5b`, `Qwen3-0.6B`, `Qwen3-4B`, and `Qwen3-8B` functional tests. |
+| v0.9.2rc1 | Improved Atlas 300I performance and enabled W8A8 quantization. | Atlas 300I W8A8 deployment path. |
+| v0.13.0 | Reintroduced 310P support for basic dense and VL models in eager mode. | Basic dense and VL models. |
+| v0.15.0rc1 | Expanded 310P support with MoE, W8A8, weightNZ, attention accuracy fixes, and 300I DUO AddRMSNorm support. | 310P MoE and W8A8 quantized models. |
+| v0.16.0rc1 | Added 310P W8A8SC quantization support, documented the `max-model-len` caveat, and fixed 300I unquantized-model weight ND-to-NZ conversion. | 310P W8A8SC quantized models. |
+| v0.17.0rc1 | Added Qwen3.5 support and fixed 310P ngram graph replay accuracy. | Qwen3.5 series and 310P ngram graph replay. |
+| v0.19.1rc1 | Added 310P improvements for Qwen3.5 adaptation, W8A8 dynamic linear, shared experts, sampling, graph-mode post-sampling, GDN state semantics, and sharded-state loading. | Qwen3.5 dense / MoE paths and 310P quantized loading. |
+| v0.20.2rc1 | Improved 310P Qwen3.5 Dense ACLGraph fused operators and simplified the 310P RMSNormGated path. | Qwen3.5 Dense ACLGraph. |
+
 ## Text-Only Language Models
 
 ### Generative Models
