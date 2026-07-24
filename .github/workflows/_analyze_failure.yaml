@@ -165,7 +165,7 @@ jobs:
           from obs import ObsClient
 
           OBS_BUCKET = "vllm-ascend"
-          OBS_PREFIX = "ci/failure-analysis"
+          OBS_PREFIX = "ci/precision-test"
           OBS_SERVER = "https://obs.cn-north-4.myhuaweicloud.com"
           REPORT_PATH = Path("failure-analysis-report/failure_report.md")
           WORK_DIR = Path("failure-analysis-archive")
