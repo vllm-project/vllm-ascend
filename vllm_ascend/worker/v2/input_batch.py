@@ -100,7 +100,7 @@ class AscendInputBatch(InputBatch):
         # when dummy run for memory profiling,
         # attention metadata isn't needed,
         # we can also set attn_state to AscendAttentionState.DecodeOnly.
-        # For mla/sfa, update cos/sin. Here is for _dummy_run.
+        # For mla, update cos/sin. Here is for _dummy_run.
         update_cos_sin(input_batch.positions)
         return cls(
             **asdict(input_batch),

@@ -82,7 +82,7 @@ class NPUModelRunner(GPUModelRunner):
         del self.speculator
 
         # Reinitialize the speculator via init_speculator (returns the Ascend
-        # speculator matching speculative_config: Eagle / MTP / DSpark / DFlash).
+        # speculator matching speculative_config: Eagle / MTP).
         self.speculator: AscendEagleSpeculator | AscendMTPSpeculator | None = None
         if self.speculative_config is not None:
             self.speculator = init_speculator(self.vllm_config, self.device)

@@ -202,11 +202,7 @@ class DecodeEagleAclGraphManager(DecodeSpeculatorCudaGraphManager):
         else:
             logger.info_once("DecodeEagleAclGraphManager: draft run_fullgraph with num_tokens=%s", num_tokens)
 
-        # ``get_draft_decode_num_reqs_padded`` is MLA-aware on MTP (padded
-        # num_tokens / FIA TND) and returns num_reqs for flat Eagle.
-        draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
-            self.speculator.get_draft_decode_num_reqs_padded(desc), self.is_draft_model_prefill
-        )
+        draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs, self.is_draft_model_prefill)
 
         ret = super().run_fullgraph(desc)
 
