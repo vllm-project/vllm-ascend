@@ -546,13 +546,28 @@ def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None)
     if kv_transfer_config is None:
         return
 
-    visible_devices = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
-    if visible_devices is None:
-        from vllm_ascend.cpu_binding import DeviceInfo
-
-        devices = sorted([int(x) for x in DeviceInfo.get_npu_map_info()])
+    # ASCEND_VISIBLE_DEVICES is set only when using MindIE Motor.
+    visible_devices = os.getenv("ASCEND_VISIBLE_DEVICES")
+    if visible_devices:
+        physical_devices = sorted(
+            int(x) for x in visible_devices.split(",") if x.strip())
+        rt_visible_devices = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
+        if rt_visible_devices:
+            logical_devices = [int(x) for x in rt_visible_devices.split(",") if x.strip()]
+            if logical_devices and all(0 <= x < len(physical_devices) for x in logical_devices):
+                devices = [physical_devices[x] for x in logical_devices]
+            else:
+                devices = logical_devices
+        else:
+            devices = physical_devices
     else:
-        devices = [int(x) for x in visible_devices.split(",") if x.strip()]
+        visible_devices = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
+        if visible_devices is None:
+            from vllm_ascend.cpu_binding import DeviceInfo
+
+            devices = sorted([int(x) for x in DeviceInfo.get_npu_map_info()])
+        else:
+            devices = [int(x) for x in visible_devices.split(",") if x.strip()]
 
     extra_config = kv_transfer_config.kv_connector_extra_config or {}
     local_comm_res_path = extra_config.get("ascend_local_comm_res_path")
