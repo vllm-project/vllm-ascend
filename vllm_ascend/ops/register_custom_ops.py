@@ -105,35 +105,19 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor, is_ep_comm: bool = False) -> tor
 
 
 def _maybe_all_gather_and_maybe_unpad_fake(x: torch.Tensor, label: bool, is_ep_comm: bool = False) -> torch.Tensor:
-    flash_comm_enabled = _EXTRA_CTX.flash_comm_v1_enabled or (
-        enable_sp_by_pass() and is_ep_comm
-    )
+    flash_comm_enabled = _EXTRA_CTX.flash_comm_v1_enabled or (enable_sp_by_pass() and is_ep_comm)
     if flash_comm_enabled and label:
-        world_size = (
-            get_ep_group().world_size
-            if is_ep_comm
-            else get_tensor_model_parallel_world_size()
-        )
-        return torch.empty(
-            (x.shape[0] * world_size, *x.shape[1:]), device=x.device, dtype=x.dtype
-        )
+        world_size = get_ep_group().world_size if is_ep_comm else get_tensor_model_parallel_world_size()
+        return torch.empty((x.shape[0] * world_size, *x.shape[1:]), device=x.device, dtype=x.dtype)
 
     return x
 
 
 def _maybe_pad_and_reduce_fake(x: torch.Tensor, is_ep_comm: bool = False) -> torch.Tensor:
-    flash_comm_enabled = _EXTRA_CTX.flash_comm_v1_enabled or (
-        enable_sp_by_pass() and is_ep_comm
-    )
+    flash_comm_enabled = _EXTRA_CTX.flash_comm_v1_enabled or (enable_sp_by_pass() and is_ep_comm)
     if flash_comm_enabled:
-        world_size = (
-            get_ep_group().world_size
-            if is_ep_comm
-            else get_tensor_model_parallel_world_size()
-        )
-        return torch.empty(
-            (x.shape[0] // world_size, *x.shape[1:]), device=x.device, dtype=x.dtype
-        )
+        world_size = get_ep_group().world_size if is_ep_comm else get_tensor_model_parallel_world_size()
+        return torch.empty((x.shape[0] // world_size, *x.shape[1:]), device=x.device, dtype=x.dtype)
 
     return x
 
