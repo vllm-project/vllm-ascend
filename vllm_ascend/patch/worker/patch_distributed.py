@@ -246,6 +246,26 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self._init_device_communicator()
         return True
 
+    def make_sibling_device_group(self, group_desc: str | None = None):
+        """Create a sibling device process group with upstream-compatible fields.
+
+        vLLM 0.25 uses ``torch_distributed_backend`` in the inherited
+        implementation. Keep a fallback to ``backend`` so objects constructed by
+        older patch code still work when MRV2 PP initializes PPHandler.
+        """
+        sibling = None
+        backend = getattr(self, "torch_distributed_backend", self.backend)
+        for ranks in self.group_ranks:
+            pg = torch.distributed.new_group(
+                ranks,
+                backend=backend,
+                group_desc=group_desc,
+            )
+            if self.rank in ranks:
+                sibling = pg
+        assert sibling is not None
+        return sibling
+
     def all_to_all(
         self,
         input_: torch.Tensor,
