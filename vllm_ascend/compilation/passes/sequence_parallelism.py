@@ -21,6 +21,7 @@ SP_MIN_TOKEN_NUM_DEFAULT = 1000
 
 #     return SP_MIN_TOKEN_NUM_DEFAULT
 
+
 def get_sp_min_token_num(config: VllmConfig) -> int:
     configured = config.compilation_config.pass_config.sp_min_token_num
     if configured is not None:
@@ -30,6 +31,7 @@ def get_sp_min_token_num(config: VllmConfig) -> int:
         return 1
 
     return SP_MIN_TOKEN_NUM_DEFAULT
+
 
 class _SequenceParallelPatternHelper:
     """Helper for sequence parallelism patterns.
@@ -93,9 +95,7 @@ class _SequenceParallelPatternHelper:
         output = pm.CallFunction(operator.getitem, norm, 0)
         if not return_residual:
             return output
-        return pm.MultiOutputPattern(
-            [output, pm.CallFunction(operator.getitem, norm, 2)]
-        )
+        return pm.MultiOutputPattern([output, pm.CallFunction(operator.getitem, norm, 2)])
 
     def _reduce_scatter(self, x: torch.Tensor) -> torch.Tensor:
         return torch.ops.vllm.reduce_scatter(x, dim=0, world_size=self.tp_size, group_name=self.tp_group.unique_name)
