@@ -21,6 +21,8 @@ This module generates the service_profiling_symbols.yaml configuration file
 to ~/.config/vllm_ascend/ directory.
 """
 
+# ruff: noqa: E501
+
 import contextlib
 import tempfile
 from pathlib import Path
@@ -31,10 +33,9 @@ from vllm.logger import logger
 VLLM_VERSION = vllm.__version__
 # Configuration file name
 CONFIG_FILENAME = f"service_profiling_symbols.{VLLM_VERSION}.yaml"
-MOONCAKE_CONNECTOR_MODULE = "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector"
 
 # Hard-coded YAML content, default symbols changed by user can be added here.
-SERVICE_PROFILING_SYMBOLS_YAML = f"""
+SERVICE_PROFILING_SYMBOLS_YAML = """
 # ===== OpenAI API entry =====
 
 - symbol: vllm.entrypoints.openai.chat_completion.serving:OpenAIServingChat.create_chat_completion
@@ -327,7 +328,7 @@ SERVICE_PROFILING_SYMBOLS_YAML = f"""
   min_version: "0.9.1"
   domain: Execute
   name: GPUModelRunner._update_states_after_model_execute
-- symbol: {MOONCAKE_CONNECTOR_MODULE}:MooncakeConnectorScheduler.get_num_new_matched_tokens
+- symbol: vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector:MooncakeConnectorScheduler.get_num_new_matched_tokens
   min_version: "0.9.1"
   domain: KVTransfer
   name: MooncakeScheduler.matchRemoteKV
@@ -338,7 +339,7 @@ SERVICE_PROFILING_SYMBOLS_YAML = f"""
     expr: args[1] | attr kv_transfer_params | str
   - name: matched
     expr: return | str
-- symbol: {MOONCAKE_CONNECTOR_MODULE}:MooncakeConnectorScheduler.update_state_after_alloc
+- symbol: vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector:MooncakeConnectorScheduler.update_state_after_alloc
   min_version: "0.9.1"
   domain: KVTransfer
   name: MooncakeScheduler.updateAfterAlloc
@@ -425,14 +426,14 @@ SERVICE_PROFILING_SYMBOLS_YAML = f"""
     expr: this | attr finished_requests | str
   - name: reqs_to_process
     expr: this | attr reqs_to_process | str
-- symbol: {MOONCAKE_CONNECTOR_MODULE}:KVCacheTaskTracker.get_and_clear_finished_requests
+- symbol: vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector:KVCacheTaskTracker.get_and_clear_finished_requests
   min_version: "0.9.1"
   domain: KVTransfer
   name: MooncakeTaskFinishedPoll
   attributes:
   - name: req_ids
     expr: return | str
-- symbol: {MOONCAKE_CONNECTOR_MODULE}:KVCacheRecvingThread.get_and_clear_finished_requests
+- symbol: vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector:KVCacheRecvingThread.get_and_clear_finished_requests
   min_version: "0.9.1"
   domain: KVTransfer
   name: MooncakeRecvFinishedPoll
