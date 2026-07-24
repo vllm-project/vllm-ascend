@@ -26,12 +26,18 @@ def _maybe_chunk_residual_impl(x: torch.Tensor, residual: torch.Tensor) -> torch
         return residual
 
     if x.size(0) != residual.size(0):
-        pad_size = _EXTRA_CTX.pad_size
-        if pad_size > 0:
-            residual = F.pad(residual, (0, 0, 0, pad_size))
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        residual = torch.chunk(residual, tp_size, dim=0)[tp_rank]
+        if residual.size(0) < x.size(0):
+            # A preceding SP RMSNorm leaves a local residual, while a MoE
+            # communication path can restore the full sequence before the
+            # next residual add.
+            residual = tensor_model_parallel_all_gather(residual, 0)
+        else:
+            pad_size = _EXTRA_CTX.pad_size
+            if pad_size > 0:
+                residual = F.pad(residual, (0, 0, 0, pad_size))
+            tp_size = get_tensor_model_parallel_world_size()
+            tp_rank = get_tensor_model_parallel_rank()
+            residual = torch.chunk(residual, tp_size, dim=0)[tp_rank]
 
     return residual
 
@@ -114,7 +120,10 @@ def _maybe_all_gather_and_maybe_unpad_fake(x: torch.Tensor, label: bool, is_ep_c
 
 
 def _maybe_pad_and_reduce_fake(x: torch.Tensor, is_ep_comm: bool = False) -> torch.Tensor:
-    if _EXTRA_CTX.flash_comm_v1_enabled or enable_sp_by_pass():
+    # Keep fake shape propagation aligned with _maybe_pad_and_reduce_impl.
+    # Sequence parallelism changes the shape only for the EP communication
+    # path; the regular TP path still performs an all-reduce.
+    if _EXTRA_CTX.flash_comm_v1_enabled or (enable_sp_by_pass() and is_ep_comm):
         return torch.empty(
             (x.shape[0] // get_tensor_model_parallel_world_size(), *x.shape[1:]), device=x.device, dtype=x.dtype
         )
