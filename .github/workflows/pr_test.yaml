@@ -159,7 +159,7 @@ jobs:
           pip install uc-manager
           uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
-      - name: Install Gitleaks Secret Scan
+      - name: Install and run Gitleaks Secret Scan
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           chmod +x .github/workflows/scripts/gitleaks.sh
