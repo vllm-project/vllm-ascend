@@ -96,10 +96,6 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     _register_m3_sparse_packed_modules,
     _use_fused_qkv_indexer,
 )
-
-_SPARSE_ATTN_LOGGED = False
-
-
 class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     """Block-sparse attention with lightning indexer on Ascend."""
 
@@ -241,14 +237,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {self.layer_name}")
         compilation_config.static_forward_context[self.layer_name] = self
         self.kv_cache = torch.tensor([])
-        global _SPARSE_ATTN_LOGGED
-        if not _SPARSE_ATTN_LOGGED:
-            logger.warning(
-                "MiniMax M3 sparse attention enabled via npu_sparse_attention_score (topk_blocks=%d, block_size=%d)",
-                sparse_cfg["sparse_topk_blocks"],
-                sparse_cfg["sparse_block_size"],
-            )
-            _SPARSE_ATTN_LOGGED = True
 
     def get_attn_backend(self) -> type[AscendMiniMaxM3SparseBackend]:
         return self.attn_backend
