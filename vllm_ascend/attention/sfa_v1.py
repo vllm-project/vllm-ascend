@@ -511,17 +511,10 @@ class AscendSFAImpl(MLAAttentionImpl):
     q_hadamard: torch.Tensor | None = None
     k_hadamard: torch.Tensor | None = None
 
-    # [预取优化] 组级预取 KV buffer：全模型共享一份（层顺序执行，同一时刻只有一个 4 层组在用）。
-    # 由首个 producer 首次 forward 时懒分配；producer 写入、shared 层按自己的切片下标读。不动 vllm。
-    # 注意：类变量是进程级（每 TP rank 各一份），多模型同进程会冲突——当前单模型 serving 假设下没问题。
     _prefetched_kv: torch.Tensor | None = None     # [3, max_num_seqs, index_topk, kv_lora_rank]
     _prefetched_k_pe: torch.Tensor | None = None   # [3, max_num_seqs, index_topk, qk_rope_head_dim]
-    # 双流：gather 在独立 stream 跑，与 full 层 sparse_attn/MLP 并行；shared 层读 buffer 前 wait_event
     _gather_stream: torch_npu.npu.Stream | None = None
     _gather_done_event: torch_npu.npu.Event | None = None
-    # 第一组的 full 后是短 dense FFN，无法遮住 gather；把 producer 后移到该组第一个
-    # shared 层，使其与该 shared 层的 MoE 重叠。此 producer 仅预取后续两个 shared cache。
-    # 后续组仍由 full 层 producer 预取完整的三个 shared cache。
     DELAY_FIRST_GROUP_PREFETCH_TO_FIRST_SHARED: bool = True
     MAX_PREFETCH_LAYERS: int = 3
 
@@ -671,10 +664,13 @@ class AscendSFAImpl(MLAAttentionImpl):
         When sparse C8 packs the SFA KV cache into a single tensor, the indexer
         key cache moves from slot 2 to slot 1:
 
-        ================  =========  =========  =============  =======        Layout            kv_cache[0]  kv_cache[1]  kv_cache[2]  kv_cache[3]
-        ================  =========  =========  =============  =======        Default           k_nope     k_pe       indexer_k      indexer_scale
+        ================  ===========  ===========  =============  ==============
+        Layout            kv_cache[0]  kv_cache[1]  kv_cache[2]  kv_cache[3]
+        ================  ===========  ===========  =============  ==============
+        Default           k_nope        k_pe         indexer_k      indexer_scale
         Sparse C8         packed_kv  indexer_k  indexer_scale  (unused)
-        ================  =========  =========  =============  =======        """
+        ================  ===========  ===========  =============  ==============
+        """
         return 1 if self.use_sparse_c8_sfa else 2
 
     @property
@@ -1193,12 +1189,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Convert from (N, B, L) to (B, N, L)
         return ql_nope.transpose(0, 1), q_pe
 
-    # ===================== [预取优化] 辅助方法 ==============    # 全部基于本层已有的 self.layer_name / self.skip_topk / self.has_indexer / hf_config，
-    # 不依赖 vllm 透传新 kwargs。buffer 用类级单例（层顺序执行，同时只有一个组在用）。
 
     @staticmethod
     def _extract_layer_id(layer_name: str) -> int:
-        """layer_name 形如 'model.layers.6.self_attn...' → 6；解析失败返回 -1。"""
         parts = layer_name.split(".")
         for i, p in enumerate(parts):
             if p == "layers" and i + 1 < len(parts):
@@ -1209,8 +1202,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         return -1
 
     def _layer_name_with_id(self, target_id: int) -> str:
-        """把 self.layer_name 里的 layer index 替换成 target_id，得到同模型另一层的名字
-        （用于从 static_forward_context 取该层 kv_cache 引用）。"""
         parts = self.layer_name.split(".")
         for i, p in enumerate(parts):
             if p == "layers" and i + 1 < len(parts):
@@ -1220,8 +1211,6 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     @staticmethod
     def _full_layer_group_index(indexer_types, full_layer_id: int) -> int:
-        """该 full 层所在的组号 = 它之前(不含自身)有多少个 'full' 层。
-        [F,S,S,S] 循环下：layer0(首个 full)=组0, layer4=组1, layer8=组2 ..."""
         return sum(1 for t in indexer_types[:full_layer_id] if str(t).lower() == "full")
 
     def _init_prefetch_optimization(self, hf_config, hf_text_config) -> None:
@@ -1234,13 +1223,10 @@ class AscendSFAImpl(MLAAttentionImpl):
         That launch overlaps the first shared layer's MoE instead of the dense
         FFN, while consumers still use the same buffer/FIA path.
         """
-        self.is_full_indexer_layer = False
         self.is_prefetch_producer = False
         self.prefetch_buf_index = -1
         self.shared_layer_ids: list[int] = []
         self.group_shared_kv_caches = None
-        self.prefetched_kv = None
-        self.prefetched_k_pe = None
         self._index_topk = 0
         self.prefetch_enabled = False
         if self.use_sparse_c8_sfa:
@@ -1270,7 +1256,6 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         my_type = str(indexer_types[layer_id]).lower()
         if my_type == "full" and self.has_indexer and not self.skip_topk:
-            self.is_full_indexer_layer = True
             group_idx = self._full_layer_group_index(indexer_types, layer_id)
             if not (group_idx == 0
                     and AscendSFAImpl.DELAY_FIRST_GROUP_PREFETCH_TO_FIRST_SHARED):
@@ -1304,15 +1289,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.prefetch_buf_index = shared_offset
 
     def _ensure_prefetch_buffer(self, kv_cache, num_actual_tokens: int) -> None:
-        """full 层首次 forward 时懒分配【全局唯一】预取 buffer（层顺序执行，同时只有一个组在用）。
-
-        shape: [3, max_num_seqs, index_topk, H]
-          3            = 最多 3 个 shared 层（每层 KV 不同，各占一片）
-          max_num_seqs = decode 批量上限（预取仅 decode 触发，故用 max_num_seqs 而非 max_num_batched_tokens）
-          index_topk   = 2048
-          H            = ctkv(kv_lora_rank) / k_pe(qk_rope_head_dim)，两个 buffer 分开
-        dtype 跟 kv_cache[0] 一致（非 c8 = bfloat16；c8 打包路径需另议，k_pe 并入 kv_cache[0]）。
-        """
+        """Allocate the shared prefetch buffers on the first producer call."""
         if AscendSFAImpl._prefetched_kv is not None:
             return
         max_tokens = self.vllm_config.scheduler_config.max_num_seqs
@@ -1320,38 +1297,40 @@ class AscendSFAImpl(MLAAttentionImpl):
         dtype = kv_cache[0].dtype
         topk = self._index_topk
         AscendSFAImpl._prefetched_kv = torch.empty(
-            AscendSFAImpl.MAX_PREFETCH_LAYERS, max_tokens, topk, self.kv_lora_rank, dtype=dtype, device=device)
+            AscendSFAImpl.MAX_PREFETCH_LAYERS,
+            max_tokens,
+            topk,
+            self.kv_lora_rank,
+            dtype=dtype,
+            device=device,
+        )
         AscendSFAImpl._prefetched_k_pe = torch.empty(
-            AscendSFAImpl.MAX_PREFETCH_LAYERS, max_tokens, topk, self.qk_rope_head_dim, dtype=dtype, device=device)
-        # logger.info(
-        #     "[prefetch] allocated global prefetch buffer: kv=%s k_pe=%s (max_tokens=%d, topk=%d)",
-        #     tuple(AscendSFAImpl._prefetched_kv.shape),
-        #     tuple(AscendSFAImpl._prefetched_k_pe.shape), max_tokens, topk)
+            AscendSFAImpl.MAX_PREFETCH_LAYERS,
+            max_tokens,
+            topk,
+            self.qk_rope_head_dim,
+            dtype=dtype,
+            device=device,
+        )
 
     def _ensure_group_shared_kv_caches(self) -> None:
-        """full 层首次 forward 时按层名从 static_forward_context 取 3 个 shared 层的 kv_cache 引用（零拷贝）。
-
-        kv_cache 由 bind_kv_cache 绑到 static_forward_context[layer_name].kv_cache，bind 发生在 runner init
-        （晚于 impl __init__），故必须懒取。block_table 是 per-request 跨层共用，不在此存。
-        """
+        """Resolve the producer follower caches from the static context."""
         if not self.is_prefetch_producer or self.group_shared_kv_caches is not None:
             return
-        ctx = self.vllm_config.compilation_config.static_forward_context
-        refs = []
-        for sid in self.shared_layer_ids:
-            name = self._layer_name_with_id(sid)
-            entry = ctx.get(name)
-            if entry is None or getattr(entry, "kv_cache", None) is None:
+        context = self.vllm_config.compilation_config.static_forward_context
+        caches = []
+        for layer_id in self.shared_layer_ids:
+            layer_context = context.get(self._layer_name_with_id(layer_id))
+            if layer_context is None or layer_context.kv_cache is None:
                 logger.warning(
-                    "[prefetch] shared layer %s not in static_forward_context or kv_cache unset; "
-                    "disable prefetch for %s", name, self.layer_name)
-                self.group_shared_kv_caches = None
-                self.is_full_indexer_layer = False
+                    "Grouped sparse-KV prefetch is disabled for %s because a "
+                    "shared-layer KV cache is unavailable.",
+                    self.layer_name,
+                )
+                self.is_prefetch_producer = False
                 return
-            refs.append(entry.kv_cache)
-        self.group_shared_kv_caches = refs
-        # logger.info("[prefetch] %s is full layer, shared followers=%s",
-                    # self.layer_name, self.shared_layer_ids)
+            caches.append(layer_context.kv_cache)
+        self.group_shared_kv_caches = caches
 
     _sparse_kv_gather_group_op_available_cache: bool | None = None
 
@@ -1369,8 +1348,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         return cache
 
     def _get_prefetch_slice(self, num_actual_tokens: int):
-        """shared 层取自己在预取 buffer 里的切片（前 num_actual_tokens 行）。
-        返回 (ctkv_slice, k_pe_slice)，未启用预取时返回 (None, None)。"""
         if self.prefetch_buf_index < 0 or AscendSFAImpl._prefetched_kv is None:
             return None, None
         kv = AscendSFAImpl._prefetched_kv[self.prefetch_buf_index][:num_actual_tokens]
@@ -2200,57 +2177,71 @@ class AscendSFAImpl(MLAAttentionImpl):
         )
         if self.skip_topk:
             topk_indices = self._get_indexcache_topk_indices(topk_num_tokens)
-            # ===== [预取优化] shared 层：取自己切片（验证读路径；op#1 就绪前仍走下面的 sparse attn）=====
-            if (prefetch_active and self.prefetch_buf_index >= 0
-                    and AscendSFAImpl._prefetched_kv is not None):
+            if (
+                prefetch_active
+                and self.prefetch_buf_index >= 0
+                and AscendSFAImpl._prefetched_kv is not None
+            ):
                 num_actual = attn_metadata.num_actual_tokens
-                # 双流 sync：等 gather_stream 上的 gather 完成（full 层的 gather 在独立流跑，这里 wait_event）
                 if AscendSFAImpl._gather_done_event is not None:
-                    torch_npu.npu.current_stream().wait_event(AscendSFAImpl._gather_done_event)
-                my_ctkv, my_kpe = self._get_prefetch_slice(num_actual)  # [num_actual,2048,512]/[...,64] buffer 视图
-                # logger.info(
-                #     # ">>>[prefetch] shared %s buf_idx=%d slice=%s",
-                #     self.layer_name, self.prefetch_buf_index,
-                #     None if my_ctkv is None else tuple(my_ctkv.shape),
-                # )
-                # decode-only：按 is_cur_selected 把本层当前 token 的 KV 融合进 buffer
-                # （full 层 gather 时排除了当前 token、留了空槽；这里用本层 prolog 刚写进 kv_cache 的当前 KV 填上）
-                if (my_ctkv is not None
-                        and attn_metadata.attn_state == AscendAttentionState.DecodeOnly):
-                    block_size = 128
-                    bt = attn_metadata.block_table
-                    topk_real = topk_indices[:num_actual].reshape(num_actual, -1)  # [num_actual, 2048]
-                    cur_pos = attn_metadata.seq_lens[:num_actual] - 1              # [num_actual] 当前 token 位置
-                    is_cur_slot = (topk_real == cur_pos.unsqueeze(-1))             # [num_actual, 2048]
-                    is_cur_selected = is_cur_slot.any(dim=-1)                      # [num_actual] bool
-                    # 本层当前 token 的 KV（prolog 已写入 kv_cache 的 cur_pos 位置）
-                    cur_block_id = bt[torch.arange(num_actual, device=topk_real.device),
-                                       cur_pos // block_size]                      # [num_actual] 物理块号
-                    cur_offset = cur_pos % block_size                             # [num_actual]
-                    cur_ctkv = kv_cache[0][cur_block_id, cur_offset, 0]           # [num_actual, 512]
-                    cur_kpe = kv_cache[1][cur_block_id, cur_offset, 0]            # [num_actual, 64]
-                    # 向量化 fuse（图捕获兼容，无 .item()/for 循环）：
-                    # is_cur_slot [N,2048] 标记当前 token 槽位，用 torch.where 把当前 KV 填进去
-                    cur_ctkv_exp = cur_ctkv.unsqueeze(1).expand_as(my_ctkv)       # [N,2048,512]
-                    cur_kpe_exp = cur_kpe.unsqueeze(1).expand_as(my_kpe)          # [N,2048,64]
-                    fuse_mask = is_cur_slot.unsqueeze(-1)                          # [N,2048,1]
-                    my_ctkv.copy_(torch.where(fuse_mask, cur_ctkv_exp, my_ctkv))   # 原地写入 buffer
-                    my_kpe.copy_(torch.where(fuse_mask, cur_kpe_exp, my_kpe))
-                    # ---- FIA dense attn（吸收态连续 KV，block_table=None）替代 sparse attn ----
-                    query = ql_nope[:num_actual]                                      # [num_actual, num_heads, kv_lora_rank]
-                    query_rope = q_pe[:num_actual]                                    # [num_actual, num_heads, qk_rope_head_dim]
-                    kv_len = self._index_topk                                         # 2048
-                    key = value = my_ctkv.reshape(num_actual * kv_len, 1,
-                                                   self.kv_lora_rank).contiguous()    # [num_actual*2048, 1, 512]
-                    key_rope = my_kpe.reshape(num_actual * kv_len, 1,
-                                              self.qk_rope_head_dim).contiguous()     # [num_actual*2048, 1, 64]
+                    torch_npu.npu.current_stream().wait_event(
+                        AscendSFAImpl._gather_done_event
+                    )
+                prefetched_kv, prefetched_k_pe = self._get_prefetch_slice(
+                    num_actual
+                )
+                if (
+                    prefetched_kv is not None
+                    and attn_metadata.attn_state
+                    == AscendAttentionState.DecodeOnly
+                ):
+                    topk_real = topk_indices[:num_actual].reshape(
+                        num_actual, -1
+                    )
+                    current_positions = torch.as_tensor(
+                        attn_metadata.seq_lens[:num_actual],
+                        dtype=torch.int64,
+                        device=topk_real.device,
+                    ) - 1
+                    current_slots = topk_real == current_positions.unsqueeze(-1)
+                    block_ids = attn_metadata.block_table[
+                        torch.arange(num_actual, device=topk_real.device),
+                        current_positions // 128,
+                    ]
+                    offsets = current_positions % 128
+                    current_kv = kv_cache[0][block_ids, offsets, 0]
+                    current_k_pe = kv_cache[1][block_ids, offsets, 0]
+                    current_slots = current_slots.unsqueeze(-1)
+                    prefetched_kv.copy_(
+                        torch.where(
+                            current_slots,
+                            current_kv.unsqueeze(1).expand_as(prefetched_kv),
+                            prefetched_kv,
+                        )
+                    )
+                    prefetched_k_pe.copy_(
+                        torch.where(
+                            current_slots,
+                            current_k_pe.unsqueeze(1).expand_as(prefetched_k_pe),
+                            prefetched_k_pe,
+                        )
+                    )
+
+                    kv_len = self._index_topk
+                    contiguous_kv = prefetched_kv.reshape(
+                        num_actual * kv_len, 1, self.kv_lora_rank
+                    ).contiguous()
                     attn_output, _ = torch_npu.npu_fused_infer_attention_score(
-                        query, key, value,
+                        ql_nope[:num_actual],
+                        contiguous_kv,
+                        contiguous_kv,
                         num_heads=self.num_heads,
                         num_key_value_heads=1,
                         input_layout="TND",
-                        query_rope=query_rope,
-                        key_rope=key_rope,
+                        query_rope=q_pe[:num_actual],
+                        key_rope=prefetched_k_pe.reshape(
+                            num_actual * kv_len, 1, self.qk_rope_head_dim
+                        ).contiguous(),
                         atten_mask=None,
                         sparse_mode=0,
                         scale=self.scale,
@@ -2259,45 +2250,21 @@ class AscendSFAImpl(MLAAttentionImpl):
                         block_table=None,
                         block_size=0,
                         softmax_lse_flag=True,
-                        actual_seq_lengths=attn_metadata.cum_query_lens_list[:num_actual],
-                        actual_seq_lengths_kv=[kv_len * (i + 1) for i in range(num_actual)],
+                        actual_seq_lengths=attn_metadata.cum_query_lens_list[
+                            :num_actual
+                        ],
+                        actual_seq_lengths_kv=[
+                            kv_len * (index + 1)
+                            for index in range(num_actual)
+                        ],
                     )
-                    # SP: o_proj 的 reduce_scatter 要求 token 数 % TP==0；FIA 只算了 num_actual 个真实 query，
-                    # 补齐到 num_input_tokens（SP 已补到 TP 倍数），padding 行输出会被下游丢弃
                     if num_actual < num_input_tokens:
-                        padded = attn_output.new_zeros(num_input_tokens, *attn_output.shape[1:])
+                        padded = attn_output.new_zeros(
+                            num_input_tokens, *attn_output.shape[1:]
+                        )
                         padded[:num_actual] = attn_output
                         attn_output = padded
-                    # logger.info(">>>Used FIA>>>")
-                    pass
                     used_prefetch = True
-                    # logger.info(
-                        # ">>>[prefetch-fia] %s shared buf_idx=%d num_actual=%d attn_out=%s",
-                        # self.layer_name, self.prefetch_buf_index, num_actual,
-                        # tuple(attn_output.shape))
-            # TODO: shared 层非 decode（prefill）或预取未启用时仍走下方 sparse attn
-            #   替代下方 _execute_sparse_flash_attention_process。注意按 num_actual_tokens 截断 SP padding。
-            # 以下旧 dense-attn 伪代码保留作参考（op#1 前不启用）:
-            # 注意 SP padding：topk_num_tokens 是补齐到 TP 倍数的值，真实 query 数是 num_actual_tokens，
-            #   预取 buffer 也只填了前 num_actual_tokens 行——二者都要按 actual 截断，绝不能拿 padding 行的垃圾 index 去 gather。
-            # num_actual = attn_metadata.num_actual_tokens
-            # my_ctkv  = self.prefetched_kv[self.pos_in_group - 1][:num_actual]    # [bs, 2048, 512]
-            # my_kpe   = self.prefetched_k_pe[self.pos_in_group - 1][:num_actual]  # [bs, 2048, 64]
-            # topk_real = topk_indices[:num_actual]
-            # # 1) append 本层当前 token 的 KV（本层 prolog 刚写进 kv_cache 的那 1 个）到第 2048 槽（仅当被选中）
-            # cur_pos = attn_metadata.seq_lens - 1                                   # [bs]
-            # is_cur_sel = (topk_real == cur_pos[:, None]).any(-1)                   # [bs] bool
-            # self._append_current_kv(my_ctkv, my_kpe, kv_cache, is_cur_sel, attn_metadata)
-            # # 2) dense MLA attn：复用 mla_v1 的连续算子（吸收态喂法，block_table=None）+ _v_up_proj
-            # attn_output = torch_npu.npu_fused_infer_attention_score(
-            #     query=ql_nope[:num_actual], key=my_ctkv, value=my_ctcv,           # MLA 吸收态 K=V=ctkv
-            #     query_rope=q_pe[:num_actual], key_rope=my_kpe,
-            #     num_heads=self.num_heads, num_key_value_heads=<ctkv head 数，照搬 sparse attn 设法>,
-            #     input_layout="TND", scale=self.scale, block_table=None, block_size=0,
-            #     actual_seq_lengths=[1]*num_actual, actual_seq_lengths_kv=[2048]*num_actual,
-            #     atten_mask=None, sparse_mode=0)
-            # attn_output = self._v_up_proj(attn_output)   # 吸收态输出在 latent 空间，必须过 W_UV 还原
-            # used_prefetch = True
         else:
             if not self.has_indexer:
                 raise RuntimeError(f"skip_topk is False but indexer is None. layer_name={self.layer_name}.")
@@ -2327,10 +2294,13 @@ class AscendSFAImpl(MLAAttentionImpl):
                     and self.group_shared_kv_caches is not None):
                 prefetch_bt = attn_metadata.block_table
                 prefetch_topk = topk_indices[:num_actual].reshape(num_actual, -1)
-                prefetch_cur_pos = attn_metadata.seq_lens[:num_actual] - 1
+                prefetch_cur_pos = torch.as_tensor(
+                    attn_metadata.seq_lens[:num_actual],
+                    dtype=torch.int64,
+                    device=prefetch_topk.device,
+                ) - 1
                 should_gather = True
 
-        # ===== [预取优化] attn 分流：shared 层 decode 走 FIA(used_prefetch=True)跳过 sparse；其余维持 sparse =====
         if not used_prefetch:
             attn_output = self._execute_sparse_flash_attention_process(
                 ql_nope,
@@ -2364,15 +2334,10 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         output[...] = self.o_proj(attn_output)[0]
 
-        # 双流 gather：o_proj 之后启动，与后续 MoE 的 dispatch/combine 通信并行
-        # 用 wait_stream 确保 gather 等 o_proj 完成（不是只等 topk），避免图编译器把 gather
-        # 和 sparse_attn 并行调度导致 AI cores 竞争。gather 和 MoE 并行：MoE 通信用 HCCL，
-        # AI cores 空闲，gather 用 AI cores，无竞争。gather(3.9ms) < MoE(~6ms) → shared 层 wait_event 是 no-op
         if should_gather:
             if AscendSFAImpl._gather_stream is None:
                 AscendSFAImpl._gather_stream = torch_npu.npu.Stream()
             gather_stream = AscendSFAImpl._gather_stream
-            gather_stream.wait_stream(torch_npu.npu.current_stream())   # 等 o_proj 完成，不等 sparse_attn
             with torch_npu.npu.stream(gather_stream):
                 assert prefetch_bt is not None
                 assert prefetch_topk is not None
