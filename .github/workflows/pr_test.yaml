@@ -232,6 +232,36 @@ jobs:
             echo "matched_modules="
           } >> "$GITHUB_OUTPUT"
 
+  prepare-build:
+    name: Prepare build inputs
+    runs-on: linux-amd64-cpu-8-hk
+    outputs:
+      vllm_main_commit: ${{ steps.vllm.outputs.main_commit }}
+      vllm_release_tag: ${{ steps.vllm.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Read verified vLLM refs
+        id: vllm
+        run: |
+          main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
+          release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
+          {
+            echo "main_commit=${main_commit}"
+            echo "release_tag=${release_tag}"
+          } >> "$GITHUB_OUTPUT"
+
+  build-test-image:
+    needs: prepare-build
+    uses: ./.github/workflows/_build_test_image.yaml
+    with:
+      vllm_main_commit: ${{ needs.prepare-build.outputs.vllm_main_commit }}
+      vllm_release_tag: ${{ needs.prepare-build.outputs.vllm_release_tag }}
+      pr_number: ${{ github.event.pull_request.number }}
+      ascend_ref: ${{ github.event.pull_request.head.sha }}
+
   run-selected-tests:
     needs: [pre-commit, select-tests]
     if: ${{ needs.select-tests.outputs.has_tests == 'true' && contains(github.event.pull_request.labels.*.name, 'ready') }}
