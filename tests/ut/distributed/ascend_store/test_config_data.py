@@ -88,6 +88,15 @@ class TestPoolKey(unittest.TestCase):
         self.assertIn("@pp_rank:0", s)
         self.assertIn("hash1", s)
 
+    def test_pp_ranks_use_distinct_keys(self):
+        other_pp_meta = KeyMetadata("llama", 1, 2, 3, 1)
+        pp0_key = PoolKey(self.meta, "hash1")
+        pp1_key = PoolKey(other_pp_meta, "hash1")
+
+        self.assertNotEqual(pp0_key.to_string(), pp1_key.to_string())
+        self.assertIn("@pp_rank:0", pp0_key.to_string())
+        self.assertIn("@pp_rank:1", pp1_key.to_string())
+
     def test_split_layers(self):
         k = PoolKey(self.meta, "hash1")
         layers = k.split_layers(3)
