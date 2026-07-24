@@ -10,6 +10,7 @@ from dataclasses import replace
 
 import torch
 from vllm.config import get_layers_from_vllm_config
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.spec_decode.gemma4 import (
     Gemma4Proposer as _VllmGemma4Proposer,
@@ -18,6 +19,8 @@ from vllm.v1.spec_decode.gemma4 import (
 from vllm_ascend.spec_decode.llm_base_proposer import (
     AscendSpecDecodeBaseProposer,
 )
+
+logger = init_logger(__name__)
 
 
 class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
@@ -109,8 +112,6 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
 
     def _maybe_share_lm_head(self, target_language_model):
         """Keep draft lm_head; delegate ACL graph setup to Ascend parent."""
-        from vllm.logger import logger
-
         logger.info("Gemma4 MTP: keeping draft model's own lm_head (draft_dim != backbone_dim).")
         # The Ascend parent's _maybe_share_lm_head only shares for
         # eagle/dflash or deepseek_mla — neither applies here.
@@ -123,13 +124,11 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
     # number of KV heads than the target layer it shares with (e.g. draft
     # reports 16 KV heads from HuggingFace config but the target's
     # full_attention uses num_global_kv_heads=4), reading that cache under the
-    # draft's head counts would misinterpret the layout.  Align the draft's
-    # num_kv_heads (and num_heads) to the target layer's values so the shared
-    # KV cache is decoded correctly on both the FIA (A5) and PA (A2/A3) paths.
+    # draft's head counts would misinterpret the layout.  Align only
+    # num_kv_heads; query heads (num_heads) are tied to the draft's Q
+    # projection weight and must not change.
 
-    def _fix_draft_kv_head_counts(self, target_model) -> None:
-        from vllm.logger import logger
-
+    def _fix_draft_kv_head_counts(self) -> None:
         target_attn_layers = get_layers_from_vllm_config(
             self.vllm_config,
             AttentionLayerBase,
@@ -155,46 +154,41 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
             draft_nh = attn.num_heads
             tgt_nh = target_module.num_heads
 
+            # Query heads are tied to the draft's Q projection weight
+            # ([num_heads * head_dim, hidden_size]) and must match the
+            # target's.  If they differ, KV sharing cannot be used safely.
+            assert draft_nh == tgt_nh, (
+                f"Draft layer {draft_idx} has {draft_nh} query heads but "
+                f"target '{tgt_name}' has {tgt_nh}; query-head mismatch "
+                f"is not supported with KV sharing."
+            )
+
             # Sync kv_sharing_target_layer_name to the backend impl.
-            # _setup_gemma4_kv_sharing sets it on the Attention wrapper
-            # but the AscendAttention backend was already initialised with None.
             impl = attn.impl
             if impl is not None:
                 object.__setattr__(impl, "kv_sharing_target_layer_name", tgt_name)
 
-            if draft_nkv != tgt_nkv or draft_nh != tgt_nh:
+            if draft_nkv != tgt_nkv:
                 logger.info(
-                    "MTP KV-sharing head fix: draft layer %d "
-                    "(heads=%d, kv_heads=%d) -> target '%s' "
-                    "(heads=%d, kv_heads=%d)",
+                    "MTP KV-sharing head fix: draft layer %d (kv_heads=%d) -> target '%s' (kv_heads=%d)",
                     draft_idx,
-                    draft_nh,
                     draft_nkv,
                     tgt_name,
-                    tgt_nh,
                     tgt_nkv,
                 )
                 object.__setattr__(attn, "num_kv_heads", tgt_nkv)
-                object.__setattr__(attn, "num_heads", tgt_nh)
                 if impl is not None:
                     object.__setattr__(impl, "num_kv_heads", tgt_nkv)
-                    object.__setattr__(impl, "num_heads", tgt_nh)
-                # CRITICAL: Also fix Gemma4MTPAttention's own attributes.
-                # Gemma4MTPAttention.forward() creates kv_dummy using
-                # self.num_kv_heads. If this doesn't match
-                # Attention.num_kv_heads, the vLLM Attention.forward
-                # reshape (view(-1, num_kv_heads, head_size)) produces
-                # a different batch dimension for key vs query, causing
-                # the KV-sharing prefill condition
+                # Also fix Gemma4MTPAttention's own num_kv_heads, used to
+                # create the dummy KV tensor in forward().  If this doesn't
+                # match Attention.num_kv_heads, the reshape inside
+                # Attention.forward produces a different batch dimension for
+                # key vs query, causing the KV-sharing prefill condition
                 #   query.shape[0] == key.shape[0]
-                # to fail. Layer 59 then falls through to the
-                # LARGE-HEAD FALLBACK PA path, missing the prefill-only
-                # KV gathering from the shared target cache.
+                # to fail.
                 mtp_attn = layer.self_attn
                 if mtp_attn.num_kv_heads != tgt_nkv:
                     object.__setattr__(mtp_attn, "num_kv_heads", tgt_nkv)
-                if mtp_attn.num_heads != tgt_nh:
-                    object.__setattr__(mtp_attn, "num_heads", tgt_nh)
 
     # ---- load_model --------------------------------------------------------
     # We need BOTH:
@@ -232,7 +226,7 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
         # 4 global KV heads).  If they don't match, reading the shared cache
         # under the draft's head counts misinterprets the layout, leading to
         # garbage attention outputs and downstream crashes.
-        self._fix_draft_kv_head_counts(target_model)
+        self._fix_draft_kv_head_counts()
 
         # Centroids CUDA graphs are CUDA-only; skip on Ascend.
         # The upstream check calls _setup_centroids_cuda_graphs()
