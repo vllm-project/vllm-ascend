@@ -1,6 +1,8 @@
 from unittest.mock import MagicMock, patch
 
+import torch
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import RowParallelLinear, UnquantizedLinearMethod
 
 from tests.ut.base import TestBase
@@ -91,6 +93,48 @@ class TestAscendCompressedTensorsConfigGetQuantMethod(TestBase):
         result = self.config.get_quant_method(layer, "lm_head")
         self.assertEqual(layer.ascend_quant_method, COMPRESSED_TENSORS_METHOD)
         self.assertTrue(isinstance(result, UnquantizedLinearMethod))
+
+    def test_adds_routed_experts_target_for_linear_scheme(self):
+        linear_scheme = self.config.target_scheme_map["Linear"]
+
+        self.config._add_fused_moe_to_target_scheme_map()
+
+        self.assertIs(self.config.target_scheme_map["RoutedExperts"], linear_scheme)
+
+    @patch("vllm_ascend.quantization.compressed_tensors_config.find_matched_target", return_value=None)
+    def test_get_scheme_dict_returns_none_for_unmatched_target(self, _mock_find_target):
+        layer = MagicMock(spec=Attention)
+
+        result = self.config.get_scheme_dict(layer, "model.layers.0.self_attn.attn")
+
+        self.assertIsNone(result)
+
+    @patch(
+        "vllm_ascend.quantization.compressed_tensors_config.find_matched_target",
+        return_value="Linear",
+    )
+    def test_get_scheme_dict_returns_none_for_none_scheme(self, _mock_find_target):
+        self.config.target_scheme_map["Linear"] = None
+        layer = MagicMock(spec=Attention)
+
+        result = self.config.get_scheme_dict(layer, "model.layers.0.self_attn.attn")
+
+        self.assertIsNone(result)
+
+    @patch("vllm_ascend.quantization.method_adapters.AscendFusedMoEMethod")
+    def test_get_routed_experts_quant_method(self, mock_method):
+        layer = RoutedExperts.__new__(RoutedExperts)
+        torch.nn.Module.__init__(layer)
+        layer.moe_config = MagicMock()
+        moe_scheme = MagicMock()
+
+        with patch.object(self.config, "_get_moe_scheme", return_value=moe_scheme):
+            result = self.config.get_quant_method(layer, "model.layers.0.mlp.experts")
+
+        self.assertIs(result, mock_method.return_value)
+        self.assertEqual(layer.ascend_quant_method, COMPRESSED_TENSORS_METHOD)
+        self.assertIs(layer.scheme, moe_scheme)
+        mock_method.assert_called_once_with(moe_scheme, layer.moe_config, None)
 
     def test_no_quant_method(self):
         layer = MagicMock(spec=Attention)
