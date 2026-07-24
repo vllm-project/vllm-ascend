@@ -294,6 +294,91 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "disable_padded_drafter_batch in the speculative_config."
             )
 
+    def _maybe_anti_rotate_fc(self) -> None:
+        """ Anti-rotate draft fc weights when the target is a QuaRot model.
+        The target's hidden states (fed to the draft via combine_hidden_states)
+        live in QuaRot's rotated space, while the draft fc projection was trained
+        in the unrotated space. Right-multiply fc.weight by the rotation matrix Q
+        (block-diagonal over the concatenated aux features) so the draft operates
+        in the same rotated space as the target.
+        """
+        if self.method not in ("dflash", "dspark"):
+            return
+        target_model_path = self.vllm_config.model_config.model
+        Q = self._load_quarot_rotation(target_model_path)
+        if Q is None:
+            return
+        draft_model = getattr(self.model, "model", None)
+        fc = getattr(draft_model, "fc", None) if draft_model is not None else None
+        if fc is None:
+            return
+        fc_weight = fc.weight
+        out_features, in_features = fc_weight.shape
+        H = Q.shape[0]
+        if in_features % H != 0:
+            logger.warning(
+                "[spec_decode/quarot] fc in_features=%d not divisible by Q dim=%d; "
+                "skipping fc anti-rotation.",
+                in_features,
+                H,
+            )
+            return
+        num_features = in_features // H
+        Q = Q.to(fc_weight.device).to(torch.float32)
+        # Apply Q to each H-sized block of the in_features axis (block-diagonal
+        # rotation) without materializing the mostly-zero block-diagonal matrix.
+        fc_f32 = fc_weight.data.to(torch.float32).reshape(out_features, num_features, H)
+        fc_rot = torch.matmul(fc_f32, Q)  # [out, num_features, H]
+        fc_weight.data = fc_rot.reshape(out_features, in_features).to(fc_weight.dtype)
+        logger.info(
+            "[spec_decode/quarot] Anti-rotated draft fc.weight with QuaRot Q "
+            "(num_features=%d, fc=%s).",
+            num_features,
+            tuple(fc_weight.shape),
+        )
+
+    @staticmethod
+    def _load_quarot_rotation(target_model_path: str):
+        """ Load QuaRot global_rotation Q from the target model dir.
+        Returns None when target is not a QuaRot model.
+        """
+        import json
+        from pathlib import Path
+        from safetensors.torch import load_file
+        desc_path = Path(target_model_path) / "quant_model_description.json"
+        if not desc_path.exists():
+            logger.info(
+                "[spec_decode/quarot] No QuaRot descriptor found at %s; "
+                "skipping draft fc anti-rotation (target treated as non-QuaRot). "
+                "If the target is a QuaRot model, make sure it is a local path.",
+                desc_path,
+            )
+            return None
+        try:
+            with open(desc_path) as f: desc = json.load(f)
+            if not desc.get("is_rot_used", False):
+                return None
+            rel = desc["optional"]["quarot"]["rotation_map"]["global_rotation"]
+        except (KeyError, ValueError, OSError) as e:
+            logger.warning("[spec_decode/quarot] is_rot_used=True but a key is missing in %s "
+                   "(verify schema: %s); skipping.", desc_path, e)
+            return None
+
+        q_path = Path(target_model_path) / rel
+        if not q_path.exists():
+            logger.warning("[spec_decode/quarot] is_rot_used=True but rotation file %s "
+                           "missing; skipping fc anti-rotation",
+                           q_path,
+            )
+            return None
+        try:
+            return load_file(q_path)["global_rotation"]
+        except Exception as e:
+            logger.warning(
+                "[spec_decode/quarot] Failed to load rotation %s: %s", q_path, e,
+            )
+            return None
+
     def _get_model(self) -> nn.Module:
         """
         Default method to call get_model(). Can be overridden by subclasses which
@@ -324,6 +409,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         with self.maybe_eager_context:
             self.model = self._get_model()
+
+        self._maybe_anti_rotate_fc()
 
         # Find draft layers (attention layers added by draft model)
         all_attn_layers = get_layers_from_vllm_config(
