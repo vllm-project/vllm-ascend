@@ -29,7 +29,6 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
-from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
@@ -406,20 +405,45 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
             initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
             clear_ssm_states(initial_state, prefill_has_initial_state)
-            (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
-                q=query_non_spec,
-                k=key_non_spec,
-                v=value_non_spec,
-                g=g_non_spec,
-                beta=beta_non_spec,
-                initial_state=initial_state,
-                output_final_state=True,
-                cu_seqlens=prefill_query_start_loc,
-                prebuilt_meta=attn_metadata.non_spec_prefill_metadata.chunk,
-                head_first=False,
-                use_qk_l2norm_in_kernel=True,
+
+            # q/k/v/g/beta are [1, T, H, *] (head_first=False, batch is flat B=1
+            # over the concatenated prefill tokens). The aclnn chunk_gated_delta
+            # rule op requires TND layout, so drop the leading batch dim.
+            # Note: this op does NOT l2-normalize q/k internally (the prior
+            # triton entry did via use_qk_l2norm_in_kernel=True), so do it here.
+            q_tnd = l2norm_fwd(query_non_spec.squeeze(0))   # (T, Nk, Dk)
+            k_tnd = l2norm_fwd(key_non_spec.squeeze(0))     # (T, Nk, Dk)
+            v_tnd = value_non_spec.squeeze(0)               # (T, Nv, Dv)
+            beta_tnd = beta_non_spec.squeeze(0)             # (T, Nv)
+            g_tnd = g_non_spec.squeeze(0)                    # (T, Nv), fp32 log-gate
+
+            # cu_seqlens [0, s1, s1+s2, ...] -> per-seq lengths (B,) int32.
+            # initial_state.shape[0] == num prefill sequences == B.
+            actual_seq_lengths = (
+                prefill_query_start_loc[1:] - prefill_query_start_loc[:-1]
+            ).to(torch.int32).contiguous()
+
+            scale = q_tnd.shape[-1] ** -0.5
+            core_attn_out_non_spec, last_recurrent_state = (
+                torch.ops._C_ascend.npu_chunk_gated_delta_rule(
+                    q_tnd,
+                    k_tnd,
+                    v_tnd,
+                    beta_tnd,
+                    initial_state,
+                    actual_seq_lengths,
+                    g_tnd,
+                    scale,
+                )
             )
-            ssm_state[prefill_state_indices] = last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
+
+            # Op returns out=(T, Nv, Dv) bf16; restore the batch dim -> [1, T, Nv, Dv].
+            core_attn_out_non_spec = core_attn_out_non_spec.unsqueeze(0)
+            # final_state=(B, Nv, Dv, Dk); transpose back to ssm_state's
+            # (B, Nv, Dk, Dv) layout, matching the prior triton path.
+            ssm_state[prefill_state_indices] = (
+                last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
+            )
             if split_non_spec:
                 core_attn_out_non_spec = torch.cat(
                     [core_attn_out_decode, core_attn_out_non_spec],
