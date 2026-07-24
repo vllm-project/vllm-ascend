@@ -611,6 +611,18 @@
   tests:
     - tests/ut/
 # Single File
+- name: dependency_documentation
+  optional: true
+  cpu_only: true
+  source_file_dependencies:
+    - docs/source/community/versioning_policy.md
+    - docs/source/installation.md
+    - mkdocs.yml
+    - pyproject.toml
+    - requirements.txt
+  tests:
+    - tests/ut/test_dependency_documentation.py
+
 - name: misc
   optional: false
   source_file_dependencies:
@@ -746,7 +758,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py: 20
   tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py: 150
   tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py: 510
-  tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora_tp.py: 280
+  tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora.py: 500
   tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py: 520
   tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 740
   tests/e2e/pull_request/two_card/test_data_parallel.py: 570

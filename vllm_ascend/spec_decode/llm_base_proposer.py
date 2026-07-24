@@ -2,6 +2,7 @@
 import copy
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
+from dataclasses import replace
 from functools import partial
 from typing import Any, cast
 
@@ -83,12 +84,19 @@ _PREPARE_INPUTS_BLOCK_SIZE = 4
 # patch vllm_config to be in CompilationMode.NONE temporarily
 @contextmanager
 def _maybe_eager_context(vllm_config):
-    raw_compilation_config_mode = vllm_config.compilation_config.mode
-    vllm_config.compilation_config.mode = CompilationMode.NONE
+    target_compilation_config = vllm_config.compilation_config
+    draft_compilation_config = replace(
+        target_compilation_config,
+        mode=CompilationMode.NONE,
+    )
+    # Model layers use these registries even when compilation is disabled.
+    draft_compilation_config.static_forward_context = target_compilation_config.static_forward_context
+    draft_compilation_config.static_all_moe_layers = target_compilation_config.static_all_moe_layers
+    vllm_config.compilation_config = draft_compilation_config
     try:
         yield
     finally:
-        vllm_config.compilation_config.mode = raw_compilation_config_mode
+        vllm_config.compilation_config = target_compilation_config
 
 
 # split hidden states along dimension of sequence
@@ -718,6 +726,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             aclgraph_runtime_mode=aclgraph_runtime_mode,
             is_draft_model=True,
             draft_attn_metadatas=multi_steps_attn_metadata,
+            eplb_heat_collection_status=(
+                self.runner.eplb_heat_collection_status if self.runner.dynamic_eplb else False
+            ),
         ):
             # Reset MOE layer index before first model call
             forward_context = get_forward_context()

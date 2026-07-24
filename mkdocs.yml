@@ -186,9 +186,9 @@ nav:
         - tutorials/models/Qwen3-VL-30B-A3B-Instruct.md
         - tutorials/models/Qwen3-VL-235B-A22B-Instruct.md
         - tutorials/models/Qwen3-Coder-30B-A3B.md
-        - tutorials/models/Qwen3_embedding.md
+        - tutorials/models/Qwen3-Embedding.md
         - tutorials/models/Qwen3-VL-Embedding.md
-        - tutorials/models/Qwen3_reranker.md
+        - tutorials/models/Qwen3-Reranker.md
         - tutorials/models/Qwen3-VL-Reranker.md
         - tutorials/models/Qwen3-Next.md
         - tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md
@@ -257,7 +257,6 @@ nav:
         - user_guide/feature_guide/kv_pool.md
         - user_guide/feature_guide/kv_cache_cpu_offload.md
         - user_guide/feature_guide/recompute_cpu_offload.md
-        - user_guide/feature_guide/external_dp.md
         - user_guide/feature_guide/large_scale_ep.md
         - user_guide/feature_guide/ucm_deployment.md
         - user_guide/feature_guide/Fine_grained_TP.md
@@ -267,7 +266,6 @@ nav:
         - user_guide/feature_guide/batch_invariance.md
         - user_guide/feature_guide/lmcache_ascend_deployment.md
         - user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md
-        - user_guide/feature_guide/short_request_first.md
         - user_guide/feature_guide/flash_attention.md
         - user_guide/feature_guide/batch_job_aware_scheduler.md
     - Deployment Guide:

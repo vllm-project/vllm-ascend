@@ -32,6 +32,11 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
+from vllm_ascend.lora.fused_moe import (
+    all2all_lora_indices,
+    postprocess_lora_indices,
+    preprocess_lora_indices,
+)
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all, gather_from_sequence_parallel_region
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEAllGatherCombineMetadata,
@@ -68,6 +73,10 @@ class MoETokenDispatcher(ABC, Generic[TMoECombineMetadata]):
         """
         self.top_k = kwargs.get("top_k", 0)
         self.num_experts = kwargs.get("num_experts", 0)
+        self.lora_context = None
+
+    def set_lora_context(self, lora_context) -> None:
+        self.lora_context = lora_context
 
     @property
     def ep_group(self):
@@ -511,6 +520,14 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         permute1_ep_all_to_all_handle.wait()
         permutated_local_input_tokens.untyped_storage().resize_(0)
 
+        if self.lora_context is not None:
+            all2all_lora_indices(
+                self.lora_context,
+                output_splits=output_splits,
+                input_splits=input_splits,
+                ep_group=self.ep_group,
+            )
+
         # Postprocess
         global_input_tokens, dynamic_scale_final, reversed_global_input_permutation_mapping = (
             self._dispatch_postprocess(
@@ -577,6 +594,13 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             indices=topk_ids,
             num_out_tokens=num_out_tokens,
         )
+
+        if self.lora_context is not None:
+            preprocess_lora_indices(
+                self.lora_context,
+                topk_ids=topk_ids,
+                reversed_permutation_mapping=reversed_local_input_permutation_mapping,
+            )
 
         return (
             permutated_local_input_tokens,
@@ -651,28 +675,28 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             "global_input_tokens_local_experts_indices must be provided"
         )
 
-        if scale_type == torch.float8_e8m0fnu:
-            experts_indices_2d_copy = global_input_tokens_local_experts_indices.reshape(
-                global_input_tokens_local_experts_indices.shape[0], 1
-            )
-            dynamic_scale_for_routing = dynamic_scale_after_all2all.view(torch.float8_e8m0fnu)
-            global_input_tokens, reversed_global_input_permutation_mapping, _, routed_scale = (
-                torch_npu.npu_moe_init_routing_v2(
-                    global_input_tokens,
-                    experts_indices_2d_copy,
-                    scale=dynamic_scale_for_routing,
-                    active_num=experts_indices_2d_copy.shape[0],
-                    expert_num=self.num_local_experts,
-                    expert_tokens_num_type=1,
-                    expert_tokens_num_flag=True,
-                    active_expert_range=[0, self.num_local_experts],
-                    x_dtype=dst_type,
+        if with_quant:
+            if scale_type == torch.float8_e8m0fnu:
+                experts_indices_2d_copy = global_input_tokens_local_experts_indices.reshape(
+                    global_input_tokens_local_experts_indices.shape[0], 1
                 )
-            )
-            dynamic_scale_after_all2all = routed_scale.view(torch.uint8)
-            experts_indices_2d_copy.untyped_storage().resize_(0)
-            return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
-        elif with_quant:
+                dynamic_scale_for_routing = dynamic_scale_after_all2all.view(torch.float8_e8m0fnu)
+                global_input_tokens, reversed_global_input_permutation_mapping, _, routed_scale = (
+                    torch_npu.npu_moe_init_routing_v2(
+                        global_input_tokens,
+                        experts_indices_2d_copy,
+                        scale=dynamic_scale_for_routing,
+                        active_num=experts_indices_2d_copy.shape[0],
+                        expert_num=self.num_local_experts,
+                        expert_tokens_num_type=1,
+                        expert_tokens_num_flag=True,
+                        active_expert_range=[0, self.num_local_experts],
+                        x_dtype=dst_type,
+                    )
+                )
+                dynamic_scale_after_all2all = routed_scale.view(torch.uint8)
+                experts_indices_2d_copy.untyped_storage().resize_(0)
+                return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
             dynamic_scale_after_all2all, _ = torch_npu.npu_moe_token_permute(
                 dynamic_scale_after_all2all.unsqueeze(-1), global_input_tokens_local_experts_indices
             )
@@ -682,6 +706,11 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         global_input_tokens, reversed_global_input_permutation_mapping = torch_npu.npu_moe_token_permute(
             global_input_tokens, global_input_tokens_local_experts_indices
         )
+        if self.lora_context is not None:
+            postprocess_lora_indices(
+                self.lora_context,
+                reversed_permutation_mapping=reversed_global_input_permutation_mapping,
+            )
         return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
 
     def _combine_preprocess(
