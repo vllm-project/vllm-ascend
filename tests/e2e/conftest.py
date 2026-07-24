@@ -816,6 +816,7 @@ class DisaggEpdProxy(RemoteEPDServer):
 _DP_RUNNER_START_TIMEOUT_SECONDS = 900.0
 _DP_RUNNER_REQUEST_TIMEOUT_SECONDS = 900.0
 _DP_RUNNER_SHUTDOWN_TIMEOUT_SECONDS = 30.0
+_DP_RUNNER_TERMINATE_TIMEOUT_SECONDS = 10.0
 
 
 def _split_data_parallel_indices(num_items: int, dp_size: int) -> list[list[int]]:
@@ -874,6 +875,8 @@ def _normalize_score_inputs(text_1: str | list[str], text_2: str | list[str]) ->
 def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, dp_size: int, master_port: int) -> None:
     llm = None
     try:
+        if os.name == "posix":
+            os.setsid()
         os.environ["VLLM_DP_RANK"] = str(dp_rank)
         os.environ["VLLM_DP_RANK_LOCAL"] = str(dp_rank)
         os.environ["VLLM_DP_SIZE"] = str(dp_size)
@@ -1466,7 +1469,10 @@ class DPVllmRunner(VllmRunner):
         for proc in self._dp_processes:
             proc.join(timeout=_DP_RUNNER_SHUTDOWN_TIMEOUT_SECONDS)
             if proc.is_alive():
-                proc.kill()
+                self._signal_data_parallel_process(proc, signal.SIGTERM)
+                proc.join(timeout=_DP_RUNNER_TERMINATE_TIMEOUT_SECONDS)
+            if proc.is_alive():
+                self._signal_data_parallel_process(proc, signal.SIGKILL)
                 proc.join(timeout=5)
 
         for conn in self._dp_parent_conns:
@@ -1475,6 +1481,20 @@ class DPVllmRunner(VllmRunner):
 
         self._dp_parent_conns.clear()
         self._dp_processes.clear()
+
+    @staticmethod
+    def _signal_data_parallel_process(proc: multiprocessing.Process, sig: signal.Signals) -> None:
+        if os.name == "posix":
+            with contextlib.suppress(ProcessLookupError):
+                process_group = os.getpgid(proc.pid)
+                if process_group == proc.pid:
+                    os.killpg(process_group, sig)
+                    return
+
+        if sig == signal.SIGTERM:
+            proc.terminate()
+        else:
+            proc.kill()
 
     def _dispatch_prompt_command(
         self,

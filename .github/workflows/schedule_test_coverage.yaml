@@ -18,6 +18,16 @@
 name: Schedule Test Coverage
 
 on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - labeled
+    branches:
+      - 'main'
+      - '*-dev'
+      - 'releases/v*'
   schedule:
     - cron: "0 18 * * *"
   workflow_dispatch:
@@ -41,7 +51,7 @@ concurrency:
 
 jobs:
   select-full-tests:
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -87,10 +97,8 @@ jobs:
         run: |
           pip install regex pyyaml
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
-          python3 .github/workflows/scripts/select_tests.py \
-            --changed-files vllm_ascend/dummy.py \
-            --run-all-modules
-
+          python3 .github/workflows/scripts/select_tests.py --explicit-e2e-tests "tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py" "tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py" "tests/e2e/pull_request/four_card/test_pipeline_parallel.py"
+  
   run-full-tests:
     needs: select-full-tests
     if: ${{ needs.select-full-tests.outputs.has_tests == 'true' }}

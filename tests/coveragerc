@@ -3,11 +3,16 @@ branch = True
 # The file path in the specified overwritten data is an absolute path, which facilitates path matching during subsequent analysis.
 relative_files = False
 # Specifies the base name of the generated coverage data file. The absolute path can be used.
+# CI overrides this via COVERAGE_FILE (per pytest target under tests/outputs/*/covdata/).
 data_file = /tests/outputs/covdata/coverage
 # Adding identifiers such as the process ID to the coverage data file.
 parallel = True
 concurrency = thread,multiprocessing
 sigterm = False
+# Per-test contexts are enabled by pytest-cov --cov-context=test (pytest nodeid).
+# After each run, split_coverage_by_context.py expands contexts into
+# tests/outputs/<file>--<test>/covdata/ directories for artifact upload.
+# Keep dynamic_context unset here so plain `coverage run` does not require contexts.
 # Debugging configuration, which helps locate possible exceptions. Enable it as required.
 # debug=pid,dataio,dataop
 # debug_file=/opt/coveragepy_debug.out
@@ -22,3 +27,8 @@ include =
 omit = */.local/*
     /usr/*
     utils/tirefire.py
+
+[report]
+# Contexts are stored in the data file for downstream per-test analysis.
+# Use `coverage report --contexts=...` / HTML with show_contexts when inspecting locally.
+show_contexts = False

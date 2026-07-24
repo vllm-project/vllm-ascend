@@ -36,7 +36,7 @@ on:
         type: string
         required: false
         default: 'main'
-        description: 'The base branch to rebase onto (e.g. main, v0.8.x).'
+        description: 'The base branch to merge before testing (e.g. main, v0.8.x).'
       upload_timing:
         type: boolean
         required: false
@@ -128,12 +128,12 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Rebase on latest ${{ inputs.base_ref }}
+      - name: Merge latest ${{ inputs.base_ref }}
         run: |
           git config user.name "vllm-ascend-ci"
           git config user.email "vllm-ascend-ci@users.noreply.github.com"
           git fetch origin ${{ inputs.base_ref }}
-          git rebase origin/${{ inputs.base_ref }}
+          git merge --no-edit origin/${{ inputs.base_ref }}
 
       - name: Get csrc hash
         id: get_csrc_hash
@@ -260,6 +260,7 @@ jobs:
           . /usr/local/Ascend/ascend-toolkit/set_env.sh
           if [ "${{ inputs.enable-coverage }}" = "true" ]; then
             export ENABLE_COVERAGE=true
+            export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=600
           fi
           TIMING_FLAG=""
           if [ "${{ inputs.upload_timing }}" = "true" ]; then
@@ -411,6 +412,17 @@ jobs:
               echo "TASK_DATE=${TASK_DATE}"
               echo "TASK_NAME=${TASK_NAME}"
             } >> "${GITHUB_ENV}"
+
+        - name: Upload assembled coverage package to artifact
+          uses: actions/upload-artifact@v7
+          with:
+            name: assembled-coverage-${{ env.TASK_NAME }}
+            path: |
+              coverage.tar
+              coverage_version.txt
+            if-no-files-found: error
+            retention-days: 14
+            compression-level: 0
 
         - name: Upload coverage to OBS
           run: |

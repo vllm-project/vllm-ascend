@@ -32,6 +32,7 @@ import torch_npu
 from modelscope import snapshot_download  # type: ignore
 
 from tests.e2e.conftest import wait_until_npu_memory_free
+from tests.e2e.timeout_utils import coverage_scaled_timeout, run_subprocess_with_timeout
 
 MODELS = ["Qwen/Qwen3-0.6B"]
 MOE_MODELS = ["Qwen/Qwen3-30B-A3B"]
@@ -52,18 +53,13 @@ def _decode_output(output):
 def _run_external_launcher(cmd, env):
     env = env.copy()
     env["PYTHONUNBUFFERED"] = "1"
+    timeout = coverage_scaled_timeout(EXTERNAL_LAUNCHER_TIMEOUT_S)
 
     print(f"Running subprocess: {' '.join(cmd)}")
     try:
-        proc = subprocess.run(
-            cmd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=EXTERNAL_LAUNCHER_TIMEOUT_S,
-        )
+        proc = run_subprocess_with_timeout(cmd, env=env, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        print(f"Subprocess timed out after {EXTERNAL_LAUNCHER_TIMEOUT_S} seconds.")
+        print(f"Subprocess timed out after {timeout} seconds.")
         output = _decode_output(exc.output)
         if output:
             print(output)

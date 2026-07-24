@@ -21,7 +21,6 @@ Run `pytest tests/e2e/pull_request/two_card/test_data_parallel.py`.
 """
 
 import os
-import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -29,6 +28,7 @@ from unittest.mock import patch
 import pytest
 
 from tests.e2e.conftest import wait_until_npu_memory_free
+from tests.e2e.timeout_utils import coverage_scaled_timeout, run_subprocess_with_timeout
 
 MODELS = ["Qwen/Qwen3-30B-A3B", "vllm-ascend/Qwen3-30B-A3B-W8A8"]
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -68,7 +68,7 @@ def test_qwen3_inference_dp2(model, max_tokens):
         cmd.append("ascend")
 
     print(f"Running subprocess: {' '.join(cmd)}")
-    proc = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
+    proc = run_subprocess_with_timeout(cmd, env=env, timeout=coverage_scaled_timeout(600))
     output = proc.stdout.decode(errors="ignore")
 
     print(output)

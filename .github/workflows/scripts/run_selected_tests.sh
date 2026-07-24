@@ -51,16 +51,59 @@ project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
 mkdir -p "${pytest_log_dir}"
 
+# Sanitize pytest target/nodeid to tests/outputs/<name>/ (same rules as
+# split_coverage_by_context.py). File targets are staging dirs; after the run
+# they are split into per-test dirs: <file>--<test_name>/covdata/.
+sanitize_coverage_dirname() {
+  local target="$1"
+  local path node
+  if [[ "${target}" == *"::"* ]]; then
+    path="${target%%::*}"
+    node="${target#*::}"
+    path="${path%.py}"
+    target="${path}::${node}"
+  else
+    target="${target%.py}"
+  fi
+  target="${target//\//__}"
+  target="${target//::/--}"
+  printf '%s' "${target}"
+}
+
 setup_coverage() {
   local target="$1"
-  local test_basename="${target%.py}"
-  test_basename="${test_basename//\//__}"
-  test_basename="${test_basename//::/--}"
+  local test_basename
+  test_basename="$(sanitize_coverage_dirname "${target}")"
   local covdata_dir="${project_root}/tests/outputs/${test_basename}/covdata"
   mkdir -p "${covdata_dir}"
+  # pytest-cov / coverage.py honor COVERAGE_FILE over coveragerc data_file.
   export COVERAGE_FILE="${covdata_dir}/coverage"
+  export COVERAGE_RCFILE="${project_root}/tests/coveragerc"
   echo -e "  \033[33mCOVERAGE_FILE:\033[0m ${COVERAGE_FILE}"
 }
+
+# After pytest-cov finishes, expand contexts into per-test output directories.
+split_coverage_by_context() {
+  local covdata_dir="$1"
+  if [ ! -d "${covdata_dir}" ]; then
+    echo -e "  \033[33mWARNING:\033[0m covdata dir missing, skip split: ${covdata_dir}"
+    return 0
+  fi
+  echo -e "  \033[33mSplitting coverage by test case under:\033[0m ${covdata_dir}"
+  python3 "${project_root}/.github/workflows/scripts/split_coverage_by_context.py" \
+    --covdata-dir "${covdata_dir}" \
+    --outputs-root "${project_root}/tests/outputs" \
+    --rcfile "${project_root}/tests/coveragerc"
+}
+
+# Per-test (pytest nodeid) coverage via pytest-cov dynamic contexts.
+# Data is written to COVERAGE_FILE; --cov-report= skips terminal/HTML output.
+PYTEST_COV_ARGS=(
+  --cov=vllm_ascend
+  --cov-config="${project_root}/tests/coveragerc"
+  --cov-context=test
+  --cov-report=
+)
 
 setup_vllm_cache_root() {
   if [ "${CI:-}" != "true" ]; then
@@ -117,16 +160,23 @@ run_pytest_target() {
   if [ "${record_timing}" = true ]; then
     start_time=$(date +%s%N)
   fi
+  local covdata_dir=""
   if [ "${enable_coverage}" = "true" ]; then
     setup_coverage "${target}"
+    covdata_dir="$(dirname "${COVERAGE_FILE}")"
     set +e
-    python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
+    pytest -sv --color=yes "${PYTEST_COV_ARGS[@]}" "${target}" 2>&1 | tee "${log_file}"
   else
     set +e
     pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
   fi
   local status=${PIPESTATUS[0]}
   set -e
+  if [ "${enable_coverage}" = "true" ] && [ -n "${covdata_dir}" ]; then
+    set +e
+    split_coverage_by_context "${covdata_dir}"
+    set -e
+  fi
   if [ "${record_timing}" = true ]; then
     local elapsed_ns=$(( $(date +%s%N) - start_time ))
     local elapsed=$(( elapsed_ns / 1000000000 )).$(( (elapsed_ns % 1000000000) / 100000000 ))
@@ -158,17 +208,23 @@ run_pytest_batch() {
   if [ "${record_timing}" = true ]; then
     start_time=$(date +%s%N)
   fi
+  local covdata_dir=""
   if [ "${enable_coverage}" = "true" ]; then
-    echo "DEBUG: Go to the [Coverage Branch] page."
     setup_coverage "cpu-ut"
+    covdata_dir="$(dirname "${COVERAGE_FILE}")"
     set +e
-    python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${batch_targets[@]}" 2>&1 | tee "${log_file}"
+    pytest -sv --color=yes "${PYTEST_COV_ARGS[@]}" "${batch_targets[@]}" 2>&1 | tee "${log_file}"
   else
     set +e
     pytest -sv --color=yes "${batch_targets[@]}" 2>&1 | tee "${log_file}"
   fi
   local status=${PIPESTATUS[0]}
   set -e
+  if [ "${enable_coverage}" = "true" ] && [ -n "${covdata_dir}" ]; then
+    set +e
+    split_coverage_by_context "${covdata_dir}"
+    set -e
+  fi
   if [ "${record_timing}" = true ]; then
     local elapsed_ns=$(( $(date +%s%N) - start_time ))
     local elapsed=$(( elapsed_ns / 1000000000 )).$(( (elapsed_ns % 1000000000) / 100000000 ))
