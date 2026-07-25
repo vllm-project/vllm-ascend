@@ -46,6 +46,9 @@ def test_sfa_dcp_torch_merge_handles_invalid_lse() -> None:
         ]
     )
 
-    merged = AscendSFADCPImpl._merge_dcp_outputs_with_torch(output, lse)
+    merged = AscendSFADCPImpl._merge_dcp_outputs_with_torch(output, lse, token_dim=2)
 
     torch.testing.assert_close(merged, torch.tensor([[[3.0], [7.0]]]))
+
+    dsa_merged = AscendSFADCPImpl._merge_dcp_outputs_with_torch(output, lse, token_dim=1)
+    torch.testing.assert_close(dsa_merged, torch.tensor([[[3.0]], [[7.0]]]))
