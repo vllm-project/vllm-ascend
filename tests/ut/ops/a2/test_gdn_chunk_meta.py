@@ -171,22 +171,10 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
     beta = _DummyTensor("beta")
     initial_state = _DummyTensor("initial_state")
 
-    non_pcp_calls: list[tuple[str, object]] = []
-    pcp_calls: list[tuple[str, object]] = []
+    calls: list[tuple[str, object]] = []
 
-    def run_case(world_size: int, calls: list[tuple[str, object]]):
-        group = type(
-            "Group",
-            (),
-            {
-                "world_size": world_size,
-                "rank_in_group": 0,
-                "all_gather": lambda self, value, dim: _GatherResult([_DummyTensor("g0"), _DummyTensor("g1")]),
-            },
-        )()
-
+    def run_case():
         monkeypatch.setattr(chunk, "get_forward_context", lambda: type("Ctx", (), {"attn_metadata": None})())
-        monkeypatch.setattr(chunk, "get_pcp_group", lambda: group)
         monkeypatch.setattr(chunk, "chunk_local_cumsum", lambda *args, **kwargs: _DummyTensor("g_cumsum"))
         monkeypatch.setattr(chunk, "chunk_scaled_dot_kkt_fwd", lambda *args, **kwargs: _DummyTensor("A"))
         monkeypatch.setattr(chunk, "solve_tril", lambda *args, **kwargs: _DummyTensor("A_solved"))
@@ -235,9 +223,6 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
             return _DummyTensor("h_updated")
 
         monkeypatch.setattr(chunk, "chunk_fwd_o", fake_chunk_fwd_o)
-        if world_size > 1:
-            monkeypatch.setattr(chunk, "chunk_gated_delta_rule_fwd_hupdate", fake_chunk_fwd_o_update)
-
         chunk.chunk_gated_delta_rule_fwd(
             q=q,
             k=k,
@@ -251,11 +236,8 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
             prebuilt_meta=prebuilt_meta,
         )
 
-    run_case(1, non_pcp_calls)
-    assert non_pcp_calls == []
-
-    run_case(2, pcp_calls)
-    assert pcp_calls == [("o_update", chunk_offsets)]
+    run_case()
+    assert calls == []
 
 
 def test_chunk_gated_delta_rule_fwd_uses_prebuilt_metadata_without_runtime_tolist(
@@ -288,11 +270,6 @@ def test_chunk_gated_delta_rule_fwd_uses_prebuilt_metadata_without_runtime_tolis
     captured: dict[str, tuple[int, ...] | None] = {}
 
     monkeypatch.setattr(chunk, "get_forward_context", lambda: type("Ctx", (), {"attn_metadata": None})())
-    monkeypatch.setattr(
-        chunk,
-        "get_pcp_group",
-        lambda: type("Group", (), {"world_size": 1, "rank_in_group": 0})(),
-    )
     monkeypatch.setattr(chunk, "chunk_local_cumsum", lambda *args, **kwargs: _DummyTensor("g_cumsum"))
     monkeypatch.setattr(chunk, "chunk_scaled_dot_kkt_fwd", lambda *args, **kwargs: _DummyTensor("A"))
     monkeypatch.setattr(chunk, "solve_tril", lambda *args, **kwargs: _DummyTensor("A_solved"))
@@ -338,102 +315,3 @@ def test_chunk_gated_delta_rule_fwd_uses_prebuilt_metadata_without_runtime_tolis
 
     assert captured["cu_seqlens"] == prebuilt_meta.cu_seqlens_host
     assert captured["chunk_indices"] == prebuilt_meta.chunk_indices_chunk64_host
-
-
-def test_chunk_gated_delta_rule_fwd_pcp_chaining_subtracts_initial_state(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """PCP chaining uses (updated_state[i-1] - initial_state), not updated_state[i-1].
-
-    With s0 != 0 (subsequent prefill chunk), the fix subtracts s0 to avoid
-    double-counting Φ_i·s0. Verified by checking the returned final_state
-    matches the sequential result Φ_1·(Φ_0·s0+p_0)+p_1.
-    """
-    torch.manual_seed(42)
-    N, H, K, V = 1, 2, 4, 4
-    s0 = torch.randn(N, H, K, V)
-    phi_0 = torch.randn(N, H, K, K)
-    phi_1 = torch.randn(N, H, K, K)
-    p_0 = torch.randn(N, H, K, V)
-    p_1 = torch.randn(N, H, K, V)
-
-    # Each rank computes final_state = Φ_i · s0 + p_i (from shared s0)
-    rank0_fs = torch.matmul(phi_0, s0) + p_0
-    rank1_fs = torch.matmul(phi_1, s0) + p_1
-    # h_update shape [1, N, H, K, K]; after [:, [0], :, :, :] → [1, N, H, K, K]
-    h_update_tensor = phi_0.unsqueeze(0)
-
-    prebuilt_meta = type(
-        "PrebuiltMeta",
-        (),
-        {
-            "block_indices_cumsum": None,
-            "cu_seqlens_host": (0, N),
-            "chunk_indices_chunk64_host": (0, 0),
-            "chunk_indices_chunk64": None,
-            "chunk_offsets_chunk64": torch.tensor([0, 1], dtype=torch.int32),
-            "update_chunk_offsets_chunk64": torch.tensor([0, 2], dtype=torch.int32),
-            "final_chunk_indices_chunk64": torch.tensor([0], dtype=torch.int32),
-            "chunk_indices_large_block": None,
-            "num_decodes": 0,
-            "keep_meta": None,
-            "cu_seqlens_kern": None,
-        },
-    )()
-
-    all_gather_returns = [
-        torch.stack([rank0_fs, rank1_fs]),  # all_final_state: [2, N, H, K, V]
-        torch.stack([phi_0, phi_1]),  # all_final_h_update: [2, N, H, K, K]
-    ]
-
-    group = type(
-        "Group",
-        (),
-        {
-            "world_size": 2,
-            "rank_in_group": 0,
-            "all_gather": lambda self, value, dim: all_gather_returns.pop(0),
-        },
-    )()
-
-    monkeypatch.setattr(chunk, "get_forward_context", lambda: type("Ctx", (), {"attn_metadata": None})())
-    monkeypatch.setattr(chunk, "get_pcp_group", lambda: group)
-    monkeypatch.setattr(chunk, "chunk_local_cumsum", lambda *a, **kw: _DummyTensor("g_cumsum"))
-    monkeypatch.setattr(chunk, "chunk_scaled_dot_kkt_fwd", lambda *a, **kw: _DummyTensor("A"))
-    monkeypatch.setattr(chunk, "solve_tril", lambda *a, **kw: _DummyTensor("A_solved"))
-    monkeypatch.setattr(chunk, "recompute_w_u_fwd", lambda *a, **kw: (_DummyTensor("w"), _DummyTensor("u")))
-    monkeypatch.setattr(
-        torch.ops._C_ascend,
-        "chunk_gated_delta_rule_fwd_h",
-        lambda *a, **kw: (_DummyTensor("h"), _DummyTensor("v_new"), rank0_fs),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        chunk,
-        "chunk_gated_delta_rule_fwd_hupdate",
-        lambda *a, **kw: h_update_tensor,
-    )
-    monkeypatch.setattr(
-        torch.ops._C_ascend,
-        "chunk_fwd_o",
-        lambda *a, **kw: _DummyTensor("o_ascendc"),
-        raising=False,
-    )
-
-    result = chunk.chunk_gated_delta_rule_fwd(
-        q=_DummyTensor("q"),
-        k=_DummyTensor("k"),
-        v=_DummyTensor("v"),
-        g=_DummyTensor("g"),
-        beta=_DummyTensor("beta"),
-        scale=1.0,
-        initial_state=s0,
-        output_final_state=False,
-        cu_seqlens=torch.tensor([0, N], dtype=torch.int32),
-        prebuilt_meta=prebuilt_meta,
-    )
-
-    final_state = result[3]
-    # Sequential: Φ_1·(Φ_0·s0 + p_0) + p_1
-    expected = torch.matmul(phi_1, torch.matmul(phi_0, s0) + p_0) + p_1
-    torch.testing.assert_close(final_state, expected, rtol=1e-4, atol=1e-4)

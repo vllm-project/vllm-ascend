@@ -910,25 +910,17 @@ class TestNPUPlatform(TestBase):
 
         self.assertEqual(vllm_config.cache_config.block_size, 512)
 
-    def test_validate_parallel_config_rejects_pcp_plus_dp(self):
+    def test_validate_parallel_config_rejects_pcp(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
-        vllm_config.parallel_config.data_parallel_size = 2
         vllm_config.parallel_config.prefill_context_parallel_size = 2
 
-        with pytest.raises(ValueError, match="PCP \(Prefill Context Parallelism\) and DP \(Data Parallelism\)"):
+        with pytest.raises(ValueError, match="Prefill Context Parallel"):
             self.platform._validate_parallel_config(vllm_config)
 
     def test_validate_parallel_config_accepts_dp_only(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.parallel_config.data_parallel_size = 2
         vllm_config.parallel_config.prefill_context_parallel_size = 1
-
-        self.platform._validate_parallel_config(vllm_config)
-
-    def test_validate_parallel_config_accepts_pcp_only(self):
-        vllm_config = TestNPUPlatform.mock_vllm_config()
-        vllm_config.parallel_config.data_parallel_size = 1
-        vllm_config.parallel_config.prefill_context_parallel_size = 2
 
         self.platform._validate_parallel_config(vllm_config)
 

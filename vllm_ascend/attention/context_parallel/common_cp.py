@@ -1,58 +1,153 @@
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.distributed as dist
 import torch_npu
-from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.distributed import get_dcp_group
 
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 
 
+def get_dcp_local_seq_lens(
+    seq_lens: torch.Tensor,
+    dcp_size: int,
+    interleave_size: int,
+) -> torch.Tensor:
+    """Return the interleave-aware KV length of every DCP rank."""
+    tiled = seq_lens.unsqueeze(-1)
+    rank_offsets = torch.arange(
+        dcp_size,
+        dtype=seq_lens.dtype,
+        device=seq_lens.device,
+    )
+    base = tiled // interleave_size // dcp_size * interleave_size
+    remainder = tiled - base * dcp_size
+    return base + torch.clamp(
+        remainder - rank_offsets * interleave_size,
+        0,
+        interleave_size,
+    )
+
+
+class DCPMetadataBuilderMixin:
+    """Shared DCP metadata access for backend-specific metadata builders."""
+
+    dcp_size: int
+    dcp_rank: int
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        dcp_group = get_dcp_group()
+        self.dcp_size = dcp_group.world_size
+        self.dcp_rank = dcp_group.rank_in_group
+
+    @staticmethod
+    def _require_dcp_metadata(
+        common_attn_metadata: Any,
+    ) -> Any:
+        dcp_metadata = common_attn_metadata.context_parallel_metadata
+        if (
+            dcp_metadata is None
+            or dcp_metadata.num_computed_tokens_of_dcp is None
+        ):
+            raise AssertionError("DCP metadata must be populated.")
+        return dcp_metadata
+
+    def _get_dcp_context_lens(
+        self,
+        common_attn_metadata: Any,
+        *,
+        start: int = 0,
+        end: int | None = None,
+        device: torch.device | None = None,
+    ) -> torch.Tensor:
+        dcp_metadata = self._require_dcp_metadata(common_attn_metadata)
+        context_lens = torch.as_tensor(
+            dcp_metadata.num_computed_tokens_of_dcp[start:end],
+            dtype=torch.int32,
+            device=device,
+        )
+        return context_lens.reshape(-1, self.dcp_size)
+
+    def _get_dcp_rank_context_lens(
+        self,
+        common_attn_metadata: Any,
+        *,
+        start: int = 0,
+        end: int | None = None,
+        device: torch.device | None = None,
+    ) -> torch.Tensor:
+        return self._get_dcp_context_lens(
+            common_attn_metadata,
+            start=start,
+            end=end,
+            device=device,
+        )[:, self.dcp_rank]
+
+
+class DCPImplMixin:
+    """Shared DCP group lifecycle and collectives for attention backends."""
+
+    dcp_size: int
+    dcp_rank: int
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.dcp_group = get_dcp_group()
+        self.dcp_size = self.dcp_group.world_size
+        self.dcp_rank = self.dcp_group.rank_in_group
+        self.dcp_device_group = (
+            self.dcp_group.device_group if self.dcp_size > 1 else None
+        )
+
+    def _dcp_all_gather(
+        self,
+        tensor: torch.Tensor,
+        dim: int,
+    ) -> torch.Tensor:
+        if self.dcp_size == 1:
+            return tensor
+        return self.dcp_group.all_gather(tensor.contiguous(), dim)
+
+    def _dcp_all_gather_fragments(
+        self,
+        *tensors: torch.Tensor,
+        dim: int,
+    ) -> tuple[torch.Tensor, ...]:
+        if not tensors:
+            return ()
+        split_sizes = [tensor.shape[-1] for tensor in tensors]
+        gathered = self._dcp_all_gather(
+            torch.cat(tensors, dim=-1),
+            dim,
+        )
+        return torch.split(gathered, split_sizes, dim=-1)
+
+    def _merge_dcp_attention_output(
+        self,
+        attn_output: torch.Tensor,
+        softmax_lse: torch.Tensor,
+        head_size: int,
+    ) -> torch.Tensor:
+        return _npu_attention_update(
+            head_size,
+            _process_attn_out_lse(
+                attn_output,
+                softmax_lse,
+                dcp_size=self.dcp_size,
+                dcp_device_group=self.dcp_device_group,
+            ),
+            dcp_size=self.dcp_size,
+        )
+
+
 @dataclass
-class AscendPCPMetadata:
-    """
-    Metadata for Prefill Context Parallelism (PCP) on Ascend devices.
-
-    Stores index tensors and sequence lengths for routing attention
-    computations across PCP ranks during long sequence processing.
-    """
-
-    q_head_idx: torch.Tensor = None
-    q_tail_idx: torch.Tensor = None
-    kv_with_q_head_nomask_idx: torch.Tensor = None
-    kv_with_q_head_mask_idx: torch.Tensor = None
-    kv_with_q_tail_nomask_idx: torch.Tensor = None
-    kv_with_q_tail_mask_idx: torch.Tensor = None
-    kv_tail_proj_idx: torch.Tensor = None
-    kv_with_q_head_attn_idx_in_tail: torch.Tensor = None
-    kv_with_q_tail_attn_idx_in_tail: torch.Tensor = None
-    attn_mask_seqlens: torch.Tensor = None
-    head_attn_nomask_seqlens: torch.Tensor = None
-    tail_attn_nomask_seqlens: torch.Tensor = None
-    head_actual_seq_lengths_kv: list[int] | None = None
-    tail_actual_seq_lengths_kv: list[int] | None = None
-    q_full_idx: torch.Tensor = None
-    pcp_use_hybrid_attn: bool = False
-    pcp_unpad_mask: torch.Tensor = None
-    pcp_allgather_restore_idx: list[int] | None = None
-    pcp_fa_query_idx: torch.Tensor = None
-    pcp_padded_tokens_fla: int = 0
-    pcp_enter_fa_restore_idx: torch.Tensor = None
-    pcp_fa_padding_restore_idx: torch.Tensor = None
-    block_table_cp: torch.Tensor = None
-    valid_block_ids: torch.Tensor = None
-    prefill_q_cum_seqlens: torch.Tensor = None
-    max_num_tokens_across_pcp: int = 0
-    total_num_scheduled_tokens: int = 0
-    block_arange: torch.Tensor = None
-
-
-@dataclass
-class CPChunkedContextMetadata:
+class DCPChunkedContextMetadata:
     """
     Metadata for chunked context handling in Context Parallelism (CP).
 
-    Extends chunked prefill with per-rank chunk information for PCP/DCP.
+    Extends chunked prefill with per-rank chunk information for DCP.
     """
 
     # For handling chunked prefill
@@ -64,7 +159,7 @@ class CPChunkedContextMetadata:
     chunk_seq_lens: torch.Tensor
     chunk_seq_lens_npu: torch.Tensor
     chunk_actual_seq_lengths_kv_list: list[list[int]]
-    # for mla DCP & PCP
+    # MLA DCP metadata
     padded_chunk_seq_lens_npu: torch.Tensor = None
     padded_local_chunk_seq_lens: list[list[int]] | None = None
     local_context_lens_allranks: list[list[int]] | None = None
@@ -75,7 +170,7 @@ class CPChunkedContextMetadata:
 
 @dataclass
 class AscendMetadataForPrefill:
-    """Prefill-specific metadata for Ascend attention with Context Parallelism."""
+    """Prefill-specific metadata for Ascend attention with DCP."""
 
     @dataclass
     class ChunkedContextMetadata:
@@ -87,13 +182,9 @@ class AscendMetadataForPrefill:
         chunk_seq_mask_filtered_indices: torch.Tensor
         chunked_req_mask: list[bool] | None = None
         local_context_lens_allranks: list[list[int]] | None = None
-        cp_kv_recover_idx_for_chunk: list[int] | None = None
-        kv_inverse_idx_for_chunk: list[int] | None = None
         local_total_toks: int | None = None
 
     """ Prefill Specific Metadata for Ascend"""
-    pcp_metadata: AscendPCPMetadata | None = None
-    pcp_exit_fa_scatter_idx: torch.Tensor | None = None
     chunked_context: ChunkedContextMetadata | None = None
     block_tables: torch.Tensor = None
     actual_seq_lengths_q: torch.Tensor = None
@@ -101,17 +192,24 @@ class AscendMetadataForPrefill:
 
 @dataclass
 class AscendMetadataForDecode:
-    """Decode-specific metadata for Ascend attention with Context Parallelism."""
+    """Decode-specific metadata for Ascend attention with DCP."""
 
-    num_computed_tokens_of_pcp_dcp: list[list[list[int]]] | None = None
+    num_computed_tokens_of_dcp: list[list[int]] | None = None
     block_tables: torch.Tensor = None
     dcp_mtp_attn_mask: torch.Tensor = None
 
 
-def _process_attn_out_lse(attn_output: torch.Tensor, softmax_lse: torch.Tensor) -> torch.Tensor:
-    pcp_size = get_pcp_group().world_size
-    dcp_size = get_decode_context_model_parallel_world_size()
-    dcp_group = get_dcp_group().device_group if dcp_size > 1 else None
+def _process_attn_out_lse(
+    attn_output: torch.Tensor,
+    softmax_lse: torch.Tensor,
+    *,
+    dcp_size: int | None = None,
+    dcp_device_group=None,
+) -> torch.Tensor:
+    if dcp_size is None:
+        dcp_size = get_decode_context_model_parallel_world_size()
+    if dcp_size > 1 and dcp_device_group is None:
+        dcp_device_group = get_dcp_group().device_group
     softmax_lse = softmax_lse.to(torch.float32)
     attn_output = attn_output.to(torch.float32)
     # Concat out&lse: [bs,num_heads,v_head_dim] + [bs,num_heads,1] -> [bs,num_heads,v_head_dim+1]
@@ -120,31 +218,32 @@ def _process_attn_out_lse(attn_output: torch.Tensor, softmax_lse: torch.Tensor) 
         # permute: [bs, num_heads, v_head_dim+1] -> [num_heads, v_head_dim+1, bs]
         attn_out_lse = attn_out_lse.permute([1, 2, 0]).contiguous()
         attn_out_lse_all2all = torch.empty_like(attn_out_lse)
-        dist.all_to_all_single(attn_out_lse_all2all, attn_out_lse, group=dcp_group)
+        dist.all_to_all_single(
+            attn_out_lse_all2all,
+            attn_out_lse,
+            group=dcp_device_group,
+        )
         attn_out_lse = attn_out_lse_all2all.permute([2, 0, 1])
-
-    if pcp_size > 1:
-        # AllGather out&lse within CP group
-        attn_out_lse = get_pcp_group().all_gather(attn_out_lse.contiguous(), dim=0)
 
     return attn_out_lse
 
 
-def _npu_attention_update(head_size, attn_out_lse: torch.Tensor) -> torch.Tensor:
-    pcp_size = get_pcp_group().world_size
-    dcp_size = get_decode_context_model_parallel_world_size()
-    # [PCP * S, DCP * H, D+1]
-    B_total, H_total, D_plus_1 = attn_out_lse.shape
-    S = B_total // pcp_size
+def _npu_attention_update(
+    head_size,
+    attn_out_lse: torch.Tensor,
+    *,
+    dcp_size: int | None = None,
+) -> torch.Tensor:
+    if dcp_size is None:
+        dcp_size = get_decode_context_model_parallel_world_size()
+    # [S, DCP * H, D+1]
+    S, H_total, D_plus_1 = attn_out_lse.shape
     H = H_total // dcp_size
     D = head_size
     assert D_plus_1 == D + 1
-    # [PCP, S, DCP, H, D+1]
-    x = attn_out_lse.view(pcp_size, S, dcp_size, H, D_plus_1)
-    # [PCP, DCP, S, H, D+1]
-    x = x.permute(0, 2, 1, 3, 4).contiguous()
-    # Flatten [N, S, H, D+1], N = pcp_size * dcp_size
-    x = x.view(-1, S, H, D_plus_1)
+    # [S, DCP, H, D+1] -> [DCP, S, H, D+1]
+    x = attn_out_lse.view(S, dcp_size, H, D_plus_1)
+    x = x.permute(1, 0, 2, 3).contiguous()
     # Split out lse
     out_flat, lse_flat = torch.split(x, [D, 1], dim=-1)  # [N, S, H, D], [N, S, H, 1]
     #    out: [N, S, H, D] -> [N, S*H, D]

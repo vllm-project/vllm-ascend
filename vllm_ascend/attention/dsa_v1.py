@@ -678,7 +678,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.seq_lens = self.common_ratio_to_sas_metadata["seq_lens"]
             self.query_lens = self.common_ratio_to_sas_metadata["query_lens"]
 
-        # NOTE: Currently, MTP-fullgraph is incompatibility pcp
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         self.slot_mapping[:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(slot_mapping, self.block_size)
 
@@ -1569,7 +1568,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         num_tokens,
         vllm_config=None,
         speculative_config=None,
-        num_dcp_pcp_tokens=None,
+        num_dcp_tokens=None,
         draft_attn_metadatas=None,
     ):
         # dsa does not need to update graph params

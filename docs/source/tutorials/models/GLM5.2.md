@@ -1132,9 +1132,9 @@ Recommended configurations for serving `GLM-5.2` with a 1M context window on Atl
 
 | Mode | Hardware | Parallelism | Context |
 | ---- | -------- | ----------- | ------- |
-| Single-node co-located | 1 Atlas 800 A3 (64G x 16) | `DP1 PP1 TP16 PCP1 DCP16` | `1024000` |
-| Dual-node co-located | 2 Atlas 800 A3 (64G x 16) | `DP4 PP1 TP8 PCP1 DCP8` | `1024000` |
-| 1P1D PD disaggregation | 1 prefiller with 2 A3 nodes + 1 decoder with 2 A3 nodes | Prefill `DP4 PP1 TP8 PCP1 DCP8`, Decode `DP4 PP1 TP8 PCP1 DCP8` | `1024000` |
+| Single-node co-located | 1 Atlas 800 A3 (64G x 16) | `DP1 PP1 TP16 DCP16` | `1024000` |
+| Dual-node co-located | 2 Atlas 800 A3 (64G x 16) | `DP4 PP1 TP8 DCP8` | `1024000` |
+| 1P1D PD disaggregation | 1 prefiller with 2 A3 nodes + 1 decoder with 2 A3 nodes | Prefill `DP4 PP1 TP8 DCP8`, Decode `DP4 PP1 TP8 DCP8` | `1024000` |
 
 #### Single-Node 1M Deployment
 
@@ -1164,7 +1164,6 @@ vllm serve <MODEL_PATH> \
   --data-parallel-size 1 \
   --pipeline-parallel-size 1 \
   --tensor-parallel-size 16 \
-  --prefill-context-parallel-size 1 \
   --decode-context-parallel-size 16 \
   --cp-kv-cache-interleave-size 128 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 16, 128]}' \
@@ -1219,7 +1218,6 @@ vllm serve <MODEL_PATH> \
   --data-parallel-rpc-port 16591 \
   --pipeline-parallel-size 1 \
   --tensor-parallel-size 8 \
-  --prefill-context-parallel-size 1 \
   --decode-context-parallel-size 8 \
   --cp-kv-cache-interleave-size 128 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -1275,7 +1273,6 @@ vllm serve <MODEL_PATH> \
   --data-parallel-rpc-port 16591 \
   --pipeline-parallel-size 1 \
   --tensor-parallel-size 8 \
-  --prefill-context-parallel-size 1 \
   --decode-context-parallel-size 8 \
   --cp-kv-cache-interleave-size 128 \
   --enforce-eager \
@@ -1346,7 +1343,6 @@ vllm serve <MODEL_PATH> \
   --data-parallel-rpc-port 16600 \
   --pipeline-parallel-size 1 \
   --tensor-parallel-size 8 \
-  --prefill-context-parallel-size 1 \
   --decode-context-parallel-size 8 \
   --cp-kv-cache-interleave-size 128 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \

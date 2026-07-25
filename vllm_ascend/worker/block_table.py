@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.distributed import get_dcp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
@@ -26,8 +26,6 @@ class BlockTable:
         kv_cache_group: KVCacheGroupSpec = None,
     ):
         self.max_num_reqs = max_num_reqs
-        self.pcp_world_size = get_pcp_group().world_size
-        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_world_size > 1 else 0
         self.dcp_world_size = get_dcp_group().world_size
         self.dcp_rank = get_dcp_group().rank_in_group
         compress_ratio = 1
@@ -42,10 +40,10 @@ class BlockTable:
         if (
             kv_cache_group is not None
             and hasattr(kv_cache_group, "kv_cache_spec")
-            and (self.pcp_world_size * self.dcp_world_size > 1)
+            and self.dcp_world_size > 1
             and isinstance(kv_cache_group.kv_cache_spec, MambaSpec)
         ):
-            max_num_blocks_per_req = max_num_blocks_per_req * self.pcp_world_size * self.dcp_world_size
+            max_num_blocks_per_req = max_num_blocks_per_req * self.dcp_world_size
         max_num_blocks_per_req = max(cdiv(max_num_blocks_per_req, compress_ratio), 1)
         self.max_num_blocks_per_req = max_num_blocks_per_req
         self.max_num_batched_tokens = max_num_batched_tokens
@@ -92,12 +90,12 @@ class BlockTable:
             logical_table_size = max_num_blocks_per_req
 
         duplicate_size = 1
-        if self.pcp_world_size * self.dcp_world_size > 1:
+        if self.dcp_world_size > 1:
             duplicate_size += num_speculative_tokens
         self.block_table = self._make_buffer(max_num_reqs * duplicate_size, logical_table_size, dtype=torch.int32)
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
         self.slot_mapping = self._make_buffer(
-            self.max_num_batched_tokens + 2 * self.pcp_world_size * self.max_num_reqs, dtype=torch.int32
+            self.max_num_batched_tokens + 2 * self.max_num_reqs, dtype=torch.int32
         )
 
         self.kernel_sizes = kernel_sizes
@@ -150,15 +148,15 @@ class BlockTable:
         positions: torch.Tensor,
     ) -> None:
         num_tokens = positions.shape[0]
-        total_cp_world_size = self.pcp_world_size * self.dcp_world_size
-        total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
-        if self.dcp_world_size * self.pcp_world_size > 1:
+        total_cp_world_size = self.dcp_world_size
+        total_cp_rank = self.dcp_rank
+        if self.dcp_world_size > 1:
             req_indices = torch.repeat_interleave(
                 torch.arange(num_reqs, dtype=torch.int32, device=query_start_loc.device),
                 query_start_loc[1:] - query_start_loc[:-1],
                 output_size=num_tokens,
             )
-            self._compute_pcp_dcp_slot_mapping(req_indices, positions)
+            self._compute_dcp_slot_mapping(req_indices, positions)
         else:
             kernel_kwargs = {
                 "TOTAL_CP_WORLD_SIZE": total_cp_world_size,
@@ -199,12 +197,12 @@ class BlockTable:
         # here because M (max_model_len) is not necessarily divisible by
         # block_size.
 
-        if self.dcp_world_size * self.pcp_world_size > 1:
+        if self.dcp_world_size > 1:
             if not isinstance(req_indices, torch.Tensor):
                 req_indices = torch.from_numpy(req_indices)
             if not isinstance(positions, torch.Tensor):
                 positions = torch.from_numpy(positions)
-            self._compute_pcp_dcp_slot_mapping(req_indices, positions)
+            self._compute_dcp_slot_mapping(req_indices, positions)
         else:
             if isinstance(req_indices, torch.Tensor):
                 if req_indices.device.type != "cpu":
@@ -237,29 +235,29 @@ class BlockTable:
             )
             self.slot_mapping.copy_to_gpu(req_indices.shape[0])
 
-    def _compute_pcp_dcp_slot_mapping(
+    def _compute_dcp_slot_mapping(
         self,
         req_indices: torch.Tensor,
         positions: torch.Tensor,
     ) -> None:
         # Note(hc): The DCP implement store kvcache with an interleave
         # style, the kvcache for the token whose token_idx is i is
-        # always stored on the GPU whose dcp_rank equals i % pcp_world_size:
+        # always stored on the GPU whose dcp_rank equals the interleaved shard:
 
         # Use a "virtual block" which equals to world_size * block_size
         # for block_table_indices calculation.
-        # virtual_block_size = self.block_size * self.dcp_world_size * self.pcp_world_size
+        # virtual_block_size = self.block_size * self.dcp_world_size
 
         # IMPORTANT: In hybrid mode, positions are in logical block space,
         # but we need to map them to the correct logical block table indices
         # logical_block_idx = positions // virtual_block_size
 
-        total_cp_world_size = self.dcp_world_size * self.pcp_world_size
+        total_cp_world_size = self.dcp_world_size
         virtual_physical_block_size = self.physical_block_size * total_cp_world_size
         physical_block_idx = positions // virtual_physical_block_size
         virtual_block_offsets = positions % virtual_physical_block_size
 
-        self.current_rank = self.dcp_world_size * self.pcp_rank + self.dcp_rank
+        self.current_rank = self.dcp_rank
         mask = virtual_block_offsets // self.cp_kv_cache_interleave_size % total_cp_world_size == self.current_rank
         local_physical_offsets = (
             virtual_block_offsets

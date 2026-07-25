@@ -77,7 +77,6 @@ class TestKVPoolScheduler(unittest.TestCase):
         config.kv_transfer_config.kv_connector_extra_config = extra_config or {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
         config.parallel_config.data_parallel_rank = 0
-        config.parallel_config.prefill_context_parallel_size = 1
         config.parallel_config.decode_context_parallel_size = 1
         config.parallel_config.tensor_parallel_size = 1
         config.parallel_config.pipeline_parallel_size = 1
@@ -279,7 +278,6 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         config.kv_transfer_config.kv_connector_extra_config = {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
         config.parallel_config.data_parallel_rank = 0
-        config.parallel_config.prefill_context_parallel_size = 1
         config.parallel_config.decode_context_parallel_size = 1
         config.parallel_config.tensor_parallel_size = 1
         config.parallel_config.pipeline_parallel_size = 1
@@ -453,7 +451,6 @@ class TestKVPoolSchedulerGenerateKeys(unittest.TestCase):
         config.kv_transfer_config.kv_connector_extra_config = {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
         config.parallel_config.data_parallel_rank = 0
-        config.parallel_config.prefill_context_parallel_size = 1
         config.parallel_config.decode_context_parallel_size = 1
         config.parallel_config.tensor_parallel_size = 1
         config.parallel_config.pipeline_parallel_size = 1
@@ -504,7 +501,6 @@ class TestKVPoolSchedulerStoreQueryKeys(unittest.TestCase):
         config.kv_transfer_config.kv_connector_extra_config = {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
         config.parallel_config.data_parallel_rank = 0
-        config.parallel_config.prefill_context_parallel_size = 1
         config.parallel_config.decode_context_parallel_size = 1
         config.parallel_config.tensor_parallel_size = 1
         config.parallel_config.pipeline_parallel_size = 1
@@ -524,7 +520,7 @@ class TestKVPoolSchedulerStoreQueryKeys(unittest.TestCase):
     def test_generate_store_query_keys_basic(self):
         scheduler = self._make_scheduler()
         result = scheduler._generate_store_query_keys([b"\xaa\xbb"])
-        # 1 block * 1 tp_rank * 1 pp_rank * 1 pcp * 1 dcp = 1 key per block
+        # 1 block * 1 tp_rank * 1 pp_rank * 1 dcp = 1 key per block
         self.assertEqual(len(result), 1)
         self.assertEqual(len(result[0]), 1)
 
@@ -541,7 +537,7 @@ class TestKVPoolSchedulerStoreQueryKeys(unittest.TestCase):
         scheduler.tp_size = 2
         scheduler.put_step = 1
         result = scheduler._generate_store_query_keys([b"\xaa\xbb"])
-        # 1 block * 2 tp_ranks * 1 pp * 1 pcp * 1 dcp = 2 keys
+        # 1 block * 2 tp_ranks * 1 pp * 1 dcp = 2 keys
         self.assertEqual(len(result[0]), 2)
 
 
@@ -555,7 +551,6 @@ class TestKVPoolSchedulerGetStoreLookupHitTokens(unittest.TestCase):
         config.kv_transfer_config.kv_connector_extra_config = {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
         config.parallel_config.data_parallel_rank = 0
-        config.parallel_config.prefill_context_parallel_size = 1
         config.parallel_config.decode_context_parallel_size = 1
         config.parallel_config.tensor_parallel_size = 1
         config.parallel_config.pipeline_parallel_size = 1
@@ -656,7 +651,6 @@ class TestKVPoolSchedulerFloorGranularity(unittest.TestCase):
         config.kv_transfer_config.kv_connector_extra_config = {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
         config.parallel_config.data_parallel_rank = 0
-        config.parallel_config.prefill_context_parallel_size = 1
         config.parallel_config.decode_context_parallel_size = 1
         config.parallel_config.tensor_parallel_size = 1
         config.parallel_config.pipeline_parallel_size = 1
@@ -688,7 +682,6 @@ class TestKVPoolSchedulerGetSwClippedBlocks(unittest.TestCase):
         config.kv_transfer_config.kv_connector_extra_config = {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
         config.parallel_config.data_parallel_rank = 0
-        config.parallel_config.prefill_context_parallel_size = 1
         config.parallel_config.decode_context_parallel_size = 1
         config.parallel_config.tensor_parallel_size = 1
         config.parallel_config.pipeline_parallel_size = 1
@@ -715,7 +708,6 @@ class TestKVPoolSchedulerGetSwClippedBlocks(unittest.TestCase):
         config.kv_transfer_config.kv_connector_extra_config = {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
         config.parallel_config.data_parallel_rank = 0
-        config.parallel_config.prefill_context_parallel_size = 1
         config.parallel_config.decode_context_parallel_size = 1
         config.parallel_config.tensor_parallel_size = 1
         config.parallel_config.pipeline_parallel_size = 1
@@ -744,7 +736,6 @@ class TestKVPoolSchedulerGetSwClippedBlocks(unittest.TestCase):
         config.kv_transfer_config.kv_connector_extra_config = {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
         config.parallel_config.data_parallel_rank = 0
-        config.parallel_config.prefill_context_parallel_size = 1
         config.parallel_config.decode_context_parallel_size = 1
         config.parallel_config.tensor_parallel_size = 1
         config.parallel_config.pipeline_parallel_size = 1
@@ -775,7 +766,6 @@ class TestKVPoolSchedulerGetSendingEventId(unittest.TestCase):
         config.kv_transfer_config.kv_connector_extra_config = {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
         config.parallel_config.data_parallel_rank = 0
-        config.parallel_config.prefill_context_parallel_size = 1
         config.parallel_config.decode_context_parallel_size = 1
         config.parallel_config.tensor_parallel_size = 1
         config.parallel_config.pipeline_parallel_size = 1
@@ -807,7 +797,6 @@ class TestKVPoolSchedulerUpdateFinished(unittest.TestCase):
         config.kv_transfer_config.kv_connector_extra_config = {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
         config.parallel_config.data_parallel_rank = 0
-        config.parallel_config.prefill_context_parallel_size = 1
         config.parallel_config.decode_context_parallel_size = 1
         config.parallel_config.tensor_parallel_size = 1
         config.parallel_config.pipeline_parallel_size = 1
@@ -859,7 +848,6 @@ class TestKVPoolSchedulerBindBlockPool(unittest.TestCase):
         config.kv_transfer_config.kv_connector_extra_config = {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
         config.parallel_config.data_parallel_rank = 0
-        config.parallel_config.prefill_context_parallel_size = 1
         config.parallel_config.decode_context_parallel_size = 1
         config.parallel_config.tensor_parallel_size = 1
         config.parallel_config.pipeline_parallel_size = 1
@@ -891,7 +879,6 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
         config.kv_transfer_config.kv_connector_extra_config = {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
         config.parallel_config.data_parallel_rank = 0
-        config.parallel_config.prefill_context_parallel_size = 1
         config.parallel_config.decode_context_parallel_size = 1
         config.parallel_config.tensor_parallel_size = 1
         config.parallel_config.pipeline_parallel_size = 1
@@ -982,7 +969,6 @@ class TestKVPoolSchedulerRequestFinishedAllGroups(unittest.TestCase):
         config.kv_transfer_config.kv_connector_extra_config = {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
         config.parallel_config.data_parallel_rank = 0
-        config.parallel_config.prefill_context_parallel_size = 1
         config.parallel_config.decode_context_parallel_size = 1
         config.cache_config.block_size = 16
         config.cache_config.hash_block_size = 16
@@ -1055,7 +1041,6 @@ class TestKVPoolSchedulerInferMambaGroups(unittest.TestCase):
         config.kv_transfer_config.kv_connector_extra_config = {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
         config.parallel_config.data_parallel_rank = 0
-        config.parallel_config.prefill_context_parallel_size = 1
         config.parallel_config.decode_context_parallel_size = 1
         config.parallel_config.tensor_parallel_size = 1
         config.parallel_config.pipeline_parallel_size = 1
@@ -1084,7 +1069,6 @@ class TestKVPoolSchedulerGetLayerwiseGvaHitTokens(unittest.TestCase):
         config.kv_transfer_config.kv_connector_extra_config = {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
         config.parallel_config.data_parallel_rank = 0
-        config.parallel_config.prefill_context_parallel_size = 1
         config.parallel_config.decode_context_parallel_size = 1
         config.parallel_config.tensor_parallel_size = 1
         config.parallel_config.pipeline_parallel_size = 1
@@ -1162,7 +1146,6 @@ class TestKVPoolSchedulerUpdateStateAfterAllocBranches(unittest.TestCase):
         config.kv_transfer_config.kv_connector_extra_config = extra_config or {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
         config.parallel_config.data_parallel_rank = 0
-        config.parallel_config.prefill_context_parallel_size = 1
         config.parallel_config.decode_context_parallel_size = 1
         config.cache_config.block_size = 16
         config.cache_config.hash_block_size = 16

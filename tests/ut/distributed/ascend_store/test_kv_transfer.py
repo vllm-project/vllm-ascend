@@ -77,7 +77,7 @@ class FakeTokenDatabase:
         self.group_block_stride = {0: [block_size, block_size]}
 
     def process_tokens(self, token_len, block_hashes, mask_num=0):
-        meta = KeyMetadata("m", 0, 0, 0, 0)
+        meta = KeyMetadata("m", 0, 0, 0)
         for i, h in enumerate(block_hashes):
             start = i * self.block_size
             if start >= token_len:
@@ -453,7 +453,7 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
         return t, store
 
     def _make_layer_req(self, layer_id=0, is_last_chunk=False, num_keys=2):
-        meta = KeyMetadata("m", 0, 0, 0, 0)
+        meta = KeyMetadata("m", 0, 0, 0)
         keys = [LayerPoolKey(meta, f"h{i}", layer_id) for i in range(num_keys)]
         return LayerMultiBlockReqMeta(
             req_id="r1",
@@ -498,7 +498,7 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
 
     def test_handle_request_empty_keys(self):
         t, store = self._make_thread()
-        _meta = KeyMetadata("m", 0, 0, 0, 0)
+        _meta = KeyMetadata("m", 0, 0, 0)
         req = LayerMultiBlockReqMeta(
             req_id="r1",
             keys=[],
@@ -517,7 +517,7 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
     def test_handle_request_with_current_event(self):
         t, store = self._make_thread([0])
         event = MagicMock()
-        meta = KeyMetadata("m", 0, 0, 0, 0)
+        meta = KeyMetadata("m", 0, 0, 0)
         req = LayerMultiBlockReqMeta(
             req_id="r1",
             keys=[LayerPoolKey(meta, "h0", 0)],
@@ -594,7 +594,7 @@ class TestKVCacheStoreLayerRecvingThread(unittest.TestCase):
             invalid_block_ids=set(),
             invalid_block_ids_lock=threading.Lock(),
         )
-        meta = KeyMetadata("m", 0, 0, 0, 0)
+        meta = KeyMetadata("m", 0, 0, 0)
         req = LayerMultiBlockReqMeta(
             req_id="r1",
             keys=[LayerPoolKey(meta, "h0", 0)],

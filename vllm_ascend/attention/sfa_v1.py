@@ -1,4 +1,5 @@
 import enum
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
@@ -24,13 +25,11 @@ from vllm.v1.worker.utils import select_common_block_size
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
 from vllm_ascend.attention.mla_v1 import MLAPO_MAX_SUPPORTED_TOKENS
 from vllm_ascend.attention.utils import (
     SFA_QSFA_TILE_SIZE,
     AscendCommonAttentionMetadata,
     ascend_chunked_prefill_workspace_size,
-    enable_cp,
     get_sfa_qsfa_packed_head_dim,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
@@ -139,10 +138,6 @@ class AscendSFABackend(AttentionBackend):
             from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 
             return AscendSFADCPMetadataBuilder
-        if enable_cp():
-            from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFACPMetadataBuilder
-
-            return AscendSFACPMetadataBuilder
         return AscendSFAMetadataBuilder
 
     @staticmethod
@@ -161,10 +156,6 @@ class AscendSFABackend(AttentionBackend):
             from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
 
             return AscendSFADCPImpl
-        if enable_cp():
-            from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFACPImpl
-
-            return AscendSFACPImpl
         return AscendSFAImpl
 
     @staticmethod
@@ -228,7 +219,6 @@ class AscendSFAMetadata:
     dcp_context: DCPContext | None = None
     dsa_cp_context: DSACPContext | None = None
     reshape_cache_event: torch.npu.Event = None
-    sfa_cp_metadata: AscendPCPMetadata | None = None
     num_decodes: int = 0
     num_decode_tokens: int = 0
     num_prefills: int = 0
@@ -325,7 +315,10 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         **kwargs,
     ) -> AscendSFAMetadata:
         # common_prefix_len / fast_build are unused; kept for API compatibility.
-        return self._build(common_attn_metadata, draft_index=None)
+        return self._build_with_metadata_view(
+            common_attn_metadata,
+            lambda: self._build(common_attn_metadata, draft_index=None),
+        )
 
     def build_for_drafting(
         self,
@@ -333,7 +326,25 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         draft_index: int,
         **kwargs,
     ) -> AscendSFAMetadata:
-        return self._build(common_attn_metadata, draft_index=draft_index)
+        return self._build_with_metadata_view(
+            common_attn_metadata,
+            lambda: self._build(
+                common_attn_metadata,
+                draft_index=draft_index,
+            ),
+        )
+
+    def _build_with_metadata_view(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        build_metadata: Callable[[], AscendSFAMetadata],
+    ) -> AscendSFAMetadata:
+        """Build against the default KV-cache view.
+
+        Distributed layouts can override this hook to expose a temporary view
+        while reusing the complete SFA metadata construction flow.
+        """
+        return build_metadata()
 
     def _build(
         self,
@@ -677,7 +688,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         num_tokens,
         vllm_config=None,
         speculative_config=None,
-        num_dcp_pcp_tokens=None,
+        num_dcp_tokens=None,
         draft_attn_metadatas=None,
     ):
         # sfa does not need to update graph params
