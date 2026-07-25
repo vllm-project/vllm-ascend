@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.dsa_mxfp8_fusion import can_fuse_q_norm_mx_quant as _can_fuse_q_norm_mx_quant
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
@@ -1368,7 +1369,11 @@ class AscendDSACPImpl(DSAAttentionImpl):
         fusion_available = is_rms_norm_dynamic_mx_quant_fusion_available()
         # CP compress_ratio=4 always consumes qr_local for indexer topk.
         qr_consumed_by_topk = self.compress_ratio == 4
-        can_fuse_q_norm_mx_quant = is_mxfp8 and fusion_available and not qr_consumed_by_topk
+        can_fuse_q_norm_mx_quant = _can_fuse_q_norm_mx_quant(
+            is_mxfp8=is_mxfp8,
+            fusion_available=fusion_available,
+            qr_consumed_by_topk=qr_consumed_by_topk,
+        )
         if not _DSA_CP_MX_FUSION_GATE_LOGGED:
             ops_npu = getattr(torch.ops, "npu", None)
             logger.info(
