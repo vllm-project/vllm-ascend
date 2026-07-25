@@ -1237,36 +1237,29 @@ class AscendAttentionBackendImpl(AttentionImpl):
         actual_seq_lengths_kv: list[int] | torch.Tensor,
         scheduler_metadata=None,
     ):
-        """FA3 graph capture — driver-level NPUGraph recording.
+        """FA3 graph capture — NPUGraph driver-level recording.
 
-        FA3 (PyTorch CustomOp) is invisible to the CANN task-group mechanism,
-        so no ``graph_task_group_begin/End`` wrapper is needed.  Instead, FA3
-        is captured at the driver level by ``torch.npu.graph()``.
-
-        Unlike CANN V1/V2 graph ops, FA3 does **not** participate in
-        ``graph_task_update_begin/End``: its inputs are overwritten in-place
-        (``.copy_()``) by the model's normal computation before each replay,
-        and the NPUGraph re-dispatches the captured kernel with the updated
-        data from the same addresses.
-
-        All tensors used here are **existing** ``attn_metadata`` tensors that
-        persist across iterations — no new H2D copies from Python lists that
-        would become stale during replay.
+        FA3 (PyTorch CustomOp) is invisible to the CANN task-group mechanism.
+        However, CANN runtime expects every layer to be framed by
+        ``graph_task_group_begin/End`` during capture; the wrappers are added
+        here to keep the stream state consistent for subsequent CANN layers,
+        even though the returned handle is empty and never used for update.
         """
+        stream = torch_npu.npu.current_stream()
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         is_cache = attn_metadata.attn_state != AscendAttentionState.PrefillNoCache
 
+        # CANN runtime expects task-group framing for every layer — wrap FA3
+        # even though it is invisible to the op-level capture.
+        torch.npu.graph_task_group_begin(stream)
+
         if is_cache:
-            # ---- paged KV cache path ----
             from flash_attn_npu_v3 import flash_attn_with_kvcache as fa3_kvcache
 
             num_blocks, bs = key.shape[0], key.shape[1]
             k_fa = key.view(num_blocks, bs, self.num_kv_heads, self.head_size)
             v_fa = value.view(num_blocks, bs, self.num_kv_heads, self.head_size)
 
-            # Use EXISTING attn_metadata tensors (not newly created from
-            # Python lists) so that in-place .copy_() before replay updates
-            # the data at the captured addresses.
             cache_seqlens = attn_metadata.seq_lens
             if cache_seqlens.device != query.device:
                 cache_seqlens = cache_seqlens.to(device=query.device, non_blocking=True)
@@ -1294,7 +1287,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 scheduler_metadata=scheduler_metadata,
             )
         else:
-            # ---- dense prefill path (no KV cache) ----
             from flash_attn_npu_v3 import flash_attn_varlen_func
 
             cu_seqlens_q = attn_metadata.query_start_loc
@@ -1313,6 +1305,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 softmax_scale=self.scale,
                 causal=attn_metadata.causal,
             )
+
+        # End task group framing. Handle is empty (FA3 not captured by CANN)
+        # and deliberately NOT stored in graph_params — the update phase uses
+        # graph_task_update_begin/End which cannot operate on empty handles.
+        torch.npu.graph_task_group_end(stream)
 
         attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output[:num_tokens]
@@ -1392,9 +1389,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # just use getattr to avoid attribute error.
         if _EXTRA_CTX.capturing:
             if self._fa3_enabled and self.sinks is None:
-                # FA3 graph capture: build scheduler_metadata (cached from
-                # eager warmup, outside graph) then call full_graph_fa3 which
-                # is captured at the NPUGraph driver level.
+                # FA3 graph capture: scheduler_metadata is cached from eager
+                # warmup (outside graph).  full_graph_fa3 wraps FA3 in
+                # graph_task_group_begin/End so CANN runtime sees consistent
+                # task-group framing across all layers.
                 key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
                     key, value, attn_metadata, kv_cache,
                 )
