@@ -213,10 +213,12 @@ jobs:
     - name: Get csrc hash
       id: get_csrc_hash
       run: |
+        # Fail closed so a git error cannot silently produce sha256(empty).
         set -euo pipefail
         git config --global --add safe.directory "$GITHUB_WORKSPACE"
         cd "$GITHUB_WORKSPACE"
 
+        # Match the standalone cache producer's tracked csrc build inputs.
         CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake)
         if [ -z "$CSRC_MANIFEST" ]; then
           echo "::error::No tracked csrc inputs found."
@@ -263,6 +265,8 @@ jobs:
         # only trigger when tag, branch/main push
         push: ${{ inputs.should_push }}
         outputs: type=image,name=${{ env.QUAY_TEMP_REPO }},push-by-digest=true,name-canonical=true,push=${{ inputs.should_push }}
+        # Image builds can compile inside Docker and therefore keep a fallback;
+        # NPU test jobs use fail-on-cache-miss instead.
         build-args: |
           PIP_INDEX_URL=https://pypi.org/simple
           COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}

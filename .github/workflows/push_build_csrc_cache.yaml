@@ -61,10 +61,13 @@ jobs:
       - name: Calculate csrc hash
         id: hash
         run: |
+          # Fail closed: without pipefail, a git failure can be hidden by the
+          # pipeline and produce sha256(empty) as a valid-looking cache key.
           set -euo pipefail
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE"
 
+          # Limit invalidation to tracked inputs that can change csrc artifacts.
           CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake)
           if [ -z "$CSRC_MANIFEST" ]; then
             echo "::error::No tracked csrc inputs found."

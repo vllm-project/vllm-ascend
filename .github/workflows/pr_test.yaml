@@ -195,6 +195,8 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
           EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
+          # Resolve the moving base branch once so test selection, cache
+          # production, and cache consumption all receive one immutable SHA.
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE"
           git config user.name "vllm-ascend-ci"
@@ -202,6 +204,10 @@ jobs:
           git fetch origin "$BASE_REF"
           BASE_SHA=$(git rev-parse FETCH_HEAD)
 
+          # The workflow graph was loaded when the event was created. If its
+          # cache control files changed on the base branch since then, pairing
+          # the old graph with the new helpers could produce incompatible keys.
+          # A rerun reloads the workflow and helpers from a consistent revision.
           if ! git diff --quiet "$EVENT_BASE_SHA" "$BASE_SHA" -- \
             .github/workflows/_ensure_csrc_cache.yaml \
             .github/workflows/_build_csrc_cache.yaml \

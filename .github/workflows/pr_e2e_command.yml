@@ -141,6 +141,8 @@ jobs:
           PR_BASE_SHA: ${{ github.event.client_payload.pull_request.base.sha }}
           ALL_ARGS: ${{ github.event.client_payload.slash_command.args.all }}
         run: |
+          # Carry immutable head/base commits across jobs because branch refs can
+          # move between slash-command dispatch, cache creation, and test startup.
           {
             echo "pr_sha=$PR_SHA"
             echo "pr_base_ref=${PR_BASE_REF:-main}"

@@ -78,6 +78,10 @@ jobs:
           ref: ${{ inputs.source_ref }}
           fetch-depth: 0
 
+      # Treat target metadata and its resolver as workflow code rather than
+      # source inputs. source_ref may point to a fork or an older commit, so a
+      # separate sparse checkout keeps the helpers compatible with this workflow
+      # without modifying the source snapshot that will be hashed.
       - name: Checkout cache workflow helpers
         uses: actions/checkout@v7
         with:
@@ -95,16 +99,22 @@ jobs:
           BASE_REF: ${{ inputs.base_ref }}
           BASE_SHA: ${{ inputs.base_sha }}
         run: |
+          # Include base-branch csrc changes before hashing. Pinning the SHA in
+          # the caller keeps lookup, cache build, and tests on the same snapshot
+          # even if the base branch advances while this run is in progress.
           if [ -z "$BASE_REF" ]; then
             echo "::error::base_ref is required when base_sha is set."
             exit 1
           fi
 
+          # Container users may not own the checkout. Trust the runtime workspace
+          # instead of a repository-specific path so forks and renames still work.
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE"
           git config user.name "vllm-ascend-ci"
           git config user.email "vllm-ascend-ci@users.noreply.github.com"
 
+          # A fork checkout does not necessarily contain the upstream base commit.
           BASE_REMOTE=origin
           if [ "$BASE_REPOSITORY" != "$SOURCE_REPOSITORY" ]; then
             BASE_REMOTE=csrc-base
@@ -117,10 +127,13 @@ jobs:
       - name: Calculate csrc hash
         id: hash
         run: |
+          # Fail closed: without pipefail, a git failure can be hidden by the
+          # pipeline and produce sha256(empty) as a valid-looking cache key.
           set -euo pipefail
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE"
 
+          # Limit invalidation to tracked inputs that can change csrc artifacts.
           CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake)
           if [ -z "$CSRC_MANIFEST" ]; then
             echo "::error::No tracked csrc inputs found."
@@ -138,6 +151,8 @@ jobs:
           python3 .csrc-cache-workflow/.github/workflows/scripts/resolve_csrc_cache_targets.py \
             --target-ids "$TARGET_IDS"
 
+      # This coordinator only needs to know whether a cache exists; downloading
+      # large artifacts here would add latency before the actual consumer jobs.
       - name: Look up csrc cache (a2-arm64-ubuntu)
         id: lookup-a2
         if: contains(fromJSON(inputs.target_ids), 'a2-arm64-ubuntu')
@@ -195,6 +210,8 @@ jobs:
               "310p-arm64-ubuntu": os.environ["P310_CACHE_HIT"] == "true",
           }
           targets = json.loads(os.environ["TARGETS"])
+          # Lookup steps are intentionally explicit. Fail when configuration
+          # expands before this workflow is taught how to check the new target.
           unsupported = sorted(
               target["id"]
               for target in targets

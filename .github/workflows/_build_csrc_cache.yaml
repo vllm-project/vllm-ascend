@@ -108,6 +108,9 @@ jobs:
           BASE_REF: ${{ inputs.base_ref }}
           BASE_SHA: ${{ inputs.base_sha }}
         run: |
+          # Build from the same rebased snapshot used to calculate the cache key
+          # and later consumed by tests. This also includes csrc updates that
+          # landed on the base branch after the source branch was created.
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE"
 
@@ -118,6 +121,8 @@ jobs:
 
           git config user.name "vllm-ascend-ci"
           git config user.email "vllm-ascend-ci@users.noreply.github.com"
+          # Fork builds need the fixed base commit from upstream rather than
+          # assuming it exists in the source repository's origin.
           BASE_REMOTE=origin
           if [ "$BASE_REPOSITORY" != "$SOURCE_REPOSITORY" ]; then
             BASE_REMOTE=csrc-base
@@ -131,6 +136,8 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE"
+          # A rebase can change submodule pointers; refresh them so cached
+          # artifacts are built from the complete rebased source snapshot.
           git submodule sync --recursive
           git submodule update --init --recursive
 

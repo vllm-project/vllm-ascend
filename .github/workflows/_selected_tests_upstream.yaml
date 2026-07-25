@@ -134,6 +134,8 @@ jobs:
               BASE_REF: ${{ inputs.base_ref }}
               FIXED_BASE_SHA: ${{ inputs.base_sha }}
             run: |
+              # Reproduce the snapshot used by the cache coordinator. Falling
+              # back to FETCH_HEAD supports callers without a fixed base SHA.
               git config user.name "vllm-ascend-ci"
               git config user.email "vllm-ascend-ci@users.noreply.github.com"
               git fetch origin "$BASE_REF"
@@ -166,10 +168,13 @@ jobs:
           - name: Get csrc hash
             id: get_csrc_hash
             run: |
+              # Fail closed so a git error cannot become sha256(empty) and then
+              # appear to be an ordinary cache miss.
               set -euo pipefail
               git config --global --add safe.directory "$GITHUB_WORKSPACE"
               cd "$GITHUB_WORKSPACE"
 
+              # Match the cache producer's tracked csrc build inputs exactly.
               CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake)
               if [ -z "$CSRC_MANIFEST" ]; then
                 echo "::error::No tracked csrc inputs found."
@@ -199,6 +204,8 @@ jobs:
                 vllm_ascend/lib
                 vllm_ascend/include
               key: vllm-ascend-build-v2-${{ steps.get_arch.outputs.arch }}-${{ matrix.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+              # Normal CI fails on a miss. Setting this to false explicitly
+              # activates the NPU build fallback below for cache emergencies.
               fail-on-cache-miss: true
 
           - name: Install vllm-project/vllm-ascend with device
@@ -209,6 +216,8 @@ jobs:
               pip install uc-manager
               uv pip install -r requirements-dev.txt
               uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
+              # Intentionally dormant in normal mode; retain the miss branch as
+              # an explicit emergency fallback when cache failures are tolerated.
               if [ "$CSRC_CACHE_HIT" = "true" ]; then
                 echo "csrc cache hit: skip kernel compilation"
                 COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
