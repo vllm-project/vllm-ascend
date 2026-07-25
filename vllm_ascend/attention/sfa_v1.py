@@ -79,6 +79,13 @@ class PreprocessType(enum.Enum):
     MLAPO = "mlapo"
 
 
+class _ByteGatherPart(NamedTuple):
+    name: str
+    shape: tuple[int, ...]
+    dtype: torch.dtype
+    num_bytes_per_row: int
+
+
 O_PROJ_ACLNN_INPUT_PARAMS = (
     "aclnn_input_scale",
     "aclnn_input_scale_reciprocal",
@@ -1568,6 +1575,70 @@ class AscendSFAImpl(MLAAttentionImpl):
         # DCP replicated indexer needs to gather the query after it has been projected and roped.
         return ql_nope, q_pe
 
+    @staticmethod
+    def _flatten_for_byte_gather(tensor: torch.Tensor) -> tuple[torch.Tensor, int]:
+        if tensor.dim() == 0:
+            raise RuntimeError("Byte-packed all-gather requires tensors with a token dimension.")
+        tensor = tensor.contiguous()
+        num_rows = tensor.shape[0]
+        num_bytes_per_row = tensor.element_size()
+        for dim in tensor.shape[1:]:
+            num_bytes_per_row *= dim
+        return tensor.view(torch.int8).view(num_rows, num_bytes_per_row), num_bytes_per_row
+
+    @classmethod
+    def _all_gather_byte_packed_async(
+        cls,
+        parts: list[tuple[str, torch.Tensor]],
+        async_op: bool,
+    ) -> tuple[torch.Tensor, torch.distributed.Work | None, tuple[_ByteGatherPart, ...]]:
+        if not parts:
+            raise RuntimeError("Byte-packed all-gather requires at least one tensor.")
+
+        packed_parts = []
+        metadata = []
+        expected_num_rows: int | None = None
+        for name, tensor in parts:
+            num_rows = tensor.shape[0]
+            if expected_num_rows is None:
+                expected_num_rows = num_rows
+            elif num_rows != expected_num_rows:
+                raise RuntimeError(
+                    "Cannot byte-pack KV tensors with different token counts: "
+                    f"expected {expected_num_rows}, got {num_rows} for {name}."
+                )
+
+            packed_tensor, num_bytes_per_row = cls._flatten_for_byte_gather(tensor)
+            packed_parts.append(packed_tensor)
+            metadata.append(
+                _ByteGatherPart(
+                    name=name,
+                    shape=tuple(tensor.shape),
+                    dtype=tensor.dtype,
+                    num_bytes_per_row=num_bytes_per_row,
+                )
+            )
+
+        packed_input = torch.cat(packed_parts, dim=1) if len(packed_parts) > 1 else packed_parts[0]
+        gathered, handle = all_gather_async(
+            packed_input,
+            get_tp_group(),
+            async_op=async_op,
+        )
+        return gathered, handle, tuple(metadata)
+
+    @staticmethod
+    def _restore_byte_gathered_tensors(
+        gathered: torch.Tensor,
+        metadata: tuple[_ByteGatherPart, ...],
+    ) -> dict[str, torch.Tensor]:
+        chunks = torch.split(gathered, [part.num_bytes_per_row for part in metadata], dim=1)
+        num_rows = gathered.shape[0]
+        restored = {}
+        for part, chunk in zip(metadata, chunks):
+            restored[part.name] = chunk.contiguous().view(part.dtype).view(num_rows, *part.shape[1:])
+        return restored
+
     def _maybe_gather_kv_for_dsacp(
         self,
         k_pe: torch.Tensor | None,
@@ -1581,15 +1652,17 @@ class AscendSFAImpl(MLAAttentionImpl):
         torch.Tensor | None,
         torch.Tensor | None,
         torch.distributed.Work | None,
+        tuple[_ByteGatherPart, ...] | None,
     ]:
         """Gather native-preprocess KV tensors when DSA context parallel is enabled."""
         if not self.enable_dsa_cp:
-            return k_li, k_li_scale, None, None
+            return k_li, k_li_scale, None, None, None
 
         assert k_pe is not None
         assert k_nope is not None
         async_op = full_gather_o_proj_enabled
-        # Support all-gather KV async for communication/calculation overlap.
+        # Pack all KV-related tensors into one byte stream so DSA-CP only
+        # submits one KV all-gather while still preserving original dtypes.
         if self.use_sparse_c8_sfa:
             assert knope_scale is not None
             fused_kv_parts = [
@@ -1602,32 +1675,24 @@ class AscendSFAImpl(MLAAttentionImpl):
                 k_pe.view(-1, k_pe.shape[-1]),
                 k_nope.view(-1, k_nope.shape[-1]),
             ]
-            if self.has_indexer and not self.use_sparse_c8_indexer:
-                assert k_li is not None
-                fused_kv_parts.append(k_li.view(-1, k_li.shape[-1]))
 
         fused_kv_input = torch.cat(fused_kv_parts, dim=1)
-        fused_kv_no_split, kv_ag_handle = all_gather_async(
-            fused_kv_input,
-            get_tp_group(),
+        kv_gather_parts = [("sfa_kv", fused_kv_input)]
+        if self.has_indexer:
+            assert k_li is not None
+            k_li_gather_input = k_li
+            if not self.use_sparse_c8_indexer:
+                k_li_gather_input = k_li.view(-1, k_li.shape[-1])
+            kv_gather_parts.append(("k_li", k_li_gather_input))
+        if self.has_indexer and self.use_sparse_c8_indexer:
+            assert k_li_scale is not None
+            kv_gather_parts.append(("k_li_scale", k_li_scale))
+
+        kv_gathered_bytes, kv_ag_handle, kv_gather_metadata = self._all_gather_byte_packed_async(
+            kv_gather_parts,
             async_op=async_op,
         )
-
-        if self.has_indexer and self.use_sparse_c8_indexer:
-            assert k_li is not None
-            k_li, kv_ag_handle = all_gather_async(
-                k_li,
-                get_tp_group(),
-                async_op=async_op,
-            )
-            assert k_li_scale is not None
-            k_li_scale, kv_ag_handle = all_gather_async(
-                k_li_scale,
-                get_tp_group(),
-                async_op=async_op,
-            )
-
-        return k_li, k_li_scale, fused_kv_no_split, kv_ag_handle
+        return k_li, k_li_scale, kv_gathered_bytes, kv_ag_handle, kv_gather_metadata
 
     def _maybe_store_kvcache_for_c8_n_dsacp(
         self,
@@ -1635,13 +1700,16 @@ class AscendSFAImpl(MLAAttentionImpl):
         k_nope: torch.Tensor | None,
         knope_scale: torch.Tensor | None,
         k_li: torch.Tensor | None,
-        fused_kv_no_split: torch.Tensor | None,
+        k_li_scale: torch.Tensor | None,
+        kv_gathered_bytes: torch.Tensor | None,
         kv_ag_handle: torch.distributed.Work | None,
+        kv_gather_metadata: tuple[_ByteGatherPart, ...] | None,
         kv_cache: tuple[torch.Tensor, ...] | None,
         slot_mapping_sfa: torch.Tensor,
         attn_metadata: M,
         full_gather_o_proj_enabled: bool,
     ) -> tuple[
+        torch.Tensor | None,
         torch.Tensor | None,
         torch.Tensor | None,
         torch.Tensor | None,
@@ -1676,6 +1744,16 @@ class AscendSFAImpl(MLAAttentionImpl):
         if self.enable_dsa_cp:
             if kv_ag_handle is not None:
                 kv_ag_handle.wait()
+            if kv_gather_metadata is not None:
+                assert kv_gathered_bytes is not None
+                kv_gather_outputs = self._restore_byte_gathered_tensors(kv_gathered_bytes, kv_gather_metadata)
+                fused_kv_no_split = kv_gather_outputs["sfa_kv"]
+                if self.has_indexer:
+                    k_li = kv_gather_outputs["k_li"]
+                    if self.use_sparse_c8_indexer:
+                        k_li_scale = kv_gather_outputs["k_li_scale"]
+            else:
+                fused_kv_no_split = kv_gathered_bytes
 
             if full_gather_o_proj_enabled:
                 _, o_proj_full_handle = all_gather_async(
@@ -1702,16 +1780,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                     )
                     k_pe = None
                     k_nope = None
-                elif not self.has_indexer:
-                    k_pe, k_nope = fused_kv_no_split.split(
-                        [self.qk_rope_head_dim, self.kv_lora_rank],
-                        dim=-1,
-                    )
-                elif not self.use_sparse_c8_indexer:
-                    k_pe, k_nope, k_li = fused_kv_no_split.split(
-                        [self.qk_rope_head_dim, self.kv_lora_rank, self.head_dim],
-                        dim=-1,
-                    )
                 else:
                     k_pe, k_nope = fused_kv_no_split.split(
                         [self.qk_rope_head_dim, self.kv_lora_rank],
@@ -1730,7 +1798,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                         slot_mapping=slot_mapping_sfa[: attn_metadata.num_actual_tokens],
                     )
 
-        return k_pe, k_nope, k_li, o_proj_full_handle, o_proj_full_param_handles
+        return k_pe, k_nope, k_li, k_li_scale, o_proj_full_handle, o_proj_full_param_handles
 
     def _compose_sfa_kv_cache(self, kv_cache) -> tuple[torch.Tensor, ...] | None:
         """Compose split cache handles into the tuple expected by SFA kernels.
@@ -1915,7 +1983,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             kv_outputs = self.exec_kv(kv_no_split, cos, sin, kv_cache, kv_slots, attn_metadata)
             k_pe, k_nope = kv_outputs[:2]
             knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
-            k_li, k_li_scale, fused_kv_no_split, kv_ag_handle = self._maybe_gather_kv_for_dsacp(
+            k_li, k_li_scale, kv_gathered_bytes, kv_ag_handle, kv_gather_metadata = self._maybe_gather_kv_for_dsacp(
                 k_pe,
                 k_nope,
                 knope_scale,
@@ -1930,6 +1998,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 k_pe,
                 k_nope,
                 k_li,
+                k_li_scale,
                 o_proj_full_handle,
                 o_proj_full_param_handles,
             ) = self._maybe_store_kvcache_for_c8_n_dsacp(
@@ -1937,8 +2006,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                 k_nope,
                 knope_scale,
                 k_li,
-                fused_kv_no_split,
+                k_li_scale,
+                kv_gathered_bytes,
                 kv_ag_handle,
+                kv_gather_metadata,
                 kv_cache,
                 slot_mapping_sfa,
                 attn_metadata,
