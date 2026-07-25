@@ -18,7 +18,7 @@ Documentation: https://docs.vllm.ai/projects/ascend/en/latest/index.html
 - Hardware: Atlas 800I A2 Inference, Atlas A2 Training, Atlas 800I A3 Inference, Atlas A3 Training, Atlas 300I Duo (Experimental).
 - For software and version requirements, follow the official Installation and Release Notes pages.
 
-## support_matrix
+## Features and Models
 - [Supported Models Matrix](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_models.html): source of truth for support status (`✅`/`🔵`/`❌`), hardware scope, and feature coverage.
 - [Supported Features Matrix](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_features.html): feature availability per hardware and model type.
 

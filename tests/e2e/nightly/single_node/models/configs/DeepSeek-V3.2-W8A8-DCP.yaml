@@ -47,8 +47,6 @@ test_cases:
       - "1"
       - "--tensor-parallel-size"
       - "16"
-      - "--prefill-context-parallel-size"
-      - "1"
       - "--decode-context-parallel-size"
       - "16"
       - "--cp-kv-cache-interleave-size"

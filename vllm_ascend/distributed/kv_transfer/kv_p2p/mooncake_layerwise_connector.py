@@ -1336,7 +1336,8 @@ class MooncakeLayerwiseConnectorWorker:
         if use_kv_buffer:
             self.create_kv_buffer(kv_buffer)
 
-        num_attn_module = 2 if self.vllm_config.model_config.hf_text_config.model_type == "longcat_flash" else 1
+        model_type = self.vllm_config.model_config.hf_text_config.model_type
+        num_attn_module = 2 if model_type in ("longcat_flash", "longcat_flash_ngram") else 1
         mtp_layer_name = ""
         for layer_name in kv_caches:
             if "mtp" in layer_name:
