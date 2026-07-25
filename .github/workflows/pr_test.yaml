@@ -160,37 +160,27 @@ jobs:
           pip install uc-manager
           uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
-      - name: Restore pre-commit cache
+      - name: Get pre-commit config hash
+        id: get_hash
         run: |
-          # Install obsutil if not present
-          if ! command -v obsutil &>/dev/null; then
-            ARCH=$(uname -m)
-            case "$ARCH" in
-              x86_64) OBSUTIL_ARCH="amd64" ;;
-              aarch64|arm64) OBSUTIL_ARCH="arm64" ;;
-            esac
-            curl -sSL "https://obs-community.obs.cn-north-1.myhuaweicloud.com/obsutil/current/obsutil_linux_${OBSUTIL_ARCH}.tar.gz" -o /tmp/obsutil.tar.gz
-            tar -xzf /tmp/obsutil.tar.gz -C /tmp
-            OBSUTIL_DIR=$(find /tmp -maxdepth 1 -name "obsutil_linux_${OBSUTIL_ARCH}_*" -type d | head -1)
-            chmod +x "${OBSUTIL_DIR}/obsutil"
-            export PATH="${OBSUTIL_DIR}:${PATH}"
-            echo "${OBSUTIL_DIR}" >> $GITHUB_PATH
-          fi
-          # Use read-only AK/SK from pod env (injected via envFrom from Vault)
-          obsutil config -i="${AWS_ACCESS_KEY_ID}" -k="${AWS_SECRET_ACCESS_KEY}" -e=obs.ap-southeast-1.myhuaweicloud.com
-          CACHE_KEY="pre-commit-$(sha256sum .pre-commit-config.yaml | awk '{print $1}')"
-          if obsutil stat "obs://ascend-ci-cache-hk/precommit-cache/${CACHE_KEY}" &>/dev/null; then
-            ARCHIVE_DIR=$(mktemp -d)
-            obsutil cp "obs://ascend-ci-cache-hk/precommit-cache/${CACHE_KEY}" "${ARCHIVE_DIR}/cache.tgz" -f
-            mkdir -p ~/.cache/pre-commit
-            tar -xzf "${ARCHIVE_DIR}/cache.tgz" -C ~
-            echo "Cache restored successfully"
-          else
-            echo "Cache not found, pre-commit will build from scratch"
-          fi
+          HASH=$(sha256sum .pre-commit-config.yaml | awk '{print $1}')
+          echo "HASH=$HASH" >> $GITHUB_OUTPUT
+
+      - name: Restore pre-commit cache
+        uses: runs-on/cache/restore@v5
+        env:
+          RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+          RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
+          RUNS_ON_S3_FORCE_PATH_STYLE: "false"
+          AWS_S3_FORCE_PATH_STYLE: "false"
+          AWS_REGION: ap-southeast-1
+        with:
+          path: /tmp/pre-commit-cache
+          key: pre-commit-${{ steps.get_hash.outputs.HASH }}
 
       - name: Run pre-commit
         env:
+          PRE_COMMIT_HOME: /tmp/pre-commit-cache
           PRE_COMMIT_COLOR: always
           FORCE_COLOR: "1"
           TERM: xterm-256color
