@@ -6,6 +6,10 @@ This is an optimization based on FX graphs, which can be considered an accelerat
 
 You can get its code [code](https://gitcode.com/Ascend/torchair)
 
+```{note}
+Atlas inference products and Atlas 200I Pro do not support `enable_npugraph_ex`. Set --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}'.
+```
+
 ## Default FX Graph Optimization
 
 ### FX Graph pass

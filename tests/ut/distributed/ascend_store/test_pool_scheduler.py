@@ -128,6 +128,12 @@ class TestKVPoolScheduler(unittest.TestCase):
         self.assertEqual(need, 32)  # 48 - 16
         self.assertFalse(is_async)
         self.assertIn("r1", scheduler.load_specs)
+        mock_client_cls.return_value.lookup.assert_called_once_with(
+            64,
+            request.block_hashes,
+            [0],
+            hbm_hit_tokens=16,
+        )
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_get_num_new_matched_tokens_all_hit(self, mock_client_cls):
@@ -144,6 +150,20 @@ class TestKVPoolScheduler(unittest.TestCase):
 
         need, _ = scheduler.get_num_new_matched_tokens(request, 0)
         self.assertEqual(need, 63)
+        self.assertEqual(scheduler.load_specs["r1"].kvpool_cached_tokens, 63)
+        self.assertEqual(scheduler.load_specs["r1"].kvpool_store_skip_tokens, 64)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_get_num_new_matched_tokens_full_hbm_hit_skips_external_lookup(self, mock_client_cls):
+        scheduler = KVPoolScheduler(self._make_config(block_size=16), use_layerwise=False)
+        request = MagicMock()
+        request.prompt_token_ids = list(range(64))
+        request.num_tokens = 64
+        request.request_id = "r1"
+        request.block_hashes = [b"h"] * 4
+
+        self.assertEqual(scheduler.get_num_new_matched_tokens(request, 64), (0, False))
+        mock_client_cls.return_value.lookup.assert_not_called()
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_get_num_new_matched_tokens_less_than_computed(self, mock_client_cls):
@@ -424,9 +444,15 @@ class TestLookupKeyClient(unittest.TestCase):
         mock_socket.recv.return_value = (32).to_bytes(4, "big")
 
         client = LookupKeyClient(config)
-        result = client.lookup(64, [b"\xaa\xbb"])
+        # Replace the concrete encoder so multipart framing can be asserted deterministically.
+        mock_encoder = MagicMock()
+        mock_encoder.encode.side_effect = [[b"hashes"], [b"groups"]]
+        client.encoder = mock_encoder
+        result = client.lookup(64, [b"\xaa\xbb"], hbm_hit_tokens=16)
         self.assertEqual(result, 32)
         mock_socket.send_multipart.assert_called_once()
+        frames = mock_socket.send_multipart.call_args.args[0]
+        self.assertEqual(int.from_bytes(frames[2], "big"), 16)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")
