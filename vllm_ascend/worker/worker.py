@@ -308,8 +308,7 @@ class NPUWorker(WorkerBase):
         self._check_nz_disabled()
 
         assert self.weight_transfer_engine is not None
-        with torch.device(self.device):
-            self.weight_transfer_engine.start_weight_update()
+        self.weight_transfer_engine.start_weight_update()
         self._weight_update_active = True
 
     def update_weights(self, update_info: dict) -> None:
@@ -321,8 +320,11 @@ class NPUWorker(WorkerBase):
         if not self._weight_update_active:
             raise RuntimeError("start_weight_update must be called before update_weights.")
 
-        with torch.device(self.device):
+        try:
             self.weight_transfer_engine.update_weights(update_info)
+        except BaseException:
+            self._weight_update_active = False
+            raise
 
     def finish_weight_update(self) -> None:
         """Finish the current weight update; runs layerwise postprocessing."""
@@ -332,8 +334,7 @@ class NPUWorker(WorkerBase):
             raise RuntimeError("start_weight_update must be called before finish_weight_update.")
 
         assert self.weight_transfer_engine is not None
-        with torch.device(self.device):
-            self.weight_transfer_engine.finish_weight_update()
+        self.weight_transfer_engine.finish_weight_update()
         self._weight_update_active = False
 
     def shutdown(self) -> None:

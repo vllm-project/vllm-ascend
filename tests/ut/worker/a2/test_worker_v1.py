@@ -1431,6 +1431,17 @@ class TestNPUWorkerWeightUpdate(TestBase):
 
         engine.update_weights.assert_called_once_with({"foo": "bar"})
 
+    def test_update_weights_resets_active_on_error(self):
+        engine = MagicMock()
+        engine.update_weights.side_effect = ValueError("boom")
+        worker = self._make_worker(engine=engine)
+        worker._weight_update_active = True
+
+        with self.assertRaisesRegex(ValueError, "boom"):
+            worker.update_weights({"foo": "bar"})
+
+        self.assertFalse(worker._weight_update_active)
+
     def test_finish_weight_update_resets_state(self):
         engine = MagicMock()
         worker = self._make_worker(engine=engine)

@@ -71,12 +71,13 @@ def get_ip() -> str:
 
 
 @lru_cache(maxsize=1)
-def npu_generate_uuid() -> str:
+def npu_generate_uuid(logical_device: int | None = None) -> str:
     """Generate a unique identifier for the current process's physical NPU chip.
 
     Returns ``{host_ip}-{physical_chip_id}`` where ``host_ip`` is the local
     machine's IP address and ``physical_chip_id`` is derived from the current
-    logical device index mapped through ``ASCEND_RT_VISIBLE_DEVICES``.
+    logical device index mapped through ``ASCEND_RT_VISIBLE_DEVICES``. The
+    logical index is read from the current device when it is not provided.
 
     On Ascend NPU, ``torch.accelerator.current_device_index()`` returns the
     *logical* device index. When ``ASCEND_RT_VISIBLE_DEVICES`` is set, it
@@ -90,7 +91,8 @@ def npu_generate_uuid() -> str:
     on the same physical NPU chip will produce the same UUID, which is
     required for NPU IPC handle matching.
     """
-    logical_device = torch.accelerator.current_device_index()
+    if logical_device is None:
+        logical_device = torch.accelerator.current_device_index()
     visible_devices = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", None)
     if visible_devices:
         physical_device = int(visible_devices.split(",")[logical_device].strip())
@@ -180,8 +182,8 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
             update_info: NPU IPC update info containing parameter names,
                 dtypes, shapes, and IPC handles.
         """
-        device_index = torch.accelerator.current_device_index()
-        physical_npu_id = npu_generate_uuid()
+        device_index = self.device.index
+        physical_npu_id = npu_generate_uuid(device_index)
 
         if update_info.packed:
             assert update_info.tensor_sizes is not None
