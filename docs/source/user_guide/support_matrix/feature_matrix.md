@@ -36,6 +36,6 @@ The symbols used have the following meanings:
 | <abbr title="Tensor Parallel">TP</abbr> | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |  |
 | Weight nz | ✅ | ✅ | ✅ | ✅ | ✅ | ❔ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | 🟠 | ✅ | ✅ | ✅ |
 
-- <sup>2</sup> Flashcomm is only enabled on the prefill stage.
-- <sup>3</sup> Lmhead TP is only enabled in the pure dp scenarios.
-- <sup>4</sup> MLAPO is only supported on the decode stage.
+- <sup>1</sup> Flashcomm is only enabled on the prefill stage.
+- <sup>2</sup> Lmhead TP is only enabled in the pure dp scenarios.
+- <sup>3</sup> MLAPO is only supported on the decode stage.
