@@ -18,7 +18,6 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from tests.ut.conftest import RunnerDeviceType, npu_test
 from vllm_ascend.ops.triton.rope import rope_forward_triton
 from vllm_ascend.ops.triton.triton_utils import (
     init_device_properties_triton,
@@ -79,7 +78,6 @@ def _reference_neox(
 
 
 @pytest.mark.parametrize("head_dim", [128, 192])
-@npu_test(num_npus=1, npu_type=RunnerDeviceType.A3)
 @torch.inference_mode()
 def test_rope_forward_triton_neox_large_head_dim(
     head_dim: int,
