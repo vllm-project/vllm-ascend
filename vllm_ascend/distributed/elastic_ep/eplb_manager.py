@@ -32,7 +32,7 @@ class ElasticEplbManager:
 
         expert_map = []
         for layer_id in range(self.num_moe_layers):
-            expert_map.append(self.model.model.layers[self.num_dense_layers + layer_id].mlp.experts.expert_map)
+            expert_map.append(self.model.model.layers[self.num_dense_layers + layer_id].mlp.experts._expert_map)
         expert_map = torch.stack(expert_map).unsqueeze(1).npu()
         expert_maps = get_eplb_group().all_gather(expert_map, dim=1).cpu()
         for layer_id in range(self.num_moe_layers):

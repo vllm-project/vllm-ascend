@@ -284,8 +284,12 @@ class AscendConfig:
 
             if get_ascend_device_type() != AscendDeviceType.A3:
                 raise ValueError("Elastic EP is only supported on A3.")
-            if self.eplb_config.dynamic_eplb and self.eplb_config.eplb_policy_type == 3:
-                raise ValueError("Elastic EP is not supported when eplb_policy=3.")
+
+            if get_ascend_config().eplb_config.dynamic_eplb:
+                raise RuntimeError(
+                    "Elastic EP with dynamic_eplb=True is temporarily unsupported. "
+                    "Set dynamic_eplb=False in eplb_config to use Elastic EP."
+                )
 
     @staticmethod
     def _get_config_value(additional_config: dict[str, Any], config_key: str, env_key: str, env_value: Any) -> Any:

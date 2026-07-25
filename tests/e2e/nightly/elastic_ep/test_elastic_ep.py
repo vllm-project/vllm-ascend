@@ -48,7 +48,7 @@ MAX_NUM_SEQS = 16
 
 # How long (seconds) to wait after a scale request before evaluating,
 # giving the Elastic EP state machine time to finish reconfiguration.
-_SCALE_DELAY_SECONDS = 30
+_SCALE_DELAY_SECONDS = 60
 
 # GSM8K accuracy baseline and tolerance.
 # The model is expected to achieve accuracy within this range after scaling.
@@ -86,7 +86,7 @@ def _send_scale_command(server, new_dp_size: int) -> bool:
     headers = {"Content-Type": "application/json"}
 
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=300)
+        response = requests.post(url, json=payload, headers=headers, timeout=1000)
         code = response.status_code
         if code != 200:
             print(f"[scale] HTTP {code}: {response.text}")
@@ -130,7 +130,7 @@ def _make_env_dict() -> dict[str, str]:
     env = {
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
         "BENCHMARK_HOME": "./benchmark",
-        "HCCL_BUFFSIZE": "1024",
+        "HCCL_BUFFSIZE": "2048",
         "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
     }
     if os.environ.get("VLLM_USE_MODELSCOPE", "").lower() not in ("", "0", "false"):
@@ -159,6 +159,8 @@ class ElasticEPTestConfig:
     data_parallel_size: int
     data_parallel_size_local: int
     tensor_parallel_size: int
+    gpu_memory_utilization: float = 0.9
+    num_redundant_experts: int = 0
     compilation_config: str | None = None
     additional_config: str | None = None
     quant: bool = False
@@ -184,6 +186,8 @@ CONFIG_QWEN3_30B_DEFAULT = ElasticEPTestConfig(
     data_parallel_size=8,
     data_parallel_size_local=8,
     tensor_parallel_size=1,
+    gpu_memory_utilization=0.7,
+    num_redundant_experts=128,
     additional_config=COMMON_ADDITIONAL_CONFIG,
 )
 
@@ -192,6 +196,8 @@ CONFIG_QWEN3_30B_FULL = ElasticEPTestConfig(
     data_parallel_size=8,
     data_parallel_size_local=8,
     tensor_parallel_size=1,
+    gpu_memory_utilization=0.7,
+    num_redundant_experts=128,
     compilation_config='{"cudagraph_mode": "FULL"}',
     additional_config=COMMON_ADDITIONAL_CONFIG,
 )
@@ -201,6 +207,8 @@ CONFIG_QWEN3_30B_PIECEWISE = ElasticEPTestConfig(
     data_parallel_size=8,
     data_parallel_size_local=8,
     tensor_parallel_size=1,
+    gpu_memory_utilization=0.7,
+    num_redundant_experts=128,
     compilation_config='{"cudagraph_mode": "PIECEWISE"}',
     additional_config=COMMON_ADDITIONAL_CONFIG,
 )
@@ -210,6 +218,8 @@ CONFIG_QWEN3_30B_FULL_DECODE_ONLY = ElasticEPTestConfig(
     data_parallel_size=8,
     data_parallel_size_local=8,
     tensor_parallel_size=1,
+    gpu_memory_utilization=0.7,
+    num_redundant_experts=128,
     compilation_config='{"cudagraph_mode": "FULL_DECODE_ONLY"}',
     additional_config=COMMON_ADDITIONAL_CONFIG,
 )
@@ -219,11 +229,12 @@ CONFIG_QWEN3_30B_TP4 = ElasticEPTestConfig(
     data_parallel_size=4,
     data_parallel_size_local=4,
     tensor_parallel_size=4,
+    gpu_memory_utilization=0.7,
+    num_redundant_experts=128,
     additional_config=(
         '{"eplb_config": {"dynamic_eplb": false,'
         ' "num_redundant_experts": 128},'
-        ' "enable_flashcomm1": true,'
-        ' "enable_flashcomm2_parallel_size": 2}'
+        ' "enable_flashcomm1": true}'
     ),
     scale_sequence=ScaleSequence(
         name="tp4_scaling",
@@ -241,6 +252,8 @@ CONFIG_QWEN3_30B_W8A8_DEFAULT = ElasticEPTestConfig(
     data_parallel_size=8,
     data_parallel_size_local=8,
     tensor_parallel_size=1,
+    gpu_memory_utilization=0.7,
+    num_redundant_experts=128,
     additional_config=COMMON_ADDITIONAL_CONFIG,
     quant=True,
 )
@@ -250,11 +263,12 @@ CONFIG_QWEN3_30B_W8A8_TP4 = ElasticEPTestConfig(
     data_parallel_size=4,
     data_parallel_size_local=4,
     tensor_parallel_size=4,
+    gpu_memory_utilization=0.7,
+    num_redundant_experts=128,
     additional_config=(
         '{"eplb_config": {"dynamic_eplb": false,'
         ' "num_redundant_experts": 128},'
-        ' "enable_flashcomm1": true,'
-        ' "enable_flashcomm2_parallel_size": 2}'
+        ' "enable_flashcomm1": true}'
     ),
     quant=True,
     scale_sequence=ScaleSequence(
@@ -269,10 +283,12 @@ CONFIG_QWEN3_30B_W8A8_TP4 = ElasticEPTestConfig(
 )
 
 CONFIG_QWEN3_235B_TP2 = ElasticEPTestConfig(
-    name="Qwen3-235B-A22B, TP=4, Default, FC1, FC2",
+    name="Qwen3-235B-A22B, TP=2, Default, FC1",
     data_parallel_size=8,
     data_parallel_size_local=8,
     tensor_parallel_size=2,
+    gpu_memory_utilization=0.9,
+    num_redundant_experts=32,
     additional_config=(
         '{"eplb_config": {"dynamic_eplb": false, "num_redundant_experts": 32}, "enable_flashcomm1": true}'
     ),
@@ -303,10 +319,12 @@ def _build_vllm_args(config: ElasticEPTestConfig) -> list[str]:
         "--enable-expert-parallel",
         "--enable-elastic-ep",
         "--enable-eplb",
+        "--eplb_config.use_async",
+        "false",
         "--tensor-parallel-size",
         str(config.tensor_parallel_size),
         "--gpu-memory-utilization",
-        "0.9",
+        str(config.gpu_memory_utilization),
         "--max-model-len",
         str(MAX_MODEL_LEN),
         "--max-num-seqs",

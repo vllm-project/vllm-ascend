@@ -18,7 +18,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import reset_compile_wrapper
 from vllm.config import (
     CompilationMode,
-    set_current_vllm_config,
+    set_current_vllm_config, get_current_vllm_config,
 )
 from vllm.distributed import (
     get_dp_group,
@@ -35,7 +35,8 @@ from vllm.distributed.elastic_ep.standby_state import (
 )
 from vllm.distributed.parallel_state import _replace_active_groups
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE, FusedMoEParallelConfig
+from vllm.model_executor.layers.fused_moe import MoERunner
+from vllm.model_executor.layers.fused_moe.layer import FusedMoEParallelConfig
 from vllm.v1.attention.backend import AttentionImplBase
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
@@ -114,10 +115,10 @@ def ascend_batch_transfer_weights(
         handle_sub_module(module, module_name)
 
     for module_name, module in model.named_modules():
-        if (expert_map := getattr(module, "expert_map", None)) is not None:
+        if (expert_map := getattr(module, "_expert_map", None)) is not None:
             if isinstance(expert_map, torch.Tensor):
                 expert_map_params.append((expert_map.npu(), expert_map))
-                all_params_name.append(module_name + "." + "expert_map")
+                all_params_name.append(module_name + "." + "_expert_map")
     all_params.extend([npu_tensor for npu_tensor, _ in expert_map_params])
 
     if is_sender:
@@ -179,7 +180,8 @@ def broadcast_expert_mapping(
 
 def setup_moe_comm_and_quant_method(module: nn.Module) -> None:
     if isinstance(
-        quant_method := getattr(module.quant_method, "quant_method", None), AscendW8A8DynamicFusedMoEMethod
+        quant_method := getattr(module.routed_experts.quant_method, "quant_method", None),
+        AscendW8A8DynamicFusedMoEMethod
     ):
         try:
             device_group = get_mc2_group().device_group
@@ -224,6 +226,7 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
         new_ep_size = get_ep_group().world_size
         n_redundant = new_ep_size * num_local_experts - num_logical_experts
         get_ascend_config().eplb_config.num_redundant_experts = n_redundant
+        self.worker.parallel_config.eplb_config.num_redundant_experts = n_redundant
         self.old_ep_size = old_ep_size
         self.worker.load_model(load_dummy_weights=True)
         self.eplb_manager.expert_maps = expert_maps
@@ -252,6 +255,7 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
             )
 
     def transfer_weights(self, old_dp_size: int, new_dp_size: int) -> None:
+        self.worker.get_model().expert_weights = []
         with _PATCH_LOCK, self._use_ascend_transfer_impl():
             super().transfer_weights(old_dp_size=old_dp_size, new_dp_size=new_dp_size)
 
@@ -320,7 +324,7 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
         self.worker.model_runner.dp_size = new_dp_size
 
         # Reconfigure MoE modules with new EP size
-        moe_modules = [module for module in self.worker.model_runner.model.modules() if isinstance(module, FusedMoE)]
+        moe_modules = [module for module in self.worker.model_runner.model.modules() if isinstance(module, MoERunner)]
         num_local_experts = moe_modules[0].moe_config.num_local_experts
         num_logical_experts = self.eplb_manager.get_expert_maps().shape[-1]
         assert all(module.moe_config.num_local_experts == num_local_experts for module in moe_modules), (
@@ -333,14 +337,13 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
             tp_size = get_tp_group().world_size
             is_sequence_parallel = parallel_config.use_sequence_parallel_moe
             sp_size = tp_size if is_sequence_parallel else 1
-            module.moe_parallel_config = FusedMoEParallelConfig.make(
+            module.moe_config.moe_parallel_config = FusedMoEParallelConfig.make(
                 tp_size_=tp_size,
                 pcp_size_=get_pcp_group().world_size,
                 dp_size_=get_dp_group().world_size,
                 sp_size_=sp_size,
                 vllm_parallel_config=parallel_config,
             )
-            module.moe_config.moe_parallel_config = module.moe_parallel_config
 
             module.moe_config.tp_group = get_tp_group()
             module.moe_config.dp_group = get_dp_group()
@@ -382,6 +385,7 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
         self.eplb_manager.eplb(old_ep_size, new_ep_size)
 
     def receive_weights(self) -> None:
+        self.worker.get_model().expert_weights = []
         with _PATCH_LOCK, self._use_ascend_transfer_impl():
             super().receive_weights()
 
@@ -399,7 +403,7 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
         return expert_maps, num_local_experts, num_logical_experts
 
     def prepare_new_worker(self) -> None:
-        moe_modules = [module for module in self.worker.model_runner.model.modules() if isinstance(module, FusedMoE)]
+        moe_modules = [module for module in self.worker.model_runner.model.modules() if isinstance(module, MoERunner)]
         for module in moe_modules:
             with set_current_vllm_config(self.worker.vllm_config):
                 setup_moe_comm_and_quant_method(module)

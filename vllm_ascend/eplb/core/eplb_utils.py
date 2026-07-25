@@ -17,13 +17,13 @@
 # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove eplb utils.
 import json
 from collections import defaultdict
-from typing import Any
 
 import numpy as np
 import torch
 
 from vllm.config import get_current_vllm_config
 from vllm.logger import logger
+from vllm.model_executor.layers.fused_moe.expert_map_manager import determine_expert_map
 
 
 def expert_file_to_tensor(expert_map_path, layer_id):
@@ -43,6 +43,7 @@ def expert_file_to_tensor(expert_map_path, layer_id):
         device_data.append(device["device_expert"])
     global_placement = torch.tensor(device_data, dtype=torch.int32)
     return global_placement, physical_count
+
 
 def generate_global_placement(n_expert, ep_size, n_redundant, num_shared_experts):
     n_expert -= num_shared_experts
@@ -102,10 +103,10 @@ def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num
 
     if expert_map_path:
         global_placement, physical_count = expert_file_to_tensor(expert_map_path, layer_id)
-        if physical_count is not None:
-            n_redundant = physical_count - n_experts
-            if not moe_config.supports_eplb:
-                raise ValueError("Eplb supports only w8a8_dynamic quantization.")
+        n_redundant = physical_count - n_experts
+    elif not eplb_enable and not get_current_vllm_config().parallel_config.enable_elastic_ep:
+        _, expert_map, _ = determine_expert_map(ep_size, moe_config.ep_rank, n_experts)
+        return None, expert_map, None, 0
 
     if global_placement is None:
         if get_current_vllm_config().parallel_config.enable_elastic_ep:
@@ -132,7 +133,6 @@ def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num
 
 
 def generate_log2phy_map(global_expert_map, ep_rank, tp_size: int | None = None):
-    n_experts = len(global_expert_map[0])
     log2phy_map = defaultdict(list)
     valid_count = torch.sum(global_expert_map[0] != -1)
     for rankid, map_per_rank in enumerate(global_expert_map):
@@ -152,7 +152,7 @@ def generate_log2phy_map(global_expert_map, ep_rank, tp_size: int | None = None)
         log2phy_map[key] = log2phy_map[key][replica_index]
 
     log2phy_map = torch.scatter(
-        torch.zeros(n_experts, dtype=torch.int32),
+        torch.zeros(len(log2phy_map), dtype=torch.int32),
         0,
         torch.tensor(list(log2phy_map), dtype=torch.int64),
         torch.tensor(list(log2phy_map.values()), dtype=torch.int32),

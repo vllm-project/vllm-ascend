@@ -6,7 +6,7 @@ import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Tuple
 from unittest.mock import patch
 
 import torch
@@ -26,6 +26,7 @@ from ..utils import weak_ref_tensors
 
 _acl_graph_wrappers: weakref.WeakSet[Any] = weakref.WeakSet()
 _acl_graph_pool: Tuple[int, int] | None = None
+# TODO 注释
 _STREAM_RESOURCE_ERROR_CODE = "207008"
 _STREAM_RESOURCE_ERROR_MARKERS = (
     "insufficient_stream_resources",
@@ -87,7 +88,7 @@ class ACLGraphWrapper:
     def clear_all_graphs(cls) -> None:
         global _acl_graph_pool
         _acl_graph_pool = None
-        for instance in list(cls._all_instances):
+        for instance in list(_acl_graph_wrappers):
             instance.clear_graphs()
 
     @classmethod
