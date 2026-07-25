@@ -1,10 +1,7 @@
 import torch
 from vllm.distributed.parallel_state import get_eplb_group
-from vllm.logger import init_logger
 
 from vllm_ascend.eplb.core.eplb_utils import generate_log2phy_map
-
-logger = init_logger(__name__)
 
 
 class ElasticEplbManager:
@@ -54,5 +51,3 @@ class ElasticEplbManager:
             self.model.model.layers[self.num_dense_layers + layer_id].mlp.experts.log2phy.copy_(
                 generate_log2phy_map(expert_maps_this_layer, rank_id)
             )
-
-

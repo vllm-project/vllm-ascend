@@ -4,7 +4,6 @@ from vllm.distributed import get_cached_tcp_store_client
 from vllm.distributed.parallel_state import (
     GroupCoordinator,
     _init_stateless_group,
-    get_tp_group,
     get_world_group,
     init_model_parallel_group,
 )
@@ -13,13 +12,13 @@ from vllm_ascend.ascend_config import get_ascend_config
 
 
 def _init_ep_like_group(
-        group_ranks: list[list[int]],
-        group_name: str,
-        master_ip: str,
-        backend: str,
-        *,
-        coord_store=None,
-        enable_elastic_ep: bool = False,
+    group_ranks: list[list[int]],
+    group_name: str,
+    master_ip: str,
+    backend: str,
+    *,
+    coord_store=None,
+    enable_elastic_ep: bool = False,
 ) -> GroupCoordinator:
     """Create an EP-like communication group (mc2 / dynamic_eplb / fc3_quant_x).
 
@@ -28,10 +27,17 @@ def _init_ep_like_group(
     """
     if enable_elastic_ep:
         return _init_stateless_group(
-            group_ranks, group_name, master_ip, backend, coord_store=coord_store,
+            group_ranks,
+            group_name,
+            master_ip,
+            backend,
+            coord_store=coord_store,
         )
     return init_model_parallel_group(
-        group_ranks, get_world_group().local_rank, backend, group_name=group_name,
+        group_ranks,
+        get_world_group().local_rank,
+        backend,
+        group_name=group_name,
     )
 
 
@@ -99,7 +105,11 @@ def init_ascend_model_parallel(
         if num_head_replica <= 1:
             group_ranks = ranks_base.view(-1, prefill_tensor_model_parallel_size).unbind(0)
         else:
-            reshape_dim = global_pp_size * global_pcp_size if enable_elastic_ep else global_dp_size * global_pp_size * global_pcp_size
+            reshape_dim = (
+                global_pp_size * global_pcp_size
+                if enable_elastic_ep
+                else global_dp_size * global_pp_size * global_pcp_size
+            )
             group_ranks = ranks_base.clone().view(reshape_dim, -1, num_head_replica)
             group_ranks = group_ranks.permute(0, 2, 1)
             group_ranks = group_ranks.reshape(-1, group_ranks.size(-1))  # [DP_size * num_head_replica, num_head]
@@ -129,13 +139,21 @@ def init_ascend_model_parallel(
 
     global _MC2, _DYNAMIC_EPLB
     _MC2 = _init_ep_like_group(
-        group_ranks, "mc2", parallel_config.data_parallel_master_ip, backend,
-        coord_store=coord_store, enable_elastic_ep=enable_elastic_ep,
+        group_ranks,
+        "mc2",
+        parallel_config.data_parallel_master_ip,
+        backend,
+        coord_store=coord_store,
+        enable_elastic_ep=enable_elastic_ep,
     )
     if get_ascend_config().eplb_config.dynamic_eplb:
         _DYNAMIC_EPLB = _init_ep_like_group(
-            group_ranks, "dynamic_eplb", parallel_config.data_parallel_master_ip, backend,
-            coord_store=coord_store, enable_elastic_ep=enable_elastic_ep,
+            group_ranks,
+            "dynamic_eplb",
+            parallel_config.data_parallel_master_ip,
+            backend,
+            coord_store=coord_store,
+            enable_elastic_ep=enable_elastic_ep,
         )
 
     # Initialize fine-grained TP process groups on Ascend for four components:

@@ -15,12 +15,12 @@
 # limitations under the License.
 #
 
-import vllm.envs as envs
 from collections.abc import Callable
 from typing import Any
 
 import torch
 import torch_npu
+import vllm.envs as envs
 from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.logger import logger
 

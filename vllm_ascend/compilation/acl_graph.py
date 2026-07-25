@@ -6,7 +6,7 @@ import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Any, Tuple
+from typing import Any
 from unittest.mock import patch
 
 import torch
@@ -25,8 +25,9 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from ..utils import weak_ref_tensors
 
 _acl_graph_wrappers: weakref.WeakSet[Any] = weakref.WeakSet()
-_acl_graph_pool: Tuple[int, int] | None = None
-# TODO 注释
+# Global graph pool handle.
+# In Elastic EP, recompilation and capture must switch the pool to avoid resource reference counting issues.
+_acl_graph_pool: tuple[int, int] | None = None
 _STREAM_RESOURCE_ERROR_CODE = "207008"
 _STREAM_RESOURCE_ERROR_MARKERS = (
     "insufficient_stream_resources",

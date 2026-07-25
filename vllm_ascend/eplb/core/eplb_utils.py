@@ -20,7 +20,6 @@ from collections import defaultdict
 
 import numpy as np
 import torch
-
 from vllm.config import get_current_vllm_config
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.expert_map_manager import determine_expert_map
@@ -70,6 +69,7 @@ def generate_global_placement(n_expert, ep_size, n_redundant, num_shared_experts
         for i, group in enumerate(groups):
             groups[i] = np.append(group, n_expert + i % num_shared_experts)
     return torch.tensor(groups, dtype=torch.int32)
+
 
 def generate_global_placement_elastic_ep(n_expert, ep_size, n_redundant, num_shared_experts):
     n_expert -= num_shared_experts

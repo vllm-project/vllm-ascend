@@ -1,7 +1,6 @@
 # NOTE: Adapted from vLLM's elastic_execute.py.
 # Key changes: CUDA→NPU/ACL, custom weight transfer for quantized weights,
-# simplified broadcast_expert_mapping, Ascend-specific comm groups (mc2/
-# dynamic_eplb/fc3_quant_x), and EPLB via eplb_manager.
+# simplified broadcast_expert_mapping, Ascend-specific comm groups (mc2/dynamic_eplb), and EPLB via eplb_manager.
 # ============================================================
 
 import copy
@@ -18,7 +17,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import reset_compile_wrapper
 from vllm.config import (
     CompilationMode,
-    set_current_vllm_config, get_current_vllm_config,
+    set_current_vllm_config,
 )
 from vllm.distributed import (
     get_dp_group,
@@ -42,18 +41,14 @@ from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.workspace import lock_workspace, unlock_workspace
 
-from vllm.logger import init_logger
-
 from vllm_ascend.ascend_config import get_ascend_config
-
-
-logger = init_logger(__name__)
 from vllm_ascend.compilation.acl_graph import (
     ACLGraphWrapper,
     reset_graph_params,
     set_draft_graph_params,
     set_graph_params,
 )
+from vllm_ascend.distributed.elastic_ep.eplb_manager import ElasticEplbManager
 from vllm_ascend.distributed.elastic_ep.standby_state import (
     create_ascend_standby_groups,
     pop_ascend_standby_groups,
@@ -65,8 +60,6 @@ from vllm_ascend.distributed.parallel_state import (
 from vllm_ascend.distributed.utils import use_stateless_pg_with_world_registration
 from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod
-
-from vllm_ascend.distributed.elastic_ep.eplb_manager import ElasticEplbManager
 
 _PATCH_LOCK = threading.Lock()
 
@@ -181,7 +174,7 @@ def broadcast_expert_mapping(
 def setup_moe_comm_and_quant_method(module: nn.Module) -> None:
     if isinstance(
         quant_method := getattr(module.routed_experts.quant_method, "quant_method", None),
-        AscendW8A8DynamicFusedMoEMethod
+        AscendW8A8DynamicFusedMoEMethod,
     ):
         try:
             device_group = get_mc2_group().device_group

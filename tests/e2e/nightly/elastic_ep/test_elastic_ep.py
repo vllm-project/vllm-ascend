@@ -232,9 +232,7 @@ CONFIG_QWEN3_30B_TP4 = ElasticEPTestConfig(
     gpu_memory_utilization=0.7,
     num_redundant_experts=128,
     additional_config=(
-        '{"eplb_config": {"dynamic_eplb": false,'
-        ' "num_redundant_experts": 128},'
-        ' "enable_flashcomm1": true}'
+        '{"eplb_config": {"dynamic_eplb": false, "num_redundant_experts": 128}, "enable_flashcomm1": true}'
     ),
     scale_sequence=ScaleSequence(
         name="tp4_scaling",
@@ -266,9 +264,7 @@ CONFIG_QWEN3_30B_W8A8_TP4 = ElasticEPTestConfig(
     gpu_memory_utilization=0.7,
     num_redundant_experts=128,
     additional_config=(
-        '{"eplb_config": {"dynamic_eplb": false,'
-        ' "num_redundant_experts": 128},'
-        ' "enable_flashcomm1": true}'
+        '{"eplb_config": {"dynamic_eplb": false, "num_redundant_experts": 128}, "enable_flashcomm1": true}'
     ),
     quant=True,
     scale_sequence=ScaleSequence(
