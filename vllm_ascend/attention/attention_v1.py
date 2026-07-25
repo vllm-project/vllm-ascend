@@ -1388,11 +1388,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.
         if _EXTRA_CTX.capturing:
-            if self._fa3_enabled and self.sinks is None:
-                # FA3 graph capture: scheduler_metadata is cached from eager
-                # warmup (outside graph).  full_graph_fa3 wraps FA3 in
-                # graph_task_group_begin/End so CANN runtime sees consistent
-                # task-group framing across all layers.
+            if self._fa3_enabled:
+                # FA3 graph capture for ALL layers when FA3 is available.
+                # Using FA3 and CANN FIA ops in the same torch.npu.graph()
+                # session corrupts CANN runtime capture state — the FA3
+                # CustomOp interferes with CANN's internal AICPU metadata
+                # tracking (ComputeFAMetadataPv), causing subsequent CANN
+                # FIA ops to crash.
                 key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
                     key, value, attn_metadata, kv_cache,
                 )
