@@ -206,13 +206,13 @@ class TestAscendLogitsProcessor(unittest.TestCase):
     def setUp(self):
         self.mock_vllm_config = MagicMock()
         self.mock_vllm_config.compilation_config.custom_ops = ["all"]
+        self.mock_vllm_config.model_config = None
 
         from vllm.config.vllm import set_current_vllm_config
 
-        set_current_vllm_config(self.mock_vllm_config)
-
-        self.config_patch = patch("vllm.config.vllm.get_current_vllm_config", return_value=self.mock_vllm_config)
-        self.config_patch.start()
+        self.config_context = set_current_vllm_config(self.mock_vllm_config)
+        self.config_context.__enter__()
+        self.addCleanup(self.config_context.__exit__, None, None, None)
         self.vocab_size = 50
         self.num_embeddings = 50
         self.embedding_dim = 10

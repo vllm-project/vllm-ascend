@@ -43,6 +43,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     infer_tp_mismatch_info,
     normalize_block_ids_by_group,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 class KVPoolScheduler:
@@ -107,7 +108,11 @@ class KVPoolScheduler:
         self.original_block_size = self._infer_group_block_sizes(vllm_config, kv_cache_config)
         cp_scale = self.pcp_size * self.dcp_size
         self.grouped_block_size = [block_size * cp_scale for block_size in self.original_block_size]
-        requested_hash_block_size = vllm_config.cache_config.hash_block_size
+        requested_hash_block_size = (
+            vllm_config.cache_config.hash_block_size
+            if vllm_version_is("0.25.1")
+            else vllm_config.cache_config.prefix_match_unit
+        )
         if not isinstance(requested_hash_block_size, int):
             requested_hash_block_size = None
         self.hash_block_size = (

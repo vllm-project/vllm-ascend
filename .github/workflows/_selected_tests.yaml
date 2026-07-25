@@ -390,6 +390,15 @@ jobs:
             echo "=== task dir file count ==="
             find "${TASK_DIR}" -type f | wc -l
 
+            echo "=== building test_case_map.json ==="
+            python3 .github/workflows/scripts/test_selector.py \
+              --build-map \
+              --coverage-dir "${TASK_DIR}" \
+              --source-dir "${COVERAGE_PKG_DIR}/covstub" \
+              --map-file test_case_map.json
+            test -s test_case_map.json
+            du -h test_case_map.json
+
             tar cf coverage.tar -C coverage vllm-ascend
             echo "Packed coverage/vllm-ascend into coverage.tar"
             du -h coverage.tar
@@ -421,6 +430,7 @@ jobs:
             uploads = [
                 ('coverage.tar', f'{OBS_PREFIX}/coverage.tar'),
                 ('coverage_version.txt', f'{OBS_PREFIX}/coverage_version.txt'),
+                ('test_case_map.json', f'{OBS_PREFIX}/test_case_map.json'),
             ]
             for local_path, obs_path in uploads:
                 resp = client.putFile(OBS_BUCKET, obs_path, local_path)
