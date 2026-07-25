@@ -88,7 +88,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
 
 @dataclass(frozen=True, kw_only=True)
-class AscendSFAIndexerCacheSpec(FullAttentionSpec):
+class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
     """KV cache spec for SFA indexer K/scale cache.
 
     The scheduler should treat this as a full-attention-compatible cache so it
