@@ -76,8 +76,6 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
 - Install `vllm-ascend` from source, refer to [installation](../../installation.md).
 
-If you want to deploy multi-node environment, you need to set up environment on each node.
-
 ## 5 Online Service Deployment
 
 ### 5.1 Single-Node Online Deployment
@@ -88,7 +86,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 ::::{tab-item} InternVL3_5-38B
 :sync: 38b
 
-- Quantized model `InternVL3_5-38B-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
+- Quantized model `InternVL3_5-38B-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) node.
 
 Run the following script to execute online inference.
 
@@ -135,7 +133,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/InternVL3_5-38B-w8a8/ 
 ::::{tab-item} InternVL3_5-241B-A28B
 :sync: 241b
 
-- Quantized model `InternVL3_5-241B-A28B-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
+- Quantized model `InternVL3_5-241B-A28B-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) node.
 
 Run the following script to execute online inference.
 
@@ -237,4 +235,4 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 ## 9 FAQ
 
-- Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+- Common Issues Tip: If you encounter issues, refer to [FAQs](../../faqs.md).

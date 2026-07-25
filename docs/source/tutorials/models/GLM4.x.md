@@ -23,7 +23,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `GLM-4.7`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.7).
 - `GLM-4.5-w8a8-with-float-mtp`(Quantized version with mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.5-w8a8).
 - `GLM-4.6-w8a8`(Quantized version without mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8). Because vllm does not support GLM4.6 mtp in October, we do not provide an mtp version. Since it is now supported, you can use the following quantization scheme to add mtp weights to the quantized weights.
-- `GLM-4.7-w8a8-with-float-mtp`(Quantized version without mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp).
+- `GLM-4.7-w8a8-with-float-mtp`(Quantized version with mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp).
 - `Method of Quantization`: [quantization scheme](https://ai.gitcode.com/Ascend-SACT/GLM-4.5-w8a8). You can use these methods to quantize the model.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
@@ -616,7 +616,7 @@ Before you start, please
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
             "torch_profiler_with_stack": false}' \
-            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY",  "cudagraph_capture_sizes":[1,2,4,6,8,10,12,14,16,18,20,24,26,28,30,32,64,128,256,512]}' \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,2,4,6,8,10,12,14,16,18,20,24,26,28,30,32,64,128,256,512]}' \
             --additional-config '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
@@ -705,15 +705,15 @@ curl -H "Accept: application/json" \
     -H "Content-type: application/json" \
     -X POST \
     -d '{
-        "model": "glm", 
-        "messages": [{ 
-            "role": "user", 
-            "content": "The future of AI is" 
-        }], 
-        "stream": false, 
-        "ignore_eos": false, 
-        "temperature": 0, 
-        "max_tokens": 200 
+        "model": "glm",
+        "messages": [{
+            "role": "user",
+            "content": "The future of AI is"
+        }],
+        "stream": false,
+        "ignore_eos": false,
+        "temperature": 0,
+        "max_tokens": 200
     }' http://<node0_ip>:<port>/v1/chat/completions
 ```
 
