@@ -51,6 +51,7 @@
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/fused_gdn_gating/fused_gdn_gating_torch_adpt.h"
+#include "attention/fused_gdn_decode/fused_gdn_decode_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -2817,5 +2818,17 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                     float beta=1.0, "
         "                     float threshold=20.0) -> (Tensor g, Tensor beta_output)");
     ops.impl("npu_fused_gdn_gating", torch::kPrivateUse1, &vllm_ascend::npu_fused_gdn_gating);
+
+    ops.def(
+        "npu_fused_gdn_decode(Tensor mixed_qkv, "
+        "                     Tensor a, "
+        "                     Tensor b, "
+        "                     Tensor A_log, "
+        "                     Tensor dt_bias, "
+        "                     Tensor(a!) state, "
+        "                     Tensor ssm_state_indices, "
+        "                     float scale, "
+        "                     float softplus_threshold=20.0) -> Tensor");
+    ops.impl("npu_fused_gdn_decode", torch::kPrivateUse1, &vllm_ascend::npu_fused_gdn_decode);
 }
 #endif
