@@ -1,44 +1,40 @@
-tests/standalone/fa3/test_fa3_graph_incompat.py::TestFA3GraphTaskGroupIncompatibility::test_fa3_graph_task_group_yields_stale_replay[True] FAILED
-tests/standalone/fa3/test_fa3_graph_incompat.py::TestFA3GraphTaskGroupIncompatibility::test_fa3_graph_task_group_yields_stale_replay[False] FAILED
-tests/standalone/fa3/test_fa3_graph_incompat.py::TestFA3GraphTaskGroupIncompatibility::test_cann_v1_graph_task_group_works FAILED
-
-======================================================================== FAILURES =========================================================================
-________________________________ TestFA3GraphTaskGroupIncompatibility.test_fa3_graph_task_group_yields_stale_replay[True] _________________________________
-
-self = <test_fa3_graph_incompat.TestFA3GraphTaskGroupIncompatibility object at 0xfffda04cd390>, causal = True
-
-    @pytest.mark.parametrize("causal", [True, False])
-    def test_fa3_graph_task_group_yields_stale_replay(self, causal):
-        """FA3 inside ``graph_task_group_begin/End`` → runs eagerly, correct.
-    
-        vllm-ascend's op-level capture only recognises CANN-native ops.
-        FA3 (PyTorch CustomOp) is invisible to it, so the capture session
-        records nothing.  During ``graph_task_update_begin/End``, the FA3
-        call therefore runs **eagerly** with whatever inputs are passed at
-        that point — producing the correct output for the new data.
-    
-        (The ``graph_task_group`` handle is semantically a no-op here; it
-        does not interfere with the CustomOp dispatch.)
-        """
-        q, k, v, bt, kv_seqlens, cu_q, max_qlen, _, _, metadata = _make_tensors(causal=causal)
-        stream = torch_npu.npu.current_stream()
-    
-        # -- capture: FA3 is NOT recorded by CANN op-level capture --
->       torch.npu.graph_task_group_begin(stream)
-
-tests/standalone/fa3/test_fa3_graph_incompat.py:240: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
-
-stream = <torch_npu.npu.Stream device=npu:0 npu_stream=0xaaab16117e50>
-
-    def graph_task_group_begin(stream):
->       _graph_task_group_begin(stream)
-E       RuntimeError: graph_task_group_begin:../torch_npu/csrc/core/npu/NPUGraph.cpp:51 NPU function error: c10_npu::acl::AclmdlRICaptureTaskGrpBegin(stream), error code is 107029
-E       [ERROR] 2026-07-24-20:07:21 (PID:4261, Device:0, RankID:-1) ERR00100 PTA call acl api failed.
-E       EE9999: Inner Error!
-E       EE9999[PID: 4261] 2026-07-24-20:07:21.003.826 (EE9999):  the stream is not captured.[FUNC:StreamBeginTaskGrp][FILE:api_error.cc][LINE:5829]
-E               TraceBack (most recent call last):
-E              rtsStreamBeginTaskGrp execution failed, reason=stream is not in capture status[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:65]
-E              begin capture task group failed, runtime result = 107029[FUNC:ReportCallError][FILE:log_inner.cpp][LINE:148]
-
-/usr/local/python3.11.10/lib/python3.11/site-packages/torch_npu/npu/graphs.py:82: RuntimeError
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.318.574 [stars_engine.cc:1548]28552 ProcLogicCqReport:Task run failed, device_id=3, stream_id=40, task_id=0, sqe_type=1(aicpu), errType=0x1(task exception), sqSwStatus=0
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.320.972 [device_error_proc.cc:1644]28552 ProcessStarsAicpuErrorInfo:The error from device(chipId:3, dieId:0), serial number is 1, an exception occurred during AICPU execution, stream_id:40, task_id:0, errcode:0, msg:aicpu execute failed.
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.321.041 [davinci_task.cc:209]28552 SetStarsResultForDavinciTask:AICPU Kernel task happen error, retCode=0x2a.
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.324.967 [davinci_kernel_task.cc:1729]28552 PreCheckTaskErr:Kernel task happen error, retCode=0x2a, [aicpu exception].
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.324.997 [davinci_kernel_task.cc:1435]28552 PrintAicpuErrorInfo:Aicpu kernel execute failed, device_id=3, stream_id=40, task_id=0, soName=9094278053579074077.so, funcName=_Z17ComputeFAMetadataPv, kernelName=_Z17ComputeFAMetadataPv, errorCode=0x2a.
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.325.010 [davinci_kernel_task.cc:1445]28552 PrintAicpuErrorInfo:Aicpu kernel execute failed, device_id=3, stream_id=40, task_id=0, fault op_name=.
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.326.135 [stream.cc:1473]28552 GetError:Stream Synchronize failed, stream_id=40, retCode=0x2a, [aicpu exception].
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.326.139 [stream.cc:1476]28552 GetError:AICPU Kernel task happen error, retCode=0x2a.
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.326.148 [stream.cc:1476]28552 GetError:Aicpu kernel execute failed, device_id=3, stream_id=40, task_id=0, fault op_name=.
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.326.154 [stream.cc:3698]28552 EnterFailureAbort:stream_id=40 enter failure abort.
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.326.168 [stream.cc:1614]28413 SynchronizeExecutedTask:context is abort, status=0x715002a.
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.326.175 [stars_engine.cc:1439]28552 StarsResumeRtsq:stop scheduling in abort failure mode: stream_id=40, sq_id=9, sq_head=0, task_id=0, taskType=1.
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.326.179 [stream.cc:1668]28413 SynchronizeImpl:failed, stream_id=40, error=0x715002a
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.326.184 [api_error.cc:1029]28413 StreamSynchronize:Stream synchronize failed, stream_id=40, timeout=-1ms.
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.326.195 [api_c_stream.cc:161]28413 rtStreamSynchronize:ErrCode=507018, desc=[aicpu exception], InnerCode=0x715002a
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.326.200 [error_message_manage.cc:65]28413 FuncErrorReason:rtStreamSynchronize execution failed, reason=aicpu exception
+[ERROR] ASCENDCL(28413,):2026-07-25-14:13:22.326.623 [stream.cpp:139]28413 aclrtSynchronizeStreamImpl:synchronize stream failed, runtime result = 507018
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.378.433 [engine.cc:142]28553 SubmitTask:context is abort, status=0x715002a.
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.378.451 [context.cc:1223]28553 LaunchKernelSubmit:Failed to submit kernel task, retCode=0x715002a.
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.378.497 [context.cc:1671]28553 LaunchKernel:kernel launch submit failed.
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.378.510 [api_error.cc:692]28553 LaunchKernelV2:LaunchKernel failed.
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.378.536 [api_c_kernel.cc:82]28553 rtsLaunchKernelWithHostArgs:ErrCode=507018, desc=[aicpu exception], InnerCode=0x715002a
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.378.542 [error_message_manage.cc:65]28553 FuncErrorReason:rtsLaunchKernelWithHostArgs execution failed, reason=aicpu exception
+[ERROR] ASCENDCL(28413,):2026-07-25-14:13:22.378.891 [kernel.cpp:513]28553 aclrtLaunchKernelWithHostArgsImpl:rtsLaunchKernelWithHostArgs failed, runtime result = 507018.
+[ERROR] OP(28413,):2026-07-25-14:13:22.378.922 [indv_executor.cpp:1064][NNOP][NnopbaseExecutorLaunchKernel][28553] errno[507018] OpName:[FusedInferAttentionScore_0] Check aclrtLaunchKernelWithHostArgs( funcHandle, numBlocks, stream, &cfg, executor->argsExt.args, executor->argsExt.argsSize, rtsHostPlaceHolder.data(), rtsHostPlaceHolder.size()) failed
+[ERROR] OP(28413,):2026-07-25-14:13:22.378.950 [indv_executor.cpp:1232][NNOP][NnopbaseExecutorKernelLaunch][28553] errno[361001] OpName:[FusedInferAttentionScore_0] Assert ((NnopbaseExecutorLaunchKernel(executor, stream, numBlocks)) == 0) failed
+[ERROR] OP(28413,):2026-07-25-14:13:22.378.962 [indv_executor.cpp:1322][NNOP][NnopbaseExecutorRunWithWorkspace][28553] errno[361001] OpName:[FusedInferAttentionScore_0] Check NnopbaseExecutorKernelLaunch(executor, stream) failed
+[ERROR] OP(28413,):2026-07-25-14:13:22.378.981 [individual_op_api.cpp:32][NNOP][NnopbaseOpLogE][28553] errno[361001] OpName:[FusedInferAttentionScore_0] Check NnopbaseRunWithWorkspace(executor, stream, workspace, workspaceSize) failed
+[ERROR] APP(28413,):2026-07-25-14:13:22.380.309 28553 ExecFuncOpApi:OpParamMaker.cpp:458: "[PTA]:"Custom hand error:operator():../third_party/op-plugin/op_plugin/ops/opapi/FusedInferAttentionScoreKernelNpuOpApi.cpp:425 NPU function error: call aclnnFusedInferAttentionScoreV3 failed, error code is 507018
+[ERROR] 2026-07-25-14:13:22 (PID:28413, Device:3, RankID:-1) ERR00100 PTA call acl api failed
+[Error]: The aicpu execution is abnormal. 
+        Rectify the fault based on the error information in the ascend log.
+[PID: 28413] 2026-07-25-14:13:22.378.956 AclNN_Runtime_Error(EZ9903): Assert ((NnopbaseExecutorLaunchKernel(ex""
+[ERROR] APP(28413,):2026-07-25-14:13:22.380.319 28553 ExecFuncOpApi:OpParamMaker.cpp:462: "[PTA]:"Custom hand fail! name=aclnnFusedInferAttentionScoreV3, ret=100000""
+[ERROR] APP(28413,):2026-07-25-14:13:22.380.329 28553 ReadQueue:NPUQueue.cpp:454: "[PTA]:"---Thread---281468945295072: device = 3, write_idx = 2871, read_idx = 2856, status = 1, ret = 100000""
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.471.871 [api_impl.cc:2284]28603 EventQueryStatus:context is abort, status=0x715002a.
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.471.898 [api_c.cc:802]28603 rtEventQueryStatus:ErrCode=507018, desc=[aicpu exception], InnerCode=0x715002a
+[ERROR] RUNTIME(28413,):2026-07-25-14:13:22.471.903 [error_message_manage.cc:65]28603 FuncErrorReason:rtEventQueryStatus execution failed, reason=aicpu exception
+[ERROR] ASCENDCL(28413,):2026-07-25-14:13:22.472.376 [event.cpp:157]28603 aclrtQueryEventStatusImpl:[Query][Status]query event recorded status failed, runtime result = 507018
+[ERROR] APP(28413,):2026-07-25-14:13:22.473.913 aclAppLog call vsnprintf_s failed
