@@ -1,6 +1,5 @@
 import os
 
-import numpy as np
 import torch
 import torch_npu
 from memfabric_hybrid import offload
@@ -12,8 +11,11 @@ from vllm.distributed import (
 )
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     KVCacheConfig,
+    KVCacheSpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -24,9 +26,6 @@ from vllm_ascend.ascend_config import SparseKVOffloadConfig
 # Main BF16 cache: [k_cache, v_cache, k_cache_cpu, v_cache_cpu,
 # topk_buffer_k, topk_buffer_v]. Sparse LI C8 indexer caches are separate and
 # remain device-resident, so they are not registered with this manager.
-# TODO remove KV_OFFLOAD_COLOCATE_DEBUG after PD disaggregate is done:
-# the npu k_cache/v_cache entries only exist for colocate debug (prefill
-# staging) and are deleted together with the prefill path.
 OFFLOAD_KV_CACHE_TUPLE_LEN = 6
 OFFLOAD_K_CACHE_NPU_INDEX = 0
 OFFLOAD_V_CACHE_NPU_INDEX = 1
@@ -43,6 +42,200 @@ def get_subscribed_compute_streams() -> set:
     return _SUBSCRIBED_COMPUTE_STREAMS
 
 
+def get_host_device_memory_usage_ratio(kv_cache_spec: dict[str, KVCacheSpec]) -> float:
+    page_size_bytes_host = 0
+    page_size_bytes_device = 0
+    for kv_cache_spec in kv_cache_spec.values():
+        assert isinstance(kv_cache_spec, KVCacheSpec)
+        if getattr(kv_cache_spec, 'store_on_host', False):
+            page_size_bytes_host += kv_cache_spec.page_size_bytes
+        else:
+            page_size_bytes_device += kv_cache_spec.page_size_bytes
+
+    assert page_size_bytes_device > 0, "Case of no device kv cache is not considered."
+    return page_size_bytes_host / page_size_bytes_device
+
+
+def allocate_kv_offload_topk_buffer_pair(
+    vllm_config: VllmConfig,
+    sparse_kv_offload_config: SparseKVOffloadConfig,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    decode_width = 1
+    if vllm_config.speculative_config is not None:
+        decode_width += vllm_config.speculative_config.num_speculative_tokens
+
+    topk_buffer_size = sparse_kv_offload_config.topk_buffer_size
+    num_kv_heads = 1 # sparse kv offload only support sfa(mla) now.
+    k_dim = vllm_config.model_config.hf_text_config.kv_lora_rank
+    v_dim = vllm_config.model_config.hf_text_config.qk_rope_head_dim
+    max_num_topk_rows = min(
+        vllm_config.scheduler_config.max_num_batched_tokens,
+        vllm_config.scheduler_config.max_num_seqs * decode_width,
+    )
+    topk_buffer_k_size_bytes = max_num_topk_rows * topk_buffer_size * num_kv_heads * k_dim * torch.bfloat16.itemsize
+    topk_buffer_v_size_bytes = max_num_topk_rows * topk_buffer_size * num_kv_heads * v_dim * torch.bfloat16.itemsize
+    # NOTE make sure to allocate k+v together and split them after allocate.
+    # Refer to the comment in empty_aligned_int8_cpu_tensors for reason.
+    topk_buffer_raw = torch.empty([topk_buffer_k_size_bytes + topk_buffer_v_size_bytes], dtype=torch.int8, device='npu')
+    topk_buffer_k = (
+        topk_buffer_raw[:topk_buffer_k_size_bytes]
+        .view(torch.bfloat16)
+        .view([max_num_topk_rows, topk_buffer_size, num_kv_heads, k_dim])
+    )
+    topk_buffer_v = (
+        topk_buffer_raw[topk_buffer_k_size_bytes:topk_buffer_k_size_bytes + topk_buffer_v_size_bytes]
+        .view(torch.bfloat16)
+        .view([max_num_topk_rows, topk_buffer_size, num_kv_heads, v_dim])
+    )
+    return (topk_buffer_k, topk_buffer_v)
+
+
+def allocate_kv_offload_topk_profile_buffers(
+    kv_cache_spec: dict[str, KVCacheSpec],
+    vllm_config: VllmConfig,
+    sparse_kv_offload_config: SparseKVOffloadConfig,
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    num_offload_layers = sum(
+        bool(getattr(spec, "store_on_host", False))
+        for spec in kv_cache_spec.values()
+    )
+    if num_offload_layers == 0:
+        raise RuntimeError(
+            "Sparse KV offload profile did not find any host-resident SFA "
+            "KV cache layers."
+        )
+
+    buffers = [
+        allocate_kv_offload_topk_buffer_pair(vllm_config, sparse_kv_offload_config)
+        for _ in range(num_offload_layers)
+    ]
+    buffer_bytes = sum(
+        tensor.numel() * tensor.element_size()
+        for buffer_pair in buffers
+        for tensor in buffer_pair
+    )
+    logger.info_once(
+        "Sparse KV offload reserved %.2f GiB of KV offload topk buffers across %d "
+        "layers for profile run.",
+        buffer_bytes / (1 << 30),
+        num_offload_layers,
+    )
+    return buffers
+
+
+_CPU_CACHE_ALIGNMENT = 2 * 1024 * 1024
+def empty_aligned_int8_cpu_tensors(
+    sizes: list[int],
+    alignment: int = _CPU_CACHE_ALIGNMENT,
+) -> list[torch.Tensor]:
+    """
+    Allocate multiple int8 tensors with specified sizes,
+    each aligned to specified alignment,
+    and minimize the gap between each tensor's data_ptr.
+    This is used for GLM-5.2 indexer reuse optimize:
+    make sure that delta_k_cache_addrs and delta_v_cache_addrs
+    between each two layers are the same,
+    so we only need to add one delta_addr to the addr tensor of sparse_copy
+    without need to mask k and v separately.
+    Same reason that we allocate topk_buffer_k & topk_buffer_v together.
+    """
+    chunk_nums = [cdiv(size, alignment) for size in sizes]
+    total_chunk_num = 1 + sum(chunk_nums)
+    raw_tensor = offload.empty([total_chunk_num * alignment], dtype=torch.int8, pin_memory=True)
+    base_addr = raw_tensor.data_ptr()
+    if base_addr % alignment:
+        base_addr = (base_addr // alignment + 1) * alignment
+    base_offset = base_addr - raw_tensor.data_ptr()
+    allocate_tensors = []
+    for size, chunk_num in zip(sizes, chunk_nums):
+        allocate_tensors.append(raw_tensor[base_offset:base_offset + size])
+        base_offset += chunk_num * alignment
+    return allocate_tensors
+
+
+def allocate_kv_cache_tensors_for_sparse_kv_offload(
+    k_tensor_size: int,
+    v_tensor_size: int,
+    alignment: int,
+    tp_rank: int,
+    keep_device_kv_cache: bool,
+    npu_kv_cache_allocate_func: callable,
+) -> tuple[torch.Tensor | int]:
+    if tp_rank == 0:
+        [k_tensor_cpu, v_tensor_cpu] = empty_aligned_int8_cpu_tensors(
+            [k_tensor_size, v_tensor_size],
+            alignment,
+        )
+    else:
+        k_tensor_cpu = None
+        v_tensor_cpu = None
+
+    if keep_device_kv_cache:
+        k_tensor = npu_kv_cache_allocate_func(
+            k_tensor_size,
+            alignment,
+        )
+        v_tensor = npu_kv_cache_allocate_func(
+            v_tensor_size,
+            alignment,
+        )
+    else:
+        k_tensor = None
+        v_tensor = None
+
+    return (k_tensor, v_tensor, k_tensor_cpu, v_tensor_cpu, k_tensor_size + v_tensor_size)
+
+
+def reshape_kv_cache_tensors_for_sparse_kv_offload(
+    raw_cache_tensors: tuple[torch.Tensor | int],
+    current_kv_cache_spec: AttentionSpec,
+    attn_backend: type[AttentionBackend],
+    tp_rank: int,
+    vllm_config: VllmConfig,
+    sparse_kv_offload_config: SparseKVOffloadConfig,
+) -> tuple[torch.Tensor]:
+    raw_k_tensor, raw_v_tensor, raw_k_tensor_cpu, raw_v_tensor_cpu, sum_page_size_bytes = raw_cache_tensors
+    assert sum_page_size_bytes % current_kv_cache_spec.page_size_bytes == 0
+    num_blocks = sum_page_size_bytes // current_kv_cache_spec.page_size_bytes
+    kv_cache_shape = attn_backend.get_kv_cache_shape(
+        num_blocks,
+        current_kv_cache_spec.block_size,
+        current_kv_cache_spec.num_kv_heads,
+        current_kv_cache_spec.head_size,
+    )
+    mla_num_blocks, mla_block_size, num_kv_heads, _ = kv_cache_shape
+    k_dim = vllm_config.model_config.hf_text_config.kv_lora_rank
+    v_dim = vllm_config.model_config.hf_text_config.qk_rope_head_dim
+    k_shape = (
+        mla_num_blocks,
+        mla_block_size,
+        num_kv_heads,
+        k_dim,
+    )
+    v_shape = (
+        mla_num_blocks,
+        mla_block_size,
+        num_kv_heads,
+        v_dim,
+    )
+    k_cache_dtype = v_cache_dtype = current_kv_cache_spec.dtype
+
+    k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape) if raw_k_tensor is not None else None
+    v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape) if raw_v_tensor is not None else None
+
+    if tp_rank == 0:
+        k_cache_cpu = raw_k_tensor_cpu.view(k_cache_dtype).view(k_shape)
+        v_cache_cpu = raw_v_tensor_cpu.view(v_cache_dtype).view(v_shape)
+    else:
+        k_cache_cpu = None
+        v_cache_cpu = None
+
+    topk_buffer_k, topk_buffer_v = (
+        allocate_kv_offload_topk_buffer_pair(vllm_config, sparse_kv_offload_config)
+    )
+    return (k_cache, v_cache, k_cache_cpu, v_cache_cpu, topk_buffer_k, topk_buffer_v)
+
+
 class SparseKVOffloadManager:
     """
     A manager responsible to the Sparse KV cache Offload.
@@ -50,45 +243,6 @@ class SparseKVOffloadManager:
     so we can schedule longer max_model_len or larger decode batch size.
     No more scheduling logic: we reuse the original block_table/slot_mapping.
     """
-    _CPU_CACHE_ALIGNMENT = 2 * 1024 * 1024
-
-    @staticmethod
-    def _align_memory(tensor: torch.Tensor, alignment: int) -> torch.Tensor:
-        data_ptr = tensor.data_ptr()
-        aligned_addr = (data_ptr + alignment - 1) // alignment * alignment
-        offset = (aligned_addr - data_ptr) // tensor.element_size()
-        return tensor[int(offset):]
-
-    @classmethod
-    def _empty_aligned_cpu_tensor(
-        cls,
-        shape: list[int],
-        dtype: torch.dtype,
-        alignment: int = _CPU_CACHE_ALIGNMENT,
-    ) -> torch.Tensor:
-        num_elements = int(np.prod(shape))
-        extra_elements = cdiv(alignment, torch.empty((), dtype=dtype).element_size())
-        tensor = offload.empty([num_elements + extra_elements], dtype=dtype, pin_memory=True)
-        return cls._align_memory(tensor, alignment)[:num_elements].view(shape)
-
-    @staticmethod
-    def empty_aligned_int8_cpu_tensors(
-        sizes: list[int],
-        alignment: int = _CPU_CACHE_ALIGNMENT,
-    ) -> list[torch.Tensor]:
-        chunk_nums = [cdiv(size, alignment) for size in sizes]
-        total_chunk_num = 1 + sum(chunk_nums)
-        raw_tensor = offload.empty([total_chunk_num * alignment], dtype=torch.int8, pin_memory=True)
-        base_addr = raw_tensor.data_ptr()
-        if base_addr % alignment:
-            base_addr = (base_addr // alignment + 1) * alignment
-        base_offset = base_addr - raw_tensor.data_ptr()
-        allocate_tensors = []
-        for size, chunk_num in zip(sizes, chunk_nums):
-            allocate_tensors.append(raw_tensor[base_offset:base_offset + size])
-            base_offset += chunk_num * alignment
-        return allocate_tensors
-
     def __init__(
         self,
         vllm_config: VllmConfig,

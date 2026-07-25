@@ -128,7 +128,12 @@ from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_full_graph_params,
 )
-from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import init_sparse_kv_offload_manager
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    allocate_kv_cache_tensors_for_sparse_kv_offload,
+    allocate_kv_offload_topk_profile_buffers,
+    init_sparse_kv_offload_manager,
+    reshape_kv_cache_tensors_for_sparse_kv_offload,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_config import (
     get_gva_layerwise_config,
     get_layerwise_physical_layer_index,
@@ -3486,7 +3491,11 @@ class NPUModelRunner(GPUModelRunner):
         topk_profile_buffers: list[tuple[torch.Tensor, torch.Tensor]] = []
         try:
             if self.sparse_kv_offload_enabled:
-                topk_profile_buffers = self._allocate_kv_offload_topk_profile_buffers()
+                topk_profile_buffers = allocate_kv_offload_topk_profile_buffers(
+                    getattr(self, "kv_cache_spec", None) or self.get_kv_cache_spec(),
+                    self.vllm_config,
+                    self.sparse_kv_offload_config,
+                )
 
             mc2_tokens_capacity = get_mc2_tokens_capacity()
             if self.max_num_tokens > mc2_tokens_capacity and select_moe_comm_method(
@@ -3496,70 +3505,6 @@ class NPUModelRunner(GPUModelRunner):
             super().profile_run()
         finally:
             del topk_profile_buffers
-
-    def _allocate_kv_offload_topk_buffer_pair(
-        self,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        decode_width = 1
-        if self.vllm_config.speculative_config is not None:
-            decode_width += self.vllm_config.speculative_config.num_speculative_tokens
-
-        topk_buffer_size = self.sparse_kv_offload_config.topk_buffer_size
-        num_kv_heads = 1
-        k_dim = self.vllm_config.model_config.hf_text_config.kv_lora_rank
-        v_dim = self.vllm_config.model_config.hf_text_config.qk_rope_head_dim
-        max_num_topk_rows = min(
-            self.max_num_tokens,
-            self.max_num_reqs * decode_width,
-        )
-        topk_buffer_k_size_bytes = max_num_topk_rows * topk_buffer_size * num_kv_heads * k_dim * torch.bfloat16.itemsize
-        topk_buffer_v_size_bytes = max_num_topk_rows * topk_buffer_size * num_kv_heads * v_dim * torch.bfloat16.itemsize
-        topk_buffer_raw = torch.empty([topk_buffer_k_size_bytes + topk_buffer_v_size_bytes], dtype=torch.int8, device='npu')
-        topk_buffer_k = (
-            topk_buffer_raw[:topk_buffer_k_size_bytes]
-            .view(torch.bfloat16)
-            .view([max_num_topk_rows, topk_buffer_size, num_kv_heads, k_dim])
-        )
-        topk_buffer_v = (
-            topk_buffer_raw[topk_buffer_k_size_bytes:topk_buffer_k_size_bytes + topk_buffer_v_size_bytes]
-            .view(torch.bfloat16)
-            .view([max_num_topk_rows, topk_buffer_size, num_kv_heads, v_dim])
-        )
-        return (topk_buffer_k, topk_buffer_v)
-
-    def _allocate_kv_offload_topk_profile_buffers(
-        self,
-    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
-        kv_cache_spec = getattr(self, "kv_cache_spec", None)
-        if kv_cache_spec is None:
-            kv_cache_spec = self.get_kv_cache_spec()
-        num_offload_layers = sum(
-            bool(getattr(spec, "store_on_host", False))
-            for spec in kv_cache_spec.values()
-        )
-        if num_offload_layers == 0:
-            raise RuntimeError(
-                "Sparse KV offload profile did not find any host-resident SFA "
-                "KV cache layers."
-            )
-
-        buffers = [
-            self._allocate_kv_offload_topk_buffer_pair()
-            for _ in range(num_offload_layers)
-        ]
-        buffer_bytes = sum(
-            tensor.numel() * tensor.element_size()
-            for buffer_pair in buffers
-            for tensor in buffer_pair
-        )
-        if self.tp_rank == 0:
-            logger.info(
-                "Reserved %.2f GiB of KV offload topk buffers across %d "
-                "layers for profile run.",
-                buffer_bytes / (1 << 30),
-                num_offload_layers,
-            )
-        return buffers
 
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
@@ -4291,10 +4236,13 @@ class NPUModelRunner(GPUModelRunner):
                     if self.sparse_kv_offload_enabled:
                         assert self.use_sparse, "Sparse KV offload only support sparse attention."
                         assert not current_sparse_sfa_c8, "Sparse KV offload do not support sparse SFA C8."
-                        raw_tensors = self._allocate_kv_cache_tensors_for_sparse_kv_offload(
+                        raw_tensors = allocate_kv_cache_tensors_for_sparse_kv_offload(
                             k_tensor_size,
                             v_tensor_size,
                             alignment,
+                            self.tp_rank,
+                            self.sparse_kv_offload_config.keep_device_kv_cache,
+                            self._allocate_int8_cache_tensor,
                         )
                         assert len(kv_cache_tensor.shared_by) == 1, "Sparse KV offload do not support HMA."
                         kv_cache_raw_tensors[layer_name] = raw_tensors
@@ -4496,11 +4444,13 @@ class NPUModelRunner(GPUModelRunner):
                     if self.sparse_kv_offload_enabled:
                         assert self.use_sparse, "Sparse KV offload only support sparse attention."
                         assert not current_sparse_sfa_c8, "Sparse KV offload do not support sparse SFA C8."
-                        reshaped_tensors = self._reshape_kv_cache_tensors_for_sparse_kv_offload(
-                            layer_name,
+                        reshaped_tensors = reshape_kv_cache_tensors_for_sparse_kv_offload(
                             kv_cache_raw_tensors[layer_name],
                             current_kv_cache_spec,
                             attn_backend,
+                            self.tp_rank,
+                            self.vllm_config,
+                            self.sparse_kv_offload_config,
                         )
                         kv_caches[layer_name] = reshaped_tensors
                         continue
@@ -5043,27 +4993,8 @@ class NPUModelRunner(GPUModelRunner):
                 if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:  # type: ignore[attr-defined]
                     object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
 
-        if (
-            self.sparse_kv_offload_enabled
-            and self.enable_sparse_li_c8
-            and getattr(self, "tp_rank", 0) == 0
-        ):
-            indexer_specs = [
-                spec
-                for spec in kv_cache_spec.values()
-                if isinstance(spec, AscendSFAIndexerCacheSpec)
-            ]
-            li_c8_indexer_specs = [
-                spec for spec in indexer_specs if spec.cache_sparse_li_c8
-            ]
-            logger.info(
-                "Sparse KV offload keeps SFA indexer caches device-resident; "
-                "sparse LI C8 is active for %d/%d indexer cache layers.",
-                len(li_c8_indexer_specs),
-                len(indexer_specs),
-            )
-
-        self.kv_cache_spec = kv_cache_spec # reserve for Sparse KV offload usage
+        if self.sparse_kv_offload_enabled:
+            self.kv_cache_spec = kv_cache_spec # reserve for Sparse KV offload usage
         return kv_cache_spec
 
     def _check_and_update_cudagraph_mode(
@@ -5179,96 +5110,6 @@ class NPUModelRunner(GPUModelRunner):
             runner_only_attn_layers=self.runner_only_attn_layers,
             static_forward_context=(self.compilation_config.static_forward_context),
         )
-
-    def get_host_device_memory_usage_ratio(self) -> float:
-        page_size_bytes_host = 0
-        page_size_bytes_device = 0
-        for kv_cache_spec in self.kv_cache_spec.values():
-            assert isinstance(kv_cache_spec, KVCacheSpec)
-            if getattr(kv_cache_spec, 'store_on_host', False):
-                page_size_bytes_host += kv_cache_spec.page_size_bytes
-            else:
-                page_size_bytes_device += kv_cache_spec.page_size_bytes
-
-        assert page_size_bytes_device > 0, "Case of no device kv cache is not considered."
-        return page_size_bytes_host / page_size_bytes_device
-
-    def _allocate_kv_cache_tensors_for_sparse_kv_offload(
-        self,
-        k_tensor_size: int,
-        v_tensor_size: int,
-        alignment: int,
-    ) -> tuple[torch.Tensor | int]:
-        if self.tp_rank == 0:
-            [k_tensor_cpu, v_tensor_cpu] = self.sparse_kv_offload_manager.empty_aligned_int8_cpu_tensors(
-                [k_tensor_size, v_tensor_size],
-                alignment,
-            )
-        else:
-            k_tensor_cpu = None
-            v_tensor_cpu = None
-
-        if self.sparse_kv_offload_config.keep_device_kv_cache:
-            k_tensor = self._allocate_int8_cache_tensor(
-                k_tensor_size,
-                alignment,
-            )
-            v_tensor = self._allocate_int8_cache_tensor(
-                v_tensor_size,
-                alignment,
-            )
-        else:
-            k_tensor = None
-            v_tensor = None
-
-        return (k_tensor, v_tensor, k_tensor_cpu, v_tensor_cpu, k_tensor_size + v_tensor_size)
-
-    def _reshape_kv_cache_tensors_for_sparse_kv_offload(
-        self,
-        layer_name: str,
-        raw_cache_tensors: tuple[torch.Tensor | int],
-        current_kv_cache_spec: AttentionSpec,
-        attn_backend: type[AttentionBackend],
-    ) -> tuple[torch.Tensor]:
-        raw_k_tensor, raw_v_tensor, raw_k_tensor_cpu, raw_v_tensor_cpu, sum_page_size_bytes = raw_cache_tensors
-        assert sum_page_size_bytes % current_kv_cache_spec.page_size_bytes == 0
-        num_blocks = sum_page_size_bytes // current_kv_cache_spec.page_size_bytes
-        kv_cache_shape = attn_backend.get_kv_cache_shape(
-            num_blocks,
-            current_kv_cache_spec.block_size,
-            current_kv_cache_spec.num_kv_heads,
-            current_kv_cache_spec.head_size,
-        )
-        mla_num_blocks, mla_block_size, num_kv_heads, _ = kv_cache_shape
-        k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
-        k_shape = (
-            mla_num_blocks,
-            mla_block_size,
-            num_kv_heads,
-            k_dim,
-        )
-        v_shape = (
-            mla_num_blocks,
-            mla_block_size,
-            num_kv_heads,
-            v_dim,
-        )
-        k_cache_dtype = v_cache_dtype = current_kv_cache_spec.dtype
-
-        k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape) if raw_k_tensor is not None else None
-        v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape) if raw_v_tensor is not None else None
-
-        if self.tp_rank == 0:
-            k_cache_cpu = raw_k_tensor_cpu.view(k_cache_dtype).view(k_shape)
-            v_cache_cpu = raw_v_tensor_cpu.view(v_cache_dtype).view(v_shape)
-        else:
-            k_cache_cpu = None
-            v_cache_cpu = None
-
-        topk_buffer_k, topk_buffer_v = (
-            self._allocate_kv_offload_topk_buffer_pair()
-        )
-        return (k_cache, v_cache, k_cache_cpu, v_cache_cpu, topk_buffer_k, topk_buffer_v)
 
 def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
     """
