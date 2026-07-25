@@ -133,6 +133,34 @@ class TestUtils(TestBase):
         with mock.patch("torch.npu.current_stream") as mock_current_stream:
             self.assertEqual(utils.current_stream(), mock_current_stream())
 
+    def test_setup_ascend_local_comm_res_maps_endpoint_device(self):
+        kv_transfer_config = mock.MagicMock()
+        kv_transfer_config.kv_connector_extra_config = {
+            "ascend_local_comm_res_path": "/etc/hixl",
+        }
+        cases = [
+            ("visible device list", {"ASCEND_RT_VISIBLE_DEVICES": "4,5"}, 1, {}, 5),
+            ("partial container mount", {}, 0, {"4": {"0": "4"}, "5": {"0": "5"}}, 4),
+        ]
+
+        for name, environ, visible_index, npu_map, endpoint_device_id in cases:
+            with (
+                self.subTest(name),
+                mock.patch("vllm.platforms.current_platform") as mock_platform,
+                mock.patch.dict(os.environ, environ, clear=True),
+                mock.patch(
+                    "vllm_ascend.cpu_binding.DeviceInfo.get_npu_map_info",
+                    return_value=npu_map,
+                ),
+                mock.patch("builtins.open", mock.mock_open(read_data='{"version":"1.3"}')) as mock_file,
+            ):
+                mock_platform.logical_device_id_to_visible_device_id.return_value = visible_index
+
+                utils.setup_ascend_local_comm_res(0, kv_transfer_config)
+
+                mock_platform.logical_device_id_to_visible_device_id.assert_called_once_with(0)
+                mock_file.assert_called_once_with(f"/etc/hixl/ub_endpoint_npu_{endpoint_device_id}.json")
+
     def test_enable_dsa_cp_with_o_proj_tp_accepts_missing_kv_transfer(self):
         mock_vllm_config = mock.MagicMock()
         mock_vllm_config.kv_transfer_config = None

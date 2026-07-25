@@ -542,10 +542,26 @@ def adapt_patch(is_global_patch: bool = False):
 
 
 def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None) -> None:
-    """Load the local A5 endpoint config into ASCEND_LOCAL_COMM_RES."""
+    """Load the local A5 endpoint config into ASCEND_LOCAL_COMM_RES.
+
+    This is a temporary workaround for a HiXL transport dependency on 950DT
+    server/pod deployments. Endpoint resource selection should eventually be
+    handled by HiXL or its lower-level components. The visible device index is
+    mapped through the runtime device list so containers mounting only a subset
+    of host NPUs still select the matching endpoint file.
+    """
     if kv_transfer_config is None:
         return
 
+    extra_config = kv_transfer_config.kv_connector_extra_config or {}
+    local_comm_res_path = extra_config.get("ascend_local_comm_res_path")
+    if not local_comm_res_path:
+        return
+
+    # Inline import avoids a circular dependency with vllm_ascend.platform.
+    from vllm.platforms import current_platform
+
+    visible_device_index = current_platform.logical_device_id_to_visible_device_id(local_rank)
     visible_devices = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
     if visible_devices is None:
         from vllm_ascend.cpu_binding import DeviceInfo
@@ -554,17 +570,14 @@ def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None)
     else:
         devices = [int(x) for x in visible_devices.split(",") if x.strip()]
 
-    extra_config = kv_transfer_config.kv_connector_extra_config or {}
-    local_comm_res_path = extra_config.get("ascend_local_comm_res_path")
-    if not local_comm_res_path:
-        return
-
     if not devices:
         raise ValueError("No NPU devices found or specified in ASCEND_RT_VISIBLE_DEVICES.")
-    if local_rank < 0 or local_rank >= len(devices):
-        raise ValueError(f"local_rank {local_rank} is out of bounds for the available NPU devices: {devices}")
+    if visible_device_index < 0 or visible_device_index >= len(devices):
+        raise ValueError(
+            f"visible_device_index {visible_device_index} is out of bounds for the available NPU devices: {devices}"
+        )
 
-    local_comm_res_file = os.path.join(local_comm_res_path, f"ub_endpoint_npu_{devices[local_rank]}.json")
+    local_comm_res_file = os.path.join(local_comm_res_path, f"ub_endpoint_npu_{devices[visible_device_index]}.json")
     try:
         with open(local_comm_res_file) as f:
             data = json.load(f)

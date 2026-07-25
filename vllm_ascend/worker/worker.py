@@ -453,6 +453,9 @@ class NPUWorker(WorkerBase):
         torch.npu.empty_cache()
 
         if get_ascend_device_type() == AscendDeviceType.A5:
+            # Temporary workaround for a HiXL transport dependency on 950DT
+            # server/pod deployments. HiXL should eventually select its local
+            # endpoint resource without requiring vLLM Ascend to configure it.
             setup_ascend_local_comm_res(self.local_rank, self.vllm_config.kv_transfer_config)
 
         # take current memory snapshot
