@@ -108,6 +108,12 @@ struct MlaTilingData {
     uint32_t hiddenStrideRope{192};    // qk_nope_head_dim + qk_rope_head_dim
     uint32_t qkNopeHeadDim{128};       // for RoPE offset calc
     float avgFactor{0.000651041666f};  // 1/splitSizeTwo (1/qLoraRank), for RmsNorm avg
+
+    // KV cache dim0 (blockNum) stride support.
+    // Use uint64_t for all three so host/device ABI padding matches.
+    uint64_t kvCacheBlockSize{128};
+    uint64_t kvCacheStride0{0};
+    uint64_t kvCacheRopeStride0{0};
 };
 
 #endif  // MLAPREPROCESS_TILING_H

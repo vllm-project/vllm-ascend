@@ -135,6 +135,10 @@ struct OpParam {
     uint32_t qkNopeHeadDim;
     uint32_t qkRopeHeadDim;
     uint32_t kvLoraRank;
+    // KV cache first-axis (blockNum) non-contiguous support
+    uint64_t kvCacheBlockSize{128};
+    uint64_t kvCacheStride0{0};
+    uint64_t kvCacheRopeStride0{0};
 };
 
 class PpMatmulTilingApi
@@ -630,12 +634,15 @@ void MlaPreprocessTiling::Init()
     tilingData->hiddenStrideRope = opParam.qkNopeHeadDim + opParam.qkRopeHeadDim;
     tilingData->qkNopeHeadDim = opParam.qkNopeHeadDim;
     tilingData->avgFactor = 1.0f / static_cast<float>(opParam.qLoraRank);
+    tilingData->kvCacheBlockSize = opParam.kvCacheBlockSize == 0 ? 128ULL : opParam.kvCacheBlockSize;
+    tilingData->kvCacheStride0 = opParam.kvCacheStride0;
+    tilingData->kvCacheRopeStride0 = opParam.kvCacheRopeStride0;
 
     return;
 }
 
 std::unordered_map<c10::string_view, uint16_t> cache_mode_map = {
-    {"krope_ctkv", 1}, {"int8_nzcache", 2}, {"nzcache", 3}};
+    {"kvcache", 0}, {"krope_ctkv", 1}, {"int8_nzcache", 2}, {"nzcache", 3}};
 
 std::unordered_map<c10::string_view, uint16_t> quant_mode_map = {
     {"per_tensor_quant_asymm", 0},
@@ -654,11 +661,63 @@ inline int get_op_mode(const MapType &mode_map, c10::optional<c10::string_view> 
     return it->second;
 }
 
+// Contiguous layout default for dim0: product(shape[1:]).
+inline uint64_t GetDefaultStride0FromSizes(at::IntArrayRef sizes)
+{
+    uint64_t stride = 1;
+    for (size_t dim = 1; dim < sizes.size(); ++dim) {
+        stride *= static_cast<uint64_t>(sizes[dim]);
+    }
+    return stride;
+}
+
+// Only dim0 may be non-contiguous; dims 1..N-1 must match contiguous strides.
+inline void ValidateCacheNonFirstAxisContiguous(const at::Tensor &cache, const char *tensorName)
+{
+    if (cache.dim() <= 1) {
+        return;
+    }
+    auto sizes = cache.sizes();
+    auto strides = cache.strides();
+    int64_t expectedStride = 1;
+    for (int64_t i = static_cast<int64_t>(sizes.size()) - 1; i >= 1; --i) {
+        TORCH_CHECK(strides[i] == expectedStride,
+                    tensorName, " dim", i, " is non-contiguous: actual stride=", strides[i],
+                    ", expected contiguous stride=", expectedStride,
+                    ". Only the first axis (dim0/blockNum) may be non-contiguous.");
+        expectedStride *= sizes[i];
+    }
+}
+
+inline uint64_t GetTensorStride0(const at::Tensor &cache)
+{
+    const uint64_t defaultStride0 = GetDefaultStride0FromSizes(cache.sizes());
+    if (cache.dim() < 1) {
+        return defaultStride0;
+    }
+    const uint64_t actualStride0 = static_cast<uint64_t>(cache.stride(0));
+    return (actualStride0 == defaultStride0) ? defaultStride0 : actualStride0;
+}
+
+// blockSize: ND [blockNum, blockSize, ...] → dim1;
+// NZ physical storage [blockNum, C1, blockSize, C0] → dim2 when dim2 != 1.
+inline uint64_t GetKvCacheBlockSize(const at::Tensor &kv_cache, int32_t cacheMode)
+{
+    auto sizes = kv_cache.sizes();
+    TORCH_CHECK(sizes.size() >= 2, "kv_cache must have at least 2 dims");
+    const bool isNzCache = (cacheMode == 2 || cacheMode == 3);
+    if (isNzCache && sizes.size() > 2 && sizes[2] != 1) {
+        return static_cast<uint64_t>(sizes[2]);
+    }
+    return static_cast<uint64_t>(sizes[1]);
+}
+
 std::tuple<at::Tensor, at::Tensor, uint32_t> mla_preprocess_tiling(
     const at::Tensor &hiddenState,
     const at::Tensor &wdqkv,
     const at::Tensor &wuk,
     const at::Tensor &gamma1,
+    const at::Tensor &kv_cache,
     const at::Tensor &kv_cache_rope,
     c10::optional<c10::string_view> cache_mode,
     c10::optional<c10::string_view> quant_mode,
@@ -692,6 +751,9 @@ std::tuple<at::Tensor, at::Tensor, uint32_t> mla_preprocess_tiling(
     uint32_t qLoraRank = gamma1.sizes()[0];
     uint32_t qkRopeHeadDim = kv_cache_rope.sizes().back();
 
+    ValidateCacheNonFirstAxisContiguous(kv_cache, "kv_cache");
+    ValidateCacheNonFirstAxisContiguous(kv_cache_rope, "kv_cache_rope");
+
     OpParam opParam;
     opParam.hiddenStateDim = hiddenStateDim;
     opParam.N = N;
@@ -699,12 +761,18 @@ std::tuple<at::Tensor, at::Tensor, uint32_t> mla_preprocess_tiling(
     opParam.cacheMode = static_cast<int32_t>(cacheMode);
     opParam.quantMode = static_cast<QuantMode>(quantMode);
     opParam.inDtype = hiddenState.options().dtype();
+    // PER_TOKEN_SYMM only has bf16 kernel instantiations (tilingKey bit8=1).
+    TORCH_CHECK(!(opParam.quantMode == QuantMode::PER_TOKEN_SYMM_QUANT && opParam.inDtype != at::kBFloat16),
+                "quant_mode=per_token_quant_symm only supports bf16 input, got ", opParam.inDtype);
     opParam.enableInnerOut = enable_inner_out;
     opParam.enableRope = enable_rope;
     opParam.qLoraRank = qLoraRank;
     opParam.qkNopeHeadDim = qkNopeHeadDim;
     opParam.qkRopeHeadDim = qkRopeHeadDim;
     opParam.kvLoraRank = kvLoraRank;
+    opParam.kvCacheBlockSize = GetKvCacheBlockSize(kv_cache, static_cast<int32_t>(cacheMode));
+    opParam.kvCacheStride0 = GetTensorStride0(kv_cache);
+    opParam.kvCacheRopeStride0 = GetTensorStride0(kv_cache_rope);
     if (wdqkv.options().dtype() == at::kBFloat16 || wdqkv.options().dtype() == at::kHalf) {
         opParam.isWeightQuantized = 0;
     } else {
