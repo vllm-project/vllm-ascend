@@ -1,0 +1,8 @@
+{
+  "nightly": [
+    "IQuest-Coder-V1-40B-Instruct.yaml"
+  ],
+  "pr-only": [
+    "IQuest-Coder-V1-40B-Instruct.yaml"
+  ]
+}
