@@ -7,6 +7,8 @@ from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP, DeepSeekMultiTo
 from vllm.model_executor.models.deepseek_v2 import GlmMoeDsaForCausalLM
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
+from vllm_ascend.utils import vllm_version_is
+
 MTP_ROT_WEIGHT_NAME = "rot.weight"
 
 
@@ -73,8 +75,13 @@ class AscendGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
         return loader.load_weights(weights)
 
 
-vllm.model_executor.models.deepseek_v2.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name
-vllm.model_executor.models.deepseek_mtp.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name
+if vllm_version_is("0.25.1"):
+    vllm.model_executor.models.deepseek_v2.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name  # type: ignore[import-not-found]
+    vllm.model_executor.models.deepseek_mtp.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name  # type: ignore[import-not-found]
+else:
+    vllm.model_executor.models.utils.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name  # type: ignore[import-not-found]
+    vllm.model_executor.models.deepseek_v2.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name  # type: ignore[import-not-found]
+    vllm.model_executor.models.deepseek_mtp.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name  # type: ignore[import-not-found]
 vllm.model_executor.models.deepseek_mtp.DeepSeekMultiTokenPredictorLayer = AscendDeepSeekMultiTokenPredictorLayer
 vllm.model_executor.models.deepseek_mtp.DeepSeekMTP = AscendDeepSeekMTP
 vllm.model_executor.models.deepseek_v2.GlmMoeDsaForCausalLM = AscendGlmMoeDsaForCausalLM
