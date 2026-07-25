@@ -21,6 +21,7 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import Specul
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     set_draft_graph_prefill_params,
@@ -101,16 +102,27 @@ class EagleAclGraphManager(SpeculatorCudaGraphManager):
                     if self.dp_size > 1
                     else None
                 )
-                prepare_inputs_to_capture(
-                    num_reqs,
-                    num_tokens,
-                    model_state,
-                    input_buffers,
-                    block_tables,
-                    attn_groups,
-                    kv_cache_config,
-                    full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
-                )
+                if vllm_version_is("0.25.1"):
+                    prepare_inputs_to_capture(
+                        num_reqs,
+                        num_tokens,
+                        model_state,
+                        input_buffers,
+                        block_tables,
+                        attn_groups,
+                        kv_cache_config,
+                        full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
+                    )
+                else:
+                    prepare_inputs_to_capture(
+                        num_reqs,
+                        num_tokens,
+                        model_state,
+                        input_buffers,
+                        block_tables,
+                        attn_groups,
+                        kv_cache_config,
+                    )
                 return lambda cg_mode: forward_fn(
                     num_reqs,
                     cg_mode == CUDAGraphMode.PIECEWISE,
