@@ -620,6 +620,27 @@ at::Tensor npu_recurrent_gated_delta_rule_meta(
     return output;
 }
 
+at::Tensor npu_fused_gdn_decode_meta(
+    const at::Tensor& mixed_qkv,
+    const at::Tensor& a,
+    const at::Tensor& b,
+    const at::Tensor& A_log,
+    const at::Tensor& dt_bias,
+    at::Tensor& state,
+    const at::Tensor& ssm_state_indices,
+    double scale,
+    double softplus_threshold)
+{
+    (void)a;
+    (void)b;
+    (void)A_log;
+    (void)dt_bias;
+    (void)ssm_state_indices;
+    (void)scale;
+    (void)softplus_threshold;
+    return at::empty_symint({mixed_qkv.size(0), 1, state.size(1), state.size(2)}, mixed_qkv.options());
+}
+
 std::vector<at::Tensor> moe_grouped_matmul_meta(
     at::Tensor x,
     at::Tensor weight,
@@ -1646,6 +1667,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
      // store_kv_block
     ops.impl("store_kv_block_pre", &vllm_ascend::meta::store_kv_block_metadata);
     ops.impl("store_kv_block", &vllm_ascend::meta::store_kv_block);
+    // npu_fused_gdn_decode
+    ops.impl("npu_fused_gdn_decode", &vllm_ascend::meta::npu_fused_gdn_decode_meta);
 }
 }
 #endif

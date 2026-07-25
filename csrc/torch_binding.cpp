@@ -49,6 +49,7 @@
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
+#include "attention/fused_gdn_decode/fused_gdn_decode_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -2759,5 +2760,17 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_sparse_attention_score", torch::kPrivateUse1,
              &vllm_ascend::npu_sparse_attention_score);
+
+    ops.def(
+        "npu_fused_gdn_decode(Tensor mixed_qkv, "
+        "                     Tensor a, "
+        "                     Tensor b, "
+        "                     Tensor A_log, "
+        "                     Tensor dt_bias, "
+        "                     Tensor(a!) state, "
+        "                     Tensor ssm_state_indices, "
+        "                     float scale, "
+        "                     float softplus_threshold=20.0) -> Tensor");
+    ops.impl("npu_fused_gdn_decode", torch::kPrivateUse1, &vllm_ascend::npu_fused_gdn_decode);
 }
 #endif
