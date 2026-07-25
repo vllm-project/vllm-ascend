@@ -513,9 +513,37 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             if self.enable_multi_card:
                 from vllm.distributed.parallel_state import get_ep_group as _gep
                 _ep = _gep()
+                # [ep_size*topk slot sizing] Under cross-rank router FP variance,
+                # each EP rank may select a different topk set for the same
+                # token, so the all-reduced active-expert union can reach
+                # ep_size * experts_per_token. With fewer device slots than
+                # that, plan_placement overflows and falls back to the spread
+                # log2phy, which deadlocks MC2 all-to-all. Auto-bump so any
+                # ep_size is safe without manual config tuning. The manager
+                # singleton is built at model-runner load time (before this
+                # layer's __init__) and caches num_device_experts, so update it
+                # explicitly; the runner reads the bumped value below via
+                # moe_config.num_local_experts (set after this block) and
+                # _expert_map, keeping device weights and placement consistent.
+                _topk = self.moe_config.experts_per_token
+                _min_slots = _ep.world_size * _topk
+                if _offload_cfg.num_device_experts < _min_slots:
+                    logger.warning(
+                        "[expert_offload] num_device_experts=%d < "
+                        "ep_size*topk=%d*%d=%d; bumping to %d to avoid "
+                        "multi-card placement overflow.",
+                        _offload_cfg.num_device_experts, _ep.world_size, _topk,
+                        _min_slots, _min_slots)
+                    _offload_cfg.num_device_experts = _min_slots
+                    from vllm_ascend.expert_offload import ExpertOffloadManager
+                    if ExpertOffloadManager._instance is not None:
+                        _mgr = ExpertOffloadManager.get_instance()
+                        _mgr.num_device_experts = _min_slots
+                        _mgr.offload_threshold = _min_slots // _mgr.topk
                 _per_rank = _offload_cfg.num_device_experts // _ep.world_size
                 self.log2phy = init_log2phy_for_offload_multi_card(
-                    self.global_num_experts, _per_rank, _ep.world_size, _ep.rank())
+                    self.global_num_experts, _per_rank, _ep.world_size,
+                    _ep.rank_in_group)
                 self._expert_map = torch.arange(
                     _offload_cfg.num_device_experts, dtype=torch.int32)
                 # device weight dim0 must equal per_rank slots (GMM groupList).
@@ -527,7 +555,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                         "[multi_card_offload INIT] ep_size=%s ep_rank=%s "
                         "global_num_experts=%s num_device_experts(total)=%s "
                         "per_rank_slots=%s _expert_map.shape=%s",
-                        _ep.world_size, _ep.rank(), self.global_num_experts,
+                        _ep.world_size, _ep.rank_in_group, self.global_num_experts,
                         _offload_cfg.num_device_experts, _per_rank,
                         tuple(self._expert_map.shape))
             else:
