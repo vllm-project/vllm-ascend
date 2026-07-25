@@ -1382,28 +1382,33 @@ class ExpertOffloadManager:
         # so stream/graph-independent; safe inside the host callback).
         local_counts = local_expert_counts_cpu(topk_ids_h, self.num_total_experts)
         global_counts = gather_global_counts_cpu(local_counts, cpu_group)
-        # --- Two-timescale LRU: local freq tracking + periodic gloo all_reduce ---
-        import numpy as np
-        step = self._mc_step.get(layer_idx, 0) + 1
-        self._mc_step[layer_idx] = step
-        freq = self._mc_freq.setdefault(
-            layer_idx, np.zeros(self.num_total_experts, dtype=np.int32))
-        for e in topk_ids_h.reshape(-1).tolist():
-            freq[int(e)] += 1
-        # Every N steps: all_reduce local freq -> global hotness, reset window.
-        if self.ep_size > 1 and step % self._mc_allreduce_interval == 0:
-            import torch.distributed as dist
-            ft = torch.from_numpy(freq.copy())
-            dist.all_reduce(ft, op=dist.ReduceOp.SUM, group=cpu_group)
-            self._mc_global_hotness = ft.numpy()
-            freq[:] = 0
-        hotness = self._mc_global_hotness
+        # --- Two-timescale LRU (gated by cache_policy_enabled) ---
+        cache_on = self.offload_config.cache_policy_enabled
+        if cache_on:
+            import numpy as np
+            step = self._mc_step.get(layer_idx, 0) + 1
+            self._mc_step[layer_idx] = step
+            freq = self._mc_freq.setdefault(
+                layer_idx, np.zeros(self.num_total_experts, dtype=np.int32))
+            for e in topk_ids_h.reshape(-1).tolist():
+                freq[int(e)] += 1
+            if self.ep_size > 1 and step % self._mc_allreduce_interval == 0:
+                import torch.distributed as dist
+                ft = torch.from_numpy(freq.copy())
+                dist.all_reduce(ft, op=dist.ReduceOp.SUM, group=cpu_group)
+                self._mc_global_hotness = ft.numpy()
+                freq[:] = 0
+            hotness = self._mc_global_hotness
+            prev_log2phy = self._mc_prev_log2phy.get(layer_idx)
+        else:
+            hotness = None
+            prev_log2phy = None
 
         # --- Plan placement: stable slot (prev_log2phy) + hotness (new order) ---
-        prev_log2phy = self._mc_prev_log2phy.get(layer_idx)
         placement = plan_placement(global_counts, self.ep_size, per_rank_slots,
                                    prev_log2phy, hotness)
-        self._mc_prev_log2phy[layer_idx] = placement.log2phy.clone()
+        if cache_on:
+            self._mc_prev_log2phy[layer_idx] = placement.log2phy.clone()
         if self._debug:
             logger.info(
                 "[MC_OBS] rank=%s L=%s DECODE placement per_rank_experts=%s "
@@ -1421,15 +1426,21 @@ class ExpertOffloadManager:
                 self.ep_rank, layer_idx, len(placement.unassigned), physical_range)
             return
         my_experts = placement.per_rank_experts[self.ep_rank]
-        # Resident cache: skip H2D on hit (same expert already in same slot).
+        # Resident cache (gated by cache_policy_enabled): skip H2D on hit.
         # Skip -1 slots (empty, from stable-slot gaps).
-        cur = self._mc_resident.setdefault(layer_idx, {})
-        hits, misses = [], []
-        for slot, eid in enumerate(my_experts):
-            if eid < 0:
-                continue
-            eid = int(eid)
-            (hits if cur.get(slot) == eid else misses).append((slot, eid))
+        if cache_on:
+            cur = self._mc_resident.setdefault(layer_idx, {})
+            hits, misses = [], []
+            for slot, eid in enumerate(my_experts):
+                if eid < 0:
+                    continue
+                eid = int(eid)
+                (hits if cur.get(slot) == eid else misses).append((slot, eid))
+        else:
+            # No cache: every expert is a miss (full H2D every step).
+            cur = {}
+            hits = []
+            misses = [(slot, int(eid)) for slot, eid in enumerate(my_experts) if eid >= 0]
         if misses:
             with torch_npu.npu.stream(self.load_stream):
                 for slot, eid in misses:

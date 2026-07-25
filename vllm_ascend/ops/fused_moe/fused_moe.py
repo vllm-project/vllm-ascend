@@ -518,9 +518,10 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     self.global_num_experts, _per_rank, _ep.world_size, _ep.rank())
                 self._expert_map = torch.arange(
                     _offload_cfg.num_device_experts, dtype=torch.int32)
-                # device weight dim0 must equal per_rank slots (GMM groupList);
-                # the re-create_weights below sizes it from local_num_experts.
-                self.local_num_experts = _per_rank
+                # device weight dim0 must equal per_rank slots (GMM groupList).
+                # NOTE: local_num_experts is a read-only property -> moe_config.num_local_experts;
+                # the small slot count is applied to moe_config in the offload block below
+                # (after EPLB validation), which the property then reads.
                 if _offload_cfg.moe_offload_debug:
                     logger.info_once(
                         "[multi_card_offload INIT] ep_size=%s ep_rank=%s "
@@ -532,7 +533,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             else:
                 self.log2phy = init_log2phy_for_offload(
                     self.global_num_experts, _offload_cfg.num_device_experts)
-                self.local_num_experts = _offload_cfg.num_device_experts
 
         moe_config.global_redundant_expert_num = self.global_redundant_expert_num
         local_num_experts = moe_config.num_local_experts
@@ -545,6 +545,17 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 f"allocated={local_num_experts}, placement={expected_local_num_experts}. "
                 "Ensure vLLM and Ascend use the same redundant expert count."
             )
+        # [expert_offload] local_num_experts is a read-only property -> moe_config.num_local_experts.
+        # The EPLB validation above passed with the full count; NOW override to the small offload
+        # slot count, BEFORE setup_moe_comm_method so expert_token_nums / token-dispatcher are sized
+        # to the offload per-rank slots (== device weight dim0 from create_weights), not full EP.
+        if self.enable_expert_offload:
+            if self.enable_multi_card:
+                from vllm.distributed.parallel_state import get_ep_group as _gep
+                _offload_ne = _offload_cfg.num_device_experts // _gep().world_size
+            else:
+                _offload_ne = _offload_cfg.num_device_experts
+            self.moe_config.num_local_experts = _offload_ne
         # Keep ExpertMapManager's physical-expert map until checkpoint loading
         # finishes. The upstream loader uses it to place both original and
         # redundant physical experts. Ascend execution uses self._expert_map,
@@ -584,25 +595,39 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
 
             self._quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
 
-        # --- [expert_offload ADAPT onto main] main's factory pre-allocated weights
-        # at standard-EP size (num_local_experts per rank). Offload needs only
-        # num_device_experts slots resident, so re-create the device weights at the
-        # offload size (local_num_experts set in the override above), wrap the
-        # weight_loader to stash experts >= ndev into the CPU buffer, and register
-        # the per-layer CPU buffers. Mirrors the pre-rebase working init path. ---
+        # --- [expert_offload ADAPT onto main] In v0.25.1 the expert weights live
+        # on routed_experts (the "refactored weight owner" — apply() passes
+        # routed_experts as the weight layer, not self), so the offload machinery
+        # must operate on routed_experts, not the runner. Propagate the offload
+        # flags + global_num_experts onto it (apply's offload block reads them
+        # from layer=routed_experts), wrap routed_experts.weight_loader so
+        # checkpoint loading stashes experts >= ndev into the CPU buffer,
+        # re-create its device weights at the offload slot size
+        # (num_device_experts//ep_size) so the freshly-wrapped loader takes
+        # effect on the new params, and register per-layer CPU buffers. ---
         if self.enable_expert_offload:
+            self.routed_experts.global_num_experts = self.global_num_experts
+            self.routed_experts.enable_expert_offload = self.enable_expert_offload
+            self.routed_experts.enable_multi_card = self.enable_multi_card
             self._wrap_weight_loader_for_offload()
+            # Source create_weights params from where main actually keeps them:
+            # moe_config / routed_experts, NOT the runner (main moved
+            # intermediate_size_per_partition off the runner; params_dtype lives on
+            # routed_experts). hidden_size is still a runner attr. Mirrors the
+            # factory's moe_quant_params in routed_experts.py.
             _offload_moe_quant_params = {
                 "num_experts": self.local_num_experts,
                 "hidden_size": self.hidden_size,
-                "intermediate_size_per_partition": self.intermediate_size_per_partition,
-                "params_dtype": self.params_dtype,
-                "weight_loader": self.weight_loader,
+                "intermediate_size_per_partition":
+                    self.moe_config.intermediate_size_per_partition,
+                "params_dtype": self.routed_experts.params_dtype,
+                "weight_loader": self.routed_experts.weight_loader,
             }
-            self.quant_method.create_weights(layer=self, **_offload_moe_quant_params)
+            self._quant_method.create_weights(layer=self.routed_experts,
+                                             **_offload_moe_quant_params)
             from vllm_ascend.expert_offload import ExpertOffloadManager
             ExpertOffloadManager.get_instance().init_layer_cpu_buffers(
-                self, self.moe_instance_id)
+                self.routed_experts, self.moe_instance_id)
 
         # Register this MoE layer with EPLB for PP compatibility.
         # PPMissingLayer (nn.Identity) never calls AscendFusedMoE.__init__,
@@ -621,7 +646,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         from vllm_ascend.expert_offload import ExpertOffloadManager
         mgr = ExpertOffloadManager.get_instance()
         layer_moe_idx = self.moe_instance_id
-        orig_wl = self.weight_loader
+        # v0.25.1: weight_loader lives on routed_experts (RoutedExperts), not the
+        # runner. Wrap it there so checkpoint loading of expert params (which hold
+        # a reference to routed_experts.weight_loader set at create_weights time)
+        # goes through the offload interceptor. Re-create weights after this so
+        # the new params capture the wrapped loader.
+        orig_wl = self.routed_experts.weight_loader
         # ndev = per-rank device slot count (== device weight dim0). The loader
         # fills the device weight with experts [0, ndev); num_device_experts is
         # the TOTAL slot count, so divide by ep_size. ep_size=1 (single-card) is
@@ -664,7 +694,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             return orig_wl(param, loaded_weight, weight_name, shard_id,
                            expert_id, **kwargs)
 
-        self.weight_loader = _offload_weight_loader
+        self.routed_experts.weight_loader = _offload_weight_loader
 
     def _validate_shared_expert_consistency(self):
         """Validate that split shared expert computation matches integrated computation."""
