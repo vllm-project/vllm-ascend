@@ -84,7 +84,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     get_kv_quant_mode,
 )
-
 from vllm_ascend.models.minimax_m3.msa_m3 import (
     AscendMiniMaxM3Indexer,
     AscendMiniMaxM3IndexerLinear,
