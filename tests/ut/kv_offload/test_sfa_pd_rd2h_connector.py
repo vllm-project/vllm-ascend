@@ -1,4 +1,4 @@
-"""Regression tests for SFA PD transfer into KVOffloadDecodeManager."""
+"""Regression tests for SFA PD transfer into SparseKVOffloadManager."""
 
 import asyncio
 import threading
@@ -24,37 +24,37 @@ from examples.disaggregated_prefill_v1.load_balance_proxy_layerwise_server_examp
 )
 from vllm_ascend import envs  # noqa: E402
 from vllm_ascend.distributed.kv_transfer import register_connector  # noqa: E402
-from vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.connector import (  # noqa: E402
-    SFAPDCpuOffloadConnector,
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector import (  # noqa: E402
+    SFAPDRD2HConnector,
 )
-from vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.protocol import (  # noqa: E402
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (  # noqa: E402
     BATCH_KV_TRANSFER_PARAMS,
     READ_READY_BATCH,
     LayerMetadata,
     SendTask,
     infer_sfa_component_group_ids,
 )
-from vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.read_thread import (  # noqa: E402
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.read_thread import (  # noqa: E402
     ConsumerReadState,
     MembPullReadThread,
 )
-from vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.scheduler import (  # noqa: E402
-    SFAPDCpuOffloadScheduler,
-    SFAPDProducerScheduler,
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.scheduler import (  # noqa: E402
+    SFAPDRD2HProducerScheduler,
+    SFAPDRD2HScheduler,
 )
-from vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.send_thread import (  # noqa: E402
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.send_thread import (  # noqa: E402
     MembPullSendingThread,
 )
-from vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.worker import (  # noqa: E402
-    SFAPDCpuOffloadConsumerWorker,
-    SFAPDCpuOffloadProducerWorker,
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.worker import (  # noqa: E402
+    SFAPDRD2HConsumerWorker,
+    SFAPDRD2HProducerWorker,
 )
 from vllm_ascend.distributed.kv_transfer.utils.memfabric_transfer_engine import (  # noqa: E402
     BACKEND_MEMFABRIC,
 )
 
 
-def test_sfa_pd_cpu_offload_connector_is_registered():
+def test_sfa_pd_rd2h_connector_is_registered():
     with (
         patch.object(KVConnectorFactory, "_registry", {}),
         patch.object(KVConnectorFactory, "register_connector") as mock_register,
@@ -62,9 +62,9 @@ def test_sfa_pd_cpu_offload_connector_is_registered():
         register_connector()
 
     mock_register.assert_any_call(
-        "SFAPDCpuOffloadConnector",
-        "vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.connector",
-        "SFAPDCpuOffloadConnector",
+        "SFAPDRD2HConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector",
+        "SFAPDRD2HConnector",
     )
 
 
@@ -418,7 +418,7 @@ def test_non_tp0_verify_log_marks_shared_main_as_unavailable():
         patch.object(envs, "VLLM_ASCEND_MF_VERIFY", True),
         patch.object(envs, "VLLM_ASCEND_SFA_DEBUG", False),
         patch(
-            "vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.read_thread.logger.info"
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.read_thread.logger.info"
         ) as log_info,
     ):
         thread._log_read_result(read_info)
@@ -429,7 +429,7 @@ def test_non_tp0_verify_log_marks_shared_main_as_unavailable():
 
 
 def _make_consumer_worker_for_completion_test():
-    worker = SFAPDCpuOffloadConsumerWorker.__new__(SFAPDCpuOffloadConsumerWorker)
+    worker = SFAPDRD2HConsumerWorker.__new__(SFAPDRD2HConsumerWorker)
     worker.tp_rank = 0
     worker.tp_size = 2
     worker.request_map = {"req-0": "req-0-internal"}
@@ -663,7 +663,9 @@ def test_send_thread_slices_each_group_at_chunk_boundaries():
 
 @pytest.mark.parametrize("all_groups", [False, True])
 def test_producer_scheduler_cleans_request_state_on_finish(all_groups):
-    scheduler = SFAPDProducerScheduler.__new__(SFAPDProducerScheduler)
+    scheduler = SFAPDRD2HProducerScheduler.__new__(
+        SFAPDRD2HProducerScheduler
+    )
     request = SimpleNamespace(request_id="req-0")
     scheduler._reqs_need_send_layerwise = {"req-0": MagicMock()}
 
@@ -677,7 +679,9 @@ def test_producer_scheduler_cleans_request_state_on_finish(all_groups):
 
 
 def test_producer_scheduler_resolves_batch_metadata_by_external_request_id():
-    scheduler = SFAPDProducerScheduler.__new__(SFAPDProducerScheduler)
+    scheduler = SFAPDRD2HProducerScheduler.__new__(
+        SFAPDRD2HProducerScheduler
+    )
     scheduler._reqs_need_send_layerwise = {}
     child_params = {
         "do_remote_decode": True,
@@ -710,7 +714,9 @@ def test_producer_scheduler_resolves_batch_metadata_by_external_request_id():
 
 
 def test_producer_scheduler_rejects_missing_batch_metadata():
-    scheduler = SFAPDProducerScheduler.__new__(SFAPDProducerScheduler)
+    scheduler = SFAPDRD2HProducerScheduler.__new__(
+        SFAPDRD2HProducerScheduler
+    )
     scheduler._reqs_need_send_layerwise = {}
     request = SimpleNamespace(
         request_id="cmpl-parent-1-12345678",
@@ -756,7 +762,7 @@ def test_pd_read_wait_continues_after_log_interval_until_read_done():
     send_thread.get_storage_send_event.return_value = event
     send_thread.get_storage_error.return_value = None
     send_thread.is_alive.return_value = True
-    worker = SFAPDCpuOffloadProducerWorker.__new__(SFAPDCpuOffloadProducerWorker)
+    worker = SFAPDRD2HProducerWorker.__new__(SFAPDRD2HProducerWorker)
     worker.kv_send_layer_thread = send_thread
     worker.layer_storage_slots = {0: (0,)}
 
@@ -774,7 +780,7 @@ def test_pd_read_wait_fails_when_send_thread_stops():
     send_thread.get_storage_error.return_value = None
     send_thread.is_alive.return_value = False
     send_thread.startup_error = None
-    worker = SFAPDCpuOffloadProducerWorker.__new__(SFAPDCpuOffloadProducerWorker)
+    worker = SFAPDRD2HProducerWorker.__new__(SFAPDRD2HProducerWorker)
     worker.kv_send_layer_thread = send_thread
     worker.layer_storage_slots = {0: (0,)}
 
@@ -788,7 +794,7 @@ def test_pd_read_wait_propagates_read_failed():
     send_thread = MagicMock()
     send_thread.get_storage_send_event.return_value = event
     send_thread.get_storage_error.return_value = "memfabric read failed"
-    worker = SFAPDCpuOffloadProducerWorker.__new__(SFAPDCpuOffloadProducerWorker)
+    worker = SFAPDRD2HProducerWorker.__new__(SFAPDRD2HProducerWorker)
     worker.kv_send_layer_thread = send_thread
     worker.layer_storage_slots = {0: (0,)}
 
@@ -797,7 +803,7 @@ def test_pd_read_wait_propagates_read_failed():
 
 
 def test_save_kv_layer_requires_send_thread_without_marking_dispatched():
-    worker = SFAPDCpuOffloadProducerWorker.__new__(SFAPDCpuOffloadProducerWorker)
+    worker = SFAPDRD2HProducerWorker.__new__(SFAPDRD2HProducerWorker)
     worker._backend = BACKEND_MEMFABRIC
     worker.kv_send_layer_thread = None
     worker._pd_dispatched_layers = set()
@@ -833,7 +839,7 @@ def test_main_only_and_indexer_layers_share_their_physical_main_slot():
         has_indexer=True,
     )
 
-    slots = SFAPDCpuOffloadProducerWorker._infer_layer_storage_slots(
+    slots = SFAPDRD2HProducerWorker._infer_layer_storage_slots(
         {
             "model.layers.1.self_attn": main_only,
             "model.layers.5.self_attn": with_indexer,
@@ -846,7 +852,7 @@ def test_main_only_and_indexer_layers_share_their_physical_main_slot():
 
 
 def test_consumer_scheduler_closes_remote_prefill_before_rendezvous():
-    scheduler = SFAPDCpuOffloadScheduler.__new__(SFAPDCpuOffloadScheduler)
+    scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
     scheduler.main_group_idx = 0
     scheduler.indexer_group_idx = 1
     scheduler.engine_id = "decode-engine"
@@ -883,14 +889,14 @@ def test_consumer_scheduler_closes_remote_prefill_before_rendezvous():
 
 
 def test_metaserver_treats_legacy_http_error_as_delivered():
-    scheduler = SFAPDCpuOffloadScheduler.__new__(SFAPDCpuOffloadScheduler)
+    scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
     response = MagicMock()
     response.is_error = True
     response.status_code = 500
     client = MagicMock()
     client.post.return_value = response
 
-    with patch("vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.scheduler.httpx.Client") as client_cls:
+    with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.scheduler.httpx.Client") as client_cls:
         client_cls.return_value.__enter__.return_value = client
         scheduler._access_metaserver("http://metaserver", {"request_id": "req-0"})
 
@@ -902,7 +908,7 @@ def test_metaserver_treats_legacy_http_error_as_delivered():
 
 
 def test_metaserver_retries_transport_errors():
-    scheduler = SFAPDCpuOffloadScheduler.__new__(SFAPDCpuOffloadScheduler)
+    scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
     response = MagicMock(is_error=False)
     client = MagicMock()
     client.post.side_effect = [
@@ -910,7 +916,7 @@ def test_metaserver_retries_transport_errors():
         response,
     ]
 
-    with patch("vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.scheduler.httpx.Client") as client_cls:
+    with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.scheduler.httpx.Client") as client_cls:
         client_cls.return_value.__enter__.return_value = client
         scheduler._access_metaserver("http://metaserver", {"request_id": "req-0"})
 
@@ -918,7 +924,7 @@ def test_metaserver_retries_transport_errors():
 
 
 def test_metaserver_callback_retries_without_changing_request_state():
-    scheduler = SFAPDCpuOffloadScheduler.__new__(SFAPDCpuOffloadScheduler)
+    scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
     scheduler._metaserver_lock = threading.Lock()
     scheduler._shutdown_event = threading.Event()
     scheduler._metaserver_retry_timers = {}
@@ -929,7 +935,7 @@ def test_metaserver_callback_retries_without_changing_request_state():
 
     retry_timer = MagicMock()
     with patch(
-        "vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.scheduler.threading.Timer",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.scheduler.threading.Timer",
         return_value=retry_timer,
     ):
         scheduler._on_metaserver_done(
@@ -945,7 +951,7 @@ def test_metaserver_callback_retries_without_changing_request_state():
 
 
 def test_metaserver_callback_clears_completed_future():
-    scheduler = SFAPDCpuOffloadScheduler.__new__(SFAPDCpuOffloadScheduler)
+    scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
     scheduler._metaserver_lock = threading.Lock()
     scheduler._shutdown_event = threading.Event()
     scheduler._metaserver_retry_timers = {}
@@ -975,7 +981,7 @@ def test_metaserver_callback_clears_completed_future():
 )
 def test_prefill_to_decode_tp_rank_mapping(p_tp, d_tp, p_rank, expected_d_rank):
     assert (
-        SFAPDCpuOffloadProducerWorker._map_prefill_rank_to_decode_rank(
+        SFAPDRD2HProducerWorker._map_prefill_rank_to_decode_rank(
             prefill_tp_size=p_tp,
             decode_tp_size=d_tp,
             prefill_tp_rank=p_rank,
@@ -999,7 +1005,7 @@ def test_prefill_to_decode_tp_rank_mapping_rejects_invalid_topology(
     p_rank,
 ):
     with pytest.raises(ValueError):
-        SFAPDCpuOffloadProducerWorker._map_prefill_rank_to_decode_rank(
+        SFAPDRD2HProducerWorker._map_prefill_rank_to_decode_rank(
             prefill_tp_size=p_tp,
             decode_tp_size=d_tp,
             prefill_tp_rank=p_rank,
@@ -1028,7 +1034,7 @@ def test_read_thread_propagates_bind_failure_without_hanging():
 
 
 def test_scheduler_shutdown_cancels_rendezvous_and_executor():
-    scheduler = SFAPDCpuOffloadScheduler.__new__(SFAPDCpuOffloadScheduler)
+    scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
     scheduler._metaserver_lock = threading.Lock()
     scheduler._shutdown_event = threading.Event()
     scheduler._metaserver_retry_timers = {}
@@ -1047,7 +1053,7 @@ def test_scheduler_shutdown_cancels_rendezvous_and_executor():
 
 
 def test_connector_shutdown_delegates_to_active_components():
-    connector = SFAPDCpuOffloadConnector.__new__(SFAPDCpuOffloadConnector)
+    connector = SFAPDRD2HConnector.__new__(SFAPDRD2HConnector)
     connector.connector_worker = MagicMock()
     connector.connector_scheduler = MagicMock()
 

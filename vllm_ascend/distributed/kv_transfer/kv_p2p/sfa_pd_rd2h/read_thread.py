@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""D-side memfabric pull read thread for SFA PD CPU offload."""
+"""D-side memfabric pull read thread for SFA PD RD2H."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
 from vllm_ascend import envs
-from vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.protocol import (
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     MF_META,
     READ_DONE,
     READ_FAILED,

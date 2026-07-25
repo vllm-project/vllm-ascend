@@ -1,8 +1,8 @@
 # mypy: ignore-errors
 # SPDX-License-Identifier: Apache-2.0
-"""Worker side of the PD-disaggregated SFA connector (memfabric pull mode).
+"""Worker side of the decode-offload SFA Remote D2H connector.
 
-D (``kv_consumer``): binds to :class:`KVOffloadDecodeManager`'s TP-shared CPU
+D (``kv_consumer``): binds to :class:`SparseKVOffloadManager`'s TP-shared CPU
 KV pool and receives indexer KV into rank-local HBM. Every TP rank pulls a
 disjoint part of main MLA KV and its rank-local indexer KV. Decode KV continues
 to be written directly to the same CPU pool by the decode-offload manager.
@@ -30,22 +30,22 @@ from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
 from vllm_ascend import envs
-from vllm_ascend.distributed.kv_transfer.kv_offload_decode.kv_offload_decode_manager import (
-    get_kv_offload_decode_manager,
-)
-from vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.protocol import (
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     LayerMetadata,
     SendTask,
     get_external_request_id,
     infer_sfa_component_group_ids,
 )
-from vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.read_thread import (
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.read_thread import (
     ConsumerReadState,
     MembPullReadThread,
 )
-from vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.send_thread import (
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.send_thread import (
     MembPullSendingThread,
     ProducerSendState,
+)
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    get_sparse_kv_offload_manager,
 )
 from vllm_ascend.distributed.kv_transfer.utils.memfabric_transfer_engine import (
     BACKEND_MEMFABRIC,
@@ -95,7 +95,7 @@ def _validate_tcp_port(port: int, *, description: str) -> None:
         raise ValueError(f"{description} must be in [{MIN_TCP_PORT}, {MAX_TCP_PORT}], got {port}")
 
 
-class SFAPDCpuOffloadConsumerWorker:
+class SFAPDRD2HConsumerWorker:
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -122,7 +122,7 @@ class SFAPDCpuOffloadConsumerWorker:
         self.layer_metadata: dict[str, LayerMetadata] = {}
         self.engine = None
 
-        self.decode_manager = None
+        self.offload_manager = None
         self._cpu_blocks_by_req: dict[str, int] = {}
         self._invalid_block_ids: set[int] = set()
         # external_req_id -> internal_req_id, so get_finished can map the recv
@@ -147,7 +147,7 @@ class SFAPDCpuOffloadConsumerWorker:
             backend = _resolve_kv_transfer_backend(self.vllm_config)
             if backend != BACKEND_MEMFABRIC:
                 raise RuntimeError(
-                    "SFAPDCpuOffloadConnector D side supports MemFabric pull only (set transfer_backend=memfabric)."
+                    "SFAPDRD2HConnector D side supports MemFabric pull only (set transfer_backend=memfabric)."
                 )
             global_memfabric_te.configure(
                 role=MEMFABRIC_ROLE_DECODE,
@@ -158,17 +158,17 @@ class SFAPDCpuOffloadConsumerWorker:
 
     # ------------------------------------------------------------------
     # D side (kv_consumer) — this class is only instantiated for consumers;
-    # Producers use :class:`SFAPDCpuOffloadProducerWorker`.
+    # Producers use :class:`SFAPDRD2HProducerWorker`.
     # ------------------------------------------------------------------
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
-        """Bind MemFabric destinations owned by KVOffloadDecodeManager."""
+        """Bind MemFabric destinations owned by SparseKVOffloadManager."""
         assert _resolve_kv_transfer_backend(self.vllm_config) == BACKEND_MEMFABRIC, (
-            "SFAPDCpuOffloadConnector D side supports memfabric pull only (set transfer_backend=memfabric)."
+            "SFAPDRD2HConnector D side supports memfabric pull only (set transfer_backend=memfabric)."
         )
-        self.decode_manager = get_kv_offload_decode_manager()
-        if not hasattr(self.decode_manager, "offload_layer_names"):
+        self.offload_manager = get_sparse_kv_offload_manager()
+        if not hasattr(self.offload_manager, "offload_layer_names"):
             raise RuntimeError(
-                "KVOffloadDecodeManager.register_kv_caches must run before the PD connector is registered"
+                "SparseKVOffloadManager.register_kv_caches must run before the PD connector is registered"
             )
         self._register_memfabric_pull(kv_caches)
 
@@ -296,13 +296,13 @@ class SFAPDCpuOffloadConsumerWorker:
 
     def get_num_cpu_blocks(self, req_ids: list[str]) -> dict[str, int] | None:
         """Per-req actual main-MLA CPU-block count for the solution-1 threshold."""
-        if self.decode_manager is None:
+        if self.offload_manager is None:
             return None
         result = {rid: self._cpu_blocks_by_req[rid] for rid in req_ids if rid in self._cpu_blocks_by_req}
         return result or None
 
     def _build_consumer_read_state(self) -> ConsumerReadState:
-        assert self.decode_manager is not None
+        assert self.offload_manager is not None
         return ConsumerReadState(
             num_blocks=self.kv_cache_config.num_blocks,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
@@ -314,7 +314,7 @@ class SFAPDCpuOffloadConsumerWorker:
             indexer_tensors=self._indexer_tensors,
             indexer_scale_tensors=self._indexer_scale_tensors,
             dest_blocks_by_req=self._dest_blocks_by_req,
-            get_offload_layer_id=self.decode_manager._get_offload_layer_id,
+            get_offload_layer_id=self.offload_manager._get_offload_layer_id,
         )
 
     def _register_memfabric_pull(
@@ -322,28 +322,28 @@ class SFAPDCpuOffloadConsumerWorker:
         kv_caches: dict[str, torch.Tensor],
     ) -> None:
         """Start D pull thread with manager CPU KV and rank-local indexer HBM."""
-        assert self.decode_manager is not None
+        assert self.offload_manager is not None
         assert self.kv_cache_config is not None
         num_blocks = self.kv_cache_config.num_blocks
-        main_names = list(self.decode_manager.offload_layer_names)
+        main_names = list(self.offload_manager.offload_layer_names)
         indexer_by_layer = {_layer_idx(name): name for name in kv_caches if "indexer" in name.lower()}
 
         # Store layer info for MembPullReadThread
         self._main_names = main_names
         self._main_name_to_idx = {n: i for i, n in enumerate(main_names)}
-        k_caches_cpu = self.decode_manager.k_caches_cpu
-        v_caches_cpu = self.decode_manager.v_caches_cpu
-        gvas_k = self.decode_manager.gvas_k_bases
-        gvas_v = self.decode_manager.gvas_v_bases
+        k_caches_cpu = self.offload_manager.k_caches_cpu
+        v_caches_cpu = self.offload_manager.v_caches_cpu
+        gvas_k = self.offload_manager.gvas_k_bases
+        gvas_v = self.offload_manager.gvas_v_bases
         if len(gvas_k) != len(main_names) or len(gvas_v) != len(main_names):
-            raise RuntimeError("KVOffloadDecodeManager shared CPU GVA/layer count mismatch")
+            raise RuntimeError("SparseKVOffloadManager shared CPU GVA/layer count mismatch")
         self._main_gva_bases = list(zip(gvas_k, gvas_v))
-        self._main_block_lens = self.decode_manager.cpu_block_lens
+        self._main_block_lens = self.offload_manager.cpu_block_lens
         if len(self._main_block_lens) != len(main_names):
-            raise RuntimeError("KVOffloadDecodeManager shared CPU block-size/layer count mismatch")
+            raise RuntimeError("SparseKVOffloadManager shared CPU block-size/layer count mismatch")
         if self.tp_rank == 0:
             if len(k_caches_cpu) != len(main_names) or len(v_caches_cpu) != len(main_names):
-                raise RuntimeError("KVOffloadDecodeManager CPU pool/layer count mismatch")
+                raise RuntimeError("SparseKVOffloadManager CPU pool/layer count mismatch")
             self._cpu_pools = list(zip(k_caches_cpu, v_caches_cpu))
         else:
             self._cpu_pools = [None] * len(main_names)
@@ -415,7 +415,7 @@ class SFAPDCpuOffloadConsumerWorker:
             self._mf_read_thread.stop()
             raise RuntimeError("SFAPD D-side read thread failed during startup") from error
         logger.info(
-            "SFAPDCpuOffload D-side registered (memfabric pull): "
+            "SFAPDRD2H D-side registered (memfabric pull): "
             "%d indexer + %d TP-shared main layers",
             sum(t is not None for t in self._indexer_tensors),
             len(main_names),
@@ -427,7 +427,7 @@ class SFAPDCpuOffloadConsumerWorker:
             read_thread.stop()
 
 
-class SFAPDCpuOffloadProducerWorker:
+class SFAPDRD2HProducerWorker:
     """P-side worker for memfabric pull mode.
 
     It registers P's local KV tensors with memfabric and runs a pull-mode
@@ -442,7 +442,7 @@ class SFAPDCpuOffloadProducerWorker:
         self._backend = _resolve_kv_transfer_backend(vllm_config)
         if self._backend != BACKEND_MEMFABRIC:
             raise RuntimeError(
-                "SFAPDCpuOffloadConnector P side supports MemFabric pull only (set transfer_backend=memfabric)."
+                "SFAPDRD2HConnector P side supports MemFabric pull only (set transfer_backend=memfabric)."
             )
         global_memfabric_te.configure(
             role=MEMFABRIC_ROLE_PREFILL,
@@ -494,7 +494,7 @@ class SFAPDCpuOffloadProducerWorker:
         delay MF_META / READ_READY_BATCH."""
         if self._backend == BACKEND_MEMFABRIC:
             return req_meta
-        raise RuntimeError("SFAPDCpuOffloadConnector P side supports memfabric pull only.")
+        raise RuntimeError("SFAPDRD2HConnector P side supports memfabric pull only.")
 
     def start_load_kv(self, metadata: KVConnectorMetadata) -> None:
         """Prepare P-side request metadata for memfabric pull mode.
@@ -546,7 +546,7 @@ class SFAPDCpuOffloadProducerWorker:
                         req_meta.local_transed_tokens,
                     )
             return
-        raise RuntimeError("SFAPDCpuOffloadConnector P side supports memfabric pull only.")
+        raise RuntimeError("SFAPDRD2HConnector P side supports memfabric pull only.")
 
     @staticmethod
     def _map_prefill_rank_to_decode_rank(
@@ -602,7 +602,7 @@ class SFAPDCpuOffloadProducerWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         # memfabric pull mode only.
-        assert self._backend == BACKEND_MEMFABRIC, "SFAPDCpuOffloadConnector P side supports memfabric pull only."
+        assert self._backend == BACKEND_MEMFABRIC, "SFAPDRD2HConnector P side supports memfabric pull only."
         layer2group_ids: dict[str, int] = {}
         for group_idx, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
             for layer_name in kv_cache_group.layer_names:
@@ -741,7 +741,7 @@ class SFAPDCpuOffloadProducerWorker:
         **kwargs,
     ) -> None:
         if self._backend != BACKEND_MEMFABRIC:
-            raise RuntimeError("SFAPDCpuOffloadConnector P side supports memfabric pull only.")
+            raise RuntimeError("SFAPDRD2HConnector P side supports memfabric pull only.")
         send_thread = self.kv_send_layer_thread
         if send_thread is None:
             raise RuntimeError(
