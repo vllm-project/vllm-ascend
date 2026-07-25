@@ -317,6 +317,8 @@ def _build_vllm_args(config: ElasticEPTestConfig) -> list[str]:
         "--enable-eplb",
         "--eplb_config.use_async",
         "false",
+        "--eplb_config.num_redundant_experts",
+        str(config.num_redundant_experts),
         "--tensor-parallel-size",
         str(config.tensor_parallel_size),
         "--gpu-memory-utilization",
