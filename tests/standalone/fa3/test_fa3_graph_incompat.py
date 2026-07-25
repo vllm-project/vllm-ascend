@@ -237,10 +237,14 @@ class TestFA3GraphTaskGroupIncompatibility:
         stream = torch_npu.npu.current_stream()
 
         # -- capture: FA3 is NOT recorded by CANN op-level capture --
-        torch.npu.graph_task_group_begin(stream)
-        _run_fa3_eager(q, k, v, bt, kv_seqlens, cu_q, max_qlen,
-                       causal=causal, scheduler_metadata=metadata)
-        handle = torch.npu.graph_task_group_end(stream)
+        # graph_task_group_begin/End requires the stream to be in capture
+        # mode, entered via torch.npu.graph().
+        _graph = torch.npu.NPUGraph()
+        with torch.npu.graph(_graph):
+            torch.npu.graph_task_group_begin(stream)
+            _run_fa3_eager(q, k, v, bt, kv_seqlens, cu_q, max_qlen,
+                           causal=causal, scheduler_metadata=metadata)
+            handle = torch.npu.graph_task_group_end(stream)
 
         # -- replay with DIFFERENT input data --
         tensors2 = _make_tensors(causal=causal)
@@ -283,24 +287,26 @@ class TestFA3GraphTaskGroupIncompatibility:
         lse_buf = torch.empty(1, dtype=torch.float32, device="npu")
 
         # -- capture --
-        torch.npu.graph_task_group_begin(stream)
-        torch_npu.npu_fused_infer_attention_score.out(
-            query=q,
-            key=k_v1,
-            value=v_v1,
-            block_table=bt,
-            input_layout="TND",
-            block_size=_BLOCK_SIZE,
-            actual_seq_lengths=cu_v1,
-            actual_seq_lengths_kv=kv_list,
-            num_key_value_heads=_NUM_KV_HEADS,
-            num_heads=_NUM_HEADS,
-            scale=_SCALE,
-            sparse_mode=3,
-            atten_mask=attn_mask,
-            out=[out_buf, lse_buf],
-        )
-        handle = torch.npu.graph_task_group_end(stream)
+        _graph = torch.npu.NPUGraph()
+        with torch.npu.graph(_graph):
+            torch.npu.graph_task_group_begin(stream)
+            torch_npu.npu_fused_infer_attention_score.out(
+                query=q,
+                key=k_v1,
+                value=v_v1,
+                block_table=bt,
+                input_layout="TND",
+                block_size=_BLOCK_SIZE,
+                actual_seq_lengths=cu_v1,
+                actual_seq_lengths_kv=kv_list,
+                num_key_value_heads=_NUM_KV_HEADS,
+                num_heads=_NUM_HEADS,
+                scale=_SCALE,
+                sparse_mode=3,
+                atten_mask=attn_mask,
+                out=[out_buf, lse_buf],
+            )
+            handle = torch.npu.graph_task_group_end(stream)
 
         # Build reference for a DIFFERENT set of inputs
         tensors2 = _make_tensors()
