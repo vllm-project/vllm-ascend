@@ -236,15 +236,10 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
     ) -> torch.Tensor:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
-        n_shared_experts = getattr(layer, "n_shared_experts", 0)
-        mix_placement = getattr(layer, "mix_placement", False)
-        if n_shared_experts is None:
-            n_shared_experts = 0
         num_logical_experts = get_moe_num_logical_experts(
             layer,
             num_experts,
             global_redundant_expert_num=global_redundant_expert_num,
-            num_shared_experts=n_shared_experts,
         )
         if zero_expert_num == 0 or zero_expert_type is None:
             assert router_logits.shape[1] == num_logical_experts, (
@@ -268,9 +263,6 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
-            mix_placement=mix_placement,
-            num_logical_experts=router_logits.shape[1],
-            num_shared_experts=n_shared_experts,
             num_experts=num_logical_experts,
             tid2eid=tid2eid,
         )
