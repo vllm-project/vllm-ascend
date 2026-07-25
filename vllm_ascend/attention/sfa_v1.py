@@ -669,7 +669,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # PD decode consumers with sparse C8 can use mla_prolog_v3 to write the packed KV cache.
         # TODO: Re-enable after the community CANN baseline upgrades from 9.0 to 9.1.
         # npu_mla_prolog_v3 depends on CANN 9.1 and is not available in the current community CANN 9.0.
-        sfa_prolog_v3_supported = False
+        sfa_prolog_v3_supported = torch.version.cann == "9.1.0"
         self.enable_sfa_prolog_v3 = (
             sfa_prolog_v3_supported
             and self.is_kv_consumer
