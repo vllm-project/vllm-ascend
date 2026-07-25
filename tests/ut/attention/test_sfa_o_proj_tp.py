@@ -143,6 +143,7 @@ class TestAscendSFAOProjTPParams(TestBase):
 
         with (
             patch("vllm_ascend.attention.sfa_v1.wait_for_kv_layer_from_connector"),
+            patch("vllm_ascend.attention.sfa_v1.notify_kv_cache_written") as notify_written,
             patch("vllm_ascend.attention.sfa_v1.record_attention_compute_start") as record_gate,
             patch("vllm_ascend.attention.sfa_v1.maybe_save_kv_layer_to_connector") as save_layer,
         ):
@@ -155,6 +156,7 @@ class TestAscendSFAOProjTPParams(TestBase):
             )
 
         self.assertIs(result, output)
-        record_gate.assert_called_once_with()
+        notify_written.assert_called_once_with(impl.layer_name)
+        record_gate.assert_called_once_with(impl.layer_name)
         save_layer.assert_called_once_with(impl.layer_name, list(kv_cache))
         impl.o_proj.assert_not_called()

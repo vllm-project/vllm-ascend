@@ -19,6 +19,8 @@ import threading
 import unittest
 from unittest.mock import MagicMock
 
+import numpy as np
+
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm.distributed.kv_events import BlockStored
@@ -26,10 +28,15 @@ from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     ChunkedTokenDatabase,
     KeyMetadata,
+    LayerLoadTask,
+    LayerSaveTask,
+    LayerTransferArrays,
+    LayerTransferTask,
     LayerMultiBlockReqMeta,
     LayerPoolKey,
     LoadSpec,
     ReqMeta,
+    TransferCompletion,
 )
 
 # isort: on
@@ -432,6 +439,200 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         t._handle_request(req)
         keys, _, _ = store.get_calls[0]
         self.assertEqual(len(keys), 1)
+
+
+class TestGVALayerSendingThread(unittest.TestCase):
+    def _make_thread(self, *, copy_result=0, builders=None):
+        store = MagicMock()
+        store.store.batch_copy.return_value = copy_result
+        slot_free = threading.Event()
+        thread = KVCacheStoreLayerSendingThread(
+            m_store=store,
+            token_database=MagicMock(),
+            block_size=16,
+            tp_rank=0,
+            tp_size=1,
+            dcp_size=1,
+            put_step=1,
+            ready_event=threading.Event(),
+            num_layers=1,
+            layer_save_finished_events=[slot_free],
+            sync_save_events=[MagicMock()],
+            group_array_builders=builders,
+        )
+        return thread, store, slot_free
+
+    def test_multi_group_copy_completes_before_pd_attention_and_slot_free(self):
+        builders = [MagicMock(), MagicMock()]
+        builders[0].build_addrs.return_value = LayerTransferArrays(
+            np.asarray([10]),
+            np.asarray([16]),
+            np.asarray([100]),
+        )
+        builders[1].build_addrs.return_value = LayerTransferArrays(
+            np.asarray([20]),
+            np.asarray([32]),
+            np.asarray([200]),
+        )
+        thread, store, slot_free = self._make_thread(builders=builders)
+        call_order = []
+        store.store.batch_copy.side_effect = lambda *_args: call_order.append("copy") or 0
+        thread.pd_transfer_waiter = lambda _layer_id: call_order.append("pd")
+        attention_recorded = threading.Event()
+        attention_recorded.set()
+        sync_attention = MagicMock()
+        sync_attention.synchronize.side_effect = lambda: call_order.append("attention")
+        thread.layer_attn_recorded_events = [attention_recorded]
+        thread.sync_attn_events = [sync_attention]
+        tasks = [
+            LayerTransferTask(
+                layer_id=0,
+                block_ranges=[],
+                transfer_data=MagicMock(),
+                completion=TransferCompletion(["r1"], [True]),
+                finished_req_ids={"r1"} if group_id == 1 else set(),
+                group_id=group_id,
+            )
+            for group_id in range(2)
+        ]
+        thread.add_stored_request("r1")
+        thread.add_stored_request("r1")
+        request = LayerSaveTask(layer_id=0, transfer_tasks=tasks)
+        thread.request_queue.put(request)
+
+        thread._handle_request(request)
+
+        store.store.batch_copy.assert_called_once_with(
+            [100, 200],
+            [10, 20],
+            [16, 32],
+            0,
+        )
+        self.assertEqual(call_order, ["copy", "pd", "attention"])
+        self.assertEqual(thread.get_and_clear_finished_requests(), {"r1"})
+        self.assertTrue(slot_free.is_set())
+
+    def test_copy_failure_does_not_release_slot_or_complete_request(self):
+        builder = MagicMock()
+        builder.build_addrs.return_value = LayerTransferArrays(
+            np.asarray([10]),
+            np.asarray([16]),
+            np.asarray([100]),
+        )
+        thread, _, slot_free = self._make_thread(
+            copy_result=1,
+            builders=[builder],
+        )
+        task = LayerTransferTask(
+            layer_id=0,
+            block_ranges=[],
+            transfer_data=MagicMock(),
+            completion=TransferCompletion(["r1"], [True]),
+            finished_req_ids={"r1"},
+        )
+        thread.add_stored_request("r1")
+        request = LayerSaveTask(layer_id=0, transfer_tasks=[task])
+        thread.request_queue.put(request)
+
+        with self.assertRaisesRegex(RuntimeError, "save batch_copy failed"):
+            thread._handle_request(request)
+
+        self.assertEqual(thread.stored_requests["r1"], 1)
+        self.assertEqual(thread.get_and_clear_finished_requests(), set())
+        self.assertFalse(slot_free.is_set())
+
+    def test_control_only_save_waits_for_pd_and_attention_before_slot_free(self):
+        call_order = []
+        slot_free = threading.Event()
+        attention_recorded = threading.Event()
+        attention_recorded.set()
+        sync_attention = MagicMock()
+        sync_attention.synchronize.side_effect = lambda: call_order.append("attention")
+
+        def wait_for_pd(layer_id):
+            self.assertEqual(layer_id, 0)
+            self.assertFalse(slot_free.is_set())
+            call_order.append("pd")
+
+        thread = KVCacheStoreLayerSendingThread(
+            m_store=MagicMock(),
+            token_database=MagicMock(),
+            block_size=16,
+            tp_rank=0,
+            tp_size=1,
+            dcp_size=1,
+            put_step=1,
+            ready_event=threading.Event(),
+            num_layers=1,
+            layer_save_finished_events=[slot_free],
+            sync_save_events=[MagicMock()],
+            pd_transfer_waiter=wait_for_pd,
+            sync_attn_events=[sync_attention],
+            layer_attn_recorded_events=[attention_recorded],
+        )
+        request = LayerSaveTask(layer_id=0, transfer_tasks=[])
+        thread.request_queue.put(request)
+
+        thread._handle_request(request)
+
+        self.assertEqual(call_order, ["pd", "attention"])
+        self.assertTrue(slot_free.is_set())
+
+
+class TestGVALayerRecvingThread(unittest.TestCase):
+    def test_fatal_copy_failure_stops_before_next_queued_task(self):
+        store = MagicMock()
+        store.store.batch_copy.return_value = 1
+        builder = MagicMock()
+        builder.build_addrs.return_value = LayerTransferArrays(
+            np.asarray([10]),
+            np.asarray([16]),
+            np.asarray([100]),
+        )
+        lease_releaser = MagicMock()
+        layer_load_done = [threading.Event(), threading.Event()]
+        thread = KVCacheStoreLayerRecvingThread(
+            m_store=store,
+            token_database=MagicMock(),
+            block_size=16,
+            tp_rank=0,
+            tp_size=1,
+            dcp_size=1,
+            ready_event=threading.Event(),
+            get_event=threading.Event(),
+            layer_load_finished_events=layer_load_done,
+            layer_save_finished_events=[threading.Event(), threading.Event()],
+            num_layers=2,
+            group_array_builders=[builder],
+            load_lease_releaser=lease_releaser,
+        )
+
+        for layer_id, req_id in enumerate(("r1", "r2")):
+            task = LayerTransferTask(
+                layer_id=layer_id,
+                block_ranges=[],
+                transfer_data=MagicMock(),
+                completion=TransferCompletion([req_id], [False]),
+            )
+            thread.add_request(
+                LayerLoadTask(
+                    wait_for_save_layer=None,
+                    transfer_tasks=[task],
+                    layer_id=layer_id,
+                )
+            )
+
+        thread.start()
+        thread.join(timeout=1)
+
+        self.assertFalse(thread.is_alive())
+        self.assertIsInstance(thread._fatal_error, RuntimeError)
+        store.store.batch_copy.assert_called_once()
+        lease_releaser.assert_called_once_with({"r1"})
+        self.assertEqual(thread.request_queue.qsize(), 1)
+        self.assertEqual(thread.request_queue.unfinished_tasks, 1)
+        self.assertEqual(thread.get_and_clear_finished_requests(), set())
+        self.assertFalse(any(event.is_set() for event in layer_load_done))
 
 
 @unittest.skip("LayerMultiBlockReqMeta API is deprecated, tests need update for LayerTransferTask")

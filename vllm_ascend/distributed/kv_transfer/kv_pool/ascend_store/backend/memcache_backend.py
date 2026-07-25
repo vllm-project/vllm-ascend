@@ -134,9 +134,9 @@ class MemcacheBackend(Backend):
         assert self.store is not None
         return self.store.batch_is_exist(keys)
 
-    def batch_get_key_info(self, keys: list[str]):
+    def batch_get_key_info(self, keys: list[str], flag: int = 0):
         assert self.store is not None
-        return self.store.batch_get_key_info(keys)
+        return self.store.batch_get_key_info(keys, flag=flag)
 
     def batch_alloc(self, keys: list[str], sizes: list[int]) -> list[int]:
         assert self.store is not None

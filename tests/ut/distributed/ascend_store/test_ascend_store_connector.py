@@ -477,6 +477,38 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
             connector.wait_for_layer_load("layer_0")
             mock_worker_cls.return_value.wait_for_layer_load.assert_called_once()
 
+    def test_on_kv_cache_written_delegates_for_gva_producer(self):
+        connector = self.connector_mod.AscendStoreConnector.__new__(self.connector_mod.AscendStoreConnector)
+        connector.use_gva_layerwise = True
+        connector.kv_role = "kv_producer"
+        connector.connector_worker = MagicMock()
+        connector.has_connector_metadata = MagicMock(return_value=True)
+
+        connector.on_kv_cache_written("model.layers.0.self_attn")
+
+        connector.connector_worker.on_kv_cache_written.assert_called_once_with("model.layers.0.self_attn")
+
+    def test_on_kv_cache_written_waits_for_step_metadata(self):
+        connector = self.connector_mod.AscendStoreConnector.__new__(self.connector_mod.AscendStoreConnector)
+        connector.use_gva_layerwise = True
+        connector.kv_role = "kv_producer"
+        connector.connector_worker = MagicMock()
+        connector.has_connector_metadata = MagicMock(return_value=False)
+
+        connector.on_kv_cache_written("model.layers.0.self_attn")
+
+        connector.connector_worker.on_kv_cache_written.assert_not_called()
+
+    def test_set_layerwise_pd_transfer_waiter_delegates_to_worker(self):
+        connector = self.connector_mod.AscendStoreConnector.__new__(self.connector_mod.AscendStoreConnector)
+        connector.use_gva_layerwise = True
+        connector.connector_worker = MagicMock()
+        waiter = MagicMock()
+
+        connector.set_layerwise_pd_transfer_waiter(waiter)
+
+        connector.connector_worker.set_layerwise_pd_transfer_waiter.assert_called_once_with(waiter)
+
 
 if __name__ == "__main__":
     unittest.main()

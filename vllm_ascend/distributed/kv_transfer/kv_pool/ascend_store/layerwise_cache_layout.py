@@ -22,6 +22,7 @@ _DEFAULT_MAX_PREFETCH_LAYERS = 8
 
 
 def get_layerwise_physical_layer_index(layer_name: str, base_layers: int) -> int:
+    """Extract the physical transformer layer index from a cache name."""
     match = re.search(r"layers\.(\d+)", layer_name)
     if match:
         return int(match.group(1))

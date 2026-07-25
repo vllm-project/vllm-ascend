@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -24,6 +25,7 @@ import numpy as np
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
+    LayerSaveTask,
     LoadSpec,
     ReqMeta,
 )
@@ -185,6 +187,33 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         self.assertEqual(worker.independent_layers, [0])
         self.assertEqual(len(worker.layer_load_tasks), 5)
         self.assertEqual(len(worker.layer_save_tasks), 5)
+
+
+class TestKVPoolWorkerEarlyDispatch(unittest.TestCase):
+    def test_kv_written_hook_dispatches_once_at_scatter_completion(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+        worker = object.__new__(KVPoolWorker)
+        worker.use_gva_layerwise = True
+        worker.num_layers = 1
+        worker.current_layer = 0
+        worker._scatter_cursor = 0
+        worker._early_dispatched = set()
+        worker.sync_save_events = [MagicMock()]
+        worker.layer_save_finished_events = [threading.Event()]
+        worker.layer_save_tasks = [[]]
+        worker.kv_send_thread = MagicMock()
+        worker._extract_physical_layer_index = MagicMock(return_value=0)
+
+        worker.on_kv_cache_written("model.layers.0.self_attn")
+        worker.on_kv_cache_written("model.layers.0.self_attn")
+
+        worker.sync_save_events[0].record.assert_called_once()
+        worker.kv_send_thread.add_request.assert_called_once()
+        request = worker.kv_send_thread.add_request.call_args.args[0]
+        self.assertIsInstance(request, LayerSaveTask)
+        self.assertEqual(request.layer_id, 0)
+        self.assertEqual(request.transfer_tasks, [])
 
 
 class TestKVPoolWorkerInit(unittest.TestCase):
@@ -766,6 +795,163 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.m_store.exists.return_value = [1, 1, 1, 1]
         result = worker.lookup_scheduler(32, ["h0", "h1"], use_layerwise=False)
         self.assertEqual(result, 32)
+
+    def test_process_layer_data_prepares_load_batch_once_across_layers(self):
+        worker = self._make_worker()
+        worker.use_gva_layerwise = True
+        worker.kv_recv_thread = MagicMock()
+        load_spec = LoadSpec(
+            vllm_cached_tokens=0,
+            kvpool_cached_tokens=16,
+            can_load=True,
+            token_len=16,
+        )
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=["h0", "h1"],
+            can_save=True,
+            load_spec=load_spec,
+        )
+
+        preparer = worker._layerwise_transfer_preparer
+        preparer.enabled = True
+        resolved_data = MagicMock()
+        completion = MagicMock()
+        with patch.object(
+            preparer,
+            "resolve_load_groups",
+            return_value={(0, False): (resolved_data, completion)},
+        ) as prepare_load:
+            worker.process_layer_data([request])
+            worker._layer_load_preparation.ensure_ready()
+            worker._layer_load_preparation.ensure_ready()
+
+        prepare_load.assert_called_once()
+        worker.kv_recv_thread.prepare_layerwise_tasks.assert_called_once_with(worker.layer_load_tasks)
+        self.assertTrue(all(tasks[0].transfer_data is resolved_data for tasks in worker.layer_load_tasks))
+        self.assertTrue(all(tasks[0].completion is completion for tasks in worker.layer_load_tasks))
+
+    def test_layer_reuse_loads_full_prefix_only_for_shared_layers(self):
+        worker = self._make_worker()
+        worker.num_layers = 3
+        worker.layerwise_offload = True
+        worker.independent_layers = [0, 2]
+        load_spec = LoadSpec(
+            vllm_cached_tokens=16,
+            kvpool_cached_tokens=32,
+            can_load=True,
+            token_len=32,
+        )
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=["h0", "h1"],
+            load_spec=load_spec,
+        )
+
+        worker.process_layer_data([request])
+
+        self.assertEqual(worker.layer_load_tasks[0][0].block_ranges[0].start_block, 1)
+        self.assertEqual(worker.layer_load_tasks[1][0].block_ranges[0].start_block, 0)
+        self.assertEqual(worker.layer_load_tasks[2][0].block_ranges[0].start_block, 1)
+        self.assertIs(
+            worker.layer_load_tasks[0][0].block_ranges,
+            worker.layer_load_tasks[2][0].block_ranges,
+        )
+
+    def test_layer_reuse_slices_each_request_by_its_hbm_prefix(self):
+        worker = self._make_worker()
+        worker.layerwise_offload = True
+        worker.independent_layers = [0]
+        requests = [
+            ReqMeta(
+                req_id="tail",
+                token_len_chunk=32,
+                block_ids=[0, 1],
+                block_hashes=["h0", "h1"],
+                load_spec=LoadSpec(
+                    vllm_cached_tokens=16,
+                    kvpool_cached_tokens=32,
+                    can_load=True,
+                ),
+            ),
+            ReqMeta(
+                req_id="fully-local",
+                token_len_chunk=32,
+                block_ids=[2, 3],
+                block_hashes=["h2", "h3"],
+                load_spec=LoadSpec(
+                    vllm_cached_tokens=32,
+                    kvpool_cached_tokens=32,
+                    can_load=True,
+                ),
+            ),
+        ]
+
+        worker.process_layer_data(requests)
+
+        independent_ranges = worker.layer_load_tasks[0][0].block_ranges
+        shared_ranges = worker.layer_load_tasks[1][0].block_ranges
+        self.assertEqual(
+            [
+                (
+                    block_range.request.req_id,
+                    block_range.start_block,
+                    block_range.end_block,
+                )
+                for block_range in independent_ranges
+            ],
+            [("tail", 1, 2)],
+        )
+        self.assertEqual(
+            [
+                (
+                    block_range.request.req_id,
+                    block_range.start_block,
+                    block_range.end_block,
+                )
+                for block_range in shared_ranges
+            ],
+            [("tail", 0, 2), ("fully-local", 0, 2)],
+        )
+
+    def test_reused_layer_without_load_still_submits_save_gate(self):
+        worker = self._make_worker()
+        worker.num_layers = 3
+        worker.current_layer = 2
+        worker.next_layer_to_submit = 2
+        worker.num_prefetch_layers = 1
+        worker.prefetch_layer_map = {2: 0}
+        worker.layer_load_tasks = [[], [], []]
+        worker.kv_recv_thread = MagicMock()
+
+        worker._submit_ready_layer_loads()
+
+        task = worker.kv_recv_thread.add_request.call_args.args[0]
+        self.assertEqual(task.layer_id, 2)
+        self.assertEqual(task.wait_for_save_layer, 0)
+        self.assertEqual(task.transfer_tasks, [])
+
+    def test_final_save_keeps_reuse_gate_for_receive_thread(self):
+        worker = self._make_worker()
+        worker.num_layers = 3
+        worker.current_layer = 2
+        worker.prefetch_layer_map = {2: 0}
+        worker.layer_save_tasks = [[], [], []]
+        worker.sync_save_events = [MagicMock() for _ in range(3)]
+        worker.layer_save_finished_events = [threading.Event() for _ in range(3)]
+        worker.layer_save_finished_events[0].set()
+        worker.layer_save_finished_events[1].set()
+        worker.kv_send_thread = MagicMock()
+
+        worker.save_kv_layer(MagicMock())
+
+        self.assertTrue(worker.layer_save_finished_events[0].is_set())
+        self.assertFalse(worker.layer_save_finished_events[1].is_set())
+        self.assertFalse(worker.layer_save_finished_events[2].is_set())
 
 
 class TestKVPoolWorkerStaticHelpers(unittest.TestCase):

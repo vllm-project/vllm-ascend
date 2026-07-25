@@ -1,5 +1,5 @@
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -241,6 +241,26 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             # A load-only consumer does not publish KV.
             return
         self.connector_worker.save_kv_layer(self._get_connector_metadata())
+
+    def on_kv_cache_written(self, layer_name: str = "") -> None:
+        """Dispatch a layerwise save as soon as its KV scatter completes."""
+        if not self.use_gva_layerwise or self.kv_role == "kv_consumer":
+            return
+        if not self.has_connector_metadata():
+            return
+        worker = getattr(self, "connector_worker", None)
+        if worker is None:
+            return
+        worker.on_kv_cache_written(layer_name)
+
+    def set_layerwise_pd_transfer_waiter(self, waiter: Callable[[int], None]) -> None:
+        """Gate shared layerwise slots on an external PD transfer."""
+        if not self.use_gva_layerwise:
+            return
+        worker = getattr(self, "connector_worker", None)
+        if worker is None:
+            return
+        worker.set_layerwise_pd_transfer_waiter(waiter)
 
     def wait_for_save(self):
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
