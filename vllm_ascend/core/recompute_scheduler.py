@@ -146,7 +146,9 @@ class RecomputeScheduler(Scheduler):
         if vllm_version_is("0.25.1"):
             assert finished_reqs == [(request.request_id, request.client_index)]
         else:
-            assert [(r.request_id, r.client_index) for r in finished_reqs] == [(request.request_id, request.client_index)]
+            assert [(r.request_id, r.client_index) for r in finished_reqs] == [
+                (request.request_id, request.client_index)
+            ]
 
     def schedule(self, throttle_prefills: bool = False) -> RecomputeSchedulerOutput:
         self.current_step += 1

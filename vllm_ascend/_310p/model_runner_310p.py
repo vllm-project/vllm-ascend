@@ -56,7 +56,6 @@ from vllm_ascend.spec_decode.utils import (
 )
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
-    get_total_cp_world_size,
     is_rc_device,
     lmhead_tp_enable,
 )

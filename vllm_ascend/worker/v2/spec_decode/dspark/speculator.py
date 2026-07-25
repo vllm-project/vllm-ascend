@@ -84,12 +84,15 @@ class AscendDSparkSpeculator(DSparkSpeculator):
 
     def build_draft_attn_metadatas(self, num_reqs_padded):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
+        upper_bound = self.input_batch.seq_lens_cpu_upper_bound
+        if upper_bound.shape[0] < num_reqs_padded:
+            upper_bound = torch.nn.functional.pad(upper_bound, (0, num_reqs_padded - upper_bound.shape[0]))
         with build_attn_metadata_wrapper():
             attn_metadata = self._build_draft_attn_metadata(
-                num_reqs=self.input_batch.num_reqs,
+                num_reqs=num_reqs_padded,
                 num_reqs_padded=num_reqs_padded,
                 num_tokens_padded=num_tokens_padded,
-                seq_lens_cpu_upper_bound=self.input_batch.seq_lens_cpu_upper_bound,
+                seq_lens_cpu_upper_bound=upper_bound,
                 step=self.num_query_per_req,
                 causal=self._group_causal,
             )
