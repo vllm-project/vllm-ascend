@@ -1,3 +1,148 @@
+1、拉起服务脚本：
+unset http_proxy && unset https_proxy
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_BUFFSIZE=512
+export NPU_MEMORY_FRACTION=0.95
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+export OMP_PROC_BIND=false
+export VLLM_USE_V1=1
+export TASK_QUEUE_ENABLE=1
+export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+export OMP_NUM_THREADS=1
+sysctl -w vm.swappiness=0
+sysctl -w kernel.numa_balancing=0
+export VLLM_ASCEND_ENABLE_NZ=2
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+vllm serve /home/Qwen3-30B-A3B                          --served-model-name Qwen3_30B_A3B                          --async-scheduling                          --tensor-parallel-size 4                          --port 8000                          --max-num-seqs 16                          --max-model-len 16384                          --max-num-batched-tokens 16384                          --gpu-memory-utilization 0.9                          --trust-remote-code                          --additional-config '{"enable_cpu_binding":true}'                          --compilation-config '{"cudagraph_mode": "FULL","cudagraph_capture_sizes":[1,2,4,8,16,32,48,64,96,128,160,192,256,512,1024,2048,4096,8192]}'
+
+2、服务端报错信息python traceback调用栈：
+Capturing CUDA graphs (mixed prefill-decode, FULL):   0%|                                                                          | 0/18 [00:00<?, ?it/s][rank1]:[E725 16:54:01.706323474 OpParamMaker.cpp:454] operator():../third_party/op-plugin/op_plugin/ops/opapi/FusedInferAttentionScoreKernelNpuOpApi.cpp:425 NPU function error: call aclnnFusedInferAttentionScoreV3 failed, error code is 507018
+[ERROR] 2026-07-25-16:54:01 (PID:36842, Device:1, RankID:-1) ERR00100 PTA call acl api failed
+[Error]: The aicpu execution is abnormal. 
+        Rectify the fault based on the error information in the ascend log.
+[PID: 36842] 2026-07-25-16:54:01.555.555 AclNN_Runtime_Error(EZ9903): Assert ((NnopbaseExecutorLaunchKernel(executor, stream, numBlocks)) == 0) failed
+        Solution: In this scenario, collect the plog when the fault occurs and locate the fault based on the plog.
+        TraceBack (most recent call last):
+        Failed to submit kernel task, retCode=0x715002a.[FUNC:LaunchKernelSubmit][FILE:context.cc][LINE:1223]
+        kernel launch submit failed.[FUNC:LaunchKernel][FILE:context.cc][LINE:1671]
+        rtsLaunchKernelWithHostArgs execution failed, reason=aicpu exception[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:65]
+        rtsLaunchKernelWithHostArgs failed, runtime result = 507018.[FUNC:ReportCallError][FILE:log_inner.cpp][LINE:148]
+        Check aclrtLaunchKernelWithHostArgs( funcHandle, numBlocks, stream, &cfg, executor->argsExt.args, executor->argsExt.argsSize, rtsHostPlaceHolder.data(), rtsHostPlaceHolder.size()) failed
+        Assert ((NnopbaseExecutorLaunchKernel(executor, stream, numBlocks)) == 0) failed
+        Check NnopbaseExecutorKernelLaunch(executor, stream) failed
+        Check NnopbaseRunWithWorkspace(executor, stream, workspace, workspaceSize) failed
+
+Exception raised from operator() at ../third_party/op-plugin/op_plugin/ops/opapi/FusedInferAttentionScoreKernelNpuOpApi.cpp:425 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0xc8 (0xffff81e65978 in /usr/local/python3.11.10/lib/python3.11/site-packages/torch/lib/libc10.so)
+frame #1: c10::detail::torchCheckFail(char const*, char const*, unsigned int, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&) + 0xc4 (0xffff81e09adc in /usr/local/python3.11.10/lib/python3.11/site-packages/torch/lib/libc10.so)
+frame #2: <unknown function> + 0x1c2d684 (0xffff6d7bd684 in /usr/local/python3.11.10/lib/python3.11/site-packages/torch_npu/lib/libtorch_npu.so)
+frame #3: <unknown function> + 0x3a26db4 (0xffff6f5b6db4 in /usr/local/python3.11.10/lib/python3.11/site-packages/torch_npu/lib/libtorch_npu.so)
+frame #4: <unknown function> + 0xca80f0 (0xffff6c8380f0 in /usr/local/python3.11.10/lib/python3.11/site-packages/torch_npu/lib/libtorch_npu.so)
+frame #5: <unknown function> + 0xca8ccc (0xffff6c838ccc in /usr/local/python3.11.10/lib/python3.11/site-packages/torch_npu/lib/libtorch_npu.so)
+frame #6: <unknown function> + 0xca6be8 (0xffff6c836be8 in /usr/local/python3.11.10/lib/python3.11/site-packages/torch_npu/lib/libtorch_npu.so)
+frame #7: <unknown function> + 0xe1ae0 (0xffff8f8c1ae0 in /lib/aarch64-linux-gnu/libstdc++.so.6)
+frame #8: <unknown function> + 0x8595c (0xffff8faf595c in /lib/aarch64-linux-gnu/libc.so.6)
+frame #9: <unknown function> + 0xebb4c (0xffff8fb5bb4c in /lib/aarch64-linux-gnu/libc.so.6)
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004] WorkerProc hit an exception.
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004] Traceback (most recent call last):
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 5178, in _replace_gpu_model_runner_function_wrapper
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     yield
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 5044, in capture_model
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     cuda_graph_size = GPUModelRunner.capture_model(self)
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/home/code/vllm/main/vllm/vllm/tracing/otel.py", line 178, in sync_wrapper
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     return func(*args, **kwargs)
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/home/code/vllm/main/vllm/vllm/v1/worker/gpu_model_runner.py", line 6675, in capture_model
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     self._capture_cudagraphs(
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/home/code/vllm/main/vllm/vllm/v1/worker/gpu_model_runner.py", line 6791, in _capture_cudagraphs
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     self._warmup_and_capture(
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/home/code/vllm/main/vllm/vllm/v1/worker/gpu_model_runner.py", line 6726, in _warmup_and_capture
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     self._dummy_run(
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     return func(*args, **kwargs)
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 3686, in _dummy_run
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     outputs = self._model_forward(
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]               ^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 2923, in _model_forward
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     hidden_states = run_model()
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]                     ^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/compilation/acl_graph.py", line 145, in __call__
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     return self.runnable(*args, **kwargs)
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     return self._call_impl(*args, **kwargs)
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     return forward_call(*args, **kwargs)
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/home/code/vllm/main/vllm/vllm/model_executor/models/qwen3_moe.py", line 643, in forward
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     hidden_states = self.model(
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]                     ^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/home/code/vllm/main/vllm/vllm/compilation/decorators.py", line 520, in __call__
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     return self.aot_compiled_fn(self, *args, **kwargs)
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/_dynamo/aot_compile.py", line 124, in __call__
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     return self.fn(*args, **kwargs)
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]            ^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/home/code/vllm/main/vllm/vllm/model_executor/models/qwen3_moe.py", line 485, in forward
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     def forward(
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/home/code/vllm/main/vllm/vllm/compilation/caching.py", line 217, in __call__
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     return self.optimized_call(*args, **kwargs)
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "<string>", line 5, in execution_fn
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/home/code/vllm/main/vllm/vllm/compilation/piecewise_backend.py", line 380, in __call__
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     return range_entry.runnable(*args)
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/compilation/compiler_interface.py", line 363, in compiled_fn
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     result = _inner_fn(*args, **kwargs)
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]              ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch_npu/dynamo/npugraph_ex/npu_fx_compiler.py", line 507, in __call__
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     gm_result = self.run_kernel(*args, **kwargs)
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "<string>", line 1814, in kernel
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch_npu/dynamo/npugraph_ex/_acl_concrete_graph/acl_graph.py", line 823, in __call__
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     return self.fx_run_eagerly(*args, **kwargs)
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch_npu/dynamo/npugraph_ex/_acl_concrete_graph/acl_graph.py", line 894, in fx_run_eagerly
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     return self.fx_forward(*args, **kwargs)
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "<string>", line 58, in forward
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/_ops.py", line 819, in __call__
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     return self._op(*args, **kwargs)
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]            ^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/home/code/vllm/main/vllm/vllm/model_executor/layers/fused_moe/runner/moe_runner.py", line 127, in _moe_forward
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     return layer._forward_impl(
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]            ^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/ops/fused_moe/fused_moe.py", line 786, in _forward_impl
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     return self.no_shared_forward_impl(hidden_states, router_logits)
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/ops/fused_moe/fused_moe.py", line 566, in no_shared_forward_impl
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     fused_experts_results: FusedExpertsResult = self._quant_method.apply(
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/ops/fused_moe/fused_moe.py", line 248, in apply
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     final_hidden_states = moe_comm_method.fused_experts(
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/ops/fused_moe/moe_comm_method.py", line 148, in fused_experts
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/ops/fused_moe/token_dispatcher.py", line 401, in token_dispatch
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     sorted_hidden_states, expanded_row_idx, expert_tokens, dynamic_scale = DeviceOperator.npu_moe_init_routing(
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]                                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/device/device_op.py", line 120, in npu_moe_init_routing
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     return torch_npu.npu_moe_init_routing_v2(
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]   File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch/_ops.py", line 1209, in __call__
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]     return self._op(*args, **kwargs)
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004]            ^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004] RuntimeError: The Inner error is reported as above. The process exits for this inner error, and the current working operator name is aclnnFusedInferAttentionScoreV3.
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004] Since the operator is called asynchronously, the stacktrace may be inaccurate. If you want to get the accurate stacktrace, please set the environment variable ASCEND_LAUNCH_BLOCKING=1.
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004] Note: ASCEND_LAUNCH_BLOCKING=1 will force ops to run in synchronous mode, resulting in performance degradation. Please unset ASCEND_LAUNCH_BLOCKING in time after debugging.
+(Worker_TP2 pid=36843) ERROR 07-25 16:54:03 [multiproc_executor.py:1004] [ERROR] 2026-07-25-16:54:01 (PID:36843, Device:2, RankID:-1) ERR00100 PTA call acl api failed.
+
+3、CANN PLOG：
 [ERROR] RUNTIME(28413,):2026-07-25-14:13:22.318.574 [stars_engine.cc:1548]28552 ProcLogicCqReport:Task run failed, device_id=3, stream_id=40, task_id=0, sqe_type=1(aicpu), errType=0x1(task exception), sqSwStatus=0
 [ERROR] RUNTIME(28413,):2026-07-25-14:13:22.320.972 [device_error_proc.cc:1644]28552 ProcessStarsAicpuErrorInfo:The error from device(chipId:3, dieId:0), serial number is 1, an exception occurred during AICPU execution, stream_id:40, task_id:0, errcode:0, msg:aicpu execute failed.
 [ERROR] RUNTIME(28413,):2026-07-25-14:13:22.321.041 [davinci_task.cc:209]28552 SetStarsResultForDavinciTask:AICPU Kernel task happen error, retCode=0x2a.
