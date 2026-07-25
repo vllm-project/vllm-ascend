@@ -339,12 +339,12 @@ class MultiGroupBlockTable:
         block_sizes: list[int],
         num_speculative_tokens: int = 0,
         max_num_blocks: list[int] | None = None,
-        kernel_sizes: list[list[int]] | None = None,
+        kernel_sizes: list[int] | None = None,
         cp_kv_cache_interleave_size: int = 1,
         kv_cache_groups: KVCacheGroupSpec = None,
     ) -> None:
         if kernel_sizes is None:
-            kernel_sizes = [[0]] * len(block_sizes)
+            kernel_sizes = [0] * len(block_sizes)
         # Ensure kernel_sizes matches block_sizes length
         elif len(kernel_sizes) == 1 and len(block_sizes) > 1:
             kernel_sizes = kernel_sizes * len(block_sizes)
@@ -376,12 +376,12 @@ class MultiGroupBlockTable:
                     max_num_batched_tokens,
                     pin_memory,
                     device,
-                    kernel_size_list,
+                    [kernel_size],
                     cp_kv_cache_interleave_size,
                     num_speculative_tokens,
                     kv_cache_group,
                 )
-                for block_size, kernel_size_list, max_num_blocks_per_req, kv_cache_group in zip(
+                for block_size, kernel_size, max_num_blocks_per_req, kv_cache_group in zip(
                     block_sizes, kernel_sizes, max_num_blocks, kv_cache_groups
                 )
             ]
@@ -394,11 +394,11 @@ class MultiGroupBlockTable:
                     max_num_batched_tokens,
                     pin_memory,
                     device,
-                    kernel_size_list,
+                    [kernel_size],
                     cp_kv_cache_interleave_size,
                     num_speculative_tokens,
                 )
-                for block_size, kernel_size_list, max_num_blocks_per_req in zip(
+                for block_size, kernel_size, max_num_blocks_per_req in zip(
                     block_sizes, kernel_sizes, max_num_blocks
                 )
             ]
