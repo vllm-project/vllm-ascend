@@ -1187,6 +1187,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 "key_quant_mode": 0,
                 "value_quant_mode": 0,
             }
+        if input_layout == "BNSD":
+            sparse_mode = 0
+        else:
+            is_single_token_decode = (
+                attn_metadata.attn_state == AscendAttentionState.DecodeOnly and attn_metadata.max_query_len == 1
+            )
+            sparse_mode = 0 if is_single_token_decode else (
+                4 if self.sliding_window is not None else 3
+            )
         if use_max_workspace:
             # See full_graph_fia: this path needs the max workspace across layer
             # variants sharing the same graph size.
@@ -1203,7 +1212,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_key_value_heads=self.num_kv_heads,
                 softmax_scale=self.scale,
                 num_query_heads=self.num_heads,
-                sparse_mode=4 if self.sliding_window is not None else 3,
+                sparse_mode=sparse_mode,
                 pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
                 next_tokens=0,
                 learnable_sink=self.sinks if input_layout == "TND" else None,
@@ -1223,9 +1232,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 value=value,
                 atten_mask=attn_metadata.attn_mask,
                 block_table=block_table,
-                input_layout="TND",
+                input_layout=input_layout,
                 block_size=block_size,
-                actual_seq_qlen=actual_seq_lengths_q,
+                actual_seq_qlen=actual_seq_lengths_q if input_layout == "TND" else None,
                 actual_seq_kvlen=actual_seq_lengths_kv,
                 num_key_value_heads=self.num_kv_heads,
                 softmax_scale=self.scale,
@@ -1233,7 +1242,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 sparse_mode=4 if self.sliding_window is not None else 3,
                 pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
                 next_tokens=0,
-                learnable_sink=self.sinks,
+                learnable_sink=self.sinks if input_layout == "TND" else None,
+                **dequant_args,
             )
             should_update_workspace_cache = True
         if should_update_workspace_cache:
@@ -1249,6 +1259,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         event.wait(stream)
         event.reset(stream)
         graph_params.events[num_tokens].append(event)
+        pre_tokens = self.sliding_window if self.sliding_window is not None else SWA_INT_MAX
+        next_tokens = 0
         v2_attn_params = (
             weak_ref_tensors(query),
             weak_ref_tensors(key),
@@ -1257,14 +1269,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
             weak_ref_tensors(attn_metadata.attn_mask) if not (self.enable_c8_fp8_quant and layer is not None) else None,
             block_size,
             actual_seq_lengths_kv,
+            actual_seq_lengths_q,
             self.num_kv_heads,
             self.num_heads,
             self.scale,
-            self.sliding_window,
-            self.sinks,
             weak_ref_tensors(output),
             weak_ref_tensors(softmax_lse),
-            self._graph_metadata_layer_name() if self._use_layer_aware_fia_graph_replay else None,
+            sparse_mode,
+            pre_tokens,
+            next_tokens,
         )
         if self.enable_c8_fp8_quant and layer is not None:
             v2_attn_params = v2_attn_params + (
@@ -1272,9 +1285,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 None,
                 weak_ref_tensors(layer._c8_v_aq_scale_nz_bnsd),
                 None,
+                True,
             )
         else:
-            v2_attn_params = v2_attn_params + (None, None, None, None)
+            v2_attn_params = v2_attn_params + (None, None, None, None, False)
+        layer_name = self._graph_metadata_layer_name(layer) if self._use_layer_aware_fia_graph_replay else None
+        v2_attn_params = v2_attn_params + (layer_name,)
         graph_params.attn_params[num_tokens].append(v2_attn_params)
         torch.npu.graph_task_group_begin(stream)
         torch_npu.npu_fused_infer_attention_score_v2.out(
@@ -1289,7 +1305,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_kvlen=actual_seq_lengths_kv,
             num_key_value_heads=self.num_kv_heads,
             num_query_heads=self.num_heads,
-            sparse_mode=4 if self.sliding_window is not None else 3,
+            sparse_mode=sparse_mode,
             pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
             next_tokens=0,
             softmax_scale=self.scale,
@@ -1300,6 +1316,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         )
         handle = torch.npu.graph_task_group_end(stream)
         graph_params.handles[num_tokens].append(handle)
+        if input_layout == "BNSD":
+            output = output.squeeze(2)
         return output, num_tokens
 
     def full_graph_pa(
@@ -2401,9 +2419,10 @@ class AscendC8Fp8AttentionBackendImpl(AscendAttentionBackendImpl):
             return
 
         def _shard_and_reshape(raw: torch.Tensor) -> torch.Tensor:
-            if raw.numel() == 1:
-                return raw.to(device=device)
             expected = self.num_kv_heads * self.head_size
+
+            if raw.numel() == 1:
+                return raw.expand(1, self.num_kv_heads, self.head_size).contiguous().to(device=device)
 
             if raw.numel() != expected:
                 total_kv_heads = raw.numel() // self.head_size
@@ -2422,8 +2441,8 @@ class AscendC8Fp8AttentionBackendImpl(AscendAttentionBackendImpl):
         layer._c8_v_inv_scale = 1.0 / layer._c8_v_scale
 
         nz_bnsd = (1, self.num_kv_heads, 1, self.head_size)
-        layer._c8_k_aq_scale_nz_bnsd = layer._c8_k_scale.view(nz_bnsd).contiguous().to(torch.bf16)
-        layer._c8_v_aq_scale_nz_bnsd = layer._c8_v_scale.view(nz_bnsd).contiguous().to(torch.bf16)
+        layer._c8_k_aq_scale_nz_bnsd = layer._c8_k_scale.view(nz_bnsd).contiguous().to(torch.bfloat16)
+        layer._c8_v_aq_scale_nz_bnsd = layer._c8_v_scale.view(nz_bnsd).contiguous().to(torch.bfloat16)
 
         layer._c8_fp8_scales_prepared = True
 
