@@ -323,6 +323,10 @@ class NPUModelRunner(GPUModelRunner):
             # max_seq_len is only consumed by the PP `compute_need_sampled_mask`.
             max_seq_len_np = self.req_states.max_seq_len[idx_mapping_np]
 
+        prompt_lens = None
+        if getattr(self.model_config, "rswa_window", None) is not None:
+            prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
+
         self.input_batch = AscendInputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -353,8 +357,7 @@ class NPUModelRunner(GPUModelRunner):
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
             has_structured_output_reqs=scheduler_output.has_structured_output_requests,
-            # TODO: only populated for R-SWA (not supported yet).
-            prompt_lens=None,
+            prompt_lens=prompt_lens,
             # extra attributes for ascend npus.
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,

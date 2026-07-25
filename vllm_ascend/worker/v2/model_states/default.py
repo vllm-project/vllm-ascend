@@ -73,5 +73,6 @@ class AscendModelState(DefaultModelState):
             positions=input_batch.positions,
             attn_state=input_batch.attn_state,
             for_cudagraph_capture=for_capture,
+            rswa_prefix_lens=input_batch.prompt_lens,
         )
         return self.attn_metadata
