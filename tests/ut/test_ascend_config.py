@@ -234,6 +234,30 @@ class TestAscendConfig(TestBase):
             init_ascend_config(test_vllm_config)
 
     @_clean_up_ascend_config
+    @patch("vllm_ascend.ascend_config.logger.warning")
+    @patch("vllm_ascend.utils.is_310p", return_value=True)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_disable_npugraph_ex_on_310p(
+        self, mock_fix_incompatible_config, mock_is_310p, mock_warning
+    ):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "ascend_compilation_config": {"enable_npugraph_ex": True, "enable_static_kernel": True},
+            "refresh": True,
+        }
+
+        ascend_compilation_config = init_ascend_config(test_vllm_config).ascend_compilation_config
+
+        self.assertFalse(ascend_compilation_config.enable_npugraph_ex)
+        self.assertFalse(ascend_compilation_config.enable_static_kernel)
+        warning_messages = [call.args[0] for call in mock_warning.call_args_list]
+        self.assertIn("npugraph_ex is not supported on Ascend 310P. Disabling it.", warning_messages)
+        self.assertIn(
+            "static kernel requires npugraph_ex, which is not supported on Ascend 310P. Disabling it.",
+            warning_messages,
+        )
+
+    @_clean_up_ascend_config
     @patch("vllm_ascend.ascend_config.logger.info_once")
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_migrated_config_falls_back_to_envs(self, mock_fix_incompatible_config, mock_info_once):

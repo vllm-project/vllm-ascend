@@ -16,8 +16,10 @@
 #
 # ruff: noqa: E501
 from collections.abc import Callable
+from copy import copy
 from dataclasses import dataclass, field
 from functools import wraps
+from types import SimpleNamespace
 
 import torch
 import torch.nn.functional as F
@@ -38,6 +40,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
+from vllm_ascend.lora.fused_moe import sync_lora_context
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
@@ -88,11 +91,29 @@ def mock_true():
     return True
 
 
+def use_multistage_eplb_load(dynamic_eplb: bool, policy_type: int, collection_interval: int) -> bool:
+    """Whether EPLB should retain a separate expert-load vector per step."""
+    return dynamic_eplb and policy_type == 3 and collection_interval > 1
+
+
+def make_eplb_placement_config(eplb_config, num_redundant_experts: int) -> SimpleNamespace:
+    """Build the minimal config view consumed by init_eplb_config."""
+    return SimpleNamespace(
+        expert_map_path=eplb_config.expert_map_path,
+        dynamic_eplb=eplb_config.dynamic_eplb,
+        num_redundant_experts=num_redundant_experts,
+    )
+
+
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def __init__(self, moe: FusedMoEConfig = None, tid2eid=None):
         super().__init__(moe=moe)
         self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
         self.tid2eid = tid2eid
+        self.lora_context = None
+
+    def set_lora_context(self, lora_context) -> None:
+        self.lora_context = lora_context
 
     @property
     def is_monolithic(self) -> bool:
@@ -106,10 +127,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def process_weights_after_loading(self, layer):
         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
 
-        w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2)
+        w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()
         layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
 
-        w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2)
+        w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
         layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
         # TODO: Current dispatch_ffn_combine fusion operator ONLY supports NZ format.
@@ -376,8 +397,19 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
 
         eplb_config = ascend_config.eplb_config
 
-        if mix_placement:
-            moe_config.num_experts += n_shared_experts
+        # The upstream FusedMoE factory has already included redundant expert
+        # slots in moe_config and allocated RoutedExperts weights accordingly.
+        # Ascend's placement builder operates on logical expert IDs, so give it
+        # a shallow config view with the logical count.
+        placement_moe_config = copy(moe_config)
+        placement_moe_config.num_experts = moe_config.num_logical_experts + (n_shared_experts if mix_placement else 0)
+        allocated_redundancy = moe_config.num_experts - moe_config.num_logical_experts
+        if eplb_config.num_redundant_experts not in (0, allocated_redundancy):
+            raise ValueError(
+                "Conflicting EPLB redundant expert counts: "
+                f"allocated={allocated_redundancy}, Ascend={eplb_config.num_redundant_experts}."
+            )
+        placement_eplb_config = make_eplb_placement_config(eplb_config, allocated_redundancy)
 
         (
             self.global_expert_map,
@@ -385,24 +417,43 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             self.log2phy,
             self.global_redundant_expert_num,
         ) = init_eplb_config(
-            eplb_config,
+            placement_eplb_config,
             AscendMoERunner.moe_counter,
-            moe_config,
+            placement_moe_config,
             mix_placement,
             n_shared_experts,
             tp_size=vllm_config.parallel_config.tensor_parallel_size,
         )
 
         moe_config.global_redundant_expert_num = self.global_redundant_expert_num
-        local_num_experts = (moe_config.num_experts + self.global_redundant_expert_num) // moe_config.ep_size
-        moe_config.num_local_experts = local_num_experts
-        routed_experts.expert_map_manager._local_num_experts = local_num_experts
-        routed_experts.expert_map_manager._expert_map = self._expert_map
+        local_num_experts = moe_config.num_local_experts
+        expected_local_num_experts = (
+            placement_moe_config.num_experts + self.global_redundant_expert_num
+        ) // moe_config.ep_size
+        if local_num_experts != expected_local_num_experts:
+            raise ValueError(
+                "EPLB local expert capacity mismatch: "
+                f"allocated={local_num_experts}, placement={expected_local_num_experts}. "
+                "Ensure vLLM and Ascend use the same redundant expert count."
+            )
+        # Keep ExpertMapManager's physical-expert map until checkpoint loading
+        # finishes. The upstream loader uses it to place both original and
+        # redundant physical experts. Ascend execution uses self._expert_map,
+        # which maps logical expert IDs to the local physical slots.
 
         self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy is not None)
         self.multi_stage = False
         self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64).npu()
-        if self.dynamic_eplb and eplb_config.expert_heat_collection_interval > 1:
+        # Only FlashLB consumes a time series of expert loads. Other EPLB
+        # policies (including the default SwiftBalance policy) expect one load
+        # vector per layer and rank. Using the collection interval alone here
+        # adds an unexpected window dimension and produces
+        # [layer, rank, interval, expert] after all-gather.
+        if use_multistage_eplb_load(
+            self.dynamic_eplb,
+            eplb_config.eplb_policy_type,
+            eplb_config.expert_heat_collection_interval,
+        ):
             self.multi_stage = True
             self.load_counter = torch.tensor(0, dtype=torch.int32, device="npu")
             self.num_iter = eplb_config.expert_heat_collection_interval
@@ -510,6 +561,32 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             MoECommType.FUSED_MC2,
         } or (moe_comm_type == MoECommType.ALLGATHER and _EXTRA_CTX.flash_comm_v1_enabled)
 
+    @property
+    def local_num_experts(self) -> int:
+        """Number of physical experts managed by this EPLB layer."""
+        return self.moe_config.num_local_experts
+
+    @property
+    def ep_rank(self) -> int:
+        return self.moe_config.ep_rank
+
+    def update_expert_map(self, new_expert_map: torch.Tensor) -> None:
+        """Update both the runner and routed-expert map references."""
+        self._expert_map = new_expert_map
+        self.routed_experts.expert_map_manager._expert_map = new_expert_map
+
+    def get_log2phy_map(self) -> torch.Tensor | None:
+        return self.log2phy
+
+    def clear_moe_load(self) -> None:
+        self.moe_load.zero_()
+        if self.multi_stage:
+            self.load_counter.zero_()
+
+    def get_eplb_parameter(self, name: str):
+        """Return an expert parameter from the refactored weight owner."""
+        return getattr(self.routed_experts, name)
+
     def _maybe_reduce_shared_expert_output(
         self,
         shared_output: torch.Tensor | None,
@@ -545,6 +622,10 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # TODO: The community only considers load balancing when DP > 1.
         # This approach may overlook some extreme scenarios.
         enable_force_load_balance = _EXTRA_CTX.in_profile_run
+
+        lora_context = getattr(self.routed_experts, "_ascend_moe_lora_context", None)
+        if lora_context is not None:
+            sync_lora_context(self._quant_method, lora_context)
 
         prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
             hidden_states=hidden_states,
@@ -612,6 +693,10 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             reduce_results=isinstance(_EXTRA_CTX.moe_comm_method, AllGatherCommImpl),
             padded_hidden_states_shape=padded_hidden_states_shape,
         )
+
+        # clear per-forward LoRA state from long-lived singletons.
+        if lora_context is not None:
+            sync_lora_context(self._quant_method, None)
 
         if return_with_event:
             return FusedMoEResult(

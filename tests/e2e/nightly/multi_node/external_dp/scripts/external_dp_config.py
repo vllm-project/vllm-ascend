@@ -15,10 +15,8 @@ from tests.e2e.nightly.multi_node.scripts.utils import (
 
 logger = logging.getLogger(__name__)
 
-ROUTING_GENERIC_DP = "generic_dp"
 ROUTING_DISAGGREGATED_PREFILL = "disaggregated_prefill"
 PROXY_SCRIPT_BY_ROUTING_TYPE = {
-    ROUTING_GENERIC_DP: "examples/external_online_dp/dp_load_balance_proxy_server.py",
     ROUTING_DISAGGREGATED_PREFILL: "examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py",
 }
 
@@ -347,8 +345,6 @@ class ExternalDPConfigLoader:
             raise ValueError(f"Unsupported routing.type: {config.routing.type}")
 
         groups = config.routing.groups
-        if config.routing.type == ROUTING_GENERIC_DP and not groups.get("worker"):
-            raise ValueError("generic_dp routing requires routing.groups.worker")
         if config.routing.type == ROUTING_DISAGGREGATED_PREFILL and (
             not groups.get("prefiller") or not groups.get("decoder")
         ):

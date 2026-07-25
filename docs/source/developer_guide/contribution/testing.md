@@ -237,9 +237,6 @@ You can run tests with `pytest` as well. Typical examples:
 
     ```bash
     cd /vllm-workspace/vllm-ascend/
-    # run all multi-card op tests on A2
-    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a2/
-
     # run all multi-card op tests on A3
     VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a3/
     ```

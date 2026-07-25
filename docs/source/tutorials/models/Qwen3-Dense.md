@@ -289,8 +289,6 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 
 === "Atlas inference products"
 
-    Atlas inference products use the W8A8SC-310 quantized weights from the Eco-Tech official ModelScope repository. Keep an explicit `--max-model-len` for 310P deployment to avoid OOM caused by oversized attention mask allocation.
-
     Qwen3-8B-W8A8SC:
 
     ```bash
@@ -305,10 +303,10 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --max-num-seqs 32 \
         --served-model-name qwen3 \
         --dtype float16 \
-        --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+        --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32]}' \
         --quantization ascend \
-        --max-model-len 16384 \
+        --max-model-len 20480 \
         --no-enable-prefix-caching \
         --load-format sharded_state
     ```
@@ -327,10 +325,10 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --max-num-seqs 16 \
         --served-model-name qwen3 \
         --dtype float16 \
-        --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+        --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}' \
         --quantization ascend \
-        --max-model-len 16384 \
+        --max-model-len 20480 \
         --no-enable-prefix-caching \
         --load-format sharded_state
     ```
@@ -349,7 +347,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --max-num-seqs 32 \
         --served-model-name qwen3 \
         --dtype float16 \
-        --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+        --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [16,32]}' \
         --quantization ascend \
         --max-model-len 20480 \
