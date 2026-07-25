@@ -247,6 +247,10 @@ class TestFA3GraphTaskGroupIncompatibility:
             captured = _run_fa3_eager(q, k, v, bt, kv_seqlens, cu_q, max_qlen,
                                       causal=causal, scheduler_metadata=metadata)
             handle = torch.npu.graph_task_group_end(stream)
+        assert handle is not None, (
+            "graph_task_group_end returned None — FA3 may have been "
+            "inadvertently captured by the CANN task group."
+        )
 
         # FA3 IS captured by NPUGraph (driver-level kernel capture) but NOT
         # by the CANN task group (op-level).  The task group handle is empty.
@@ -384,4 +388,6 @@ class TestFA3GraphTaskGroupIncompatibility:
         # Replay output must match the reference for the NEW inputs (not the
         # old stale data from capture time).
         torch.testing.assert_close(replay_out, ref_out,
+                                   rtol=1e-2, atol=1e-2)
+        torch.testing.assert_close(replay_lse, ref_lse,
                                    rtol=1e-2, atol=1e-2)
