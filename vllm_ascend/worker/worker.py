@@ -61,6 +61,10 @@ from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_config import (
+    get_gva_layerwise_config,
+    get_layerwise_kv_cache_num_tensors,
+)
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     get_host_device_memory_usage_ratio,
 )
@@ -587,6 +591,20 @@ class NPUWorker(WorkerBase):
             "isolate vLLM in its own container."
         )
         self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
+
+        extra_config = get_gva_layerwise_config(self.vllm_config.kv_transfer_config)
+        if extra_config is not None:
+            num_layers = self.model_config.get_num_layers(self.parallel_config)
+            num_tensors = get_layerwise_kv_cache_num_tensors(num_layers, extra_config)
+            if num_tensors is not None and num_tensors < num_layers:
+                factor = num_layers / num_tensors
+                self.available_kv_cache_memory_bytes = int(self.available_kv_cache_memory_bytes * factor)
+                logger.info(
+                    "Layerwise KV cache reuse uses %d slots for %d layers; scale logical KV budget by %.3f.",
+                    num_tensors,
+                    num_layers,
+                    factor,
+                )
 
         logger.debug(profile_result)
         logger.info_once(
