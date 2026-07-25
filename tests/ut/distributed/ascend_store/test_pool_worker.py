@@ -586,7 +586,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.start_load_kv(meta)
         # No get called since no load_spec
 
-    def test_wait_for_save_enqueues_async(self):
+    def test_wait_for_save_waits_for_save(self):
         worker = self._make_worker()
         worker.kv_send_thread = MagicMock()
 
@@ -602,7 +602,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.wait_for_save(meta)
         worker.kv_send_thread.add_stored_request.assert_called_with("r1")
         worker.kv_send_thread.add_request.assert_called_once()
-        worker.kv_send_thread.request_queue.join.assert_not_called()
+        worker.kv_send_thread.request_queue.join.assert_called_once()
 
     def test_wait_for_save_skip_non_save(self):
         worker = self._make_worker()
@@ -619,6 +619,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         meta.add_request(req)
         worker.wait_for_save(meta)
         worker.kv_send_thread.add_stored_request.assert_not_called()
+        worker.kv_send_thread.request_queue.join.assert_not_called()
 
     def test_get_finished_producer(self):
         worker = self._make_worker(kv_role="kv_producer")
