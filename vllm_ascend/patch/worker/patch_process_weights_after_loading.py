@@ -34,6 +34,8 @@ def ascend_process_weights_after_loading(
             # parameters onto device for processing and back off after.
             with device_loading_context(module, target_device):
                 quant_method.process_weights_after_loading(module)
+            if hasattr(module, "update_param_tp_status"):
+                module.update_param_tp_status()
 
     # Initialize post-load attention weights for Attention, MLA, and MM encoder.
     # NOTE: Happens after other modules so we can easily decompress weights.

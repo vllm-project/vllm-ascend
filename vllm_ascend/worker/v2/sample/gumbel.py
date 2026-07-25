@@ -62,15 +62,28 @@ def apply_temperature(
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 44032
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
-    _temperature_kernel[(num_tokens, num_blocks)](
-        logits,
-        logits.stride(0),
-        expanded_idx_mapping,
-        temperature,
-        vocab_size,
-        BLOCK_SIZE=BLOCK_SIZE,
-        multibuffer=False,
-    )
+    if logits.dtype != torch.float32:
+        logits_fp32 = logits.to(torch.float32)
+        _temperature_kernel[(num_tokens, num_blocks)](
+            logits_fp32,
+            logits_fp32.stride(0),
+            expanded_idx_mapping,
+            temperature,
+            vocab_size,
+            BLOCK_SIZE=BLOCK_SIZE,
+            multibuffer=False,
+        )
+        logits.copy_(logits_fp32)
+    else:
+        _temperature_kernel[(num_tokens, num_blocks)](
+            logits,
+            logits.stride(0),
+            expanded_idx_mapping,
+            temperature,
+            vocab_size,
+            BLOCK_SIZE=BLOCK_SIZE,
+            multibuffer=False,
+        )
 
 
 @triton.jit(
