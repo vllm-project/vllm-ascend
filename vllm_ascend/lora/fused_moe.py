@@ -339,6 +339,7 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         self.device = _get_lora_device(base_layer)
         self._enable_aux_cuda_stream = envs.VLLM_LORA_ENABLE_DUAL_STREAM
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
+        self.enable_moe_shared_loras = False
         # Mirrors per-(lora_id) layout of `self.lora_a_stacked` (built in
         # `create_lora_weights`) so `create_dummy_lora`'s n_slices fallback
         # matches `lora_a_stacked` length under EP.
