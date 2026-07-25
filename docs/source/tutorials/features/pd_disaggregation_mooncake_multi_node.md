@@ -409,6 +409,7 @@ Modify `run_dp_template.sh` on each node.
                  }
           }
       }'
+    ```
 
 === "Decoder node 2"
 
@@ -631,6 +632,7 @@ Modify `run_dp_template.sh` on each node.
                  }
           }
       }'
+    ```
 
 === "Decoder node 2"
 
