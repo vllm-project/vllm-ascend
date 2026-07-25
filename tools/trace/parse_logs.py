@@ -17,6 +17,15 @@ _VLLM_INTERNAL_REQUEST_ID_RE = re.compile(
     r"^(?P<external>.+)-[0-9a-fA-F]{8}$"
 )
 
+# Map role-sensitive actions to the field name used in time_analysis.xlsx.
+# Actions not listed here keep their original names for every role.
+_ACTION_ROLE_MAP: dict[str, dict[str, str]] = {
+    "Add need pulling sequence": {
+        "prefill": "prefill_Add need pulling sequence",
+        "decode": "Add need pulling sequence",
+    },
+}
+
 
 def _normalize_request_id(request_id):
     # vLLM V1 may rewrite EngineCore request IDs as "<external>-<8 hex>".
@@ -226,13 +235,19 @@ def _get_step_line(
                             role, ip = role.split("_")
                             action = action.strip()
                             timestamp = float(timestamp)
+                            request_role[request_id][role] = ip
+                            role_action_map = _ACTION_ROLE_MAP.get(action)
+                            if role_action_map is not None:
+                                mapped_action = role_action_map.get(role)
+                                if mapped_action is None:
+                                    continue
+                                action = mapped_action
                             # min value
                             if (
                                 action not in data_by_request[request_id]
                                 or timestamp < data_by_request[request_id][action]
                             ):
                                 data_by_request[request_id][action] = timestamp
-                            request_role[request_id][role] = ip
                             if (
                                 action not in action_timestamps
                                 or timestamp < action_timestamps[action]
@@ -351,6 +366,7 @@ def _get_action_map() -> dict:
         "Prefill add waiting queue": "prefill 请求添加到waiting队列",
         "try to schedule in waiting queue": "首次尝试加入running队列",
         "fail to add result of kv insufficient": "首次kv不足加入失败",
+        "prefill_Add need pulling sequence": "prefill添加到need pulling队列",
         "Prefill get new_blocks": "P侧申请完成KV",
         "success add to seq groups": "成功加入running队列",
         "Prefill start execute_model": "P开始execute model",
