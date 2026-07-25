@@ -234,13 +234,15 @@ class TestFA3GraphTaskGroupIncompatibility:
         does not interfere with the CustomOp dispatch.)
         """
         q, k, v, bt, kv_seqlens, cu_q, max_qlen, _, _, metadata = _make_tensors(causal=causal)
-        stream = torch_npu.npu.current_stream()
 
         # -- capture: FA3 is NOT recorded by CANN op-level capture --
         # graph_task_group_begin/End requires the stream to be in capture
-        # mode, entered via torch.npu.graph().
+        # mode, entered via torch.npu.graph().  The stream must be obtained
+        # INSIDE the capture context—current_stream() returns a capture-
+        # specific stream within torch.npu.graph().
         _graph = torch.npu.NPUGraph()
         with torch.npu.graph(_graph):
+            stream = torch_npu.npu.current_stream()
             torch.npu.graph_task_group_begin(stream)
             _run_fa3_eager(q, k, v, bt, kv_seqlens, cu_q, max_qlen,
                            causal=causal, scheduler_metadata=metadata)
@@ -254,10 +256,13 @@ class TestFA3GraphTaskGroupIncompatibility:
 
         # FA3 was not captured — the call inside the update block runs
         # eagerly with the new inputs, producing the correct result.
-        torch.npu.graph_task_update_begin(stream, handle)
+        # Use current_stream() for update (not the capture stream), matching
+        # production where update happens on a separate update_stream.
+        update_stream = torch_npu.npu.current_stream()
+        torch.npu.graph_task_update_begin(update_stream, handle)
         replay_out = _run_fa3_eager(q2, k2, v2, bt2, kv2, cu_q2, max_qlen2,
                                     causal=causal, scheduler_metadata=metadata2)
-        torch.npu.graph_task_update_end(stream)
+        torch.npu.graph_task_update_end(update_stream)
         torch.npu.synchronize()
 
         torch.testing.assert_close(replay_out, ref2, rtol=1e-2, atol=1e-2)
@@ -276,7 +281,6 @@ class TestFA3GraphTaskGroupIncompatibility:
         q, k, v, bt, kv_seqlens, cu_q, max_qlen, cu_v1, kv_list, _ = tensors
         k_v1, v_v1 = _build_cann_v1_tensors(k, v)
 
-        stream = torch_npu.npu.current_stream()
         attn_mask = torch.triu(
             torch.ones(2048, 2048, dtype=torch.int8, device="npu"), diagonal=1
         )
@@ -289,6 +293,7 @@ class TestFA3GraphTaskGroupIncompatibility:
         # -- capture --
         _graph = torch.npu.NPUGraph()
         with torch.npu.graph(_graph):
+            stream = torch_npu.npu.current_stream()
             torch.npu.graph_task_group_begin(stream)
             torch_npu.npu_fused_infer_attention_score.out(
                 query=q,
@@ -338,7 +343,10 @@ class TestFA3GraphTaskGroupIncompatibility:
         replay_lse = torch.empty_like(lse_buf)
 
         # -- replay with new inputs --
-        torch.npu.graph_task_update_begin(stream, handle)
+        # Use current_stream() for update (not the capture stream), matching
+        # production where update happens on a separate update_stream.
+        update_stream = torch_npu.npu.current_stream()
+        torch.npu.graph_task_update_begin(update_stream, handle)
         torch_npu.npu_fused_infer_attention_score.out(
             query=q2,
             key=k2_v1,
@@ -355,7 +363,7 @@ class TestFA3GraphTaskGroupIncompatibility:
             atten_mask=attn_mask,
             out=[replay_out, replay_lse],
         )
-        torch.npu.graph_task_update_end(stream)
+        torch.npu.graph_task_update_end(update_stream)
         torch.npu.synchronize()
 
         # Replay output must match the reference for the NEW inputs (not the
