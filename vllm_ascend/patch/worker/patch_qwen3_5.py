@@ -210,7 +210,7 @@ if Qwen3_5MultiTokenPredictor is not None:
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    Qwen3_5MultiTokenPredictor.forward = qwen3_5_mtp_forward
+    Qwen3_5MultiTokenPredictor.forward = qwen3_5_mtp_forward  # gitleaks:allow
 
 
 if not _HAS_ALL_GATHER_HIDDEN_AND_RESIDUAL:
