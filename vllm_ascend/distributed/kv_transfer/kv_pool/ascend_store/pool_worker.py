@@ -334,6 +334,22 @@ class KVPoolWorker:
         # multiple cache tensors of ONE layer (caches_per_layer > 1).
         self.physical_layer_to_group_layers: dict[int, list[tuple[int, int]]] = {}
 
+        if self.kv_cache_config is not None:
+            physical_layers = {
+                self._extract_physical_layer_index(layer_name)
+                for group_spec in self.kv_cache_config.kv_cache_groups
+                for layer_name in group_spec.layer_names
+            }
+            if physical_layers:
+                effective_num_layers = max(self.num_layers, max(physical_layers) + 1)
+                if effective_num_layers != self.num_layers:
+                    logger.info(
+                        "KVPoolWorker: updated num_layers %d -> %d from cache group layout.",
+                        self.num_layers,
+                        effective_num_layers,
+                    )
+                    self.num_layers = effective_num_layers
+
         if self.kv_cache_config is not None and self.num_kv_cache_groups > 1:
             for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
                 # Map each unique physical layer to a sequential layer_idx_in_group
@@ -391,10 +407,7 @@ class KVPoolWorker:
         for group_id in range(self.num_kv_cache_groups):
             group_num_layers = self.group_num_layers.get(group_id, self.num_layers)
             group_block_len = self.group_block_len.get(group_id, self.group_block_len.get(0, []))
-            if group_block_len and group_num_layers > 0:
-                group_page_size = sum(group_block_len) // group_num_layers
-            else:
-                group_page_size = self.page_size_bytes
+            group_page_size = sum(group_block_len) if group_block_len else self.page_size_bytes
             builders.append(
                 LayerBatchBuilder(
                     self.token_database,
@@ -679,23 +692,35 @@ class KVPoolWorker:
         group_addrs: list[int] = []
         group_block_lens: list[int] = []
         group_block_strides: list[int] = []
-        physical_layers = set()
+        layer_names_by_physical: dict[int, list[str]] = {}
         for layer_name in layer_names:
             phys = self._extract_physical_layer_index(layer_name)
-            if phys >= getattr(self.hf_config, "num_hidden_layers", self.num_layers):
+            if phys >= self.num_layers and self.num_kv_cache_groups > 1:
                 continue
-            physical_layers.add(phys)
-            cache_or_caches = self.kv_caches[layer_name]
-            for cache in self._as_cache_tuple(cache_or_caches):
-                base_addr = cache.data_ptr()
-                block_len, block_stride, _, _ = self._get_cache_block_metadata(cache)
-                group_addrs.append(base_addr)
-                group_block_lens.append(block_len)
-                group_block_strides.append(block_stride)
+            layer_names_by_physical.setdefault(phys, []).append(layer_name)
+
+        layer_offsets = [0]
+        physical_layer_order = (
+            sorted(layer_names_by_physical) if self.num_kv_cache_groups == 1 else layer_names_by_physical
+        )
+        for phys in physical_layer_order:
+            for layer_name in sorted(
+                layer_names_by_physical[phys],
+                key=lambda name: "indexer" in name,
+            ):
+                cache_or_caches = self.kv_caches[layer_name]
+                for cache in self._as_cache_tuple(cache_or_caches):
+                    base_addr = cache.data_ptr()
+                    block_len, block_stride, _, _ = self._get_cache_block_metadata(cache)
+                    group_addrs.append(base_addr)
+                    group_block_lens.append(block_len)
+                    group_block_strides.append(block_stride)
+            layer_offsets.append(len(group_addrs))
         self.group_kv_caches_base_addr[group_id] = group_addrs
         self.group_block_len[group_id] = group_block_lens
         self.group_block_stride[group_id] = group_block_strides
-        self.group_num_layers[group_id] = len(physical_layers)
+        self.group_layer_offsets[group_id] = layer_offsets
+        self.group_num_layers[group_id] = len(layer_names_by_physical)
 
     def _align_kv_ptrs(self, registered_regions: dict[int, tuple[int, int]]):
         """
@@ -736,6 +761,7 @@ class KVPoolWorker:
         self.group_kv_caches_base_addr: dict[int, list[int]] = {}
         self.group_block_len: dict[int, list[int]] = {}
         self.group_block_stride: dict[int, list[int]] = {}
+        self.group_layer_offsets: dict[int, list[int]] = {}
         self.kv_caches = kv_caches
         self.group_kv_cache_families: dict[int, str] = {
             group_id: self._get_group_family(self.kv_cache_group_families, group_id)
@@ -794,6 +820,13 @@ class KVPoolWorker:
                 original_num_layers,
                 self.num_layers,
             )
+            self.layer_load_tasks = [[] for _ in range(self.num_layers)]
+            self.layer_save_tasks = [[] for _ in range(self.num_layers)]
+            cache_layout = build_layerwise_cache_layout(self.num_layers, self._extra_config)
+            self.layerwise_offload = cache_layout.has_layer_reuse
+            self.independent_layers = cache_layout.independent_layers
+            self.prefetch_layer_map = cache_layout.prefetch_layer_map
+            self.num_prefetch_layers = cache_layout.num_prefetch_layers
 
         self.page_size_bytes = sum(self.block_len)
         self.token_database.set_group_buffers(
@@ -803,6 +836,7 @@ class KVPoolWorker:
             cache_role="kv",
             group_cache_families=self.group_kv_cache_families,
             group_num_layers=self.group_num_layers,
+            group_layer_offsets=self.group_layer_offsets,
         )
 
         if self.tp_mismatch:
@@ -1184,13 +1218,8 @@ class KVPoolWorker:
                 cache_family = self._get_group_family(self.kv_cache_group_families, group_id)
                 ratio = max(infer_cache_family_ratio(cache_family), 1)
                 effective_block_size = group_block_size * ratio
-                group_num_layers = self.group_num_layers.get(group_id, self.num_layers)
                 group_block_len = self.group_block_len.get(group_id, self.group_block_len.get(0, []))
-                if group_block_len and group_num_layers > 0:
-                    group_page_size = sum(group_block_len) // group_num_layers
-                else:
-                    group_page_size = self.page_size_bytes
-                alloc_size = group_page_size * group_num_layers
+                alloc_size = sum(group_block_len) if group_block_len else self.page_size_bytes
 
                 group_block_hashes = get_block_hashes(block_hashes, effective_block_size, self.hash_block_size)
                 block_ids_by_group = (
