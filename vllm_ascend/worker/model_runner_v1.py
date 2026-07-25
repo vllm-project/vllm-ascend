@@ -92,9 +92,15 @@ from vllm.v1.spec_decode.ngram_proposer_gpu import copy_num_valid_draft_tokens
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
-from vllm.v1.worker.cp_utils import (
-    get_total_cp_world_size,
-)
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.25.1"):
+    from vllm.v1.worker.cp_utils import get_total_cp_world_size  # type: ignore[import-not-found]
+else:
+    from vllm.v1.worker.cp_utils import (
+        get_kv_cache_shard_count as get_total_cp_world_size,  # type: ignore[import-not-found]
+    )
 from vllm.v1.worker.gpu_model_runner import AsyncGPUModelRunnerOutput, GPUModelRunner
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,

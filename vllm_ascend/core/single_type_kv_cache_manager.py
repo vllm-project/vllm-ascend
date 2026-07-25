@@ -231,8 +231,12 @@ class CompressAttentionManager(FullAttentionManager):
         # )
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple([] for _ in range(len(kv_cache_group_ids)))
         block_size = kv_cache_spec.block_size
-        if dcp_world_size * pcp_world_size > 1:
-            block_size *= dcp_world_size * pcp_world_size
+        if vllm_version_is("0.25.1"):
+            if dcp_world_size * pcp_world_size > 1:
+                block_size *= dcp_world_size * pcp_world_size
+        else:
+            if dcp_world_size > 1:
+                block_size *= dcp_world_size
         logical_block_size = block_size * kv_cache_spec.compress_ratio
         hash_block_size = block_size if vllm_version_is("0.25.1") else block_pool.hash_block_size
         logical_block_hashes = BlockHashListWithBlockSize(block_hashes, hash_block_size, logical_block_size)

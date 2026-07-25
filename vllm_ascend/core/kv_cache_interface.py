@@ -13,6 +13,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, Slid
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.core.single_type_kv_cache_manager import CompressAttentionManager
+from vllm_ascend.utils import vllm_version_is
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -83,8 +84,12 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
         # Note(hc): each dcp rank only need save
         # (max_model_len//dcp_world_size) tokens locally.
-        if dcp_world_size * pcp_world_size > 1:
-            max_model_len = cdiv(max_model_len, dcp_world_size * pcp_world_size)
+        if vllm_version_is("0.25.1"):
+            if dcp_world_size * pcp_world_size > 1:
+                max_model_len = cdiv(max_model_len, dcp_world_size * pcp_world_size)
+        else:
+            if dcp_world_size > 1:
+                max_model_len = cdiv(max_model_len, dcp_world_size)
         return cdiv(max_model_len, self.block_size * self.compress_ratio) * self.page_size_bytes
 
 

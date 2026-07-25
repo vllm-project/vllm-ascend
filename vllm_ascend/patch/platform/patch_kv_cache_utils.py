@@ -17,6 +17,8 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.utils import vllm_version_is
+
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
 
 
@@ -41,7 +43,7 @@ def _ascend_resolve_kv_cache_block_sizes(
     groups = kv_cache_config.kv_cache_groups
 
     if len(groups) <= 1:
-        bs = cache_config.block_size * dcp * pcp
+        bs = cache_config.block_size * dcp * pcp if vllm_version_is("0.25.1") else cache_config.block_size * dcp
         return bs, bs
 
     if dcp != 1 or pcp != 1:
@@ -49,7 +51,8 @@ def _ascend_resolve_kv_cache_block_sizes(
         # scheduler_block_size using the LCM of all group block sizes
         # multiplied by the CP factors for proper alignment.
         group_block_sizes = [g.kv_cache_spec.block_size for g in groups]
-        scheduler_block_size = math.lcm(*group_block_sizes) * dcp * pcp
+        cp_factor = dcp * pcp if vllm_version_is("0.25.1") else dcp
+        scheduler_block_size = math.lcm(*group_block_sizes) * cp_factor
         if not cache_config.enable_prefix_caching:
             return scheduler_block_size, scheduler_block_size
         hash_block_size = math.gcd(*group_block_sizes)

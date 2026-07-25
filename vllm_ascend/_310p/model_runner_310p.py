@@ -43,7 +43,15 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-from vllm.v1.worker.cp_utils import get_total_cp_world_size
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.25.1"):
+    from vllm.v1.worker.cp_utils import get_total_cp_world_size  # type: ignore[import-not-found]
+else:
+    from vllm.v1.worker.cp_utils import (
+        get_kv_cache_shard_count as get_total_cp_world_size,  # type: ignore[import-not-found]
+    )
 
 from vllm_ascend._310p.block_table import MultiGroupBlockTable as MultiGroupBlockTable310
 from vllm_ascend._310p.kv_block_zeroer import AscendKVBlockZeroer310
