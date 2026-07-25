@@ -194,6 +194,8 @@ class AscendPrefillContextParallelMetadata:
 
     pcp_allgather_restore_idx: torch.Tensor = None
 
+    pcp_allgather_inverse_idx: torch.Tensor = None
+
     num_actual_tokens_pcp_padded: int = 0
 
     num_computed_tokens_of_pcp_dcp: list[list[list[int]]] | None = None

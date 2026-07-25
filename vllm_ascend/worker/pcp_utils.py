@@ -133,6 +133,12 @@ class PCPManager:
             device=device,
             pin_memory=pin_memory,
         )
+        self.pcp_allgather_inverse_idx = CpuGpuBuffer(
+            max_buffer_num_tokens,
+            dtype=torch.int64,
+            device=device,
+            pin_memory=pin_memory,
+        )
         self.pcp_exit_fa_scatter_idx = CpuGpuBuffer(
             max_buffer_num_tokens,
             dtype=torch.int64,
@@ -801,8 +807,14 @@ class PCPManager:
             get_current_rank_positions(padded_pos_start_loc, rank_i) for rank_i in range(self.pcp_world_size)
         ]
         all_positions = np.concatenate(all_positions_lst)
-        self.pcp_allgather_restore_idx.np[: all_positions.shape[0]] = all_positions.argsort()
-        self.pcp_allgather_restore_idx.copy_to_gpu(all_positions.shape[0])
+        num_all_positions = all_positions.shape[0]
+        restore_idx = all_positions.argsort()
+        inverse_idx = np.empty_like(restore_idx)
+        inverse_idx[restore_idx] = np.arange(num_all_positions, dtype=restore_idx.dtype)
+        self.pcp_allgather_restore_idx.np[:num_all_positions] = restore_idx
+        self.pcp_allgather_inverse_idx.np[:num_all_positions] = inverse_idx
+        self.pcp_allgather_restore_idx.copy_to_gpu(num_all_positions)
+        self.pcp_allgather_inverse_idx.copy_to_gpu(num_all_positions)
 
         self.pcp_tokens[: self.num_reqs] = pcp_tokens[: self.num_reqs]
         self.total_num_sampled_tokens_pcp = pcp_tokens[: self.num_reqs].sum()
@@ -2129,6 +2141,9 @@ class PCPManager:
                     "tail_actual_seq_lengths_kv": tail_actual_seq_lengths_kv,
                 }
                 long_seq_metadata.pcp_allgather_restore_idx = self.pcp_allgather_restore_idx.gpu[
+                    :num_actual_tokens_pcp_padded
+                ]
+                long_seq_metadata.pcp_allgather_inverse_idx = self.pcp_allgather_inverse_idx.gpu[
                     :num_actual_tokens_pcp_padded
                 ]
                 if self.pcp_use_hybrid_attn:
