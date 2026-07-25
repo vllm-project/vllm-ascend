@@ -17,6 +17,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.mxfp_compat import is_rms_norm_dynamic_mx_quant_fusion_available
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
@@ -69,14 +70,6 @@ def _is_w8a8_mxfp8_dynamic(linear) -> bool:
         return False
     inner = getattr(qm, "quant_method", None)
     return isinstance(inner, AscendW8A8MXFP8DynamicLinearMethod)
-
-
-def _has_rms_norm_dynamic_mx_quant() -> bool:
-    ops_npu = getattr(torch.ops, "npu", None)
-    return (
-        (ops_npu is not None and hasattr(ops_npu, "npu_rms_norm_dynamic_mx_quant"))
-        or hasattr(torch_npu, "npu_rms_norm_dynamic_mx_quant")
-    )
 
 
 def _rms_norm_dynamic_mx_quant(
@@ -1372,19 +1365,20 @@ class AscendDSACPImpl(DSAAttentionImpl):
         is_mxfp8 = _is_w8a8_mxfp8_dynamic(self.wq_b)
         device_type = get_ascend_device_type()
         is_a5 = device_type == AscendDeviceType.A5
-        has_fused_mx_op = _has_rms_norm_dynamic_mx_quant()
+        fusion_available = is_rms_norm_dynamic_mx_quant_fusion_available()
         # CP compress_ratio=4 always consumes qr_local for indexer topk.
         qr_consumed_by_topk = self.compress_ratio == 4
-        can_fuse_q_norm_mx_quant = is_mxfp8 and is_a5 and has_fused_mx_op and not qr_consumed_by_topk
+        can_fuse_q_norm_mx_quant = is_mxfp8 and fusion_available and not qr_consumed_by_topk
         if not _DSA_CP_MX_FUSION_GATE_LOGGED:
             ops_npu = getattr(torch.ops, "npu", None)
             logger.info(
                 "DSA CP RMSNormDynamicMXQuant fusion gate: can_fuse=%s, is_mxfp8=%s, is_w8a8=%s, "
-                "device_type=%s, is_a5=%s, has_torch_ops_npu_op=%s, has_torch_npu_op=%s, "
+                "fusion_available=%s, device_type=%s, is_a5=%s, has_torch_ops_npu_op=%s, has_torch_npu_op=%s, "
                 "compress_ratio=%s, qr_consumed_by_topk=%s, has_prefill=%s, hidden_local_shape=%s",
                 can_fuse_q_norm_mx_quant,
                 is_mxfp8,
                 is_w8a8,
+                fusion_available,
                 device_type,
                 is_a5,
                 ops_npu is not None and hasattr(ops_npu, "npu_rms_norm_dynamic_mx_quant"),
