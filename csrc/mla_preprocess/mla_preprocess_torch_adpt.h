@@ -97,7 +97,7 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
         sin.has_value()
             ? sin.value()
             : at::empty({1}, at::TensorOptions().dtype(at::kHalf).device(hiddenState.options().device()));
-    int64_t kvLoraRank = wuk.size(2);
+    int64_t kvLoraRank = wuk.size(-1);
     int64_t qkRopeHeadDim = kv_cache_rope.size(-1);
     if (kvLoraRank != MLA_PREPROCESS_FULLY_SUPPORTED_KV_LORA_RANK ||
         qkRopeHeadDim != MLA_PREPROCESS_FULLY_SUPPORTED_QK_ROPE_HEAD_DIM) {
