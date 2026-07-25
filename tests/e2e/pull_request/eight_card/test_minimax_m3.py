@@ -27,8 +27,7 @@ import regex as re
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
-# Eco-Tech/MiniMax-M3-w8a8
-MINIMAX_M3_MODEL_PATH = Path(os.environ.get("MINIMAX_M3_MODEL_PATH", "Eco-Tech/MiniMax-M3-w8a8"))
+MINIMAX_M3_MODEL_PATH = os.environ.get("MINIMAX_M3_MODEL_PATH", "Eco-Tech/MiniMax-M3-w8a8")
 GSM8K_QUESTION = "Ali had $21. Leila gave him half of her $100. How much does Ali have now?"
 GSM8K_ANSWER = "71"
 MAX_TOKENS = 512
@@ -89,13 +88,12 @@ def _configure_jemalloc() -> None:
     },
 )
 @wait_until_npu_memory_free()
-def test_minimax_m3_online_gsm8k_one_case() -> None:
-    assert MINIMAX_M3_MODEL_PATH.exists(), f"MiniMax-M3 model is not available: {MINIMAX_M3_MODEL_PATH}"
+def test_minimax_m3_gsm8k_one_case() -> None:
     _configure_jemalloc()
 
     example_prompts = [GSM8K_PROMPT_TEMPLATE.format(question=GSM8K_QUESTION)]
     with VllmRunner(
-        str(MINIMAX_M3_MODEL_PATH),
+        MINIMAX_M3_MODEL_PATH,
         max_model_len=10240,
         max_num_seqs=8,
         max_num_batched_tokens=8192,

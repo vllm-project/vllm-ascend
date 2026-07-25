@@ -298,7 +298,7 @@
   tests:
     - tests/ut/models/minimax_m3/test_minimax_m3.py
     - tests/e2e/pull_request/one_card/test_minimax_m3_sparse_attn.py
-    - tests/e2e/pull_request/eight_card/test_minimax_m3_online_gsm8k.py
+    - tests/e2e/pull_request/eight_card/test_minimax_m3.py
     - tests/ut/models/minimax_m3/test_minimax_m3_vit.py
     - tests/ut/models/minimax_m3/test_msa_m3.py
 
@@ -787,7 +787,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_qwen3_5.py: 610
   tests/e2e/pull_request/four_card/test_qwen3_next.py: 1180
   tests/e2e/pull_request/four_card/test_graph_mode.py: 480
-  tests/e2e/pull_request/eight_card/test_minimax_m3_online_gsm8k.py: 1800
+  tests/e2e/pull_request/eight_card/test_minimax_m3.py: 1800
   tests/ut/attention/a2/test_attention_cp.py: 40
   tests/ut/attention/a2/test_attention_cp_precision.py: 30
   tests/ut/attention/a2/test_attention_v1.py: 30
