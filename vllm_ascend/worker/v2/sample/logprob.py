@@ -124,6 +124,7 @@ def compute_topk_logprobs(
     logprob_token_ids_state=None,
     expanded_idx_mapping: torch.Tensor | None = None,
     max_per_req_token_ids: int = 0,
+    logits_mode: bool = False,
 ) -> LogprobsTensors:
     assert num_logprobs >= 0
     batch_size, vocab_size = logits.shape
