@@ -84,6 +84,8 @@ class AscendDFlashSpeculator(DFlashSpeculator):
                 num_reqs=num_reqs_padded,
                 num_reqs_padded=num_reqs_padded,
                 num_tokens_padded=num_tokens_padded,
+                seq_lens_cpu_upper_bound=torch.zeros(num_reqs_padded, dtype=torch.int32, device=self.device),
+                step=self.num_query_per_req,
                 causal=self._group_causal,
             )
         return [attn_metadata]
