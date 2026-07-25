@@ -27,7 +27,11 @@ import torch
 logger = logging.getLogger(__name__)
 
 try:
-    from flash_attn_npu_v3 import flash_attn_varlen_func, flash_attn_with_kvcache as fa3_kvcache
+    from flash_attn_npu_v3 import (
+        flash_attn_varlen_func,
+        flash_attn_with_kvcache as fa3_kvcache,
+        get_scheduler_metadata,
+    )
     HAS_FLASH_ATTN_NPU = True
 except ImportError:
     HAS_FLASH_ATTN_NPU = False
@@ -81,6 +85,7 @@ def fa3_forward(
     cache_mode: bool = False,
     block_table: Optional[torch.Tensor] = None,
     seq_lens_list: Optional[List[int]] = None,
+    scheduler_metadata=None,
 ) -> torch.Tensor:
     """Unified FA3 attention forward.
 
@@ -91,7 +96,9 @@ def fa3_forward(
     ``cache_mode=True`` (PrefillCacheHit / DecodeOnly / ChunkedPrefill)
         Key/value are **paged cache views** ``(num_blocks, block_size, -1)``;
         calls :func:`flash_attn_with_kvcache`.  *block_table* and
-        *seq_lens_list* are required.
+        *seq_lens_list* are required.  *scheduler_metadata* (pre-computed
+        by :func:`get_scheduler_metadata`) may be passed to avoid internal
+        re-computation in FA3.
 
     Returns
         Tensor ``(total_tokens, num_heads, head_size)``.
@@ -141,6 +148,7 @@ def fa3_forward(
             softmax_scale=scale,
             causal=causal,
             window_size=window_size,
+            scheduler_metadata=scheduler_metadata,
         )
     else:
         # ---- dense prefill path (no KV cache) ----
