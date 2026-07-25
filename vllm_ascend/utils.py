@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import functools
 import json
 import math
@@ -541,30 +542,50 @@ def adapt_patch(is_global_patch: bool = False):
         from vllm_ascend.patch import worker  # noqa: F401
 
 
+def _get_physical_device_id(user_device_id: int) -> int:
+    acl = ctypes.CDLL("libascendcl.so")
+    logic_device_id = ctypes.c_int32()
+    physical_device_id = ctypes.c_int32()
+
+    get_logic_device_id = acl.aclrtGetLogicDevIdByUserDevId
+    get_logic_device_id.argtypes = [ctypes.c_int32, ctypes.POINTER(ctypes.c_int32)]
+    get_logic_device_id.restype = ctypes.c_int
+    result = get_logic_device_id(user_device_id, ctypes.byref(logic_device_id))
+    if result != 0:
+        raise RuntimeError(f"aclrtGetLogicDevIdByUserDevId failed with error code {result}")
+
+    get_physical_device_id = acl.aclrtGetPhyDevIdByLogicDevId
+    get_physical_device_id.argtypes = [ctypes.c_int32, ctypes.POINTER(ctypes.c_int32)]
+    get_physical_device_id.restype = ctypes.c_int
+    result = get_physical_device_id(logic_device_id, ctypes.byref(physical_device_id))
+    if result != 0:
+        raise RuntimeError(f"aclrtGetPhyDevIdByLogicDevId failed with error code {result}")
+    return physical_device_id.value
+
+
 def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None) -> None:
-    """Load the local A5 endpoint config into ASCEND_LOCAL_COMM_RES."""
+    """Load the local A5 endpoint config into ASCEND_LOCAL_COMM_RES.
+
+    This is a temporary workaround for a HiXL transport dependency on 950DT
+    server/pod deployments. Endpoint resource selection should eventually be
+    handled by HiXL or its lower-level components. Ascend Runtime is used to
+    resolve the physical device ID so container device remapping does not affect
+    endpoint selection.
+    """
     if kv_transfer_config is None:
         return
-
-    visible_devices = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
-    if visible_devices is None:
-        from vllm_ascend.cpu_binding import DeviceInfo
-
-        devices = sorted([int(x) for x in DeviceInfo.get_npu_map_info()])
-    else:
-        devices = [int(x) for x in visible_devices.split(",") if x.strip()]
 
     extra_config = kv_transfer_config.kv_connector_extra_config or {}
     local_comm_res_path = extra_config.get("ascend_local_comm_res_path")
     if not local_comm_res_path:
         return
 
-    if not devices:
-        raise ValueError("No NPU devices found or specified in ASCEND_RT_VISIBLE_DEVICES.")
-    if local_rank < 0 or local_rank >= len(devices):
-        raise ValueError(f"local_rank {local_rank} is out of bounds for the available NPU devices: {devices}")
+    # Inline import avoids a circular dependency with vllm_ascend.platform.
+    from vllm.platforms import current_platform
 
-    local_comm_res_file = os.path.join(local_comm_res_path, f"ub_endpoint_npu_{devices[local_rank]}.json")
+    visible_device_index = current_platform.logical_device_id_to_visible_device_id(local_rank)
+    endpoint_device_id = _get_physical_device_id(visible_device_index)
+    local_comm_res_file = os.path.join(local_comm_res_path, f"ub_endpoint_npu_{endpoint_device_id}.json")
     try:
         with open(local_comm_res_file) as f:
             data = json.load(f)

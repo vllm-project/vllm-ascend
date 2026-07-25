@@ -133,6 +133,45 @@ class TestUtils(TestBase):
         with mock.patch("torch.npu.current_stream") as mock_current_stream:
             self.assertEqual(utils.current_stream(), mock_current_stream())
 
+    def test_get_physical_device_id(self):
+        acl = mock.MagicMock()
+
+        def get_logic_device_id(user_device_id, logic_device_id):
+            self.assertEqual(user_device_id, 0)
+            logic_device_id._obj.value = 1
+            return 0
+
+        def get_physical_device_id(logic_device_id, physical_device_id):
+            self.assertEqual(logic_device_id.value, 1)
+            physical_device_id._obj.value = 6
+            return 0
+
+        acl.aclrtGetLogicDevIdByUserDevId.side_effect = get_logic_device_id
+        acl.aclrtGetPhyDevIdByLogicDevId.side_effect = get_physical_device_id
+
+        with mock.patch("ctypes.CDLL", return_value=acl):
+            self.assertEqual(utils._get_physical_device_id(0), 6)
+
+    def test_setup_ascend_local_comm_res_uses_runtime_physical_id(self):
+        kv_transfer_config = mock.MagicMock()
+        kv_transfer_config.kv_connector_extra_config = {
+            "ascend_local_comm_res_path": "/etc/hixl",
+        }
+
+        with (
+            mock.patch("vllm.platforms.current_platform") as mock_platform,
+            mock.patch("vllm_ascend.utils._get_physical_device_id", return_value=6) as mock_get_physical_device_id,
+            mock.patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"}),
+            mock.patch("builtins.open", mock.mock_open(read_data='{"version":"1.3"}')) as mock_file,
+        ):
+            mock_platform.logical_device_id_to_visible_device_id.return_value = 0
+
+            utils.setup_ascend_local_comm_res(0, kv_transfer_config)
+
+            mock_platform.logical_device_id_to_visible_device_id.assert_called_once_with(0)
+            mock_get_physical_device_id.assert_called_once_with(0)
+            mock_file.assert_called_once_with("/etc/hixl/ub_endpoint_npu_6.json")
+
     def test_enable_dsa_cp_with_o_proj_tp_accepts_missing_kv_transfer(self):
         mock_vllm_config = mock.MagicMock()
         mock_vllm_config.kv_transfer_config = None
