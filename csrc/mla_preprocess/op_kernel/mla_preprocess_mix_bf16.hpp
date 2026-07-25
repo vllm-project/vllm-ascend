@@ -177,13 +177,10 @@ public:
             WAIT_FLAG(MTE3, MTE2, EVENT_ID1);
             AscendC::DataCopy(inputQ, this->qGm_[qOffset],
                               {loopN, headBlockLen, static_cast<uint16_t>(qkNopeHeadDim_ / 16), 0});
-            SET_FLAG(MTE2, V, EVENT_ID1);
-            WAIT_FLAG(MTE2, V, EVENT_ID1);
-
+            SET_FLAG(MTE2, MTE3, EVENT_ID1);
             uint64_t outQOffset = startHead * outLineOffset + this->concatSize;
             uint64_t outQOffset2 = startHead * this->headDim;
-            SET_FLAG(V, MTE3, EVENT_ID1);
-            WAIT_FLAG(V, MTE3, EVENT_ID1);
+            WAIT_FLAG(MTE2, MTE3, EVENT_ID1);
             if constexpr (CacheMode == CACHE_MODE_KVCACHE) {
                 AscendC::DataCopy(this->outRopeConcatGm_[outQOffset], inputQ,
                                   {loopN, headBlockLen, 0, concatBlockLen});
