@@ -15,8 +15,6 @@
 #
 
 
-import logging
-
 import torch
 from torch import nn
 from vllm.config import get_current_vllm_config
@@ -25,40 +23,6 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormG
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
 from vllm_ascend.utils import enable_custom_op
-
-logger = logging.getLogger(__name__)
-_add_rms_norm_bias_available = True
-
-
-def _npu_add_rms_norm(
-    x: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor | None,
-    eps: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Use the fused extension when the installed CANN runtime supports it."""
-    import torch_npu
-
-    global _add_rms_norm_bias_available
-    if enable_custom_op() and _add_rms_norm_bias_available:
-        try:
-            x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(x, residual, weight, bias, eps)
-            return x, residual
-        except RuntimeError as exc:
-            message = str(exc)
-            if "aclnnAddRmsNormBias" not in message or "libopapi.so" not in message:
-                raise
-            _add_rms_norm_bias_available = False
-            logger.warning(
-                "aclnnAddRmsNormBias is unavailable in the installed CANN runtime; "
-                "falling back to torch_npu.npu_add_rms_norm."
-            )
-
-    x, _, residual = torch_npu.npu_add_rms_norm(x, residual, weight, eps)
-    if bias is not None:
-        x.add_(bias)
-    return x, residual
 
 
 class AscendRMSNorm(RMSNorm):
@@ -101,12 +65,19 @@ class AscendRMSNorm(RMSNorm):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        import torch_npu
+
         if residual is not None:
             residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
-            x, residual = _npu_add_rms_norm(x, residual, self.weight, self.bias, self.variance_epsilon)
+            if enable_custom_op():
+                x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                    x, residual, self.weight, self.bias, self.variance_epsilon
+                )
+            else:
+                x, _, residual = torch_npu.npu_add_rms_norm(x, residual, self.weight, self.variance_epsilon)
+                if self.bias is not None:
+                    x.add_(self.bias)
             return x, residual
-
-        import torch_npu
 
         x, residual = torch_npu.npu_rms_norm(x, self.weight, self.variance_epsilon)
         if self.bias_loaded:
@@ -121,9 +92,16 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        import torch_npu
+
         if residual is not None:
             residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
-            x, residual = _npu_add_rms_norm(x, residual, 1.0 + self.weight, None, self.variance_epsilon)
+            if enable_custom_op():
+                x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                    x, residual, 1.0 + self.weight, None, self.variance_epsilon
+                )
+            else:
+                x, _, residual = torch_npu.npu_add_rms_norm(x, residual, 1.0 + self.weight, self.variance_epsilon)
             return x, residual
 
         x = DeviceOperator.npu_gemma_rms_norm(x, self.weight, self.variance_epsilon)
