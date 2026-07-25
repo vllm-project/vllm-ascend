@@ -244,27 +244,27 @@ class TestFA3GraphTaskGroupIncompatibility:
         with torch.npu.graph(_graph):
             stream = torch_npu.npu.current_stream()
             torch.npu.graph_task_group_begin(stream)
-            _run_fa3_eager(q, k, v, bt, kv_seqlens, cu_q, max_qlen,
-                           causal=causal, scheduler_metadata=metadata)
+            captured = _run_fa3_eager(q, k, v, bt, kv_seqlens, cu_q, max_qlen,
+                                      causal=causal, scheduler_metadata=metadata)
             handle = torch.npu.graph_task_group_end(stream)
 
-        # -- replay with DIFFERENT input data --
+        # FA3 is invisible to CANN, so the task group captured nothing.
+        # Verify FA3 still produced correct output inside the task group.
+        ref = _run_fa3_eager(q, k, v, bt, kv_seqlens, cu_q, max_qlen,
+                             causal=causal, scheduler_metadata=metadata)
+        torch.npu.synchronize()
+        torch.testing.assert_close(captured, ref, rtol=1e-2, atol=1e-2)
+
+        # Also verify FA3 runs correctly with different inputs afterwards
+        # (plain eager, not inside graph_task_update_begin/End — the empty
+        # task group has no CANN ops to update).
         tensors2 = _make_tensors(causal=causal)
         q2, k2, v2, bt2, kv2, cu_q2, max_qlen2, _, _, metadata2 = tensors2
         ref2 = _run_fa3_eager(q2, k2, v2, bt2, kv2, cu_q2, max_qlen2,
                               causal=causal, scheduler_metadata=metadata2)
-
-        # FA3 was not captured — the call inside the update block runs
-        # eagerly with the new inputs, producing the correct result.
-        # Use current_stream() for update (not the capture stream), matching
-        # production where update happens on a separate update_stream.
-        update_stream = torch_npu.npu.current_stream()
-        torch.npu.graph_task_update_begin(update_stream, handle)
         replay_out = _run_fa3_eager(q2, k2, v2, bt2, kv2, cu_q2, max_qlen2,
                                     causal=causal, scheduler_metadata=metadata2)
-        torch.npu.graph_task_update_end(update_stream)
         torch.npu.synchronize()
-
         torch.testing.assert_close(replay_out, ref2, rtol=1e-2, atol=1e-2)
 
     # ------------------------------------------------------------------
@@ -343,8 +343,10 @@ class TestFA3GraphTaskGroupIncompatibility:
         replay_lse = torch.empty_like(lse_buf)
 
         # -- replay with new inputs --
-        # Use current_stream() for update (not the capture stream), matching
-        # production where update happens on a separate update_stream.
+        # Step 1: update the captured task group parameters on the default stream
+        # (matching production where update happens on a separate update_stream).
+        # graph_task_update_begin/End only UPDATES the captured parameters — it
+        # does NOT execute the op.  Execution happens during NPUGraph replay below.
         update_stream = torch_npu.npu.current_stream()
         torch.npu.graph_task_update_begin(update_stream, handle)
         torch_npu.npu_fused_infer_attention_score.out(
@@ -364,6 +366,11 @@ class TestFA3GraphTaskGroupIncompatibility:
             out=[replay_out, replay_lse],
         )
         torch.npu.graph_task_update_end(update_stream)
+        torch.npu.synchronize()
+
+        # Step 2: replay the NPUGraph — the captured FIA op executes with the
+        # UPDATED task group parameters, writing to replay_out / replay_lse.
+        _graph.replay()
         torch.npu.synchronize()
 
         # Replay output must match the reference for the NEW inputs (not the
