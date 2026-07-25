@@ -68,14 +68,14 @@ transfer bandwidth.
 | :--- | :--- | :--- |
 | `use_layerwise` | `false` | Enables layer-by-layer KV transfer. |
 | `backend` | `"mooncake"` | Must be `"memcache"` for shared-buffer layerwise offload. |
-| `layerwise_num_shared_buffers` | Number of base transformer layers | Number of reusable buffers assigned to non-independent layers. If omitted, no cross-layer buffer reuse is enabled. The value must be at least `1`. |
-| `layerwise_independent_layers` | `[0]` | Base transformer layers that keep dedicated buffers. Accepts a list of integers or `"all"`. Negative indices are resolved against the base transformer layers. |
+| `layerwise_num_shared_buffers` | Number of cache-bearing layers | Number of reusable buffers assigned to non-independent layers. If omitted, no cross-layer buffer reuse is enabled. The value must be at least `1`. |
+| `layerwise_independent_layers` | `[0]` | Cache-bearing layers that keep dedicated buffers. Accepts a list of integers or `"all"`. Negative indices are resolved against all cache-bearing layers, including MTP layers. |
 
 ## Buffer Layout
 
 Let:
 
-- `N` be the number of base transformer layers;
+- `N` be the number of physical layers, including MTP layers;
 - `I` be the number of independent layers;
 - `R = N - I` be the number of reusable layers;
 - `B` be `layerwise_num_shared_buffers`.
@@ -103,18 +103,23 @@ Layer 4 reuses layer 1's physical buffer, layer 7 reuses layer 4's buffer, and
 so on. Before loading layer 4, the transfer thread waits until layer 1 has
 finished saving.
 
-For the supported uniform KV layout, the approximate logical-to-physical
-memory factor is `N / (I + min(B, R))`.
+For a uniform KV layout, the approximate logical-to-physical memory factor is
+`N / (I + min(B, R))`. For sparse C8, components can have different page
+sizes, so the implementation calculates the factor from the actual main and
+indexer page bytes instead of using the layer count alone.
 
 ## Request Flow
 
 ### Initialization
 
-1. Layers are assigned to dedicated or shared physical KV buffers.
-2. KV cache tensor descriptors assigned to the same buffer are merged.
-3. The worker registers the resulting physical buffers with Memcache and
-   adjusts the logical KV cache memory budget according to the reduction in
-   allocated buffers.
+1. The KV cache planner maps logical layer names to physical layer indices.
+2. Base transformer layers keep their normal indices. MTP layers are appended
+   after the base layers.
+3. Layers are assigned to dedicated or shared physical KV buffers.
+4. KV cache tensor descriptors assigned to the same buffer are merged by
+   component.
+5. The worker registers the resulting physical buffers with Memcache and
+   adjusts the logical KV cache memory budget according to the bytes saved.
 
 ### Prefill Execution
 
@@ -134,12 +139,42 @@ During each Prefill step:
    save. Attention computation continues while this save and later prefetches
    run on the transfer thread.
 
+## MTP and Sparse C8 Layouts
+
+### MTP
+
+MTP layers use names such as `mtp.0.self_attn` and are placed after the base
+transformer layers in the physical layout. They participate in buffer
+assignment, transfer event allocation, and memory accounting.
+
+Because negative independent-layer indices use the complete physical layout,
+`-1` refers to the last MTP layer when MTP is enabled, not the last base
+transformer layer.
+
+### Sparse C8
+
+An SFA layer can contain separate cache components:
+
+- the main MLA/SFA KV cache;
+- the sparse indexer cache;
+- their corresponding C8 scale data when enabled.
+
+The planner keeps main and indexer components separate when merging logical
+layers into physical slots. Transfer addresses and allocation sizes are
+derived from each layer's real component offsets and page bytes. This allows
+MTP and sparse C8 layouts to use the same layerwise offload pipeline without
+assuming that every layer has one uniform tensor layout.
+
+Layers sharing one physical buffer must have equal page size within each
+component. An incompatible layout is rejected during initialization instead
+of being transferred with incorrect offsets.
+
 ## Verification
 
 The following log messages indicate that shared-buffer offload is active:
 
 ```text
-Layerwise KV cache reuse merged ... tensor descriptors into ... shared buffers.
+Layerwise KV cache reuse merged ... descriptors into ... descriptors across ... physical buffers.
 Layerwise KV cache reuse uses ... buffers for ... layers; scale logical KV budget by ...
 ```
 
@@ -149,7 +184,7 @@ If the first message is absent, check that:
 - `use_layerwise` is `true`;
 - `layerwise_num_shared_buffers` is smaller than the number of reusable
   layers;
-- the model exposes one uniform KV cache tensor per base transformer layer.
+- all expected base and MTP layer cache specifications are present.
 
 ## Limitations
 
@@ -157,5 +192,5 @@ If the first message is absent, check that:
 - TP-size mismatch is not supported with layerwise KV transfer.
 - Context-parallel configurations have not been validated with shared-buffer
   layerwise offload.
-- MTP, multiple KV cache groups, and non-uniform or compressed KV layouts are
-  not supported by the base layer-reuse implementation.
+- Multiple KV cache groups are supported only for separated SFA main/indexer
+  cache layouts. General hybrid or compressed KV layouts are not supported.
