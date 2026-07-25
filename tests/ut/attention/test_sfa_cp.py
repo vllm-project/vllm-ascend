@@ -2,9 +2,11 @@
 
 from dataclasses import fields
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
+from vllm_ascend.attention.context_parallel.common_cp import DCPMetadataBuilderMixin
 from vllm_ascend.attention.context_parallel.sfa_cp import (
     AscendSFADCPImpl,
     AscendSFADCPMetadata,
@@ -25,6 +27,33 @@ def test_sfa_dcp_extends_v1_backend() -> None:
     )
     assert "dcp_context" not in {field.name for field in fields(AscendSFAMetadata)}
     assert "dcp_context" in {field.name for field in fields(AscendSFADCPMetadata)}
+
+
+def test_sfa_dcp_builder_sizes_replicated_view_from_padded_block_table() -> None:
+    def fake_base_init(self, *args, **kwargs) -> None:
+        self.dcp_size = 2
+        self.kernel_block_size = 128
+
+    kv_cache_spec = SimpleNamespace(block_size=128)
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=1),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=4,
+            max_num_batched_tokens=1024,
+        ),
+        model_config=SimpleNamespace(max_model_len=1024),
+    )
+
+    with patch.object(DCPMetadataBuilderMixin, "__init__", new=fake_base_init):
+        builder = AscendSFADCPMetadataBuilder(
+            kv_cache_spec,
+            [],
+            vllm_config,
+            torch.device("cpu"),
+        )
+
+    assert builder.block_table_replicated_view_buf.shape == (5, 16)
+    assert builder.arange_buffer.shape == (16,)
 
 
 def _make_builder(rank: int = 0) -> AscendSFADCPMetadataBuilder:

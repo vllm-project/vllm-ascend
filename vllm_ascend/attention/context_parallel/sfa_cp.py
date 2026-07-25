@@ -112,12 +112,11 @@ class AscendSFADCPMetadataBuilder(
         max_num_input_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         max_model_len = vllm_config.model_config.max_model_len
         total_cp_size = self.dcp_size
-        # Match BlockTable's local logical width, then expand it to the
-        # replicated view seen by the SFA indexer.
-        max_local_block_table_cols = (
-            cdiv(max_model_len, kv_cache_spec.block_size * total_cp_size) * self.blocks_per_phys_block
-        )
-        max_replicated_block_table_cols = max_local_block_table_cols * total_cp_size
+        # BlockTable keeps its global maximum width even though DCP only
+        # populates rank-local blocks. Size from that padded input width before
+        # expanding every column into the replicated indexer view.
+        max_block_table_cols = cdiv(max_model_len, kv_cache_spec.block_size) * self.blocks_per_phys_block
+        max_replicated_block_table_cols = max_block_table_cols * total_cp_size
         self.block_table_replicated_view_buf: torch.Tensor = torch.empty(
             (max_num_reqs, max_replicated_block_table_cols),
             dtype=torch.int32,
