@@ -1490,7 +1490,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Open the prefetch gate for every SFA layer. Some GLM-5.2 layers
         # reuse cached top-k indices and have no indexer, so recording this
         # inside the indexer's forward would leave their gate closed.
-        record_attention_compute_start()
+        record_attention_compute_start(self.layer_name or "")
 
         attn_output = self._execute_sparse_flash_attention_process(
             ql_nope,
