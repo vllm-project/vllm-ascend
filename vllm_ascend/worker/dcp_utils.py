@@ -564,8 +564,9 @@ class DCPManager:
         seq_lens_cpu: torch.Tensor | None = None,
         attn_metadata_builder: Any | None = None,
     ) -> None:
+        is_sfa_dcp = self._is_sfa_dcp_metadata_builder(attn_metadata_builder)
         is_mla = self._is_mla_kv_cache_spec(kv_cache_spec)
-        if is_mla:
+        if is_mla and not is_sfa_dcp:
             assert attn_metadata.decode is not None, (
                 "MLA DCP speculative draft metadata must be classified as decode "
                 "before backend-specific metadata is finalized."
@@ -573,7 +574,6 @@ class DCPManager:
             assert attn_metadata.decode.cp_seq_len is not None
             return
 
-        is_sfa_dcp = self._is_sfa_dcp_metadata_builder(attn_metadata_builder)
         seq_lens_for_dcp = seq_lens
         if seq_lens_cpu is not None:
             seq_lens_for_dcp = seq_lens_cpu

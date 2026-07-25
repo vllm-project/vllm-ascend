@@ -245,3 +245,35 @@ def test_update_spec_decode_drafting_metadata_requires_mla_decode() -> None:
             seq_lens=torch.tensor([3]),
             draft_index=1,
         )
+
+
+def test_update_spec_decode_drafting_metadata_prioritizes_sfa_dcp() -> None:
+    manager = object.__new__(DCPManager)
+    manager.dcp_world_rank = 1
+    local_seq_lens = torch.tensor([[4, 3], [6, 5]], dtype=torch.int32)
+    manager._get_dcp_local_seq_lens = MagicMock(return_value=local_seq_lens)
+    dcp_seq_lens = torch.zeros(3, dtype=torch.int32)
+    attn_metadata = SimpleNamespace(
+        dcp_context=SimpleNamespace(seq_lens=dcp_seq_lens),
+    )
+    seq_lens_cpu = torch.tensor([6, 10], dtype=torch.int32)
+
+    with (
+        patch.object(DCPManager, "_is_mla_kv_cache_spec", return_value=True),
+        patch.object(DCPManager, "_is_sfa_dcp_metadata_builder", return_value=True),
+    ):
+        manager.update_spec_decode_drafting_cp_metadata(
+            attn_metadata=attn_metadata,
+            kv_cache_spec=object(),
+            seq_lens=torch.tensor([7, 11], dtype=torch.int32),
+            seq_lens_cpu=seq_lens_cpu,
+            draft_index=1,
+            attn_metadata_builder=object(),
+        )
+
+    assert torch.equal(dcp_seq_lens, torch.tensor([3, 5, 0], dtype=torch.int32))
+    manager._get_dcp_local_seq_lens.assert_called_once()
+    assert torch.equal(
+        manager._get_dcp_local_seq_lens.call_args.args[0],
+        torch.tensor([8, 12], dtype=torch.int32),
+    )

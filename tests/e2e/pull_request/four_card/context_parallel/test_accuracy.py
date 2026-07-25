@@ -45,11 +45,23 @@ COMMON_PROMPTS = [
     "The president of United States is",
 ]
 
-DSV3_2_DCP_GOLDEN = [
-    "The capital of France isoint054 Rund959arki",
-    "Hello, my name is Tom, I am" + "ERIC slicpacelike挂",
-    "The president of United States isoint054 Rund959arki",
-]
+DSV3_2_DCP_GOLDENS = (
+    [
+        "The capital of France isoint054 Rund959arki",
+        "Hello, my name is Tom, I am" + "ERIC slicpacelike挂",
+        "The president of United States isoint054 Rund959arki",
+    ],
+    [
+        "The capital of France isorrionicALLY casmith",
+        "Hello, my name is Tom, I am" + "ERIC slicpacelike挂",
+        "The president of United States is平行于我 charm与技术oi",
+    ],
+    [
+        "The capital of France isorrionic Tudefeault",
+        "Hello, my name is Tom, I am" + "ERIC slicpacelike挂",
+        "The president of United States is平行于我 charm与技术oi",
+    ],
+)
 
 DEEPSEEK_V4_PROMPTS = [
     "Hello, my name is",
@@ -108,7 +120,7 @@ FULL_FEATURE_MODEL_CASES = [
         name="dsv3_2_sfa_dcp_replicated_indexer",
         model="vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
         prompts=COMMON_PROMPTS,
-        expected_outputs=DSV3_2_DCP_GOLDEN,
+        expected_outputs=DSV3_2_DCP_GOLDENS,
         max_tokens=5,
         runner_kwargs={
             "max_model_len": 1024,
