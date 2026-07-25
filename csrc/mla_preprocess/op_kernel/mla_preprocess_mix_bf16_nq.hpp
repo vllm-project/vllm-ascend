@@ -392,6 +392,9 @@ public:
                  AscendC::DEFAULT_REPEAT_STRIDE});
             AscendC::PipeBarrier<PIPE_V>();
             
+            // Gamma at OFFSET_GAMMA is reused by every row handled by this
+            // vector core.  Store the conversion temporary in the now-dead
+            // sqx region so processing pid > 0 cannot overwrite gamma.
             AscendC::LocalTensor<T> tmpfp16 =
                 buf.ReinterpretCast<T>()[OFFSET_SUM * num_col_align_withStride_fp32 * 2];
             CastFrom32To16(tmpfp16, fp32_xy, num_col_align_withStride_fp32);
@@ -950,6 +953,16 @@ public:
         this->ropeSplitSizeTwo_ = mlaParams_.ropeSplitSizeTwo;
         this->hiddenStrideRope_ = mlaParams_.hiddenStrideRope;
         this->qkNopeHeadDim_ = mlaParams_.qkNopeHeadDim;
+        this->kv_cache_block_size_ = mlaParams_.kvCacheBlockSize == 0 ? 128U : mlaParams_.kvCacheBlockSize;
+        uint64_t defaultCacheStride0 = static_cast<uint64_t>(kv_cache_block_size_) *
+            (CACHE_MODE == CACHE_MODE_KVCACHE ? static_cast<uint64_t>(splitSizeOne_)
+                                              : static_cast<uint64_t>(splitRmsNormSizeOne_));
+        uint64_t defaultRopeStride0 =
+            static_cast<uint64_t>(kv_cache_block_size_) * static_cast<uint64_t>(splitRmsNormSizeTwo_);
+        this->kv_cache_stride0_ =
+            mlaParams_.kvCacheStride0 == 0 ? defaultCacheStride0 : mlaParams_.kvCacheStride0;
+        this->kv_cache_rope_stride0_ =
+            mlaParams_.kvCacheRopeStride0 == 0 ? defaultRopeStride0 : mlaParams_.kvCacheRopeStride0;
     }
 
     __aicore__ inline void Init(GM_ADDR hiddenStateGm, GM_ADDR wdqkvGm, GM_ADDR gamma2Gm,
@@ -1021,9 +1034,19 @@ private:
     uint32_t ropeSplitSizeTwo_;
     uint32_t hiddenStrideRope_;
     uint32_t qkNopeHeadDim_;
+    uint32_t kv_cache_block_size_;
+    uint64_t kv_cache_stride0_;
+    uint64_t kv_cache_rope_stride0_;
 
     constexpr static uint32_t C0_SIZE = 16;
     constexpr static uint32_t I8_C0_SIZE = 32;
+
+    __aicore__ inline uint64_t GetCacheOffset(uint64_t slotValue, uint64_t innerSize, uint64_t stride0) const
+    {
+        uint64_t blockIdx = slotValue / kv_cache_block_size_;
+        uint64_t blockOffset = slotValue % kv_cache_block_size_;
+        return blockIdx * stride0 + blockOffset * innerSize;
+    }
 
     template <class T1>
     __aicore__ inline void RmsNormAndRopeConvergence1(
@@ -1059,13 +1082,10 @@ private:
             AscendC::DataCopy(cosTensor, cos1GmTensor[(row_work * vectorBlockIdx + loop) * splitRmsNormSizeTwo_],
                               splitRmsNormSizeTwo_);
             SET_FLAG(MTE2, V, EVENT_ID0);
-            // ND
-            uint64_t cacheStart = static_cast<uint64_t>(slotValue) * static_cast<uint64_t>(splitSizeOne_);
-            uint64_t cacheStart1 = static_cast<uint64_t>(slotValue) * static_cast<uint64_t>(splitRmsNormSizeOne_);
-            uint64_t cacheStart2 = static_cast<uint64_t>(slotValue) * static_cast<uint64_t>(splitRmsNormSizeTwo_);
-            // NZ
-            uint32_t outer_idx = slotValue / 128;
-            uint32_t inner_idx = slotValue % 128;
+            uint64_t cacheSlot = static_cast<uint64_t>(slotValue);
+            uint64_t cacheStart = GetCacheOffset(cacheSlot, splitSizeOne_, kv_cache_stride0_);
+            uint64_t cacheStart1 = GetCacheOffset(cacheSlot, splitRmsNormSizeOne_, kv_cache_stride0_);
+            uint64_t cacheStart2 = GetCacheOffset(cacheSlot, splitRmsNormSizeTwo_, kv_cache_rope_stride0_);
 
             SET_FLAG(S, MTE3, EVENT_ID0);
             /* RmsNorm start */
