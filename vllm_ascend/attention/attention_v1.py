@@ -17,8 +17,6 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
-
 import torch
 import torch_npu
 import vllm.envs as envs_vllm
@@ -437,9 +435,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self._layer_name: str | None = None
         # flash-attention-npu (FA3) replacement for CANN V1 FIA in eager mode.
         self._fa3_enabled = self._check_fa3_available()
-        # Pre-computed FA3 scheduler metadata cached per graph-capture size,
-        # built during eager warmup (outside graph) and reused in graph path.
-        self._fa3_scheduler_metadata: dict[int, Any] = {}
 
     @staticmethod
     def _check_fa3_available():
@@ -457,32 +452,35 @@ class AscendAttentionBackendImpl(AttentionImpl):
         block_size: int,
         query: torch.Tensor,
     ):
-        """Return cached FA3 scheduler metadata for *num_tokens*, building it
-        on first access (during eager warmup, outside graph capture).
+        """Build FA3 scheduler metadata from current ``attn_metadata``.
+
+        Always constructs fresh metadata — sequence lengths and batch
+        configuration can change between iterations even when the total
+        token count (``num_tokens``) stays the same.  Caching per
+        ``num_tokens`` would return stale metadata for the new iteration,
+        causing ``ComputeFAMetadataPv`` inside FA3's kernel to crash
+        (errorCode=0x2a).
 
         Returns ``None`` for non-cache attention states (PrefillNoCache).
         """
-        if num_tokens not in self._fa3_scheduler_metadata:
-            from vllm_ascend.attention.fa3_adapter import get_scheduler_metadata
+        from vllm_ascend.attention.fa3_adapter import get_scheduler_metadata
 
-            is_cache = attn_metadata.attn_state != AscendAttentionState.PrefillNoCache
-            if not is_cache:
-                self._fa3_scheduler_metadata[num_tokens] = None
-            else:
-                self._fa3_scheduler_metadata[num_tokens] = get_scheduler_metadata(
-                    batch_size=len(attn_metadata.seq_lens_list),
-                    max_seqlen_q=attn_metadata.max_query_len,
-                    max_seqlen_k=max(attn_metadata.seq_lens_list),
-                    num_heads_q=self.num_heads,
-                    num_heads_kv=self.num_kv_heads,
-                    headdim=self.head_size,
-                    cache_seqlens=attn_metadata.seq_lens,
-                    qkv_dtype=query.dtype,
-                    cu_seqlens_q=attn_metadata.query_start_loc,
-                    page_size=block_size,
-                    causal=attn_metadata.causal,
-                )
-        return self._fa3_scheduler_metadata[num_tokens]
+        is_cache = attn_metadata.attn_state != AscendAttentionState.PrefillNoCache
+        if not is_cache:
+            return None
+        return get_scheduler_metadata(
+            batch_size=len(attn_metadata.seq_lens_list),
+            max_seqlen_q=attn_metadata.max_query_len,
+            max_seqlen_k=max(attn_metadata.seq_lens_list),
+            num_heads_q=self.num_heads,
+            num_heads_kv=self.num_kv_heads,
+            headdim=self.head_size,
+            cache_seqlens=attn_metadata.seq_lens,
+            qkv_dtype=query.dtype,
+            cu_seqlens_q=attn_metadata.query_start_loc,
+            page_size=block_size,
+            causal=attn_metadata.causal,
+        )
 
     def _graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
         layer_name = layer.layer_name if layer is not None else self._layer_name
