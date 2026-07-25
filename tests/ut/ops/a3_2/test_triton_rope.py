@@ -39,9 +39,7 @@ def _make_input(
     numel = num_tokens * num_heads * head_dim
     values = torch.arange(numel, dtype=torch.float32)
     values = ((values + offset) % 251 - 125) / 32
-    return values.reshape(num_tokens, num_heads, head_dim).to(
-        torch.bfloat16
-    )
+    return values.reshape(num_tokens, num_heads, head_dim).to(torch.bfloat16)
 
 
 def _make_cos_sin_cache(head_dim: int) -> torch.Tensor:
@@ -130,7 +128,7 @@ def test_rope_forward_triton_neox_large_head_dim(
     assert query_output.shape == query_cpu.shape
     assert key_output.shape == key_cpu.shape
     assert query_output.dtype == torch.bfloat16
-    assert key_output.dtype == torch.bfloat16
+    assert key_output.dtype == torch.bfloat16  # gitleaks:allow
 
     torch.testing.assert_close(
         query_output.cpu(),
