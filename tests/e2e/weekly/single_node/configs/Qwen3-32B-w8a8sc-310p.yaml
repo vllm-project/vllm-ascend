@@ -26,7 +26,7 @@ test_cases:
       - "--load_format"
       - "sharded_state"
       - "--compilation-config"
-      - '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[8,32]}'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[32]}'
       - "--additional-config"
       - '{"ascend_compilation_config":{"enable_npugraph_ex":false, "fuse_norm_quant": false}}'
       - "--default-chat-template-kwargs"
@@ -44,3 +44,14 @@ test_cases:
         request_rate: 0
         baseline: 105.26
         threshold: 0.95
+      acc:
+        case_type: accuracy
+        dataset_path: vllm-ascend/gsm8k
+        request_conf: vllm_api_general_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+        max_out_len: 10240
+        batch_size: 32
+        baseline: 95.07
+        threshold: 1
+        temperature: 0
+        top_p: 0.95

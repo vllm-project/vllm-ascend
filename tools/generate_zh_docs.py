@@ -13,24 +13,22 @@ import sys
 from pathlib import Path
 
 import regex as re
-from polib import pofile
 
 SOURCE_DIR = Path("docs/source")
 LOCALE_DIR = SOURCE_DIR / "locale" / "zh_CN" / "LC_MESSAGES"
 ZH_DIR = SOURCE_DIR / "zh"
 
 FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})[^\n]*$", re.MULTILINE)
-INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 URL_RE = re.compile(r"https?://\S+")
 LINK_TARGET_RE = re.compile(r"\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
-
-# Combined pattern that matches everything that should be protected from
-# translation: inline code, bare URLs, and markdown link targets.
-PROTECTED_RE = re.compile(rf"{INLINE_CODE_RE.pattern}|{URL_RE.pattern}|{LINK_TARGET_RE.pattern}")
+WHITESPACE_RE = re.compile(r"[ \t\n]+")
+MARKDOWN_BLOCK_PREFIX_RE = re.compile(r"(?:[-+*>#|]|\d+[.)])(?:\s|$)")
 
 
 def parse_po_file(po_path: Path) -> dict:
     """Parse a .po file and return msgid -> msgstr mapping."""
+    from polib import pofile
+
     po = pofile(str(po_path))
     translations = {}
     for entry in po:
@@ -90,35 +88,156 @@ def _split_by_code_blocks(content: str) -> list:
     return segments
 
 
-def _protect_spans(text: str) -> list:
-    """Split a text segment into parts, protecting inline code, URLs,
-    and markdown link targets.
+def _inline_code_ranges(text: str) -> list[tuple[int, int]]:
+    """Return Markdown code-span ranges, including multi-backtick spans."""
+    ranges = []
+    pos = 0
 
-    Returns a list of (text_part, is_protected) tuples.
+    while True:
+        start = text.find("`", pos)
+        if start == -1:
+            break
+
+        opener_end = start + 1
+        while opener_end < len(text) and text[opener_end] == "`":
+            opener_end += 1
+        delimiter = text[start:opener_end]
+        search_from = opener_end
+
+        while True:
+            close = text.find(delimiter, search_from)
+            if close == -1:
+                pos = opener_end
+                break
+
+            close_end = close + len(delimiter)
+            exact_run = (close == 0 or text[close - 1] != "`") and (close_end == len(text) or text[close_end] != "`")
+            if exact_run:
+                ranges.append((start, close_end))
+                pos = close_end
+                break
+            search_from = close + 1
+
+    return ranges
+
+
+def _protected_ranges(text: str) -> list[tuple[int, int]]:
+    """Return merged ranges for inline code, URLs, and link targets."""
+    ranges = _inline_code_ranges(text)
+    ranges.extend(match.span() for match in URL_RE.finditer(text))
+    ranges.extend(match.span() for match in LINK_TARGET_RE.finditer(text))
+    ranges.sort()
+
+    merged = []
+    for start, end in ranges:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _is_reflow_safe(msgid: str) -> bool:
+    """Return whether a multiline msgid is a reflowed prose paragraph.
+
+    Markdown block markers on continuation lines make line breaks semantic, so
+    those entries must keep using exact matching.
     """
+    lines = msgid.splitlines()
+    return len(lines) > 1 and all(not MARKDOWN_BLOCK_PREFIX_RE.match(line.lstrip()) for line in lines[1:])
+
+
+def _reflowed_msgid_pattern(msgid: str) -> re.Pattern:
+    """Build a pattern that tolerates single prose line-wrap differences."""
     parts = []
-    last_end = 0
+    cursor = 0
+    for whitespace in WHITESPACE_RE.finditer(msgid):
+        parts.append(re.escape(msgid[cursor : whitespace.start()]))
+        value = whitespace.group()
+        if value.count("\n") <= 1:
+            # Match either spaces on one line or one wrapped line. Never cross
+            # a blank line, which would join separate Markdown blocks.
+            parts.append(r"(?:[ \t]+|[ \t]*\n[ \t]*)")
+        else:
+            parts.append(re.escape(value))
+        cursor = whitespace.end()
+    parts.append(re.escape(msgid[cursor:]))
+    return re.compile("".join(parts))
 
-    for match in PROTECTED_RE.finditer(text):
-        if match.start() > last_end:
-            parts.append((text[last_end : match.start()], False))
-        parts.append((match.group(), True))
-        last_end = match.end()
 
-    if last_end < len(text):
-        parts.append((text[last_end:], False))
+def _apply_segment_translations(text: str, translations: list[tuple[str, str]]) -> str:
+    """Apply the longest non-overlapping translations to the source once.
 
-    return parts
+    Matches contained entirely in code spans, URLs, or link targets are
+    ignored. Replacements are selected from the original text, so translated
+    content cannot be processed again by a shorter msgid.
+    """
+    protected = _protected_ranges(text)
+    candidates = []
+
+    for msgid, msgstr in translations:
+        if not msgid.strip() or not msgstr.strip():
+            continue
+        matches = []
+        search_from = 0
+        while True:
+            start = text.find(msgid, search_from)
+            if start == -1:
+                break
+            end = start + len(msgid)
+            matches.append((start, end))
+            search_from = end
+
+        # PO entries can retain an older prose line wrapping even when the
+        # English paragraph is unchanged. Fall back to a whitespace-tolerant
+        # match for prose only; list, quote, table, and heading boundaries keep
+        # exact matching because their newlines are structural Markdown.
+        if not matches and _is_reflow_safe(msgid):
+            matches.extend(match.span() for match in _reflowed_msgid_pattern(msgid).finditer(text))
+
+        for start, end in matches:
+            fully_protected = any(start >= range_start and end <= range_end for range_start, range_end in protected)
+            if not fully_protected:
+                candidates.append((start, end, msgstr))
+
+    # Prefer complete paragraphs over shorter msgids contained within them.
+    candidates.sort(key=lambda item: (-(item[1] - item[0]), item[0]))
+    selected = []
+    selected_starts = []
+    for candidate in candidates:
+        start, end, _msgstr = candidate
+        low = 0
+        high = len(selected_starts)
+        while low < high:
+            middle = (low + high) // 2
+            if selected_starts[middle] < start:
+                low = middle + 1
+            else:
+                high = middle
+        index = low
+        overlaps_previous = index > 0 and selected[index - 1][1] > start
+        overlaps_next = index < len(selected) and selected[index][0] < end
+        if overlaps_previous or overlaps_next:
+            continue
+        selected.insert(index, candidate)
+        selected_starts.insert(index, start)
+
+    result = []
+    cursor = 0
+    for start, end, msgstr in selected:
+        result.append(text[cursor:start])
+        result.append(msgstr)
+        cursor = end
+    result.append(text[cursor:])
+    return "".join(result)
 
 
 def apply_translations(content: str, translations: dict) -> str:
     """Apply translations to markdown content.
 
-    Translations are first applied to the full prose text (outside fenced
-    code blocks) so that msgids containing link syntax (e.g. "[text](url)")
-    are matched correctly.  Afterwards, inline code, URLs, and link targets
-    are restored from the original text to prevent short-msgid replacements
-    (e.g. "mode" → "模式") from leaking into URLs or code.
+    Replacements are applied once to prose outside fenced code blocks. Longer
+    msgids take precedence, while inline code, URLs, and link targets remain
+    protected from shorter translations.
     """
     if not translations:
         return content
@@ -137,33 +256,7 @@ def apply_translations(content: str, translations: dict) -> str:
             result_parts.append(seg_text)
             continue
 
-        # Phase 1 — translate the full segment so msgids that cross
-        # protected-span boundaries (e.g. a msgid containing a markdown
-        # link) still match.
-        translated = seg_text
-        for msgid, msgstr in sorted_items:
-            if msgid.strip() and msgstr.strip():
-                before = translated
-                translated = translated.replace(msgid, msgstr)
-                # For single-line msgids that do not start with whitespace,
-                # also try matching indented versions.  The .po extraction
-                # strips leading whitespace, but source documents often
-                # indent prose inside notes, lists, etc.
-                if translated == before and "\n" not in msgid and not msgid[0].isspace():
-                    for indent in ("    ", "        ", "            "):
-                        translated = translated.replace(indent + msgid, indent + msgstr)
-
-        # Phase 2 — protect spans on both the original and the translated
-        # text.  Where the original had a protected span (URL, inline
-        # code, link target), restore the original text — this prevents
-        # short msgids like "mode" → "模式" from corrupting URLs.
-        orig_spans = _protect_spans(seg_text)
-        xlat_spans = _protect_spans(translated)
-        for (orig_text, orig_protected), (xlat_text, _xlat_protected) in zip(orig_spans, xlat_spans):
-            if orig_protected:
-                result_parts.append(orig_text)
-            else:
-                result_parts.append(xlat_text)
+        result_parts.append(_apply_segment_translations(seg_text, sorted_items))
 
     return "".join(result_parts)
 

@@ -214,7 +214,6 @@ class TestRowParallelOpDispatch(unittest.TestCase):
             patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
             patch("vllm_ascend.ops.linear_op.enable_sp", return_value=False),
             patch("vllm_ascend.ops.linear_op.is_moe_layer", return_value=False),
-            patch("vllm_ascend.ops.linear_op.flashcomm2_enable", return_value=False),
         ]
         for p in self._patches:
             p.start()
@@ -227,19 +226,6 @@ class TestRowParallelOpDispatch(unittest.TestCase):
         from vllm_ascend.ops.linear_op import _get_row_parallel_op
 
         return _get_row_parallel_op(prefix, self.mock_layer)
-
-    def test_mtp_block_excluded_from_flashcomm2_oproj(self):
-        """No6: mtp_block prefix excluded from FlashComm2 o_proj."""
-        mock_op = MagicMock()
-        self._patches.append(patch("vllm_ascend.ops.linear_op.flashcomm2_enable", return_value=True))
-        self._patches.append(patch("vllm_ascend.ops.linear_op.Flashcomm2OProjRowParallelOp", return_value=mock_op))
-        for p in self._patches[-2:]:
-            p.start()
-        # Normal o_proj should use FlashComm2
-        result = self._op("model.layers.0.self_attn.o_proj")
-        self.assertIs(result, mock_op)
-        # But mtp_block.o_proj should NOT use FlashComm2
-        self.assertIsNone(self._op("model.mtp_block.self_attn.o_proj"))
 
     def test_share_expert_disabled_with_sp_row(self):
         """share_expert / shared_expert prefix → None when SP enabled."""

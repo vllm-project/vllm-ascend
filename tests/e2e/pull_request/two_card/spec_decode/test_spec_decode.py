@@ -161,11 +161,7 @@ def test_eagle3_sp_acceptance(
     golden = BASELINES_SP[method]
 
     match = all(abs(a - b) < 0.06 for a, b in zip(acceptance_per_pos, golden))
-    if not match:
-        print(f"acceptance_per_pos: {acceptance_per_pos}")
-        print(f"golden: {golden}")
-
-    assert match
+    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
 def test_qwen3_eagle3_pcp2_tp1():
@@ -330,11 +326,7 @@ def test_p_eagle_acceptance(
     golden = BASELINES_SP[method]
 
     match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
-    if not match:
-        print(f"acceptance_per_pos: {acceptance_per_pos}")
-        print(f"golden: {golden}")
-
-    assert match
+    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
@@ -422,11 +414,7 @@ def test_qwen3_vwn_eagle3_tp2():
     golden = BASELINES_SP["vwn_eagle3"]
 
     match = all(abs(a - b) < 0.06 for a, b in zip(acceptance_per_pos, golden))
-    if not match:
-        print(f"acceptance_per_pos: {acceptance_per_pos}")
-        print(f"golden: {golden}")
-
-    assert match
+    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
 def test_eagle3_sliding_window():
@@ -506,8 +494,4 @@ def test_eagle3_sliding_window():
     acceptance_per_pos = [n / num_drafts for n in num_accepted_tokens_per_pos]
     golden = [0.7, 0.4, 0.3]
     match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
-    if not match:
-        print(f"acceptance_per_pos: {acceptance_per_pos}")
-        print(f"golden: {golden}")
-
-    assert match
+    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"

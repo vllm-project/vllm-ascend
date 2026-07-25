@@ -62,6 +62,11 @@ jobs:
         UV_HTTP_TIMEOUT: 120
         UV_NO_CACHE: 1
         UV_SYSTEM_PYTHON: 1
+        PRE_COMMIT_HOME: /tmp/main2main-pre-commit
+        # Use Huawei Cloud's domestic Go module proxy for pre-commit hooks
+        # such as actionlint, whose golangenv otherwise accesses proxy.golang.org.
+        GOPROXY: https://repo.huaweicloud.com/repository/goproxy/
+        GONOSUMDB: '*'
     defaults:
       run:
         shell: bash -el {0}
@@ -167,12 +172,32 @@ jobs:
           fi
 
       - name: Install opencode + main2main-flow
+        env:
+          NODE_VERSION: 24.18.0
         run: |
-          set -eu
-          set -o pipefail
+          set -euxo pipefail
 
-          # install opencode (curl --retry handles transient SSL drops)
-          curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors https://opencode.ai/install | bash
+          NODE_INSTALL_DIR="/opt/nodejs"
+          NODE_ARCHIVE_NAME="node-v${NODE_VERSION}-linux-arm64.tar.gz"
+          NODE_ARCHIVE="/tmp/${NODE_ARCHIVE_NAME}"
+          NODE_CHECKSUMS="/tmp/node-v${NODE_VERSION}-SHASUMS256.txt"
+          curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
+            -o "${NODE_ARCHIVE}" \
+            "https://repo.huaweicloud.com/nodejs/v${NODE_VERSION}/${NODE_ARCHIVE_NAME}"
+          curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
+            -o "${NODE_CHECKSUMS}" \
+            "https://repo.huaweicloud.com/nodejs/v${NODE_VERSION}/SHASUMS256.txt"
+          (cd /tmp && grep " ${NODE_ARCHIVE_NAME}$" "${NODE_CHECKSUMS}" | sha256sum -c -)
+          mkdir -p "${NODE_INSTALL_DIR}"
+          tar -xzf "${NODE_ARCHIVE}" --strip-components=1 -C "${NODE_INSTALL_DIR}"
+          export PATH="${NODE_INSTALL_DIR}/bin:${PATH}"
+          node --version
+          npm --version
+
+          npm install --global \
+            --prefix "$HOME/.opencode" \
+            --registry https://repo.huaweicloud.com/repository/npm/ \
+            opencode-ai
           # configure opencode auth
           mkdir -p ~/.local/share/opencode
           cat > ~/.local/share/opencode/auth.json <<EOF
@@ -185,7 +210,7 @@ jobs:
           EOF
 
           # ensure opencode is on PATH within this step
-          export PATH="/root/.opencode/bin:$PATH"
+          export PATH="$HOME/.opencode/bin:$PATH"
 
           # verify opencode works
           echo "Verifying opencode..."
@@ -246,8 +271,39 @@ jobs:
           BRANCH="main2main_auto_$(date +%Y-%m-%d_%H-%M)"
           git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" || \
             git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
-          git fetch upstream main
-          git checkout -B "${BRANCH}" upstream/main
+          # Attempt incremental: fetch main2main_baseline from the fork,
+          # then rebase it onto the latest upstream/main.  This carries
+          # forward all prior adaptation commits and merges with any
+          # external changes (e.g. PRs merged since the last run).
+          if git fetch "https://github.com/${HEAD_FORK}.git" "refs/heads/main2main_baseline:refs/remotes/origin/main2main_baseline" 2>/dev/null; then
+            git fetch upstream main
+            git checkout -B "${BRANCH}" origin/main2main_baseline
+            if git rebase upstream/main; then
+              # If a specific TARGET_COMMIT was set (e.g. manual dispatch) and
+              # it is older than what the baseline already verified, the
+              # baseline's version guards would be wrong for this older vllm
+              # commit.  Fall back to fresh mode in that case.
+              if [ -n "${TARGET_COMMIT}" ]; then
+                BASELINE_VLLM=$(cat .github/vllm-main-verified.commit 2>/dev/null || echo "")
+                if [ -n "${BASELINE_VLLM}" ] && git -C vllm-upstream merge-base --is-ancestor "${TARGET_COMMIT}" "${BASELINE_VLLM}" 2>/dev/null; then
+                  git checkout -B "${BRANCH}" upstream/main
+                  echo "::warning::target commit ${TARGET_COMMIT} is behind baseline verified commit ${BASELINE_VLLM}, forcing fresh mode"
+                else
+                  echo "::notice::incremental mode: rebased main2main_baseline onto upstream/main"
+                fi
+              else
+                echo "::notice::incremental mode: rebased main2main_baseline onto upstream/main"
+              fi
+            else
+              git rebase --abort
+              git checkout -B "${BRANCH}" upstream/main
+              echo "::warning::rebase conflicts between main2main_baseline and upstream/main, falling back to fresh mode"
+            fi
+          else
+            git fetch upstream main
+            git checkout -B "${BRANCH}" upstream/main
+            echo "::notice::fresh mode: starting from upstream/main (no main2main_baseline found)"
+          fi
           BASE_SHA=$(git rev-parse HEAD)
           echo "name=${BRANCH}" >> "$GITHUB_OUTPUT"
           echo "base_sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"
@@ -304,7 +360,7 @@ jobs:
           RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: True
         run: |
           set -euo pipefail
-          export PATH="/root/.opencode/bin:$PATH"
+          export PATH="$HOME/.opencode/bin:$PATH"
           eval "${MAIN2MAIN_LOG_HELPERS}"
 
           rm -rf /tmp/main2main
@@ -423,6 +479,7 @@ jobs:
           {
             echo "status=${FINAL_STATUS}"
             echo "commit_count=${COMMIT_COUNT}"
+            echo "steps_completed=${STEPS_COMPLETED}"
             echo "manual_review_required=${MANUAL_REVIEW_REQUIRED}"
             echo "old_commit=${OLD_COMMIT}"
             echo "new_commit=${NEW_COMMIT}"
@@ -462,3 +519,10 @@ jobs:
             --repo "${UPSTREAM_REPO}" \
             --title "[main2main] main2main manual review required (${SHORT_NEW})" \
             --body-file /tmp/main2main-manual-review.md
+
+      - name: Chain next run
+        if: steps.final-status.outputs.status == 'completed' && steps.final-status.outputs.steps_completed != '0'
+        run: |
+          echo "::notice::Chaining next main2main run..."
+          gh workflow run Main2Main \
+            --repo "${UPSTREAM_REPO}"

@@ -27,14 +27,8 @@ import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import DPVllmRunner, wait_until_npu_memory_free
-from vllm_ascend.utils import vllm_version_is
 
 MODELS = ["vllm-ascend/DeepSeek-V2-Lite-W8A8"]
-
-pytestmark = pytest.mark.skipif(
-    vllm_version_is("0.23.0"),
-    reason="v2 model runner patches not supported on v0.23.0",
-)
 
 
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})

@@ -168,12 +168,6 @@ class AscendConfig:
             "VLLM_ASCEND_ENABLE_MLAPO",
             ascend_envs.VLLM_ASCEND_ENABLE_MLAPO,
         )
-        self.enable_flashcomm2_parallel_size = self._get_config_value(
-            additional_config,
-            "enable_flashcomm2_parallel_size",
-            "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE",
-            ascend_envs.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE,
-        )
         self.msmonitor_use_daemon = self._get_config_value(
             additional_config,
             "msmonitor_use_daemon",
@@ -215,9 +209,11 @@ class AscendConfig:
 
             if self.pd_tp_ratio == 0:
                 raise AssertionError("Only support P node tp size lagger then D node tp size")
-        from vllm_ascend.utils import get_flashcomm2_config_and_validate
-
-        self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_config_and_validate(self, vllm_config)
+        # We find that _npu_paged_attention still performs better than
+        # npu_fused_infer_attention_score in some cases. We allow to execute
+        # _npu_paged_attention in this cases. This should be removed once
+        # npu_fused_infer_attention_score performs better on all scenarios.
+        self.pa_shape_list = additional_config.get("pa_shape_list", [])
         # Weight NZ mode configuration.
         # 0: disabled, 1: only quant case enable nz (default), 2: BF16/FP16 also enable nz
         self.weight_nz_mode = self._get_config_value(
@@ -225,15 +221,6 @@ class AscendConfig:
             "weight_nz_mode",
             "VLLM_ASCEND_ENABLE_NZ",
             ascend_envs.VLLM_ASCEND_ENABLE_NZ,
-        )
-
-        # when enable_async_exponential is True, AscendSampler will be different from vllm Sampler,
-        # which make batch_invariant mode not working.
-        # so we disable async exponential when batch_invariant mode is enabled.
-        import vllm.envs as envs
-
-        self.enable_async_exponential = (
-            bool(additional_config.get("enable_async_exponential", False)) and not envs.VLLM_BATCH_INVARIANT
         )
 
         from vllm_ascend.utils import model_uses_sfa_sparse
@@ -282,20 +269,11 @@ class AscendConfig:
         if self.mega_moe_max_tokens <= 0:
             raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
 
-        # Whether to use NPU device group for DP metadata all_reduce.
-        # "True": use NPU device group, "False" (default): use CPU group.
-        self.dp_allreduce_on_npu = additional_config.get("dp_allreduce_on_npu", False)
-
         # Enable optimized reduce sampling scheme
         self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
 
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()
-
-        self.hamming_sparse = additional_config.get("hamming_sparse", {"enabled": False, "sparse_json_location": ""})
-        self.enable_hamming_sparse = self.hamming_sparse["enabled"]
-        self.sparse_json = self.hamming_sparse["sparse_json_location"]
-        self._check_enable_hamming_sparse()
 
         # Enable Block Verify and Entropy Verify in Rejection Sampler
         rejection_sampler_config = additional_config.get("rejection_sampler_config", {})
@@ -345,11 +323,6 @@ class AscendConfig:
         if self.mix_placement:
             if self.enable_shared_expert_dp or self.multistream_overlap_shared_expert:
                 raise ValueError("Mix placement is not supported with shared expert DP or multistream overlap.")
-
-    def _check_enable_hamming_sparse(self):
-        if self.enable_hamming_sparse:
-            if isinstance(self.sparse_json, str) and not os.path.isfile(self.sparse_json):
-                raise ValueError("Hamming sparse config json file doesn't exist.")
 
     @staticmethod
     def _materialize_dump_config_to_file(dump_config: dict[str, Any]) -> str:
@@ -556,6 +529,18 @@ class AscendCompilationConfig:
                 Default: True
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
+        from vllm_ascend.utils import is_310p
+
+        if is_310p():
+            if enable_npugraph_ex:
+                logger.warning("npugraph_ex is not supported on Ascend 310P. Disabling it.")
+            if enable_static_kernel:
+                logger.warning(
+                    "static kernel requires npugraph_ex, which is not supported on Ascend 310P. Disabling it."
+                )
+            enable_npugraph_ex = False
+            enable_static_kernel = False
+
         self.fuse_norm_quant = fuse_norm_quant
         self.fuse_qknorm_rope = fuse_qknorm_rope
         self.enable_npugraph_ex = enable_npugraph_ex

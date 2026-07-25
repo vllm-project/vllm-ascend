@@ -1,0 +1,84 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  LCCL_DETERMINISTIC: "1"
+  VLLM_USE_V1: "1"
+  HCCL_DETERMINISTIC: "true"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  HCCL_BUFFSIZE: "1024"
+  ATB_MATMUL_SHUFFLE_K_ENABLE: "0"
+  ATB_LLM_LCOC_ENABLE: "1"
+  SERVER_PORT: "DEFAULT_PORT"
+
+_server_cmd: &server_cmd
+  - "--port"
+  - "$SERVER_PORT"
+  - "--data-parallel-size"
+  - "2"
+  - "--enable-expert-parallel"
+  - "--seed"
+  - "1024"
+  - "--max-num-batched-tokens"
+  - "4096"
+  - "--max-num-seqs"
+  - "16"
+  - "--quantization"
+  - "ascend"
+  - "--async-scheduling"
+  - "--speculative-config"
+  - '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+  - "--trust-remote-code"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--disable-log-stats"
+  - "--compilation_config"
+  - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+
+
+_benchmarks: &benchmarks
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_in3500_bs2800_deepseek
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 64
+    max_out_len: 1500
+    batch_size: 1
+    request_rate: 0
+    baseline: 411
+    threshold: 0.95
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "Deepseek_R1_W8A8_Performance_0006"
+    model: "vllm-ascend/DeepSeek-R1-0528_w8a8_mtpmix_rot_final_vllm"
+    envs:
+      <<: *envs
+      OMP_PROC_BIND: "1"
+      OMP_NUM_THREADS: "1"
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--tensor-parallel-size"
+      - "4"
+      - "--max-model-len"
+      - "5500"
+    benchmarks:
+      <<: *benchmarks
+  - name: "chunked_prefill_func_test_005"
+    model: "vllm-ascend/DeepSeek-R1-0528_w8a8_mtpmix_rot_final_vllm"
+    envs:
+      <<: *envs
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "10"
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--tensor-parallel-size"
+      - "8"
+      - "--max-model-len"
+      - "32768"
+

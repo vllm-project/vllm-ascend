@@ -23,6 +23,7 @@ The table below is the release compatibility matrix for vLLM Ascend release.
 
 | vLLM Ascend | vLLM              | Python          | Stable CANN |        PyTorch/torch_npu        |   Triton Ascend   |    Mooncake  |
 |-------------|-------------------|-----------------|-------------|---------------------------------|-------------------|--------------|
+| v0.23.0rc1  | v0.23.0           | >= 3.10, < 3.13 | 9.0.1       | 2.10.0 / 2.10.0.post2           | 3.2.1             | v0.3.11.post1 |
 | v0.22.1rc1  | v0.22.1           | >= 3.10, < 3.13 | 9.0.0       | 2.10.0 / 2.10.0                 | 3.2.1             | v0.3.9       |
 | v0.21.0rc1  | v0.21.0           | >= 3.10, < 3.13 | 9.0.0       | 2.10.0 / 2.10.0                 | 3.2.1             | v0.3.9       |
 | v0.20.2rc1  | v0.20.2           | >= 3.10, < 3.12 | 9.0.0       | 2.10.0 / 2.10.0                 | 3.2.1             | v0.3.8.post1 |
@@ -68,12 +69,25 @@ For main branch of vLLM Ascend, we usually make it compatible with the latest vL
 |-------------|--------------|------------------|-------------|--------------------|---------------|
 |     main    | {{main_vllm_commit}}, {{main_vllm_tag}} | {{main_python_version}}   | {{main_cann_version}} | {{main_pytorch_torch_npu_version}} | {{main_triton_ascend_version}} |
 
+The release rows and the main row are different installation targets. For a
+release installation, use the vLLM and vLLM Ascend versions from the same
+release row. For main-branch development, check out the exact vLLM commit from
+`.github/vllm-main-verified.commit`. Do not assume that an arbitrary vLLM tag
+or PyPI release has the same transitive dependencies as that verified commit.
+
+The matrix describes the complete NPU runtime stack. A successful CPU-only
+editable build verifies package construction only; it does not prove that the
+resulting environment is resolver-compatible or that NPU runtime tests pass.
+Using `--no-build-isolation` can bypass build-environment resolution, so run
+`python -m pip check` before using such an environment for runtime testing.
+
 ## Release cadence
 
 ### Release window
 
 | Date       | Event                                     |
 |------------|-------------------------------------------|
+| 2026.07.20 | Release candidates, v0.23.0rc1            |
 | 2026.06.30 | Release candidates, v0.22.1rc1            |
 | 2026.06.16 | Release candidates, v0.21.0rc1            |
 | 2026.06.03 | Release candidates, v0.20.2rc1            |
@@ -140,6 +154,7 @@ Usually, each minor version of vLLM (such as 0.7) corresponds to a vLLM Ascend v
 | Branch     | State        | Note                                                     |
 | ---------- | ------------ | -------------------------------------------------------- |
 | main       | Maintained   | CI commitment for vLLM main branch and vLLM {{main_vllm_tag}}  tag |
+| releases/v0.23.0 | Maintained | CI commitment for vLLM 0.23.0 version                |
 | releases/v0.18.0 | Maintained | CI commitment for vLLM 0.18.0 version                |
 | releases/v0.13.0 | Maintained | CI commitment for vLLM 0.13.0 version                |
 | v0.11.0-dev| Maintained   | CI commitment for vLLM 0.11.0 version |
@@ -151,7 +166,7 @@ Usually, each minor version of vLLM (such as 0.7) corresponds to a vLLM Ascend v
 
 | Branch     | State       | RFC Link                             | Scheduled Merge Time | Mentor |
 |------------|--------------|---------------------------------------|------------|--------|
-|rfc/long_seq_optimization|Maintained|<https://github.com/vllm-project/vllm/issues/22693>|930|wangxiyuan|
+|rfc/long_seq_optimization|Maintained|[RFC: long sequence optimization #22693](https://github.com/vllm-project/vllm/issues/22693)|930|wangxiyuan|
 
 - Branch: The feature branch should be created with a prefix `rfc/` followed by the feature name, such as `rfc/feature-name`.
 - State: The state of the feature branch is `Maintained` until it is merged into the main branch or deleted.
