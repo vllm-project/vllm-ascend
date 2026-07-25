@@ -1,9 +1,9 @@
 # mypy: ignore-errors
 # SPDX-License-Identifier: Apache-2.0
-"""Scheduler side of the PD-disaggregated SFA connector.
+"""Scheduler side of the decode-offload SFA Remote D2H connector.
 
 D (``kv_consumer``): retain the normal vLLM main/indexer block ids allocated
-for the request. Main ids address KVOffloadDecodeManager's CPU pool and indexer
+for the request. Main ids address SparseKVOffloadManager's CPU pool and indexer
 ids address rank-local HBM. The metaserver rendezvous carries only contact info
 and ``do_remote_decode``; D resolves its destinations by request id.
 
@@ -26,7 +26,7 @@ from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
 from vllm_ascend import envs
-from vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.protocol import (
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     BATCH_KV_TRANSFER_PARAMS,
     SfaPDConsumerMetadata,
     SfaPDProducerMetadata,
@@ -67,7 +67,7 @@ class _SendReqInfo:
         self.local_transferred_tokens = transferred_tokens
 
 
-class SFAPDProducerScheduler:
+class SFAPDRD2HProducerScheduler:
     """P-side scheduler for SFA PD (pull mode).
 
     D's metaserver rendezvous carries ``do_remote_decode=True`` plus D's ZMQ
@@ -223,7 +223,7 @@ class SFAPDProducerScheduler:
         return False, None
 
 
-class SFAPDCpuOffloadScheduler:
+class SFAPDRD2HScheduler:
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -236,7 +236,7 @@ class SFAPDCpuOffloadScheduler:
         self.engine_id = vllm_config.kv_transfer_config.engine_id
 
         if kv_cache_config is None:
-            raise ValueError("SFAPDCpuOffloadScheduler requires KVCacheConfig")
+            raise ValueError("SFAPDRD2HScheduler requires KVCacheConfig")
         self.block_size = [group_spec.kv_cache_spec.block_size for group_spec in kv_cache_config.kv_cache_groups]
         self.main_group_idx, self.indexer_group_idx = infer_sfa_component_group_ids(kv_cache_config)
 
@@ -247,7 +247,7 @@ class SFAPDCpuOffloadScheduler:
         )
 
         # Decode offload reuses vLLM's normal block ids.  Main block ids index
-        # KVOffloadDecodeManager's CPU tensors; no connector-private block pool
+        # SparseKVOffloadManager's CPU tensors; no connector-private block pool
         # is allocated.
         self._request_trackers: dict[str, tuple[list[int], list[int]]] = {}
         # req_ids awaiting their first build_connector_meta seed (so the worker
@@ -283,7 +283,9 @@ class SFAPDCpuOffloadScheduler:
         if params is None or not params.get("do_remote_prefill"):
             return
 
-        block_ids_by_group = SFAPDProducerScheduler._normalize_block_ids(blocks.get_block_ids())
+        block_ids_by_group = SFAPDRD2HProducerScheduler._normalize_block_ids(
+            blocks.get_block_ids()
+        )
         required_group = max(self.main_group_idx, self.indexer_group_idx)
         if len(block_ids_by_group) <= required_group:
             raise RuntimeError(
@@ -329,7 +331,7 @@ class SFAPDCpuOffloadScheduler:
             )
         if envs.VLLM_ASCEND_SFA_DEBUG:
             logger.info(
-                "SFAPDCpuOffload D advertised req %s: indexer_hbm_ids=%s, "
+                "SFAPDRD2H D advertised req %s: indexer_hbm_ids=%s, "
                 "main_cpu_ids=%s, remote_host=%s, remote_port=%s, metaserver=%s",
                 request.request_id,
                 indexer_block_ids,

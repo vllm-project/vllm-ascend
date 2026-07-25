@@ -101,7 +101,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from vllm.logger import init_logger
 
-from vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.protocol import (
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     BATCH_KV_TRANSFER_PARAMS,
 )
 
