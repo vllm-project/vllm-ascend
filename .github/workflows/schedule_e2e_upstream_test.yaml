@@ -153,7 +153,7 @@ jobs:
                 vllm_ascend/*.so
                 vllm_ascend/lib
                 vllm_ascend/include
-              key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+              key: vllm-ascend-build-v2-${{ steps.get_arch.outputs.arch }}-${{ matrix.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
               fail-on-cache-miss: true
 
           - name: Install vllm-project/vllm-ascend with device
@@ -283,7 +283,7 @@ jobs:
                 vllm_ascend/*.so
                 vllm_ascend/lib
                 vllm_ascend/include
-              key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+              key: vllm-ascend-build-v2-${{ steps.get_arch.outputs.arch }}-${{ matrix.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
               fail-on-cache-miss: true
 
           - name: Install vllm-project/vllm-ascend with device
@@ -406,7 +406,7 @@ jobs:
                 vllm_ascend/*.so
                 vllm_ascend/lib
                 vllm_ascend/include
-              key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+              key: vllm-ascend-build-v2-${{ steps.get_arch.outputs.arch }}-${{ matrix.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
               fail-on-cache-miss: true
 
           - name: Install vllm-project/vllm-ascend with device
