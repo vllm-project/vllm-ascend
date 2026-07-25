@@ -1,11 +1,12 @@
 # mypy: ignore-errors
 # SPDX-License-Identifier: Apache-2.0
-"""PD-disaggregated SFA KV-transfer connector.
+"""PD-disaggregated SFA Remote D2H KV-transfer connector.
 
-On the Decode node (``kv_consumer``), remote Prefill exposes its KV and Decode
-pulls the bulk MLA KV into a CPU pinned offload pool; the indexer KV lands in
-HBM. The CPU pool and sparse resident-cache load path are owned by
-:class:`KVOffloadDecodeManager`.
+This connector is dedicated to decode offload. On the Decode node
+(``kv_consumer``), remote Prefill exposes its KV and Decode pulls the bulk MLA
+KV directly into a CPU pinned offload pool; the indexer KV lands in HBM. The
+CPU pool and sparse resident-cache load path are owned by
+:class:`SparseKVOffloadManager`.
 """
 
 from typing import TYPE_CHECKING, Any
@@ -23,13 +24,13 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
-from vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.scheduler import (
-    SFAPDCpuOffloadScheduler,
-    SFAPDProducerScheduler,
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.scheduler import (
+    SFAPDRD2HProducerScheduler,
+    SFAPDRD2HScheduler,
 )
-from vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.worker import (
-    SFAPDCpuOffloadConsumerWorker,
-    SFAPDCpuOffloadProducerWorker,
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.worker import (
+    SFAPDRD2HConsumerWorker,
+    SFAPDRD2HProducerWorker,
 )
 
 if TYPE_CHECKING:
@@ -40,8 +41,8 @@ if TYPE_CHECKING:
 _LAYER_IDX_RE = re.compile(r"layers\.(\d+)")
 
 
-class SFAPDCpuOffloadConnector(KVConnectorBase_V1, SupportsHMA):
-    """One connector class branching on ``role`` and ``kv_role``.
+class SFAPDRD2HConnector(KVConnectorBase_V1, SupportsHMA):
+    """Decode-offload Remote D2H connector branching on role and KV role.
 
     * SCHEDULER + producer : P-side metadata for memfabric pull notifications.
     * SCHEDULER + consumer : D-side vLLM block-id / advertisement tracking.
@@ -68,31 +69,35 @@ class SFAPDCpuOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         self.use_layerwise = vllm_config.kv_transfer_config.kv_connector_extra_config.get("use_layerwise", True)
         self.engine_id = vllm_config.kv_transfer_config.engine_id
         # Decode offload is asymmetric: P exposes regular paged KV while D owns
-        # the KVOffloadDecodeManager CPU pool.
+        # the SparseKVOffloadManager CPU pool.
         from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 
         # AscendConfig may not be initialized yet at connector construction
         # time; init_ascend_config is idempotent (no-op if already done).
         init_ascend_config(vllm_config)
-        decode_offload_enabled = get_ascend_config().kv_offload_decode_config.enabled
+        decode_offload_enabled = get_ascend_config().sparse_kv_offload_config.enabled
         if self.is_producer:
             assert not decode_offload_enabled, (
-                "SFAPDCpuOffloadConnector producer (P) must run with "
-                "kv_offload_decode_config.enabled=false."
+                "SFAPDRD2HConnector producer (P) must run with "
+                "sparse_kv_offload_config.enabled=false."
             )
         if self.is_consumer:
             assert decode_offload_enabled, (
-                "SFAPDCpuOffloadConnector consumer (D) must run with "
-                "kv_offload_decode_config.enabled=true."
+                "SFAPDRD2HConnector consumer (D) must run with "
+                "sparse_kv_offload_config.enabled=true."
             )
 
         if role == KVConnectorRole.SCHEDULER:
             # Producer scheduler prepares P-side metadata; consumer scheduler
             # allocates and advertises D-side CPU blocks.
             if self.is_producer:
-                self.connector_scheduler = SFAPDProducerScheduler(vllm_config, kv_cache_config, str(self.engine_id))
+                self.connector_scheduler = SFAPDRD2HProducerScheduler(
+                    vllm_config,
+                    kv_cache_config,
+                    str(self.engine_id),
+                )
             else:
-                self.connector_scheduler = SFAPDCpuOffloadScheduler(
+                self.connector_scheduler = SFAPDRD2HScheduler(
                     vllm_config,
                     self.use_layerwise,
                     kv_cache_config,
@@ -101,9 +106,9 @@ class SFAPDCpuOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         else:
             self.connector_scheduler = None
             if self.is_producer:
-                self.connector_worker = SFAPDCpuOffloadProducerWorker(vllm_config, kv_cache_config, str(self.engine_id))
+                self.connector_worker = SFAPDRD2HProducerWorker(vllm_config, kv_cache_config, str(self.engine_id))
             else:
-                self.connector_worker = SFAPDCpuOffloadConsumerWorker(
+                self.connector_worker = SFAPDRD2HConsumerWorker(
                     vllm_config,
                     self.use_layerwise,
                     kv_cache_config,
@@ -165,7 +170,7 @@ class SFAPDCpuOffloadConnector(KVConnectorBase_V1, SupportsHMA):
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Per-layer gate called before each layer's attention computation.
 
-        D-side: no-op (SFA loads through ``KVOffloadDecodeManager`` directly).
+        D-side: no-op (SFA loads through ``SparseKVOffloadManager`` directly).
         P-side: before this layer writes HBM, wait for D to finish every pending
         read from the physical main/indexer storage slots touched by this layer.
 
@@ -198,7 +203,7 @@ class SFAPDCpuOffloadConnector(KVConnectorBase_V1, SupportsHMA):
 
     def on_kv_cache_written(self, layer_name: str = "") -> None:
         # Producer-only early dispatch of the PD pull notification at scatter
-        # time. Consumer pulls through KVOffloadDecodeManager; skip there.
+        # time. Consumer pulls through SparseKVOffloadManager; skip there.
         if not self.is_producer or self.connector_worker is None:
             return
         if not self.has_connector_metadata():
@@ -208,7 +213,7 @@ class SFAPDCpuOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             hook(layer_name, self._get_connector_metadata())
 
     def wait_for_save(self):
-        # Decode KV writes are synchronized by KVOffloadDecodeManager. P-side
+        # Decode KV writes are synchronized by SparseKVOffloadManager. P-side
         # completion is tracked by READ_DONE/storage_send_done_events.
         if self.is_consumer and self.connector_worker is not None:
             self.connector_worker.wait_for_save()
