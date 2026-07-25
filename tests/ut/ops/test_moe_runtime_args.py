@@ -265,6 +265,25 @@ class TestMoERuntimeArgs(unittest.TestCase):
                 self.assertEqual(fused_experts_input.quant.mxfp.per_token_scale_dtype, torch.float16)
                 self.assertFalse(fused_experts_input.quant.mxfp.use_bf16)
 
+    def test_build_fused_experts_input_coerces_none_swiglu_params(self):
+        # vLLM FusedMoE defaults swiglu_{limit,alpha,beta} to None; Ascend ops
+        # require concrete floats (e.g. npu_dequant_swiglu_quant glu_alpha).
+        fused_experts_input = build_fused_experts_input(
+            hidden_states=torch.randn(4, 8),
+            topk_weights=torch.randn(4, 2),
+            topk_ids=torch.randint(0, 4, (4, 2), dtype=torch.int32),
+            w1=torch.randn(2, 8, 16),
+            w2=torch.randn(2, 16, 8),
+            quant_type=QuantType.W8A8,
+            dynamic_eplb=False,
+            swiglu_limit=None,
+            swiglu_alpha=None,
+            swiglu_beta=None,
+        )
+        self.assertEqual(fused_experts_input.swiglu_limit, 0.0)
+        self.assertEqual(fused_experts_input.swiglu_alpha, 1.0)
+        self.assertEqual(fused_experts_input.swiglu_beta, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

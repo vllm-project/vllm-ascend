@@ -198,6 +198,8 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
 )
+from vllm_ascend.models.minimax_m3.minimax_m3 import MiniMaxM3SparseAttention
+from vllm_ascend.models.minimax_m3.msa_m3 import AscendMiniMaxM3IndexerCache
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
@@ -4760,7 +4762,9 @@ class NPUModelRunner(GPUModelRunner):
                 layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
                 if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
                     layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
-                if isinstance(layer_kv_cache_spec, AscendSFAIndexerCacheSpec):
+                if isinstance(layers[layer_name], AscendMiniMaxM3IndexerCache):
+                    attn_backend = layers[layer_name].get_attn_backend()
+                elif isinstance(layer_kv_cache_spec, AscendSFAIndexerCacheSpec):
                     from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 
                     attn_backend = AscendSFAIndexerBackend
@@ -4872,7 +4876,10 @@ class NPUModelRunner(GPUModelRunner):
                 # Skip modules that don't need KV cache (eg encoder-only attention)
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
-            elif isinstance(attn_module, Attention):
+            elif isinstance(
+                attn_module,
+                (Attention, MiniMaxM3SparseAttention, AscendMiniMaxM3IndexerCache),
+            ):
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
                     attn_layer_names.add(layer_name)
