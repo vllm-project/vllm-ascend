@@ -185,4 +185,4 @@ jobs:
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ fromJSON(inputs.target).cache_arch }}-${{ fromJSON(inputs.target).image_tag }}-${{ inputs.csrc_hash }}
+          key: vllm-ascend-build-v2-${{ fromJSON(inputs.target).cache_arch }}-${{ fromJSON(inputs.target).image_tag }}-${{ inputs.csrc_hash }}

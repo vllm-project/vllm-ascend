@@ -27,9 +27,6 @@ on:
       - 'CMakeLists.txt'
       - 'cmake/**'
       - 'packages.txt'
-      - 'requirements.txt'
-      - 'requirements-dev.txt'
-      - 'vllm_ascend/envs.py'
       - '.github/workflows/_build_csrc_cache.yaml'
       - '.github/workflows/scripts/csrc_cache_targets.json'
   workflow_dispatch:
