@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Wire protocol helpers for SFA PD CPU offload."""
+"""Wire protocol helpers for SFA PD RD2H."""
 
 from __future__ import annotations
 
@@ -129,7 +129,7 @@ class SfaPDConsumerReqMeta:
     """D-side destinations owned by vLLM's normal KV block manager.
 
     Main MLA block ids index the CPU cache owned by
-    :class:`KVOffloadDecodeManager`; indexer block ids index the rank-local
+    :class:`SparseKVOffloadManager`; indexer block ids index the rank-local
     HBM cache.  Keeping the two components explicit avoids depending on a
     model-runner tuple layout.
     """

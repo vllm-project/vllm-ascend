@@ -19,7 +19,7 @@ Then run Decode on the peer machine::
         --device-id 0
 
 The default destination is an aligned ``memfabric_hybrid.offload`` pinned CPU
-buffer, matching KVOffloadDecodeManager. Use ``--dst-memory npu`` as an HBM to
+buffer, matching SparseKVOffloadManager. Use ``--dst-memory npu`` as an HBM to
 HBM control test.
 """
 
@@ -95,7 +95,7 @@ def _parse_args() -> argparse.Namespace:
         "--dst-memory",
         choices=("offload", "npu"),
         default="offload",
-        help="Decode destination type; offload matches KVOffloadDecodeManager.",
+        help="Decode destination type; offload matches SparseKVOffloadManager.",
     )
     parser.add_argument(
         "--dram-pool-gb",
@@ -332,7 +332,7 @@ def _run_decode(args: argparse.Namespace) -> None:
                 backing = destination
                 torch.npu.synchronize()
 
-            # Match the production D-side order: KVOffloadDecodeManager owns
+            # Match the production D-side order: SparseKVOffloadManager owns
             # the CPU pool before the connector initializes its transfer
             # engine. A pull destination is local and is not registered.
             _, engine = _new_transfer_engine("decode", args.local_ip, args.device_id)
