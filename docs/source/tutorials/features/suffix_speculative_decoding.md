@@ -19,7 +19,7 @@ The benchmarking tool used in this tutorial is AISBench, which supports performa
 
 ## **Download vllm-ascend Image**
 
-This tutorial uses the official image, version v0.13.0rc1. Use the following command to download:
+This tutorial uses the official image, version `{{ vllm_ascend_version }}`. Use the following command to download:
 
 ```bash
 
@@ -142,7 +142,7 @@ ais_bench --models vllm-api-stream-chat \
 
 ## **Test Results**
 
-Below are the detailed test results of the six open-source datasets in this evaluation. Compared to the baseline performance, the improvement in TPOT and throughput performance at different concurrency levels after enabling Suffix Decoding varies across datasets. The extent of improvement after enabling Suffix Decoding differs among the datasets. Below is a summary of the results:
+Below are the detailed test results of the six open-source datasets in this evaluation. Compared to the baseline, the improvement in TPOT and throughput performance at different concurrency levels after enabling Suffix Decoding varies across datasets. Below is a summary of the results:
 
 | **Dataset Category** | **Typical Representative** | **Throughput Improvement (BS=1-10)** | **SLO TPOT** |
 | -------------------- | -------------------------- | ------------------------------------ | ------------ |

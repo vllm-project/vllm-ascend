@@ -28,7 +28,7 @@ You can use our official docker image to run GLM-5.2 directly.
 
 === "A3 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```shell
 
@@ -704,7 +704,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-        
+
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
@@ -823,7 +823,7 @@ Before you start, please
         ```shell
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
-            
+
         export HCCL_OP_EXPANSION_MODE="AIV"
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name

@@ -20,9 +20,9 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 | Model | Version | Hardware Requirement | Download |
 |-------|---------|----------------------|----------|
-| Qwen3.5-2B | FP16 | Atlas inference products or Atlas 200I Pro | [Download](https://modelscope.cn/models/Qwen/Qwen3.5-2B) |
-| Qwen3.5-4B | FP16 | Atlas inference products or Atlas 200I Pro | [Download](https://modelscope.cn/models/Qwen/Qwen3.5-4B) |
-| Qwen3.5-9B | FP16 | Atlas inference products or Atlas 200I Pro | [Download](https://modelscope.cn/models/Qwen/Qwen3.5-9B) |
+| Qwen3.5-2B | FP16 | Atlas inference products or Atlas 200I Pro | [Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-2B) |
+| Qwen3.5-4B | FP16 | Atlas inference products or Atlas 200I Pro | [Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-4B) |
+| Qwen3.5-9B | FP16 | Atlas inference products or Atlas 200I Pro | [Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-9B) |
 
 It is recommended to download the model weight to a local directory such as `/root/.cache/` or `/home/data/`.
 
@@ -36,7 +36,7 @@ It is **recommended to use the latest release candidate (rc) version or the late
 
 === "Atlas inference products"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```bash
     export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
@@ -66,7 +66,7 @@ It is **recommended to use the latest release candidate (rc) version or the late
 
 === "Atlas 200I Pro"
 
-    Start the docker image on your each node. Adjust `--device=/dev/davinci0` according to the NPU ID you want to use.
+    Start the docker image on each node. Adjust `--device=/dev/davinci0` according to the NPU ID you want to use.
 
     === "Ubuntu 24.04"
 

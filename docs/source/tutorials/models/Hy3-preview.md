@@ -17,7 +17,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 ### Model Weight
 
 - Hugging Face: [tencent/Hy3-preview](https://huggingface.co/tencent/Hy3-preview)
-- ModelScope: [Tencent-Hunyuan/Hy3-preview](https://modelscope.cn/models/Tencent-Hunyuan/Hy3-preview)
+- ModelScope: [Tencent-Hunyuan/Hy3-preview](https://www.modelscope.cn/models/Tencent-Hunyuan/Hy3-preview)
 - GitCode: [tencent_hunyuan/Hy3-preview](https://ai.gitcode.com/tencent_hunyuan/Hy3-preview)
 
 Download or mount the checkpoint to a path shared by the runtime container, for example `/models/Hy3-preview`.
@@ -97,7 +97,7 @@ vllm serve ${MODEL_PATH} \
   --port 8000
 ```
 
-- `--enable-ep-weight-filter` is optional. It skips expert weights that do not belong to the local EP rank during loading, reducing disk and host-memory pressure for very large MoE checkpoints. We recommend keeping it enabled.
+- `--enable-ep-weight-filter` recommended. It skips expert weights that do not belong to the local EP rank during loading, reducing disk and host-memory pressure for very large MoE checkpoints. We recommend keeping it enabled.
 - Tool calling and reasoning are service interfaces declared in the Hy3 README, so it is recommended to pass the corresponding `hy_v3` parsers by default.
 
 ## Functional Verification
