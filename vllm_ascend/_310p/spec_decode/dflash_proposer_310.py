@@ -35,7 +35,6 @@ from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.spec_decode.dflash_debug import trace_dflash_tensors
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.dspark_proposer import AscendDsparkProposer
 
@@ -178,18 +177,6 @@ def _prepare_per_layer_slot_mappings_310(
     proposer._dflash_query_slot_mapping_by_layer_310 = {
         layer_name: query_slots_by_size[block_sizes_by_layer[layer_name]] for layer_name in proposer.attn_layer_names
     }
-    trace_dflash_tensors(
-        proposer,
-        "copy_expand.per_layer_slots",
-        message=(
-            f"layers={proposer.attn_layer_names} "
-            f"block_sizes="
-            f"{[block_sizes_by_layer[name] for name in proposer.attn_layer_names]}"
-        ),
-        context_slots_by_size=list(context_slots_by_size.values()),
-        query_slots_by_size=list(query_slots_by_size.values()),
-    )
-
 
 def _ensure_kernel_block_size_matches_cache_310(proposer: Any) -> None:
     """Align the draft ``kernel_block_size`` with the allocated KV cache.
@@ -295,23 +282,6 @@ def _copy_and_expand_inputs_ascendc(
     # self.kernel_block_size with the allocated cache once, right before the op.
     _ensure_kernel_block_size_matches_cache_310(self)
 
-    trace_dflash_tensors(
-        self,
-        "copy_expand.pre",
-        message=(
-            f"batch={batch_size} context={num_context} "
-            f"query_per_req={num_query_per_req} spec={self.num_speculative_tokens} "
-            f"kernel_block={self.kernel_block_size} sample_anchor={sample_from_anchor}"
-        ),
-        next_token_ids=next_token_ids,
-        target_positions=target_positions,
-        cad_slot_mapping=cad.slot_mapping,
-        cad_query_start_loc=cad.query_start_loc,
-        cad_seq_lens=cad.seq_lens,
-        cad_block_table=cad.block_table_tensor,
-        num_rejected_tokens=num_rejected_tokens_gpu,
-    )
-
     if num_rejected_tokens_gpu is not None:
         num_rejected = num_rejected_tokens_gpu.to(torch.int32)
     else:
@@ -371,18 +341,6 @@ def _copy_and_expand_inputs_ascendc(
         batch_size,
     )
 
-    trace_dflash_tensors(
-        self,
-        "copy_expand.post",
-        message=(f"batch={batch_size} context={num_context} query_total={num_query_total}"),
-        output_input_ids=out_input_ids[:num_query_total],
-        output_query_positions=out_query_positions[:num_query_total],
-        output_query_slot_mapping=out_query_slot_mapping[:num_query_total],
-        output_context_positions=out_context_positions[:num_context],
-        output_context_slot_mapping=out_context_slot_mapping[:num_context],
-        output_token_indices=out_token_indices,
-    )
-
     self.input_ids[:num_query_total].copy_(out_input_ids[:num_query_total])
     self.positions[:num_query_total].copy_(out_query_positions[:num_query_total])
     self._slot_mapping_buffer[:num_query_total].copy_(out_query_slot_mapping[:num_query_total])
@@ -417,18 +375,6 @@ class AscendDflashProposer310(AscendDflashProposer):
 
         self._dflash_num_context = num_context
         self._dflash_hidden_states[:num_context] = target_hidden_states
-
-        trace_dflash_tensors(
-            self,
-            "first_pass.target",
-            message=(f"batch={batch_size} context={num_context} query_per_req={num_query_per_req}"),
-            target_token_ids=target_token_ids,
-            next_token_ids=next_token_ids,
-            target_positions=target_positions,
-            target_hidden_states=target_hidden_states,
-            token_indices_to_sample=token_indices_to_sample,
-            num_rejected_tokens=num_rejected_tokens_gpu,
-        )
 
         has_num_rejected = num_rejected_tokens_gpu is not None
 
@@ -473,20 +419,6 @@ class AscendDflashProposer310(AscendDflashProposer):
         cad.causal = False
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
-
-        trace_dflash_tensors(
-            self,
-            "first_pass.metadata",
-            message=(
-                f"causal={cad.causal} state={cad.attn_state} "
-                f"num_actual_tokens={cad.num_actual_tokens} "
-                f"max_query_len={cad.max_query_len} max_seq_len={cad.max_seq_len}"
-            ),
-            query_start_loc=cad.query_start_loc,
-            seq_lens=cad.seq_lens,
-            slot_mapping=cad.slot_mapping,
-            block_table=cad.block_table_tensor,
-        )
 
         return num_query_total, token_indices_to_sample, cad, None
 
@@ -545,12 +477,6 @@ class AscendDflashProposer310(AscendDflashProposer):
                 metadata_by_slots[cache_key] = layer_metadata
             per_layer[layer_name] = metadata_by_slots[cache_key]
 
-        trace_dflash_tensors(
-            self,
-            "first_pass.per_layer_metadata",
-            message=f"unique_slot_layouts={len(metadata_by_slots)}",
-            slot_mappings=list(query_slots_by_layer.values()),
-        )
         return per_layer
 
 
