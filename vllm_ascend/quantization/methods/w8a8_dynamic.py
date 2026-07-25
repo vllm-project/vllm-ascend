@@ -295,22 +295,29 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         topk_weights = topk_weights.to(self.in_dtype)
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
-        fused_scale_flag = (
-            _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2 and get_ascend_config().enable_fused_mc2 == 1
-        )
+        fused_scale_flag = _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2
+        enable_fused_mc2 = get_ascend_config().enable_fused_mc2 if fused_scale_flag else 0
+        fused_scale_flag = fused_scale_flag and enable_fused_mc2 in (1, 3)
+        fused_scale_bias_flag = fused_scale_flag and enable_fused_mc2 == 1
+        cann_mega_moe_flag = fused_scale_flag and enable_fused_mc2 == 3
         if self.dynamic_eplb:
             w1 = layer.w13_weight_list
             w1_scale = layer.fused_w1_scale_list if fused_scale_flag else layer.w13_weight_scale_fp32_list
             w2 = layer.w2_weight_list
             w2_scale = layer.fused_w2_scale_list if fused_scale_flag else layer.w2_weight_scale_list
+        elif cann_mega_moe_flag:
+            w1 = layer.cann_mega_moe_w13_weight_list
+            w1_scale = layer.cann_mega_moe_fused_w1_scale_list
+            w2 = layer.cann_mega_moe_w2_weight_list
+            w2_scale = layer.cann_mega_moe_fused_w2_scale_list
         else:
             w1 = [layer.w13_weight]
             w1_scale = [layer.fused_w1_scale] if fused_scale_flag else [layer.w13_weight_scale_fp32]
             w2 = [layer.w2_weight]
             w2_scale = [layer.fused_w2_scale] if fused_scale_flag else [layer.w2_weight_scale]
 
-        w1_scale_bias = [torch.tensor([], dtype=torch.float32)] if fused_scale_flag else None
-        w2_scale_bias = [torch.tensor([], dtype=torch.float32)] if fused_scale_flag else None
+        w1_scale_bias = [torch.tensor([], dtype=torch.float32)] if fused_scale_bias_flag else None
+        w2_scale_bias = [torch.tensor([], dtype=torch.float32)] if fused_scale_bias_flag else None
 
         final_hidden_states = moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
@@ -353,9 +360,20 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(layer.w2_weight_scale.data.shape[0], -1)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(layer.w2_weight_offset.data.shape[0], -1)
 
-        if get_ascend_config().enable_fused_mc2 == 1:
+        enable_int_fused_mc2 = get_ascend_config().enable_fused_mc2 in (1, 3)
+        if get_ascend_config().enable_fused_mc2 in (1, 3):
             layer.fused_w1_scale = scale_from_float_to_int64(layer.w13_weight_scale.data)
             layer.fused_w2_scale = scale_from_float_to_int64(layer.w2_weight_scale.data)
+
+        if get_ascend_config().enable_fused_mc2 == 3 and not self.dynamic_eplb:
+            layer.cann_mega_moe_w13_weight_list = list(layer.w13_weight.data.unbind(dim=0))
+            layer.cann_mega_moe_w2_weight_list = list(layer.w2_weight.data.unbind(dim=0))
+            layer.cann_mega_moe_fused_w1_scale_list = list(
+                layer.fused_w1_scale.view(layer.w13_weight.shape[0], -1).data.unbind(dim=0)
+            )
+            layer.cann_mega_moe_fused_w2_scale_list = list(
+                layer.fused_w2_scale.view(layer.w2_weight.shape[0], -1).data.unbind(dim=0)
+            )
 
         if self.dynamic_eplb:
             layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
@@ -364,7 +382,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 weight.clone() for weight in layer.w13_weight_scale_fp32.data.unbind(dim=0)
             ]
             layer.w2_weight_scale_list = [weight.clone() for weight in layer.w2_weight_scale.data.unbind(dim=0)]
-            if get_ascend_config().enable_fused_mc2 == 1:
+            if enable_int_fused_mc2:
                 layer.fused_w1_scale_list = [
                     weight.clone()
                     for weight in layer.fused_w1_scale.view(len(layer.w13_weight_list), -1).data.unbind(dim=0)
@@ -378,7 +396,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             del layer.w13_weight_scale
             del layer.w13_weight_scale_fp32
             del layer.w2_weight_scale
-            if get_ascend_config().enable_fused_mc2 == 1:
+            if enable_int_fused_mc2:
                 del layer.fused_w1_scale
                 del layer.fused_w2_scale
             torch.npu.empty_cache()

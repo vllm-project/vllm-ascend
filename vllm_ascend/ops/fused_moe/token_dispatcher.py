@@ -133,6 +133,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         num_tokens_per_tp_rank = mc2_tokens_capacity // tp_size
+        self.max_num_tokens_per_rank = num_tokens_per_tp_rank
         _max_global_bs = num_tokens_per_tp_rank * self.ep_world_size
 
         # When allreduce across DP is not skipped, tokens are uniform across ranks:
