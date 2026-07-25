@@ -2,7 +2,7 @@
 
 import math
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.patch.platform import patch_mamba_manager
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
     _is_deepseek_v4_kv_cache_spec,
@@ -425,6 +426,74 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
     manager = AscendMambaManager(**manager_kwargs)
 
     assert manager.block_size == mamba_spec.block_size
+
+
+def test_ascend_mamba_manager_supports_legacy_allocate_signature() -> None:
+    manager = AscendMambaManager.__new__(AscendMambaManager)
+    manager.block_size = 16
+    blocks = [object()]
+
+    with (
+        patch.object(
+            patch_mamba_manager,
+            "_MAMBA_ALLOC_HAS_LOCAL_COMPUTED_TOKENS",
+            False,
+        ),
+        patch.object(
+            patch_mamba_manager.MambaManager,
+            "get_num_blocks_to_allocate",
+            return_value=5,
+        ) as allocate,
+    ):
+        result = manager.get_num_blocks_to_allocate("request", 32, blocks, 16, 64)
+
+    assert result == 5
+    allocate.assert_called_once_with(
+        "request",
+        32,
+        blocks,
+        16,
+        64,
+        apply_admission_cap=False,
+    )
+
+
+def test_ascend_mamba_manager_supports_current_allocate_signature() -> None:
+    manager = AscendMambaManager.__new__(AscendMambaManager)
+    manager.block_size = 16
+    blocks = [object()]
+
+    with (
+        patch.object(
+            patch_mamba_manager,
+            "_MAMBA_ALLOC_HAS_LOCAL_COMPUTED_TOKENS",
+            True,
+        ),
+        patch.object(
+            patch_mamba_manager.MambaManager,
+            "get_num_blocks_to_allocate",
+            return_value=5,
+        ) as allocate,
+    ):
+        result = manager.get_num_blocks_to_allocate(
+            "request",
+            32,
+            blocks,
+            16,
+            8,
+            64,
+        )
+
+    assert result == 6
+    allocate.assert_called_once_with(
+        "request",
+        32,
+        blocks,
+        16,
+        8,
+        64,
+        apply_admission_cap=False,
+    )
 
 
 def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:

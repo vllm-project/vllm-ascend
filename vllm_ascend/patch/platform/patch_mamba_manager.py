@@ -4,6 +4,7 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
 #
+import inspect
 from collections.abc import Sequence
 
 import vllm.v1.core.single_type_kv_cache_manager as single_type_kv_cache_manager
@@ -17,6 +18,10 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 
 from vllm_ascend.utils import vllm_version_is
+
+_MAMBA_ALLOC_HAS_LOCAL_COMPUTED_TOKENS = (
+    "num_local_computed_tokens" in inspect.signature(MambaManager.get_num_blocks_to_allocate).parameters
+)
 
 
 class AscendMambaManager(MambaManager):
@@ -74,7 +79,7 @@ class AscendMambaManager(MambaManager):
         num_tokens_main_model: int | None = None,
         apply_admission_cap: bool = False,
     ) -> int:
-        if vllm_version_is("0.25.1"):
+        if not _MAMBA_ALLOC_HAS_LOCAL_COMPUTED_TOKENS:
             if num_tokens_main_model is None:
                 assert num_local_computed_tokens is not None
                 num_tokens_main_model = num_local_computed_tokens

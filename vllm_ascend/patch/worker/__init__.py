@@ -18,7 +18,7 @@
 from vllm.triton_utils import HAS_TRITON
 
 import vllm_ascend.patch.worker.patch_lora_compile_wrapper  # noqa
-from vllm_ascend.utils import is_310p, vllm_version_is
+from vllm_ascend.utils import is_310p
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
@@ -70,9 +70,15 @@ import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
 
-# MRV2 speculative decoding currently tracks only the verified vLLM main
-# commit. Keep its main-only imports unreachable on the v0.25.1 release lane.
-if not vllm_version_is("0.25.1"):
+# MRV2 speculative decoding depends on the vLLM main speculator graph manager.
+try:
+    from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
+        SpeculatorCudaGraphManager as _SpeculatorCudaGraphManager,
+    )
+except ImportError:
+    _SpeculatorCudaGraphManager = None
+
+if _SpeculatorCudaGraphManager is not None:
     import vllm_ascend.patch.worker.patch_v2.patch_eagle_speculator  # noqa
     import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa
 

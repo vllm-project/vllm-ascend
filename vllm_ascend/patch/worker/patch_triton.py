@@ -7,9 +7,9 @@ from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.layernorm_guard import LayerNormFn
 from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_recurrent_gated_delta_rule_fwd_kernel
 from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_npu
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import vllm_fla_uses_model_executor_path
 
-if vllm_version_is("0.25.1"):
+if vllm_fla_uses_model_executor_path():
     import vllm.model_executor.layers.fla.ops as fla_ops  # type: ignore[import-not-found]
     import vllm.model_executor.layers.fla.ops.fused_recurrent as fla_fused_recurrent  # type: ignore[import-not-found]
     import vllm.model_executor.layers.fla.ops.layernorm_guard as fla_layernorm_guard  # type: ignore[import-not-found]

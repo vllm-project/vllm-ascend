@@ -26,6 +26,7 @@ import os
 from contextlib import nullcontext
 from enum import Enum
 from functools import lru_cache
+from importlib.util import find_spec
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -597,6 +598,15 @@ def vllm_version_is(target_vllm_version: str):
             "to control it by hand. And please make sure the value follows the "
             "format of x.y.z."
         )
+
+
+@functools.cache
+def vllm_fla_uses_model_executor_path() -> bool:
+    """Return whether vLLM exposes FLA ops under model_executor."""
+    try:
+        return find_spec("vllm.model_executor.layers.fla.ops") is not None
+    except ModuleNotFoundError:
+        return False
 
 
 def get_max_hidden_layers(hf_config) -> int:

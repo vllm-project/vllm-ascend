@@ -8,9 +8,9 @@ from vllm_ascend._310p.ops.fla.idex import (
 from vllm_ascend._310p.spec_decode.llm_base_proposer_310 import AscendSpecDecodeBaseProposer310
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
-from vllm_ascend.utils import is_rc_device, vllm_version_is
+from vllm_ascend.utils import is_rc_device, vllm_fla_uses_model_executor_path
 
-if vllm_version_is("0.25.1"):
+if vllm_fla_uses_model_executor_path():
     from vllm.model_executor.layers.fla.ops import index as fla_index  # type: ignore[import-not-found]
 else:
     from vllm.third_party.flash_linear_attention.ops import index as fla_index
