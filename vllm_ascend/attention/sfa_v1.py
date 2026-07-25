@@ -30,6 +30,9 @@ from vllm_ascend.attention.utils import (
     SFA_QSFA_TILE_SIZE,
     AscendCommonAttentionMetadata,
     ascend_chunked_prefill_workspace_size,
+    enable_cp,
+    get_layer_index,
+    get_layer_name_with_index,
     get_sfa_qsfa_packed_head_dim,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
@@ -502,7 +505,6 @@ class AscendSFAImpl(MLAAttentionImpl):
     _prefetched_k_pe: torch.Tensor | None = None   # [3, max_num_seqs, index_topk, qk_rope_head_dim]
     _gather_stream: torch_npu.npu.Stream | None = None
     _gather_done_event: torch_npu.npu.Event | None = None
-    DELAY_FIRST_GROUP_PREFETCH_TO_FIRST_SHARED: bool = True
     MAX_PREFETCH_LAYERS: int = 3
 
     def __init__(
@@ -1173,29 +1175,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         return ql_nope.transpose(0, 1), q_pe
 
 
-    @staticmethod
-    def _extract_layer_id(layer_name: str) -> int:
-        parts = layer_name.split(".")
-        for i, p in enumerate(parts):
-            if p == "layers" and i + 1 < len(parts):
-                try:
-                    return int(parts[i + 1])
-                except ValueError:
-                    pass
-        return -1
-
-    def _layer_name_with_id(self, target_id: int) -> str:
-        parts = self.layer_name.split(".")
-        for i, p in enumerate(parts):
-            if p == "layers" and i + 1 < len(parts):
-                parts[i + 1] = str(target_id)
-                return ".".join(parts)
-        return self.layer_name
-
-    @staticmethod
-    def _full_layer_group_index(indexer_types, full_layer_id: int) -> int:
-        return sum(1 for t in indexer_types[:full_layer_id] if str(t).lower() == "full")
-
     def _init_prefetch_optimization(self, hf_config, hf_text_config) -> None:
         """Derive the prefetch producer and its real shared-cache followers.
 
@@ -1223,7 +1202,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self._index_topk = int(
             getattr(hf_text_config, "index_topk", 0)
             or getattr(hf_config, "index_topk", 0) or 0)
-        layer_id = self._extract_layer_id(self.layer_name)
+        layer_id = get_layer_index(self.layer_name)
         if layer_id < 0 or layer_id >= len(indexer_types):
             return
 
@@ -1239,9 +1218,11 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         my_type = str(indexer_types[layer_id]).lower()
         if my_type == "full" and self.has_indexer and not self.skip_topk:
-            group_idx = self._full_layer_group_index(indexer_types, layer_id)
-            if not (group_idx == 0
-                    and AscendSFAImpl.DELAY_FIRST_GROUP_PREFETCH_TO_FIRST_SHARED):
+            is_first_full_group = all(
+                str(indexer_type).lower() != "full"
+                for indexer_type in indexer_types[:layer_id]
+            )
+            if not is_first_full_group:
                 self.shared_layer_ids = followers_after(layer_id)
                 self.is_prefetch_producer = bool(self.shared_layer_ids)
             return
@@ -1259,9 +1240,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         if not all(str(indexer_types[owning_full + 1 + offset]).lower() == "shared"
                    for offset in range(shared_offset + 1)):
             return
-        group_idx = self._full_layer_group_index(indexer_types, owning_full)
-        if (group_idx == 0
-                and AscendSFAImpl.DELAY_FIRST_GROUP_PREFETCH_TO_FIRST_SHARED):
+        is_first_full_group = all(
+            str(indexer_type).lower() != "full"
+            for indexer_type in indexer_types[:owning_full]
+        )
+        if is_first_full_group:
             delayed_producer = owning_full + 1
             if layer_id == delayed_producer:
                 self.shared_layer_ids = followers_after(layer_id)
@@ -1303,7 +1286,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         context = self.vllm_config.compilation_config.static_forward_context
         caches = []
         for layer_id in self.shared_layer_ids:
-            layer_context = context.get(self._layer_name_with_id(layer_id))
+            layer_context = context.get(
+                get_layer_name_with_index(self.layer_name, layer_id)
+            )
             if layer_context is None or layer_context.kv_cache is None:
                 logger.warning(
                     "Grouped sparse-KV prefetch is disabled for %s because a "
@@ -1314,21 +1299,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                 return
             caches.append(layer_context.kv_cache)
         self.group_shared_kv_caches = caches
-
-    _sparse_kv_gather_group_op_available_cache: bool | None = None
-
-    @staticmethod
-    def _sparse_kv_gather_group_op_available() -> bool:
-        """Return whether the registered group gather ABI is available."""
-        cache = AscendSFAImpl._sparse_kv_gather_group_op_available_cache
-        if cache is None:
-            cache = hasattr(torch.ops._C_ascend, "npu_sparse_kv_gather_group_out")
-            AscendSFAImpl._sparse_kv_gather_group_op_available_cache = cache
-            if not cache:
-                logger.warning_once(
-                    "[prefetch] npu_sparse_kv_gather_group_out is unavailable; "
-                    "fall back to the regular sparse-attention path.")
-        return cache
 
     def _get_prefetch_slice(self, num_actual_tokens: int):
         if self.prefetch_buf_index < 0 or AscendSFAImpl._prefetched_kv is None:
@@ -2166,15 +2136,10 @@ class AscendSFAImpl(MLAAttentionImpl):
         else:
             topk_num_tokens = num_input_tokens or hidden_states.shape[0]
         used_prefetch = False
-        should_gather = False
-        prefetch_active = (
-            self.prefetch_enabled
-            and self._sparse_kv_gather_group_op_available()
-        )
         if self.skip_topk:
             topk_indices = self._get_indexcache_topk_indices(topk_num_tokens)
             if (
-                prefetch_active
+                self.prefetch_enabled
                 and self.prefetch_buf_index >= 0
                 and AscendSFAImpl._prefetched_kv is not None
             ):
@@ -2282,7 +2247,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # The delayed producer is layer 1 of group 0, so its gather runs after attention
         # and overlaps its MoE; it intentionally owns only layers 2 and 3.
         prefetch_bt = prefetch_topk = prefetch_cur_pos = None
-        if prefetch_active and self.is_prefetch_producer:
+        if self.prefetch_enabled and self.is_prefetch_producer:
             num_actual = attn_metadata.num_actual_tokens
             self._ensure_prefetch_buffer(kv_cache, num_actual)
             self._ensure_group_shared_kv_caches()
@@ -2295,7 +2260,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                     dtype=torch.int64,
                     device=prefetch_topk.device,
                 ) - 1
-                should_gather = True
 
         if not used_prefetch:
             attn_output = self._execute_sparse_flash_attention_process(
@@ -2330,7 +2294,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         output[...] = self.o_proj(attn_output)[0]
 
-        if should_gather:
+        if prefetch_bt is not None:
             if AscendSFAImpl._gather_stream is None:
                 AscendSFAImpl._gather_stream = torch_npu.npu.Stream()
             gather_stream = AscendSFAImpl._gather_stream
