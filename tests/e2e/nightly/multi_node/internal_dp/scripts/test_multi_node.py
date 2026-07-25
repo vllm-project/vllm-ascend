@@ -26,7 +26,6 @@ from tools.aisbench import run_aisbench_cases
 logger = logging.getLogger(__name__)
 
 _FEATURE_ENVS: dict[str, str] = {
-    "VLLM_ASCEND_ENABLE_FLASHCOMM": "flashcomm",
     "VLLM_ASCEND_ENABLE_FLASHCOMM1": "flashcomm1",
     "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "topk_optimize",
     "VLLM_ASCEND_ENABLE_MLAPO": "mlapo",

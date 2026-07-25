@@ -169,7 +169,6 @@ def _extract_features(commands: list["ServerCommand"]) -> list[str]:
         features.append("aclgraph")
 
     feature_envs = {
-        "VLLM_ASCEND_ENABLE_FLASHCOMM": "flashcomm",
         "VLLM_ASCEND_ENABLE_FLASHCOMM1": "flashcomm1",
         "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "topk_optimize",
         "VLLM_ASCEND_ENABLE_MLAPO": "mlapo",

@@ -69,22 +69,3 @@ def test_qwen3_dense_fc1_tp2(model):
         quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
-@pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
-def test_qwen3_dense_prefetch_mlp_weight_tp2(model):
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    max_tokens = 5
-
-    with VllmRunner(
-        model,
-        max_model_len=8192,
-        dtype="auto",
-        tensor_parallel_size=2,
-        cudagraph_capture_sizes=[1, 2, 4, 8],
-        quantization="ascend",
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)

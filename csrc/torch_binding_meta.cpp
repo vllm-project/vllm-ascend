@@ -442,20 +442,6 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, rstd, x);
 }
 
-at::Tensor npu_sign_bits_pack_meta(const at::Tensor& input,
-                                   const int64_t size) {
-    auto ySize = ceil_div(input.sym_size(0), 8);
-    c10::SymInt outDim(0);
-    if (size != 0) {
-        outDim = ySize / c10::SymInt(size);
-    }
-
-    at::Tensor out = at::empty_symint(
-        c10::SymDimVector{c10::SymInt(size), outDim},
-        torch::TensorOptions().dtype(torch::kUInt8).device(input.device()));
-    return out;
-}
-
 std::tuple<at::Tensor, at::Tensor> npu_gemma_rms_norm_meta(
     const at::Tensor& x,
     const at::Tensor& gamma,
@@ -1580,8 +1566,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
     // transpose_kv_cache_by_block
     ops.impl("transpose_kv_cache_by_block", &vllm_ascend::meta::transpose_kv_cache_by_block_meta);
-    // npu_sign_bits_pack
-    ops.impl("npu_sign_bits_pack", &vllm_ascend::meta::npu_sign_bits_pack_meta);
     // CopyAndExpandEagleInputs
     ops.impl("npu_copy_and_expand_eagle_inputs", &vllm_ascend::meta::npu_copy_and_expand_eagle_inputs_meta);
     // causal_conv1d_fn

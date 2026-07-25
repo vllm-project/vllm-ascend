@@ -15,7 +15,6 @@ lora
 expert_parallelism_load_balancer
 netloader
 rfork
-dynamic_batch
 epd_disaggregation
 kv_pool
 layerwise_kv_pool
@@ -23,10 +22,8 @@ kv_cache_cpu_offload
 large_scale_ep
 ucm_deployment
 Fine_grained_TP
-layer_sharding
 speculative_decoding
 context_parallel
-weight_prefetch
 sequence_parallelism
 batch_invariance
 lmcache_ascend_deployment

@@ -487,19 +487,6 @@ at::Tensor sgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indic
 }
 #endif
 
-at::Tensor npu_sign_bits_pack(const at::Tensor& input,
-                                   const int64_t size) {
-    int64_t ySize = (input.size(0) + 7) / 8;
-    int64_t outDim = 0;
-    if (size != 0) {
-        outDim = ySize / size;
-    }
-
-    at::Tensor out = torch::empty({size, outDim}, torch::TensorOptions().dtype(torch::kUInt8).device(input.device()));
-    EXEC_NPU_CMD(aclnnSignBitsPack, input, size, out);
-    return out;
-}
-
 std::tuple<at::Tensor, at::Tensor> npu_gemma_rms_norm(
     const at::Tensor& x,
     const at::Tensor& gamma,
@@ -2298,9 +2285,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "-> (Tensor y ,Tensor rstd, Tensor x)"
         );
     ops.impl("npu_add_rms_norm_bias", torch::kPrivateUse1, &vllm_ascend::npu_add_rms_norm_bias);
-
-    ops.def("npu_sign_bits_pack(Tensor input, int size) -> Tensor");
-    ops.impl("npu_sign_bits_pack", torch::kPrivateUse1, &vllm_ascend::npu_sign_bits_pack);
 
     ops.def(
         "transpose_kv_cache_by_block(Tensor[] kCache, Tensor[] vCache, Tensor blockIDs, int blockSize, int headNum, int headDim, int splitNum, int layerNum) -> ()"
