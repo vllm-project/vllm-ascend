@@ -128,6 +128,11 @@ from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoa
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.model_executor.offloader import create_offloader
+from vllm_ascend.expert_offload.expert_offload_manager import (
+    maybe_init_expert_offload_manager,
+    has_expert_offload_manager,
+    get_expert_offload_manager,
+)
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -332,6 +337,11 @@ class NPUModelRunner(GPUModelRunner):
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+
+        if self.ascend_config.expert_offload_config.expert_offload:
+            maybe_init_expert_offload_manager(self.vllm_config)
+            if has_expert_offload_manager():
+                self.offload_manager = get_expert_offload_manager()
 
         # Dump / PrecisionDebugger configuration now comes from AscendConfig
         dump_cfg = self.ascend_config.dump_config_path
@@ -3735,13 +3745,24 @@ class NPUModelRunner(GPUModelRunner):
         if self.max_num_tokens > mc2_tokens_capacity and select_moe_comm_method(
             mc2_tokens_capacity, self.vllm_config
         ) in {MoECommType.MC2, MoECommType.FUSED_MC2}:
+            # Disable prefill pool during profile run — the kernel is
+            # configured for decode expert counts and cannot handle
+            # full-expert-count prefill tensors.
+            if hasattr(self, 'offload_manager'):
+                self.offload_manager._skip_prefill = True
             self._dummy_run(mc2_tokens_capacity, with_prefill=True, is_profile=True)
+            if hasattr(self, 'offload_manager'):
+                self.offload_manager._skip_prefill = False
         origin_max_num_tokens = self.max_num_tokens
         # in the pcp scenario, the split sequence needs to be used for profile run
         # TODO: after the vllm pcp function is launched, this logic needs to be brought up to the community
         if self.pcp_size > 1:
             self.max_num_tokens = math.ceil(self.max_num_tokens / (self.pcp_size * 2)) * 2
+        if hasattr(self, 'offload_manager'):
+            self.offload_manager._skip_prefill = True
         super().profile_run()
+        if hasattr(self, 'offload_manager'):
+            self.offload_manager._skip_prefill = False
         self.max_num_tokens = origin_max_num_tokens
 
     def eplb_warmup(self):
@@ -3789,6 +3810,8 @@ class NPUModelRunner(GPUModelRunner):
                 if "sink" in name:
                     self._has_sinks = True
                     break
+            if hasattr(self, 'offload_manager'):
+                self._finalize_offload_setup()
             if self.drafter:
                 logger.info("Loading drafter model...")
                 if self.vllm_config.quant_config is not None:
@@ -3887,7 +3910,18 @@ class NPUModelRunner(GPUModelRunner):
 
         self.debugger.step(**kwargs)
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def _finalize_offload_setup(self):
+        """Post-weight-loading finalization for expert offload."""
+        t_a = time.perf_counter()
+        self.offload_manager._finalize_offload(self.model)
+        t_b = time.perf_counter()
+        logger.info("offload finalize: %.1fs", t_b - t_a)
+
+    def initialize_kv_cache(
+        self,
+        kv_cache_config: KVCacheConfig,
+        is_profiling: bool = False,
+    ) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
         Args:
@@ -5032,6 +5066,41 @@ class NPUModelRunner(GPUModelRunner):
             set_graph_params(capture_sizes)
             if self.speculative_config:
                 set_draft_graph_params(capture_sizes)
+
+    def profile_cudagraph_memory(self) -> int:
+        parent_module_name = _get_gpu_model_runner_module_name(self)
+        # This runs a throwaway eager forward (npugraph_ex fx_run_eagerly) on
+        # dummy inputs to estimate graph memory. Expert weights aren't
+        # reactively loaded yet → GMM yields NaN hidden_states → prefetch
+        # prediction degenerates to [0..topk] and would fire wasteful H2D
+        # copies + pollute the expert cache. Skip prefetch side-effects for
+        # the whole estimate, same as profile_run. The real graph used at
+        # decode is captured/replayed elsewhere with _skip_prefill=False.
+        if hasattr(self, 'offload_manager'):
+            self.offload_manager._skip_prefill = True
+        try:
+            with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
+                result = GPUModelRunner.profile_cudagraph_memory(self)
+        finally:
+            if hasattr(self, 'offload_manager'):
+                self.offload_manager._skip_prefill = False
+
+        reset_graph_params()
+
+        # NOTE: This is a serious problem that we maintain two extra copies of the KV cache as the instance
+        # variable of the attention layers, when they are local variables in the upstream vLLM code.
+        # We have to manually clear them here to release memory after profiling. 
+        for layer in self.compilation_config.static_forward_context.values():
+            if hasattr(layer, "impl"):
+                if hasattr(layer.impl, "key_cache"):
+                    layer.impl.key_cache = None
+                if hasattr(layer.impl, "value_cache"):
+                    layer.impl.value_cache = None
+
+        gc.collect()
+        torch.accelerator.empty_cache()
+
+        return result
 
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""

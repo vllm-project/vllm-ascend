@@ -322,6 +322,24 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
         # is a single fused C++ op. This covers both normal model
         # forward and _dummy_run during profile_run.
         moe_comm_type = MoECommType.ALLTOALL
+    elif (get_ascend_config().expert_offload_config.expert_offload
+            and get_ascend_config().expert_offload_config.enable_multi_card):
+        # Multi-card offload splits by batch size:
+        #  - DECODE (num_tokens <= mc2_tokens_capacity): MC2 with dynamic
+        #    per-layer placement (log2phy). Only MC2 routes by physical id.
+        #  - PREFILL (num_tokens > capacity): MC2 dispatch kernel has a HARD
+        #    512-token limit (aclnnMoeDistributeDispatchV4 rejects xDim0>512),
+        #    so prefill cannot use MC2. Use ALLTOALL with a per-rank contiguous
+        #    EP shard loaded into the prefill pool — this is the standard A3 EP
+        #    prefill path (select_moe_comm_method A3 branch also picks ALLTOALL
+        #    for >capacity). AllGather EP needs sequence parallel (enable_sp)
+        #    to all-gather tokens; without SP it does no cross-card gather and
+        #    deadlocks, so ALLTOALL (which does its own token all-to-all) is the
+        #    correct choice here.
+        if num_tokens <= mc2_tokens_capacity and num_tokens <= 512:
+            moe_comm_type = MoECommType.MC2
+        else:
+            moe_comm_type = MoECommType.ALLTOALL
     elif soc_version == AscendDeviceType.A2:
         moe_comm_type = _select_a2_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
     elif soc_version == AscendDeviceType.A3:
