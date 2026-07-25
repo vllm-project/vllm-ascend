@@ -104,8 +104,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. Can also be configured via the `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable during the migration period. |
 | `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature depends on FLASHCOMM1. Please ensure that FLASHCOMM1 is enabled before enabling this feature.|
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
-| `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
-| `multistream_dsv4_csa_compressor_overlap` | bool | `False` | Whether to overlap decode CSA compressor and compressed KV scatter with QLI preparation for DeepSeek V4. Requires `multistream_dsv4_dsa_overlap` and currently applies to `compress_ratio == 4` with top-k selection enabled. |
+| `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable DSA multi-stream overlap for DeepSeek V4, including decode CSA compressor and compressed KV scatter overlap on the c4 top-k path. |
 
 The details of each configuration option are as follows:
 

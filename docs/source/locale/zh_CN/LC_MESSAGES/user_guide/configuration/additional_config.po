@@ -625,8 +625,12 @@ msgid "`multistream_dsv4_dsa_overlap`"
 msgstr "`multistream_dsv4_dsa_overlap`"
 
 #: ../../source/user_guide/configuration/additional_config.md
-msgid "Whether to enable dsa multi-stream overlap for DeepSeek V4."
-msgstr "是否为 DeepSeek V4 启用 dsa 多流重叠。"
+msgid ""
+"Whether to enable DSA multi-stream overlap for DeepSeek V4, including decode "
+"CSA compressor and compressed KV scatter overlap on the c4 top-k path."
+msgstr ""
+"是否为 DeepSeek V4 启用 DSA 多流重叠，包括 c4 top-k 路径上的 decode CSA "
+"compressor 和 compressed KV scatter 重叠。"
 
 #: ../../source/user_guide/configuration/additional_config.md:107
 msgid "The details of each configuration option are as follows:"
