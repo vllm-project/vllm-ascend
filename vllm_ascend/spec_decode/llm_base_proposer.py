@@ -749,6 +749,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self.speculative_config is not None and getattr(self.speculative_config, "use_gemma4_mtp", lambda: False)()
         )
 
+    def _reuse_step0_metadata(self) -> bool:
+        """Hook: if True, all draft steps reuse step-0's attention metadata."""
+        return False
+
+    def _next_draft_positions(self, positions: torch.Tensor) -> torch.Tensor:
+        """Hook: compute positions for the next draft step."""
+        return positions + 1
+
     def _propose(
         self,
         # [num_tokens]
@@ -981,7 +989,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         metadata_has_prefill = bool(getattr(attn_metadata_i, "num_prefills", 0))
         is_prefill_batch = num_prefill_reqs > 0 or metadata_has_prefill
-        if self.pcp_size * self.dcp_size > 1:
+        if self._reuse_step0_metadata():
+            step0_meta = multi_steps_attn_metadata[0]
+            for _ in range(1, self.num_speculative_tokens):
+                multi_steps_attn_metadata.append(step0_meta)
+        elif self.pcp_size * self.dcp_size > 1:
             is_decode_only_batch = num_decode_reqs > 0 and not is_prefill_batch
             if self.num_speculative_tokens > 1 and is_decode_only_batch:
                 # For pcp/dcp, tokens are split across different cp ranks,
@@ -1309,7 +1321,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
             input_ids = draft_token_ids_tensor[draft_index]
-            positions += 1
+            positions = self._next_draft_positions(positions)
 
             # NOTE(woosuk): We should handle the case where the draft model
             # generates tokens beyond the max model length. Since it is complex

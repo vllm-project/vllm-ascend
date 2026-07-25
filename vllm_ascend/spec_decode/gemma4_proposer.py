@@ -97,6 +97,19 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
             return model.get_top_tokens(hidden_states)
         return super()._greedy_sample(hidden_states)
 
+    # ---- constant_draft_positions hooks -------------------------------------
+    # Gemma4 MTP predicts all draft tokens from the same position.  Override
+    # the base-class hooks so positions stay fixed and step-0 attention
+    # metadata is reused for every draft step.
+
+    def _reuse_step0_metadata(self) -> bool:
+        return self.constant_draft_positions
+
+    def _next_draft_positions(self, positions: torch.Tensor) -> torch.Tensor:
+        if self.constant_draft_positions:
+            return positions
+        return super()._next_draft_positions(positions)
+
     # ---- model_returns_tuple -----------------------------------------------
     # Ascend base returns False for "mtp", but Gemma4 MTP forward()
     # returns (draft_hidden_states, backbone_hidden_states).
