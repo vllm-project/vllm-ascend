@@ -36,28 +36,6 @@ def get_sfa_qsfa_packed_head_dim(
     return kv_lora_rank + qk_rope_head_dim * get_dtype_size(torch.bfloat16) + scale_metadata_bytes
 
 
-def get_layer_index(layer_name: str) -> int:
-    """Extract the index from a model.layers.<index> module path."""
-    parts = layer_name.split(".")
-    for index, part in enumerate(parts):
-        if part == "layers" and index + 1 < len(parts):
-            try:
-                return int(parts[index + 1])
-            except ValueError:
-                pass
-    return -1
-
-
-def get_layer_name_with_index(layer_name: str, target_index: int) -> str:
-    """Return a layer path with its model.layers index replaced."""
-    parts = layer_name.split(".")
-    for index, part in enumerate(parts):
-        if part == "layers" and index + 1 < len(parts):
-            parts[index + 1] = str(target_index)
-            return ".".join(parts)
-    return layer_name
-
-
 @dataclass
 class PagedAttentionGraphParam:
     """Mark PA params when PA and FIA share one graph replay list."""

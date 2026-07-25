@@ -26,13 +26,17 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import MLAPO_MAX_SUPPORTED_TOKENS
+from vllm_ascend.attention.sfa_prefetch import (
+    GROUP_GATHER_OPERATOR_MAX_LAYERS,
+    build_sfa_prefetch_plan,
+    get_layer_index,
+    get_layer_name_with_index,
+)
 from vllm_ascend.attention.utils import (
     SFA_QSFA_TILE_SIZE,
     AscendCommonAttentionMetadata,
     ascend_chunked_prefill_workspace_size,
     enable_cp,
-    get_layer_index,
-    get_layer_name_with_index,
     get_sfa_qsfa_packed_head_dim,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
@@ -501,11 +505,10 @@ class AscendSFAImpl(MLAAttentionImpl):
     q_hadamard: torch.Tensor | None = None
     k_hadamard: torch.Tensor | None = None
 
-    _prefetched_kv: torch.Tensor | None = None     # [3, max_num_seqs, index_topk, kv_lora_rank]
-    _prefetched_k_pe: torch.Tensor | None = None   # [3, max_num_seqs, index_topk, qk_rope_head_dim]
+    _prefetched_kv: torch.Tensor | None = None     # [max_prefetch_layers, max_num_seqs, index_topk, kv_lora_rank]
+    _prefetched_k_pe: torch.Tensor | None = None   # [max_prefetch_layers, max_num_seqs, index_topk, qk_rope_head_dim]
     _gather_stream: torch_npu.npu.Stream | None = None
     _gather_done_event: torch_npu.npu.Event | None = None
-    MAX_PREFETCH_LAYERS: int = 3
 
     def __init__(
         self,
@@ -1176,101 +1179,27 @@ class AscendSFAImpl(MLAAttentionImpl):
 
 
     def _init_prefetch_optimization(self, hf_config, hf_text_config) -> None:
-        """Configure the grouped prefetch role for this SFA layer."""
+        """Initialize this layer from the model-level SFA prefetch plan."""
         self.is_prefetch_producer = False
         self.prefetch_buffer_index = -1
         self.prefetch_target_layer_ids: list[int] = []
         self.prefetch_target_kv_caches = None
         self.prefetch_topk_size = 0
-        self.prefetch_enabled = not self.use_sparse_c8_sfa
+        self.prefetch_plan = build_sfa_prefetch_plan(hf_config, hf_text_config)
+        self.prefetch_enabled = (
+            get_ascend_config().enable_sfa_kv_cache_prefetch
+            and not self.use_sparse_c8_sfa
+            and self.prefetch_plan.max_prefetch_layers > 0
+        )
         if not self.prefetch_enabled:
             return
 
-        configured_layer_types = (
-            getattr(hf_text_config, "indexer_types", None)
-            or getattr(hf_config, "indexer_types", None)
-        )
-        if configured_layer_types is None:
-            return
-        layer_types = [
-            str(layer_type).lower()
-            for layer_type in configured_layer_types
-        ]
-        self.prefetch_topk_size = int(
-            getattr(hf_text_config, "index_topk", 0)
-            or getattr(hf_config, "index_topk", 0)
-        )
-        current_layer_id = get_layer_index(self.layer_name)
-        if not 0 <= current_layer_id < len(layer_types):
-            return
-
-        def get_contiguous_shared_layer_ids(
-            first_layer_id: int,
-        ) -> list[int]:
-            following_shared_layer_ids = []
-            next_layer_id = first_layer_id + 1
-            while (
-                next_layer_id < len(layer_types)
-                and layer_types[next_layer_id] == "shared"
-                and len(following_shared_layer_ids)
-                < self.MAX_PREFETCH_LAYERS
-            ):
-                following_shared_layer_ids.append(next_layer_id)
-                next_layer_id += 1
-            return following_shared_layer_ids
-
-        current_layer_type = layer_types[current_layer_id]
-        if current_layer_type == "full":
-            if not self.has_indexer or self.skip_topk:
-                return
-            is_first_full_group = "full" not in layer_types[:current_layer_id]
-            if not is_first_full_group:
-                self.prefetch_target_layer_ids = (
-                    get_contiguous_shared_layer_ids(current_layer_id)
-                )
-                self.is_prefetch_producer = bool(
-                    self.prefetch_target_layer_ids
-                )
-            return
-
-        if current_layer_type != "shared":
-            return
-        preceding_full_layer_id = next(
-            (
-                layer_id
-                for layer_id in range(current_layer_id - 1, -1, -1)
-                if layer_types[layer_id] == "full"
-            ),
-            None,
-        )
-        if preceding_full_layer_id is None:
-            return
-
-        preceding_group_shared_layer_ids = (
-            get_contiguous_shared_layer_ids(preceding_full_layer_id)
-        )
-        try:
-            shared_layer_position = preceding_group_shared_layer_ids.index(
-                current_layer_id
-            )
-        except ValueError:
-            return
-
-        is_first_full_group = (
-            "full" not in layer_types[:preceding_full_layer_id]
-        )
-        if is_first_full_group:
-            if shared_layer_position == 0:
-                self.prefetch_target_layer_ids = (
-                    get_contiguous_shared_layer_ids(current_layer_id)
-                )
-                self.is_prefetch_producer = bool(
-                    self.prefetch_target_layer_ids
-                )
-            else:
-                self.prefetch_buffer_index = shared_layer_position - 1
-        else:
-            self.prefetch_buffer_index = shared_layer_position
+        layer_id = get_layer_index(self.layer_name)
+        role = self.prefetch_plan.get_role(layer_id)
+        self.is_prefetch_producer = role.is_producer
+        self.prefetch_target_layer_ids = list(role.target_layer_ids)
+        self.prefetch_buffer_index = role.buffer_index
+        self.prefetch_topk_size = self.prefetch_plan.topk_size
 
     def _ensure_prefetch_buffer(self, kv_cache) -> None:
         """Allocate the shared prefetch buffers on the first producer call."""
@@ -1281,7 +1210,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         dtype = kv_cache[0].dtype
         topk = self.prefetch_topk_size
         AscendSFAImpl._prefetched_kv = torch.empty(
-            AscendSFAImpl.MAX_PREFETCH_LAYERS,
+            self.prefetch_plan.max_prefetch_layers,
             max_tokens,
             topk,
             self.kv_lora_rank,
@@ -1289,7 +1218,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             device=device,
         )
         AscendSFAImpl._prefetched_k_pe = torch.empty(
-            AscendSFAImpl.MAX_PREFETCH_LAYERS,
+            self.prefetch_plan.max_prefetch_layers,
             max_tokens,
             topk,
             self.qk_rope_head_dim,
@@ -2317,7 +2246,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 gather_stream = AscendSFAImpl._gather_stream
                 with torch_npu.npu.stream(gather_stream):
                     num_prefetch_layers = len(self.prefetch_target_kv_caches)
-                    assert 1 <= num_prefetch_layers <= self.MAX_PREFETCH_LAYERS
+                    assert 1 <= num_prefetch_layers <= GROUP_GATHER_OPERATOR_MAX_LAYERS
                     target_kv_caches = self.prefetch_target_kv_caches
                     prefetch_outputs = [
                         (
@@ -2328,7 +2257,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                                 :num_actual_tokens
                             ],
                         )
-                        for index in range(self.MAX_PREFETCH_LAYERS)
+                        for index in range(GROUP_GATHER_OPERATOR_MAX_LAYERS)
                     ]
                     ctkv_0, kpe_0 = target_kv_caches[0]
                     ctkv_1, kpe_1 = (

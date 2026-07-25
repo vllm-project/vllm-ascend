@@ -284,6 +284,10 @@ class AscendConfig:
         # Enable optimized reduce sampling scheme
         self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
 
+        self.enable_sfa_kv_cache_prefetch = bool(
+            additional_config.get("enable_sfa_kv_cache_prefetch", False)
+        )
+
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()
 
