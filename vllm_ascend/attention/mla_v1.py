@@ -1051,19 +1051,24 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.q_nope_scale = torch.tensor([1], dtype=act_dtype, device=device)
 
         # On KV consumers (decode-only) MLAPO uses the transformed weights built above;
-        # the original fused_qkv_a_proj/q_proj weights and quant params are no longer
-        # referenced, so drop them to save memory.
+        # the original fused_qkv_a_proj/q_proj weights and quant params are not
+        # referenced by the MLAPO decode fast path, so offload them to CPU to save
+        # NPU memory. They are lazily restored to NPU in forward() if D must
+        # local-prefill (recompute / fallback / preempt, see issue #11882).
         if (
             self.vllm_config.kv_transfer_config is not None
             and self.vllm_config.kv_transfer_config.is_kv_consumer
             and self.vllm_config.scheduler_config.max_num_batched_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
         ):
-            self.fused_qkv_a_proj.weight = None  # type: ignore[union-attr]
-            self.fused_qkv_a_proj.deq_scale = None  # type: ignore[union-attr]
-            self.fused_qkv_a_proj.quant_bias = None  # type: ignore[union-attr]
-            self.q_proj.weight = None
-            self.q_proj.deq_scale = None
-            self.q_proj.quant_bias = None
+            cpu_device = torch.device("cpu")
+            for module in (self.fused_qkv_a_proj, self.q_proj):
+                if module is None:
+                    continue
+                for attr in ("weight", "deq_scale", "quant_bias"):
+                    val = getattr(module, attr, None)
+                    if val is not None:
+                        val.data = val.data.to(cpu_device, non_blocking=True)
+            self._prefill_weights_offloaded = True
             torch.npu.empty_cache()
 
     def _process_weights_for_fused_mlapo_a5(self, act_dtype: torch.dtype):
@@ -1734,6 +1739,30 @@ class AscendMLAImpl(MLAAttentionImpl):
                 self, hidden_states, kv_cache, attn_metadata
             )
         else:
+            # On a kv_consumer with MLAPO, the prefill weights were offloaded to CPU
+            # to save NPU memory. This branch is reached when D must local-prefill
+            # (recompute / fallback / preempt, or miss-parametrized kv_transfer_params
+            # without valid remote KV, see #11882). Lazily restore them to NPU once
+            # per layer on the first such step, then clear the flag so subsequent
+            # steps pay no copy cost.
+            if getattr(self, "_prefill_weights_offloaded", False):
+                logger.warning(
+                    "Layer %s: restoring MLAPO prefill weights from CPU to NPU for "
+                    "local prefill on kv_consumer (see issue #11882).",
+                    layer_name,
+                )
+                device = hidden_states.device
+                for module in (self.fused_qkv_a_proj, self.q_proj):
+                    if module is None:
+                        continue
+                    for attr in ("weight", "deq_scale", "quant_bias"):
+                        val = getattr(module, attr, None)
+                        if val is not None and val.device.type == "cpu":
+                            # Synchronous copy: _mla_preprocess dereferences these
+                            # weights immediately after, so the transfer must be
+                            # complete before we proceed.
+                            val.data = val.data.to(device)
+                self._prefill_weights_offloaded = False
             decode_preprocess_res, prefill_preprocess_res = self._mla_preprocess(
                 layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv
             )
