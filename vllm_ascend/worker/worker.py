@@ -63,7 +63,9 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     build_layerwise_cache_layout,
+    build_layerwise_reuse_layout,
     get_gva_layerwise_config,
+    get_layerwise_physical_layer_index,
 )
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
@@ -586,15 +588,19 @@ class NPUWorker(WorkerBase):
 
         extra_config = get_gva_layerwise_config(self.vllm_config.kv_transfer_config)
         if extra_config is not None:
-            num_layers = self.model_config.get_num_layers(self.parallel_config)
-            layout = build_layerwise_cache_layout(num_layers, extra_config)
-            if layout.has_layer_reuse:
-                num_tensors = len(layout.storage_indices)
-                factor = num_layers / num_tensors
+            memory_info = getattr(self, "_gva_layerwise_memory_info", None)
+            if memory_info is None:
+                num_layers = self.model_config.get_num_layers(self.parallel_config)
+                layout = build_layerwise_cache_layout(num_layers, extra_config)
+                num_slots = len(layout.storage_indices)
+                factor = num_layers / num_slots if layout.has_layer_reuse else 1.0
+            else:
+                num_layers, num_slots, factor = memory_info
+            if factor != 1.0:
                 self.available_kv_cache_memory_bytes = int(self.available_kv_cache_memory_bytes * factor)
                 logger.info(
                     "Layerwise KV cache reuse uses %d slots for %d layers; scale logical KV budget by %.3f.",
-                    num_tensors,
+                    num_slots,
                     num_layers,
                     factor,
                 )
@@ -888,8 +894,57 @@ class NPUWorker(WorkerBase):
             return {(pp_rank, pcp_rank, tp_rank): metadata}
         return {(pp_rank, tp_rank): metadata}
 
+    def _get_layerwise_kv_cache_memory_info(
+        self,
+        kv_cache_spec: dict[str, KVCacheSpec],
+        extra_config: dict[str, Any],
+    ) -> tuple[int, int, float]:
+        if not kv_cache_spec:
+            return 0, 0, 1.0
+        base_layers = self.model_config.get_num_layers(self.parallel_config)
+        physical_layers = {get_layerwise_physical_layer_index(layer_name, base_layers) for layer_name in kv_cache_spec}
+        num_layers = len(physical_layers)
+        if num_layers < base_layers:
+            return num_layers, num_layers, 1.0
+        layout = build_layerwise_cache_layout(num_layers, extra_config)
+        if not layout.has_layer_reuse:
+            return num_layers, num_layers, 1.0
+        num_slots = len(layout.storage_indices)
+
+        layer_layout, storage_slots = build_layerwise_reuse_layout(
+            kv_cache_spec,
+            base_layers,
+            extra_config,
+        )
+        if len(layer_layout) != num_layers or len(storage_slots) != num_slots:
+            raise RuntimeError("Layerwise KV cache memory layout does not match the physical layer reuse plan.")
+
+        logical_page_bytes = sum(spec.page_size_bytes for spec in kv_cache_spec.values())
+        physical_page_bytes = 0
+        for slot_layers in storage_slots:
+            for component in ("main", "indexer"):
+                component_specs = [
+                    kv_cache_spec[layer_layout[layer][component]]
+                    for layer in slot_layers
+                    if component in layer_layout[layer]
+                ]
+                if not component_specs:
+                    continue
+                page_sizes = {spec.page_size_bytes for spec in component_specs}
+                if len(page_sizes) != 1:
+                    raise ValueError(f"Layers sharing a layerwise slot must have equal {component} page sizes.")
+                physical_page_bytes += page_sizes.pop()
+        return num_layers, num_slots, logical_page_bytes / physical_page_bytes
+
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
-        return self.model_runner.get_kv_cache_spec()
+        kv_cache_spec = self.model_runner.get_kv_cache_spec()
+        extra_config = get_gva_layerwise_config(self.vllm_config.kv_transfer_config)
+        if extra_config is not None:
+            self._gva_layerwise_memory_info = self._get_layerwise_kv_cache_memory_info(
+                kv_cache_spec,
+                extra_config,
+            )
+        return kv_cache_spec
 
     def update_max_model_len(self, max_model_len: int) -> None:
         """Update max_model_len after auto-fit to NPU memory.

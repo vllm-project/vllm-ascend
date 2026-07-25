@@ -69,6 +69,42 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(k_cache_raw.numel(), kv_cache_spec.page_size_bytes)
         self.assertEqual(v_cache_raw.numel(), kv_cache_spec.page_size_bytes)
 
+    def test_sparse_c8_indexer_reuses_raw_cache_from_shared_descriptor(self):
+        runner = self._build_runner()
+        layer_names = [
+            "model.layers.1.self_attn.indexer.k_cache",
+            "model.layers.3.self_attn.indexer.k_cache",
+        ]
+        indexer_spec = AscendSFAIndexerCacheSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.int8,
+            scale_dim=1,
+            scale_dtype=torch.float16,
+            cache_sparse_c8=True,
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=indexer_spec.page_size_bytes * 2,
+                    shared_by=layer_names,
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=layer_names,
+                    kv_cache_spec=indexer_spec,
+                )
+            ],
+        )
+
+        raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+
+        assert raw_caches[layer_names[0]][0] is raw_caches[layer_names[1]][0]
+        assert raw_caches[layer_names[0]][1] is raw_caches[layer_names[1]][1]
+
     def test_reshape_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()
         kv_cache_spec = FullAttentionSpec(
