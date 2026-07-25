@@ -74,16 +74,16 @@ class SFAPDCpuOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         # AscendConfig may not be initialized yet at connector construction
         # time; init_ascend_config is idempotent (no-op if already done).
         init_ascend_config(vllm_config)
-        decode_offload_enabled = get_ascend_config().kv_offload_decode_config.enabled
+        decode_offload_enabled = get_ascend_config().sparse_kv_offload_config.enabled
         if self.is_producer:
             assert not decode_offload_enabled, (
                 "SFAPDCpuOffloadConnector producer (P) must run with "
-                "kv_offload_decode_config.enabled=false."
+                "sparse_kv_offload_config.enabled=false."
             )
         if self.is_consumer:
             assert decode_offload_enabled, (
                 "SFAPDCpuOffloadConnector consumer (D) must run with "
-                "kv_offload_decode_config.enabled=true."
+                "sparse_kv_offload_config.enabled=true."
             )
 
         if role == KVConnectorRole.SCHEDULER:

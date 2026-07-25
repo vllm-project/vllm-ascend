@@ -39,7 +39,7 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
-from vllm_ascend.distributed.kv_transfer.kv_offload_decode.kv_offload_decode_manager import (
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     OFFLOAD_KV_CACHE_TUPLE_LEN,
     OFFLOAD_K_CACHE_NPU_INDEX,
     OFFLOAD_V_CACHE_NPU_INDEX,
@@ -126,7 +126,7 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
-        if get_ascend_config().kv_offload_decode_config.enabled:
+        if get_ascend_config().sparse_kv_offload_config.enabled:
             from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadMetadataBuilder
 
             return AscendSFAKVOffloadMetadataBuilder
@@ -148,7 +148,7 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["AscendSFAImpl"]:
-        if get_ascend_config().kv_offload_decode_config.enabled:
+        if get_ascend_config().sparse_kv_offload_config.enabled:
             from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
 
             return AscendSFAKVOffloadImpl
@@ -215,7 +215,7 @@ class AscendSFAMetadata:
     group_len: torch.Tensor | None = None
     group_key_idx: torch.Tensor | None = None
     group_key_cache_idx: torch.Tensor | None = None
-    # Request identity for the KV offload decode resident LRU; only populated
+    # Request identity for the Sparse KV offload resident LRU; only populated
     # by AscendSFAKVOffloadMetadataBuilder.
     req_ids_tensor: torch.Tensor | None = None
     token_to_req: torch.Tensor | None = None
@@ -1788,7 +1788,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         if main_cache is None or not self.has_indexer:
             return main_cache
 
-        # KV offload decode registers the main MLA cache as a 6-tuple
+        # Sparse KV offload registers the main MLA cache as a 6-tuple
         # (k_npu, v_npu, k_cpu, v_cpu, topk_buffer_k, topk_buffer_v); the
         # attention kernels only consume the leading NPU pair.
         if len(main_cache) == OFFLOAD_KV_CACHE_TUPLE_LEN:

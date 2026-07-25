@@ -1,9 +1,9 @@
-"""Standalone SFA backend for KV offload decode.
+"""Standalone SFA backend for Sparse KV offload.
 
 Modeled after ``vllm_ascend/attention/context_parallel/sfa_cp.py``: all
 KV-offload-related attention logic lives in this module and is selected by
 ``AscendSFABackend.get_impl_cls()`` / ``get_builder_cls()`` when
-``kv_offload_decode_config.enabled`` is set, keeping ``sfa_v1.py`` clean.
+``sparse_kv_offload_config.enabled`` is set, keeping ``sfa_v1.py`` clean.
 
 Data plane (see zsc-sfa-kv-offload-merge-plan.md):
 
@@ -44,8 +44,8 @@ from vllm_ascend.attention.utils import (
     split_decodes_and_prefills,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.distributed.kv_transfer.kv_offload_decode.kv_offload_decode_manager import (
-    get_kv_offload_decode_manager,
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    get_sparse_kv_offload_manager,
 )
 
 M = TypeVar("M", bound=AscendSFAMetadata)
@@ -54,9 +54,9 @@ M = TypeVar("M", bound=AscendSFAMetadata)
 def _check_device_kv_cache_exist() -> None:
     # prefill/mixed handling only exists for single-node PD-colocate debug;
     # a PD-disaggregated decode node never receives prefill batches.
-    if not get_ascend_config().kv_offload_decode_config.keep_device_kv_cache:
+    if not get_ascend_config().sparse_kv_offload_config.keep_device_kv_cache:
         raise RuntimeError(
-            "KV offload decode received a prefill/mixed batch without "
+            "Sparse KV offload received a prefill/mixed batch without "
             "keep_device_kv_cache=True; a PD-disaggregated decode node "
             "only accepts decode requests"
         )
@@ -166,10 +166,10 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             **kwargs,
         )
         if enable_cp() or self.enable_dsa_cp:
-            raise NotImplementedError("KV offload decode currently requires TP without context parallelism")
+            raise NotImplementedError("Sparse KV offload currently requires TP without context parallelism")
         if self.enable_sparse_sfa_c8:
             raise NotImplementedError(
-                "KV offload decode does not support the sparse SFA C8 main "
+                "Sparse KV offload does not support the sparse SFA C8 main "
                 "cache; sparse LI C8 is supported for the device-resident "
                 "indexer cache."
             )
@@ -177,7 +177,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
 
     def _resolve_preprocess_type(self, act_dtype: torch.dtype) -> PreprocessType:
         logger.warning_once(
-            "KV offload decode requires the native SFA preprocessing path; "
+            "Sparse KV offload requires the native SFA preprocessing path; "
             "sfa_prolog_v3/mlapo is disabled."
         )
         return PreprocessType.NATIVE
@@ -220,7 +220,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
     def _offload_layer_name(self) -> str:
         layer_name = self.layer_name or self._current_layer_name
         if layer_name is None:
-            raise RuntimeError("KV offload decode requires a bound attention layer name")
+            raise RuntimeError("Sparse KV offload requires a bound attention layer name")
         return layer_name
 
     @staticmethod
@@ -310,7 +310,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
     ):
         if self._is_decode_only(attn_metadata):
             k_nope, k_pe = self._compute_kv_only(kv_no_split, cos, sin)
-            manager = get_kv_offload_decode_manager()
+            manager = get_sparse_kv_offload_manager()
             layer_name = self._offload_layer_name()
             k_cache_cpu, v_cache_cpu = self._cpu_cache_pair(manager, layer_name)
             manager.offload_new_kv(
@@ -331,7 +331,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         # shared CPU pool.
         _check_device_kv_cache_exist()
         result = super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
-        manager = get_kv_offload_decode_manager()
+        manager = get_sparse_kv_offload_manager()
         layer_name = self._offload_layer_name()
         k_cache_cpu, v_cache_cpu = self._cpu_cache_pair(manager, layer_name)
         manager.offload_new_kv(
@@ -360,7 +360,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         num_decodes = int(getattr(attn_metadata, "num_decodes", 0) or 0)
         num_decode_tokens = int(getattr(attn_metadata, "num_decode_tokens", 0) or 0)
         num_prefills = int(getattr(attn_metadata, "num_prefills", 0) or 0)
-        manager = get_kv_offload_decode_manager()
+        manager = get_sparse_kv_offload_manager()
         layer_name = self._offload_layer_name()
 
         if num_decode_tokens == 0:
@@ -377,7 +377,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             )
 
         if attn_metadata.req_ids_tensor is None or attn_metadata.token_to_req is None:
-            raise RuntimeError("KV offload decode requires req_ids_tensor/token_to_req metadata")
+            raise RuntimeError("Sparse KV offload requires req_ids_tensor/token_to_req metadata")
         token_to_req = attn_metadata.token_to_req[:num_decode_tokens]
         row_to_req = token_to_req.to(dtype=torch.int64)
         decode_seq_lens = torch.index_select(
@@ -412,7 +412,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         if decode_topk.ndim == 3 and decode_topk.shape[1] == 1:
             decode_topk = decode_topk.squeeze(1)
         if decode_topk.ndim != 2:
-            raise ValueError("KV offload decode top-k must have [tokens, topk] shape")
+            raise ValueError("Sparse KV offload top-k must have [tokens, topk] shape")
 
         (
             resident_k,

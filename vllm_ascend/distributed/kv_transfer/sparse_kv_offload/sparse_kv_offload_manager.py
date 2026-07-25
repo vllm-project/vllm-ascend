@@ -18,7 +18,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import KVOffloadDecodeConfig
+from vllm_ascend.ascend_config import SparseKVOffloadConfig
 
 
 # Main BF16 cache: [k_cache, v_cache, k_cache_cpu, v_cache_cpu,
@@ -43,9 +43,9 @@ def get_subscribed_compute_streams() -> set:
     return _SUBSCRIBED_COMPUTE_STREAMS
 
 
-class KVOffloadDecodeManager:
+class SparseKVOffloadManager:
     """
-    A manager responsible to the offload KV cache.
+    A manager responsible to the Sparse KV cache Offload.
     It enlarge the availble memory that scheduler can see,
     so we can schedule longer max_model_len or larger decode batch size.
     No more scheduling logic: we reuse the original block_table/slot_mapping.
@@ -93,11 +93,11 @@ class KVOffloadDecodeManager:
         self,
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
-        kv_offload_decode_config: KVOffloadDecodeConfig,
+        sparse_kv_offload_config: SparseKVOffloadConfig,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
-        self.kv_offload_decode_config = kv_offload_decode_config
+        self.sparse_kv_offload_config = sparse_kv_offload_config
 
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
@@ -107,8 +107,8 @@ class KVOffloadDecodeManager:
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_group = get_tp_group()
         self.block_size = self._infer_group_block_sizes(self.kv_cache_config)
-        self.topk_buffer_size = kv_offload_decode_config.topk_buffer_size
-        self.topk = kv_offload_decode_config.topk
+        self.topk_buffer_size = sparse_kv_offload_config.topk_buffer_size
+        self.topk = sparse_kv_offload_config.topk
 
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -138,12 +138,12 @@ class KVOffloadDecodeManager:
         self._build_cpp()
 
         logger.info(
-            f"KVOffloadManager start init CPU KV pool with {kv_offload_decode_config.dram_size_per_dp_GB} "
+            f"SparseKVOffloadManager start init CPU KV pool with {sparse_kv_offload_config.dram_size_per_dp_GB} "
             "GB dram per dp group, it might be time consuming, please wait."
         )
         config = offload.OffloadConfig()
         config.device_id = torch_npu.npu.current_device()
-        config.size = kv_offload_decode_config.dram_size_per_dp_GB * 1024 * 1024 * 1024
+        config.size = sparse_kv_offload_config.dram_size_per_dp_GB * 1024 * 1024 * 1024
         config.world_size = self.tp_size
         config.rank_id = self.tp_rank
         offload.initialize(config)
@@ -163,10 +163,10 @@ class KVOffloadDecodeManager:
         os.environ['CXX'] = 'clang++'
         os.environ['CC'] = 'clang'
         abs_path = os.path.dirname(os.path.abspath(__file__))
-        src_path = os.path.join(abs_path, "kv_offload_decode.cpp")
-        logger.info(f'KV offload decode build cpp utils from src: {src_path}')
-        self.kv_offload_decode_cpp = torch.utils.cpp_extension.load(
-            name="kv_offload_decode",
+        src_path = os.path.join(abs_path, "sparse_kv_offload.cpp")
+        logger.info(f'Sparse KV offload build cpp utils from src: {src_path}')
+        self.sparse_kv_offload_cpp = torch.utils.cpp_extension.load(
+            name="sparse_kv_offload",
             sources=[src_path],
             extra_cflags=[
                 "-O3",
@@ -209,7 +209,7 @@ class KVOffloadDecodeManager:
             if 'indexer' not in layer_name
         ]
         if not self.offload_layer_names:
-            raise ValueError("KV offload decode did not find SFA KV cache layers.")
+            raise ValueError("Sparse KV offload did not find SFA KV cache layers.")
 
         self.num_layers = len(self.offload_layer_names)
         self.layer_name_to_offload_id = {
@@ -218,7 +218,7 @@ class KVOffloadDecodeManager:
         }
 
         logger.info(
-            "KV offload decode registered %s layers (%s target layers).",
+            "Sparse KV offload registered %s layers (%s target layers).",
             self.num_layers,
             self.num_target_layers,
         )
@@ -227,7 +227,7 @@ class KVOffloadDecodeManager:
             preview_layer_names = self.offload_layer_names[:4]
             if len(self.offload_layer_names) > 4:
                 preview_layer_names += ["..."] + self.offload_layer_names[-4:]
-            logger.info("KV offload decode layer names: %s", preview_layer_names)
+            logger.info("Sparse KV offload layer names: %s", preview_layer_names)
 
     def _get_offload_layer_id(self, layer_name: str) -> int:
         layer_id = self.layer_name_to_offload_id.get(layer_name)
@@ -236,7 +236,7 @@ class KVOffloadDecodeManager:
             if len(self.offload_layer_names) > 8:
                 registered_layers += ", ..."
             raise KeyError(
-                "KV offload decode layer is not registered, "
+                "Sparse KV offload layer is not registered, "
                 f"layer_name={layer_name}, registered_layers=[{registered_layers}]"
             )
         return layer_id
@@ -257,7 +257,7 @@ class KVOffloadDecodeManager:
             tuple_len = len(cache_or_caches)
             if tuple_len not in [OFFLOAD_KV_CACHE_TUPLE_LEN]:
                 raise ValueError(
-                    f"KV offload decode layer {layer_name}: expected tuple length "
+                    f"Sparse KV offload layer {layer_name}: expected tuple length "
                     f"{OFFLOAD_KV_CACHE_TUPLE_LEN}, got {tuple_len}"
                 )
             self.topk_buffers_k.append(cache_or_caches[OFFLOAD_TOPK_BUFFER_K_INDEX])
@@ -270,17 +270,17 @@ class KVOffloadDecodeManager:
         head_dim_k = self.topk_buffers_k[0].size(-1)
         head_dim_v = self.topk_buffers_v[0].size(-1)
         dtype = self.topk_buffers_k[0].dtype
-        assert kv_head_num == 1, "KV offload decode only support sfa(mla)"
+        assert kv_head_num == 1, "Sparse KV offload only support sfa(mla)"
         if dtype != torch.bfloat16:
             raise ValueError(
-                "KV offload decode requires a BF16 main SFA cache; sparse LI "
+                "Sparse KV offload requires a BF16 main SFA cache; sparse LI "
                 "C8 is supported only for the device-resident indexer cache."
             )
         self.token_size_bytes_k = kv_head_num * head_dim_k * dtype.itemsize
         self.token_size_bytes_v = kv_head_num * head_dim_v * dtype.itemsize
         if self.topk_buffer_size % self.block_size != 0:
             raise ValueError(
-                "KV offload decode topk_buffer_size must be divisible by "
+                "Sparse KV offload topk_buffer_size must be divisible by "
                 f"block_size, got {self.topk_buffer_size} and {self.block_size}"
             )
 
@@ -521,10 +521,10 @@ class KVOffloadDecodeManager:
             # shared pool from all TP ranks through the broadcast GVA.
             return
         if k_cache_cpu is None or v_cache_cpu is None:
-            raise RuntimeError("KV offload decode TP0 CPU cache is not registered")
-        if has_prefill and not self.kv_offload_decode_config.keep_device_kv_cache:
+            raise RuntimeError("Sparse KV offload TP0 CPU cache is not registered")
+        if has_prefill and not self.sparse_kv_offload_config.keep_device_kv_cache:
             raise RuntimeError(
-                "KV offload decode prefill offload requires "
+                "Sparse KV offload prefill offload requires "
                 "keep_device_kv_cache=True; a PD-disaggregated decode node "
                 "never stages prefill KV in an NPU paged cache"
             )
@@ -542,7 +542,7 @@ class KVOffloadDecodeManager:
         token_count = slots.numel()
         if token_count > self.max_num_tokens:
             raise ValueError(
-                "KV offload decode rows exceed D2H descriptor capacity, "
+                "Sparse KV offload rows exceed D2H descriptor capacity, "
                 f"got {token_count}, capacity={self.max_num_tokens}"
             )
 
@@ -554,7 +554,7 @@ class KVOffloadDecodeManager:
         )
         if num_k_slots != num_v_slots or num_k_slots <= 0:
             raise ValueError(
-                "KV offload decode CPU K/V pools have incompatible token capacities: "
+                "Sparse KV offload CPU K/V pools have incompatible token capacities: "
                 f"k={num_k_slots}, v={num_v_slots}"
             )
         valid = (slots >= 0) & (slots < num_k_slots)
@@ -619,7 +619,7 @@ class KVOffloadDecodeManager:
         layer_id = self._get_offload_layer_id(layer_name)
         if num_tokens > self.max_num_topk_rows:
             raise ValueError(
-                "KV offload decode topk rows exceed configured workspace, "
+                "Sparse KV offload topk rows exceed configured workspace, "
                 f"num_tokens={num_tokens}, max_num_topk_rows={self.max_num_topk_rows}"
             )
         if layer_id in [0, self.mtp_layer_id]:
@@ -762,7 +762,7 @@ class KVOffloadDecodeManager:
             # Graph callbacks are stream-ordered after TP0's D2H. In eager mode,
             # the blocking metadata copies above wait for that same stream first.
             self.tp_group.barrier()
-        self.kv_offload_decode_cpp.lru_resident_compact(
+        self.sparse_kv_offload_cpp.lru_resident_compact(
             lru_req_ids_ptr,
             lru_last_req_ids_ptr,
             lru_topk_indices_ptr,
@@ -785,7 +785,7 @@ class KVOffloadDecodeManager:
             self.lru_workspace_threads,
             self.lru_workspace_threads,
         )
-        self.kv_offload_decode_cpp.compute_lru_resident_addrs(
+        self.sparse_kv_offload_cpp.compute_lru_resident_addrs(
             miss_count,
             miss_tokens,
             miss_slots,
@@ -806,24 +806,24 @@ class KVOffloadDecodeManager:
         )
 
 
-_KV_OFFLOAD_DECODE_MANAGER: KVOffloadDecodeManager = None
+_SPARSE_KV_OFFLOAD_MANAGER: SparseKVOffloadManager = None
 
 
-def init_kv_offload_decode_manager(
+def init_sparse_kv_offload_manager(
     vllm_config: VllmConfig,
     kv_cache_config: KVCacheConfig,
-    kv_offload_decode_config: KVOffloadDecodeConfig,
+    sparse_kv_offload_config: SparseKVOffloadConfig,
 ):
-    global _KV_OFFLOAD_DECODE_MANAGER
-    if _KV_OFFLOAD_DECODE_MANAGER is None:
-        _KV_OFFLOAD_DECODE_MANAGER = KVOffloadDecodeManager(
+    global _SPARSE_KV_OFFLOAD_MANAGER
+    if _SPARSE_KV_OFFLOAD_MANAGER is None:
+        _SPARSE_KV_OFFLOAD_MANAGER = SparseKVOffloadManager(
             vllm_config,
             kv_cache_config,
-            kv_offload_decode_config,
+            sparse_kv_offload_config,
         )
-    return _KV_OFFLOAD_DECODE_MANAGER
+    return _SPARSE_KV_OFFLOAD_MANAGER
 
 
-def get_kv_offload_decode_manager():
-    assert _KV_OFFLOAD_DECODE_MANAGER is not None, "KV offload manager is not initialized."
-    return _KV_OFFLOAD_DECODE_MANAGER
+def get_sparse_kv_offload_manager():
+    assert _SPARSE_KV_OFFLOAD_MANAGER is not None, "KV offload manager is not initialized."
+    return _SPARSE_KV_OFFLOAD_MANAGER

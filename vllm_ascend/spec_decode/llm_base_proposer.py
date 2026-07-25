@@ -541,13 +541,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         num_reqs: int,
         query_start_loc_cpu: torch.Tensor,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        if not getattr(self.runner, "kv_offload_decode_enabled", False):
+        if not getattr(self.runner, "sparse_kv_offload_enabled", False):
             return None, None
 
         req_ids_buffer = self.runner._offload_req_ids_tensor
         token_to_req_buffer = self.runner._offload_token_to_req
         if req_ids_buffer is None or token_to_req_buffer is None:
-            raise RuntimeError("KV offload decode metadata buffers are not initialized")
+            raise RuntimeError("Sparse KV offload metadata buffers are not initialized")
 
         query_lens = np.diff(
             query_start_loc_cpu[: num_reqs + 1].numpy()
@@ -1579,11 +1579,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.graph_pad_size = -1
             common_attn_metadata.num_input_tokens = input_batch_size
 
-            if getattr(self.runner, "kv_offload_decode_enabled", False):
+            if getattr(self.runner, "sparse_kv_offload_enabled", False):
                 # Draft steps run exactly one token per request, while the
                 # inherited token_to_req still describes the verify-step
                 # layout (num_spec + 1 tokens per request). Rebuild it to the
-                # one-token-per-request layout so the KV offload decode path
+                # one-token-per-request layout so the Sparse KV offload path
                 # routes every decode row to its own request's CPU-pool
                 # blocks/seq_len; otherwise rows of requests >= 1 are mapped
                 # onto request 0 and attend another request's KV.

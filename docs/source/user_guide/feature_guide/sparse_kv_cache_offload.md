@@ -24,7 +24,7 @@ Some other features that can be used together with Sparse KV Cache Offload are a
 
 ## How to use KV Cache offload
 
-You can enable Sparse KV Cache Offload by setting `kv_offload_decode_config` in `additional-config`. You also need to specify `SFAPDCpuOffloadConnector` in `kv-transfer-config` for PD KV transfer. Refer to the following example:
+You can enable Sparse KV Cache Offload by setting `sparse_kv_offload_config` in `additional-config`. You also need to specify `SFAPDCpuOffloadConnector` in `kv-transfer-config` for PD KV transfer. Refer to the following example:
 
 ```bash
 vllm serve zai-org/GLM-5.2 \
@@ -40,7 +40,7 @@ vllm serve zai-org/GLM-5.2 \
     --gpu-memory-utilization 0.7 \
     --quantization ascend \
     --no-enable-prefix-caching \
-    --additional-config '{"kv_offload_decode_config": {"enabled": true, "topk_buffer_size": 4096, "dram_size_per_dp_GB": 128}}' \
+    --additional-config '{"sparse_kv_offload_config": {"enabled": true, "topk_buffer_size": 4096, "dram_size_per_dp_GB": 128}}' \
     --kv-transfer-config "{
         \"kv_connector\": \"SFAPDCpuOffloadConnector\",
         \"kv_buffer_device\": \"npu\",

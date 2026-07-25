@@ -248,7 +248,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     group_len: torch.Tensor = None
     group_key_idx: torch.Tensor = None
     group_key_cache_idx: torch.Tensor = None
-    # Per-request / per-token request identity used by the KV offload decode
+    # Per-request / per-token request identity used by the Sparse KV offload
     # resident LRU (adler32-hashed request ids and token->request mapping).
     req_ids_tensor: torch.Tensor | None = None
     token_to_req: torch.Tensor | None = None

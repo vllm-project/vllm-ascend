@@ -30,8 +30,8 @@ from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
 from vllm_ascend import envs
-from vllm_ascend.distributed.kv_transfer.kv_offload_decode.kv_offload_decode_manager import (
-    get_kv_offload_decode_manager,
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    get_sparse_kv_offload_manager,
 )
 from vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.protocol import (
     LayerMetadata,
@@ -165,7 +165,7 @@ class SFAPDCpuOffloadConsumerWorker:
         assert _resolve_kv_transfer_backend(self.vllm_config) == BACKEND_MEMFABRIC, (
             "SFAPDCpuOffloadConnector D side supports memfabric pull only (set transfer_backend=memfabric)."
         )
-        self.decode_manager = get_kv_offload_decode_manager()
+        self.decode_manager = get_sparse_kv_offload_manager()
         if not hasattr(self.decode_manager, "offload_layer_names"):
             raise RuntimeError(
                 "KVOffloadDecodeManager.register_kv_caches must run before the PD connector is registered"

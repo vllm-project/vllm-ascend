@@ -128,7 +128,7 @@ from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_full_graph_params,
 )
-from vllm_ascend.distributed.kv_transfer.kv_offload_decode.kv_offload_decode_manager import init_kv_offload_decode_manager
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import init_sparse_kv_offload_manager
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_config import (
     get_gva_layerwise_config,
     get_layerwise_physical_layer_index,
@@ -562,15 +562,15 @@ class NPUModelRunner(GPUModelRunner):
         self._mamba_bufs: Any | None = None
         self._mamba_copy_bufs: Any | None = None
 
-        self.kv_offload_decode_config = self.ascend_config.kv_offload_decode_config
-        self.kv_offload_decode_enabled = self.kv_offload_decode_config.enabled
-        self.kv_offload_decode_manager = None
+        self.sparse_kv_offload_config = self.ascend_config.sparse_kv_offload_config
+        self.sparse_kv_offload_enabled = self.sparse_kv_offload_config.enabled
+        self.sparse_kv_offload_manager = None
         self.tp_rank = get_tensor_model_parallel_rank()
 
-        # Per-request metadata consumed by the KV offload decode resident LRU.
+        # Per-request metadata consumed by the Sparse KV offload resident LRU.
         self._offload_req_ids_tensor = None
         self._offload_token_to_req = None
-        if self.kv_offload_decode_enabled:
+        if self.sparse_kv_offload_enabled:
             self._offload_req_ids_tensor = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
             self._offload_token_to_req = self._make_buffer(self.max_num_tokens, dtype=torch.int32)
 
@@ -2798,7 +2798,7 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens_padded: int,
         num_reqs_padded: int,
     ) -> None:
-        """Populate per-request identity tensors for the KV offload decode LRU.
+        """Populate per-request identity tensors for the Sparse KV offload LRU.
 
         Request ids are adler32 hashes of the scheduler request id; rows are
         reset whenever the occupying request changes. Ported from vllm-ascend
@@ -3485,7 +3485,7 @@ class NPUModelRunner(GPUModelRunner):
         self.eplb_warmup()
         topk_profile_buffers: list[tuple[torch.Tensor, torch.Tensor]] = []
         try:
-            if self.kv_offload_decode_enabled:
+            if self.sparse_kv_offload_enabled:
                 topk_profile_buffers = self._allocate_kv_offload_topk_profile_buffers()
 
             mc2_tokens_capacity = get_mc2_tokens_capacity()
@@ -3504,7 +3504,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.vllm_config.speculative_config is not None:
             decode_width += self.vllm_config.speculative_config.num_speculative_tokens
 
-        topk_buffer_size = self.kv_offload_decode_config.topk_buffer_size
+        topk_buffer_size = self.sparse_kv_offload_config.topk_buffer_size
         num_kv_heads = 1
         k_dim = self.vllm_config.model_config.hf_text_config.kv_lora_rank
         v_dim = self.vllm_config.model_config.hf_text_config.qk_rope_head_dim
@@ -3539,7 +3539,7 @@ class NPUModelRunner(GPUModelRunner):
         )
         if num_offload_layers == 0:
             raise RuntimeError(
-                "KV offload decode profile did not find any host-resident SFA "
+                "Sparse KV offload profile did not find any host-resident SFA "
                 "KV cache layers."
             )
 
@@ -3893,11 +3893,11 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         self.may_reinitialize_input_batch(kv_cache_config)
-        if self.kv_offload_decode_enabled:
-            self.kv_offload_decode_manager = init_kv_offload_decode_manager(
+        if self.sparse_kv_offload_enabled:
+            self.sparse_kv_offload_manager = init_sparse_kv_offload_manager(
                 self.vllm_config,
                 kv_cache_config,
-                self.kv_offload_decode_config,
+                self.sparse_kv_offload_config,
             )
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
         # TODO: refactor the logic of attention
@@ -3917,8 +3917,8 @@ class NPUModelRunner(GPUModelRunner):
                 self.kernel_block_sizes, list) else self.kernel_block_sizes)
             self.drafter.initialize_attn_backend(kv_cache_config, block_size)
 
-        if self.kv_offload_decode_enabled:
-            self.kv_offload_decode_manager.register_kv_caches(kv_caches)
+        if self.sparse_kv_offload_enabled:
+            self.sparse_kv_offload_manager.register_kv_caches(kv_caches)
         if has_kv_transfer_group():
             # Decode-side PD connectors bind their destinations to the CPU KV
             # pool allocated and registered by KVOffloadDecodeManager.
@@ -4288,15 +4288,15 @@ class NPUModelRunner(GPUModelRunner):
                             k_tensor_split_factor, v_tensor_split_factor = calc_split_factor(kv_head_dim_list)
                         k_tensor_size = int(kv_cache_tensor.size // k_tensor_split_factor)
                         v_tensor_size = int(kv_cache_tensor.size // v_tensor_split_factor)
-                    if self.kv_offload_decode_enabled:
-                        assert self.use_sparse, "KV offload decode only support sparse attention."
-                        assert not current_sparse_sfa_c8, "KV offload decode do not support sparse SFA C8."
-                        raw_tensors = self._allocate_kv_cache_tensors_for_kv_offload_decode(
+                    if self.sparse_kv_offload_enabled:
+                        assert self.use_sparse, "Sparse KV offload only support sparse attention."
+                        assert not current_sparse_sfa_c8, "Sparse KV offload do not support sparse SFA C8."
+                        raw_tensors = self._allocate_kv_cache_tensors_for_sparse_kv_offload(
                             k_tensor_size,
                             v_tensor_size,
                             alignment,
                         )
-                        assert len(kv_cache_tensor.shared_by) == 1, "KV Offload decode do not support HMA."
+                        assert len(kv_cache_tensor.shared_by) == 1, "Sparse KV offload do not support HMA."
                         kv_cache_raw_tensors[layer_name] = raw_tensors
                         continue
                     # Allocate raw int8 tensors. Even bf16/fp16 KV cache entries
@@ -4493,10 +4493,10 @@ class NPUModelRunner(GPUModelRunner):
                     current_sparse_sfa_c8 = self.use_sparse and kv_cache_spec_uses_sparse_sfa_c8(
                         current_kv_cache_spec
                     )
-                    if self.kv_offload_decode_enabled:
-                        assert self.use_sparse, "KV offload decode only support sparse attention."
-                        assert not current_sparse_sfa_c8, "KV offload decode do not support sparse SFA C8."
-                        reshaped_tensors = self._reshape_kv_cache_tensors_for_kv_offload_decode(
+                    if self.sparse_kv_offload_enabled:
+                        assert self.use_sparse, "Sparse KV offload only support sparse attention."
+                        assert not current_sparse_sfa_c8, "Sparse KV offload do not support sparse SFA C8."
+                        reshaped_tensors = self._reshape_kv_cache_tensors_for_sparse_kv_offload(
                             layer_name,
                             kv_cache_raw_tensors[layer_name],
                             current_kv_cache_spec,
@@ -4970,7 +4970,7 @@ class NPUModelRunner(GPUModelRunner):
                         dtype=dtype,
                         cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
                         cache_sparse_sfa_c8=cache_sparse_sfa_c8,
-                        store_on_host=self.kv_offload_decode_enabled,
+                        store_on_host=self.sparse_kv_offload_enabled,
                     )
                 elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     if getattr(attn_module.impl, "fa_quant_layer", False):
@@ -5044,7 +5044,7 @@ class NPUModelRunner(GPUModelRunner):
                     object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
 
         if (
-            self.kv_offload_decode_enabled
+            self.sparse_kv_offload_enabled
             and self.enable_sparse_li_c8
             and getattr(self, "tp_rank", 0) == 0
         ):
@@ -5057,13 +5057,13 @@ class NPUModelRunner(GPUModelRunner):
                 spec for spec in indexer_specs if spec.cache_sparse_li_c8
             ]
             logger.info(
-                "KV offload decode keeps SFA indexer caches device-resident; "
+                "Sparse KV offload keeps SFA indexer caches device-resident; "
                 "sparse LI C8 is active for %d/%d indexer cache layers.",
                 len(li_c8_indexer_specs),
                 len(indexer_specs),
             )
 
-        self.kv_cache_spec = kv_cache_spec # reserve for kv offload decode usage
+        self.kv_cache_spec = kv_cache_spec # reserve for Sparse KV offload usage
         return kv_cache_spec
 
     def _check_and_update_cudagraph_mode(
@@ -5193,14 +5193,14 @@ class NPUModelRunner(GPUModelRunner):
         assert page_size_bytes_device > 0, "Case of no device kv cache is not considered."
         return page_size_bytes_host / page_size_bytes_device
 
-    def _allocate_kv_cache_tensors_for_kv_offload_decode(
+    def _allocate_kv_cache_tensors_for_sparse_kv_offload(
         self,
         k_tensor_size: int,
         v_tensor_size: int,
         alignment: int,
     ) -> tuple[torch.Tensor | int]:
         if self.tp_rank == 0:
-            [k_tensor_cpu, v_tensor_cpu] = self.kv_offload_decode_manager.empty_aligned_int8_cpu_tensors(
+            [k_tensor_cpu, v_tensor_cpu] = self.sparse_kv_offload_manager.empty_aligned_int8_cpu_tensors(
                 [k_tensor_size, v_tensor_size],
                 alignment,
             )
@@ -5208,7 +5208,7 @@ class NPUModelRunner(GPUModelRunner):
             k_tensor_cpu = None
             v_tensor_cpu = None
 
-        if self.kv_offload_decode_config.keep_device_kv_cache:
+        if self.sparse_kv_offload_config.keep_device_kv_cache:
             k_tensor = self._allocate_int8_cache_tensor(
                 k_tensor_size,
                 alignment,
@@ -5223,7 +5223,7 @@ class NPUModelRunner(GPUModelRunner):
 
         return (k_tensor, v_tensor, k_tensor_cpu, v_tensor_cpu, k_tensor_size + v_tensor_size)
 
-    def _reshape_kv_cache_tensors_for_kv_offload_decode(
+    def _reshape_kv_cache_tensors_for_sparse_kv_offload(
         self,
         layer_name: str,
         raw_cache_tensors: tuple[torch.Tensor | int],
