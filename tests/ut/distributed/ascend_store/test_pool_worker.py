@@ -16,6 +16,7 @@
 #
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -153,6 +154,39 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker.cache_coordinator.find_longest_cache_hit.assert_called_once()
         self.assertFalse(worker.cache_coordinator.find_longest_cache_hit.call_args.kwargs["apply_eagle"])
         worker.token_database.process_tokens.assert_not_called()
+
+    def test_layerwise_multi_group_layout_includes_mtp(self):
+        cls = self._make_worker_class()
+        worker = object.__new__(cls)
+        worker.num_layers = 4
+        worker.num_kv_cache_groups = 2
+        worker.hf_config = SimpleNamespace(num_hidden_layers=4)
+        worker.use_gva_layerwise = True
+        worker._extra_config = {"layerwise_num_shared_buffers": 2}
+        worker.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(
+                    layer_names=[
+                        *(f"model.layers.{layer}.self_attn.attn" for layer in range(4)),
+                        "model.mtp.0.self_attn.attn",
+                    ]
+                ),
+                SimpleNamespace(
+                    layer_names=[
+                        *(f"model.layers.{layer}.self_attn.indexer.k_cache" for layer in range(4)),
+                    ]
+                ),
+            ]
+        )
+
+        worker._init_layerwise_config()
+
+        self.assertEqual(worker.num_layers, 5)
+        self.assertEqual(worker.physical_layer_to_group_layers[4], [(0, 4)])
+        self.assertTrue(worker.layerwise_offload)
+        self.assertEqual(worker.independent_layers, [0])
+        self.assertEqual(len(worker.layer_load_tasks), 5)
+        self.assertEqual(len(worker.layer_save_tasks), 5)
 
 
 class TestKVPoolWorkerInit(unittest.TestCase):
