@@ -7,6 +7,8 @@ Qwen3-Omni-30B-A3B-Instruct.yaml
 InternVL3_5-8B-hf.yaml
 ERNIE-4.5-21B-A3B-PT.yaml
 gemma-3-4b-it.yaml
+gemma-4-e2b-it.yaml
+gemma-4-e4b-it.yaml
 internlm3-8b-instruct.yaml
 Molmo-7B-D-0924.yaml
 llava-onevision-qwen2-0.5b-ov-hf.yaml
