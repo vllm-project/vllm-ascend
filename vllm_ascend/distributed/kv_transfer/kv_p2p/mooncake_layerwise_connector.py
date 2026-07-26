@@ -1240,13 +1240,26 @@ class MooncakeLayerwiseConnectorWorker:
             return
 
         old_engine = getattr(self, "engine", None)
+        old_recv = self.kv_recv_layer_thread
 
-        # A. 先摘掉所有对旧 TE 的引用，避免析构被拖后
+        # Stop the listener before tearing down the transfer engine. Leaving the
+        # pre-snapshot listener alive while a new engine is created can expose
+        # stale endpoint metadata and lets old/new transport lifetimes overlap.
+        if old_recv is not None:
+            old_recv.stop()
+            old_recv.join(timeout=10)
+            if old_recv.is_alive():
+                raise RuntimeError(
+                    "[snapshot][rebuild] old KV recv thread did not stop"
+                )
+            self.kv_recv_layer_thread = None
+
+        # Detach all references to the old TE before resetting the singleton.
         self.engine = None
         if self.kv_send_layer_thread is not None:
             self.kv_send_layer_thread.engine = None
-        
-        # B. 旧 TE 上先 unregister 全部已知 region（必须在 reset/析构前）
+
+        # Unregister all known regions while the old TE is still valid.
         if old_engine is not None:
             ptrs = []
             if self._registered_regions is not None:
@@ -1261,18 +1274,21 @@ class MooncakeLayerwiseConnectorWorker:
                     logger.warning(
                         "[snapshot][rebuild] unregister %s failed: %s", hex(ptr), e
                     )
-        
-        # C. 同步销毁旧 TE（引用归零 + gc.collect），确保 ADXL Finalize / Deregister 完成
-        #    注意：这里不要先 get_transfer_engine / register
+
+        # Fully destroy the old TE before creating the replacement. In
+        # particular, the local old_engine reference must be dropped before
+        # gc.collect(); otherwise old and new Ascend transports coexist.
         global_te.reset()
         import gc
+
+        del old_engine
         gc.collect()
 
-        # D. 旧 TE 彻底死后，再创建新 TE
+        # Create the replacement only after old transport finalization.
         self.engine = global_te.get_transfer_engine(local_ip, device_name=None)
         self.te_rpc_port = self.engine.get_rpc_port()
 
-        # E. 再重新 register
+        # Re-register KV memory with the replacement TE.
         if self._registered_regions is not None:
             global_te.register_buffer(
                 self._registered_regions.ptrs, self._registered_regions.lengths
@@ -1292,19 +1308,14 @@ class MooncakeLayerwiseConnectorWorker:
                         "Mooncake kv_buffer re-registration failed after snapshot restore."
                     )
 
-        # F. 把 send thread 指到新 engine
+        # Point the producer thread at the replacement engine.
         if self.kv_send_layer_thread is not None:
             self.kv_send_layer_thread.engine = self.engine
 
-        # G. consumer：再重启 recv thread（逻辑可保持 PR 现有实现）
-        if not kv_cfg.is_kv_consumer or self.kv_recv_layer_thread is None:
+        # Restart the consumer listener only after the new TE and registrations
+        # are ready.
+        if not kv_cfg.is_kv_consumer or old_recv is None:
             return
-
-        old_recv = self.kv_recv_layer_thread
-        old_recv.stop()
-        old_recv.join(timeout=10)
-        if old_recv.is_alive():
-            logger.warning("[snapshot][rebuild] old recv thread did not stop within timeout")
 
         ready_event = threading.Event()
         metadata = MooncakeAgentMetadata(
