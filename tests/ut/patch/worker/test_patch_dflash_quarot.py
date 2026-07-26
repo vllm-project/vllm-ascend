@@ -7,16 +7,8 @@ import torch
 
 import vllm_ascend
 
-
-MODULE_PATH = (
-    Path(vllm_ascend.__file__).resolve().parent
-    / "patch"
-    / "worker"
-    / "patch_draft_quarot.py"
-)
-SPEC = importlib.util.spec_from_file_location(
-    "dflash_quarot_module_under_test", MODULE_PATH
-)
+MODULE_PATH = Path(vllm_ascend.__file__).resolve().parent / "patch" / "worker" / "patch_draft_quarot.py"
+SPEC = importlib.util.spec_from_file_location("dflash_quarot_module_under_test", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 patch_draft_quarot = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(patch_draft_quarot)
@@ -27,9 +19,7 @@ def test_transform_quarot_linear_weight_matches_block_diagonal():
     rotation, _ = torch.linalg.qr(torch.randn(4, 4, dtype=torch.float32))
     weight = torch.randn(3, 12, dtype=torch.float32)
 
-    actual = patch_draft_quarot.transform_quarot_linear_weight(
-        weight, rotation
-    )
+    actual = patch_draft_quarot.transform_quarot_linear_weight(weight, rotation)
     expected = weight @ torch.block_diag(rotation, rotation, rotation)
 
     torch.testing.assert_close(actual, expected)
@@ -59,17 +49,13 @@ def test_dflash_wrapper_transforms_only_fc_weight(monkeypatch):
         captured.update(dict(weights))
         return {"loaded": True}
 
-    load_weights = patch_draft_quarot.make_dflash_load_weights(
-        "unused.safetensors", original_load_weights
-    )
+    load_weights = patch_draft_quarot.make_dflash_load_weights("unused.safetensors", original_load_weights)
     result = load_weights(
         object(),
         [("fc.weight", fc_weight), ("model.layers.0.weight", other_weight)],
     )
 
-    expected_fc = fc_weight @ torch.block_diag(
-        rotation, rotation, rotation, rotation
-    )
+    expected_fc = fc_weight @ torch.block_diag(rotation, rotation, rotation, rotation)
     torch.testing.assert_close(captured["fc.weight"], expected_fc)
     torch.testing.assert_close(captured["model.layers.0.weight"], other_weight)
     assert result == {"loaded": True}
@@ -85,9 +71,7 @@ def test_dflash_wrapper_requires_fc_weight(monkeypatch):
     def original_load_weights(_self, weights):
         list(weights)
 
-    load_weights = patch_draft_quarot.make_dflash_load_weights(
-        "unused.safetensors", original_load_weights
-    )
+    load_weights = patch_draft_quarot.make_dflash_load_weights("unused.safetensors", original_load_weights)
 
     with pytest.raises(RuntimeError, match="did not provide fc.weight"):
         load_weights(object(), [("model.layers.0.weight", torch.eye(2))])
