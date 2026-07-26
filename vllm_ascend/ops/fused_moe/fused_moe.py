@@ -528,12 +528,18 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 _topk = self.moe_config.experts_per_token
                 _min_slots = _ep.world_size * _topk
                 if _offload_cfg.num_device_experts < _min_slots:
+                    _old_ndev = _offload_cfg.num_device_experts
                     logger.warning(
-                        "[expert_offload] num_device_experts=%d < "
-                        "ep_size*topk=%d*%d=%d; bumping to %d to avoid "
-                        "multi-card placement overflow.",
-                        _offload_cfg.num_device_experts, _ep.world_size, _topk,
-                        _min_slots, _min_slots)
+                        "[expert_offload] num_device_experts=%d is too small "
+                        "for multi-card offload at ep_size=%d: needs >= "
+                        "ep_size*topk = %d*%d = %d. With fewer device slots the "
+                        "cross-rank active-expert union overflows capacity and "
+                        "the spread fallback deadlocks MC2. Auto-adjusting "
+                        "num_device_experts %d -> %d. Set expert_offload_config"
+                        ".num_device_experts >= %d explicitly to silence this "
+                        "(and avoid the extra HBM the auto-bump costs).",
+                        _old_ndev, _ep.world_size, _ep.world_size, _topk,
+                        _min_slots, _old_ndev, _min_slots, _min_slots)
                     _offload_cfg.num_device_experts = _min_slots
                     from vllm_ascend.expert_offload import ExpertOffloadManager
                     if ExpertOffloadManager._instance is not None:
