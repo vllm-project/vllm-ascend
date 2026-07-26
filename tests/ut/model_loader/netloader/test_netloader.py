@@ -14,6 +14,9 @@
 # limitations under the License.
 #
 
+from functools import wraps
+from types import SimpleNamespace
+
 import json
 from unittest.mock import MagicMock, patch
 
@@ -21,7 +24,11 @@ import pytest
 import torch
 from torch import nn
 
-from vllm_ascend.model_loader.netloader.netloader import DRAFT_PORT_OFFSET, ModelNetLoaderElastic
+from vllm_ascend.model_loader.netloader.netloader import (
+    DRAFT_PORT_OFFSET,
+    ModelNetLoaderElastic,
+    pre_transfer_weight_processing,
+)
 
 
 class DummyDeviceConfig:
@@ -148,7 +155,7 @@ def test_clear_static_forward_context_clears_current_vllm_config(monkeypatch):
     passed_config.compilation_config.static_forward_context["passed.layer"] = object()
     current_config.compilation_config.static_forward_context["current.layer"] = object()
     monkeypatch.setattr(
-        "vllm_ascend.model_loader.netloader.netloader.get_current_vllm_config",
+        "vllm_ascend.model_loader.netloader.netloader.get_current_vllm_config_or_none",
         lambda: current_config,
     )
 
@@ -156,6 +163,54 @@ def test_clear_static_forward_context_clears_current_vllm_config(monkeypatch):
 
     assert passed_config.compilation_config.static_forward_context == {}
     assert current_config.compilation_config.static_forward_context == {}
+
+
+def test_pre_transfer_weight_processing_unwraps_and_restores_quant_methods():
+    import vllm_ascend.ops.fused_moe.fused_moe as fused_moe_module
+
+    class _FakeAscendFusedMoE:
+        def __init__(self, quant_method):
+            self.quant_method = quant_method
+
+    calls = []
+
+    def original_process_weights(*args, **kwargs):
+        calls.append("original")
+
+    @wraps(original_process_weights)
+    def wrapped_process_weights(*args, **kwargs):
+        calls.append("wrapped")
+        original_process_weights(*args, **kwargs)
+
+    quant_method = SimpleNamespace(process_weights_after_loading=wrapped_process_weights)
+    fused_moe_layer = _FakeAscendFusedMoE(quant_method)
+    other_layer = SimpleNamespace()
+
+    class _FakeModule:
+        def modules(self):
+            return iter([self, fused_moe_layer, other_layer])
+
+    fake_module = _FakeModule()
+
+    missing_marker = object()
+    real_fused_moe_cls = getattr(fused_moe_module, "AscendFusedMoE", missing_marker)
+    fused_moe_module.AscendFusedMoE = _FakeAscendFusedMoE
+    try:
+        with pre_transfer_weight_processing(fake_module):
+            assert quant_method.process_weights_after_loading is original_process_weights
+            quant_method.process_weights_after_loading()
+            assert quant_method.process_weights_after_loading is wrapped_process_weights
+            assert calls == ["original"]
+
+        with pytest.raises(RuntimeError, match="boom"), pre_transfer_weight_processing(fake_module):
+            assert quant_method.process_weights_after_loading is original_process_weights
+            raise RuntimeError("boom")
+        assert quant_method.process_weights_after_loading is wrapped_process_weights
+    finally:
+        if real_fused_moe_cls is missing_marker:
+            delattr(fused_moe_module, "AscendFusedMoE")
+        else:
+            fused_moe_module.AscendFusedMoE = real_fused_moe_cls
 
 
 @patch("vllm_ascend.model_loader.netloader.netloader.logger")
@@ -185,6 +240,18 @@ def test_load_model_elastic_success(mock_logger, monkeypatch, tmp_path):
     # patch process_weights_after_loading
     monkeypatch.setattr(
         "vllm_ascend.model_loader.netloader.netloader.process_weights_after_loading", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.model_loader.netloader.netloader.cache_processed_layout_transfer_manifest",
+        lambda model: 0,
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.model_loader.netloader.netloader.log_transfer_manifest_debug_sample",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.model_loader.netloader.netloader.synchronize_npu_with_debug",
+        lambda *args, **kwargs: 0.0,
     )
     # patch get_ip
     monkeypatch.setattr("vllm.utils.network_utils.get_ip", lambda: "127.0.0.1")
@@ -239,9 +306,146 @@ def _patch_loader_common(monkeypatch):
     monkeypatch.setattr(
         "vllm_ascend.model_loader.netloader.netloader.process_weights_after_loading", lambda *a, **k: None
     )
+    monkeypatch.setattr(
+        "vllm_ascend.model_loader.netloader.netloader.cache_processed_layout_transfer_manifest",
+        lambda model: 0,
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.model_loader.netloader.netloader.log_transfer_manifest_debug_sample",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.model_loader.netloader.netloader.synchronize_npu_with_debug",
+        lambda *args, **kwargs: 0.0,
+    )
     monkeypatch.setattr("vllm.utils.network_utils.get_ip", lambda: "127.0.0.1")
     monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.find_free_port", lambda: 8888)
     return dummy_model
+
+
+@pytest.mark.parametrize(
+    "int8_cache,expected_order",
+    [
+        ("no", ["process", "elastic_load"]),
+        ("dram", ["elastic_load", "process"]),
+    ],
+)
+@patch("vllm_ascend.model_loader.netloader.netloader.logger")
+def test_elastic_load_process_weights_order_depends_on_int8_cache(mock_logger, monkeypatch, int8_cache, expected_order):
+    dummy_model = _patch_loader_common(monkeypatch)
+    calls = []
+
+    def capture_process_weights(*args, **kwargs):
+        calls.append("process")
+
+    def capture_elastic_load(**kwargs):
+        calls.append("elastic_load")
+        assert kwargs["int8_cache"] == int8_cache
+        return dummy_model
+
+    class DummyElasticServer:
+        def __init__(*a, **k):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(
+        "vllm_ascend.model_loader.netloader.netloader.process_weights_after_loading",
+        capture_process_weights,
+    )
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.elastic_load", capture_elastic_load)
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.ElasticServer", DummyElasticServer)
+
+    extra = {
+        "SOURCE": [{"device_id": 0, "sources": ["127.0.0.1:5000"]}],
+        "MODEL": "dummy-model",
+        "LISTEN_PORT": 5555,
+        "INT8_CACHE": int8_cache,
+    }
+    loader = make_loader_with_config(extra)
+    loader.load_model(DummyVllmConfig(), DummyModelConfig())
+
+    assert calls == expected_order
+
+
+@patch("vllm_ascend.model_loader.netloader.netloader.logger")
+def test_seed_int8_cache_no_processes_before_server_start(mock_logger, monkeypatch):
+    dummy_model = _patch_loader_common(monkeypatch)
+    calls = []
+
+    def capture_process_weights(*args, **kwargs):
+        calls.append("process")
+
+    class DummyElasticServer:
+        def __init__(*a, **k):
+            calls.append("server_init")
+
+        def register_transfer_manifest(self, model):
+            calls.append("register")
+
+        def start(self):
+            calls.append("server_start")
+
+    monkeypatch.setattr(
+        "vllm_ascend.model_loader.netloader.netloader.process_weights_after_loading",
+        capture_process_weights,
+    )
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.ElasticServer", DummyElasticServer)
+    monkeypatch.setattr(
+        ModelNetLoaderElastic,
+        "revert_to_default",
+        lambda self, *args, **kwargs: (dummy_model, True),
+    )
+
+    extra = {
+        "SOURCE": None,
+        "MODEL": "dummy-model",
+        "LISTEN_PORT": 5555,
+        "INT8_CACHE": "no",
+    }
+    loader = make_loader_with_config(extra)
+    loader.load_model(DummyVllmConfig(), DummyModelConfig())
+
+    assert calls == ["process", "server_init", "register", "server_start"]
+
+
+@patch("vllm_ascend.model_loader.netloader.netloader.logger")
+def test_seed_dram_keeps_server_before_process_weights(mock_logger, monkeypatch):
+    dummy_model = _patch_loader_common(monkeypatch)
+    calls = []
+
+    def capture_process_weights(*args, **kwargs):
+        calls.append("process")
+
+    class DummyElasticServer:
+        def __init__(*a, **k):
+            calls.append("server_init")
+
+        def start(self):
+            calls.append("server_start")
+
+    monkeypatch.setattr(
+        "vllm_ascend.model_loader.netloader.netloader.process_weights_after_loading",
+        capture_process_weights,
+    )
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.ElasticServer", DummyElasticServer)
+    monkeypatch.setattr(
+        ModelNetLoaderElastic,
+        "revert_to_default",
+        lambda self, *args, **kwargs: (dummy_model, True),
+    )
+
+    extra = {
+        "SOURCE": None,
+        "MODEL": "dummy-model",
+        "LISTEN_PORT": 5555,
+        "INT8_CACHE": "dram",
+    }
+    loader = make_loader_with_config(extra)
+    loader.load_model(DummyVllmConfig(), DummyModelConfig())
+
+    assert calls == ["server_init", "server_start", "process"]
 
 
 @patch("vllm_ascend.model_loader.netloader.netloader.logger")
@@ -305,6 +509,41 @@ def test_failed_target_model_participates_in_barrier_before_error(mock_logger, m
         loader.load_model(vllm_config, DummyModelConfig())
 
     assert barrier_calls == ["barrier"]
+
+
+@patch("vllm_ascend.model_loader.netloader.netloader.logger")
+def test_target_model_skips_barrier_before_draft_when_int8_cache_no(mock_logger, monkeypatch):
+    dummy_model = _patch_loader_common(monkeypatch)
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.elastic_load", lambda **kwargs: dummy_model)
+
+    class DummyElasticServer:
+        def __init__(*a, **k):
+            pass
+
+        def start(self):
+            pass
+
+        def register_transfer_manifest(self, model):
+            pass
+
+    barrier_calls = []
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.ElasticServer", DummyElasticServer)
+    monkeypatch.setattr("torch.distributed.is_available", lambda: True)
+    monkeypatch.setattr("torch.distributed.is_initialized", lambda: True)
+    monkeypatch.setattr("torch.distributed.barrier", lambda: barrier_calls.append("barrier"))
+
+    extra = {
+        "SOURCE": [{"device_id": 0, "sources": ["127.0.0.1:5000"]}],
+        "MODEL": "dummy-model",
+        "LISTEN_PORT": 5555,
+        "INT8_CACHE": "no",
+    }
+    loader = make_loader_with_config(extra)
+    vllm_config = DummyVllmConfig()
+    vllm_config.speculative_config = object()
+    loader.load_model(vllm_config, DummyModelConfig())
+
+    assert barrier_calls == []
 
 
 @patch("vllm_ascend.model_loader.netloader.netloader.logger")
@@ -377,7 +616,13 @@ def test_load_draft_model_elastic_success(mock_logger, monkeypatch, tmp_path):
 @patch("vllm_ascend.model_loader.netloader.netloader.logger")
 def test_load_draft_model_uses_hbm_when_int8_cache_is_dram(mock_logger, monkeypatch):
     dummy_model = _patch_loader_common(monkeypatch)
-    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.elastic_load", lambda **kwargs: dummy_model)
+    elastic_load_kwargs = {}
+
+    def capture_elastic_load(**kwargs):
+        elastic_load_kwargs.update(kwargs)
+        return dummy_model
+
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.elastic_load", capture_elastic_load)
 
     captured = {}
 
@@ -402,6 +647,7 @@ def test_load_draft_model_uses_hbm_when_int8_cache_is_dram(mock_logger, monkeypa
 
     assert captured["int8_cache"] == "hbm"
     assert captured["group_name"] == "netloader_draft"
+    assert elastic_load_kwargs["int8_cache"] == "hbm"
 
 
 @patch("vllm_ascend.model_loader.netloader.netloader.logger")
@@ -434,6 +680,7 @@ def test_load_draft_model_port_offset_and_group_name(mock_logger, monkeypatch, t
     loader.load_model(DummyVllmConfig(), DummyDraftModelConfig())
 
     assert captured["group_name"] == "netloader_draft"
+    assert captured["int8_cache"] == "no"
     assert captured["model_path"] == "draft-model"
     assert captured["sources"] == [
         {

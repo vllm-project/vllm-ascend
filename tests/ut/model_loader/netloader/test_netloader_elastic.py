@@ -18,12 +18,20 @@ import io
 import json
 import logging
 import socket
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
+from vllm_ascend.model_loader.netloader.executor import elastic_load as p2p_elastic_load
+from vllm_ascend.model_loader.netloader.executor.elastic_load import (
+    P2PSend,
+    _collect_processed_layout_tensors,
+    _get_recv_transfer_items,
+    _get_send_transfer_items,
+    register_processed_layout_transfer_items,
+)
 from vllm_ascend.model_loader.netloader.interaction import elastic
 from vllm_ascend.model_loader.netloader.interaction.elastic import ElasticClient, ElasticServer
 
@@ -89,18 +97,21 @@ def test_elastic_client_register():
     model_path = "mocked_model_path"
     tp = 1
     pp = 1
+    sent_payloads = []
 
     with patch("socket.socket") as mock_socket:
         mock_socket_instance = MagicMock()
         mock_socket.return_value = mock_socket_instance
         mock_socket_instance.connect.return_value = None
         mock_socket_instance.recv.return_value = mock_server_response(None)
+        mock_socket_instance.send.side_effect = lambda data: sent_payloads.append(json.loads(data.decode()))
 
         mock_socket_instance.getsockname.return_value = ("127.0.0.1", 12346)
         mock_socket_instance.__enter__.return_value = mock_socket_instance
 
         client = ElasticClient(sources, device_id, model_path, tp, pp)
         assert client.register(device_id, model_path, tp, pp) == ("mocked_name", 12346)
+        assert sent_payloads[-1]["content"]["int8_cache"] == "no"
 
 
 # Test the behavior of the `register` method of ElasticClient when the server returns an error response.
@@ -174,6 +185,45 @@ class FakeModel:
         return self.params.items()
 
 
+class FakeP2PParam:
+    def __init__(self, name):
+        self.name = name
+        self.device = torch.device("cpu")
+
+    def contiguous(self):
+        return f"{self.name}:contiguous"
+
+    def to(self, device):
+        return f"{self.name}:to:{device}"
+
+
+class FakeP2PModel:
+    def __init__(self):
+        self.params = {
+            "weight": FakeP2PParam("weight"),
+            "aclnn_input_scale": FakeP2PParam("aclnn_input_scale"),
+        }
+
+    def parameters(self):
+        return iter(self.params.values())
+
+    def named_parameters(self):
+        return self.params.items()
+
+
+class FakeProcessedLayoutLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(2, 2))
+        self.aclnn_input_scale_reciprocal = torch.ones(2)
+
+
+class FakeProcessedLayoutModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layer = FakeProcessedLayoutLayer()
+
+
 @pytest.fixture
 def mock_model():
     return FakeModel()
@@ -244,6 +294,149 @@ def test_int8_cache_handling(server_config, mock_model, cache_option, expected_d
             assert server.original_int8["param2"].device.type == expected_device
 
 
+@pytest.mark.parametrize("send_processed_weights", [False])
+def test_p2p_send_skips_aclnn_params_only_for_raw_weights(send_processed_weights):
+    sender_pg = MagicMock()
+    sender_pg.send.return_value.wait.return_value = None
+    model = FakeP2PModel()
+
+    with (
+        patch.object(p2p_elastic_load.torch, "npu", MagicMock()),
+        patch.object(p2p_elastic_load.torch_npu.npu, "Stream", return_value=MagicMock()),
+        patch.object(p2p_elastic_load.torch_npu.npu, "stream", return_value=nullcontext()),
+        patch.object(p2p_elastic_load.torch_npu.npu, "synchronize"),
+        patch.object(p2p_elastic_load.torch.distributed, "barrier"),
+        patch.object(p2p_elastic_load, "stateless_init_process_group", return_value=sender_pg),
+        patch.object(p2p_elastic_load, "destroy_stateless_process_group"),
+    ):
+        P2PSend(
+            "127.0.0.1",
+            9090,
+            "127.0.0.1:12345",
+            send_processed_weights=send_processed_weights,
+        ).send(model, {})
+
+    payloads = [call.args[0][0] for call in sender_pg.send.call_args_list]
+    assert payloads == ["weight:contiguous"]
+
+
+def test_processed_layout_transfer_items_include_module_attribute_tensors(monkeypatch):
+    monkeypatch.setattr(
+        p2p_elastic_load,
+        "_is_transferable_tensor",
+        lambda tensor: not tensor.is_meta and tensor.numel() > 0,
+    )
+    model = FakeProcessedLayoutModel()
+    transfer_names = [name for name, _ in _get_send_transfer_items(model, send_processed_weights=True)]
+
+    assert "layer.weight" in transfer_names
+    assert "layer.aclnn_input_scale_reciprocal" in transfer_names
+
+
+def test_dram_transfer_items_still_use_named_parameters_only():
+    model = FakeP2PModel()
+    transfer_names = [name for name, _ in _get_send_transfer_items(model, send_processed_weights=False)]
+
+    assert transfer_names == ["weight"]
+
+
+def test_processed_layout_recv_items_match_send_items(monkeypatch):
+    monkeypatch.setattr(
+        p2p_elastic_load,
+        "_is_transferable_tensor",
+        lambda tensor: not tensor.is_meta and tensor.numel() > 0,
+    )
+    model = FakeProcessedLayoutModel()
+    send_names = [name for name, _ in _get_send_transfer_items(model, send_processed_weights=True)]
+    recv_names = [name for name, _ in _get_recv_transfer_items(model, transfer_processed_layout=True)]
+
+    assert send_names == recv_names
+
+
+def test_send_uses_registered_items_and_skips_rescan(monkeypatch):
+    monkeypatch.setattr(
+        p2p_elastic_load,
+        "_is_transferable_tensor",
+        lambda tensor: not tensor.is_meta and tensor.numel() > 0,
+    )
+    model = FakeProcessedLayoutModel()
+    registered_transfer_items = register_processed_layout_transfer_items(model)
+    model.layer.kv_cache = torch.ones(3)
+    model.layer.runtime_only = torch.ones(4)
+
+    with patch.object(p2p_elastic_load, "_collect_processed_layout_tensors") as mock_collect:
+        send_items = _get_send_transfer_items(
+            model,
+            send_processed_weights=True,
+            registered_transfer_items=registered_transfer_items,
+        )
+        mock_collect.assert_not_called()
+
+    live_items = _collect_processed_layout_tensors(model)
+
+    assert len(send_items) == len(registered_transfer_items)
+    assert len(live_items) > len(send_items)
+    assert "layer.kv_cache" not in [name for name, _ in send_items]
+
+
+def test_processed_layout_send_requires_registered_manifest():
+    model = FakeProcessedLayoutModel()
+    sender_pg = MagicMock()
+    sender_pg.send.return_value.wait.return_value = None
+
+    with (
+        patch.object(p2p_elastic_load.torch, "npu", MagicMock()),
+        patch.object(p2p_elastic_load.torch_npu.npu, "Stream", return_value=MagicMock()),
+        patch.object(p2p_elastic_load.torch_npu.npu, "stream", return_value=nullcontext()),
+        patch.object(p2p_elastic_load.torch_npu.npu, "synchronize"),
+        patch.object(p2p_elastic_load.torch.distributed, "barrier"),
+        patch.object(p2p_elastic_load, "stateless_init_process_group", return_value=sender_pg),
+        patch.object(p2p_elastic_load, "destroy_stateless_process_group"),
+        pytest.raises(RuntimeError, match="registered transfer items"),
+    ):
+        P2PSend(
+            "127.0.0.1",
+            9090,
+            "127.0.0.1:12345",
+            send_processed_weights=True,
+        ).send(model, {})
+
+
+def test_p2p_send_processed_layout_includes_derived_tensor(monkeypatch):
+    monkeypatch.setattr(
+        p2p_elastic_load,
+        "_is_transferable_tensor",
+        lambda tensor: not tensor.is_meta and tensor.numel() > 0,
+    )
+    sender_pg = MagicMock()
+    sender_pg.send.return_value.wait.return_value = None
+    model = FakeProcessedLayoutModel()
+    registered_transfer_items = register_processed_layout_transfer_items(model)
+
+    with (
+        patch.object(p2p_elastic_load.torch, "npu", MagicMock()),
+        patch.object(p2p_elastic_load.torch_npu.npu, "Stream", return_value=MagicMock()),
+        patch.object(p2p_elastic_load.torch_npu.npu, "stream", return_value=nullcontext()),
+        patch.object(p2p_elastic_load.torch_npu.npu, "synchronize"),
+        patch.object(p2p_elastic_load.torch.distributed, "barrier"),
+        patch.object(p2p_elastic_load, "stateless_init_process_group", return_value=sender_pg),
+        patch.object(p2p_elastic_load, "destroy_stateless_process_group"),
+        patch.object(p2p_elastic_load, "_collect_processed_layout_tensors") as mock_collect,
+    ):
+        P2PSend(
+            "127.0.0.1",
+            9090,
+            "127.0.0.1:12345",
+            send_processed_weights=True,
+        ).send(model, {}, registered_transfer_items=registered_transfer_items)
+        mock_collect.assert_not_called()
+
+    sent_tensors = [call.args[0][0] for call in sender_pg.send.call_args_list]
+    assert len(sent_tensors) == 2
+    assert sent_tensors[0].shape == (2, 2)
+    assert sent_tensors[1].shape == (2,)
+
+
 # Test client processing
 def test_client_handler_valid_join(server_config, mock_model):
     server_config["model"] = mock_model
@@ -255,7 +448,14 @@ def test_client_handler_valid_join(server_config, mock_model):
         # Configuring Client Data
         valid_data = {
             "label": "JOIN",
-            "content": {"device_id": 0, "model_path": "/test/model", "tp": 1, "pp": 1, "port": 9090},
+            "content": {
+                "device_id": 0,
+                "model_path": "/test/model",
+                "tp": 1,
+                "pp": 1,
+                "port": 9090,
+                "int8_cache": "dram",
+            },
         }
         mock_conn.recv.return_value = json.dumps(valid_data).encode("utf-8")
 
@@ -266,7 +466,111 @@ def test_client_handler_valid_join(server_config, mock_model):
         # Verify response
         expected_ack = {"label": "JOIN_ACK", "content": {"name": "192.168.1.1:12345"}}
         mock_conn.send.assert_called_once_with(json.dumps(expected_ack).encode("utf-8"))
-        mock_p2p_send.assert_called_once_with("127.0.0.1", 9090, "192.168.1.1:12345", "netloader")
+        mock_p2p_send.assert_called_once_with(
+            "127.0.0.1",
+            9090,
+            "192.168.1.1:12345",
+            "netloader",
+            send_processed_weights=False,
+        )
+        mock_conn.close.assert_called_once()
+
+
+def test_client_handler_accepts_legacy_join_without_int8_cache(server_config, mock_model):
+    server_config["model"] = mock_model
+    with patch("vllm_ascend.model_loader.netloader.interaction.elastic.P2PSend") as mock_p2p_send:
+        mock_conn = MagicMock()
+        mock_addr = ("192.168.1.1", 12345)
+        legacy_data = {
+            "label": "JOIN",
+            "content": {
+                "device_id": 0,
+                "model_path": "/test/model",
+                "tp": 1,
+                "pp": 1,
+                "port": 9090,
+            },
+        }
+        mock_conn.recv.return_value = json.dumps(legacy_data).encode("utf-8")
+
+        ElasticServer(**server_config).register_handler(mock_conn, mock_addr)
+
+        expected_ack = {"label": "JOIN_ACK", "content": {"name": "192.168.1.1:12345"}}
+        mock_conn.send.assert_called_once_with(json.dumps(expected_ack).encode("utf-8"))
+        mock_p2p_send.assert_called_once_with(
+            "127.0.0.1",
+            9090,
+            "192.168.1.1:12345",
+            "netloader",
+            send_processed_weights=False,
+        )
+        mock_conn.close.assert_called_once()
+
+
+def test_client_handler_rejects_int8_cache_mismatch(server_config, mock_model):
+    server_config["model"] = mock_model
+    with patch("vllm_ascend.model_loader.netloader.interaction.elastic.P2PSend") as mock_p2p_send:
+        mock_conn = MagicMock()
+        mock_addr = ("192.168.1.1", 12345)
+        mismatch_data = {
+            "label": "JOIN",
+            "content": {
+                "device_id": 0,
+                "model_path": "/test/model",
+                "tp": 1,
+                "pp": 1,
+                "port": 9090,
+                "int8_cache": "no",
+            },
+        }
+        mock_conn.recv.return_value = json.dumps(mismatch_data).encode("utf-8")
+
+        ElasticServer(**server_config).register_handler(mock_conn, mock_addr)
+
+        expected_ack = {
+            "label": "JOIN_NACK",
+            "content": "Received int8_cache no does not consist with this server dram",
+        }
+        mock_conn.send.assert_called_once_with(json.dumps(expected_ack).encode("utf-8"))
+        mock_p2p_send.assert_not_called()
+        mock_conn.close.assert_called_once()
+
+
+def test_client_handler_uses_processed_send_for_no_cache(server_config, mock_model):
+    server_config["model"] = mock_model
+    server_config["int8_cache"] = "no"
+    with patch("vllm_ascend.model_loader.netloader.interaction.elastic.P2PSend") as mock_p2p_send:
+        mock_conn = MagicMock()
+        mock_addr = ("192.168.1.1", 12345)
+        valid_data = {
+            "label": "JOIN",
+            "content": {
+                "device_id": 0,
+                "model_path": "/test/model",
+                "tp": 1,
+                "pp": 1,
+                "port": 9090,
+                "int8_cache": "no",
+            },
+        }
+        mock_conn.recv.return_value = json.dumps(valid_data).encode("utf-8")
+
+        server = ElasticServer(**server_config)
+        server._registered_transfer_items = [("weight", MagicMock())]
+        server.register_handler(mock_conn, mock_addr)
+
+        mock_p2p_send.assert_called_once_with(
+            "127.0.0.1",
+            9090,
+            "192.168.1.1:12345",
+            "netloader",
+            send_processed_weights=True,
+        )
+        mock_p2p_send.return_value.send.assert_called_once_with(
+            mock_model,
+            {},
+            registered_transfer_items=server._registered_transfer_items,
+        )
         mock_conn.close.assert_called_once()
 
 
@@ -405,6 +709,7 @@ def test_draft_group_name_in_client_register():
 
     assert client.group_name == "netloader_draft"
     assert sent_payloads[0]["content"]["group_name"] == "netloader_draft"
+    assert sent_payloads[0]["content"]["int8_cache"] == "no"
 
 
 def test_draft_group_name_in_server_p2p_send(server_config, mock_model):
@@ -418,6 +723,7 @@ def test_draft_group_name_in_server_p2p_send(server_config, mock_model):
             "pp": 1,
             "port": 9090,
             "group_name": "netloader_draft",
+            "int8_cache": "dram",
         },
     }
 
@@ -430,7 +736,13 @@ def test_draft_group_name_in_server_p2p_send(server_config, mock_model):
 
         ElasticServer(**server_config, group_name="netloader_draft").register_handler(mock_conn, ("192.168.1.1", 12345))
 
-        mock_p2p_send.assert_called_once_with("127.0.0.1", 9090, "192.168.1.1:12345", "netloader_draft")
+        mock_p2p_send.assert_called_once_with(
+            "127.0.0.1",
+            9090,
+            "192.168.1.1:12345",
+            "netloader_draft",
+            send_processed_weights=False,
+        )
 
 
 if __name__ == "__main__":

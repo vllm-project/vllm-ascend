@@ -17,11 +17,13 @@
 import gc
 import json
 import time
+from contextlib import contextmanager
 from copy import deepcopy
+from typing import Any, cast
 
 import torch
 from torch import nn
-from vllm.config import LoadConfig, ModelConfig, VllmConfig
+from vllm.config import LoadConfig, ModelConfig, VllmConfig, get_current_vllm_config_or_none
 from vllm.logger import logger
 from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
@@ -29,17 +31,76 @@ from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.utils import initialize_model, process_weights_after_loading
 from vllm.utils.torch_utils import set_default_torch_dtype
 
+from .executor.elastic_load import (
+    cache_processed_layout_transfer_manifest,
+    log_netloader_debug_checkpoint,
+    log_transfer_manifest_debug_sample,
+    synchronize_npu_with_debug,
+)
 from .interaction.elastic import ElasticServer
 from .load import elastic_load
 from .utils import find_free_port, is_valid_path_prefix
 
 DRAFT_PORT_OFFSET = 10000
 
-try:
-    # Older vLLM versions may not expose the current-config accessor.
-    from vllm.config import get_current_vllm_config
-except ImportError:
-    get_current_vllm_config = None
+
+@contextmanager
+def pre_transfer_weight_processing(model: nn.Module):
+    """Bypass FusedMoE post-load validation during netloader pre-transfer layout work.
+
+    Ascend FusedMoE wraps ``quant_method.process_weights_after_loading`` with a
+    shared-expert consistency check. Netloader ``int8_cache=no`` calls
+    ``process_weights_after_loading`` before receiver weights arrive, so only that
+    phase should use the wrapped function's original implementation saved by
+    ``functools.wraps``.
+    """
+    try:
+        from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
+    except ImportError:
+        AscendFusedMoE = None  # type: ignore[misc, assignment]
+
+    try:
+        from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
+    except ImportError:
+        AscendMoERunner = None  # type: ignore[misc, assignment]
+
+    restored: list[tuple[Any, object]] = []
+    seen_quant_methods: set[int] = set()
+
+    def _unwrap_quant_method(quant_method: Any) -> None:
+        if quant_method is None or id(quant_method) in seen_quant_methods:
+            return
+
+        process_weights = getattr(quant_method, "process_weights_after_loading", None)
+        original_process_weights = getattr(process_weights, "__wrapped__", None)
+        if original_process_weights is None:
+            return
+
+        quant_method = cast(Any, quant_method)
+        seen_quant_methods.add(id(quant_method))
+        restored.append((quant_method, process_weights))
+        quant_method.process_weights_after_loading = original_process_weights
+
+    for module in model.modules():
+        if AscendFusedMoE is not None and isinstance(module, AscendFusedMoE):
+            quant_method = getattr(module, "quant_method", None) or getattr(module, "_quant_method", None)
+            _unwrap_quant_method(quant_method)
+
+        runner = getattr(module, "runner", None)
+        if AscendMoERunner is not None and isinstance(runner, AscendMoERunner):
+            _unwrap_quant_method(getattr(runner, "_quant_method", None))
+
+    if restored:
+        logger.info(
+            "[netloader][debug] pre_transfer_weight_processing unwrapped quant_methods=%s",
+            len(restored),
+        )
+
+    try:
+        yield
+    finally:
+        for quant_method, process_weights in restored:
+            quant_method.process_weights_after_loading = process_weights
 
 
 @register_model_loader("netloader")
@@ -143,13 +204,18 @@ class ModelNetLoaderElastic(BaseModelLoader):
         return getattr(model_config, "runner_type", None) == "draft"
 
     @staticmethod
-    def _sync_target_netloader_before_draft(vllm_config: VllmConfig) -> None:
+    def _sync_target_netloader_before_draft(vllm_config: VllmConfig, int8_cache: str) -> None:
+        if int8_cache == "no":
+            return
         if getattr(vllm_config, "speculative_config", None) is None:
             return
         if not torch.distributed.is_available() or not torch.distributed.is_initialized():
             return
 
-        logger.info("Waiting for all target netloader ranks before loading draft model")
+        logger.info(
+            "Waiting for all target netloader ranks before loading draft model (int8_cache=%s)",
+            int8_cache,
+        )
         barrier_start = time.perf_counter()
         torch.distributed.barrier()
         logger.info(
@@ -169,11 +235,9 @@ class ModelNetLoaderElastic(BaseModelLoader):
     def _clear_static_forward_context(vllm_config: VllmConfig) -> None:
         """Clear static layer registrations before rebuilding the model on fallback."""
         candidates = [("vllm_config", vllm_config)]
-        if get_current_vllm_config is not None:
-            try:
-                candidates.append(("current_vllm_config", get_current_vllm_config()))
-            except Exception as e:
-                logger.debug("Failed to get current vLLM config while clearing static context: %s", e)
+        current_vllm_config = get_current_vllm_config_or_none()
+        if current_vllm_config is not None:
+            candidates.append(("current_vllm_config", current_vllm_config))
 
         cleared_contexts = []
         seen_context_ids = set()
@@ -221,6 +285,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
 
         device_id = torch.distributed.get_rank()
         is_draft = self._is_draft_model(model_config)
+        load_int8_cache = "hbm" if is_draft and self.int8_cache != "no" else self.int8_cache
 
         if is_draft:
             logger.info("Loading draft model via netloader, model_path: %s", model_config.model)
@@ -253,6 +318,32 @@ class ModelNetLoaderElastic(BaseModelLoader):
                 with target_device:
                     model = initialize_model(vllm_config=vllm_config, model_config=model_config, prefix=prefix)
 
+                if load_int8_cache == "no":
+                    log_netloader_debug_checkpoint(
+                        "client_pre_recv_process_weights_begin",
+                        rank=device_id,
+                        int8_cache=load_int8_cache,
+                        device=str(device_config.device),
+                    )
+                    start_client_process_weights = time.perf_counter()
+                    with pre_transfer_weight_processing(model):
+                        process_weights_after_loading(model, model_config, torch.device(device_config.device))
+                    log_netloader_debug_checkpoint(
+                        "client_pre_recv_process_weights_end",
+                        rank=device_id,
+                        elapsed=f"{time.perf_counter() - start_client_process_weights:.6f}s",
+                    )
+                    synchronize_npu_with_debug(
+                        "client_pre_recv_post_process_weights",
+                        device_config.device_type,
+                    )
+                    manifest_count = cache_processed_layout_transfer_manifest(model)
+                    log_netloader_debug_checkpoint(
+                        "client_pre_recv_manifest_cached",
+                        rank=device_id,
+                        manifest_count=manifest_count,
+                    )
+                    log_transfer_manifest_debug_sample(model, "client_pre_recv")
                 start_elastic_load = time.perf_counter()
 
                 sources = self.source
@@ -280,10 +371,11 @@ class ModelNetLoaderElastic(BaseModelLoader):
                     tp=parallel_config.tensor_parallel_size,
                     pp=parallel_config.pipeline_parallel_size,
                     group_name="netloader_draft" if is_draft else "netloader",
+                    int8_cache=load_int8_cache,
                 )
                 end_elastic_load = time.perf_counter()
                 logger.info("Elastic load time: %s, rank: %s", end_elastic_load - start_elastic_load, device_id)
-                need_process_weights_after_loading = True
+                need_process_weights_after_loading = load_int8_cache != "no"
 
                 if model is None:
                     logger.warning("Netloader elastic loading fails, use load format DefaultModelLoader")
@@ -308,7 +400,39 @@ class ModelNetLoaderElastic(BaseModelLoader):
                         model_config, vllm_config, device_config, prefix
                     )
 
-        start_elastic_server = time.perf_counter()
+        if load_int8_cache == "no" and need_process_weights_after_loading:
+            log_netloader_debug_checkpoint(
+                "seed_process_weights_begin",
+                rank=device_id,
+                int8_cache=load_int8_cache,
+                device=str(device_config.device),
+            )
+            start_seed_process_weights = time.perf_counter()
+            process_weights_after_loading(model, model_config, torch.device(device_config.device))
+            log_netloader_debug_checkpoint(
+                "seed_process_weights_end",
+                rank=device_id,
+                elapsed=f"{time.perf_counter() - start_seed_process_weights:.6f}s",
+            )
+            synchronize_npu_with_debug(
+                "seed_post_process_weights",
+                device_config.device_type,
+            )
+            manifest_count = cache_processed_layout_transfer_manifest(model)
+            log_netloader_debug_checkpoint(
+                "seed_manifest_cached",
+                rank=device_id,
+                manifest_count=manifest_count,
+            )
+            log_transfer_manifest_debug_sample(model, "seed")
+            need_process_weights_after_loading = False
+            logger.info(
+                "Netloader seed process_weights time: %s, rank: %s",
+                time.perf_counter() - start_seed_process_weights,
+                device_id,
+            )
+
+        elastic_server = None
         # start elastic server
         if model is not None and (
             (self.listen_port and self.listen_port in range(1024, 65535)) or (self.listen_port is None)
@@ -357,7 +481,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
                         logger.error("Unknown error: %s", e)
 
                 try:
-                    server_int8_cache = "hbm" if is_draft and self.int8_cache != "no" else self.int8_cache
+                    start_elastic_server = time.perf_counter()
                     elastic_server = ElasticServer(
                         driver_ip,
                         listen_port,
@@ -366,11 +490,26 @@ class ModelNetLoaderElastic(BaseModelLoader):
                         model_config.model,
                         parallel_config.tensor_parallel_size,
                         parallel_config.pipeline_parallel_size,
-                        server_int8_cache,
+                        load_int8_cache,
                         self.int8_cache_name,
                         group_name=group_name,
                     )
+                    server_init_time = time.perf_counter() - start_elastic_server
+                    if load_int8_cache == "no":
+                        start_manifest_registration = time.perf_counter()
+                        elastic_server.register_transfer_manifest(model)
+                        logger.info(
+                            "Netloader transfer manifest registration time: %s, rank: %s",
+                            time.perf_counter() - start_manifest_registration,
+                            device_id,
+                        )
+                    start_handler = time.perf_counter()
                     elastic_server.start()
+                    logger.info(
+                        "Elastic server start time: %s, rank: %s",
+                        server_init_time + (time.perf_counter() - start_handler),
+                        device_id,
+                    )
                     if is_draft:
                         self._draft_elastic_server = elastic_server
                     else:
@@ -380,14 +519,27 @@ class ModelNetLoaderElastic(BaseModelLoader):
         else:
             logger.info("Skip to start Netloader server")
 
-        end_elastic_server = time.perf_counter()
-        logger.info("Elastic server start time: %s, rank: %s", end_elastic_server - start_elastic_server, device_id)
-
         if need_process_weights_after_loading:
+            log_netloader_debug_checkpoint(
+                "final_process_weights_begin",
+                rank=device_id,
+                int8_cache=load_int8_cache,
+                device=str(device_config.device),
+            )
+            start_final_process_weights = time.perf_counter()
             process_weights_after_loading(model, model_config, torch.device(device_config.device))
+            log_netloader_debug_checkpoint(
+                "final_process_weights_end",
+                rank=device_id,
+                elapsed=f"{time.perf_counter() - start_final_process_weights:.6f}s",
+            )
+            synchronize_npu_with_debug(
+                "final_post_process_weights",
+                device_config.device_type,
+            )
 
         if not is_draft:
-            self._sync_target_netloader_before_draft(vllm_config)
+            self._sync_target_netloader_before_draft(vllm_config, self.int8_cache)
 
         if model is None:
             logger.error("NetLoader elastic loads model fails")
