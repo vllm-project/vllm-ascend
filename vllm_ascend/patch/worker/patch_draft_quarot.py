@@ -6,6 +6,7 @@ from pathlib import Path
 import torch
 from safetensors.torch import load_file
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     process_eagle_weight,
@@ -77,6 +78,24 @@ def compute_rotataion_matrix3(Q):
     return torch.block_diag(Q, Q, Q)
 
 
+def transform_quarot_linear_weight(weight, rotation):
+    if weight.ndim != 2 or rotation.ndim != 2:
+        raise ValueError(f"Expected 2D weight and rotation, got {weight.shape=} {rotation.shape=}")
+    hidden_size = rotation.shape[0]
+    if rotation.shape[1] != hidden_size or weight.shape[1] % hidden_size != 0:
+        raise ValueError(
+            "DFlash fc input width must be a multiple of the QuaRot hidden size: "
+            f"weight={tuple(weight.shape)}, rotation={tuple(rotation.shape)}"
+        )
+
+    output = torch.empty_like(weight)
+    rotation_fp32 = rotation.to(device=weight.device, dtype=torch.float32)
+    for start in range(0, weight.shape[1], hidden_size):
+        end = start + hidden_size
+        output[:, start:end] = torch.matmul(weight[:, start:end].to(torch.float32), rotation_fp32).to(weight.dtype)
+    return output
+
+
 def patch_load_weights(target_vllm_config):
     target_model_path = Path(target_vllm_config.model_config.model)
     rotation_path = get_rotation_path(target_vllm_config)
@@ -86,6 +105,9 @@ def patch_load_weights(target_vllm_config):
         return
 
     Eagle3LlamaForCausalLM.load_weights = make_load_weights(target_model_path, rotation_path)
+    original_dflash_load_weights = DFlashQwen3ForCausalLM.load_weights
+    if not getattr(original_dflash_load_weights, "_vllm_ascend_quarot_wrapper", False):
+        DFlashQwen3ForCausalLM.load_weights = make_dflash_load_weights(rotation_path, original_dflash_load_weights)
 
 
 def make_load_weights(target_model_path, rotation_path):
@@ -142,4 +164,31 @@ def make_load_weights(target_model_path, rotation_path):
         )
         loader.load_weights(model_weights.items())
 
+    return load_weights
+
+
+def make_dflash_load_weights(rotation_path, original_load_weights):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        rotation = get_rotataion_matrix(rotation_path)
+        transformed_fc = False
+
+        def transformed_weights():
+            nonlocal transformed_fc
+            for name, loaded_weight in weights:
+                if name == "fc.weight" or name.endswith(".fc.weight"):
+                    loaded_weight = transform_quarot_linear_weight(loaded_weight, rotation)
+                    transformed_fc = True
+                    logger.info(
+                        "Applied target QuaRot rotation to DFlash fc.weight: shape=%s, rotation=%s",
+                        tuple(loaded_weight.shape),
+                        rotation_path,
+                    )
+                yield name, loaded_weight
+
+        result = original_load_weights(self, transformed_weights())
+        if not transformed_fc:
+            raise RuntimeError("DFlash checkpoint did not provide fc.weight; target QuaRot rotation was not applied")
+        return result
+
+    load_weights._vllm_ascend_quarot_wrapper = True  # type: ignore[attr-defined]
     return load_weights
