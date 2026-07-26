@@ -190,5 +190,5 @@ def make_dflash_load_weights(rotation_path, original_load_weights):
             raise RuntimeError("DFlash checkpoint did not provide fc.weight; target QuaRot rotation was not applied")
         return result
 
-    load_weights._vllm_ascend_quarot_wrapper = True
+    load_weights._vllm_ascend_quarot_wrapper = True  # type: ignore[attr-defined]
     return load_weights
