@@ -75,6 +75,8 @@
   base: attention_common
   source_file_dependencies:
     - vllm_ascend/attention/attention_v1.py
+  tests:
+    - tests/e2e/pull_request/two_card/test_gemma4.py
 
 - name: attention_fa3
   optional: false
@@ -462,6 +464,14 @@
     - tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py
     - tests/ut/spec_decode/test_speculators_vwn_eagle3.py
 
+- name: spec_decode_dspark
+  optional: false
+  base: spec_decode_base
+  source_file_dependencies:
+    - vllm_ascend/spec_decode/dspark_proposer.py
+  tests:
+    - tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py
+
 - name: spec_decode_ngram
   optional: false
   base: spec_decode_base
@@ -601,6 +611,18 @@
   tests:
     - tests/ut/
 # Single File
+- name: dependency_documentation
+  optional: true
+  cpu_only: true
+  source_file_dependencies:
+    - docs/source/community/versioning_policy.md
+    - docs/source/installation.md
+    - mkdocs.yml
+    - pyproject.toml
+    - requirements.txt
+  tests:
+    - tests/ut/test_dependency_documentation.py
+
 - name: misc
   optional: false
   source_file_dependencies:
@@ -736,7 +758,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py: 20
   tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py: 150
   tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py: 510
-  tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora_tp.py: 280
+  tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora.py: 500
   tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py: 520
   tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 740
   tests/e2e/pull_request/two_card/test_data_parallel.py: 570
@@ -765,6 +787,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py: 2040
   tests/e2e/pull_request/four_card/context_parallel/test_prefix_caching_cp.py: 210
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py: 450
+  tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py: 0
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py: 30
   tests/e2e/pull_request/four_card/test_data_parallel_tp2.py: 20
   tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py: 370
@@ -774,6 +797,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_qwen3_5.py: 610
   tests/e2e/pull_request/four_card/test_qwen3_next.py: 1180
   tests/e2e/pull_request/four_card/test_graph_mode.py: 480
+  tests/e2e/pull_request/two_card/test_gemma4.py: 1200
   tests/ut/attention/a2/test_attention_cp.py: 40
   tests/ut/attention/a2/test_attention_cp_precision.py: 30
   tests/ut/attention/a2/test_attention_v1.py: 30
