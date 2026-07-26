@@ -77,6 +77,56 @@ class Placement:
     unassigned: list[int] = field(default_factory=list)
 
 
+def _sort_active_experts(global_counts):
+    """Active experts as (load, id) sorted by (load desc, id asc) — deterministic
+    regardless of the order counts were produced in."""
+    active = [(int(global_counts[e]), e)
+              for e in range(int(global_counts.shape[0]))
+              if int(global_counts[e]) > 0]
+    active.sort(key=lambda x: (-x[0], x[1]))
+    return active
+
+
+def _plan_single_rank(global_counts, num_device_experts):
+    """ep_size==1 fallback: fill slots [0, N) with the hottest experts in load
+    order; log2phy value == slot index (rank offset 0)."""
+    global_num_experts = int(global_counts.shape[0])
+    log2phy = torch.full((global_num_experts,), -1, dtype=torch.int32)
+    per_rank_experts: list[list[int]] = [[]]
+    unassigned: list[int] = []
+    rank_load = [0]
+    for count, e in _sort_active_experts(global_counts):
+        if len(per_rank_experts[0]) >= num_device_experts:
+            unassigned.append(e)
+            continue
+        slot = len(per_rank_experts[0])
+        log2phy[e] = slot  # rank 0 => physical id == slot
+        per_rank_experts[0].append(e)
+        rank_load[0] += count
+    return Placement(log2phy=log2phy, per_rank_experts=per_rank_experts,
+                     per_rank_load=rank_load, unassigned=unassigned)
+
+
+def _assign_experts_to_ranks(active, ep_size, num_device_experts):
+    """Greedy load-balance: assign each expert to the least-loaded rank that
+    still has a free slot. Returns (rank_of, rank_load, unassigned)."""
+    rank_of = {}
+    rank_load = [0] * ep_size
+    rank_count = [0] * ep_size
+    unassigned: list[int] = []
+    for count, e in active:
+        candidates = [r for r in range(ep_size)
+                      if rank_count[r] < num_device_experts]
+        if not candidates:
+            unassigned.append(e)
+            continue
+        r = min(candidates, key=lambda r: (rank_load[r], r))
+        rank_of[e] = r
+        rank_load[r] += count
+        rank_count[r] += 1
+    return rank_of, rank_load, unassigned
+
+
 def plan_placement(
     global_counts: torch.Tensor,
     ep_size: int,
@@ -106,65 +156,18 @@ def plan_placement(
     assert ep_size >= 1, "ep_size must be >= 1"
     assert num_device_experts >= 1, "num_device_experts must be >= 1"
 
+    if ep_size == 1:
+        return _plan_single_rank(global_counts, num_device_experts)
+
     global_num_experts = int(global_counts.shape[0])
     log2phy = torch.full((global_num_experts,), -1, dtype=torch.int32)
+    active = _sort_active_experts(global_counts)
+    rank_of, rank_load, unassigned = _assign_experts_to_ranks(
+        active, ep_size, num_device_experts)
 
-    # Special case: single rank (ep_size == 1). Offload on one card just fills
-    # slots [0, num_device_experts) with the hottest experts in load order; the
-    # log2phy value equals the slot index (rank offset is 0). Keeps the planner
-    # usable for the single-card fallback path too.
-    if ep_size == 1:
-        per_rank_experts: list[list[int]] = [[]]
-        active = [
-            (int(global_counts[e]), e)
-            for e in range(global_num_experts)
-            if int(global_counts[e]) > 0
-        ]
-        active.sort(key=lambda x: (-x[0], x[1]))  # by load desc, id asc
-        unassigned: list[int] = []
-        rank_load = [0]
-        for count, e in active:
-            if len(per_rank_experts[0]) >= num_device_experts:
-                unassigned.append(e)
-                continue
-            slot = len(per_rank_experts[0])
-            log2phy[e] = slot  # rank 0 => physical id == slot
-            per_rank_experts[0].append(e)
-            rank_load[0] += count
-        return Placement(
-            log2phy=log2phy,
-            per_rank_experts=per_rank_experts,
-            per_rank_load=rank_load,
-            unassigned=unassigned,
-        )
-
-    # Active experts sorted by (load desc, id asc) — deterministic regardless of
-    # the order counts were produced in.
-    active = [
-        (int(global_counts[e]), e)
-        for e in range(global_num_experts)
-        if int(global_counts[e]) > 0
-    ]
-    active.sort(key=lambda x: (-x[0], x[1]))
-
-    # --- Rank assignment (greedy LB, unchanged): which expert -> which rank ---
-    rank_of = {}
-    rank_load = [0] * ep_size
-    rank_count = [0] * ep_size
-    unassigned = []
-    for count, e in active:
-        candidates = [r for r in range(ep_size) if rank_count[r] < num_device_experts]
-        if not candidates:
-            unassigned.append(e)
-            continue
-        r = min(candidates, key=lambda r: (rank_load[r], r))
-        rank_of[e] = r
-        rank_load[r] += count
-        rank_count[r] += 1
-
-    # --- Slot assignment (stable if prev_log2phy given) ---
-    # Experts that stay on the same rank keep their previous slot (cache hit);
-    # new experts fill freed slots, ordered by hotness desc (hotter -> priority).
+    # Slot assignment (stable if prev_log2phy given): experts staying on the
+    # same rank keep their prev slot (cache hit); new experts fill freed slots
+    # ordered by hotness desc (hotter -> priority).
     per_rank_experts = []
     for r in range(ep_size):
         active_r = [e for _c, e in active if rank_of.get(e) == r]
@@ -175,12 +178,9 @@ def plan_placement(
                 log2phy[eid] = r * num_device_experts + slot
         per_rank_experts.append(slots)
 
-    return Placement(
-        log2phy=log2phy,
-        per_rank_experts=per_rank_experts,
-        per_rank_load=rank_load,
-        unassigned=unassigned,
-    )
+    return Placement(log2phy=log2phy, per_rank_experts=per_rank_experts,
+                     per_rank_load=rank_load, unassigned=unassigned)
+
 
 
 def _assign_slots_stable(active_r, rank, num_device_experts,
