@@ -413,6 +413,20 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         " embed_tokens weights. Keeping separate embedding weights"
                         " from the target model."
                     )
+            elif self.method == "dflash":
+                if not getattr(self.model, "has_own_embed_tokens", True):
+                    share_embeddings = True
+                    logger.info(
+                        "[spec_decode/base] Detected DFlash model without its own"
+                        " embed_tokens. Sharing target model embedding weights with"
+                        " the draft model."
+                    )
+                else:
+                    logger.info(
+                        "[spec_decode/base] Detected DFlash model with its own"
+                        " embed_tokens. Keeping the checkpoint embedding weights"
+                        " in the unrotated draft space."
+                    )
             elif self.method == "dspark":
                 if not getattr(self.model, "has_own_embed_tokens", True):
                     share_embeddings = True
