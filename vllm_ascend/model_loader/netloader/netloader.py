@@ -19,7 +19,7 @@ import json
 import time
 from contextlib import contextmanager
 from copy import deepcopy
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import torch
 from torch import nn
@@ -31,12 +31,7 @@ from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.utils import initialize_model, process_weights_after_loading
 from vllm.utils.torch_utils import set_default_torch_dtype
 
-from .executor.elastic_load import (
-    cache_processed_layout_transfer_manifest,
-    log_netloader_debug_checkpoint,
-    log_transfer_manifest_debug_sample,
-    synchronize_npu_with_debug,
-)
+from .executor.elastic_load import cache_processed_layout_transfer_manifest, synchronize_npu
 from .interaction.elastic import ElasticServer
 from .load import elastic_load
 from .utils import find_free_port, is_valid_path_prefix
@@ -46,16 +41,9 @@ DRAFT_PORT_OFFSET = 10000
 
 @contextmanager
 def pre_transfer_weight_processing(model: nn.Module):
-    """Bypass FusedMoE post-load validation during netloader pre-transfer layout work.
-
-    Ascend FusedMoE wraps ``quant_method.process_weights_after_loading`` with a
-    shared-expert consistency check. Netloader ``int8_cache=no`` calls
-    ``process_weights_after_loading`` before receiver weights arrive, so only that
-    phase should use the wrapped function's original implementation saved by
-    ``functools.wraps``.
-    """
+    """Unwrap FusedMoE shared-expert validation during pre-transfer process_weights."""
     try:
-        from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
+        from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE  # type: ignore[attr-defined]
     except ImportError:
         AscendFusedMoE = None  # type: ignore[misc, assignment]
 
@@ -90,12 +78,6 @@ def pre_transfer_weight_processing(model: nn.Module):
         if AscendMoERunner is not None and isinstance(runner, AscendMoERunner):
             _unwrap_quant_method(getattr(runner, "_quant_method", None))
 
-    if restored:
-        logger.info(
-            "[netloader][debug] pre_transfer_weight_processing unwrapped quant_methods=%s",
-            len(restored),
-        )
-
     try:
         yield
     finally:
@@ -108,6 +90,10 @@ class ModelNetLoaderElastic(BaseModelLoader):
     """
     A model loader that uses elastic loading for loading weights.
     """
+
+    # Shared across loader instances in one worker: draft uses a separate
+    # draft_vllm_config, so an instance/config flag would not be visible there.
+    _target_elastic_fallback: ClassVar[bool] = False
 
     source: list[dict] | None
     model_path: str | None
@@ -232,34 +218,52 @@ class ModelNetLoaderElastic(BaseModelLoader):
         return static_forward_context
 
     @staticmethod
-    def _clear_static_forward_context(vllm_config: VllmConfig) -> None:
-        """Clear static layer registrations before rebuilding the model on fallback."""
+    def _iter_static_forward_contexts(vllm_config: VllmConfig):
+        """Yield unique (source_name, context_dict) pairs for this and current vllm config."""
         candidates = [("vllm_config", vllm_config)]
         current_vllm_config = get_current_vllm_config_or_none()
         if current_vllm_config is not None:
             candidates.append(("current_vllm_config", current_vllm_config))
 
-        cleared_contexts = []
-        seen_context_ids = set()
+        seen_context_ids: set[int] = set()
         for source, config in candidates:
             static_forward_context = ModelNetLoaderElastic._get_static_forward_context(config)
             if static_forward_context is None:
                 continue
-
             context_id = id(static_forward_context)
             if context_id in seen_context_ids:
                 continue
             seen_context_ids.add(context_id)
+            yield source, static_forward_context
 
+    @staticmethod
+    def _snapshot_static_forward_context_keys(vllm_config: VllmConfig) -> dict[int, set[Any]]:
+        """Snapshot context keys before initialize_model so fallback can drop only new ones."""
+        snapshots: dict[int, set[Any]] = {}
+        for _, static_forward_context in ModelNetLoaderElastic._iter_static_forward_contexts(vllm_config):
             try:
-                context_size = str(len(static_forward_context))
+                snapshots[id(static_forward_context)] = set(static_forward_context.keys())
             except TypeError:
-                context_size = "unknown"
-            static_forward_context.clear()
-            cleared_contexts.append(f"{source}:{context_size}")
+                snapshots[id(static_forward_context)] = set()
+        return snapshots
 
-        if cleared_contexts:
-            logger.info("Cleared static_forward_context before fallback: %s", cleared_contexts)
+    @staticmethod
+    def _remove_new_static_forward_context_keys(vllm_config: VllmConfig, snapshots: dict[int, set[Any]]) -> None:
+        """Remove keys added after snapshot; preserve target registrations on draft fallback."""
+        removed_contexts = []
+        for source, static_forward_context in ModelNetLoaderElastic._iter_static_forward_contexts(vllm_config):
+            keep_keys = snapshots.get(id(static_forward_context), set())
+            new_keys = [key for key in list(static_forward_context.keys()) if key not in keep_keys]
+            for key in new_keys:
+                del static_forward_context[key]
+            if new_keys:
+                removed_contexts.append(f"{source}:{len(new_keys)}")
+
+        if removed_contexts:
+            logger.info(
+                "Removed new static_forward_context keys before fallback: %s",
+                removed_contexts,
+            )
 
     def load_model(self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = "") -> nn.Module:
         """
@@ -292,16 +296,28 @@ class ModelNetLoaderElastic(BaseModelLoader):
         else:
             logger.info("Loading target model via netloader, model_path: %s", model_config.model)
 
-        if (
-            self.source is None
-            or not isinstance(self.source, list)
-            or device_id
-            not in [
+        # After target elastic fallback, skip another draft P2P attempt on the same rank.
+        skip_draft_elastic = is_draft and ModelNetLoaderElastic._target_elastic_fallback
+        has_valid_source = (
+            self.source is not None
+            and isinstance(self.source, list)
+            and device_id
+            in [
                 one_device["device_id"]
                 for one_device in self.source
                 if isinstance(one_device, dict) and "device_id" in one_device
             ]
-        ):
+        )
+
+        if skip_draft_elastic:
+            logger.warning(
+                "Target netloader already fell back to DefaultModelLoader; "
+                "skip draft elastic load and use DefaultModelLoader"
+            )
+            model, need_process_weights_after_loading = self.revert_to_default(
+                model_config, vllm_config, device_config, prefix
+            )
+        elif not has_valid_source:
             logger.warning("Did not get valid source info, use DefaultModelLoader")
             model, need_process_weights_after_loading = self.revert_to_default(
                 model_config, vllm_config, device_config, prefix
@@ -313,40 +329,32 @@ class ModelNetLoaderElastic(BaseModelLoader):
             _quant_config = getattr(vllm_config, "quant_config", None)
             _quant_config = deepcopy(_quant_config) if _quant_config is not None else None
             model_config_backup = deepcopy(model_config)
+            context_key_snapshot = self._snapshot_static_forward_context_keys(vllm_config)
+            from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
+
+            moe_layer_count_snapshot = len(VllmEplbAdaptor._registered_moe_layers)
 
             with set_default_torch_dtype(model_config.dtype):
                 with target_device:
                     model = initialize_model(vllm_config=vllm_config, model_config=model_config, prefix=prefix)
 
                 if load_int8_cache == "no":
-                    log_netloader_debug_checkpoint(
-                        "client_pre_recv_process_weights_begin",
-                        rank=device_id,
-                        int8_cache=load_int8_cache,
-                        device=str(device_config.device),
-                    )
                     start_client_process_weights = time.perf_counter()
                     with pre_transfer_weight_processing(model):
                         process_weights_after_loading(model, model_config, torch.device(device_config.device))
-                    log_netloader_debug_checkpoint(
-                        "client_pre_recv_process_weights_end",
-                        rank=device_id,
-                        elapsed=f"{time.perf_counter() - start_client_process_weights:.6f}s",
-                    )
-                    synchronize_npu_with_debug(
-                        "client_pre_recv_post_process_weights",
-                        device_config.device_type,
-                    )
+                    synchronize_npu(device_config.device_type)
                     manifest_count = cache_processed_layout_transfer_manifest(model)
-                    log_netloader_debug_checkpoint(
-                        "client_pre_recv_manifest_cached",
-                        rank=device_id,
-                        manifest_count=manifest_count,
+                    logger.info(
+                        "Netloader client pre-recv process_weights time: %s, rank: %s, manifest=%s",
+                        time.perf_counter() - start_client_process_weights,
+                        device_id,
+                        manifest_count,
                     )
-                    log_transfer_manifest_debug_sample(model, "client_pre_recv")
                 start_elastic_load = time.perf_counter()
 
-                sources = self.source
+                # Narrowed by has_valid_source above.
+                assert self.source is not None
+                sources: list[dict] = self.source
                 if is_draft:
                     sources = [
                         {
@@ -359,12 +367,13 @@ class ModelNetLoaderElastic(BaseModelLoader):
                                 and parts[1].isdigit()
                             ],
                         }
-                        for s in self.source
+                        for s in sources
                         if isinstance(s, dict) and "device_id" in s
                     ]
 
+                elastic_model = model
                 model = elastic_load(
-                    model=model,
+                    model=elastic_model,
                     device_id=device_id,
                     model_path=model_config.model,
                     sources=sources,
@@ -384,52 +393,45 @@ class ModelNetLoaderElastic(BaseModelLoader):
                         vllm_config.quant_config = _quant_config
                     model_config = model_config_backup
 
-                    del model
+                    # Drop layer refs before reclaiming memory. MoE experts are also
+                    # held by VllmEplbAdaptor._registered_moe_layers.
+                    self._remove_new_static_forward_context_keys(vllm_config, context_key_snapshot)
+                    del VllmEplbAdaptor._registered_moe_layers[moe_layer_count_snapshot:]
+                    del elastic_model
                     gc.collect()
                     if device_config.device_type == "npu":
                         logger.info("Empty NPU cache")
                         torch.npu.empty_cache()
+                        for _ in range(3):
+                            gc.collect()
+                            torch.npu.empty_cache()
                     elif device_config.device_type == "cuda":
                         logger.info("Empty CUDA cache")
                         torch.cuda.empty_cache()
+                        for _ in range(3):
+                            gc.collect()
+                            torch.cuda.empty_cache()
 
-                    # Clear registrations from the failed initialize_model
-                    self._clear_static_forward_context(vllm_config)
+                    if not is_draft:
+                        ModelNetLoaderElastic._target_elastic_fallback = True
 
                     model, need_process_weights_after_loading = self.revert_to_default(
                         model_config, vllm_config, device_config, prefix
                     )
+                elif not is_draft:
+                    ModelNetLoaderElastic._target_elastic_fallback = False
 
         if load_int8_cache == "no" and need_process_weights_after_loading:
-            log_netloader_debug_checkpoint(
-                "seed_process_weights_begin",
-                rank=device_id,
-                int8_cache=load_int8_cache,
-                device=str(device_config.device),
-            )
             start_seed_process_weights = time.perf_counter()
             process_weights_after_loading(model, model_config, torch.device(device_config.device))
-            log_netloader_debug_checkpoint(
-                "seed_process_weights_end",
-                rank=device_id,
-                elapsed=f"{time.perf_counter() - start_seed_process_weights:.6f}s",
-            )
-            synchronize_npu_with_debug(
-                "seed_post_process_weights",
-                device_config.device_type,
-            )
+            synchronize_npu(device_config.device_type)
             manifest_count = cache_processed_layout_transfer_manifest(model)
-            log_netloader_debug_checkpoint(
-                "seed_manifest_cached",
-                rank=device_id,
-                manifest_count=manifest_count,
-            )
-            log_transfer_manifest_debug_sample(model, "seed")
             need_process_weights_after_loading = False
             logger.info(
-                "Netloader seed process_weights time: %s, rank: %s",
+                "Netloader seed process_weights time: %s, rank: %s, manifest=%s",
                 time.perf_counter() - start_seed_process_weights,
                 device_id,
+                manifest_count,
             )
 
         elastic_server = None
@@ -520,22 +522,13 @@ class ModelNetLoaderElastic(BaseModelLoader):
             logger.info("Skip to start Netloader server")
 
         if need_process_weights_after_loading:
-            log_netloader_debug_checkpoint(
-                "final_process_weights_begin",
-                rank=device_id,
-                int8_cache=load_int8_cache,
-                device=str(device_config.device),
-            )
             start_final_process_weights = time.perf_counter()
             process_weights_after_loading(model, model_config, torch.device(device_config.device))
-            log_netloader_debug_checkpoint(
-                "final_process_weights_end",
-                rank=device_id,
-                elapsed=f"{time.perf_counter() - start_final_process_weights:.6f}s",
-            )
-            synchronize_npu_with_debug(
-                "final_post_process_weights",
-                device_config.device_type,
+            synchronize_npu(device_config.device_type)
+            logger.info(
+                "Netloader final process_weights time: %s, rank: %s",
+                time.perf_counter() - start_final_process_weights,
+                device_id,
             )
 
         if not is_draft:

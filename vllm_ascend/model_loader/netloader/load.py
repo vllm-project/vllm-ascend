@@ -18,7 +18,7 @@ import time
 
 from vllm.logger import logger
 
-from .executor.elastic_load import P2PLoad, log_netloader_debug_checkpoint
+from .executor.elastic_load import P2PLoad
 from .interaction.elastic import ElasticClient
 
 
@@ -83,18 +83,6 @@ def elastic_load(
                 raise RuntimeError("ElasticClient.register did not return ack")
 
             start_p2p_load = time.perf_counter()
-            log_netloader_debug_checkpoint(
-                "client_p2p_load_begin",
-                rank=device_id,
-                int8_cache=int8_cache,
-                group=group_name,
-                transfer_processed_layout=int8_cache == "no",
-                manifest_count=(
-                    len(client_interaction_layer.transfer_shape_manifest)
-                    if client_interaction_layer.transfer_shape_manifest is not None
-                    else 0
-                ),
-            )
             elastic_loader = P2PLoad(
                 ack[0],
                 client_interaction_layer.server_addr,
@@ -107,13 +95,6 @@ def elastic_load(
             if model_loaded is None:
                 logger.error("Failed to load model")
                 return None
-            log_netloader_debug_checkpoint(
-                "client_p2p_load_end",
-                rank=device_id,
-                int8_cache=int8_cache,
-                group=group_name,
-                elapsed=f"{time.perf_counter() - start_p2p_load:.6f}s",
-            )
             logger.info(
                 "Netloader P2P load time: %s, device_id: %s, group: %s",
                 time.perf_counter() - start_p2p_load,

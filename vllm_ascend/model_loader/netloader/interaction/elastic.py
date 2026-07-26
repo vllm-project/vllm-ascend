@@ -18,6 +18,7 @@ import json
 import socket
 import threading
 from contextlib import suppress
+from typing import Any
 
 import regex as re
 import torch
@@ -27,7 +28,6 @@ from ..executor.elastic_load import (
     P2PSend,
     build_transfer_shape_manifest,
     get_cached_processed_layout_transfer_items,
-    get_cached_processed_layout_transfer_shapes,
     register_processed_layout_transfer_items,
 )
 from ..utils import find_free_port
@@ -194,20 +194,11 @@ class ElasticClient:
             raise RuntimeError("Socket was not created correctly.")
         self.s.send(data_str.encode("utf-8"))
 
-    def recv_str(self, buffer_size: int = 65536) -> str:
-        """
-        Receives a string over the socket connection.
-
-        Parameters:
-        - buffer_size: The size of the buffer for receiving data.
-
-        Returns:
-        - The received string.
-        """
+    def recv_json(self) -> dict:
+        """Receive one JSON object over the socket connection."""
         if self.s is None:
             raise RuntimeError("Socket was not created correctly.")
-        payload = _recv_json_message(self.s)
-        return json.dumps(payload)
+        return _recv_json_message(self.s)
 
     def register(self, device_id: int, model_path: str, tp: int, pp: int) -> tuple[str, int]:
         """
@@ -242,14 +233,9 @@ class ElasticClient:
             raise RuntimeError(f"Send data {data} to server fails, detail: {e}")
 
         try:
-            ack_str = self.recv_str()
+            ack = self.recv_json()
         except Exception as e:
             raise RuntimeError(f"Receive data from server fails, detail: {e}")
-
-        try:
-            ack = json.loads(ack_str)
-        except Exception as e:
-            raise RuntimeError(f"Receive data {ack_str} cannot be converted to JSON format, detail: {e}")
 
         logger.info("Receive ack: %s", ack)
 
@@ -262,12 +248,6 @@ class ElasticClient:
         ):
             content = ack["content"]
             self.transfer_shape_manifest = _parse_transfer_shape_manifest(content.get("transfer_shapes"))
-            if content.get("transfer_count") is not None and self.transfer_shape_manifest is not None:
-                if int(content["transfer_count"]) != len(self.transfer_shape_manifest):
-                    raise RuntimeError(
-                        "JOIN_ACK transfer_count does not match transfer_shapes size: "
-                        f"{content['transfer_count']} vs {len(self.transfer_shape_manifest)}"
-                    )
             return (content["name"], free_port)
         elif "label" in ack and ack["label"] == "JOIN_NACK" and "content" in ack:
             raise RuntimeError(f"Receive nack from server, reason: {ack['content']}")
@@ -370,9 +350,7 @@ class ElasticServer:
 
         cached_items = get_cached_processed_layout_transfer_items(model)
         self._registered_transfer_items = register_processed_layout_transfer_items(model)
-        self._registered_transfer_shapes = get_cached_processed_layout_transfer_shapes(model)
-        if self._registered_transfer_shapes is None:
-            self._registered_transfer_shapes = build_transfer_shape_manifest(self._registered_transfer_items)
+        self._registered_transfer_shapes = build_transfer_shape_manifest(self._registered_transfer_items)
         logger.info(
             "[netloader_p2p] registered transfer manifest count=%s cache_hit=%s rank=%s group=%s",
             len(self._registered_transfer_items),
@@ -452,6 +430,7 @@ class ElasticServer:
             return isinstance(port, int) or (isinstance(port, str) and port.isdigit())
 
         comm_name = None
+        ack: dict[str, Any]
         if is_valid_data(data):
             device_id = int(data["content"]["device_id"])
             model_path = data["content"]["model_path"]
@@ -474,13 +453,12 @@ class ElasticServer:
                     }
                 else:
                     comm_name = str(addr[0]) + ":" + str(addr[1])
-                    ack_content: dict[str, object] = {"name": comm_name}
+                    ack_content: dict[str, Any] = {"name": comm_name}
                     if (
                         self.int8_cache == "no"
                         and self._registered_transfer_items is not None
                         and self._registered_transfer_shapes is not None
                     ):
-                        ack_content["transfer_count"] = len(self._registered_transfer_items)
                         ack_content["transfer_shapes"] = {
                             name: list(shape) for name, shape in self._registered_transfer_shapes.items()
                         }
