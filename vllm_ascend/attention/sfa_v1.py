@@ -672,10 +672,10 @@ class AscendSFAImpl(MLAAttentionImpl):
         cann_version = getattr(torch.version, "cann", None)
         if cann_version is not None:
             from packaging.version import Version
+
             sfa_prolog_v3_supported = Version(cann_version) >= Version("9.1.0")
         else:
             sfa_prolog_v3_supported = False
-        sfa_prolog_v3_supported = torch.version.cann == "9.1.0"
         self.enable_sfa_prolog_v3 = (
             sfa_prolog_v3_supported
             and self.is_kv_consumer
