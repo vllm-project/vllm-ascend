@@ -4669,8 +4669,8 @@ class NPUModelRunner(GPUModelRunner):
                 # All layers in the UniformTypeKVCacheSpecs have the same type,
                 # Pick an arbitrary one to dispatch.
                 kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
-            if isinstance(kv_cache_spec, SlidingWindowMLASpec) and kv_cache_spec.block_size < 8:
-                self.kernel_block_sizes.append([0])   # same as Mamba，no slot mapping
+            if isinstance(kv_cache_spec, AscendSlidingWindowMLASpec) and kv_cache_spec.block_size < 8:
+                self.kernel_block_sizes.append([0])   # same as Mamba, no slot mapping
                 continue
             if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
                 continue
