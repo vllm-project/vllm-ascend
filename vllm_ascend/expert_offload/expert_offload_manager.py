@@ -1341,7 +1341,7 @@ class ExpertOffloadManager:
         if current_compute_stream not in subscribed:
             torch_npu.npu._subscribe_report(current_compute_stream)
             subscribed.add(current_compute_stream)
-        args = (topk_ids_h, log2phy_h, layer, layer_idx, per_rank_slots)
+        args = (topk_ids_h, log2phy_h, layer, layer_idx, per_rank_slots, False)
         if _EXTRA_CTX.capturing:
             torch_npu.npu._launch_host_func(
                 current_compute_stream, self._update_weights_multi_card, args)
@@ -1381,7 +1381,7 @@ class ExpertOffloadManager:
         the compute stream), and writes placement.log2phy into the pinned
         log2phy_h (the wrapper H2D-copies it back to the NPU tensor).
         """
-        (topk_ids_h, log2phy_h, layer, layer_idx, per_rank_slots) = args
+        (topk_ids_h, log2phy_h, layer, layer_idx, per_rank_slots, is_prefetch) = args
         from vllm_ascend.expert_offload.multi_card_planner import plan_placement
         from vllm.distributed.parallel_state import get_ep_group
         cpu_group = get_ep_group().cpu_group if self.ep_size > 1 else None
@@ -1424,7 +1424,7 @@ class ExpertOffloadManager:
             self._h2d_load_mc_misses(layer, layer_idx, misses, resident_map)
         if self._debug:
             self._log_mc_decode_cache(layer_idx, my_experts, hits, misses,
-                                      resident_map)
+                                      resident_map, is_prefetch)
         # Write the FULL global placement into the pinned log2phy_h; the wrapper
         # H2D-copies it back to the NPU log2phy. Must be the FULL placement (not
         # just this rank) so MC2 routes tokens cross-rank correctly — writing only
@@ -1521,15 +1521,16 @@ class ExpertOffloadManager:
             self.load_stream.synchronize()
 
     def _log_mc_decode_cache(self, layer_idx, my_experts, hits, misses,
-                             resident_map):
+                             resident_map, is_prefetch=False):
         if not self._debug:
             return
         logger.info(
             "[MC_OBS] rank=%s L=%s DECODE cache: placed=%d hit=%d miss=%d | "
-            "resident_experts_on_rank%d=%s | miss_load_from_cpu{slot->expert}=%s",
+            "resident_experts_on_rank%d=%s | miss_load_from_cpu{slot->expert}=%s "
+            "| prefetch=%s",
             self.ep_rank, layer_idx, len(my_experts), len(hits), len(misses),
             self.ep_rank, sorted(resident_map.values()),
-            {s: e for s, e in misses})
+            {s: e for s, e in misses}, is_prefetch)
 
     def _update_weights(self, args):
         (
@@ -1767,7 +1768,7 @@ class ExpertOffloadManager:
         if self.enable_multi_card:
             per_rank_slots = self.num_device_experts // self.ep_size
             return self._update_weights_multi_card, (
-                topk_ids_h, log2phy_h, next_layer, next_idx, per_rank_slots)
+                topk_ids_h, log2phy_h, next_layer, next_idx, per_rank_slots, True)
         return self._update_weights, (
             topk_ids_h, log2phy_np, next_layer, next_idx, topk_weights_h,
             self._is_prefetch)
