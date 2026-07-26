@@ -107,9 +107,15 @@ def _plan_single_rank(global_counts, num_device_experts):
                      per_rank_load=rank_load, unassigned=unassigned)
 
 
-def _assign_experts_to_ranks(active, ep_size, num_device_experts):
-    """Greedy load-balance: assign each expert to the least-loaded rank that
-    still has a free slot. Returns (rank_of, rank_load, unassigned)."""
+def _assign_experts_to_ranks(active, ep_size, num_device_experts,
+                             prev_rank_of=None):
+    """Assign each expert to a rank. Residence-aware: an expert that was on a
+    rank last step (``prev_rank_of``) stays there — no cross-rank move means no
+    redundant re-H2D on the new rank (the expert is already physically resident
+    on its home rank). Genuinely-new experts (not in prev_rank_of, or whose home
+    rank is full) go to the least-loaded rank (LB). Deterministic, so every rank
+    computes the same assignment. Returns (rank_of, rank_load, unassigned)."""
+    prev_rank_of = prev_rank_of or {}
     rank_of = {}
     rank_load = [0] * ep_size
     rank_count = [0] * ep_size
@@ -120,7 +126,9 @@ def _assign_experts_to_ranks(active, ep_size, num_device_experts):
         if not candidates:
             unassigned.append(e)
             continue
-        r = min(candidates, key=lambda r: (rank_load[r], r))
+        home = prev_rank_of.get(e)
+        r = home if home in candidates else min(
+            candidates, key=lambda r: (rank_load[r], r))
         rank_of[e] = r
         rank_load[r] += count
         rank_count[r] += 1
@@ -162,8 +170,18 @@ def plan_placement(
     global_num_experts = int(global_counts.shape[0])
     log2phy = torch.full((global_num_experts,), -1, dtype=torch.int32)
     active = _sort_active_experts(global_counts)
+    # Residence map from last step's placement: expert -> the rank it was on
+    # (physical id // per_rank_slots). Feeding this to _assign_experts_to_ranks
+    # keeps experts on their home rank (no cross-rank move -> no redundant
+    # re-H2D); only genuinely-new experts are LB-distributed.
+    prev_rank_of = {}
+    if prev_log2phy is not None:
+        for expert, pid in enumerate(prev_log2phy.tolist()):
+            pid = int(pid)
+            if pid >= 0:
+                prev_rank_of[expert] = pid // num_device_experts
     rank_of, rank_load, unassigned = _assign_experts_to_ranks(
-        active, ep_size, num_device_experts)
+        active, ep_size, num_device_experts, prev_rank_of)
 
     # Slot assignment (stable if prev_log2phy given): experts staying on the
     # same rank keep their prev slot (cache hit); new experts fill freed slots
