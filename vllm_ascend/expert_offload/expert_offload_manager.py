@@ -1273,6 +1273,14 @@ class ExpertOffloadManager:
             layer_idx = self.moe_layers.index(layer)
         except ValueError:
             return
+        # Wait for this layer's prefetch (if any) to finish H2D before reading
+        # the device slots — mirror the single-card update_weights stream-join
+        # (graphable: stream wait_event, not host sync). Without it the reactive
+        # GMM could read a slot before the prefetch's load_stream H2D lands.
+        with self._prefetch_state_lock:
+            npu_event = self._prefetch_layer_npu_event.pop(layer_idx, None)
+        if npu_event is not None:
+            torch_npu.npu.current_stream().wait_event(npu_event)
         # num_device_experts is the TOTAL slot count; physical_range (the global
         # physical-id space MC2 routes over) == total, and each rank holds
         # num_device_experts//ep_size slots (== planner capacity per rank).
@@ -1704,61 +1712,62 @@ class ExpertOffloadManager:
         topk_ids_h.copy_(topk_ids.to(torch.int32), non_blocking=_EXTRA_CTX.capturing)
         log2phy_h.copy_(log2phy, non_blocking=_EXTRA_CTX.capturing)
 
+        # Graph-compatible dispatch (mirrors the update_weights reactive path:
+        # NO stream switch). The previous `with stream(self._prefetch_stream)`
+        # changed the current stream mid-capture and broke NPU graph capture_end
+        # (error 107025). Instead: record ready_to_load_event on the compute
+        # stream, then _launch_host_func registers the prefetch as a host
+        # callback (re-run every replay) on the compute stream. The callback
+        # runs the planner+H2D inner — which uses load_stream internally for
+        # overlap with subsequent compute — and records load_done_event on
+        # load_stream for the next layer's reactive to stream-join. Eager mode
+        # still overlaps via the prefetch stream.
+        current_compute_stream = torch_npu.npu.current_stream()
         ready_to_load_event = torch_npu.npu.Event()
-        torch_npu.npu.current_stream().record_event(ready_to_load_event) 
-        with torch_npu.npu.stream(self._prefetch_stream):
-            self._prefetch_stream.wait_event(ready_to_load_event)
+        current_compute_stream.record_event(ready_to_load_event)
+        subscribed_compute_streams = get_subscribed_compute_streams()
+        if current_compute_stream not in subscribed_compute_streams:
+            torch_npu.npu._subscribe_report(current_compute_stream)
+            subscribed_compute_streams.add(current_compute_stream)
+        self._is_prefetch = True
+        if self.enable_multi_card:
+            per_rank_slots = self.num_device_experts // self.ep_size
+            inner = self._update_weights_multi_card
+            inner_args = (
+                topk_ids_h,
+                log2phy_h,
+                next_layer,
+                next_idx,
+                per_rank_slots,
+            )
+        else:
+            inner = self._update_weights
+            inner_args = (
+                topk_ids_h,
+                log2phy_np,
+                next_layer,
+                next_idx,
+                topk_weights_h,
+                self._is_prefetch,
+            )
+        nxt = next_idx
 
-            current_compute_stream = torch_npu.npu.current_stream()
-            subscribed_compute_streams = get_subscribed_compute_streams()
-            if current_compute_stream not in subscribed_compute_streams:
-                torch_npu.npu._subscribe_report(current_compute_stream)
-                subscribed_compute_streams.add(current_compute_stream)
-            self._is_prefetch = True
-            if self.enable_multi_card:
-                # Multi-card pregate: run the next layer's placement + per-rank
-                # H2D (all_reduce predicted counts -> plan_placement -> load
-                # misses -> write log2phy_h) on the prefetch stream, reusing
-                # _update_weights_multi_card. The reactive call for the next
-                # layer (real topk) re-plans and skips H2D for experts already
-                # loaded here via the _mc_resident cache. The gloo all_reduce
-                # stays globally ordered: prefetch(N+1) is launched at the end
-                # of layer N and the reactive(N+1) call joins this prefetch's
-                # load_done_event, so every rank sequences reactive then prefetch
-                # per layer (model forward is lockstep across ranks).
-                per_rank_slots = self.num_device_experts // self.ep_size
-                inner = self._update_weights_multi_card
-                inner_args = (
-                    topk_ids_h,
-                    log2phy_h,
-                    next_layer,
-                    next_idx,
-                    per_rank_slots,
-                )
-            else:
-                inner = self._update_weights
-                inner_args = (
-                    topk_ids_h,
-                    log2phy_np,
-                    next_layer,
-                    next_idx,
-                    topk_weights_h,
-                    self._is_prefetch,
-                )
-            if _EXTRA_CTX.capturing:
-                torch_npu.npu._launch_host_func(
-                    current_compute_stream,
-                    inner,
-                    inner_args,
-                )
-            else:
-                inner(inner_args)
-                
-            # 记录一个传输流完成的事件，用于后续主流和它汇聚
-            load_done_event = torch_npu.npu.Event()
-            self._prefetch_stream.record_event(load_done_event)
+        def _prefetch_host_cb(_args):
+            inner(_args)
+            # inner ends with load_stream.synchronize() -> H2D complete; record
+            # on load_stream so the next reactive (compute stream) can wait it.
+            ev = torch_npu.npu.Event()
+            self.load_stream.record_event(ev)
             with self._prefetch_state_lock:
-                self._prefetch_layer_npu_event[next_idx] = load_done_event
+                self._prefetch_layer_npu_event[nxt] = ev
+
+        if _EXTRA_CTX.capturing:
+            torch_npu.npu._launch_host_func(
+                current_compute_stream, _prefetch_host_cb, inner_args)
+        else:
+            with torch_npu.npu.stream(self._prefetch_stream):
+                self._prefetch_stream.wait_event(ready_to_load_event)
+                _prefetch_host_cb(inner_args)
 
         log2phy.copy_(log2phy_h, non_blocking=_EXTRA_CTX.capturing)
 
