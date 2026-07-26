@@ -1053,12 +1053,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             if get_ascend_device_type() == AscendDeviceType.A5:
                 self._process_weights_for_fused_mlapo_a5(act_dtype)
             elif self._mlapo_should_persist_derived():
-                # The source weights (fused_qkv_a_proj / q_proj weight, deq_scale,
-                # quant_bias) were freed at cold start, so the transformed MLAPO
-                # tensors cannot be re-derived here. They were persisted as
-                # buffers and already refreshed in-place by ``restore_model``;
-                # just re-point the impl attributes at them and recompute only
-                # the cheap, always-rebuildable tensors.
+                # The transformed MLAPO tensors were persisted as buffers and
+                # already refreshed in-place by ``restore_model``. Re-point the
+                # impl attributes at them and recompute only the cheap,
+                # always-rebuildable tensors.
                 self._rebind_persistent_mlapo_buffers()
                 self._derive_mlapo_rebuildable(act_dtype)
             else:
@@ -1096,14 +1094,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         # The transformed MLAPO tensors below (wd_qkv / deq_scale_qkv /
         # quant_bias_qkv / wu_q / qb_deq_scl / qb_qt_bias) are derived from the
         # ``fused_qkv_a_proj`` / ``q_proj`` weight, deq_scale and quant_bias.
-        # On KV consumers those *source* params are freed right after this
-        # derivation to save memory (see the ``persist`` branch at the end of
-        # ``_process_weights_for_fused_mlapo``). Once freed they can never be
-        # re-derived after a snapshot restore, so on exactly those instances the
-        # derived tensors must be persisted as buffers (serialized in
-        # ``state_dict`` and restored by ``restore_model``) instead of being
-        # recomputed. Anywhere else the sources survive, so recomputation is
-        # fine and we avoid bloating the snapshot with duplicate weights.
+        # Persist them on KV consumers so they are serialized in ``state_dict``
+        # and restored verbatim by ``restore_model``. The source parameters must
+        # remain available as well: the existing forward routing can fall back
+        # to ``_mla_preprocess`` for prefill/mixed batches, and that path invokes
+        # the original W8A8 Linear modules.
         return (
             self.vllm_config.kv_transfer_config is not None
             and self.vllm_config.kv_transfer_config.is_kv_consumer
@@ -1221,19 +1216,6 @@ class AscendMLAImpl(MLAAttentionImpl):
                 setattr(self, attr_name, derived[attr_name])
 
         self._derive_mlapo_rebuildable(act_dtype)
-
-        # On KV consumers (decode-only) MLAPO uses the transformed weights built above;
-        # the original fused_qkv_a_proj/q_proj weights and quant params are no longer
-        # referenced, so drop them to save memory. The transformed tensors were
-        # persisted as buffers above so they survive suspend/resume.
-        if persist:
-            self.fused_qkv_a_proj.weight = None  # type: ignore[union-attr]
-            self.fused_qkv_a_proj.deq_scale = None  # type: ignore[union-attr]
-            self.fused_qkv_a_proj.quant_bias = None  # type: ignore[union-attr]
-            self.q_proj.weight = None
-            self.q_proj.deq_scale = None
-            self.q_proj.quant_bias = None
-            torch.npu.empty_cache()
 
     def _process_weights_for_fused_mlapo_a5(self, act_dtype: torch.dtype):
         assert self.fused_qkv_a_proj is not None
