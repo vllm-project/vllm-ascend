@@ -637,6 +637,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             self.routed_experts.global_num_experts = self.global_num_experts
             self.routed_experts.enable_expert_offload = self.enable_expert_offload
             self.routed_experts.enable_multi_card = self.enable_multi_card
+            # Propagate log2phy onto routed_experts (same tensor object — the
+            # planner rewrites it in place via copy_) so pregate's
+            # next_layer.log2phy resolves: moe_layers stores routed_experts in
+            # v0.25.1 (not the runner, which owns log2phy).
+            self.routed_experts.log2phy = self.log2phy
             self._wrap_weight_loader_for_offload()
             # Source create_weights params from where main actually keeps them:
             # moe_config / routed_experts, NOT the runner (main moved

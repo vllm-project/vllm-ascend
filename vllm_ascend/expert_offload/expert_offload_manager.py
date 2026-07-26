@@ -1650,12 +1650,14 @@ class ExpertOffloadManager:
 
         # Predict from the first token only — one representative token's
         # experts is enough for prefetch; others are handled reactively by
-        # update_weights().
+        # update_weights(). prefetch_topk (= min(topk, expert_prefetch_num))
+        # caps how many experts are prefetched per layer — single-card uses 1
+        # (cheap, conservative); raise expert_prefetch_num for more coverage.
         # On-device prediction: [1, hidden_dim] x [n_experts, hidden_dim]^T
         router_logits = F.linear(hidden_states[:1].float(), gate_w)
         probs = router_logits.softmax(dim=-1)
-        topk_weights, topk_ids = probs.topk(self.topk, dim=-1)  # [1, topk]
-        return topk_weights,topk_ids
+        topk_weights, topk_ids = probs.topk(self.prefetch_topk, dim=-1)
+        return topk_weights, topk_ids
 
     def trigger_next_layer_prefetch(self, layer, 
                         hidden_states: torch.Tensor | None = None) -> int:
@@ -1713,22 +1715,44 @@ class ExpertOffloadManager:
                 torch_npu.npu._subscribe_report(current_compute_stream)
                 subscribed_compute_streams.add(current_compute_stream)
             self._is_prefetch = True
-            args = (
-                topk_ids_h,
-                log2phy_np,
-                next_layer,
-                next_idx,
-                topk_weights_h,
-                self._is_prefetch,
-            )
+            if self.enable_multi_card:
+                # Multi-card pregate: run the next layer's placement + per-rank
+                # H2D (all_reduce predicted counts -> plan_placement -> load
+                # misses -> write log2phy_h) on the prefetch stream, reusing
+                # _update_weights_multi_card. The reactive call for the next
+                # layer (real topk) re-plans and skips H2D for experts already
+                # loaded here via the _mc_resident cache. The gloo all_reduce
+                # stays globally ordered: prefetch(N+1) is launched at the end
+                # of layer N and the reactive(N+1) call joins this prefetch's
+                # load_done_event, so every rank sequences reactive then prefetch
+                # per layer (model forward is lockstep across ranks).
+                per_rank_slots = self.num_device_experts // self.ep_size
+                inner = self._update_weights_multi_card
+                inner_args = (
+                    topk_ids_h,
+                    log2phy_h,
+                    next_layer,
+                    next_idx,
+                    per_rank_slots,
+                )
+            else:
+                inner = self._update_weights
+                inner_args = (
+                    topk_ids_h,
+                    log2phy_np,
+                    next_layer,
+                    next_idx,
+                    topk_weights_h,
+                    self._is_prefetch,
+                )
             if _EXTRA_CTX.capturing:
                 torch_npu.npu._launch_host_func(
                     current_compute_stream,
-                    self._update_weights,
-                    args,
+                    inner,
+                    inner_args,
                 )
             else:
-                self._update_weights(args)
+                inner(inner_args)
                 
             # 记录一个传输流完成的事件，用于后续主流和它汇聚
             load_done_event = torch_npu.npu.Event()
