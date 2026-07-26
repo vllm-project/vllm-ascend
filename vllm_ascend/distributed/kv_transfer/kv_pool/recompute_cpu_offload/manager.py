@@ -70,7 +70,9 @@ class RecomputeCPUOffloadScheduler:
         assert kv_cache_config is not None
         self.vllm_config = vllm_config
         self.enable_offload_prefix_caching = enable_offload_prefix_caching
-        self.num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
+        self.num_spec_tokens = (
+            vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
+        )
         self.cpu_kv_cache_config = self._derive_cpu_config(kv_cache_config, cpu_capacity_bytes)
         self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
         self._group_is_sliding_window = self._get_group_is_sliding_window(kv_cache_config)
@@ -288,7 +290,9 @@ class RecomputeCPUOffloadScheduler:
 
                     gpu_block = self._gpu_block_pool.blocks[block_id]
                     block_is_computed = (block_idx + 1) * group_block_size <= num_computed_tokens
-                    block_hash = gpu_block.block_hash if block_is_computed and self.enable_offload_prefix_caching else None
+                    block_hash = (
+                        gpu_block.block_hash if block_is_computed and self.enable_offload_prefix_caching else None
+                    )
                     gpu_blocks.append(gpu_block)
                     effective_hashes.append(block_hash)
                     if block_hash is None:
