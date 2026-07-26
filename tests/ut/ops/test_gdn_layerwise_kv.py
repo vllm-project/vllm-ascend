@@ -29,6 +29,7 @@ from vllm_ascend.ops.gdn_attn_builder import (
     GDNCausalConv1dMetadata,
     GDNPrefillMetadata,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 class _Linear(nn.Module):
@@ -89,6 +90,17 @@ class _GDNForwardWrapper(nn.Module):
             return None, None, None
         projected = mixed_qkv.reshape(1, mixed_qkv.shape[0], 1, 2)
         return projected, projected, projected
+
+
+def _run_gdn_forward(
+    model: nn.Module,
+    hidden_states: torch.Tensor,
+    output: torch.Tensor,
+) -> torch.Tensor:
+    if vllm_version_is("0.25.1"):
+        result = model(hidden_states, output)
+        return output if result is None else result
+    return model(hidden_states)
 
 
 def _make_prefill_metadata(device: torch.device | str = "cpu") -> GDNAttentionMetadata:
@@ -176,19 +188,12 @@ def test_connector_observes_updated_gdn_state_for_each_compiled_call():
         patch("vllm_ascend.attention.utils.is_v1_kv_transfer_group", return_value=True),
         patch("vllm_ascend.attention.utils.get_kv_transfer_group", return_value=connector),
     ):
-        # vLLM 0.24 writes to output; earlier versions return the result.
-        eager_output = model(hidden_states, output)
-        torch.testing.assert_close(
-            output if eager_output is None else eager_output,
-            hidden_states + 1,
-        )
+        eager_output = _run_gdn_forward(model, hidden_states, output)
+        torch.testing.assert_close(eager_output, hidden_states + 1)
         compiled_model = torch.compile(model, backend="inductor", fullgraph=True)
         for _ in range(2):
-            compiled_output = compiled_model(hidden_states, output)
-            torch.testing.assert_close(
-                output if compiled_output is None else compiled_output,
-                hidden_states + 1,
-            )
+            compiled_output = _run_gdn_forward(compiled_model, hidden_states, output)
+            torch.testing.assert_close(compiled_output, hidden_states + 1)
 
     assert connector.save_kv_layer.call_count == 3
     for execution, (conv_state, ssm_state) in enumerate(observed_states, start=1):

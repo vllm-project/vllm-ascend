@@ -28,6 +28,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import
     AscendStoreCoordinator,
     ExternalCachedBlockPool,
 )
+from vllm_ascend.utils import vllm_version_is
 
 # isort: on
 
@@ -79,6 +80,12 @@ class _FakeCompressedManager:
     ):
         computed: tuple[list[object], ...] = tuple([] for _ in kv_cache_group_ids)
         logical_block_size = kv_cache_spec.block_size * kv_cache_spec.compress_ratio
+        if not vllm_version_is("0.25.1") and logical_block_size != block_pool.hash_block_size:
+            scale_factor = logical_block_size // block_pool.hash_block_size
+            block_hashes = [
+                block_hashes[index + scale_factor - 1]
+                for index in range(0, len(block_hashes) // scale_factor * scale_factor, scale_factor)
+            ]
         max_blocks = max_length // logical_block_size
         for block_hash in list(block_hashes)[:max_blocks]:
             cached = block_pool.get_cached_block(block_hash, kv_cache_group_ids)
@@ -86,7 +93,9 @@ class _FakeCompressedManager:
                 break
             for blocks, block in zip(computed, cached):
                 blocks.append(block)
-        return computed
+        if vllm_version_is("0.25.1"):
+            return computed
+        return computed, len(computed[0]) * logical_block_size
 
 
 class TestAscendStoreCoordinator(unittest.TestCase):
@@ -104,7 +113,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         _, hit_length = coord.find_longest_cache_hit(
             block_hashes,
             128 * 128,
-            ExternalCachedBlockPool({(0, bytes(grouped_hash))}),
+            ExternalCachedBlockPool(128, {(0, bytes(grouped_hash))}),
         )
 
         self.assertEqual(hit_length, 128 * 128)
@@ -128,7 +137,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
             _, hit_length = coord.find_longest_cache_hit(
                 block_hashes,
                 128 * 128,
-                ExternalCachedBlockPool({(0, bytes(grouped_hash))}),
+                ExternalCachedBlockPool(128, {(0, bytes(grouped_hash))}),
             )
 
         self.assertEqual(coord.group_effective_specs[0].compress_ratio, 1)
@@ -151,7 +160,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         _, hit_length = coord.find_longest_cache_hit(
             block_hashes,
             128 * 128,
-            ExternalCachedBlockPool(c1_exists),
+            ExternalCachedBlockPool(128, c1_exists),
         )
 
         self.assertEqual(hit_length, 0)

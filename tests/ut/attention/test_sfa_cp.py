@@ -32,7 +32,7 @@ from vllm_ascend.attention.context_parallel.sfa_cp import (
     AscendSFACPMetadataBuilder,
     AscendSFADCPImpl,
 )
-from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, DCPContext
+from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, DCPContext, DSACPContext
 
 
 def _make_indexer_mock():
@@ -1485,6 +1485,181 @@ class TestAscendSFACPImpl(TestBase):
 
 
 class TestAscendSFADCPImpl(TestBase):
+    @staticmethod
+    def _make_dsa_cp_context(
+        *,
+        num_tokens: int = 4,
+        num_tokens_pad: int = 4,
+        local_start: int = 0,
+        local_end_with_pad: int = 2,
+    ) -> DSACPContext:
+        return DSACPContext(
+            num_tokens=num_tokens,
+            num_tokens_pad=num_tokens_pad,
+            local_start=local_start,
+            local_end=min(local_end_with_pad, num_tokens),
+            local_end_with_pad=local_end_with_pad,
+            slot_mapping_cp=torch.empty(0, dtype=torch.int32),
+            actual_seq_lengths_query=torch.empty(0, dtype=torch.int32),
+            actual_seq_lengths_key=torch.empty(0, dtype=torch.int32),
+        )
+
+    def test_all_to_all_dcp_tensor_supports_head_and_token_scatter(self):
+        impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
+        impl.dcp_size = 2
+        impl.dcp_group = MagicMock()
+        tensor = torch.arange(4 * 6 * 2).view(4, 6, 2)
+
+        def copy_all_to_all(recv, send, *, group):
+            self.assertIs(group, impl.dcp_group.device_group)
+            recv.copy_(send)
+
+        with patch(
+            "vllm_ascend.attention.context_parallel.sfa_cp.dist.all_to_all_single",
+            side_effect=copy_all_to_all,
+        ):
+            for scatter_dim in (0, 1):
+                with self.subTest(scatter_dim=scatter_dim):
+                    result = impl._all_to_all_dcp_tensor(tensor, scatter_dim)
+                    send = tensor.movedim(scatter_dim, 0).contiguous()
+                    expected = send.view(impl.dcp_size, send.shape[0] // impl.dcp_size, *send.shape[1:])
+                    torch.testing.assert_close(result, expected)
+
+    def test_all_to_all_dcp_tensor_rejects_nondivisible_scatter_size(self):
+        impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
+        impl.dcp_size = 2
+        impl.dcp_group = MagicMock()
+
+        with self.assertRaisesRegex(RuntimeError, "scatter dimension to be divisible"):
+            impl._all_to_all_dcp_tensor(torch.empty(3, 4, 2), scatter_dim=0)
+
+    def test_merge_dcp_outputs_with_torch_matches_head_and_token_layouts(self):
+        output_by_head = torch.arange(2 * 2 * 3 * 2, dtype=torch.float16).view(2, 2, 3, 2)
+        lse_by_head = torch.tensor(
+            [
+                [[0.0, 1.0, -1.0], [2.0, 0.0, 1.0]],
+                [[1.0, 0.0, -2.0], [0.0, 2.0, 1.0]],
+            ],
+            dtype=torch.float32,
+        )
+        weights = torch.softmax(lse_by_head, dim=0)
+        expected = (output_by_head.float() * weights.unsqueeze(-1)).sum(dim=0).movedim(1, 0).contiguous()
+
+        native_output = AscendSFADCPImpl._merge_dcp_outputs_with_torch(
+            output_by_head,
+            lse_by_head,
+            token_dim=2,
+        )
+        dsa_output = AscendSFADCPImpl._merge_dcp_outputs_with_torch(
+            output_by_head.movedim(1, 2),
+            lse_by_head.movedim(1, 2),
+            token_dim=1,
+        )
+
+        torch.testing.assert_close(native_output, expected)
+        torch.testing.assert_close(dsa_output, expected)
+
+    def test_merge_dcp_outputs_selects_native_head_scatter(self):
+        impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
+        impl.dcp_size = 2
+        impl.dcp_rank = 0
+        impl.dcp_group = MagicMock()
+        sfa_output = torch.randn(4, 4, 8)
+        softmax_lse = torch.randn(4, 4, 1)
+        output_recv = torch.randn(2, 2, 4, 8)
+        lse_recv = torch.randn(2, 2, 4, 1)
+        expected = torch.randn(4, 2, 8)
+        impl._all_to_all_dcp_tensor = MagicMock(side_effect=(output_recv, lse_recv))
+        impl._merge_dcp_outputs_with_torch = MagicMock(return_value=expected)
+
+        result = impl._merge_dcp_outputs(sfa_output, softmax_lse)
+
+        self.assertIs(result, expected)
+        all_to_all_calls = impl._all_to_all_dcp_tensor.call_args_list
+        self.assertEqual(len(all_to_all_calls), 2)
+        self.assertIs(all_to_all_calls[0].args[0], sfa_output)
+        self.assertEqual(all_to_all_calls[0].args[1], 1)
+        self.assertIs(all_to_all_calls[1].args[0], softmax_lse)
+        self.assertEqual(all_to_all_calls[1].args[1], 1)
+        merge_args = impl._merge_dcp_outputs_with_torch.call_args.args
+        self.assertIs(merge_args[0], output_recv)
+        torch.testing.assert_close(merge_args[1], lse_recv.squeeze(-1))
+        self.assertEqual(merge_args[2], 2)
+
+    def test_merge_dcp_outputs_selects_dsa_token_scatter(self):
+        impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
+        impl.dcp_size = 2
+        impl.dcp_rank = 0
+        impl.dcp_group = MagicMock()
+        sfa_output = torch.randn(4, 4, 8)
+        softmax_lse = torch.randn(4, 4, 1)
+        output_recv = torch.randn(2, 2, 4, 8)
+        lse_recv = torch.randn(2, 2, 4, 1)
+        expected = torch.randn(2, 4, 8)
+        dsa_cp_context = self._make_dsa_cp_context()
+        impl._all_to_all_dcp_tensor = MagicMock(side_effect=(output_recv, lse_recv))
+        impl._merge_dcp_outputs_with_torch = MagicMock(return_value=expected)
+
+        result = impl._merge_dcp_outputs(sfa_output, softmax_lse, dsa_cp_context)
+
+        self.assertIs(result, expected)
+        all_to_all_calls = impl._all_to_all_dcp_tensor.call_args_list
+        self.assertEqual(len(all_to_all_calls), 2)
+        self.assertIs(all_to_all_calls[0].args[0], sfa_output)
+        self.assertEqual(all_to_all_calls[0].args[1], 0)
+        self.assertIs(all_to_all_calls[1].args[0], softmax_lse)
+        self.assertEqual(all_to_all_calls[1].args[1], 0)
+        merge_args = impl._merge_dcp_outputs_with_torch.call_args.args
+        self.assertIs(merge_args[0], output_recv)
+        torch.testing.assert_close(merge_args[1], lse_recv.squeeze(-1))
+        self.assertEqual(merge_args[2], 1)
+
+    def test_merge_dcp_outputs_rejects_misaligned_dsa_token_shard(self):
+        impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
+        impl.dcp_size = 2
+        impl.dcp_rank = 0
+        impl.dcp_group = MagicMock()
+        dsa_cp_context = self._make_dsa_cp_context(local_start=1, local_end_with_pad=3)
+
+        with self.assertRaisesRegex(RuntimeError, "token shards must follow DCP rank order"):
+            impl._merge_dcp_outputs(
+                torch.randn(4, 4, 8),
+                torch.randn(4, 4, 1),
+                dsa_cp_context,
+            )
+
+    def test_record_dcp_kv_gather_context_c8_only_gathers_packed_kv(self):
+        impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
+        impl.dcp_group = MagicMock()
+        impl.use_sparse_c8_sfa = True
+        gather_context = MagicMock()
+        impl._start_dcp_gather = MagicMock(return_value=gather_context)
+
+        packed_kv = torch.arange(4 * 16, dtype=torch.int8).view(4, 1, 1, 16)
+        indexer_k = torch.zeros(8, 1, 1, 8, dtype=torch.int8)
+        indexer_scale = torch.zeros(8, 1, 1, 1, dtype=torch.float16)
+        valid_block_ids = torch.tensor([1, 3], dtype=torch.int64)
+        attn_metadata = MagicMock()
+        attn_metadata.num_prefills = 1
+        attn_metadata.dcp_context = DCPContext(
+            slot_mapping=torch.tensor([0], dtype=torch.int32),
+            block_table=torch.tensor([[0]], dtype=torch.int32),
+            seq_lens=torch.tensor([1], dtype=torch.int32),
+            kv_gather_block_ids=valid_block_ids,
+            kv_gather_block_table=torch.tensor([[0, 1]], dtype=torch.int32),
+        )
+
+        impl._record_dcp_kv_gather_context(
+            (packed_kv, indexer_k, indexer_scale),
+            attn_metadata,
+        )
+
+        gather_input = impl._start_dcp_gather.call_args.args[0]
+        self.assertTrue(torch.equal(gather_input, packed_kv.index_select(0, valid_block_ids)))
+        self.assertEqual(impl._start_dcp_gather.call_args.kwargs["dim"], 0)
+        self.assertEqual(impl._start_dcp_gather.call_args.kwargs["split_sizes"], (16,))
+        self.assertIs(attn_metadata.dcp_context.gather_context, gather_context)
+
     def test_execute_sparse_flash_attention_process_uses_c8_device_operator_lse(self):
         impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
         impl.dcp_group = MagicMock()
@@ -1499,7 +1674,7 @@ class TestAscendSFADCPImpl(TestBase):
 
         ql_nope = torch.randn(2, 2, 8)
         q_pe = torch.randn(2, 2, 4)
-        impl._finish_all_gather_query_for_dcp = MagicMock(side_effect=lambda _ctx: (ql_nope, q_pe))
+        impl._finish_dcp_gather = MagicMock(side_effect=lambda _ctx: (ql_nope, q_pe))
         kv_cache = (torch.empty(4, 1, 1, 16, dtype=torch.int8),)
         topk_indices = torch.zeros(2, 1, dtype=torch.int32)
         actual_seq_lengths_query = torch.tensor([2], dtype=torch.int32)
@@ -1508,11 +1683,13 @@ class TestAscendSFADCPImpl(TestBase):
         dcp_block_table = torch.tensor([[0, 1]], dtype=torch.int32)
 
         attn_metadata = MagicMock()
+        attn_metadata.num_prefills = 0
+        attn_metadata.dsa_cp_context = None
         attn_metadata.dcp_context = DCPContext(
             slot_mapping=torch.tensor([0, 1], dtype=torch.int32),
             block_table=dcp_block_table,
             seq_lens=dcp_seq_lens,
-            query_gather_context=MagicMock(),
+            gather_context=MagicMock(),
         )
         sfa_output = torch.randn(2, 2, 8)
         softmax_max = torch.randn(2, 2, 1)
@@ -1548,3 +1725,4 @@ class TestAscendSFADCPImpl(TestBase):
         merge_args = impl._merge_dcp_outputs.call_args.args
         self.assertIs(merge_args[0], sfa_output)
         torch.testing.assert_close(merge_args[1], softmax_lse)
+        self.assertIsNone(merge_args[2])
