@@ -7,6 +7,7 @@ from math import lcm
 import vllm
 import vllm.envs as envs_vllm
 import vllm.v1.core.kv_cache_coordinator as vllm_kv_cache_coordinator
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
     HybridKVCacheCoordinator,
@@ -159,6 +160,15 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 self._get_effective_block_size(g.kv_cache_spec) % hash_block_size == 0
                 for g in kv_cache_config.kv_cache_groups
             ), "block_size must be divisible by hash_block_size"
+        self.enable_partial_hash_hits = not vllm_version_is("0.25.1") and (
+            dcp_world_size == 1
+            and any(
+                isinstance(g.kv_cache_spec, MambaSpec)
+                and g.kv_cache_spec.mamba_cache_mode == "align"
+                and g.kv_cache_spec.block_size > hash_block_size
+                for g in kv_cache_config.kv_cache_groups
+            )
+        )
         self.verify_and_split_kv_cache_groups()
 
         # Align the WRITE-path mask granularity (reachable_block_mask) with the
@@ -171,6 +181,14 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 mgr.scheduler_block_size = self.lcm_block_size
 
         self.use_eagle = use_eagle
+
+    @property
+    def _cache_hit_alignment_tokens(self) -> int:
+        if vllm_version_is("0.25.1"):
+            return self.lcm_block_size
+        if self.enable_partial_hash_hits:
+            return self.hash_block_size
+        return self.scheduler_block_size or self.lcm_block_size
 
     def _get_effective_block_size(self, kv_cache_spec: KVCacheSpec) -> int:
         block_size = kv_cache_spec.block_size
@@ -256,7 +274,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int] | tuple[tuple[list[KVCacheBlock], ...], int, int]:
         """
         Find the longest cache hit using an iterative fixed-point algorithm.
 
@@ -276,6 +294,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         """
 
         def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
+            if not vllm_version_is("0.25.1"):
+                return block_hashes
             target_block_size = kv_cache_spec.block_size
             if not isinstance(kv_cache_spec, MambaSpec) and self.dcp_world_size * self.pcp_world_size > 1:
                 target_block_size *= self.dcp_world_size * self.pcp_world_size
@@ -285,7 +305,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_length = max_cache_hit_length
+        longest_hit_length = 0
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
+        hit_length_by_group: list[int] = [0] * num_groups
 
         # Simple hybrid (1 full attn + 1 other): one iteration suffices.
         # Full attn is always first if it exists.
@@ -302,43 +324,61 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             curr_hit_length = hit_length
             for idx, (spec, group_ids, manager_cls) in enumerate(self.attention_groups):
                 effective_block_size = self._get_effective_block_size(spec)
-                cached_blocks = hit_blocks_by_group[group_ids[0]]
+                first_group_id = group_ids[0]
+                cached_blocks = hit_blocks_by_group[first_group_id]
                 if isinstance(spec, FullAttentionSpec) and cached_blocks is not None:
                     # Full attention is downward-closed: we only need to look
                     # up cached blocks once; on subsequent iterations just trim
                     # to the (reduced) current hit length.
-                    num_blocks = curr_hit_length // effective_block_size
-                    curr_hit_length = num_blocks * effective_block_size
+                    curr_hit_length = min(curr_hit_length, hit_length_by_group[first_group_id])
                     continue
 
                 use_eagle = idx in self.eagle_attn_group_indices and idx not in eagle_verified
 
                 _max_length = curr_hit_length
-                if use_eagle:
+                if use_eagle and not isinstance(spec, MambaSpec):
                     # Eagle needs to match one more block and then pop the last.
-                    _max_length = min(curr_hit_length + spec.block_size, max_cache_hit_length)
+                    eagle_margin = (
+                        self.hash_block_size
+                        if self.enable_partial_hash_hits
+                        and manager_cls.supports_fine_grained_hash_lookup
+                        and effective_block_size > self.hash_block_size
+                        else effective_block_size
+                    )
+                    _max_length = min(curr_hit_length + eagle_margin, max_cache_hit_length)
                 eagle_kwarg = {"drop_eagle_block": use_eagle}
-                hit_blocks = manager_cls.find_longest_cache_hit(
+                hit_result = manager_cls.find_longest_cache_hit(
                     block_hashes=_get_block_hashes(spec),
                     max_length=_max_length,
                     kv_cache_group_ids=group_ids,
                     block_pool=self.block_pool,
                     kv_cache_spec=spec,
                     **eagle_kwarg,
-                    alignment_tokens=self.lcm_block_size,
+                    alignment_tokens=self._cache_hit_alignment_tokens,
                     dcp_world_size=self.dcp_world_size,
                     pcp_world_size=self.pcp_world_size,
                 )
-                _new_hit_length = len(hit_blocks[0]) * effective_block_size
+                if vllm_version_is("0.25.1"):
+                    hit_blocks = hit_result
+                    # hit_blocks[0] holds physical blocks; effective_block_size
+                    # includes compress_ratio and over-counts for compressed specs.
+                    block_size = spec.block_size
+                    if self.dcp_world_size * self.pcp_world_size > 1:
+                        block_size *= self.dcp_world_size * self.pcp_world_size
+                    _new_hit_length = len(hit_blocks[0]) * block_size
+                else:
+                    hit_blocks, _new_hit_length = hit_result
                 if use_eagle:
                     eagle_verified.add(idx)
                 elif _new_hit_length < curr_hit_length:
                     # length shrunk; invalidate previous eagle verifications
                     eagle_verified.clear()
                 curr_hit_length = _new_hit_length
-                curr_hit_length = len(hit_blocks[0]) * effective_block_size
                 for group_id, blocks in zip(group_ids, hit_blocks):
                     hit_blocks_by_group[group_id] = blocks
+                    hit_length_by_group[group_id] = _new_hit_length
+
+                longest_hit_length = max(longest_hit_length, curr_hit_length)
 
             if curr_hit_length >= hit_length:
                 break
@@ -355,19 +395,25 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # any prefix cache hit, because `hit_length` of SWA is 0.
         spec, group_ids, _ = self.attention_groups[0]
         if isinstance(spec, FullAttentionSpec):
-            num_blocks = hit_length // self._get_effective_block_size(spec)
+            num_blocks = cdiv(hit_length, self._get_effective_block_size(spec))
             for group_id in group_ids:
                 if (blks := hit_blocks_by_group[group_id]) is not None:
                     del blks[num_blocks:]
+                    hit_length_by_group[group_id] = hit_length
 
-        return tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group), hit_length
+        cache_hit_blocks = tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group)
+        if vllm_version_is("0.25.1"):
+            return cache_hit_blocks, hit_length
+        return cache_hit_blocks, hit_length, longest_hit_length - hit_length
 
     def find_longest_cache_hit_per_group(
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], tuple[int, ...]]:
         def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
+            if not vllm_version_is("0.25.1"):
+                return block_hashes
             target_block_size = kv_cache_spec.block_size
             if not isinstance(kv_cache_spec, MambaSpec) and self.dcp_world_size * self.pcp_world_size > 1:
                 target_block_size *= self.dcp_world_size * self.pcp_world_size
@@ -376,93 +422,44 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             return BlockHashListWithBlockSize(block_hashes, self.hash_block_size, target_block_size)
 
         num_groups = len(self.kv_cache_config.kv_cache_groups)
-        hit_length = max_cache_hit_length
-        hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
+        hit_blocks_by_group: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
+        hit_length_by_group: list[int] = [0] * num_groups
 
-        # Simple hybrid (1 full attn + 1 other): one iteration suffices.
-        # Full attn is always first if it exists.
-        is_simple_hybrid = len(self.attention_groups) == 2 and isinstance(
-            self.attention_groups[0][0], FullAttentionSpec
+        for idx, (spec, group_ids, manager_cls) in enumerate(self.attention_groups):
+            # The connector transfers Mamba state separately; report only the
+            # independently reusable attention-group prefixes on this path.
+            if isinstance(spec, MambaSpec):
+                continue
+
+            hit_result = manager_cls.find_longest_cache_hit(
+                block_hashes=_get_block_hashes(spec),
+                max_length=max_cache_hit_length,
+                kv_cache_group_ids=group_ids,
+                block_pool=self.block_pool,
+                kv_cache_spec=spec,
+                drop_eagle_block=idx in self.eagle_attn_group_indices,
+                alignment_tokens=self._cache_hit_alignment_tokens,
+                dcp_world_size=self.dcp_world_size,
+                pcp_world_size=self.pcp_world_size,
+            )
+            if vllm_version_is("0.25.1"):
+                hit_blocks = hit_result
+                # hit_blocks[0] holds physical blocks; _get_effective_block_size
+                # includes compress_ratio and over-counts for compressed specs.
+                block_size = spec.block_size
+                if self.dcp_world_size * self.pcp_world_size > 1:
+                    block_size *= self.dcp_world_size * self.pcp_world_size
+                group_hit_length = len(hit_blocks[0]) * block_size
+            else:
+                hit_blocks, group_hit_length = hit_result
+            for group_id, blocks in zip(group_ids, hit_blocks, strict=True):
+                hit_blocks_by_group[group_id] = blocks
+                hit_length_by_group[group_id] = group_hit_length
+
+        return (
+            tuple(hit_blocks_by_group),
+            tuple(hit_length_by_group),
         )
-
-        # Attention-group indices whose EAGLE drop is verified at the current
-        # ``curr_hit_length``. Each eagle group applies the drop at most once
-        # per candidate length (see issue #32802).
-        eagle_verified: set[int] = set()
-        while True:
-            curr_hit_length = hit_length
-            for idx, (spec, group_ids, manager_cls) in enumerate(self.attention_groups):
-                # In PD disaggregation, Mamba running/temporal state is transferred
-                # via the KV connector, but the D side has no local Mamba prefix
-                # cache hit. If we let Mamba groups participate in the min-reduction,
-                # their zero hit collapses the FullAttention hit length to 0 and
-                # defeats prefix caching on the D side. Skip them instead.
-                if isinstance(spec, MambaSpec):
-                    if hit_blocks_by_group[group_ids[0]] is None:
-                        for gid in group_ids:
-                            hit_blocks_by_group[gid] = []
-                    continue
-
-                effective_block_size = self._get_effective_block_size(spec)
-                cached_blocks = hit_blocks_by_group[group_ids[0]]
-                if isinstance(spec, FullAttentionSpec) and cached_blocks is not None:
-                    # Full attention is downward-closed: we only need to look
-                    # up cached blocks once; on subsequent iterations just trim
-                    # to the (reduced) current hit length.
-                    num_blocks = curr_hit_length // effective_block_size
-                    curr_hit_length = num_blocks * effective_block_size
-                    continue
-
-                use_eagle = idx in self.eagle_attn_group_indices and idx not in eagle_verified
-
-                _max_length = curr_hit_length
-                if use_eagle:
-                    # Eagle needs to match one more block and then pop the last.
-                    _max_length = min(curr_hit_length + spec.block_size, max_cache_hit_length)
-                eagle_kwarg = {"drop_eagle_block": use_eagle}
-                hit_blocks = manager_cls.find_longest_cache_hit(
-                    block_hashes=_get_block_hashes(spec),
-                    max_length=_max_length,
-                    kv_cache_group_ids=group_ids,
-                    block_pool=self.block_pool,
-                    kv_cache_spec=spec,
-                    **eagle_kwarg,
-                    alignment_tokens=self.lcm_block_size,
-                    dcp_world_size=self.dcp_world_size,
-                    pcp_world_size=self.pcp_world_size,
-                )
-                _new_hit_length = len(hit_blocks[0]) * effective_block_size
-                if use_eagle:
-                    eagle_verified.add(idx)
-                elif _new_hit_length < curr_hit_length:
-                    # length shrunk; invalidate previous eagle verifications
-                    eagle_verified.clear()
-                curr_hit_length = _new_hit_length
-                curr_hit_length = len(hit_blocks[0]) * effective_block_size
-                for group_id, blocks in zip(group_ids, hit_blocks):
-                    hit_blocks_by_group[group_id] = blocks
-
-            if curr_hit_length >= hit_length:
-                break
-            hit_length = curr_hit_length
-            if is_simple_hybrid:
-                break
-
-        # Truncate full attention blocks to final hit_length (if present)
-        # NOTE(zxr): for deepseek-v4, there is two fullattn groups, but
-        # in this function, only the first fullattn group is truncate by
-        # the belowing codes(c4), c128 layer does not truncate, which may
-        # have prefix cache block hit.
-        # Due to slidingwindow attn, deepseek-v4 decode node can't have
-        # any prefix cache hit, because `hit_length` of SWA is 0.
-        spec, group_ids, _ = self.attention_groups[0]
-        if isinstance(spec, FullAttentionSpec):
-            num_blocks = hit_length // self._get_effective_block_size(spec)
-            for group_id in group_ids:
-                if (blks := hit_blocks_by_group[group_id]) is not None:
-                    del blks[num_blocks:]
-
-        return tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group), hit_length
 
 
 def get_kv_cache_coordinator(

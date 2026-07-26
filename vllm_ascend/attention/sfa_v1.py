@@ -86,18 +86,17 @@ O_PROJ_ACLNN_INPUT_PARAMS = (
 )
 
 
-class DCPQueryGatherContext(NamedTuple):
-    """State needed to finish the async fused DCP query all-gather."""
+class DCPGatherContext(NamedTuple):
+    """State needed to finish an async fused DCP all-gather."""
 
-    # The gathered fused query tensor: cat([ql_nope, q_pe], dim=-1).
+    # The gathered fused tensor.
     gathered: torch.Tensor
     # Async all-gather work handle. None means the gather completed synchronously.
     handle: torch.distributed.Work | None
     # Permutation that restores the original dimension order after dim>0 gather.
     restore_perm: tuple[int, ...] | None
-    # Last-dimension sizes used to split the fused query back into ql_nope/q_pe.
-    ql_nope_dim: int
-    q_pe_dim: int
+    # Last-dimension sizes used to split the fused tensor after gather.
+    split_sizes: tuple[int, ...]
 
 
 def _get_indexer_types(configs: tuple[Any, ...]) -> Any | None:
@@ -178,7 +177,9 @@ class DCPContext:
     slot_mapping: torch.Tensor
     block_table: torch.Tensor
     seq_lens: torch.Tensor
-    query_gather_context: DCPQueryGatherContext | None = None
+    kv_gather_block_ids: torch.Tensor | None = None
+    kv_gather_block_table: torch.Tensor | None = None
+    gather_context: DCPGatherContext | None = None
 
 
 @dataclass
@@ -503,7 +504,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     understand this class
     """
 
-    # Supports forward using the all-gather o_proj weight for decode requests when Sharded CP is enabled.
+    # Reusable full-weight gather buffers for DSA-CP prefill/mixed requests.
     o_proj_full_pools: dict[tuple[str, int | None, torch.dtype, int, tuple[int, ...]], torch.Tensor] = {}
 
     # q_hadamard and k_hadamard tensor shared when dsa c8 enabled
@@ -638,12 +639,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.enable_dsa_cp = enable_dsa_cp()
         self.enable_sp = enable_sp()
 
-        # SFA DSA-CP mixed deployments keep o_proj in the existing TP layout.
-        # Decode can use the TP-sharded o_proj directly after an activation
-        # all-to-all, while prefill/mixed batches temporarily gather the TP
-        # shards into a full-weight buffer because their SFA output is not
-        # TP-sharded. This is part of the DSA-CP mixed-mode data path rather
-        # than an independent user-facing feature switch.
+        # SFA DSA-CP deployments keep o_proj in the existing TP layout. Decode
+        # can use the TP-sharded o_proj after an activation all-to-all, while
+        # prefill/mixed batches (including a PD-disaggregated P node)
+        # temporarily gather the TP shards into a full-weight buffer because
+        # their SFA output is not TP-sharded.
         self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp()
 
         if self.enable_dsa_cp:
@@ -968,8 +968,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         """
         Initialize TP-mode aliases and Full-mode buffers for DSA-CP o_proj.
 
-        In SFA DSA-CP mixed execution, the same model instance can run both
-        decode-only and prefill/mixed batches:
+        In SFA DSA-CP execution:
         - Decode-only batches all-to-all the SFA output in the TP group, then
           run the original TP-sharded o_proj.
         - Prefill/mixed batches produce SFA output that is not directly
@@ -1557,13 +1556,181 @@ class AscendSFAImpl(MLAAttentionImpl):
             actual_seq_lengths_key,
         )
 
-    def _record_dcp_query_gather_context(
+    def _q_proj_n_rope(
         self,
-        ql_nope: torch.Tensor,
-        q_pe: torch.Tensor,
+        q_c: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        attn_metadata: M | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
+        q_pe = self.rope_single(q_pe, cos, sin)
+        # DCP replicated indexer needs to gather the query after it has been projected and roped.
+        return ql_nope, q_pe
+
+    def _maybe_gather_kv_for_dsacp(
+        self,
+        k_pe: torch.Tensor | None,
+        k_nope: torch.Tensor | None,
+        knope_scale: torch.Tensor | None,
+        k_li: torch.Tensor | None,
+        k_li_scale: torch.Tensor | None,
+        full_gather_o_proj_enabled: bool,
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.distributed.Work | None,
+    ]:
+        """Gather native-preprocess KV tensors when DSA context parallel is enabled."""
+        if not self.enable_dsa_cp:
+            return k_li, k_li_scale, None, None
+
+        assert k_pe is not None
+        assert k_nope is not None
+        async_op = full_gather_o_proj_enabled
+        # Support all-gather KV async for communication/calculation overlap.
+        if self.use_sparse_c8_sfa:
+            assert knope_scale is not None
+            fused_kv_parts = [
+                k_nope.view(-1, k_nope.shape[-1]),
+                k_pe.view(-1, k_pe.shape[-1]),
+                knope_scale.view(-1, knope_scale.shape[-1]),
+            ]
+        else:
+            fused_kv_parts = [
+                k_pe.view(-1, k_pe.shape[-1]),
+                k_nope.view(-1, k_nope.shape[-1]),
+            ]
+            if self.has_indexer and not self.use_sparse_c8_indexer:
+                assert k_li is not None
+                fused_kv_parts.append(k_li.view(-1, k_li.shape[-1]))
+
+        fused_kv_input = torch.cat(fused_kv_parts, dim=1)
+        fused_kv_no_split, kv_ag_handle = all_gather_async(
+            fused_kv_input,
+            get_tp_group(),
+            async_op=async_op,
+        )
+
+        if self.has_indexer and self.use_sparse_c8_indexer:
+            assert k_li is not None
+            k_li, kv_ag_handle = all_gather_async(
+                k_li,
+                get_tp_group(),
+                async_op=async_op,
+            )
+            assert k_li_scale is not None
+            k_li_scale, kv_ag_handle = all_gather_async(
+                k_li_scale,
+                get_tp_group(),
+                async_op=async_op,
+            )
+
+        return k_li, k_li_scale, fused_kv_no_split, kv_ag_handle
+
+    def _maybe_store_kvcache_for_c8_n_dsacp(
+        self,
+        k_pe: torch.Tensor | None,
+        k_nope: torch.Tensor | None,
+        knope_scale: torch.Tensor | None,
+        k_li: torch.Tensor | None,
+        fused_kv_no_split: torch.Tensor | None,
+        kv_ag_handle: torch.distributed.Work | None,
+        kv_cache: tuple[torch.Tensor, ...] | None,
+        slot_mapping_sfa: torch.Tensor,
         attn_metadata: M,
-    ) -> None:
-        return
+        full_gather_o_proj_enabled: bool,
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.distributed.Work | None,
+        list[torch.distributed.Work | None] | None,
+    ]:
+        """Store KV produced by native preprocessing for C8 and DSA-CP paths."""
+        o_proj_full_handle = None
+        o_proj_full_param_handles = None
+
+        if self.use_sparse_c8_sfa and not self.enable_dsa_cp:
+            assert k_pe is not None
+            assert k_nope is not None
+            assert knope_scale is not None
+            packed_kv = torch.cat(
+                [
+                    k_nope.view(-1, k_nope.shape[-1]),
+                    k_pe.view(-1, k_pe.shape[-1]),
+                    knope_scale.view(-1, knope_scale.shape[-1]),
+                ],
+                dim=-1,
+            )
+            packed_head_dim = self.sfa_qsfa_packed_kv_head_dim
+            assert packed_kv.shape[-1] == packed_head_dim
+            assert kv_cache is not None
+            torch_npu.npu_scatter_nd_update_(
+                kv_cache[0].view(-1, packed_head_dim),
+                slot_mapping_sfa.view(-1, 1),
+                packed_kv.view(-1, packed_head_dim),
+            )
+
+        if self.enable_dsa_cp:
+            if kv_ag_handle is not None:
+                kv_ag_handle.wait()
+
+            if full_gather_o_proj_enabled:
+                _, o_proj_full_handle = all_gather_async(
+                    self.o_proj_tp_weight_gather_input,
+                    get_tp_group(),
+                    output=self.o_proj_full_gather_pool,
+                )
+                o_proj_full_param_handles = []
+                for param_name, param in self.o_proj_tp_input_sharded_quant_params.items():
+                    _, param_handle = all_gather_async(
+                        param,
+                        get_tp_group(),
+                        output=self.o_proj_full_input_sharded_quant_params[param_name],
+                    )
+                    o_proj_full_param_handles.append(param_handle)
+
+            if kv_cache is not None:
+                assert fused_kv_no_split is not None
+                if self.use_sparse_c8_sfa:
+                    torch_npu.npu_scatter_nd_update_(
+                        kv_cache[0].view(-1, fused_kv_no_split.shape[-1]),
+                        slot_mapping_sfa[: attn_metadata.num_actual_tokens].view(-1, 1),
+                        fused_kv_no_split[: attn_metadata.num_actual_tokens],
+                    )
+                    k_pe = None
+                    k_nope = None
+                elif not self.has_indexer:
+                    k_pe, k_nope = fused_kv_no_split.split(
+                        [self.qk_rope_head_dim, self.kv_lora_rank],
+                        dim=-1,
+                    )
+                elif not self.use_sparse_c8_indexer:
+                    k_pe, k_nope, k_li = fused_kv_no_split.split(
+                        [self.qk_rope_head_dim, self.kv_lora_rank, self.head_dim],
+                        dim=-1,
+                    )
+                else:
+                    k_pe, k_nope = fused_kv_no_split.split(
+                        [self.qk_rope_head_dim, self.kv_lora_rank],
+                        dim=-1,
+                    )
+                if not self.use_sparse_c8_sfa:
+                    assert k_pe is not None
+                    assert k_nope is not None
+                    k_nope = k_nope.view(k_nope.shape[0], 1, -1)
+                    k_pe = k_pe.view(k_pe.shape[0], 1, -1)
+                    DeviceOperator.reshape_and_cache(
+                        key=k_nope[: attn_metadata.num_actual_tokens],
+                        value=k_pe[: attn_metadata.num_actual_tokens],
+                        key_cache=kv_cache[0],
+                        value_cache=kv_cache[1],
+                        slot_mapping=slot_mapping_sfa[: attn_metadata.num_actual_tokens],
+                    )
+
+        return k_pe, k_nope, k_li, o_proj_full_handle, o_proj_full_param_handles
 
     def _compose_sfa_kv_cache(self, kv_cache) -> tuple[torch.Tensor, ...] | None:
         """Compose split cache handles into the tuple expected by SFA kernels.
@@ -1662,7 +1829,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         num_input_tokens = attn_metadata.num_input_tokens
         output_padded = output
 
-        # all-gather o_proj weight for prefill stage of PD mix node
+        # Asynchronously all-gather o_proj for DSA-CP prefill. This applies to
+        # both a mixed-role instance and a PD-disaggregated P node.
         o_proj_full_handle = None
         o_proj_full_param_handles = None
         # Prefill/mixed DSA-CP computes o_proj with a temporary full weight.
@@ -1747,129 +1915,35 @@ class AscendSFAImpl(MLAAttentionImpl):
             kv_outputs = self.exec_kv(kv_no_split, cos, sin, kv_cache, kv_slots, attn_metadata)
             k_pe, k_nope = kv_outputs[:2]
             knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
-            if self.use_sparse_c8_sfa and not self.enable_dsa_cp:
-                assert k_pe is not None
-                assert k_nope is not None
-                assert knope_scale is not None
-                packed_kv = torch.cat(
-                    [
-                        k_nope.view(-1, k_nope.shape[-1]),
-                        k_pe.view(-1, k_pe.shape[-1]),
-                        knope_scale.view(-1, knope_scale.shape[-1]),
-                    ],
-                    dim=-1,
-                )
-                packed_head_dim = self.sfa_qsfa_packed_kv_head_dim
-                assert packed_kv.shape[-1] == packed_head_dim
-                torch_npu.npu_scatter_nd_update_(
-                    kv_cache[0].view(-1, packed_head_dim),
-                    slot_mapping_sfa.view(-1, 1),
-                    packed_kv.view(-1, packed_head_dim),
-                )
+            k_li, k_li_scale, fused_kv_no_split, kv_ag_handle = self._maybe_gather_kv_for_dsacp(
+                k_pe,
+                k_nope,
+                knope_scale,
+                k_li,
+                k_li_scale,
+                full_gather_o_proj_enabled,
+            )
 
-            if self.enable_dsa_cp:
-                assert k_pe is not None
-                assert k_nope is not None
-                async_op = full_gather_o_proj_enabled
-                # support all_gather kv async for communication calculation overlap
-                if self.use_sparse_c8_sfa:
-                    assert knope_scale is not None
-                    fused_kv_parts = [
-                        k_nope.view(-1, k_nope.shape[-1]),
-                        k_pe.view(-1, k_pe.shape[-1]),
-                        knope_scale.view(-1, knope_scale.shape[-1]),
-                    ]
-                else:
-                    fused_kv_parts = [
-                        k_pe.view(-1, k_pe.shape[-1]),
-                        k_nope.view(-1, k_nope.shape[-1]),
-                    ]
-                    if self.has_indexer and not self.use_sparse_c8_indexer:
-                        assert k_li is not None
-                        fused_kv_parts.append(k_li.view(-1, k_li.shape[-1]))
+            ql_nope, q_pe = self._q_proj_n_rope(q_c, cos, sin, attn_metadata)
 
-                fused_kv_input = torch.cat(fused_kv_parts, dim=1)
-                fused_kv_no_split, kv_ag_handle = all_gather_async(
-                    fused_kv_input,
-                    get_tp_group(),
-                    async_op=async_op,
-                )
-
-                if self.has_indexer and self.use_sparse_c8_indexer:
-                    assert k_li is not None
-                    k_li, kv_ag_handle = all_gather_async(
-                        k_li,
-                        get_tp_group(),
-                        async_op=async_op,
-                    )
-                if self.has_indexer and self.use_sparse_c8_indexer:
-                    assert k_li_scale is not None
-                    k_li_scale, kv_ag_handle = all_gather_async(
-                        k_li_scale,
-                        get_tp_group(),
-                        async_op=async_op,
-                    )
-
-            ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
-            q_pe = self.rope_single(q_pe, cos, sin)
-            self._record_dcp_query_gather_context(ql_nope, q_pe, attn_metadata)
-
-            if self.enable_dsa_cp:
-                if kv_ag_handle is not None:
-                    kv_ag_handle.wait()
-
-                if full_gather_o_proj_enabled:
-                    _, o_proj_full_handle = all_gather_async(
-                        self.o_proj_tp_weight_gather_input,
-                        get_tp_group(),
-                        output=self.o_proj_full_gather_pool,
-                    )
-                    o_proj_full_param_handles = []
-                    for param_name, param in self.o_proj_tp_input_sharded_quant_params.items():
-                        _, param_handle = all_gather_async(
-                            param,
-                            get_tp_group(),
-                            output=self.o_proj_full_input_sharded_quant_params[param_name],
-                        )
-                        o_proj_full_param_handles.append(param_handle)
-
-                if kv_cache is not None:
-                    assert fused_kv_no_split is not None
-                    if self.use_sparse_c8_sfa:
-                        torch_npu.npu_scatter_nd_update_(
-                            kv_cache[0].view(-1, fused_kv_no_split.shape[-1]),
-                            slot_mapping_sfa[: attn_metadata.num_actual_tokens].view(-1, 1),
-                            fused_kv_no_split[: attn_metadata.num_actual_tokens],
-                        )
-                        k_pe = None
-                        k_nope = None
-                    elif not self.has_indexer:
-                        k_pe, k_nope = fused_kv_no_split.split(
-                            [self.qk_rope_head_dim, self.kv_lora_rank],
-                            dim=-1,
-                        )
-                    elif not self.use_sparse_c8_indexer:
-                        k_pe, k_nope, k_li = fused_kv_no_split.split(
-                            [self.qk_rope_head_dim, self.kv_lora_rank, self.head_dim],
-                            dim=-1,
-                        )
-                    else:
-                        k_pe, k_nope = fused_kv_no_split.split(
-                            [self.qk_rope_head_dim, self.kv_lora_rank],
-                            dim=-1,
-                        )
-                    if not self.use_sparse_c8_sfa:
-                        assert k_pe is not None
-                        assert k_nope is not None
-                        k_nope = k_nope.view(k_nope.shape[0], 1, -1)
-                        k_pe = k_pe.view(k_pe.shape[0], 1, -1)
-                        DeviceOperator.reshape_and_cache(
-                            key=k_nope[: attn_metadata.num_actual_tokens],
-                            value=k_pe[: attn_metadata.num_actual_tokens],
-                            key_cache=kv_cache[0],
-                            value_cache=kv_cache[1],
-                            slot_mapping=slot_mapping_sfa[: attn_metadata.num_actual_tokens],
-                        )
+            (
+                k_pe,
+                k_nope,
+                k_li,
+                o_proj_full_handle,
+                o_proj_full_param_handles,
+            ) = self._maybe_store_kvcache_for_c8_n_dsacp(
+                k_pe,
+                k_nope,
+                knope_scale,
+                k_li,
+                fused_kv_no_split,
+                kv_ag_handle,
+                kv_cache,
+                slot_mapping_sfa,
+                attn_metadata,
+                full_gather_o_proj_enabled,
+            )
 
             if self.has_indexer:
                 assert k_li is not None
@@ -1954,7 +2028,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         attn_output = self._v_up_proj(attn_output)
 
         if self.enable_dsa_cp_with_o_proj_tp:
-            # SFA DSA-CP mixed mode keeps o_proj weight sharded in the TP domain:
+            # SFA DSA-CP keeps o_proj weight sharded in the TP domain:
             # 1. prefill/mixed: gather TP shards into a temporary full weight.
             # 2. decode-only: all-to-all hidden states, then run TP o_proj.
             result, require_o_proj_forward = self._handle_o_proj_weight_switch_and_forward(
@@ -1965,6 +2039,9 @@ class AscendSFAImpl(MLAAttentionImpl):
                 should_shard_weight=full_gather_o_proj_enabled,
             )
             if not require_o_proj_forward:
+                # The full-weight prefill path completes o_proj internally,
+                # but a pure P node must still publish this layer's KV cache.
+                maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
                 return result
             attn_output = result
 

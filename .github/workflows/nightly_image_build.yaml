@@ -30,6 +30,7 @@ on:
         type: choice
         options:
           - main
+          - releases/v0.24.0rc
           - releases/v0.23.0
           - releases/v0.22.1rc
           - releases/v0.18.0
@@ -39,6 +40,7 @@ jobs:
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a2
+      vllm_ascend_branch: ${{ inputs.vllm_ascend_branch }}
     secrets:
       HW_USERNAME: ${{ secrets.HW_USERNAME }}
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
@@ -48,6 +50,7 @@ jobs:
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a3
+      vllm_ascend_branch: ${{ inputs.vllm_ascend_branch }}
     secrets:
       HW_USERNAME: ${{ secrets.HW_USERNAME }}
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
@@ -57,6 +60,7 @@ jobs:
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: 310p
+      vllm_ascend_branch: ${{ inputs.vllm_ascend_branch }}
     secrets:
       HW_USERNAME: ${{ secrets.HW_USERNAME }}
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
