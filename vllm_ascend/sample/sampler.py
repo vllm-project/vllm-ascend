@@ -9,17 +9,36 @@ from vllm.v1.sample.logits_processor.builtin import (
     MinTokensLogitsProcessor,
 )
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.ops.bad_words import apply_bad_words
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.sample.penalties import apply_all_penalties
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, global_stream, npu_stream_switch
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    get_ascend_device_type,
+    global_stream,
+    lmhead_tp_enable,
+    npu_stream_switch,
+)
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
 
 _SAMPLING_EPS = 1e-5
+
+
+def _get_reduce_sample_comm_group():
+    """Return the correct communication group for reduce-sample operations.
+
+    When lmhead TP is enabled, logits are partitioned across the lmhead TP
+    group (not the regular TP group), so all-gather and rank calculations
+    must use the lmhead TP group. Otherwise, fall back to the regular TP
+    group.
+    """
+    if lmhead_tp_enable():
+        return get_lmhead_tp_group()
+    return get_tp_group()
 
 
 def random_sample(
@@ -80,14 +99,33 @@ class AscendSampler(Sampler):
         # TODO: support logprobs_mode in vllm-ascend
         super().__init__(logprobs_mode=logprobs_mode)
         self.topk_topp_sampler = AscendTopKTopPSampler(logprobs_mode=logprobs_mode)
+        self.async_exponential_event = torch.npu.Event()
         logger.debug(
             "[sample/sampler] AscendSampler initialized. logprobs_mode=%s, triton_available=%s",
             logprobs_mode,
             HAS_TRITON,
         )
 
+    def set_q_event(self, q, event):
+        self.topk_topp_sampler.set_q_event(q, event)
+
     def prepare_sampling(self, top_k):
         self.topk_topp_sampler.prepare_sampling(top_k)
+
+    def do_async_exponential(self, b_s, head_dim, generators):
+        # Calculating exponential randoms in a different stream
+        # and overlapping with model executing.
+        with torch.npu.stream(global_stream()):
+            global_stream().wait_stream(torch.npu.current_stream())
+            q = torch.empty((b_s, head_dim), device="npu", dtype=torch.float32)
+            # Goes to async exponential with AI-CPU exponential or default exponential.
+            if len(generators) != q.shape[0]:
+                q.exponential_()
+            if generators:
+                for i, generator in generators.items():
+                    q[i].exponential_(generator=generator)
+            self.async_exponential_event.record()
+        self.set_q_event(q, self.async_exponential_event)
 
     def apply_logits_processors(
         self,
@@ -95,58 +133,38 @@ class AscendSampler(Sampler):
         sampling_metadata: SamplingMetadata,
         predict_bonus_token: bool,
     ) -> torch.Tensor:
-        bad_words_token_ids = sampling_metadata.bad_words_token_ids
-        any_penalties_or_bad_words = bool(bad_words_token_ids) or not sampling_metadata.no_penalties
-        holder = sampling_metadata.thinking_budget_state_holder
-        needs_thinking_combine = holder is not None and holder.has_tracked_requests()
-
-        output_token_ids = sampling_metadata.output_token_ids
-        if predict_bonus_token and (any_penalties_or_bad_words or needs_thinking_combine):
-            output_token_ids = self._combine_outputs_with_spec_tokens(
-                output_token_ids,
-                sampling_metadata.spec_token_ids,
+        if not get_ascend_config().enable_reduce_sample:
+            return super().apply_logits_processors(
+                logits, sampling_metadata, predict_bonus_token
             )
 
-        # Apply allowed token ids.
-        if sampling_metadata.allowed_token_ids_mask is not None:
-            logits.masked_fill_(sampling_metadata.allowed_token_ids_mask, float("-inf"))
+        # When enable_reduce_sample is active, temporarily change the class
+        # of MinTokensLogitsProcessor / LogitBiasLogitsProcessor instances
+        # to their Ascend variants. This routes apply() through the Ascend
+        # override while preserving all instance state (logits_slice, etc.).
+        # The parent apply_logits_processors is called via super(), so any
+        # upstream changes to that method are automatically picked up.
+        procs = sampling_metadata.logitsprocs
+        swaps = []
+        for p in procs.non_argmax_invariant + procs.argmax_invariant:
+            if isinstance(p, MinTokensLogitsProcessor) and not isinstance(
+                p, AscendMinTokensLogitsProcessor
+            ):
+                swaps.append((p, p.__class__))
+                p.__class__ = AscendMinTokensLogitsProcessor
+            elif isinstance(p, LogitBiasLogitsProcessor) and not isinstance(
+                p, AscendLogitBiasLogitsProcessor
+            ):
+                swaps.append((p, p.__class__))
+                p.__class__ = AscendLogitBiasLogitsProcessor
 
-        # Apply bad words exclusion.
-        if bad_words_token_ids:
-            apply_bad_words(logits, bad_words_token_ids, output_token_ids)
-
-        # Apply logits processors which can impact greedy sampling.
-        # When enable_reduce_sample is active, logits are TP-partitioned
-        # [B, V_local] but MinTokensLogitsProcessor and LogitBiasLogitsProcessor
-        # store global token IDs in logits_slice. Convert to local indices first.
-        for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
-            if get_ascend_config().enable_reduce_sample and isinstance(processor, MinTokensLogitsProcessor):
-                if processor.min_toks:
-                    V_local = logits.shape[-1]
-                    local_req, local_tok, _ = _convert_logits_slice_to_local(processor.logits_slice, V_local)
-                    logits.index_put_((local_req, local_tok), processor.neg_inf_tensor)
-            elif get_ascend_config().enable_reduce_sample and isinstance(processor, LogitBiasLogitsProcessor):
-                if processor.biases:
-                    V_local = logits.shape[-1]
-                    local_req, local_tok, in_shard = _convert_logits_slice_to_local(processor.logits_slice, V_local)
-                    logits[local_req, local_tok] += processor.bias_tensor[in_shard]
-            else:
-                logits = processor.apply(logits)
-
-        # Apply penalties (e.g., freq_penalties).
-        logits = self.apply_penalties(logits, sampling_metadata, output_token_ids)
-        if holder is not None and holder.has_tracked_requests():
-            holder.update_state(
-                output_token_ids,
-                sampling_metadata.spec_token_ids,
-                repeat_indices=None,
+        try:
+            return super().apply_logits_processors(
+                logits, sampling_metadata, predict_bonus_token
             )
-            logits = holder.apply_to_logits(
-                logits,
-                predict_bonus_token,
-                sampling_metadata.spec_token_ids,
-            )
-        return logits
+        finally:
+            for p, orig_cls in swaps:
+                p.__class__ = orig_cls
 
     @staticmethod
     def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
@@ -155,15 +173,15 @@ class AscendSampler(Sampler):
                 "[sample/sampler] Using reduce-sample greedy sampling. "
                 "TP all-gather will be performed to find global argmax.",
             )
-            tp_group = get_tp_group()
+            comm_group = _get_reduce_sample_comm_group()
             B, V_local = logits.shape
-            rank = tp_group.rank_in_group
+            rank = comm_group.rank_in_group
 
             local_max_logits, local_max_indices = logits.max(dim=-1)
             local_global_idx = local_max_indices + rank * V_local  # [B]
             # [B, world_size]
-            gathered_logits = tp_group.all_gather(local_max_logits.unsqueeze(-1), dim=-1)
-            gathered_global_idx = tp_group.all_gather(local_global_idx.unsqueeze(-1), dim=-1)  # [B, world_size]
+            gathered_logits = comm_group.all_gather(local_max_logits.unsqueeze(-1), dim=-1)
+            gathered_global_idx = comm_group.all_gather(local_global_idx.unsqueeze(-1), dim=-1)  # [B, world_size]
             global_max_rank = gathered_logits.argmax(dim=-1)  # [B]
             target_argmax = gathered_global_idx.gather(dim=-1, index=global_max_rank.unsqueeze(-1)).squeeze(-1)  # [B]
             return target_argmax
@@ -176,6 +194,12 @@ class AscendTopKTopPSampler(TopKTopPSampler):
         super().__init__(**kwargs)
         self.apply_top_k_top_p = apply_top_k_top_p
         self.top_k = None
+
+    def set_q_event(self, q, event):
+        # Pass in async exponential results.
+        # Also pass in event to prevent synchronize errors.
+        self.q = q
+        self.async_event = event
 
     def prepare_sampling(self, top_k):
         if top_k is not None:
@@ -220,6 +244,14 @@ class AscendTopKTopPSampler(TopKTopPSampler):
                 logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
             probs = logits.softmax(dim=-1, dtype=torch.float32)
+            if get_ascend_config().enable_async_exponential:
+                # Add synchronize to prevent synchronize error.
+                logger.debug_once(
+                    "[sample/sampler] Using async-exponential sampling path. "
+                    "Pre-computed exponential randoms from separate stream will be used.",
+                )
+                self.async_event.synchronize()
+                return probs.div_(self.q).argmax(dim=-1).view(-1), logits_to_return
             return random_sample(probs, generators), logits_to_return
 
 
@@ -230,9 +262,9 @@ def _apply_top_k_top_p_pytorch(
     top_k: int | None = None,
 ) -> torch.Tensor:
     if get_ascend_config().enable_reduce_sample:
-        tp_group = get_tp_group()
+        comm_group = _get_reduce_sample_comm_group()
         B, V_local = logits.shape
-        rank = tp_group.rank_in_group
+        rank = comm_group.rank_in_group
 
         if top_k is None or (p is None and k is None):
             k_for_topk = V_local
@@ -241,8 +273,8 @@ def _apply_top_k_top_p_pytorch(
 
         local_vals, local_idx = torch.topk(logits, k=k_for_topk, dim=-1)
         local_global_idx = local_idx + rank * V_local
-        gathered_vals = tp_group.all_gather(local_vals, dim=-1)
-        gathered_idx = tp_group.all_gather(local_global_idx, dim=-1)
+        gathered_vals = comm_group.all_gather(local_vals, dim=-1)
+        gathered_idx = comm_group.all_gather(local_global_idx, dim=-1)
 
         if p is None and k is None:
             return gathered_vals, gathered_idx
@@ -250,10 +282,10 @@ def _apply_top_k_top_p_pytorch(
         probs = gathered_vals.softmax(dim=-1)
         probs_sort, _ = probs.sort(dim=-1, descending=False)
         if k is not None:
-            kk = k.to(torch.long).clamp(min=1, max=V_local)
+            kk = k.to(torch.long).clamp(min=1, max=gathered_vals.shape[-1])
             top_k_count = (probs_sort.size(1) - kk).unsqueeze(1)  # [B,1]
             top_k_cutoff = probs_sort.gather(-1, top_k_count)
-            no_top_k_mask = (kk == V_local).unsqueeze(1)
+            no_top_k_mask = (kk == gathered_vals.shape[-1]).unsqueeze(1)
             top_k_cutoff.masked_fill_(no_top_k_mask, -float("inf"))
             elements_to_discard = probs < top_k_cutoff
             gathered_vals.masked_fill_(elements_to_discard, -float("inf"))
@@ -305,9 +337,9 @@ def _apply_top_k_top_p_torch_npu(
     top_k: int | None = None,
 ) -> torch.Tensor:
     if get_ascend_config().enable_reduce_sample:
-        tp_group = get_tp_group()
+        comm_group = _get_reduce_sample_comm_group()
         B, V_local = logits.shape
-        rank = tp_group.rank_in_group
+        rank = comm_group.rank_in_group
 
         if top_k is None or (p is None and k is None):
             k_for_topk = V_local
@@ -316,8 +348,8 @@ def _apply_top_k_top_p_torch_npu(
 
         local_vals, local_idx = torch.topk(logits, k=k_for_topk, dim=-1)
         local_global_idx = local_idx + rank * V_local
-        gathered_vals = tp_group.all_gather(local_vals, dim=-1)
-        gathered_idx = tp_group.all_gather(local_global_idx, dim=-1)
+        gathered_vals = comm_group.all_gather(local_vals, dim=-1)
+        gathered_idx = comm_group.all_gather(local_global_idx, dim=-1)
 
         if not (p is None and k is None):
             gathered_vals = torch_npu.npu_top_k_top_p(gathered_vals, k=k, p=p)
@@ -349,7 +381,8 @@ def _convert_logits_slice_to_local(
 
     Returns (req_indices, local_tok_ids, in_shard_mask).
     """
-    tp_rank = get_tp_group().rank_in_group
+    comm_group = _get_reduce_sample_comm_group()
+    tp_rank = comm_group.rank_in_group
     vocab_start = tp_rank * V_local
     vocab_end = vocab_start + V_local
 
@@ -358,3 +391,37 @@ def _convert_logits_slice_to_local(
     local_tok_ids = (tok_ids - vocab_start)[in_shard_mask]
     local_req_indices = req_indices[in_shard_mask]
     return (local_req_indices, local_tok_ids, in_shard_mask)
+
+
+class AscendMinTokensLogitsProcessor(MinTokensLogitsProcessor):
+    """Ascend variant that handles TP-partitioned logits when
+    enable_reduce_sample is active."""
+
+    def apply(self, logits: torch.Tensor) -> torch.Tensor:
+        if not self.min_toks:
+            return logits
+        if get_ascend_config().enable_reduce_sample:
+            V_local = logits.shape[-1]
+            local_req, local_tok, _ = _convert_logits_slice_to_local(
+                self.logits_slice, V_local
+            )
+            logits.index_put_((local_req, local_tok), self.neg_inf_tensor)
+            return logits
+        return super().apply(logits)
+
+
+class AscendLogitBiasLogitsProcessor(LogitBiasLogitsProcessor):
+    """Ascend variant that handles TP-partitioned logits when
+    enable_reduce_sample is active."""
+
+    def apply(self, logits: torch.Tensor) -> torch.Tensor:
+        if not self.biases:
+            return logits
+        if get_ascend_config().enable_reduce_sample:
+            V_local = logits.shape[-1]
+            local_req, local_tok, in_shard = _convert_logits_slice_to_local(
+                self.logits_slice, V_local
+            )
+            logits[local_req, local_tok] += self.bias_tensor[in_shard]
+            return logits
+        return super().apply(logits)
