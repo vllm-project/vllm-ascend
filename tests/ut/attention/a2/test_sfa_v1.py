@@ -249,9 +249,7 @@ class TestAscendSFACacheComposition(TestBase):
         q_li = torch.zeros(2, 1, 128, dtype=torch.int8)
         q_li_scale = torch.ones(2, 1, dtype=torch.float16)
         weights = torch.ones(2, 1, dtype=torch.bfloat16)
-        attn_metadata = SimpleNamespace(
-            block_table=torch.zeros(1, 2, dtype=torch.int32)
-        )
+        attn_metadata = SimpleNamespace(block_table=torch.zeros(1, 2, dtype=torch.int32))
 
         for enable_sfa_c8 in (False, True):
             with self.subTest(enable_sfa_c8=enable_sfa_c8):

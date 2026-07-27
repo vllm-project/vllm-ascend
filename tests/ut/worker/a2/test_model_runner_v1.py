@@ -352,26 +352,26 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     ],
                 )
                 backend = MagicMock()
-                backend.get_kv_cache_shape.side_effect = (
-                    lambda num_blocks, block_size, num_kv_heads, head_size: (
-                        num_blocks,
-                        block_size,
-                        num_kv_heads,
-                        head_size,
-                    )
+                backend.get_kv_cache_shape.side_effect = lambda num_blocks, block_size, num_kv_heads, head_size: (
+                    num_blocks,
+                    block_size,
+                    num_kv_heads,
+                    head_size,
                 )
-                runner._kv_cache_spec_attn_group_iterator = lambda: [
-                    SimpleNamespace(
-                        kv_cache_spec=main_spec,
-                        backend=backend,
-                        layer_names=[attn_layer_name],
-                    ),
-                    SimpleNamespace(
-                        kv_cache_spec=indexer_spec,
-                        backend=backend,
-                        layer_names=[indexer_layer_name],
-                    ),
-                ]
+                runner._kv_cache_spec_attn_group_iterator = MagicMock(
+                    return_value=[
+                        SimpleNamespace(
+                            kv_cache_spec=main_spec,
+                            backend=backend,
+                            layer_names=[attn_layer_name],
+                        ),
+                        SimpleNamespace(
+                            kv_cache_spec=indexer_spec,
+                            backend=backend,
+                            layer_names=[indexer_layer_name],
+                        ),
+                    ]
+                )
 
                 raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
                 caches = runner._reshape_kv_cache_tensors(kv_cache_config, raw_caches)

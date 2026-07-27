@@ -600,9 +600,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # The user-facing switches control these layouts independently. LI C8
         # applies only to layers that own an indexer cache.
         self.enable_sparse_sfa_c8 = ascend_config.enable_sparse_sfa_c8
-        self.enable_sparse_li_c8 = self.has_indexer and ascend_config.is_sparse_li_c8_layer(
-            self.indexer.k_cache.prefix
-        )
+        self.enable_sparse_li_c8 = self.has_indexer and ascend_config.is_sparse_li_c8_layer(self.indexer.k_cache.prefix)
         if self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8:
             if get_ascend_device_type() == AscendDeviceType.A5:
                 self.c8_k_cache_dtype = torch.float8_e4m3fn
