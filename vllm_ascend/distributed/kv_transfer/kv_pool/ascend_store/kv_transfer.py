@@ -545,16 +545,22 @@ class KVTransferThread(threading.Thread):
         skip_null_blocks: bool = False,
         cache_role: str = "kv",
     ):
+        def keep_latest(token_iter):
+            latest_chunks = {chunk[3]: chunk for chunk in token_iter}
+            return iter(sorted(latest_chunks.values(), key=lambda chunk: chunk[0]))
+
         process_with_block_ids = getattr(self.token_database, "process_tokens_with_block_ids", None)
         if process_with_block_ids is not None:
-            return process_with_block_ids(
-                token_len,
-                block_hashes,
-                block_ids,
-                mask_num,
-                kv_cache_group_id=kv_cache_group_id,
-                skip_null_blocks=skip_null_blocks,
-                cache_role=cache_role,
+            return keep_latest(
+                process_with_block_ids(
+                    token_len,
+                    block_hashes,
+                    block_ids,
+                    mask_num,
+                    kv_cache_group_id=kv_cache_group_id,
+                    skip_null_blocks=skip_null_blocks,
+                    cache_role=cache_role,
+                )
             )
 
         def iter_with_legacy_process_tokens():
@@ -572,7 +578,7 @@ class KVTransferThread(threading.Thread):
                     continue
                 yield start, end, key, block_id
 
-        return iter_with_legacy_process_tokens()
+        return keep_latest(iter_with_legacy_process_tokens())
 
     def _prepare_value(
         self,
