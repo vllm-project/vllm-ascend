@@ -47,10 +47,6 @@ class TestAscendSFABackend(TestBase):
         self.utils_patcher = patch("vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_config)
         self.utils_patcher.start()
 
-        from vllm_ascend.attention.utils import enable_cp
-
-        enable_cp.cache_clear()
-
     def tearDown(self):
         self.utils_patcher.stop()
         self.config_context.__exit__(None, None, None)
@@ -69,15 +65,15 @@ class TestAscendSFABackend(TestBase):
         result = AscendSFABackend.get_impl_cls()
         self.assertEqual(result, AscendSFAImpl)
 
-    @patch("vllm_ascend.attention.sfa_v1.enable_cp")
-    def test_get_builder_cls_with_cp(self, mock_enable_cp):
-        mock_enable_cp.return_value = True
+    @patch("vllm_ascend.attention.sfa_v1.enable_sfa_dcp_replicated_indexer")
+    def test_get_builder_cls_with_dcp(self, mock_enable_dcp):
+        mock_enable_dcp.return_value = True
         builder_cls = AscendSFABackend.get_builder_cls()
         self.assertIsNotNone(builder_cls)
 
-    @patch("vllm_ascend.attention.sfa_v1.enable_cp")
-    def test_get_impl_cls_with_cp(self, mock_enable_cp):
-        mock_enable_cp.return_value = True
+    @patch("vllm_ascend.attention.sfa_v1.enable_sfa_dcp_replicated_indexer")
+    def test_get_impl_cls_with_dcp(self, mock_enable_dcp):
+        mock_enable_dcp.return_value = True
         impl_cls = AscendSFABackend.get_impl_cls()
         self.assertIsNotNone(impl_cls)
 
@@ -434,7 +430,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         self.ascend_config_patcher.stop()
         self.parent_init_patcher.stop()
 
-    @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
+    @patch_distributed_groups(dcp_size=2, needs_mocks=False)
     def test_ascend_sfa_metadata_builder_default(self):
         kv_cache_spec = MagicMock()
         kv_cache_spec.block_size = 128
@@ -461,7 +457,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp")
-    @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
+    @patch_distributed_groups(dcp_size=2, needs_mocks=False)
     def test_ascend_sfa_metadata_builder_build(
         self,
         mock_enable_dsa_cp,
@@ -524,7 +520,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp", return_value=False)
     @patch("vllm.distributed.parallel_state.get_tp_group")
-    @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
+    @patch_distributed_groups(dcp_size=2, needs_mocks=False)
     def test_ascend_sfa_metadata_builder_build_for_graph_capture(
         self, mock_get_tp_group, mock_enable_dsa_cp, mock_get_cos_and_sin_mla, mock_get_current_vllm_config
     ):
