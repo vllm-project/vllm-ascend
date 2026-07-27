@@ -153,7 +153,7 @@ def build_layerwise_cache_layout(
     )
 
 
-def get_layer_kv_cache_specs(kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
+def _get_layer_kv_cache_specs(kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
     """Expand group specs into a cache spec for every logical layer."""
     layer_specs: dict[str, KVCacheSpec] = {}
     for group in kv_cache_config.kv_cache_groups:
@@ -191,7 +191,7 @@ def build_layerwise_reuse_layout(
     return layer_layout, storage_slots
 
 
-def validate_layerwise_reuse_layout(
+def _validate_layerwise_reuse_layout(
     kv_cache_config: KVCacheConfig,
     layer_specs: dict[str, KVCacheSpec],
     layer_layout: dict[int, dict[str, str]],
@@ -255,7 +255,7 @@ def apply_layerwise_kv_cache_plan(
         raise NotImplementedError("Layerwise KV cache reuse requires one KV cache tensor descriptor per layer.")
 
     base_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
-    layer_specs = get_layer_kv_cache_specs(kv_cache_config)
+    layer_specs = _get_layer_kv_cache_specs(kv_cache_config)
     layer_layout, storage_slots = build_layerwise_reuse_layout(
         layer_specs,
         base_layers,
@@ -265,7 +265,7 @@ def apply_layerwise_kv_cache_plan(
     if len(storage_slots) >= actual_layers:
         return
 
-    validate_layerwise_reuse_layout(
+    _validate_layerwise_reuse_layout(
         kv_cache_config,
         layer_specs,
         layer_layout,
