@@ -39,6 +39,7 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
         TPWeightGatherSpec("weight"),
         TPWeightGatherSpec("weight_scale"),
     )
+    supports_dsa_cp_o_proj = True
 
     def __init__(self, quant_config):
         super().__init__()

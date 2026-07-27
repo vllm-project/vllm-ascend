@@ -88,6 +88,7 @@ class AscendW4A4FlatQuantDynamicLinearMethod(AscendLinearScheme):
 
     input_size = 0
     tp_weight_gather_specs = (TPWeightGatherSpec("weight_packed", gather_dim=1),)
+    supports_dsa_cp_o_proj = True
 
     def __init__(self):
         self.sym = True

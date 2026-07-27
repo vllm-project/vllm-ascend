@@ -87,7 +87,9 @@ class TPWeightSwitchMixin:
        must be gathered instead.
     4. The supported o_proj execution paths and any excluded path. Declaring
        switch specs only guarantees weight switching; it does not make a
-       quantized operator compatible with every SFA or DSA-CP kernel.
+       quantized operator compatible with every SFA or DSA-CP kernel. Declare
+       ``supports_dsa_cp_o_proj = True`` only after validating the DSA-CP
+       operator.
 
     ``attr_name`` must name a direct tensor attribute on the layer. The mixin
     owns only reusable TP/full state and collective handles; subclasses retain
@@ -96,6 +98,7 @@ class TPWeightSwitchMixin:
 
     tp_weight_gather_specs: ClassVar[tuple[TPWeightGatherSpec, ...]] = ()
     tp_weight_repeat_specs: ClassVar[tuple[TPWeightRepeatSpec, ...]] = ()
+    supports_dsa_cp_o_proj: ClassVar[bool] = False
 
     @staticmethod
     def split_tensor_for_tp(

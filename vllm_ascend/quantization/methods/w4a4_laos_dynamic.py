@@ -34,6 +34,7 @@ class AscendW4A4LaosDynamicLinearMethod(AscendLinearScheme):
     """
 
     tp_weight_gather_specs = (TPWeightGatherSpec("weight"),)
+    supports_dsa_cp_o_proj = True
 
     def __init__(self):
         pass

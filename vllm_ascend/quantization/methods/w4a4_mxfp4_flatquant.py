@@ -71,6 +71,7 @@ class AscendW4A4MXFP4FlatQuantDynamicLinearMethod(AscendLinearScheme):
         TPWeightGatherSpec("weight"),
         TPWeightGatherSpec("weight_scale"),
     )
+    supports_dsa_cp_o_proj = True
 
     def __init__(self):
         vllm_config = get_current_vllm_config()
