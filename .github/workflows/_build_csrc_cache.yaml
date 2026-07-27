@@ -52,6 +52,11 @@ on:
         required: false
         default: ''
         description: 'Fixed base commit to rebase onto before building.'
+      continue_on_error:
+        type: boolean
+        required: false
+        default: false
+        description: 'Allow callers in rollout mode to continue when this cache build fails.'
 
 defaults:
   run:
@@ -69,6 +74,9 @@ env:
 jobs:
   build:
     name: build-${{ fromJSON(inputs.target).id }}-cache
+    # Keep standalone cache builds fail-closed by default. The ensure workflow
+    # opts into tolerance only while NPU compilation remains the CI fallback.
+    continue-on-error: ${{ inputs.continue_on_error }}
     runs-on: ${{ fromJSON(inputs.target).runner }}
     container:
       image: ${{ fromJSON(inputs.target).image }}

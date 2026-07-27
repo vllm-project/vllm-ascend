@@ -56,6 +56,9 @@ defaults:
 jobs:
   prepare-cache-checks:
     name: Prepare csrc cache checks
+    # During rollout, cache preparation is observational and must not block the
+    # existing NPU build path. Remove this tolerance once CPU caching is stable.
+    continue-on-error: true
     runs-on: linux-amd64-cpu-2-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -262,3 +265,6 @@ jobs:
       base_repository: ${{ inputs.base_repository }}
       base_ref: ${{ inputs.base_ref }}
       base_sha: ${{ inputs.base_sha }}
+      # Preserve CI during rollout if a missing cache cannot yet be built on CPU.
+      # The standalone push workflow keeps the build workflow's default false.
+      continue_on_error: true

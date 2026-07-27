@@ -194,9 +194,10 @@ jobs:
             vllm_ascend/lib
             vllm_ascend/include
           key: vllm-ascend-build-v2-${{ steps.get_arch.outputs.arch }}-${{ matrix.group.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-          # Normal CI fails on a miss. This can be temporarily changed to false
-          # to activate the NPU build fallback below during cache emergencies.
-          fail-on-cache-miss: true
+          # During the rollout, tolerate misses so CI can fall back to the
+          # existing NPU build while CPU cache production proves stable.
+          # Restore fail-on-cache-miss to true after the transition period.
+          fail-on-cache-miss: false
 
       - name: Install Mooncake wheel
         if: ${{ matrix.group.npu_type != 'cpu' }}
@@ -225,8 +226,8 @@ jobs:
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-          # The miss branch is intentionally dormant while fail-on-cache-miss is
-          # true; keep it as an explicit emergency fallback for NPU compilation.
+          # Preserve CI availability during the transition by compiling on the
+          # NPU only when the new CPU-produced cache is unavailable.
           if [ "$CSRC_CACHE_HIT" = "true" ]; then
             echo "csrc cache hit: skip kernel compilation"
             COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
