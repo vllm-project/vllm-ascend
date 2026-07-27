@@ -34,6 +34,7 @@ GLM5.2.md
 Kimi-K2-Thinking.md
 Kimi-K2.5.md
 Kimi-K2.6.md
+Kimi-K3.md
 PaddleOCR-VL.md
 MiniMax-M2.md
 Hunyuan-A13B-Instruct.md
