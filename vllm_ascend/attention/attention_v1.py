@@ -761,11 +761,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 # layer-specific metadata lookup below prevents global/sliding
                 # window layers from accidentally sharing the same metadata.
                 attn_keys = [attn_keys[index % num_layers] for index in range(graph_param_count)]
-            else:
+            elif graph_param_count > num_layers:
                 # Replay pairs captured ops with metadata by POSITION here, and
                 # cudagraph_specialize_lora captures one self-attn sweep per LoRA
                 # specialization, so tile the target layers to the op count.
                 # EAGLE3 also adds a draft key to attn_metadata; drop it first.
+                # Fewer ops than keys (e.g. MTP, whose draft key keeps its own
+                # `mtp.N` numbering) stays with the zip() truncation below.
                 base = _select_target_fia_keys(attn_keys, graph_param_count, _get_target_num_layers(vllm_config))
                 assert graph_param_count % len(base) == 0, (
                     f"graph_param_count ({graph_param_count}) is not a multiple of "
