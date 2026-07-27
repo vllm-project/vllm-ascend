@@ -69,6 +69,18 @@ For main branch of vLLM Ascend, we usually make it compatible with the latest vL
 |-------------|--------------|------------------|-------------|--------------------|---------------|
 |     main    | {{main_vllm_commit}}, {{main_vllm_tag}} | {{main_python_version}}   | {{main_cann_version}} | {{main_pytorch_torch_npu_version}} | {{main_triton_ascend_version}} |
 
+The release rows and the main row are different installation targets. For a
+release installation, use the vLLM and vLLM Ascend versions from the same
+release row. For main-branch development, check out the exact vLLM commit from
+`.github/vllm-main-verified.commit`. Do not assume that an arbitrary vLLM tag
+or PyPI release has the same transitive dependencies as that verified commit.
+
+The matrix describes the complete NPU runtime stack. A successful CPU-only
+editable build verifies package construction only; it does not prove that the
+resulting environment is resolver-compatible or that NPU runtime tests pass.
+Using `--no-build-isolation` can bypass build-environment resolution, so run
+`python -m pip check` before using such an environment for runtime testing.
+
 ## Release cadence
 
 ### Release window
@@ -154,7 +166,7 @@ Usually, each minor version of vLLM (such as 0.7) corresponds to a vLLM Ascend v
 
 | Branch     | State       | RFC Link                             | Scheduled Merge Time | Mentor |
 |------------|--------------|---------------------------------------|------------|--------|
-|rfc/long_seq_optimization|Maintained|<https://github.com/vllm-project/vllm/issues/22693>|930|wangxiyuan|
+|rfc/long_seq_optimization|Maintained|[RFC: long sequence optimization #22693](https://github.com/vllm-project/vllm/issues/22693)|930|wangxiyuan|
 
 - Branch: The feature branch should be created with a prefix `rfc/` followed by the feature name, such as `rfc/feature-name`.
 - State: The state of the feature branch is `Maintained` until it is merged into the main branch or deleted.
