@@ -739,6 +739,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
     def _propose(
         self,
+        num_speculative_tokens: int,
         # [num_tokens]
         target_token_ids: torch.Tensor,
         # [num_tokens] or [3, num_tokens] when M-RoPE is enabled
@@ -761,6 +762,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         num_rejected_tokens_gpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
+
+        # Dynamic SD: take the scheduled per-step K as an explicit argument and
+        # set it here -- mirroring vLLM's ``propose(num_speculative_tokens=...)``
+        # (which sets ``self.num_speculative_tokens`` on entry) and unified with
+        # the other proposers (ngram/suffix/medusa/extract) that also receive the
+        # scheduled K through their propose call. The value never exceeds the
+        # configured maximum, so pre-allocated buffers stay valid; K == 0 is
+        # handled just below.
+        self.num_speculative_tokens = num_speculative_tokens
 
         # Dynamic SD may schedule K == 0 draft tokens for the current batch
         # size. Return an empty [batch_size, 0] draft so downstream copy/unpack

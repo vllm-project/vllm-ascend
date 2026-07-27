@@ -1337,7 +1337,8 @@ class TestEagleProposerPropose:
             patch.object(self.proposer, 'attn_update_stack_num_spec_norm', side_effect=side_effect),
             set_current_vllm_config(self.vllm_config),
         ):
-            self.proposer._propose(target_token_ids, target_positions, target_hidden_states, next_token_ids,
+            self.proposer._propose(self.proposer.num_speculative_tokens,
+                                target_token_ids, target_positions, target_hidden_states, next_token_ids,
                                 token_indices_to_sample, mock_common_attn_metadata, target_model_batch_desc, mock_sampling_metadata,
                                 mm_embed_inputs, req_scheduled_tokens, long_seq_metadata, num_prefill_reqs, num_decode_reqs,
                                 scheduler_output, num_scheduled_tokens, num_rejected_tokens_gpu,

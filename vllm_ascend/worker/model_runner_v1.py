@@ -934,15 +934,10 @@ class NPUModelRunner(GPUModelRunner):
                 cu_num_tokens,
                 self._draft_token_ids,  # type: ignore[has-type]
                 scheduler_output,
-                # Unpacks the *previous* step's draft tensor, whose width equals
-                # the K used last step. Under dynamic SD that width can be < the
-                # configured maximum, so use ``prev_num_spec_tokens`` (tracked in
-                # ``_copy_draft_token_ids_to_cpu``) rather than ``num_spec_tokens``.
-                # It is initialized in ``GPUModelRunner.__init__`` (to the
-                # configured max K, or 0 when spec decoding is off), so it is
-                # always present before the first draft is produced. The type
-                # is only assigned in the parent class, which mypy cannot
-                # resolve here (same reason as the assignment site below).
+                # Unpack the *previous* step's draft tensor, whose width is the K
+                # used last step -- may be < the configured max under dynamic SD,
+                # so use ``prev_num_spec_tokens`` (tracked in
+                # ``_copy_draft_token_ids_to_cpu``), not ``num_spec_tokens``.
                 self.prev_num_spec_tokens,  # type: ignore[has-type]
                 prev_positions=prev_positions_gpu,
             )
@@ -1172,11 +1167,8 @@ class NPUModelRunner(GPUModelRunner):
                 arange_np=self.arange_np,
                 cu_num_tokens=cu_num_tokens,
                 draft_token_ids=self._draft_token_ids,  # type: ignore[has-type]
-                # Previous step's draft width (see the note on the other
-                # generate_pcp_mtp_input call); matters when dynamic SD varies K.
-                # Initialized in ``GPUModelRunner.__init__`` (max K, or 0 when
-                # spec decoding is off), so it is always present here. Type is
-                # only assigned in the parent class, unresolvable by mypy here.
+                # Previous step's draft width (see the other generate_pcp_mtp_input
+                # call); matters when dynamic SD varies K.
                 num_spec_tokens=self.prev_num_spec_tokens,  # type: ignore[has-type]
                 prepare_input_ids=self._prepare_input_ids,
             )
@@ -1649,14 +1641,13 @@ class NPUModelRunner(GPUModelRunner):
                 else:
                     target_hidden_states = hidden_states[token_indices]
             assert self.drafter is not None
-            # Dynamic SD: the eagle/draft-model drafter drives its draft loop
-            # off ``num_speculative_tokens``. Set it to the scheduler's per-step
-            # K (== the configured maximum when the feature is disabled, so the
-            # default path is unchanged). The value never exceeds the maximum,
-            # so the drafter's pre-allocated buffers stay valid; K == 0 is
-            # handled inside ``_propose``.
-            self.drafter.num_speculative_tokens = scheduler_output.num_spec_tokens_to_schedule
+            # Dynamic SD: pass the scheduled per-step K explicitly, unified with
+            # the other proposers (ngram/suffix/medusa/extract) and matching
+            # vLLM's ``propose(num_speculative_tokens=...)``. ``_propose`` sets
+            # ``self.num_speculative_tokens`` from it, so the model runner no
+            # longer mutates the drafter's state here.
             draft_token_ids = self.drafter._propose(
+                num_speculative_tokens=scheduler_output.num_spec_tokens_to_schedule,
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
