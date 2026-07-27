@@ -13,9 +13,9 @@
       "skip_plugin_validation": true
     },
     {
-      "variant_label": "a2",
+      "variant_label": "910b",
       "properties": [
-        "ascend :: npu_type :: a2"
+        "ascend :: npu_type :: 910b"
       ],
       "skip_plugin_validation": true
     },

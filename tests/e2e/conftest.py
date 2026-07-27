@@ -21,11 +21,13 @@ import contextlib
 import copy
 import functools
 import gc
+import hashlib
 import json
 import logging
 import multiprocessing
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import threading
@@ -55,8 +57,11 @@ from vllm.platforms import current_platform
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.network_utils import get_open_port
 
+from tests.e2e.coverage_taxonomy import (
+    validate_coverage_marker,
+)
 from tests.e2e.model_utils import TokensTextLogprobs, TokensTextLogprobsPromptLogprobs
-from tests.e2e.nightly.multi_node.scripts.multi_node_config import DisaggregatedPrefillCfg, NodeInfo
+from tests.e2e.nightly.multi_node.internal_dp.scripts.multi_node_config import DisaggregatedPrefillCfg, NodeInfo
 from vllm_ascend.ascend_config import clear_ascend_config
 
 # TODO: remove this part after the patch merged into vllm, if
@@ -80,6 +85,8 @@ _PromptMultiModalInput = list[_M] | list[list[_M]]
 PromptImageInput = _PromptMultiModalInput[Image.Image]
 PromptAudioInput = _PromptMultiModalInput[tuple[np.ndarray, int]]
 PromptVideoInput = _PromptMultiModalInput[np.ndarray]
+
+
 logger = logging.getLogger(__name__)
 
 _TEST_DIR = os.path.dirname(__file__)
@@ -87,6 +94,12 @@ _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "long_prompt.txt")]
 
 DISAGG_EPD_PROXY_SCRIPT = (
     Path(__file__).parent.parent.parent / "examples" / "disaggregated_encoder" / "disagg_epd_proxy.py"
+)
+DISAGG_PD_PROXY_SCRIPT = (
+    Path(__file__).parent.parent.parent
+    / "examples"
+    / "disaggregated_prefill_v1"
+    / "load_balance_proxy_server_example.py"
 )
 
 
@@ -178,6 +191,15 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
         torch.npu.reset_peak_memory_stats()
 
 
+class ModelName:
+    """Global model name enumeration class."""
+
+    QWEN3_06B = "Qwen/Qwen3-0.6B"
+    QWEN3_8B = "Qwen/Qwen3-8B"
+    QWEN3_30B_A3B = "Qwen/Qwen3-30B-A3B"
+    DEEPSEEK = "vllm-ascend/DeepSeek-V2-Lite-W8A8"
+
+
 class MooncakeLauncher:
     def __init__(
         self,
@@ -209,18 +231,23 @@ class MooncakeLauncher:
         mooncake_ld_path = "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:"
         os.environ["LD_LIBRARY_PATH"] = mooncake_ld_path + curr_ld_path
         env = os.environ.copy()
-        self.process = subprocess.Popen(cmd, env=env)
+        self.process = subprocess.Popen(cmd, env=env, start_new_session=True)
         return self
 
     def __exit__(self, exc_type, exc, tb):
         if not self.process:
             return
         logger.info("Stopping mooncake server...")
-        self.process.terminate()
         try:
+            pgid = os.getpgid(self.process.pid)
+            os.killpg(pgid, signal.SIGTERM)
             self.process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            self.process.kill()
+            logger.warning("Mooncake server did not stop gracefully, force killing...")
+            os.killpg(pgid, signal.SIGKILL)
+            self.process.wait(timeout=5)
+        except ProcessLookupError:
+            pass
 
 
 class RemoteOpenAIServer:
@@ -385,6 +412,7 @@ class RemoteOpenAIServer:
                     # check unexpected exit
                     result = self._poll()
                     if result is not None and result != 0:
+                        self._terminate_server()
                         raise RuntimeError(f"Server at {node_ip} exited unexpectedly.") from None
 
             if should_log:
@@ -408,12 +436,32 @@ class RemoteOpenAIServer:
 
     def _terminate_server(self) -> None:
         """Subclasses override this method to customize server process termination"""
-        self.proc.terminate()
+        self._terminate_process_tree(self.proc)
+
+    def _terminate_process_tree(self, proc: subprocess.Popen) -> None:
         try:
-            self.proc.wait(8)
-        except subprocess.TimeoutExpired:
-            # force kill if needed
-            self.proc.kill()
+            parent = psutil.Process(proc.pid)
+        except psutil.NoSuchProcess:
+            return
+
+        children = parent.children(recursive=True)
+
+        try:
+            parent.terminate()
+            parent.wait(timeout=60)
+        except (psutil.NoSuchProcess, psutil.TimeoutExpired):
+            with contextlib.suppress(psutil.NoSuchProcess):
+                parent.kill()
+
+        for child in children:
+            with contextlib.suppress(psutil.NoSuchProcess):
+                child.terminate()
+
+        _, still_alive = psutil.wait_procs(children, timeout=10)
+
+        for child in still_alive:
+            with contextlib.suppress(psutil.NoSuchProcess):
+                child.kill()
 
     def url_for(self, *parts: str) -> str:
         return self.url_root + "/" + "/".join(parts)
@@ -432,6 +480,158 @@ class RemoteOpenAIServer:
         if "timeout" not in kwargs:
             kwargs["timeout"] = 600
         return openai.AsyncOpenAI(base_url=self.url_for("v1"), api_key=self.DUMMY_API_KEY, max_retries=0, **kwargs)
+
+
+def _get_pd_server_required_devices(vllm_serve_args: list[str]) -> int:
+    def get_size(arg_name: str) -> int:
+        value = 1
+        if arg_name in vllm_serve_args:
+            value = int(vllm_serve_args[vllm_serve_args.index(arg_name) + 1])
+        if value <= 0:
+            raise ValueError(f"{arg_name} must be positive, got {value}.")
+        return value
+
+    tensor_parallel_size = get_size("--tensor-parallel-size")
+    data_parallel_arg = (
+        "--data-parallel-size-local" if "--data-parallel-size-local" in vllm_serve_args else "--data-parallel-size"
+    )
+    data_parallel_size = get_size(data_parallel_arg)
+    return tensor_parallel_size * data_parallel_size
+
+
+class RemotePDServer(RemoteOpenAIServer):
+    def __init__(
+        self,
+        vllm_serve_args: list[str] | list[list[str]],
+        server_host: str = "127.0.0.1",
+        env_dict: dict[str, str] | None = None,
+        max_wait_seconds: float | None = 600,
+    ) -> None:
+        self._proc_list = []
+
+        self.env_dict: dict[str, str] = {}
+        if env_dict is not None:
+            self.env_dict.update(env_dict)
+
+        self.env_dict["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
+        self.env_dict["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
+        self.env_dict["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+        self.vllm_serve_args_list = []
+        self.health_url_list = []
+        self.host = server_host
+
+        if isinstance(vllm_serve_args, list):
+            if not all(isinstance(item, list) for item in vllm_serve_args):
+                args_copy = copy.deepcopy(vllm_serve_args)
+                self.vllm_serve_args_list = [[str(arg) for arg in args_copy]]
+            else:
+                self.vllm_serve_args_list = [
+                    [str(arg) for arg in sublist] for sublist in copy.deepcopy(vllm_serve_args)
+                ]
+        else:
+            raise RuntimeError("vllm_serves_args must be a list")
+        serve_arg_cmd = ["vllm", "serve"]
+        start_device_id = 0
+
+        for i, vllm_serve_arg in enumerate(self.vllm_serve_args_list):
+            if "--port" not in vllm_serve_arg:
+                raise ValueError("You have to manually specify the port")
+            self.port = int(vllm_serve_arg[vllm_serve_arg.index("--port") + 1])
+            self.health_url_list.append(self.url_for("health"))
+
+            required_devices = _get_pd_server_required_devices(vllm_serve_arg)
+            server_env = copy.deepcopy(self.env_dict)
+            server_env["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(
+                str(device_id) for device_id in range(start_device_id, start_device_id + required_devices)
+            )
+            start_device_id += required_devices
+
+            vllm_serve_arg = [*serve_arg_cmd, *vllm_serve_arg]
+            proc = self._start_server_with_prefix(vllm_serve_arg, server_env, f"[PD_{i}] ")
+            self._proc_list.append(proc)
+
+        timeout_value = float(max_wait_seconds) if max_wait_seconds is not None else 2800.0
+        self._wait_for_multiple_servers(
+            [(self.host, url) for url in self.health_url_list], timeout=timeout_value, always_check_nodes=True
+        )
+
+    def _poll(self) -> int | None:
+        for proc in self._proc_list:
+            result = proc.poll()
+            if result is not None and result != 0:
+                return result
+        return None
+
+    def _read_output(self, pipe, prefix):
+        try:
+            with pipe:
+                for line in iter(pipe.readline, ""):
+                    if line:
+                        print(f"{prefix}: {line}", end="")
+
+        except Exception as e:
+            print(f"error: {e}")
+            traceback.print_exc()
+
+    def _start_server_with_prefix(self, server_cmd: list[str], env_dict: dict[str, str] | None, log_prefix: str):
+        env = os.environ.copy()
+        if env_dict is not None:
+            env.update(env_dict)
+        proc = subprocess.Popen(
+            server_cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, bufsize=1
+        )
+        stdout_thread = threading.Thread(target=self._read_output, args=(proc.stdout, log_prefix), daemon=True)
+        stderr_thread = threading.Thread(target=self._read_output, args=(proc.stderr, log_prefix), daemon=True)
+
+        stdout_thread.start()
+        stderr_thread.start()
+        return proc
+
+    def _terminate_server(self) -> None:
+        print("pd instance is stopping")
+        for proc in self._proc_list:
+            self._terminate_process_tree(proc)
+
+
+class DisaggPDProxy(RemotePDServer):
+    def __init__(
+        self,
+        port: int,
+        prefiller_ports: list[int],
+        decoder_ports: list[int],
+        host: str = "127.0.0.1",
+        env_dict: dict[str, str] | None = None,
+        max_wait_seconds: float | None = 600,
+    ) -> None:
+        self.env_dict: dict[str, str] = {}
+        if env_dict is not None:
+            self.env_dict.update(env_dict)
+        self._proc_list = []
+        self.host = host
+        self.port = int(port)
+        self.proxy_args = [
+            "--host",
+            host,
+            "--port",
+            str(port),
+            "--prefiller-hosts",
+            *[host] * len(prefiller_ports),
+            "--prefiller-ports",
+            *[str(port) for port in prefiller_ports],
+            "--decoder-hosts",
+            *[host] * len(decoder_ports),
+            "--decoder-ports",
+            *[str(port) for port in decoder_ports],
+        ]
+
+        print(f"proxy param is: {self.proxy_args}")
+        proxy_cmd = [sys.executable, str(DISAGG_PD_PROXY_SCRIPT), *self.proxy_args]
+        proc = self._start_server_with_prefix(proxy_cmd, self.env_dict, "[PD_PROXY] ")
+        self._proc_list.append(proc)
+
+        timeout_value = float(max_wait_seconds) if max_wait_seconds is not None else 600.0
+        self._wait_for_multiple_servers([(self.host, self.url_for("healthcheck"))], timeout=timeout_value)
 
 
 class RemoteEPDServer(RemoteOpenAIServer):
@@ -477,7 +677,7 @@ class RemoteEPDServer(RemoteOpenAIServer):
             self.env_dict["ASCEND_RT_VISIBLE_DEVICES"] = str(i)
             if isinstance(vllm_serve_arg, list):
                 if "--port" not in vllm_serve_arg:
-                    raise ValueError("You have manually specified the port ")
+                    raise ValueError("You have to manually specify the port")
                 else:
                     port_arg = "--port"
                     try:
@@ -489,7 +689,7 @@ class RemoteEPDServer(RemoteOpenAIServer):
             else:
                 vllm_serve_arg_str = str(vllm_serve_arg)
                 if "--port" not in vllm_serve_arg_str:
-                    raise ValueError("You have manually specified the port ")
+                    raise ValueError("You have to manually specify the port")
                 else:
                     raise ValueError(f"Unexpected type for vllm_serve_arg: {type(vllm_serve_arg)}")
 
@@ -535,7 +735,12 @@ class RemoteEPDServer(RemoteOpenAIServer):
         if env_dict is not None:
             env.update(env_dict)
         proc = subprocess.Popen(
-            server_cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, bufsize=1
+            server_cmd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            bufsize=1,
         )
         stdout_thread = threading.Thread(target=self._read_output, args=(proc.stdout, log_prefix), daemon=True)
         stderr_thread = threading.Thread(target=self._read_output, args=(proc.stderr, log_prefix), daemon=True)
@@ -545,27 +750,10 @@ class RemoteEPDServer(RemoteOpenAIServer):
         return proc
 
     def _terminate_server(self) -> None:
-        """kill process and its children"""
+        """Kill server processes and their children."""
         print("vllm instance is stopping")
         for proc in self._proc_list:
-            parent = psutil.Process(proc.pid)
-            children = parent.children(recursive=True)
-            for child in children:
-                with contextlib.suppress(psutil.NoSuchProcess):
-                    child.terminate()
-
-            gone, still_alive = psutil.wait_procs(children, timeout=10)
-
-            for child in still_alive:
-                with contextlib.suppress(psutil.NoSuchProcess):
-                    child.kill()
-
-            try:
-                parent.terminate()
-                parent.wait(timeout=10)
-            except (psutil.NoSuchProcess, psutil.TimeoutExpired):
-                with contextlib.suppress(psutil.NoSuchProcess):
-                    parent.kill()
+            self._terminate_process_tree(proc)
 
     def __enter__(self):
         """Context manager entry point."""
@@ -693,6 +881,21 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
         os.environ["VLLM_DP_MASTER_PORT"] = str(master_port)
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
+        import torch
+
+        visible = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")
+        full_device_ids: list[str] = [d for d in visible.split(",") if d]
+        if not full_device_ids:
+            full_device_ids = [str(i) for i in range(torch.npu.device_count())]
+
+        if llm_kwargs.get("distributed_executor_backend") == "ray":
+            devs = full_device_ids
+            chunk = max(len(devs) // dp_size, 1)
+            start = dp_rank * chunk
+            os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(devs[start : start + chunk])
+        else:
+            llm_kwargs["device_ids"] = full_device_ids
+
         llm = LLM(**llm_kwargs)
         conn.send({"status": "ready", "rank": dp_rank})
 
@@ -759,7 +962,6 @@ class VllmRunner:
         tensor_parallel_size: int = 1,
         block_size: int = 16,
         enable_chunked_prefill: bool = True,
-        swap_space: int = 4,
         enforce_eager: bool | None = False,
         quantization: str | None = None,
         **kwargs,
@@ -776,7 +978,6 @@ class VllmRunner:
             tokenizer_mode=tokenizer_mode,
             trust_remote_code=True,
             dtype=dtype,
-            swap_space=swap_space,
             enforce_eager=enforce_eager,
             disable_log_stats=disable_log_stats,
             tensor_parallel_size=tensor_parallel_size,
@@ -967,6 +1168,215 @@ class VllmRunner:
         cleanup_dist_env_and_memory()
 
 
+class ModelCache:
+    """Model cache management class"""
+
+    def __init__(self):
+        self._cache: dict[str, VllmRunner] = {}
+
+    def close(self):
+        """Properly closing all resources (including terminating child processes)"""
+        if hasattr(self, "model") and self.model is not None:
+            try:
+                if hasattr(self.model, "llm_engine"):
+                    self.model.llm_engine.shutdown()
+
+                del self.model
+
+                import torch
+
+                torch.npu.empty_cache()
+
+                print("[INFO] VllmRunner closed successfully")
+            except Exception as e:
+                print(f"[WARNING] Error closing VllmRunner: {e}")
+
+    def _get_available_npu_memory(self) -> float:
+        """Obtain NPU Available Memory (GiB)"""
+        import torch
+
+        free, _ = torch.npu.mem_get_info()
+        return free / (1024**3)
+
+    def _wait_for_memory(self, required_gib: float, timeout_seconds: int = 30) -> bool:
+        """Wait until there is sufficient available memory."""
+        import time
+
+        start_time = time.time()
+        while time.time() - start_time < timeout_seconds:
+            available = self._get_available_npu_memory()
+            if available >= required_gib:
+                return True
+
+            print(f"[INFO] Waiting for NPU memory... Available: {available:.2f} GiB, Required: {required_gib:.2f} GiB")
+            time.sleep(2)
+
+        return False
+
+    def get_cache_key(self, model_config: dict[str, Any]) -> str:
+        """Generating a unique cache key.
+
+        Args:
+            model_config: Model Configuration Dictionary
+
+        Returns:
+            str: The only cache key
+        """
+        sorted_config = {k: v for k, v in sorted(model_config.items())}
+        config_str = json.dumps(sorted_config, sort_keys=True)
+        return hashlib.md5(config_str.encode()).hexdigest()
+
+    def get_or_create(self, model_config: dict[str, Any]) -> "VllmRunner":
+        """Obtain or create a model instance
+
+        Args:
+            model_config: Model Configuration
+
+        Returns:
+            VllmRunner: Model Instance
+        """
+        """Obtain or create a model instance (with full memory management)"""
+
+        cache_key = self.get_cache_key(model_config)
+
+        if cache_key in self._cache:
+            print(f"[INFO] Reusing cached model instance for: {model_config['model_name']}")
+            return self._cache[cache_key]
+
+        gpu_memory_utilization = model_config.get("gpu_memory_utilization", 0.9)
+        free_memory_bytes, total_memory_bytes = torch.npu.mem_get_info()
+        gib = 1024**3
+        available_memory_gib = free_memory_bytes / gib
+        required_memory_gib = (total_memory_bytes / gib) * gpu_memory_utilization
+
+        print(
+            f"[DEBUG] Creating new model - Available: {available_memory_gib:.2f} GiB, "
+            f"Required: {required_memory_gib:.2f} GiB"
+        )
+
+        if available_memory_gib < required_memory_gib:
+            print("[WARNING] Insufficient memory! Cleaning oldest cache entries...")
+
+            self.clear()
+
+            wait_count = 0
+            max_wait = 10
+
+            while available_memory_gib < required_memory_gib and wait_count < max_wait:
+                time.sleep(3)
+                free_memory_bytes, _ = torch.npu.mem_get_info()
+                available_memory_gib = free_memory_bytes / (1024**3)
+                print(f"[INFO] Waiting for memory... Available: {available_memory_gib:.2f} GiB")
+                wait_count += 1
+
+            if available_memory_gib < required_memory_gib:
+                raise RuntimeError(
+                    f"Failed to get enough NPU memory! "
+                    f"Available: {available_memory_gib:.2f} GiB, "
+                    f"Required: {required_memory_gib:.2f} GiB."
+                )
+        if cache_key not in self._cache:
+            runner = VllmRunner(
+                model_name=model_config["model_name"],
+                quantization=model_config.get("quantization"),
+                max_model_len=model_config.get("max_model_len", 1024),
+                dtype=model_config.get("dtype", "bfloat16"),
+                gpu_memory_utilization=model_config.get("gpu_memory_utilization", 0.9),
+                enable_prefix_caching=model_config.get("enable_prefix_caching", False),
+                max_num_seqs=model_config.get("max_num_seqs", 64),
+                tensor_parallel_size=model_config.get("tensor_parallel_size", 1),
+                distributed_executor_backend=model_config.get("distributed_executor_backend", "mp"),
+                compilation_config=model_config.get(
+                    "compilation_config",
+                    {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 32, 64]},
+                ),
+                **model_config.get("extra_kwargs", {}),
+            )
+            self._cache[cache_key] = runner
+            print(f"Created new model instance for: {model_config['model_name']}")
+        else:
+            print(f"Reusing existing model instance for: {model_config['model_name']}")
+        return self._cache[cache_key]
+
+    def clear(self):
+        """Clearing All Cached Model Instances"""
+        import gc
+
+        for cache_key in list(self._cache.keys()):
+            runner = self._cache[cache_key]
+
+            try:
+                if hasattr(runner, "model"):
+                    del runner.model
+                del self._cache[cache_key]
+                del runner
+
+            except Exception as e:
+                print(f"[WARNING] Error clearing runner {cache_key}: {e}")
+
+        gc.collect()
+        torch.npu.empty_cache()
+        time.sleep(3)
+
+        self._cache.clear()
+        print("[INFO] Model cache cleared")
+
+
+model_cache = ModelCache()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_model_cache():
+    """Clearing the Model Cache After the Test Session Ends"""
+    yield
+    model_cache.clear()
+
+
+@pytest.fixture(scope="function")
+def vllm_runner(request):
+    """Obtain or create a model instance based on the model configuration.
+
+    Args:
+        request: pytest request object
+
+    Yields:
+        VllmRunner: Model Instance
+    """
+
+    print(f"[DEBUG] Test name: {request.node.name}")
+    print(f"[DEBUG] All markers on test: {list(request.node.iter_markers())}")
+
+    model_marker = request.node.get_closest_marker("model")
+
+    if model_marker is None:
+        raise ValueError("Test must have @pytest.mark.model decorator")
+
+    model_config = model_marker.kwargs
+    print(f"[DEBUG] Final model_config: {model_config}")
+
+    if model_marker:
+        model_config = model_marker.kwargs
+    else:
+        model_config = {
+            "model_name": "Qwen/Qwen3-0.6B",
+            "quantization": None,
+            "max_model_len": 1024,
+            "dtype": "auto",
+            "gpu_memory_utilization": 0.9,
+            "enable_prefix_caching": False,
+        }
+
+    print(f"[DEBUG] vllm_runner fixture - model_config: {model_config}")
+
+    try:
+        runner = model_cache.get_or_create(model_config)
+    except Exception as e:
+        print(f"[ERROR] Failed to create model instance with config: {model_config}")
+        print(f"[ERROR] Exception: {type(e).__name__}: {e}")
+        raise
+    yield runner
+
+
 class DPVllmRunner(VllmRunner):
     def __init__(
         self,
@@ -981,7 +1391,6 @@ class DPVllmRunner(VllmRunner):
         tensor_parallel_size: int = 1,
         block_size: int = 16,
         enable_chunked_prefill: bool = True,
-        swap_space: int = 4,
         enforce_eager: bool | None = False,
         quantization: str | None = None,
         data_parallel_size: int = 2,
@@ -1004,7 +1413,6 @@ class DPVllmRunner(VllmRunner):
             tokenizer_mode=tokenizer_mode,
             trust_remote_code=True,
             dtype=dtype,
-            swap_space=swap_space,
             enforce_eager=enforce_eager,
             disable_log_stats=disable_log_stats,
             tensor_parallel_size=tensor_parallel_size,
@@ -1282,7 +1690,11 @@ DataParallelVllmRunner = DPVllmRunner
 
 class HfRunner:
     def get_default_device(self):
-        return "cpu" if current_platform.is_cpu() else current_platform.device_type
+        if current_platform.is_cpu():
+            return "cpu"
+        else:
+            torch.npu.set_compile_mode(jit_compile=False)
+            return current_platform.device_type
 
     def wrap_device(self, x: _T, device: str | None = None) -> _T:
         if x is None or isinstance(x, (bool,)):
@@ -1485,6 +1897,16 @@ def qwen35_text_lora_files():
     return snapshot_download(repo_id="vllm-ascend/qwen35-4b-text-only-sql-lora")
 
 
+@pytest.fixture(scope="session")
+def qwen3moe_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen3-moe-text2sql-spider")
+
+
+@pytest.fixture(scope="session")
+def olmoe_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/olmoe-instruct-text2sql-spider")
+
+
 def qwen_prompt(questions: list[str]) -> list[str]:
     placeholder = "<|image_pad|>"
     return [
@@ -1498,7 +1920,9 @@ def qwen_prompt(questions: list[str]) -> list[str]:
 
 
 def hunyuan_prompt(questions: list[str]) -> list[str]:
-    placeholder = "<｜hy_place▁holder▁no▁100｜><｜hy_place▁holder▁no▁102｜><｜hy_place▁holder▁no▁101｜>"  # noqa: E501
+    # vLLM's Hunyuan prompt update adds the image start/end tokens around
+    # this placeholder. Supplying the wrapper here would duplicate it.
+    placeholder = "<｜hy_place▁holder▁no▁102｜>"  # noqa: E501
     return [f"<｜hy_begin▁of▁sentence｜>{placeholder}{question}<｜hy_User｜>" for question in questions]
 
 
@@ -1526,3 +1950,40 @@ def vl_config(request):
     if "skip" in config:
         pytest.skip(config["skip"])
     return config
+
+
+# ---------------------------------------------------------------------------
+# E2E coverage marker enforcement
+# ---------------------------------------------------------------------------
+# Values used in @pytest.mark.e2e_coverage(...) must come from the shared
+# taxonomy in tests/e2e/coverage_taxonomy.py. This hook enforces that at
+# collection time so a typo / invented value fails loudly and locally
+# (pytest reports an ERROR for that item). Unmarked tests are NOT enforced
+# here — the migration to e2e_coverage is still in progress, so tests
+# without the marker are allowed during the transition.
+#
+# The CI LINT job additionally fails on out-of-taxonomy values via
+# .github/workflows/scripts/coverage.py; this hook is the local, fast
+# feedback path for developers running pytest directly.
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        marker = item.get_closest_marker("e2e_coverage")
+        if marker is None:
+            continue  # migration period: unmarked tests are allowed
+
+        # marker.kwargs: {dim: raw_str}  (e.g. {"arch": "dense",
+        # "feature": "lora,mtp"}). split_multi turns each value into its
+        # constituent tokens; validate_coverage_marker checks every token
+        # against the taxonomy and reports missing required dims.
+        raw_coverage = {dim: str(val) for dim, val in marker.kwargs.items()}
+        problems = validate_coverage_marker(raw_coverage)
+        if not problems:
+            continue
+
+        loc = item.nodeid
+        detail = "; ".join(problems)
+        raise pytest.CollectError(
+            f"\n[e2e_coverage marker invalid] {loc}\n  {detail}\n"
+            "  Values must come from tests/e2e/coverage_taxonomy.py "
+            "(ALLOWED_VALUES). Fix the marker or update the taxonomy."
+        )

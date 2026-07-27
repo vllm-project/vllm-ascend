@@ -1,0 +1,255 @@
+test_name: "Qwen3.5-397B-w8a8-PD"
+model: "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp"
+num_nodes: 3
+npu_per_node: 16
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [0]
+    decoder: [1, 2]
+
+config:
+  - node_index: 0
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 2
+    dp_size_local: 2
+    dp_rank_start: 0
+    tp_size: 8
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 32
+    dp_size_local: 16
+    dp_rank_start: 0
+    tp_size: 1
+    dp_address: "${NODE_1_IP}"
+
+  - node_index: 2
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 32
+    dp_size_local: 16
+    dp_rank_start: 16
+    tp_size: 1
+    dp_address: "${NODE_1_IP}"
+
+env_common: &env_common
+  VLLM_USE_MODELSCOPE: "true"
+  SERVER_PORT: "${PORT}"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+  VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+  VLLM_RPC_TIMEOUT: "3600"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+  HCCL_EXEC_TIMEOUT: "2000"
+  HCCL_CONNECT_TIMEOUT: "1200"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "1"
+  TASK_QUEUE_ENABLE: "1"
+  ASCEND_BUFFER_POOL: "4:8"
+  VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
+  HCCL_BUFFSIZE: "1536"
+  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+  VLLM_TORCH_PROFILER_WITH_STACK: "0"
+  VLLM_USE_V1: "1"
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_common
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --api-server-count
+      - "1"
+      - --distributed-executor-backend
+      - "mp"
+      - --no-enable-prefix-caching
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --max-model-len
+      - "67000"
+      - --max-num-batched-tokens
+      - "16384"
+      - --trust-remote-code
+      - --max-num-seqs
+      - "16"
+      - --gpu-memory-utilization
+      - "0.9"
+      - --quantization
+      - "ascend"
+      - --enforce-eager
+      - --no-disable-hybrid-kv-cache-manager
+      - --speculative-config
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_producer",
+        "kv_port": "30000",
+        "engine_id": "0",
+        "kv_connector_extra_config": {
+                    "prefill": {
+                            "dp_size": 2,
+                            "tp_size": 8
+                    },
+                    "decode": {
+                            "dp_size": 32,
+                            "tp_size": 1
+                    }
+            }
+        }'
+
+  - node_index: 1
+    envs:
+      <<: *env_common
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --distributed-executor-backend
+      - "mp"
+      - --no-enable-prefix-caching
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --max-model-len
+      - "67000"
+      - --max-num-batched-tokens
+      - "128"
+      - --trust-remote-code
+      - --max-num-seqs
+      - "16"
+      - --gpu-memory-utilization
+      - "0.95"
+      - --quantization
+      - "ascend"
+      - --no-disable-hybrid-kv-cache-manager
+      - --compilation-config
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,16,24,32,40,48,56,64]}'
+      - --speculative-config
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'
+      - --additional-config
+      - '{"recompute_scheduler_enable": true, "enable_cpu_binding": true}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_consumer",
+        "kv_port": "30200",
+        "engine_id": "1",
+        "kv_connector_extra_config": {
+                    "prefill": {
+                            "dp_size": 2,
+                            "tp_size": 8
+                    },
+                    "decode": {
+                            "dp_size": 32,
+                            "tp_size": 1
+                    }
+            }
+        }'
+
+  - node_index: 2
+    envs:
+      <<: *env_common
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --distributed-executor-backend
+      - "mp"
+      - --no-enable-prefix-caching
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --max-model-len
+      - "67000"
+      - --max-num-batched-tokens
+      - "128"
+      - --trust-remote-code
+      - --max-num-seqs
+      - "16"
+      - --gpu-memory-utilization
+      - "0.95"
+      - --quantization
+      - "ascend"
+      - --no-disable-hybrid-kv-cache-manager
+      - --compilation-config
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,16,24,32,40,48,56,64]}'
+      - --speculative-config
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'
+      - --additional-config
+      - '{"recompute_scheduler_enable": true, "enable_cpu_binding": true}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_consumer",
+        "kv_port": "30200",
+        "engine_id": "2",
+        "kv_connector_extra_config": {
+                    "prefill": {
+                            "dp_size": 2,
+                            "tp_size": 8
+                    },
+                    "decode": {
+                            "dp_size": 32,
+                            "tp_size": 1
+                    }
+            }
+        }'
+
+
+benchmarks:
+      acc_aime2025:
+        case_type: accuracy
+        dataset_path: vllm-ascend/aime2025
+        request_conf: vllm_api_general_chat
+        dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
+        max_out_len: 32768
+        batch_size: 32
+        baseline: 90
+        threshold: 10
+        temperature: 0.6
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0

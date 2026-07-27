@@ -31,6 +31,12 @@ def register_connector():
     )
 
     KVConnectorFactory.register_connector(
+        "MooncakeHybridConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector",
+        "MooncakeConnector",
+    )
+
+    KVConnectorFactory.register_connector(
         "MooncakeConnectorStoreV1",
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector",
         "AscendStoreConnector",
@@ -56,4 +62,26 @@ def register_connector():
         "LMCacheAscendConnector",
         "vllm_ascend.distributed.kv_transfer.kv_pool.lmcache_ascend_connector",
         "LMCacheConnectorV1",
+    )
+
+    # Override the upstream SimpleCPUOffloadConnector with the NPU
+    # adaptation that uses aclrtMemcpyBatchAsync + torch.npu streams.
+    # Only override if the upstream module exists in this vLLM version.
+    try:
+        import vllm.v1.simple_kv_offload  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        if "SimpleCPUOffloadConnector" in KVConnectorFactory._registry:
+            KVConnectorFactory._registry.pop("SimpleCPUOffloadConnector")
+        KVConnectorFactory.register_connector(
+            "SimpleCPUOffloadConnector",
+            "vllm_ascend.distributed.kv_transfer.kv_pool.simple_cpu_offload.simple_cpu_offload_connector",  # noqa: E501
+            "AscendSimpleCPUOffloadConnector",
+        )
+
+    KVConnectorFactory.register_connector(
+        "RecomputeCPUOffloadConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.recompute_cpu_offload_connector",
+        "RecomputeCPUOffloadConnectorV1",
     )

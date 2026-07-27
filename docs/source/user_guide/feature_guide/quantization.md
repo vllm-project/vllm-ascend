@@ -16,24 +16,24 @@ vLLM Ascend supports models quantized by two main tools: `ModelSlim` and `LLM-Co
 
 ### 1. ModelSlim (Recommended)
 
-[ModelSlim](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/README.md) is an Ascend-friendly compression tool focused on acceleration, using compression techniques, and built for Ascend hardware. It includes a series of inference optimization technologies such as quantization and compression, aiming to accelerate large language dense models, MoE models, multimodal understanding models, multimodal generation models, etc.
+[ModelSlim](https://gitcode.com/Ascend/msmodelslim/blob/master/README.md) is an Ascend-friendly compression tool focused on acceleration, using compression techniques, and built for Ascend hardware. It includes a series of inference optimization technologies such as quantization and compression, aiming to accelerate large language dense models, MoE models, multimodal understanding models, multimodal generation models, etc.
 
 #### Installation
 
-To use ModelSlim for model quantization, install it from its [Git repository](https://gitcode.com/Ascend/msit):
+To use ModelSlim for model quantization, install it from its [Git repository](https://gitcode.com/Ascend/msmodelslim):
 
 ```bash
-# Install br_release_MindStudio_8.3.0_20261231 version
-git clone https://gitcode.com/Ascend/msit.git -b br_release_MindStudio_8.3.0_20261231
+# Install 26.0.0 version, this is currently the latest stable branch
+git clone https://gitcode.com/Ascend/msmodelslim.git -b 26.0.0
 
-cd msit/msmodelslim
+cd msmodelslim
 
 bash install.sh
 ```
 
 #### Model Quantization
 
-The following example shows how to generate W8A8 quantized weights for the [Qwen3-MoE model](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/example/Qwen3-MOE/README.md).
+The following example shows how to generate W8A8 quantized weights for the [Qwen3-MoE model](https://gitcode.com/Ascend/msmodelslim/blob/master/example/Qwen3-MOE/README.md).
 
 **Quantization Script:**
 
@@ -58,7 +58,7 @@ python3 quant_qwen_moe_w8a8.py --model_path $MODEL_PATH \
 
 After quantization completes, the output directory will contain the quantized model files.
 
-For more examples, refer to the [official examples](https://gitcode.com/Ascend/msit/tree/master/msmodelslim/example).
+For more examples, refer to the [official examples](https://gitcode.com/Ascend/msmodelslim/tree/master/example).
 
 ### 2. LLM-Compressor
 
@@ -100,7 +100,7 @@ python3 w8a8_int8_dynamic_moe.py
 
 For more content, refer to the [official examples](https://github.com/vllm-project/llm-compressor/tree/main/examples).
 
-Currently supported quantization types by LLM-Compressor: `W8A8` and `W8A8_DYNAMIC`.
+The quantization types currently supported by LLM-Compressor can be viewed in the `vllm_ascend/quantization/compressed_tensors_config.py` file.
 
 ## Running Quantized Models
 
@@ -156,6 +156,6 @@ python -m vllm.entrypoints.api_server \
 
 ## References
 
-- [ModelSlim Documentation](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/README.md)
+- [ModelSlim GitCode](https://gitcode.com/Ascend/msmodelslim)
 - [LLM-Compressor GitHub](https://github.com/vllm-project/llm-compressor)
 - [vLLM Quantization Guide](https://docs.vllm.ai/en/latest/features/quantization/)

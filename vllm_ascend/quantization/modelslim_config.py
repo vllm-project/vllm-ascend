@@ -34,16 +34,26 @@ from transformers import PretrainedConfig
 from vllm.config import get_current_vllm_config
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import MoERunner, RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig, QuantizeMethodBase
 from vllm.model_executor.layers.vocab_parallel_embedding import UnquantizedEmbeddingMethod, VocabParallelEmbedding
 from vllm.model_executor.models.utils import WeightsMapper
 
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, calc_split_factor
+from vllm_ascend.utils import (
+    ASCEND_QUANTIZATION_METHOD,
+    AscendDeviceType,
+    calc_split_factor,
+    get_ascend_device_type,
+)
 
 from .methods import get_scheme_class
+
+
+def _is_fused_moe_layer(layer: torch.nn.Module) -> bool:
+    return isinstance(layer, (MoERunner, RoutedExperts))
+
 
 # The config filename that ModelSlim generates after quantizing a model.
 MODELSLIM_CONFIG_FILENAME = "quant_model_description.json"
@@ -85,6 +95,10 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+    },
+    "deepseek_v4": {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
     },
     "pangu_ultra_moe": {
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -152,6 +166,30 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
     },
     "glm4_moe": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
+    "gemma4": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
+    "gemma4_text": {
         "qkv_proj": [
             "q_proj",
             "k_proj",
@@ -252,6 +290,71 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
         "o_proj": ["dense"],
     },
+    "step3p5": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
+    # The step3.5 MTP draft (speculative.py sets model_type="step3p5_mtp")
+    # reuses the same fused module layout as the verifier.
+    "step3p5_mtp": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
+}
+
+
+QUANT_MODEL_PREFIX_MAPPINGS = {
+    "deepseek_v4": {
+        "layers.": "model.layers.",
+        "embed.": "model.embed_tokens.",
+        "head.": "lm_head.",
+    },
+}
+
+
+QUANT_MODEL_SUBSTR_MAPPINGS = {
+    "deepseek_v4": {
+        ".attn.": ".self_attn.",
+        ".w1.": ".gate_proj.",
+        ".w2.": ".down_proj.",
+        ".w3.": ".up_proj.",
+        ".ffn.": ".mlp.",
+        ".ffn_norm.": ".post_attention_layernorm.",
+        ".attn_norm.": ".input_layernorm.",
+    },
+    # The step3.5 MTP draft nests its decoder block under ".mtp_block.", but the
+    # checkpoint's quant_model_description.json keys it without that infix
+    # (e.g. "model.layers.45.self_attn.q_proj.weight"). Strip it so the quant
+    # lookup matches the on-disk naming.
+    "step3p5_mtp": {
+        ".mtp_block.": ".",
+    },
+    # Gemma4 MoE renames ".experts." to ".moe.experts." in the vLLM module tree
+    # (gemma4.py weight mapper), but the ModelSlim quant description keeps the
+    # original ".experts." naming. Strip the ".moe" infix so the quant lookup
+    # matches the on-disk keys.
+    "gemma4": {
+        ".moe.experts": ".experts",
+    },
+    "gemma4_text": {
+        ".moe.experts": ".experts",
+    },
 }
 
 
@@ -266,6 +369,19 @@ def get_packed_modules_mapping(model_type: str) -> dict[str, list[str]]:
         Returns empty dict if model_type is not found.
     """
     return packed_modules_model_mapping.get(model_type, {})
+
+
+def _is_missing_v_shard(shard_key: str, quant_description: Mapping[str, Any]) -> bool:
+    """Return whether the missing shard is Gemma4's replicated v_proj.
+
+    k_eq_v layers do not have a dedicated v_proj entry because v_proj is
+    replicated from k_proj at load time. Keep q_proj/k_proj mandatory so other
+    malformed packed quant descriptions still fail as before.
+    """
+    if not shard_key.endswith(".v_proj.weight"):
+        return False
+    shard_prefix = shard_key[: -len("v_proj.weight")]
+    return f"{shard_prefix}q_proj.weight" in quant_description and f"{shard_prefix}k_proj.weight" in quant_description
 
 
 def get_linear_quant_type(
@@ -288,16 +404,23 @@ def get_linear_quant_type(
             prefix.replace(proj_name, shard_proj_name) for shard_proj_name in packed_modules_mapping[proj_name]
         ]
         for shard_prefix in shard_prefixes:
-            shard_quant_type = quant_description[shard_prefix + ".weight"]
+            shard_key = shard_prefix + ".weight"
+            # Only Gemma4 k_eq_v is allowed to omit v_proj; other missing
+            # shards fall through to the original dictionary lookup below.
+            if shard_key not in quant_description and _is_missing_v_shard(shard_key, quant_description):
+                continue
+            shard_quant_type = quant_description[shard_key]
 
             if quant_type is None:
                 quant_type = shard_quant_type
             elif shard_quant_type != quant_type:
-                raise ValueError(
-                    f"Not all shards of {prefix} are quantized with same quant type."
-                    f"Shard {proj_name} uses {shard_quant_type}, but another shard"
-                    f"use {quant_type}. Please check quantization config."
+                err_msg = (
+                    f"Not all shards of {prefix} are quantized with same quant type. "
+                    f"Shard {proj_name} uses {shard_quant_type}, but another shard "
+                    f"uses {quant_type}. Please check quantization config."
                 )
+                logger.error(err_msg)
+                raise ValueError(err_msg)
     else:
         quant_type = quant_description[prefix + ".weight"]
     return quant_type
@@ -356,14 +479,22 @@ def create_scheme_for_layer(
     quant_type = get_quant_type_for_layer(quant_description, prefix, layer_type, packed_modules_mapping)
 
     if quant_type is None:
-        raise ValueError(f"Could not determine quantization type for layer {prefix}.")
+        err_msg = f"Could not determine quantization type for layer {prefix} (layer_type={layer_type})."
+        logger.error(err_msg)
+        raise ValueError(err_msg)
 
     # Use registry to get scheme class
     scheme_cls = get_scheme_class(quant_type, layer_type)
     if scheme_cls is not None:
         return scheme_cls()
 
-    raise NotImplementedError(f"Currently, vLLM Ascend doesn't support {quant_type} for {layer_type}.")
+    err_msg = (
+        "Currently, vLLM Ascend doesn't support quant_type=%s for layer_type=%s. "
+        "Please use a supported quantization format "
+        "or load the model with its original float weights."
+    )
+    logger.error(err_msg, quant_type, layer_type)
+    raise NotImplementedError(err_msg % (quant_type, layer_type))
 
 
 @register_quantization_config(ASCEND_QUANTIZATION_METHOD)
@@ -397,6 +528,7 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
+        logger.error("Ascend hardware does not support 'get_min_capability' feature.")
         raise NotImplementedError('Ascend hardware dose not support "get_min_capability" feature.')
 
     @classmethod
@@ -443,26 +575,86 @@ class AscendModelSlimConfig(QuantizationConfig):
             self._add_kvcache_quant_metadata()
             logger.info("Applied hf_to_vllm_mapper to quant_description keys")
 
-    def get_cache_scale(self, name: str) -> str | None:
-        """Map checkpoint C8 KV scale/offset names to vLLM parameter names."""
-        if self.quant_description.get("kv_cache_type") != "C8":
-            return None
-        _C8_SCALE_MAPPING = {
-            "k_proj.kv_cache_scale": "attn.k_cache_scale",
-            "k_proj.kv_cache_offset": "attn.k_cache_offset",
-            "v_proj.kv_cache_scale": "attn.v_cache_scale",
-            "v_proj.kv_cache_offset": "attn.v_cache_offset",
-        }
-        for src_suffix, dst_suffix in _C8_SCALE_MAPPING.items():
-            if name.endswith(src_suffix):
-                return name[: -len(src_suffix)] + dst_suffix
-        return None
+    def get_cache_scale_mapper(self) -> "WeightsMapper":
+        """Upstream use staticmethod, but we need to use instance attribute"""
+        suffix_map = {}
+        if self.enable_c8_quant:
+            suffix_map.update(
+                {
+                    ".k_proj.kv_cache_scale": ".attn.k_cache_scale",
+                    ".k_proj.kv_cache_offset": ".attn.k_cache_offset",
+                    ".v_proj.kv_cache_scale": ".attn.v_cache_scale",
+                    ".v_proj.kv_cache_offset": ".attn.v_cache_offset",
+                }
+            )
+        if self.enable_fa_quant:
+            suffix_map.update(
+                {
+                    ".fa_q.scale": ".mla_attn.mla_attn.fa_q.scale",
+                    ".fa_k.scale": ".mla_attn.mla_attn.fa_k.scale",
+                    ".fa_v.scale": ".mla_attn.mla_attn.fa_v.scale",
+                    ".fa_q.offset": ".mla_attn.mla_attn.fa_q.offset",
+                    ".fa_k.offset": ".mla_attn.mla_attn.fa_k.offset",
+                    ".fa_v.offset": ".mla_attn.mla_attn.fa_v.offset",
+                }
+            )
+        if self.enable_indexer_quant:
+            suffix_map.update(
+                {
+                    ".indexer.q_rot": ".mla_attn.mla_attn.indexer.q_rot",
+                    ".indexer.k_rot": ".mla_attn.mla_attn.indexer.k_rot",
+                }
+            )
+        if not suffix_map:
+            return QuantizationConfig.get_cache_scale_mapper()
+        cache_scale_mapper = WeightsMapper(orig_to_new_suffix=suffix_map)
+        return cache_scale_mapper | QuantizationConfig.get_cache_scale_mapper()
+
+    def _has_quant_weight(self, prefix: str, packed_modules_mapping: Mapping[str, list[str]]) -> bool:
+        proj_name = prefix.split(".")[-1]
+        if proj_name in packed_modules_mapping:
+            return all(
+                f"{prefix.replace(proj_name, shard_proj_name)}.weight" in self.quant_description
+                for shard_proj_name in packed_modules_mapping[proj_name]
+            )
+        return f"{prefix}.weight" in self.quant_description
 
     def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
         self.model_type = model_type
+        # Some model paths, e.g. qwen3-vl and qwen3_5_moe MTP drafter,
+        # initialize lm_head with prefix="lm_head", while the quant description
+        # key is mapped to "language_model.lm_head.weight".
+        if (
+            prefix == "lm_head"
+            and "lm_head.weight" not in self.quant_description
+            and "language_model.lm_head.weight" in self.quant_description
+        ):
+            prefix = "language_model.lm_head"
+        prefix_mapping = QUANT_MODEL_PREFIX_MAPPINGS.get(model_type)
+        substr_mapping = QUANT_MODEL_SUBSTR_MAPPINGS.get(model_type)
+        if prefix_mapping or substr_mapping:
+            hf_to_vllm_mapper = WeightsMapper(
+                orig_to_new_prefix=prefix_mapping or {},
+                orig_to_new_substr=substr_mapping or {},
+            )
+            prefix = hf_to_vllm_mapper._map_name(prefix)
+
+        if model_type == "step3p5_mtp" and prefix.startswith("model.layers."):
+            # Step3P5 MTP and newly generated Step3P7 W8A8 MTP checkpoints use
+            # ``model.layers.*``.  The Step3P7 vLLM wrapper mapper rewrites
+            # current ``model.layers.*`` quant descriptions to
+            # ``language_model.model.layers.*``.  The MTP draft module itself
+            # is still Step3P5-shaped and queries ``model.layers.*``, so try
+            # the Step3P7 wrapper alias only when the direct Step3P5/new-key
+            # lookup misses.
+            packed_modules_mapping = get_packed_modules_mapping(model_type)
+            if not self._has_quant_weight(prefix, packed_modules_mapping):
+                for candidate in (prefix.replace("model.layers.", "language_model.model.layers.", 1),):
+                    if self._has_quant_weight(candidate, packed_modules_mapping):
+                        return candidate
         return prefix
 
-    def get_quant_method(self, layer: torch.nn.Module, prefix: str) -> Optional["QuantizeMethodBase"]:
+    def get_quant_method(self, layer: torch.nn.Module, prefix: str, tid2eid=None) -> Optional["QuantizeMethodBase"]:
         from .method_adapters import (
             AscendEmbeddingMethod,
             AscendFusedMoEMethod,
@@ -484,9 +676,6 @@ class AscendModelSlimConfig(QuantizationConfig):
                     parts = parts[: exp_idx + 1]
                     prefix = ".".join(parts)
 
-        # TODO: remove it when vllm fixes the WeightsMapper bug of qwen3-vl.
-        if model_type in ["qwen3_vl"] and prefix == "lm_head":
-            prefix = "language_model.lm_head"
         if model_type in ["bailing_hybrid"]:
             # Adapt to bailing_hybrid architecture: update layer names to MoE convention
             prefix = prefix.replace("linear_attn", "attention")
@@ -500,31 +689,40 @@ class AscendModelSlimConfig(QuantizationConfig):
                 # Delayed import to avoid circular import
                 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 
+                logger.debug("Select AscendUnquantizedLinearMethod for %s (layer=%s)", prefix, "LinearBase")
                 return AscendUnquantizedLinearMethod()
             scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
+            logger.debug("Select AscendLinearMethod for %s (layer=%s)", prefix, "LinearBase")
             return AscendLinearMethod(scheme)
         elif isinstance(layer, AttentionLayerBase) and (
             self.is_fa_quant_layer(prefix) or self.is_indexer_quant_layer(prefix)
         ):
             scheme = create_scheme_for_layer(self.quant_description, prefix, "attention", self.packed_modules_mapping)
+            logger.debug("Select AscendKVCacheMethod for %s (layer=%s)", prefix, "AttentionLayerBase[fa/indexer]")
             return AscendKVCacheMethod(scheme)
-        elif isinstance(layer, AttentionLayerBase) and self.quant_description.get("kv_cache_type") == "C8":
+        elif isinstance(layer, AttentionLayerBase) and self.is_c8_quant_layer(prefix):
             from .methods.kv_c8 import AscendC8KVCacheAttentionMethod
 
+            logger.debug("Select AscendKVCacheMethod(C8) for %s (layer=%s)", prefix, "AttentionLayerBase[C8]")
             return AscendKVCacheMethod(AscendC8KVCacheAttentionMethod(self.quant_description, prefix))
-        elif isinstance(layer, FusedMoE):
+        elif _is_fused_moe_layer(layer):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 # Delayed import to avoid circular import
                 from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
 
+                logger.debug("Select AscendUnquantizedFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
                 return AscendUnquantizedFusedMoEMethod(layer.moe_config)
             scheme = create_scheme_for_layer(self.quant_description, prefix, "moe", self.packed_modules_mapping)
-            return AscendFusedMoEMethod(scheme, layer.moe_config)
+            logger.debug("Select AscendFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
+            return AscendFusedMoEMethod(scheme, layer.moe_config, tid2eid)
         elif isinstance(layer, VocabParallelEmbedding):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
+                logger.debug("Select UnquantizedEmbeddingMethod for %s (layer=%s)", prefix, "VocabParallelEmbedding")
                 return UnquantizedEmbeddingMethod()
             scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
+            logger.debug("Select AscendEmbeddingMethod for %s (layer=%s)", prefix, "VocabParallelEmbedding")
             return AscendEmbeddingMethod(scheme)
+        logger.debug("No quant method matched for %s, falling back to base", prefix)
         return None
 
     def is_layer_skipped_ascend(self, prefix: str, fused_mapping: Mapping[str, list[str]] = MappingProxyType({})):
@@ -537,7 +735,12 @@ class AscendModelSlimConfig(QuantizationConfig):
 
             is_skipped = None
             for shard_prefix in shard_prefixes:
-                is_shard_skipped = self.quant_description[shard_prefix + ".weight"] == "FLOAT"
+                shard_key = shard_prefix + ".weight"
+                # Preserve the original failure behavior except for the known
+                # k_eq_v case where v_proj is replicated from k_proj.
+                if shard_key not in self.quant_description and _is_missing_v_shard(shard_key, self.quant_description):
+                    continue
+                is_shard_skipped = self.quant_description[shard_key] == "FLOAT"
 
                 if is_skipped is None:
                     is_skipped = is_shard_skipped
@@ -569,7 +772,10 @@ class AscendModelSlimConfig(QuantizationConfig):
             and vllm_config.kv_transfer_config.is_kv_consumer
             and not vllm_config.kv_transfer_config.is_kv_producer
         )
-        return bool(is_decode_instance and self.is_fa_quant_layer(layer_name))
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            return self.is_fa_quant_layer(layer_name)
+        else:
+            return bool(is_decode_instance and self.is_fa_quant_layer(layer_name))
 
     def is_indexer_quant_layer(self, prefix):
         if self.enable_indexer_quant:
@@ -578,10 +784,17 @@ class AscendModelSlimConfig(QuantizationConfig):
                 return True
         return False
 
+    def is_c8_quant_layer(self, prefix):
+        if self.enable_c8_quant:
+            layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
+            if layer_id_str.isdigit() and int(layer_id_str) in self.c8_quant_layers:
+                return True
+        return False
+
     def get_kv_quant_dtype(self, layer_name, cache_dtype, model_config):
         if self.enable_fa_quant and self.is_fa_quant_layer(layer_name):
             ori_dtype = model_config.dtype
-            quant_dtype = torch.int8
+            quant_dtype = torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
             # For MLA models like deepseek, we only quantify K cache to ensure accuracy
             if model_config.use_mla:
                 return quant_dtype, ori_dtype
@@ -645,6 +858,12 @@ class AscendModelSlimConfig(QuantizationConfig):
             json_names = [os.path.basename(f) for f in json_files]
 
         # Config file not found - raise a friendly error message
+        logger.error(
+            "ModelSlim quantization config not found for model '%s'. Searched path: %s. Found JSON files: %s.",
+            model_name,
+            model_name,
+            json_names if json_names else "N/A",
+        )
         raise ValueError(
             "\n"
             + "=" * 80
@@ -696,10 +915,68 @@ class AscendModelSlimConfig(QuantizationConfig):
         This handles known key transformations such as shared_head and
         weight_packed mappings.
         """
+        if "hc_head_fn" in self.quant_description:
+            # TODO
+            extra_quant_dict = {}
+            for name in self.quant_description:
+                new_name = name
+                if not name.startswith("model"):
+                    new_name = f"model.{name}"
+                extra_quant_dict[new_name] = self.quant_description[name]
+            self.quant_description.update(extra_quant_dict)
+
+            extra_quant_dict = {}
+            for name in self.quant_description:
+                new_name = name
+                if "attn" in name and "self_attn" not in name:
+                    new_name = name.replace(".attn.", ".self_attn.")
+                extra_quant_dict[new_name] = self.quant_description[name]
+            self.quant_description.update(extra_quant_dict)
+
+            extra_quant_dict = {}
+            for name in self.quant_description:
+                new_name = name
+                if "ffn" in name:
+                    new_name = name.replace("ffn", "mlp")
+                extra_quant_dict[new_name] = self.quant_description[name]
+            self.quant_description.update(extra_quant_dict)
+
+            extra_quant_dict = {}
+            for name in self.quant_description:
+                new_name = name
+                if "w1" in name:
+                    new_name = name.replace(".w1.", ".gate_proj.")
+                if "w2" in name:
+                    new_name = name.replace(".w2.", ".down_proj.")
+                if "w3" in name:
+                    new_name = name.replace(".w3.", ".up_proj.")
+
+                if "head" in name and "lm_head" not in name:
+                    new_name = name.replace("head", "lm_head")
+                if "embed" in name and "embed_tokens" not in name:
+                    new_name = name.replace("embed", "embed_tokens")
+                extra_quant_dict[new_name] = self.quant_description[name]
+            self.quant_description.update(extra_quant_dict)
+
         extra_quant_dict = {}
         for k in self.quant_description:
             if "shared_head" in k:
                 new_k = k.replace(".shared_head.", ".")
+                extra_quant_dict[new_k] = self.quant_description[k]
+            if "transformer.shared_head.output." in k:
+                # Step3.5 MTP checkpoints describe per-layer draft logits heads
+                # as ``transformer.shared_head.output``. The vLLM model module
+                # exposes the same parameter as ``shared_head.head``.
+                new_k = k.replace(
+                    "transformer.shared_head.output.",
+                    "shared_head.head.",
+                )
+                extra_quant_dict[new_k] = self.quant_description[k]
+            if "transformer.shared_head.norm." in k:
+                new_k = k.replace(
+                    "transformer.shared_head.norm.",
+                    "shared_head.norm.",
+                )
                 extra_quant_dict[new_k] = self.quant_description[k]
             if "weight_packed" in k:
                 new_k = k.replace("weight_packed", "weight")
@@ -714,11 +991,14 @@ class AscendModelSlimConfig(QuantizationConfig):
         self.enable_indexer_quant = indexer_quant_type != ""
         self.indexer_quant_layers = []
         kv_quant_type = self.quant_description.get("kv_cache_type", "")
-        self.enable_c8_quant = kv_quant_type != ""
-        if self.enable_fa_quant or self.enable_indexer_quant:
+        self.enable_c8_quant = kv_quant_type == "C8"
+        self.c8_quant_layers = []
+        if self.enable_fa_quant or self.enable_indexer_quant or self.enable_c8_quant:
             for key in self.quant_description:
                 _id = "".join(re.findall(r"\.(\d+)\.", key))
                 if "fa_k.scale" in key:
                     self.kvcache_quant_layers.append(int(_id))
                 if "indexer.quant_type" in key:
                     self.indexer_quant_layers.append(int(_id))
+                if "k_proj.kv_cache_scale" in key:
+                    self.c8_quant_layers.append(int(_id))

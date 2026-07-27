@@ -2,9 +2,34 @@
 
 ROOT_DIR=$1
 SOC_VERSION=$2
+: "${ROOT_DIR:?ROOT_DIR is not set}"
 
 log() {
     echo "[build_aclnn] $*"
+}
+
+setup_catlass_dependency() {
+    local catlass_path="${ROOT_DIR}/csrc/third_party/catlass/include"
+    local catlass_commit
+    local absolute_catlass_path
+
+    git config --global --add safe.directory "$ROOT_DIR"
+    catlass_commit=$(git config -f "${ROOT_DIR}/.gitmodules" --get submodule.csrc/third_party/catlass.commit)
+    if [[ ! -d "${catlass_path}" ]]; then
+        echo "dependency catlass is missing, try to fetch it..."
+        git submodule sync
+        if ! git submodule update --init --recursive; then
+            log "fetch failed"
+            exit 1
+        fi
+        cd "${ROOT_DIR}/csrc/third_party/catlass" || exit 1
+        git fetch origin
+        git checkout "${catlass_commit}" || exit 1
+        cd - || exit 1
+    fi
+    absolute_catlass_path=$(cd "${catlass_path}" && pwd)
+    export CPATH="${absolute_catlass_path}${CPATH:+:${CPATH}}"
+    log "catlass include=${absolute_catlass_path}"
 }
 
 resolve_op_dir() {
@@ -53,9 +78,14 @@ log "env: ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-<unset>} ASCEND_TOOLKIT_HOME=${AS
 if [[ "$SOC_VERSION" =~ ^ascend310 ]]; then
     log "matched SOC branch: ascend310"
     # ASCEND310P series
+    # dependency: catlass
+    setup_catlass_dependency
+
     CUSTOM_OPS_ARRAY=(
         "causal_conv1d_v310"
         "recurrent_gated_delta_rule_v310"
+        "chunk_fwd_o"
+        "chunk_gated_delta_rule_fwd_h"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend310p"
@@ -63,36 +93,43 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
     log "matched SOC branch: ascend910b"
     # ASCEND910B (A2) series
     # dependency: catlass
-    git config --global --add safe.directory "$ROOT_DIR"
-    CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass/include
-    if [[ ! -d "${CATLASS_PATH}" ]]; then
-        echo "dependency catlass is missing, try to fetch it..."
-        if ! git submodule update --init --recursive; then
-            echo "fetch failed"
-            exit 1
-        fi
-    fi
-    ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
-    export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH}
-    log "catlass include=${ABSOLUTE_CATLASS_PATH}"
+    setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
+        "scatter_nd_update_v2"
         "moe_grouped_matmul"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
-        "lightning_indexer_vllm"
+        "lightning_indexer"
         "sparse_flash_attention"
-        "matmul_allreduce_add_rmsnorm"
-        "moe_init_routing_custom"
+        "kv_quant_sparse_flash_attention"
         "moe_gating_top_k"
+        "moe_gating_top_k_hash"
         "add_rms_norm_bias"
-        "apply_top_k_top_p_custom"
         "transpose_kv_cache_by_block"
         "copy_and_expand_eagle_inputs"
         "causal_conv1d"
         "lightning_indexer_quant"
-        "hamming_dist_top_k"
-        "reshape_and_cache_bnsd"
+        "compressor"
+        "compressor_metadata"
+        "vllm_quant_lightning_indexer"
+        "vllm_quant_lightning_indexer_metadata"
+        "sparse_attn_sharedkv"
+        "sparse_attn_sharedkv_metadata"
+        "hc_pre_sinkhorn"
+        "hc_pre_inv_rms"
+        "hc_pre"
+        "hc_post"
+        "inplace_partial_rotary_mul"
+        "rms_norm_dynamic_quant"
+        "dequant_swiglu_quant"
+        "grouped_matmul_swiglu_quant"
+        "grouped_matmul_swiglu_quant_v2"
         "recurrent_gated_delta_rule"
+        "ngram_spec_decode"
+        "chunk_fwd_o"
+        "chunk_gated_delta_rule_fwd_h"
+        "store_kv_block"
+        "store_kv_block_metadata"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
@@ -101,83 +138,83 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     log "matched SOC branch: ascend910_93"
     # ASCEND910C (A3) series
     # dependency: catlass
-    git config --global --add safe.directory "$ROOT_DIR"
-    CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass/include
-    if [[ ! -d "${CATLASS_PATH}" ]]; then
-        echo "dependency catlass is missing, try to fetch it..."
-        if ! git submodule update --init --recursive; then
-            echo "fetch failed"
-            exit 1
-        fi
-    fi
-    # dependency: cann-toolkit file moe_distribute_base.h
-    HCCL_STRUCT_FILE_PATH=$(find -L "${ASCEND_TOOLKIT_HOME}" -name "moe_distribute_base.h" 2>/dev/null | head -n1)
-    if [ -z "$HCCL_STRUCT_FILE_PATH" ]; then
-        echo "cannot find moe_distribute_base.h file in CANN env"
-        exit 1
-    fi
-    # for dispatch_gmm_combine_decode
-    yes | cp "${HCCL_STRUCT_FILE_PATH}" "${ROOT_DIR}/csrc/utils/inc/kernel"
-    # for dispatch_ffn_combine
-    SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-    TARGET_DIR="$SCRIPT_DIR/mc2/dispatch_ffn_combine/op_kernel/utils/"
-    TARGET_FILE="$TARGET_DIR/$(basename "$HCCL_STRUCT_FILE_PATH")"
+    setup_catlass_dependency
 
-    echo "*************************************"
-    echo $HCCL_STRUCT_FILE_PATH
-    echo "$TARGET_DIR"
-    cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
-
-    sed -i 's/struct HcclOpResParam {/struct HcclOpResParamCustom {/g' "$TARGET_FILE"
-    sed -i 's/struct HcclRankRelationResV2 {/struct HcclRankRelationResV2Custom {/g' "$TARGET_FILE"
-
-    TARGET_DIR="$SCRIPT_DIR/mc2/dispatch_ffn_combine_bf16/op_kernel/utils/"
-    TARGET_FILE="$TARGET_DIR/$(basename "$HCCL_STRUCT_FILE_PATH")"
-    cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
-    sed -i 's/struct HcclOpResParam {/struct HcclOpResParamCustom {/g' "$TARGET_FILE"
-    sed -i 's/struct HcclRankRelationResV2 {/struct HcclRankRelationResV2Custom {/g' "$TARGET_FILE"
-
-    TARGET_DIR="$SCRIPT_DIR/mc2/dispatch_ffn_combine_w4_a8/op_kernel/utils/"
-    TARGET_FILE="$TARGET_DIR/$(basename "$HCCL_STRUCT_FILE_PATH")"
-    cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
-    sed -i 's/struct HcclOpResParam {/struct HcclOpResParamCustom {/g' "$TARGET_FILE"
-    sed -i 's/struct HcclRankRelationResV2 {/struct HcclRankRelationResV2Custom {/g' "$TARGET_FILE"
-
-    # for dispatch_normal and combine_normal
-    TARGET_DIR="$SCRIPT_DIR/mc2/moe_dispatch_normal/op_kernel/utils/"
-    cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
-
-    TARGET_DIR="$SCRIPT_DIR/mc2/moe_combine_normal/op_kernel/utils/"
-    echo "$TARGET_DIR"
-    cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
-    
     CUSTOM_OPS_ARRAY=(
+        "scatter_nd_update_v2"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
-        "lightning_indexer_vllm"
+        "lightning_indexer"
         "sparse_flash_attention"
+        "kv_quant_sparse_flash_attention"
         "dispatch_ffn_combine"
         "dispatch_ffn_combine_w4_a8"
         "dispatch_ffn_combine_bf16"
-        "dispatch_gmm_combine_decode"
-        "moe_combine_normal"
-        "moe_dispatch_normal"
-        "dispatch_layout"
-        "notify_dispatch"
-        "moe_init_routing_custom"
         "moe_gating_top_k"
+        "moe_gating_top_k_hash"
         "add_rms_norm_bias"
-        "apply_top_k_top_p_custom"
         "transpose_kv_cache_by_block"
         "copy_and_expand_eagle_inputs"
         "causal_conv1d"
         "moe_grouped_matmul"
         "lightning_indexer_quant"
-        "hamming_dist_top_k"
-        "reshape_and_cache_bnsd"
+        "compressor"
+        "compressor_metadata"
+        "vllm_quant_lightning_indexer"
+        "vllm_quant_lightning_indexer_metadata"
+        "sparse_attn_sharedkv"
+        "sparse_attn_sharedkv_metadata"
+        "hc_pre_sinkhorn"
+        "hc_pre_inv_rms"
+        "hc_pre"
+        "hc_post"
+        "inplace_partial_rotary_mul"
+        "rms_norm_dynamic_quant"
+        "dequant_swiglu_quant"
+        "grouped_matmul_swiglu_quant"
+        "grouped_matmul_swiglu_quant_v2"
         "recurrent_gated_delta_rule"
+        "ngram_spec_decode"
+        "chunk_fwd_o"
+        "chunk_gated_delta_rule_fwd_h"
+        "store_kv_block"
+        "store_kv_block_metadata"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
+elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
+    log "matched SOC branch: ascend950"
+    # ASCEND950 (A5) series
+    # dependency: catlass
+    setup_catlass_dependency
+
+    CUSTOM_OPS_ARRAY=(
+        "moe_gating_top_k_hash"
+        "indexer_compress_epilog"
+        "inplace_partial_rotary_mul"
+        "kv_compress_epilog"
+        "compressor"
+        "compressor_metadata"
+        "vllm_quant_lightning_indexer"
+        "vllm_quant_lightning_indexer_metadata"
+        "kv_quant_sparse_attn_sharedkv"
+        "kv_quant_sparse_attn_sharedkv_metadata"
+        "hc_pre_sinkhorn"
+        "hc_pre_inv_rms"
+        "hc_post"
+        "hc_pre"
+        "swiglu_group_quant"
+        "load_index_kv_cache"
+        "indexer_compress_epilog_v2"
+        "causal_conv1d"
+        "recurrent_gated_delta_rule"
+        "chunk_fwd_o"
+        "chunk_gated_delta_rule_fwd_h"
+        "store_kv_block"
+        "store_kv_block_metadata"
+    )
+
+    CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
+    SOC_ARG="ascend950"
 else
     # others
     # currently, no custom aclnn ops for other series
@@ -201,13 +238,14 @@ log_selected_ops
 (
   set -euo pipefail
 
-  log "subshell cwd before cd=$(pwd)"
-  cd csrc
-  log "subshell cwd after cd=$(pwd)"
-  log "cleaning csrc build dirs"
-  rm -rf -- build output build_out
-
   : "${ROOT_DIR:?ROOT_DIR is not set}"
+
+  log "subshell cwd before cd=$(pwd)"
+  cd "${ROOT_DIR}/csrc"
+  log "subshell cwd after cd=$(pwd)"
+  log "preserving csrc/build and cleaning output dirs"
+  rm -rf -- output build_out
+
   : "${CUSTOM_OPS:?CUSTOM_OPS is not set}"
   : "${SOC_VERSION:?SOC_VERSION is not set}"
   : "${SOC_ARG:?SOC_ARG is not set}"
@@ -241,7 +279,28 @@ log_selected_ops
   chmod +x -- "${installer_candidates[0]}" || true
   log "running installer: ${installer_candidates[0]}"
   "${installer_candidates[0]}" --install-path="${custom_ops_install_dir}"
+  # CANN leaves generated vendor script dirs owner-read-only; keep repo-local
+  # editable-build artifacts removable by the non-root user who built them.
+  if [[ -d "${custom_ops_install_dir}/vendors/custom_transformer/scripts" ]]; then
+    chmod u+w "${custom_ops_install_dir}/vendors/custom_transformer/scripts"
+  fi
   log "installer finished"
   log "installed files under ${custom_ops_install_dir} (maxdepth=4, first 120 entries):"
   { find "${custom_ops_install_dir}" -mindepth 1 -maxdepth 4 -print | sort | head -n 120 | sed 's#^#[build_aclnn] install: #'; } || true
+
+  # install batch_invariant run package and whl package
+  if [[ "${VLLM_BATCH_INVARIANT:-0}" == "1" ]]; then
+    log "VLLM_BATCH_INVARIANT=1, installing batch_invariant run package and whl package..."
+
+    # call separate installation script
+    batch_invariant_script="${ROOT_DIR}/csrc/build_batch_invariant_ops.sh"
+    if [[ -f "${batch_invariant_script}" ]]; then
+      log "Calling batch_invariant_ops build script: ${batch_invariant_script}"
+      bash "${batch_invariant_script}" "${SOC_ARG}"
+    else
+      log "Warning: batch_invariant_ops build script not found at ${batch_invariant_script}"
+    fi
+  else
+    log "VLLM_BATCH_INVARIANT is not set to 1, skipping batch_invariant ops build"
+  fi
 )

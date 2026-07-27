@@ -1,5 +1,17 @@
 # Disaggregated-encoder
 
+Disaggregated encoder refers to running the vision (multimodal) encoder stage of a large language model (LLM) in a separate vLLM process/instance from the language model's prefill and decode stages.
+
+Similarly, disaggregated prefill isolates prompt processing (KV cache computation) from autoregressive token generation (the decode phase) across distinct vLLM instances.
+
+This separation allows for targeted hardware and resource optimization for each phase, enabling precise tuning of Time-to-First-Token (TTFT) against Inter-Token Latency (ITL). Consequently, it enhances overall throughput and resource utilization during high-load serving.
+
+Prefill-Decode (PD) disaggregation serves as the overarching architecture for this mechanism. In this setup, dedicated prefill instances compute KV caches and transfer them—via specialized connectors such as MooncakeLayerwise—to decode instances for token generation.
+
+Within frameworks like vLLM (including the Ascend Hardware Plugin), PD disaggregation often integrates with Encoder-Prefill-Decode (EPD) architectures for multimodal models, while supporting multi-node configurations with distributed load balancing.
+
+Ultimately, these architectural patterns maximize inference efficiency by addressing the contrasting computational profiles of each stage: encoding and prefilling are compute-bound and bursty, whereas decoding is memory-bound and sustained.
+
 ## Why disaggregated-encoder?
 
 A **disaggregated encoder** runs the vision-encoder stage of a multimodal LLM in a process that is separate from the pre-fill / decoder stage. Deploying these two stages in independent vLLM instances brings three practical benefits:
@@ -63,7 +75,7 @@ All related code is under `vllm/distributed/ec_transfer`.
 We create the example setup with the **MooncakeLayerwiseConnector** from `vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake_layerwise_connector.py` and refer to the `examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py` to facilitate the kv transfer between P and D. For step-by-step deployment and configuration of Mooncake, refer to the following guide:  
 [https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html)
 
-For the PD disaggregation part, when using MooncakeLayerwiseConnector: The request first enters the Decoder instance,the Decoder triggers a remote prefill task in reverse via the Metaserver. The Prefill node then executes inference and pushes KV Cache layer-wise to the Decoder, overlapping computation with transmission. Once the transfer is complete, the Decoder seamlessly continues with the subsequent token generation.
+For the PD disaggregation part, when using MooncakeLayerwiseConnector: The request first enters the Decoder instance, the Decoder triggers a remote prefill task in reverse via the Metaserver. The Prefill node then executes inference and pushes KV Cache layer-wise to the Decoder, overlapping computation with transmission. Once the transfer is complete, the Decoder seamlessly continues with the subsequent token generation.
 `docs/source/developer_guide/Design_Documents/disaggregated_prefill.md` shows the brief idea about the disaggregated prefill.
 
 ## Limitations

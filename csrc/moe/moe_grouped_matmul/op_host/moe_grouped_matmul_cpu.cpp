@@ -320,8 +320,8 @@ static ge::graphStatus TilingForMoeGroupedMatmulFunc(gert::TilingContext *contex
     return ret;
 }
 
-struct MatmulAllreduceAddRmsnormCompileInfo1 {};
-ge::graphStatus TilingParseForMatmulAllreduceAddRmsnorm1(gert::TilingParseContext *context)
+struct MoeGroupedMatmulCompileInfo {};
+ge::graphStatus TilingParseForMoeGroupedMatmul(gert::TilingParseContext *context)
 {
     // (void)context;
     return ge::GRAPH_SUCCESS;
@@ -330,7 +330,6 @@ ge::graphStatus TilingParseForMatmulAllreduceAddRmsnorm1(gert::TilingParseContex
 
 IMPL_OP_OPTILING(MoeGroupedMatmul)
     .Tiling(TilingForMoeGroupedMatmulFunc)
-    .TilingParse<MatmulAllreduceAddRmsnormCompileInfo1>(TilingParseForMatmulAllreduceAddRmsnorm1);
+    .TilingParse<MoeGroupedMatmulCompileInfo>(TilingParseForMoeGroupedMatmul);
 
 } // namespace optiling
-

@@ -31,14 +31,14 @@ jobs:
         run: |
           apt-get update -y && apt-get install git jq -y
           pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
-          pip install modelscope
+          pip install modelscope datasets
 
       - name: Show Current Disk Usage
         run: |
           df -h /root/.cache | grep -v Filesystem | \
           awk '{print "Mount point: "$6, "Total: "$2, "Used: "$3, "Available: "$4, "Usage: "$5}'
       - name: Checkout PR branch
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 

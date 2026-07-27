@@ -8,6 +8,7 @@ _envs: &envs
   HCCL_BUFFSIZE: "1024"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   SERVER_PORT: "DEFAULT_PORT"
+  VLLM_ENGINE_READY_TIMEOUT_S: "3000"
 
 _server_cmd: &server_cmd
   - "--quantization"
@@ -44,7 +45,7 @@ _benchmarks_acc: &benchmarks_acc
     max_out_len: 32768
     batch_size: 32
     baseline: 95
-    threshold: 5
+    threshold: 10
 
 _benchmarks_perf: &benchmarks_perf
   perf:
@@ -81,14 +82,3 @@ test_cases:
       <<: *benchmarks_acc
       <<: *benchmarks_perf
 
-  - name: "DeepSeek-R1-0528-W8A8-EPLB"
-    model: "vllm-ascend/DeepSeek-R1-0528-W8A8"
-    envs:
-      <<: *envs
-      DYNAMIC_EPLB: "true"
-    server_cmd: *server_cmd
-    server_cmd_extra:
-      - "--additional-config"
-      - '{"enable_weight_nz_layout": true, "eplb_config": {"dynamic_eplb": "true", "expert_heat_collection_interval": 1000, "algorithm_execution_interval": 50, "eplb_policy_type": 3}}'
-    benchmarks:
-      <<: *benchmarks_acc

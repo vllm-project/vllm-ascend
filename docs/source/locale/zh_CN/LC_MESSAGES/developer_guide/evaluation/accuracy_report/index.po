@@ -19,7 +19,5 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.17.0\n"
 
-#: ../../developer_guide/evaluation/accuracy_report/index.md:1
-#: ../../developer_guide/evaluation/accuracy_report/index.md:3
 msgid "Accuracy Report"
 msgstr "准确性报告"

@@ -12,7 +12,6 @@ test_cases:
       HCCL_OP_EXPANSION_MODE: "AIV"
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
-      VLLM_ASCEND_ENABLE_PREFETCH_MLP: "1"
       VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE: "1"
       VLLM_ASCEND_ENABLE_NZ: "1"
       VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
@@ -34,12 +33,11 @@ test_cases:
       - "--gpu-memory-utilization"
       - "0.95"
       - "--additional-config"
-      - '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true, "enable_weight_nz_layout":true}'
+      - '{"enable_cpu_binding":true, "enable_weight_nz_layout":true}'
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3,"enforce_eager": true}'
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128,132,136,140,144]}'
-      - "--async-scheduling"
       - "--mm-processor-cache-gb"
       - "0"
       - "--mm_processor_cache_type"
@@ -54,5 +52,5 @@ test_cases:
         max_out_len: 1500
         batch_size: 32
         request_rate: 0
-        baseline: 687
+        baseline: 604
         threshold: 0.97

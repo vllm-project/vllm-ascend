@@ -1,6 +1,7 @@
 import math
 import os
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -9,6 +10,9 @@ import torch.distributed as dist
 from vllm.logger import logger
 
 from vllm_ascend.distributed.parallel_state import get_p_tp_group
+
+MAX_HCCL_REGISTER_REGIONS = 256
+REGISTER_MERGE_GAP_BYTES = 4096
 
 
 def kv_alltoall_and_rearrange(pd_tp_ratio: int, key: torch.Tensor, value: torch.TensorType):
@@ -300,3 +304,142 @@ def get_transfer_mappings(
         block_dict["trans_count"] = d_trans_count_mapping[(host, port)]
     logger.debug("MooncakeLayerwiseConnector Request %s transfer tasks: %s", req_id, transfer_mappings)
     return transfer_mappings
+
+
+@dataclass
+class RegisterRange:
+    start: int
+    end: int
+
+
+@dataclass
+class RegisterRegions:
+    ptrs: list[int]
+    lengths: list[int]
+    logical_tensor_count: int | None = None
+    logical_total_bytes: int | None = None
+
+    @property
+    def registered_bytes(self) -> int:
+        return sum(self.lengths)
+
+
+def iter_kv_cache_tensors(obj: Any) -> Iterator[torch.Tensor]:
+    """Flatten kv_caches into tensors without materializing new tensors."""
+    if obj is None:
+        return
+
+    if isinstance(obj, torch.Tensor):
+        yield obj
+        return
+
+    if isinstance(obj, (tuple, list)):
+        for item in obj:
+            yield from iter_kv_cache_tensors(item)
+        return
+
+    if isinstance(obj, dict):
+        for item in obj.values():
+            yield from iter_kv_cache_tensors(item)
+        return
+
+
+def tensor_storage_key(tensor: torch.Tensor) -> int:
+    """Return a stable grouping key for tensors sharing the same storage.
+
+    Do NOT use this key as the register address directly. For aligned KV cache
+    views, tensor.untyped_storage().data_ptr() may point to the original raw
+    allocation, whose address can be unaligned. We only use it to group views.
+    """
+    try:
+        return tensor.untyped_storage().data_ptr()
+    except Exception:
+        try:
+            return tensor.storage().data_ptr()
+        except Exception:
+            return tensor.data_ptr()
+
+
+def collect_storage_merged_register_regions(
+    kv_caches: dict[str, Any],
+) -> RegisterRegions:
+    """Collect HCCL/Mooncake register regions with storage-aware merging.
+
+    Metadata should still use each logical tensor's own data_ptr().
+    register_buffer should use the merged memory ranges returned here.
+    """
+    ranges_by_storage: OrderedDict[int, list[RegisterRange]] = OrderedDict()
+    logical_tensor_count = 0
+    logical_total_bytes = 0
+
+    for tensor in iter_kv_cache_tensors(kv_caches):
+        if tensor is None or tensor.numel() == 0:
+            continue
+
+        if not tensor.is_contiguous():
+            logger.warning(
+                "Mooncake register_buffer got a non-contiguous KV cache "
+                "tensor: shape=%s, dtype=%s, data_ptr=%s. "
+                "Registration will use logical numel * element_size.",
+                tuple(tensor.shape),
+                tensor.dtype,
+                hex(tensor.data_ptr()),
+            )
+
+        nbytes = tensor.nbytes
+        start = tensor.data_ptr()
+        end = start + nbytes
+        storage_key = tensor_storage_key(tensor)
+
+        logical_tensor_count += 1
+        logical_total_bytes += nbytes
+
+        ranges_by_storage.setdefault(storage_key, []).append(RegisterRange(start, end))
+
+    register_ptrs: list[int] = []
+    register_lengths: list[int] = []
+
+    for ranges in ranges_by_storage.values():
+        ranges.sort(key=lambda r: r.start)
+
+        merged_start = ranges[0].start
+        merged_end = ranges[0].end
+
+        for region in ranges[1:]:
+            if region.start <= merged_end + REGISTER_MERGE_GAP_BYTES:
+                merged_end = max(merged_end, region.end)
+            else:
+                register_ptrs.append(merged_start)
+                register_lengths.append(merged_end - merged_start)
+                merged_start = region.start
+                merged_end = region.end
+
+        register_ptrs.append(merged_start)
+        register_lengths.append(merged_end - merged_start)
+
+    return RegisterRegions(
+        ptrs=register_ptrs,
+        lengths=register_lengths,
+        logical_tensor_count=logical_tensor_count,
+        logical_total_bytes=logical_total_bytes,
+    )
+
+
+def validate_register_region_count(regions: RegisterRegions) -> None:
+    region_count = len(regions.ptrs)
+    if region_count <= MAX_HCCL_REGISTER_REGIONS:
+        return
+
+    detail = f"registered_bytes={regions.registered_bytes}"
+    if regions.logical_tensor_count is not None:
+        detail += f", logical_tensors={regions.logical_tensor_count}, logical_bytes={regions.logical_total_bytes}"
+
+    raise RuntimeError(
+        "Mooncake register_buffer region count "
+        f"{region_count} exceeds HCCL per-process limit "
+        f"{MAX_HCCL_REGISTER_REGIONS}. "
+        "KV cache registration would fail. "
+        f"{detail}. "
+        "Please reduce KV cache allocation fragmentation or merge "
+        "k/v/dsa/scale allocations further."
+    )

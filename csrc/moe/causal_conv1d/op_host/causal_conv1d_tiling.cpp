@@ -13,7 +13,7 @@
  * \file causal_conv1d_tiling.cpp
  */
 
- #include "../tiling_base/tiling_templates_registry.h"
+ #include "tiling_base/tiling_templates_registry.h"
  #include "causal_conv1d_tiling_utils.h"
  #include "causal_conv1d_tiling_planner.h"
  #include "causal_conv1d_tiling_validation.h"
@@ -54,10 +54,6 @@
      FnExecutionPlan fnExecutionPlan = FN_EXECUTION_PLAN_INVALID;
      FnHostPlan fnHostPlan;
      const int64_t *qslData = nullptr;
-     if (isFn && tiling->inputMode == 0) {
-         const gert::Tensor *qslTensor = context->GetOptionalInputTensor(QUERY_START_LOC_INDEX);
-         qslData = (qslTensor != nullptr) ? qslTensor->GetData<int64_t>() : nullptr;
-     }
  
      if (isFn) {
          fnHostPlan = ChooseFnHostPlan(context, *tiling, ubSize, coreNum);
@@ -169,4 +165,3 @@
      .TilingParse<CausalConv1dCompileInfo>(TilingParseForCausalConv1d);
  
  }
- 

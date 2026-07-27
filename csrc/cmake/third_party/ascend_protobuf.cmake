@@ -67,7 +67,7 @@ else()
                             -DABSL_ROOT_DIR=${ABSL_SOURCE_DIR}
                             <SOURCE_DIR>
                         SOURCE_DIR ${ASCEND_PROTOBUF_SOURCE_DIR}
-                        BUILD_COMMAND $(MAKE)
+                        BUILD_COMMAND ${CMAKE_COMMAND} --build .
                         INSTALL_COMMAND ""
                         EXCLUDE_FROM_ALL TRUE
     )

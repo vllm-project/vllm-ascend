@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 def check_or_set_default_env(cmake_args, env_name, env_variable, default_path=""):
     if env_variable is None:
         logging.warning(
-            "No %s found in your environment, pleause try to set %s if you customize the installation path of this "
+            "No %s found in your environment, please try to set %s if you customize the installation path of this "
             "library, otherwise default path will be adapted during build this project",
             env_name,
             env_name,
@@ -118,6 +118,9 @@ def get_chip_type() -> str:
         elif "950" in chip_name:
             assert npu_name
             return (chip_name + "_" + npu_name).lower()
+        elif "a2g3" in chip_name.lower():
+            # A2 case: CH version of the HDK
+            return "ascend910b1"
         else:
             raise ValueError(f"Unable to recognize chip name: {chip_name}, please manually set env SOC_VERSION")
     except subprocess.CalledProcessError as e:
@@ -520,10 +523,10 @@ setup(
     project_urls={
         "Homepage": "https://github.com/vllm-project/vllm-ascend",
     },
-    # TODO: Add 3.12 back when torch-npu support 3.12
     classifiers=[
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
         "License :: OSI Approved :: Apache Software License",
         "Intended Audience :: Developers",
         "Intended Audience :: Information Technology",
@@ -543,6 +546,7 @@ setup(
             "ascend_kv_connector = vllm_ascend:register_connector",
             "ascend_model_loader = vllm_ascend:register_model_loader",
             "ascend_service_profiling = vllm_ascend:register_service_profiling",
+            "ascend_model = vllm_ascend:register_model",
         ],
     },
 )

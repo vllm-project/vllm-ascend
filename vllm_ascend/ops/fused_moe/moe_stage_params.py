@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+import torch_npu
 
 from vllm_ascend.quantization.quant_type import QuantType
 
@@ -61,6 +62,7 @@ class MoEQuantParams:
     quant_type: QuantType = QuantType.NONE
     comm_quant_mode: int | None = None
     mxfp: MoEMxfpParams | None = None
+    is_per_channel_weight: bool = False
 
     @property
     def is_quant(self) -> bool:
@@ -68,17 +70,54 @@ class MoEQuantParams:
 
     @property
     def is_mxfp(self) -> bool:
-        return self.quant_type in (QuantType.MXFP8, QuantType.MXFP4)
+        return self.quant_type in (QuantType.W8A8MXFP, QuantType.W4A4MXFP, QuantType.W4A8MXFP, QuantType.W4A16MXFP)
+
+    @property
+    def is_w4a4_mxfp(self) -> bool:
+        return self.quant_type == QuantType.W4A4MXFP
 
     @property
     def is_int_quant(self) -> bool:
         return self.quant_type in (QuantType.W8A8, QuantType.W4A8)
 
     @property
+    def is_fp8(self) -> bool:
+        return self.quant_type == QuantType.W8A8FP
+
+    @property
+    def use_w4a8_per_channel_gmm_swiglu(self) -> bool:
+        return self.quant_type == QuantType.W4A8 and self.is_per_channel_weight
+
+    @property
     def dispatch_with_quant(self) -> bool:
-        # MXFP4 currently quantizes activations in the MoE MLP path, so
-        # MC2 dispatch must remain unquantized for that mode.
-        return self.quant_type in (QuantType.W8A8, QuantType.W4A8, QuantType.MXFP8)
+        return self.quant_type in (
+            QuantType.W8A8,
+            QuantType.W4A8,
+            QuantType.W8A8MXFP,
+            QuantType.W4A4MXFP,
+            QuantType.W4A8MXFP,
+            QuantType.W8A8FP,
+        )
+
+    @property
+    def get_dst_type(self):
+        if self.is_w4a4_mxfp:
+            return torch_npu.float4_e2m1fn_x2
+        elif self.is_mxfp or self.is_fp8:
+            return torch.float8_e4m3fn
+        elif self.dispatch_with_quant:
+            return torch.int8
+        else:
+            return None
+
+    @property
+    def get_scale_type(self):
+        if self.is_mxfp:
+            return torch.float8_e8m0fnu
+        elif self.dispatch_with_quant:
+            return torch.float32
+        else:
+            return None
 
 
 __all__ = [

@@ -1,11 +1,12 @@
 import torch
-import torch.nn.functional as F
+
+from vllm_ascend._310p.ops.fla.l2norm import l2norm_310p
 
 
 def _maybe_l2norm(x: torch.Tensor, enabled: bool) -> torch.Tensor:
     if not enabled:
         return x
-    return F.normalize(x, p=2, dim=-1, eps=1e-6).to(x.dtype)
+    return l2norm_310p(x)
 
 
 def _expand_to_hv(x: torch.Tensor, hv: int) -> torch.Tensor:

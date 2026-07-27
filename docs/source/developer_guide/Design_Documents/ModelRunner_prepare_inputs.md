@@ -33,7 +33,7 @@ The workflow of obtaining inputs:
 
 3. Get `Token IDs`: using token indices to retrieve the Token IDs from **token id table**.
 
-At last, these `Token IDs` are required to be fed into a model, and `positions` should also be sent into the model to create `Rope` (Rotary positional embedding). Both of them are the inputs of the model.
+At last, these `Token IDs` are required to be fed into a model, and `positions` should also be sent into the model to create `RoPE` (Rotary positional embedding). Both of them are the inputs of the model.
 
 **Note**: The `Token IDs` are the inputs of a model, so we also call them `Input IDs`.
 
@@ -204,7 +204,7 @@ Details:
 - (**Request level**) `number of tokens`: `[3, 2, 5]`
 - `max query len`: `5`
 - (**Token level**) `slot mapping`: `[2, 3, 4, 6, 7, 8, 9, 10, 11, 12]`
-- `attention mask`: For all requests that initiate a prefill process, we simply create only one mask matrix for reuse across different requests. The shape of this mask matrix is `5 * 5`:
+- `attention mask`: For all requests that initiate a prefill process, we simply create only one mask matrix for reuse across different requests. The shape of this mask matrix is `5 * 5`.
 
 ### Step 2: Chunked prefill
 

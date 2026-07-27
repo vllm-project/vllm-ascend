@@ -14,12 +14,17 @@ import torch
 from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.fla.ops.utils import SUPPRESS_LEVEL
 
-from .chunk_delta_h import chunk_gated_delta_rule_fwd_h
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.25.1"):
+    from vllm.model_executor.layers.fla.ops.utils import SUPPRESS_LEVEL  # type: ignore[import-not-found]
+else:
+    from vllm.third_party.flash_linear_attention.ops.utils import SUPPRESS_LEVEL
+
+from .chunk_delta_h import chunk_gated_delta_rule_fwd_h  # noqa: F401
 from .chunk_delta_hupdate import chunk_gated_delta_rule_fwd_hupdate
-from .chunk_o import chunk_fwd_o
-from .chunk_o_update import chunk_fwd_o_update
+from .chunk_o import chunk_fwd_o  # noqa: F401
 from .chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from .cumsum import chunk_local_cumsum
 from .l2norm import l2norm_fwd
@@ -49,7 +54,9 @@ def chunk_gated_delta_rule_fwd(
         num_decodes = attn_metadata.num_decodes
     chunk_size = 64
     block_indices_cumsum = None if prebuilt_meta is None else prebuilt_meta.block_indices_cumsum
+    cu_seqlens_host = None if prebuilt_meta is None else prebuilt_meta.cu_seqlens_host
     chunk_indices_chunk64 = None if prebuilt_meta is None else prebuilt_meta.chunk_indices_chunk64
+    chunk_indices_chunk64_host = None if prebuilt_meta is None else prebuilt_meta.chunk_indices_chunk64_host
     chunk_offsets_chunk64 = None if prebuilt_meta is None else prebuilt_meta.chunk_offsets_chunk64
     update_chunk_offsets_chunk64 = None if prebuilt_meta is None else prebuilt_meta.update_chunk_offsets_chunk64
     final_chunk_indices_chunk64 = None if prebuilt_meta is None else prebuilt_meta.final_chunk_indices_chunk64
@@ -85,19 +92,61 @@ def chunk_gated_delta_rule_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices_chunk64,
     )
-    h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
-        k=k,
-        w=w,
-        u=u,
-        g=g,
-        initial_state=initial_state,
-        output_final_state=output_final_state,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices_chunk64,
-        chunk_offsets=chunk_offsets_chunk64,
+
+    k_ascendc = k.to(torch.bfloat16).transpose(1, 2).contiguous()
+    w_ascendc = w.to(torch.bfloat16).transpose(1, 2).contiguous()
+    u_ascendc = u.to(torch.bfloat16).transpose(1, 2).contiguous()
+    g_ascendc = g.transpose(1, 2).contiguous()
+    q_ascendc = q.to(torch.bfloat16).transpose(1, 2).contiguous()
+
+    cu_seqlens = None if cu_seqlens is None else cu_seqlens.to(torch.int64)
+    chunk_indices = None if chunk_indices_chunk64 is None else chunk_indices_chunk64.to(torch.int64)
+    if cu_seqlens_host is None and cu_seqlens is not None:
+        cu_seqlens_host = tuple(cu_seqlens.tolist())
+    if chunk_indices_chunk64_host is None and chunk_indices is not None:
+        chunk_indices_chunk64_host = tuple(chunk_indices.flatten().tolist())
+    # Compact zero-length segments for the AscendC kernels (see
+    # _compact_empty_segments).  chunk_indices_chunk64 is already compact-
+    # ranked and is reused as-is; only cu_seqlens / initial_state need
+    # compacting.
+    if prebuilt_meta is not None and hasattr(prebuilt_meta, "keep_meta"):
+        cu_seqlens_kern = cu_seqlens_host if prebuilt_meta.cu_seqlens_kern is None else prebuilt_meta.cu_seqlens_kern
+        keep_meta = prebuilt_meta.keep_meta
+        initial_state_kern = (
+            initial_state[keep_meta] if initial_state is not None and keep_meta is not None else initial_state
+        )
+    else:
+        cu_seqlens_kern, initial_state_kern = cu_seqlens_host, initial_state
+        keep_meta = None
+    h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
+        k_ascendc,
+        w_ascendc,
+        u_ascendc,
+        g=g_ascendc,
+        gk=None,
+        initial_state=initial_state_kern,
+        output_final_state=True,
+        chunk_size=64,
+        save_new_value=True,
+        cu_seqlens=cu_seqlens_kern,
+        chunk_indices=chunk_indices_chunk64_host,
+        use_exp2=False,
+        transpose_state_layout=False,
     )
+    if keep_meta is not None:
+        # Scatter the compacted final_state back to the original [N, H, K, V]
+        # layout the PCP state recursion expects; empty segments keep their
+        # initial state.
+        _fs_full = initial_state.clone()
+        _fs_full[keep_meta] = final_state
+        final_state = _fs_full
 
     if get_pcp_group().world_size > 1:
+        # When integrating mtp, since `mix_qkv` has been split, `num_decode`
+        # cannot be directly obtained from the metadata and needs to be recalculated.
+        actual_num_decodes = getattr(prebuilt_meta, "num_decodes", None)
+        if actual_num_decodes is None:
+            actual_num_decodes = num_decodes
         h_update = chunk_gated_delta_rule_fwd_hupdate(
             k=k,
             w=w,
@@ -107,7 +156,7 @@ def chunk_gated_delta_rule_fwd(
             chunk_indices=chunk_indices_chunk64,
             chunk_offsets=chunk_offsets_chunk64,
             update_chunk_offsets=update_chunk_offsets_chunk64,
-            num_decodes=num_decodes,
+            num_decodes=actual_num_decodes,
         )
         all_final_state = get_pcp_group().all_gather(final_state.unsqueeze(0), 0)
         final_chunk_indices = final_chunk_indices_chunk64
@@ -119,8 +168,9 @@ def chunk_gated_delta_rule_fwd(
         updated_state = final_state.new_empty(get_pcp_group().world_size, *final_state.shape)
         updated_state[0, ...] = all_final_state[0]
         for i in range(1, get_pcp_group().world_size):
+            # correct_i = all_final_state[i] + Φ_i · (correct_{i-1} - s0) = Φ_i · correct_{i-1} + p_i
             updated_final_state = all_final_state[i] + torch.matmul(
-                all_final_h_update[i, ...], updated_state[i - 1, ...]
+                all_final_h_update[i, ...], updated_state[i - 1, ...] - initial_state
             )
             updated_state[i, ...] = updated_final_state
 
@@ -131,26 +181,42 @@ def chunk_gated_delta_rule_fwd(
         else:
             updated_h_state = updated_state[get_pcp_group().rank_in_group - 1, ...]
 
-        h = chunk_fwd_o_update(
-            q=q,
-            v=v_new,
-            h=h,
-            h_update=h_update,
-            updated_h_state=updated_h_state,
-            cu_seqlens=cu_seqlens,
-            chunk_offsets=chunk_offsets_chunk64,
-        )
+        if get_pcp_group().rank_in_group > 0:
+            rerun_initial_state = initial_state.clone()
+            prefill_seq_offset = actual_num_decodes
+            prefill_slice = slice(prefill_seq_offset, final_state.shape[0])
+            rerun_initial_state[prefill_slice] = updated_h_state[prefill_slice]
+            h, v_new, _ = chunk_gated_delta_rule_fwd_h(
+                k=k,
+                w=w,
+                u=u,
+                g=g,
+                initial_state=rerun_initial_state,
+                output_final_state=True,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices_chunk64,
+                chunk_offsets=chunk_offsets_chunk64,
+            )
+            h = h.transpose(1, 2).contiguous()
+            v_new = v_new.transpose(1, 2).contiguous()
 
-    o = chunk_fwd_o(
-        q=q,
-        k=k,
-        v=v_new,
-        h=h,
-        g=g,
-        scale=scale,
-        cu_seqlens=cu_seqlens,
-        chunk_offsets=chunk_offsets_chunk64,
+    o_ascendc = torch.ops._C_ascend.chunk_fwd_o(
+        q_ascendc,
+        k_ascendc,
+        v_new,
+        h,
+        scale,
+        g=g_ascendc,
+        g_gamma=None,
+        cu_seqlens=cu_seqlens_host,
+        chunk_indices=chunk_indices_chunk64_host,
+        chunk_size=64,
+        transpose_state_layout=False,
     )
+
+    o = o_ascendc.to(torch.bfloat16).transpose(1, 2).contiguous()
+    v_new = v_new.to(torch.bfloat16).transpose(1, 2).contiguous()
+    h = h.to(torch.bfloat16).transpose(1, 2).contiguous()
 
     if SUPPRESS_LEVEL < 3:
         return g, o, A, final_state, None, None, None
@@ -209,6 +275,9 @@ def chunk_gated_delta_rule(
     prebuilt_meta=None,
     head_first: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
+    chunk_indices: torch.Tensor | None = None,
+    chunk_offsets: torch.Tensor | None = None,
+    core_attn_out: torch.Tensor | None = None,
 ):
     r"""
     Args:
@@ -279,14 +348,14 @@ def chunk_gated_delta_rule(
 
     if head_first:
         raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
+            "chunk_gated_delta_rule: head_first is deprecated and will be removed in a future version. "
             "Please use head_first=False for now instead.",
             stacklevel=2,
         )
         q, k, v, beta, g = map(lambda x: rearrange(x, "b h t ... -> b t h ..."), (q, k, v, beta, g))
     if not head_first and q.shape[1] < q.shape[2]:
         warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
+            f"chunk_gated_delta_rule: Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
             "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
             "when head_first=False was specified. "
             "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
@@ -295,12 +364,12 @@ def chunk_gated_delta_rule(
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
-                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
+                f"chunk_gated_delta_rule: The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
                 f"Please flatten variable-length inputs before processing."
             )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(
-                f"The number of initial states is expected to be equal to the number of input sequences, "
+                f"chunk_gated_delta_rule: The number of initial states is expected to be equal to the number of input sequences, "
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
             )
     if scale is None:

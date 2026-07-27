@@ -27,9 +27,8 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
-from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.parallel_state import get_flashcomm2_otp_group, get_mlp_tp_group, get_otp_group
-from vllm_ascend.utils import enable_dsa_cp_with_layer_shard, flashcomm2_enable, mlp_tp_enable, oproj_tp_enable
+from vllm_ascend.distributed.parallel_state import get_mlp_tp_group, get_otp_group
+from vllm_ascend.utils import mlp_tp_enable, oproj_tp_enable
 
 from .methods import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, is_mx_quant_type
 
@@ -46,7 +45,6 @@ class AscendLinearMethod(LinearMethodBase):
 
     def __init__(self, scheme: AscendLinearScheme) -> None:
         self.quant_method = scheme
-        self._enable_dsa_cp_with_layer_shard = enable_dsa_cp_with_layer_shard()
 
     def create_weights(
         self,
@@ -78,7 +76,11 @@ class AscendLinearMethod(LinearMethodBase):
             layer.register_parameter(weight_name, param)
             set_weight_attrs(param, extra_weight_attrs)
 
-        pertensor_dict = self.quant_method.get_pertensor_param(params_dtype)
+        # NOTE: In flatquant quantization implementation,
+        # the shape of pertensor_param requires introducing layer_type
+        layer_type = "row" if isinstance(layer, RowParallelLinear) else "others"
+
+        pertensor_dict = self.quant_method.get_pertensor_param(params_dtype, layer_type=layer_type)
         for pertensor_name, pertensor_param in pertensor_dict.items():
             param = PerTensorScaleParameter(data=pertensor_param, weight_loader=weight_loader)
             # disable warning
@@ -101,11 +103,15 @@ class AscendLinearMethod(LinearMethodBase):
         pergroup_dict = self.quant_method.get_pergroup_param(
             input_size_per_partition, output_size_per_partition, params_dtype, layer_type=layer_type
         )
+        scale_packed_dim = pergroup_dict.pop("_packed_dim", None)
+        scale_packed_factor = pergroup_dict.pop("_packed_factor", None)
         for pergroup_name, pergroup_param in pergroup_dict.items():
             param = torch.nn.Parameter(pergroup_param, requires_grad=False)
             set_weight_attrs(param, {"output_dim": 0})
             layer.register_parameter(pergroup_name, param)
             set_weight_attrs(param, extra_weight_attrs)
+            if scale_packed_dim is not None and scale_packed_factor is not None:
+                set_weight_attrs(param, {"packed_dim": scale_packed_dim, "packed_factor": scale_packed_factor})
             if (
                 "weight_scale_second" in pergroup_name
                 or "weight_offset_second" in pergroup_name
@@ -140,13 +146,6 @@ class AscendLinearMethod(LinearMethodBase):
                 tp_rank = get_otp_group().rank_in_group
             elif layer.prefix.find("down_proj") != -1 and mlp_tp_enable():
                 tp_rank = get_mlp_tp_group().rank_in_group
-            elif (layer.prefix.find("o_proj") != -1 or layer.prefix.find("out_proj") != -1) and flashcomm2_enable():
-                if get_ascend_config().flashcomm2_oproj_tensor_parallel_size == 1:
-                    tp_rank = 0
-                else:
-                    tp_rank = get_flashcomm2_otp_group().rank_in_group
-            elif layer.prefix.find("o_proj") != -1 and self._enable_dsa_cp_with_layer_shard:
-                tp_rank = 0
             else:
                 tp_rank = get_tensor_model_parallel_rank()
         else:
@@ -200,9 +199,19 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         moe_config: The FusedMoE configuration.
     """
 
-    def __init__(self, scheme: AscendMoEScheme, moe_config: FusedMoEConfig) -> None:
+    def __init__(self, scheme: AscendMoEScheme, moe_config: FusedMoEConfig, tid2eid=None) -> None:
         super().__init__(moe_config)
         self.quant_method = scheme
+        self.tid2eid = tid2eid
+
+    @property
+    def is_monolithic(self) -> bool:
+        return False
+
+    def maybe_make_prepare_finalize(self, routing_tables=None):
+        # Ascend uses its own MoE communication and forward_impl path.
+        # Do not let upstream modular-kernel initialization replace it.
+        return None
 
     def create_weights(
         self,
@@ -285,6 +294,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
             mc2_mask=mc2_mask,
+            tid2eid=self.tid2eid,
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

@@ -16,4 +16,4 @@ With the joint efforts of LLaMA-Factory and vLLM Ascend ([LLaMA-Factory#7739](ht
 
 **Learn more**
 
-See more details about LLaMA-Factory and how it uses vLLM Ascend for inference on Ascend NPUs in [LLaMA-Factory Ascend NPU Inference](https://llamafactory.readthedocs.io/en/latest/advanced/npu_inference.html).
+For more details about LLaMA-Factory, please refer to the [official documentation](https://llamafactory.readthedocs.io/en/latest/index.html).

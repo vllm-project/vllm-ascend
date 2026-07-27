@@ -14,7 +14,7 @@
 #include "vector"
 #include "register/tilingdata_base.h"
 #include "tiling/tiling_api.h"
-#include "error_log.h"
+#include "tiling_base/error_log.h"
 #include "hcom_topo_info.h"
 #include "register/op_def_registry.h"
 #include "dispatch_ffn_combine_w4_a8_tiling.h"
@@ -32,6 +32,7 @@ namespace {
     constexpr uint32_t ATTR_MAX_OUTPUT_SIZE_INDEX = 1;
     constexpr uint32_t ATTR_IS_TRANS_B = 2;
     constexpr uint32_t ATTR_WEIGHT_NZ = 3;
+    constexpr uint32_t ATTR_SWIGLU_LIMIT = 4;
     constexpr uint64_t INIT_TILINGKEY = 1000000;
     constexpr uint64_t TILINGKEY_TRANS_B = 1U;
     constexpr uint64_t TILINGKEY_WEIGHT_NZ = 10;
@@ -39,6 +40,7 @@ namespace {
     constexpr uint32_t WEIGHT_INDEX = 1;
     constexpr uint32_t WEIGHT2_INDEX = 2;
     constexpr uint32_t EXPERTID_INDEX = 3;
+    constexpr uint32_t X_ACTIVE_MASK_INDEX = 9;
     constexpr uint32_t BLOCK_NUM = 20;
     constexpr uint32_t SYSTEM_NEED_WORKSPACE = 16 * 1024 * 1024;
 }
@@ -54,6 +56,7 @@ static ge::graphStatus DispatchFFNCombineW4A8CheckAttrAndSetTiling(gert::TilingC
     auto maxOutputSizePtr = attrs->GetAttrPointer<int>(ATTR_MAX_OUTPUT_SIZE_INDEX);
     auto is_trans_b = attrs->GetAttrPointer<bool>(ATTR_IS_TRANS_B);
     auto weight_nz = attrs->GetAttrPointer<bool>(ATTR_WEIGHT_NZ);
+    auto swiglu_limit = attrs->GetAttrPointer<float>(ATTR_SWIGLU_LIMIT);
     OP_TILING_CHECK(groupPtr == nullptr || strlen(groupPtr) == 0,
     OP_LOGE(K_INNER_DEBUG, "group is invalid."), return GRAPH_FAILED);
 
@@ -65,6 +68,7 @@ static ge::graphStatus DispatchFFNCombineW4A8CheckAttrAndSetTiling(gert::TilingC
     info.maxOutputSize = *maxOutputSizePtr;
     info.isTransposeB = *is_trans_b;
     info.isWeightNz = *weight_nz;
+    info.swigluLimit = swiglu_limit != nullptr ? *swiglu_limit : 0.0f;
 
     int64_t rankSize;
     (void)ge::HcomTopoInfo::Instance().GetGroupRankSize(groupPtr, rankSize);
@@ -137,6 +141,21 @@ static ge::graphStatus DispatchFFNCombineW4A8GetPlatformInfoAndSetTiling(gert::T
     return ge::GRAPH_SUCCESS;
 }
 
+static ge::graphStatus CheckXActiveMaskShape(gert::TilingContext *context, const char *nodeName, DispatchFFNCombineW4A8Info &info)
+{
+    const gert::StorageShape* xActiveMaskStorageShape = context->GetOptionalInputShape(X_ACTIVE_MASK_INDEX);
+    if (xActiveMaskStorageShape != nullptr) {
+        OP_TILING_CHECK(xActiveMaskStorageShape->GetStorageShape().GetDimNum() != 1,
+            OP_LOGE(nodeName, "xActiveMask shape dims must be 1, but current dim num is %lu.",
+                xActiveMaskStorageShape->GetStorageShape().GetDimNum()), return ge::GRAPH_FAILED);
+        const int64_t xActiveMaskDim0 = xActiveMaskStorageShape->GetStorageShape().GetDim(0);
+        OP_TILING_CHECK(xActiveMaskDim0 != static_cast<int64_t>(info.M),
+            OP_LOGE(nodeName, "xActiveMask Dim0 must be M(%u), but current dim is %lu.", info.M, xActiveMaskDim0),
+            return ge::GRAPH_FAILED);
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
 void SetTilingData(CoCTiling &cocTilingData, DispatchFFNCombineW4A8Info &info)
 {
     cocTilingData.m0 = 128;
@@ -173,6 +192,9 @@ static ge::graphStatus DispatchFFNCombineW4A8TilingFuncImpl(gert::TilingContext 
     OP_TILING_CHECK(DispatchFFNCombineW4A8GetPlatformInfoAndSetTiling(context, info) != ge::GRAPH_SUCCESS,
         OP_LOGE(context->GetNodeName(), "DispatchFFNCombineW4A8 GetPlatformInfoAndSetTiling Failed"),
         return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckXActiveMaskShape(context, nodeName, info) != ge::GRAPH_SUCCESS,
+        OP_LOGE(context->GetNodeName(), "DispatchFFNCombineW4A8 CheckXActiveMaskShape Failed"),
+        return ge::GRAPH_FAILED);
 
     SetTilingData(tilingData->cocTiling, info);
 
@@ -197,7 +219,7 @@ static ge::graphStatus DispatchFFNCombineW4A8TilingFuncImpl(gert::TilingContext 
     int64_t scaleDim0 = 0;
     int64_t ubSize = 196352;
     int64_t expertCapacity = 0;
-    int64_t expertNum = info.expertPerRank * info.worldSize;
+    int64_t expertNum = info.expertPerRank * info.worldSize + 1;
     int64_t activeNum = info.M * info.topK;
     int64_t dropPadMode = 0;
     int64_t expertTokensCountOrCumsumFlag = 2;
@@ -228,16 +250,15 @@ static ge::graphStatus DispatchFFNCombineW4A8TilingFuncImpl(gert::TilingContext 
     uint32_t n2 = info.K;
     uint32_t k2 = info.N / 2;
 
+    // ptrC/ptrC2 alias reuse: allocate max(N, n2), not N + n2
+    // ptrA1Int4/ptrA2Int4 alias reuse: allocate max(K, k2), not K + k2
+    // (lifetimes separated by SyncAll barrier after GMM1 loop, same pattern as W8A8 ptrA/ptrPermutedToken)
     uint64_t cocWorkspace = (info.M + 256 - 1) / 256 * 256 * info.topK * sizeof(int32_t) +
-                            info.worldSize * info.worldSize * info.expertPerRank * sizeof(int32_t) * 3 +
+                            info.worldSize * info.worldSize * info.expertPerRank * sizeof(int32_t) * 2 +
                             info.maxOutputSize * sizeof(float) * 2 +
-                            info.maxOutputSize * info.N * sizeof(int16_t) * 2 +
-                            info.maxOutputSize * n2 * sizeof(int16_t) * 2 +
-                            info.maxOutputSize * info.K +
-                            info.maxOutputSize * k2 +
+                            info.maxOutputSize * std::max(info.N, n2) * sizeof(int16_t) * 2 +
+                            info.maxOutputSize * std::max(info.K, k2) +
                             info.worldSize * sizeof(int32_t) * 16;
-                            // std::max(info.maxOutputSize * info.N * sizeof(int16_t), info.maxOutputSize * n2 * sizeof(int16_t)) +
-                            // std::max(info.maxOutputSize * info.K * sizeof(int8_t), info.maxOutputSize * k2 * sizeof(int8_t));
 
     workSpaces[0] = SYSTEM_NEED_WORKSPACE + std::max(cocWorkspace, initRoutingWorkspace);
 

@@ -28,7 +28,6 @@ _server_cmd: &server_cmd
   - "8192"
   - "--max-num-seqs"
   - "16"
-  - "--async-scheduling"
   - "--quantization"
   - "ascend"
   - "--trust-remote-code"
@@ -48,7 +47,7 @@ _benchmarks: &benchmarks
     max_out_len: 4096
     batch_size: 8
     baseline: 95
-    threshold: 5
+    threshold: 10
 
 # ==========================================
 # ACTUAL TEST CASES

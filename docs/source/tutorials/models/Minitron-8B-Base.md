@@ -21,7 +21,7 @@ It is recommended to place the model weight in a shared cache directory, such as
 You can use the official docker image for deployment:
 
 ```bash
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 docker run --rm \
   --name vllm-ascend \
   --shm-size=1g \
@@ -48,11 +48,7 @@ If you do not want to use the docker image, you can also build from source:
 
 Start the online serving service with the following command:
 
-```{test} bash
-:sync-yaml: tests/e2e/models/configs/Minitron-8B-Base.yaml
-:sync-target: test_cases[0].model test_cases[0].server_cmd
-:sync-class: cmd
-
+``` bash
 vllm serve "nv-community/Minitron-8B-Base" \
   --served-model-name minitron-8b-base \
   --tensor-parallel-size 1 \

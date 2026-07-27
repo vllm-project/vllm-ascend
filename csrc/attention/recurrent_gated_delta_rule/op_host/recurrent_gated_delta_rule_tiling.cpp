@@ -13,10 +13,10 @@
  */
 #include "recurrent_gated_delta_rule_tiling.h"
 
-#include "tiling_templates_registry.h"
+#include "tiling_base/tiling_templates_registry.h"
 #include "register/op_def_registry.h"
 #include "platform/platform_infos_def.h"
-#include "error_log.h"
+#include "tiling_base/error_log.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "math_util.h"
 #include "error/ops_error.h"
@@ -49,7 +49,7 @@ const size_t DIM_1 = 1;
 const size_t DIM_2 = 2;
 const size_t DIM_3 = 3;
 
-const size_t MAX_MTP = 8;
+const size_t MAX_MTP = 16;
 
 template <typename T1, typename T2>
 static T1 CeilDiv(T1 a, T2 b)

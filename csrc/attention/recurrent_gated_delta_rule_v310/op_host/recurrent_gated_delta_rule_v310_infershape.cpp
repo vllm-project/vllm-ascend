@@ -13,7 +13,7 @@
  */
 
 #include "register/op_impl_registry.h"
-#include "../tiling_base/error_log.h"
+#include "tiling_base/error_log.h"
 
 using namespace gert;
 namespace ops {

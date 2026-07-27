@@ -184,14 +184,15 @@ class HCCLLibrary:
             self.lib = HCCLLibrary.path_to_library_cache[so_file]
         except Exception as e:
             logger.error(
-                "Failed to load HCCL library from %s. "
-                "It is expected if you are not running on Ascend NPUs."
-                "Otherwise, the hccl library might not exist, be corrupted "
+                "Failed to load HCCL library. "
+                "so_file=%s, error=%s. "
+                "The hccl library might not exist, be corrupted "
                 "or it does not support the current platform %s. "
                 "If you already have the library, please set the "
                 "environment variable HCCL_SO_PATH"
                 " to point to the correct hccl library path.",
                 so_file,
+                e,
                 platform.platform(),
             )
             raise e

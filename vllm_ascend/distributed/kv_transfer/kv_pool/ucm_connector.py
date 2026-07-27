@@ -1,15 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from ucm.integration.vllm.ucm_connector import UCMConnector
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    CopyBlocksOp,
+    KVConnectorBase_V1,
+    KVConnectorHandshakeMetadata,
+    KVConnectorMetadata,
+    KVConnectorRole,
+    KVConnectorWorkerMetadata,
+    SupportsHMA,
+)
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.outputs import KVConnectorOutput
 
 # isort: off
 if TYPE_CHECKING:
-    from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
+    from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
         KVConnectorStats,
@@ -17,13 +27,14 @@ if TYPE_CHECKING:
         PromMetricT,
     )
     from vllm.forward_context import ForwardContext
+    from vllm.v1.attention.backend import AttentionMetadata
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 # isort: on
 
 
-class UCMConnectorV1(KVConnectorBase_V1):
+class UCMConnectorV1(KVConnectorBase_V1, SupportsHMA):
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -34,11 +45,35 @@ class UCMConnectorV1(KVConnectorBase_V1):
         assert vllm_config.kv_transfer_config is not None
 
         ImplCls = UCMConnector
-        self._ucm_engine = ImplCls(vllm_config, role)
+        self._ucm_engine = ImplCls(vllm_config, role, kv_cache_config)
+
+    def _get_ucm_delegate_for(self, name: str) -> Any:
+        """Return the UCM object that owns a reserved connector interface.
+
+        The imported UCMConnector is itself a thin dispatcher. Some reserved
+        KVConnectorBase_V1 hooks are not redeclared on that dispatcher yet, so
+        the base class no-op can otherwise hide the real inner connector hook.
+        Prefer an explicit method/property on the dispatcher; otherwise fall
+        through to the selected inner connector when present.
+        """
+        if name not in type(self._ucm_engine).__dict__:
+            inner_connector = getattr(self._ucm_engine, "connector", None)
+            if inner_connector is not None:
+                return inner_connector
+        return self._ucm_engine
+
+    def _call_ucm_reserved_hook(self, name: str, *args: Any, **kwargs: Any) -> Any:
+        hook = getattr(self._get_ucm_delegate_for(name), name, None)
+        if callable(hook):
+            return hook(*args, **kwargs)
+        return None
 
     # ==============================
     # Worker-side methods
     # ==============================
+    def shutdown(self) -> None:
+        self._call_ucm_reserved_hook("shutdown")
+
     def has_connector_metadata(self) -> bool:
         """Check whether the connector metadata is currently set.
 
@@ -55,6 +90,12 @@ class UCMConnectorV1(KVConnectorBase_V1):
             kv_caches: A dictionary mapping layer names to KV cache tensors.
         """
         self._ucm_engine.register_kv_caches(kv_caches)
+
+    def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp) -> None:
+        self._call_ucm_reserved_hook("set_host_xfer_buffer_ops", copy_operation)
+
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
+        self._call_ucm_reserved_hook("handle_preemptions", kv_connector_metadata)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """
@@ -204,6 +245,47 @@ class UCMConnectorV1(KVConnectorBase_V1):
             returned by the engine.
         """
         return self._ucm_engine.request_finished(request, block_ids)
+
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        return self._ucm_engine.request_finished_all_groups(request, block_ids)
+
+    def get_finished(
+        self,
+        finished_req_ids: set[str],
+    ) -> tuple[set[str] | None, set[str] | None]:
+        return self._ucm_engine.get_finished(finished_req_ids)
+
+    def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
+        return self._call_ucm_reserved_hook("build_connector_worker_meta")
+
+    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        self._ucm_engine.update_connector_output(connector_output)
+
+    def take_events(self) -> Iterable["KVCacheEvent"]:
+        events = self._call_ucm_reserved_hook("take_events")
+        return () if events is None else events
+
+    def get_kv_connector_stats(self) -> Optional["KVConnectorStats"]:
+        return self._call_ucm_reserved_hook("get_kv_connector_stats")
+
+    def get_kv_connector_kv_cache_events(self) -> Optional["KVConnectorKVEvents"]:
+        return self._call_ucm_reserved_hook("get_kv_connector_kv_cache_events")
+
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
+        return self._call_ucm_reserved_hook("get_handshake_metadata")
+
+    def set_xfer_handshake_metadata(self, metadata: dict[int, KVConnectorHandshakeMetadata]) -> None:
+        self._call_ucm_reserved_hook("set_xfer_handshake_metadata", metadata)
+
+    def get_finished_count(self) -> int | None:
+        return self._call_ucm_reserved_hook("get_finished_count")
+
+    def reset_cache(self) -> bool | None:
+        return self._call_ucm_reserved_hook("reset_cache")
 
     # ==============================
     # Metrics & Stats

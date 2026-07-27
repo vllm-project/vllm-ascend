@@ -12,14 +12,14 @@ quantization
 sleep_mode
 structured_output
 lora
-eplb_swift_balancer
+expert_parallelism_load_balancer
 netloader
 rfork
-Multi_Token_Prediction
 dynamic_batch
 epd_disaggregation
 kv_pool
-external_dp
+layerwise_kv_pool
+kv_cache_cpu_offload
 large_scale_ep
 ucm_deployment
 Fine_grained_TP
@@ -31,4 +31,5 @@ sequence_parallelism
 batch_invariance
 lmcache_ascend_deployment
 dynamic_chunk_pipeline_parallel
+flash_attention
 :::

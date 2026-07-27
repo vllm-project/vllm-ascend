@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 import numpy as np
 import torch
@@ -49,8 +49,8 @@ class MoEWeights:
     w2_bias: torch.Tensor | None = None
     w1_scale: torch.Tensor | list[torch.Tensor] | None = None
     w2_scale: torch.Tensor | list[torch.Tensor] | None = None
-    w1_scale_bias: torch.Tensor | None = None
-    w2_scale_bias: torch.Tensor | None = None
+    w1_scale_bias: torch.Tensor | list[torch.Tensor] | None = None
+    w2_scale_bias: torch.Tensor | list[torch.Tensor] | None = None
     w1_offset: torch.Tensor | None = None
     w2_offset: torch.Tensor | None = None
 
@@ -68,6 +68,11 @@ class MoEFusedExpertsInput:
     activation: str = "silu"
     need_trans: bool = False
     dynamic_eplb: bool = False
+    swiglu_limit: float = 0.0
+    # Optional per-layer MoE LoRA state (vllm_ascend.lora MoELoRAContext).
+    # ``Any`` avoids coupling the core contracts to the LoRA module; only the
+    # unquant MLP path reads it, and only when a LoRA adapter is active.
+    lora_context: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +96,7 @@ class MoEMC2CombineMetadata:
     tp_recv_counts: torch.Tensor
     assist_info_for_combine: torch.Tensor
     expand_scales: torch.Tensor | None
-    dispatch_with_quant: bool
+    quant: MoEQuantParams
     mc2_mask: torch.Tensor | None = None
 
 
@@ -139,6 +144,11 @@ class MoEMlpComputeInput:
     activation: str = "silu"
     need_trans: bool = False
     dynamic_eplb: bool = False
+    swiglu_limit: float = 0.0
+    expanded_row_idx: torch.Tensor | None = None
+    topk_ids: torch.Tensor | None = None
+    # Optional per-layer MoE LoRA state, propagated from MoEFusedExpertsInput.
+    lora_context: Any = None
 
 
 __all__ = [

@@ -72,5 +72,6 @@ class AscendModelState(DefaultModelState):
             seq_lens_np=input_batch.seq_lens_np,
             positions=input_batch.positions,
             attn_state=input_batch.attn_state,
+            for_cudagraph_capture=for_capture,
         )
         return self.attn_metadata

@@ -3,6 +3,7 @@ import torch
 import torch_npu
 
 from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import is_310p as is_310p_hw
 
 torch_npu.npu.set_compile_mode(jit_compile=False)
 
@@ -81,6 +82,7 @@ def golden_recurrent_gated_delta_rule(
     return o.to(query.dtype), initial_state.to(query.dtype)
 
 
+@pytest.mark.skipif(not is_310p_hw(), reason="Tested separately on a 310P machine.")
 @pytest.mark.parametrize("batch_size", [1, 4, 8])
 @pytest.mark.parametrize("mtp", [1, 2])
 @pytest.mark.parametrize("headnum", [(4, 8), (8, 16), (16, 32)])

@@ -14,9 +14,6 @@ Note: Please copy the skills directory `.agents/skills` to `.claude/skills` if y
     - [Quick start](#quick-start)
     - [Key constraints](#key-constraints)
     - [Two-stage validation](#two-stage-validation)
-  - [vLLM Ascend main2main Skill](#vllm-ascend-main2main-skill)
-    - [What it does](#what-it-does-1)
-    - [Quick start](#quick-start-1)
   - [vLLM Ascend Release Note Writer Skill](#vllm-ascend-release-note-writer-skill)
     - [What it does](#what-it-does-2)
     - [File layout](#file-layout-1)
@@ -70,53 +67,6 @@ This skill guides an AI agent through a deterministic workflow to:
 
 Both stages require request-level verification (`/v1/models` + at least one chat request),
 not just startup success.
-
-## vLLM Ascend main2main Skill
-
-Adapt vLLM-Ascend to upstream vLLM main branch evolution, either proactively before breakage lands or reactively when main2main CI is already red.
-
-### What it does
-
-This skill supports two workflows:
-
-1. **Proactive upgrade**
-   - Compare the currently adapted vLLM commit with a newer upstream commit.
-   - Generate a prioritized change report for vLLM-Ascend-relevant upstream changes.
-   - Apply Ascend-side adaptations before scheduled CI starts failing.
-2. **CI failure diagnosis**
-   - Analyze a failing main2main GitHub Actions run or run ID.
-   - Use the repository summary tooling to extract failed tests, code bugs, and environment flakes.
-   - Correlate failures with upstream vLLM commits, generate a diagnostic report, and apply adaptation fixes.
-
-Both workflows produce code changes in the working tree and a structured summary for follow-up git/PR operations. The skill itself does not create branches, commits, or PRs.
-
-### File layout
-
-| File | Purpose |
-| ---- | ------- |
-| `SKILL.md` | Skill entrypoint and workflow routing rules |
-| `proactive-upgrade.md` | Playbook for forward-looking upstream upgrade analysis |
-| `error-analysis.md` | Playbook for diagnosing and fixing failing main2main CI |
-| `reference/error-patterns.md` | Concrete upstream-change-to-fix patterns |
-
-### Quick start
-
-1. Open a conversation with the AI agent inside the vllm-ascend dev container.
-2. Invoke the skill (e.g. `/main2main`).
-3. Choose one of the two common entry modes:
-   - **Upgrade mode**: ask the agent to analyze upstream vLLM changes and adapt vllm-ascend to a newer commit.
-   - **Failure-analysis mode**: provide a GitHub Actions URL or run ID for a failing main2main / schedule test run.
-4. The agent follows the corresponding playbook and produces:
-   - code changes in the working tree
-   - a structured summary of causes and fixes
-   - when applicable, a diagnostic report such as `vllm_error_analyze.md`
-
-### Key guidance
-
-- Use this skill whenever the task is about upstream vLLM main branch drift, not ordinary feature development.
-- If the request contains both “upgrade” and “CI is failing” signals, treat it as a CI failure diagnosis task first.
-- For CI diagnosis, prefer running the repository summary script first instead of reading raw logs directly.
-- Most compatibility fixes should preserve both pinned-release and main-branch behavior via `vllm_version_is()` guards.
 
 ## vLLM Ascend Release Note Writer Skill
 

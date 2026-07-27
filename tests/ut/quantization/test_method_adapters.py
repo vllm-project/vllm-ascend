@@ -14,8 +14,7 @@ from vllm_ascend.quantization.methods.base import AscendAttentionScheme, AscendL
 
 
 class TestAscendLinearMethod(TestBase):
-    @patch("vllm_ascend.quantization.method_adapters.enable_dsa_cp_with_layer_shard")
-    def setUp(self, mock_enable_dsa_cp_with_layer_shard):
+    def setUp(self):
         self.mock_scheme = MagicMock(spec=AscendLinearScheme)
         self.mock_scheme.get_weight.return_value = {
             "weight": torch.empty(128, 256, dtype=torch.int8),
@@ -60,7 +59,7 @@ class TestAscendLinearMethod(TestBase):
         self.assertEqual(layer.weight.packed_factor, 0.1)
 
         # Check per tensor param
-        self.mock_scheme.get_pertensor_param.assert_called_once_with(torch.bfloat16)
+        self.mock_scheme.get_pertensor_param.assert_called_once()
         self.assertTrue(layer.weight_scale_pertensor.ignore_warning)
         self.assertEqual(layer.weight_scale_pertensor.weight_loader, weight_loader)
 

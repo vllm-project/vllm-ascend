@@ -1,7 +1,9 @@
-import torch
 import pytest
+import torch
 from vllm.triton_utils import triton
+
 from vllm_ascend.worker.v2.sample.penalties import _bincount_kernel
+
 
 def torch_bincount(
     expanded_idx_mapping: torch.Tensor,
@@ -10,7 +12,6 @@ def torch_bincount(
     prefill_len: torch.Tensor,
     prompt_bin_mask: torch.Tensor,
     output_bin_counts: torch.Tensor,
-
 ):
     req_indices = expanded_idx_mapping
     prompt_bin_mask[req_indices] = 0
@@ -28,7 +29,7 @@ def torch_bincount(
             token = tokens[pos].item()
             bin_idx = token // 32
             bit_idx = token % 32
-            prompt_bin_mask[req_idx, bin_idx] |= (1 << bit_idx)
+            prompt_bin_mask[req_idx, bin_idx] |= 1 << bit_idx
 
         for pos in range(p_len, pref_len):
             token = tokens[pos].item()
@@ -37,9 +38,9 @@ def torch_bincount(
 
 @pytest.mark.skip(reason="atomic_or operator hangs in current npu_ir version")
 def test_bincount_kernel():
-    '''
+    """
     Compute the prompt binary mask and token bincount using the Triton kernel.
-    
+
     Args:
         expanded_idx_mapping: Tensor containing the indices of requests to process.
         all_token_ids: Batch of input token IDs for all requests.
@@ -48,7 +49,7 @@ def test_bincount_kernel():
         prompt_bin_mask: Output binary mask tensor to mark prompt tokens.
         output_bin_counts: Output tensor to store token frequency counts.
         max_prefill_len: Maximum prefill length to limit kernel processing.
-    '''
+    """
 
     torch.manual_seed(42)
 
@@ -111,12 +112,14 @@ def test_bincount_kernel():
     )
 
     # ========== Verify results ==========
-    assert torch.equal(prompt_bin_mask, ref_prompt_bin_mask), \
-        f"prompt_bin_mask triton output differs from torch reference.\n" \
-        f"Max diff: {torch.max(torch.abs(prompt_bin_mask - ref_prompt_bin_mask))}\n" \
+    assert torch.equal(prompt_bin_mask, ref_prompt_bin_mask), (
+        f"prompt_bin_mask triton output differs from torch reference.\n"
+        f"Max diff: {torch.max(torch.abs(prompt_bin_mask - ref_prompt_bin_mask))}\n"
         f"Mean diff: {torch.mean(torch.abs(prompt_bin_mask - ref_prompt_bin_mask))}"
+    )
 
-    assert torch.equal(output_bin_counts, ref_output_bin_counts), \
-        f"output_bin_counts triton output differs from torch reference.\n" \
-        f"Max diff: {torch.max(torch.abs(output_bin_counts - ref_output_bin_counts))}\n" \
+    assert torch.equal(output_bin_counts, ref_output_bin_counts), (
+        f"output_bin_counts triton output differs from torch reference.\n"
+        f"Max diff: {torch.max(torch.abs(output_bin_counts - ref_output_bin_counts))}\n"
         f"Mean diff: {torch.mean(torch.abs(output_bin_counts - ref_output_bin_counts))}"
+    )

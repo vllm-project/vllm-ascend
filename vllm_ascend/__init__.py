@@ -45,8 +45,10 @@ def register_connector():
     _ensure_global_patch()
 
     from vllm_ascend.distributed.kv_transfer import register_connector
+    from vllm_ascend.distributed.weight_transfer import register_engine
 
     register_connector()
+    register_engine()
 
 
 def register_model_loader():
@@ -65,3 +67,17 @@ def register_service_profiling():
     from .profiling_config import generate_service_profiling_config
 
     generate_service_profiling_config()
+
+
+def register_model():
+    from vllm_ascend.patch.hunyuan_vl_processor_compat import (
+        install_hunyuan_vl_processor_compat,
+    )
+
+    install_hunyuan_vl_processor_compat()
+    from .models import register_model
+
+    register_model()
+
+
+import vllm_ascend.logger  # noqa: E402, F401

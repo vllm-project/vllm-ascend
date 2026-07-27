@@ -32,6 +32,7 @@ SOC_MAP_EXT = {
     "ascend910": "Ascend910A",
     "ascend910b": "Ascend910B1",
     "ascend910_93": "Ascend910_9391",
+    "ascend950": "Ascend950",
     "kirinx90": "KirinX90",
 }
 BIN_CMD = "asc_opc $1 --main_func={fun} --input_param={param} --soc_version={soc} \

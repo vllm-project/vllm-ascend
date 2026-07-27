@@ -20,33 +20,19 @@ from typing import Any
 import torch
 import torch_npu
 
-from vllm_ascend.quantization.methods.base import AscendLinearScheme
 from vllm_ascend.utils import maybe_trans_nz
 
 from .registry import register_scheme
+from .w8a8_base import AscendW8A8Linear310pScheme
 
 
 @register_scheme("W8A8", "linear")
-class AscendW8A8LinearMethod310(AscendLinearScheme):
+class AscendW8A8LinearMethod310(AscendW8A8Linear310pScheme):
     """310P-only W8A8 static linear scheme.
 
     Notes:
       - This scheme is discovered via 310P local registry.
     """
-
-    def get_weight(
-        self,
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype = torch.float16,
-    ) -> dict[str, Any]:
-        return {"weight": torch.empty(output_size, input_size, dtype=torch.int8)}
-
-    def get_pertensor_param(self, params_dtype: torch.dtype) -> dict[str, Any]:
-        return {
-            "input_scale": torch.empty(1, dtype=params_dtype),
-            "input_offset": torch.empty(1, dtype=torch.int8),
-        }
 
     def get_perchannel_param(self, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         params: dict[str, Any] = {}

@@ -1,594 +1,247 @@
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# This file is a part of the vllm-ascend project.
-#
-from typing import TypedDict
-from unittest.mock import MagicMock, patch
+# SPDX-License-Identifier: Apache-2.0
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
-import torch.nn as nn
-import torch_npu
-from pytest_mock import MockerFixture
+from torch import nn
 
-from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.ops.fused_moe.experts_selector import select_experts
-from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
-from vllm_ascend.ops.fused_moe.moe_mlp import cumsum_group_list, unified_apply_mlp
-from vllm_ascend.ops.fused_moe.moe_runtime_args import (
-    MoEMlpComputeInput,
-    MoEPrepareOutput,
-    MoEQuantParams,
-    MoEWeights,
+from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
+from vllm_ascend.ops.fused_moe.fused_moe import (
+    AscendMoERunner,
+    AscendUnquantizedFusedMoEMethod,
+    make_eplb_placement_config,
+    use_multistage_eplb_load,
 )
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import AscendDeviceType, adapt_patch
-
-adapt_patch(True)
 
 
-def mock_ep_and_mc2_group(mocker):
-    mock_group = mocker.MagicMock()
-    mock_group.rank_in_group = 0
-    mock_group.rank = 0
-    mock_group.world_size = 4
-    mock_group.device_group = "mock_group_ep"
-    mock_group.all_to_all = MagicMock(return_value=torch.randn(8, 8))
-    return mock_group
-
-
-def mock_dp_and_tp_group(mocker):
-    mock_group = mocker.MagicMock()
-    mock_group.rank_in_group = 0
-    mock_group.world_size = 2
-    mock_group.device_group = "mock_group"
-    mock_group.all_gather = MagicMock(return_value=torch.randn(10, 32))
-    return mock_group
-
-
-def mock_npu_format_cast(weight_data, format):
-    return weight_data
-
-
-def build_mlp_compute_input_fixture(
-    *,
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor | list[torch.Tensor],
-    w2: torch.Tensor | list[torch.Tensor],
-    group_list: torch.Tensor,
-    with_quant: bool,
-    group_list_type: int = 1,
-    dynamic_scale: torch.Tensor | None = None,
-    topk_scales: torch.Tensor | None = None,
-    w1_scale: torch.Tensor | list[torch.Tensor] | None = None,
-    w2_scale: torch.Tensor | list[torch.Tensor] | None = None,
-    w1_scale_bias: torch.Tensor | None = None,
-    w2_scale_bias: torch.Tensor | None = None,
-    w1_offset: torch.Tensor | None = None,
-    w2_offset: torch.Tensor | None = None,
-    fusion: bool = False,
-    activation: str = "silu",
-    need_trans: bool = True,
-    dynamic_eplb: bool = False,
-) -> MoEMlpComputeInput:
-    return MoEMlpComputeInput(
-        hidden_states=hidden_states,
-        group_list=group_list,
-        group_list_type=group_list_type,
-        dynamic_scale=dynamic_scale,
-        topk_scales=topk_scales,
-        weights=MoEWeights(
-            w1=w1,
-            w2=w2,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            w1_scale_bias=w1_scale_bias,
-            w2_scale_bias=w2_scale_bias,
-            w1_offset=w1_offset,
-            w2_offset=w2_offset,
-        ),
-        quant=MoEQuantParams(quant_type=QuantType.W8A8 if with_quant else QuantType.NONE),
-        fusion=fusion,
-        activation=activation,
-        need_trans=need_trans,
-        dynamic_eplb=dynamic_eplb,
+def _build_weight_layer():
+    return SimpleNamespace(
+        w13_weight=nn.Parameter(torch.randn(2, 3, 4)),
+        w2_weight=nn.Parameter(torch.randn(2, 4, 3)),
     )
 
 
-@pytest.fixture(autouse=True)
-def setup_vllm_config_mock(mocker: MockerFixture):
-    mock_hf_config = MagicMock()
-    mock_hf_config.model_type = "llama"
-
-    mock_model_config = MagicMock()
-    mock_model_config.hf_config = mock_hf_config
-
-    mock_vllm_config = MagicMock()
-    mock_vllm_config.model_config = mock_model_config
-    mock_vllm_config.parallel_config = MagicMock(tensor_parallel_size=2)
-    mock_vllm_config.scheduler_config = MagicMock(max_num_seqs=4)
-    mock_vllm_config.model_config.max_model_len = 2048
-
-    mocker.patch("vllm_ascend.ops.fused_moe.fused_moe.get_current_vllm_config", return_value=mock_vllm_config)
-
-
-@pytest.fixture
-def mock_dist_env(mocker: MockerFixture):
-    mock_moe_comm_method = MagicMock()
-
-    def mock_prepare(hidden_states, router_logits, **kwargs):
-        return MoEPrepareOutput(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            mc2_mask=kwargs.get("mc2_mask"),
-            padded_hidden_states_shape=None,
-            pertoken_scale=None,
-        )
-
-    mock_moe_comm_method.prepare.side_effect = mock_prepare
-
-    mock_fused_experts_result = torch.randn(16, 2)
-    mock_moe_comm_method.fused_experts.return_value = mock_fused_experts_result
-
-    def mock_finalize(hidden_states, **kwargs):
-        return hidden_states
-
-    mock_moe_comm_method.finalize.side_effect = mock_finalize
-    dp_metadata = MagicMock(num_tokens_across_dp_cpu=[5, 5])
-    mock_weight_prefetch_method = MagicMock()
-    mock_forward_context_obj = MagicMock(
-        moe_comm_method=mock_moe_comm_method,
-        moe_comm_type=MoECommType.MC2,
-        max_tokens_across_dp=10,
-        dp_metadata=dp_metadata,
-        mc2_mask=torch.zeros(16, dtype=torch.bool),
-        padded_num_tokens=16,
-        with_quant=False,
+def _build_apply_layer():
+    return SimpleNamespace(
+        w13_weight=nn.Parameter(torch.randn(4, 3, 8)),
+        w2_weight=nn.Parameter(torch.randn(4, 8, 3)),
+        w13_bias=None,
+        w2_bias=None,
+        zero_expert_num=0,
+        zero_expert_type=None,
+        n_shared_experts=0,
+        swiglu_limit=0.0,
     )
 
-    with (
-        patch("torch.distributed.get_rank", return_value=0),
-        patch("torch.distributed.get_world_size", return_value=4),
-        patch("vllm_ascend.ops.fused_moe.fused_moe.get_ep_group", return_value=mock_ep_and_mc2_group(mocker)),
-        patch("vllm_ascend.ops.fused_moe.token_dispatcher.get_ep_group", return_value=mock_ep_and_mc2_group(mocker)),
-        patch("vllm_ascend.ops.fused_moe.fused_moe.get_mc2_group", return_value=mock_ep_and_mc2_group(mocker)),
-        patch("vllm_ascend.ops.fused_moe.fused_moe.get_tp_group", return_value=mock_dp_and_tp_group(mocker)),
-        patch("vllm.distributed.parallel_state.get_tp_group", return_value=mock_dp_and_tp_group(mocker)),
-        patch("vllm_ascend.ops.fused_moe.fused_moe.get_dp_group", return_value=mock_dp_and_tp_group(mocker)),
-        patch("vllm.model_executor.layers.fused_moe.layer.get_dp_group", return_value=mock_dp_and_tp_group(mocker)),
-        patch("vllm.model_executor.layers.fused_moe.config.get_dp_group", return_value=mock_dp_and_tp_group(mocker)),
-        patch(
-            "vllm_ascend.ops.fused_moe.fused_moe.get_ascend_config",
-            return_value=MagicMock(enable_multistream_moe=False, expert_map_path=None),
-        ),
-        patch(
-            "vllm_ascend.ops.fused_moe.fused_moe.init_eplb_config",
-            return_value=(torch.tensor([0, 1, 2, -1, -1, -1, -1, -1]), None, 0),
-        ),
-        patch("vllm_ascend.ops.fused_moe.fused_moe.get_forward_context", return_value=mock_forward_context_obj),
-        patch("vllm_ascend.ascend_forward_context.get_forward_context", return_value=mock_forward_context_obj),
-        patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3),
-        patch("vllm_ascend.ops.fused_moe.moe_comm_method.MC2CommImpl._get_token_dispatcher", return_value=None),
-        patch("vllm_ascend.ops.fused_moe.moe_comm_method.AlltoAllCommImpl._get_token_dispatcher", return_value=None),
-        patch("vllm_ascend.ops.fused_moe.moe_comm_method.AllGatherCommImpl._get_token_dispatcher", return_value=None),
-        patch(
-            "vllm_ascend.ops.fused_moe.experts_selector.get_weight_prefetch_method",
-            return_value=mock_weight_prefetch_method,
-        ),
-    ):
-        yield {
-            "mock_forward_context_obj": mock_forward_context_obj,
-            "mock_moe_comm_method": mock_moe_comm_method,
-        }
+
+def _build_unquantized_method(*, dynamic_eplb: bool = False):
+    method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
+    method.dynamic_eplb = dynamic_eplb
+    method.tid2eid = None
+    method.moe = SimpleNamespace(has_bias=False)
+    method._maybe_pad_weight = MagicMock(side_effect=lambda weight: weight)
+    return method
 
 
-@pytest.fixture
-def mock_moe_env(mocker: MockerFixture):
-    with (
-        patch("torch_npu.npu_moe_gating_top_k", return_value=(torch.randn(8, 2), torch.randint(0, 8, (8, 2)), None)),
-        patch(
-            "torch_npu.npu_moe_init_routing",
-            return_value=(torch.randn(8, 2), torch.randint(0, 8, (8, 2)), torch.tensor([0, 1, 2, 4, 6, 2, 7, 1])),
-        ),
-        patch("torch_npu.npu_moe_compute_expert_tokens", return_value=(torch.randn(8, 2))),
-        patch("torch_npu.npu_moe_distribute_dispatch", return_value=(torch.randn(16, 2))),
-        patch("torch_npu.npu_moe_distribute_combine", return_value=(torch.randn(16, 2))),
-        patch("torch_npu.npu_grouped_matmul", return_value=([torch.randn(16, 2)])),
-        patch("torch_npu.npu_swiglu", return_value=(torch.randn(16, 2))),
-        patch(
-            "torch_npu.npu_moe_gating_top_k_softmax",
-            return_value=(torch.randn(8, 2), torch.randint(0, 8, (8, 2)), torch.tensor([0, 1, 2, 4, 6, 2, 7, 1])),
-        ),
-        patch("torch_npu.npu_moe_finalize_routing", return_value=(torch.randn(16, 2))),
-    ):
-        if hasattr(torch_npu, "npu_moe_distribute_dispatch_v2"):
-            with (
-                patch("torch_npu.npu_moe_distribute_dispatch_v2", return_value=(torch.randn(16, 2))),
-                patch("torch_npu.npu_moe_distribute_combine_v2", return_value=(torch.randn(16, 2))),
-            ):
-                yield
-        else:
-            yield
+@pytest.mark.parametrize(
+    ("dynamic_eplb", "policy_type", "collection_interval", "expected"),
+    [
+        (True, 2, 600, False),
+        (True, 3, 600, True),
+        (True, 3, 1, False),
+        (False, 3, 600, False),
+    ],
+)
+def test_use_multistage_eplb_load(dynamic_eplb, policy_type, collection_interval, expected):
+    assert use_multistage_eplb_load(dynamic_eplb, policy_type, collection_interval) is expected
 
 
-@pytest.fixture
-def default_moe_config():
-    return {"num_experts": 8, "top_k": 2, "hidden_size": 512, "intermediate_size": 1024}
+def test_make_eplb_placement_config_does_not_copy_source():
+    source = SimpleNamespace(expert_map_path=None, dynamic_eplb=True, num_redundant_experts=0)
 
+    placement_config = make_eplb_placement_config(source, num_redundant_experts=8)
 
-@pytest.fixture
-def moe_method(mock_dist_env):
-    moe = MagicMock()
-    moe.moe_parallel_config.return_value = MagicMock(ep_size=4)
-    moe.moe_parallel_config.use_ep = False
-    moe.moe_parallel_config.dp_size = 1
-    return AscendUnquantizedFusedMoEMethod(moe)
+    assert placement_config.expert_map_path is None
+    assert placement_config.dynamic_eplb is True
+    assert placement_config.num_redundant_experts == 8
+    assert source.num_redundant_experts == 0
 
 
 def test_ascend_unquantized_skips_upstream_modular_kernel_init():
-    method = AscendUnquantizedFusedMoEMethod.maybe_make_prepare_finalize
+    method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
 
-    assert method(object()) is None
-
-
-class Device(TypedDict):
-    device_id: int
-    device_expert: list[int]
+    assert method.maybe_make_prepare_finalize() is None
 
 
-class Layer(TypedDict):
-    layer_id: int
-    device_count: int
-    device_list: list[Device]
+def test_process_weights_after_loading_uses_version_specific_layout(
+    monkeypatch,
+):
+    method = _build_unquantized_method()
+    layer = _build_weight_layer()
+    original_w13 = layer.w13_weight.detach().clone()
+    original_w2 = layer.w2_weight.detach().clone()
+    ascend_config = SimpleNamespace(enable_fused_mc2=False)
+
+    monkeypatch.setattr(fused_moe_module, "get_ascend_config", lambda: ascend_config)
+    monkeypatch.setattr(fused_moe_module, "maybe_trans_nz", lambda weight: weight)
+    upstream_method_base = AscendUnquantizedFusedMoEMethod.__mro__[2]
+    monkeypatch.setattr(
+        upstream_method_base,
+        "process_weights_after_loading",
+        lambda self, layer: None,
+        raising=False,
+    )
+
+    method.process_weights_after_loading(layer)
+
+    torch.testing.assert_close(layer.w13_weight, original_w13.transpose(1, 2))
+    torch.testing.assert_close(layer.w2_weight, original_w2.transpose(1, 2))
+    assert layer.w13_weight.is_contiguous() is True
+    assert layer.w2_weight.is_contiguous() is True
 
 
-class MockData(TypedDict):
-    moe_layer_count: int
-    layer_list: list[Layer]
+@pytest.mark.parametrize("moe_comm_type", [MoECommType.ALLGATHER, MoECommType.FUSED_MC2])
+def test_unquantized_apply_builds_current_fused_experts_input(monkeypatch, moe_comm_type):
+    method = _build_unquantized_method()
+    layer = _build_apply_layer()
+    hidden_states = torch.randn(2, 3, dtype=torch.float16)
+    topk_weights = torch.tensor([[0.25, 0.75], [0.6, 0.4]], dtype=torch.float32)
+    topk_ids = torch.tensor([[0, 1], [1, 0]], dtype=torch.int64)
+    routed_out = torch.ones_like(hidden_states)
+    moe_comm_method = MagicMock()
+    moe_comm_method.fused_experts.return_value = routed_out
+
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(moe_comm_type=moe_comm_type, moe_comm_method=moe_comm_method),
+    )
+    monkeypatch.setattr(fused_moe_module, "get_moe_num_logical_experts", lambda *args, **kwargs: 4)
+    monkeypatch.setattr(fused_moe_module, "get_forward_context", lambda: SimpleNamespace(input_ids=None))
+    monkeypatch.setattr(fused_moe_module, "get_current_vllm_config", lambda: None)
+    select_experts = MagicMock(return_value=(topk_weights, topk_ids))
+    monkeypatch.setattr(fused_moe_module, "select_experts", select_experts)
+
+    result = method.apply(
+        layer=layer,
+        x=hidden_states,
+        use_grouped_topk=False,
+        top_k=2,
+        router_logits=torch.randn(2, 4),
+        renormalize=True,
+        num_experts=4,
+        apply_router_weight_on_input=True,
+        activation="gelu",
+    )
+
+    assert result is routed_out
+    select_experts.assert_called_once()
+    fused_input = moe_comm_method.fused_experts.call_args.kwargs["fused_experts_input"]
+    assert fused_input.hidden_states is hidden_states
+    torch.testing.assert_close(fused_input.topk_weights, topk_weights.to(hidden_states.dtype))
+    assert torch.equal(fused_input.topk_ids, topk_ids)
+    assert fused_input.routing.apply_router_weight_on_input
+    assert fused_input.activation == "gelu"
+    assert fused_input.quant.quant_type == QuantType.NONE
+    if moe_comm_type == MoECommType.FUSED_MC2:
+        assert fused_input.weights.w1[0] is layer.w13_weight
+        assert fused_input.weights.w2[0] is layer.w2_weight
+    else:
+        assert fused_input.weights.w1 is layer.w13_weight
+        assert fused_input.weights.w2 is layer.w2_weight
 
 
-class MockQuantMethod(nn.Module):
-    def __init__(self, shared_experts, num_tokens):
-        super().__init__()
-        if shared_experts:
-            self.apply = MagicMock(return_value=(torch.randn(num_tokens, 32), torch.randn(num_tokens, 10)))
-        else:
-            self.apply = MagicMock(return_value=(torch.randn(num_tokens, 32)))
+@pytest.mark.parametrize(
+    "moe_comm_type, flash_comm_v1_enabled, expected",
+    [
+        (MoECommType.ALLTOALL, False, True),
+        (MoECommType.MC2, False, True),
+        (MoECommType.FUSED_MC2, False, True),
+        (MoECommType.ALLGATHER, False, False),
+        (MoECommType.ALLGATHER, True, True),
+    ],
+)
+def test_runner_reduction_contract(monkeypatch, moe_comm_type, flash_comm_v1_enabled, expected):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    shared_output = object()
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(moe_comm_type=moe_comm_type, flash_comm_v1_enabled=flash_comm_v1_enabled),
+    )
+
+    assert runner.use_dp_chunking is False
+    assert runner._fused_output_is_reduced is expected
+    assert runner._maybe_reduce_shared_expert_output(shared_output) is shared_output
 
 
-class TestExpertsSelector:
-    @pytest.mark.parametrize("num_experts", [256, 128])
-    def test_select_experts(self, mock_dist_env, mock_moe_env, num_experts):
-        x = torch.randn(8, 2)
-        router_logits = torch.randn(8, 2)
-        topk_weights, topk_ids = select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            top_k=2,
-            use_grouped_topk=False,
-            renormalize=True,
-            topk_group=None,
-            num_expert_group=None,
-            custom_routing_function=None,
-            scoring_func="softmax",
-            e_score_correction_bias=None,
-            num_experts=num_experts,
-        )
-
-        assert topk_weights.shape == (8, 2)
-        assert topk_ids.shape == (8, 2)
+class _Projection(nn.Module):
+    def forward(self, hidden_states):
+        return hidden_states * 2.0 + 1.0, None
 
 
-class TestCumsumGroupList(TestBase):
-    def setUp(self):
-        self.active_num = 8
-        self.expert_num = 128
-        self.experts = torch.zeros((self.expert_num,), dtype=torch.int64)
-        self.experts[: self.active_num] = 1
-        self.experts = self.experts[torch.randperm(self.expert_num)]
-        self.group_list = self.experts.cumsum(dim=0)
-
-    def test_cumsum_group_list_with_type_0(self):
-        group_list = self.experts.cumsum(dim=0)
-        group_list_type = 0
-        result = cumsum_group_list(group_list, group_list_type, 0)
-        self.assertTrue(torch.equal(result, self.group_list))
-
-    def test_cumsum_group_list_with_type_1(self):
-        group_list = self.experts
-        group_list_type = 1
-        result = cumsum_group_list(group_list, group_list_type, 0)
-        self.assertTrue(torch.equal(result, self.group_list))
-
-    def test_cumsum_group_list_with_type_2(self):
-        tokens = torch.arange(self.expert_num, dtype=torch.int64)
-        group_list = torch.cat([tokens.reshape(self.expert_num, 1), self.experts.reshape(self.expert_num, 1)], dim=1)
-        group_list_type = 2
-        result = cumsum_group_list(
-            group_list, group_list_type, 0, active_num=self.active_num, expert_num=self.expert_num
-        )
-        self.assertTrue(torch.equal(result, self.group_list))
+class _Gate(nn.Module):
+    def forward(self, hidden_states):
+        return torch.zeros((*hidden_states.shape[:-1], 1), dtype=hidden_states.dtype), None
 
 
-class TestUnifiedApplyMLP(TestBase):
-    @patch("vllm_ascend.ops.fused_moe.moe_mlp.get_weight_prefetch_method", return_value=MagicMock())
-    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
-    @patch("torch_npu.npu_grouped_matmul")
-    @patch("torch_npu.npu_dynamic_quant")
-    @patch("torch_npu.npu_dequant_swiglu_quant")
-    def test_unified_apply_mlp_with_quantization_mc2(
-        self,
-        mock_npu_dequant,
-        mock_npu_dynamic_quant,
-        mock_npu_grouped_matmul,
-        mock_soc_version,
-        mock_get_forward_context,
-        mock_get_weight_prefetch_method,
-    ):
-        mock_forward_context = MagicMock()
-        mock_forward_context.moe_comm_type = MoECommType.MC2
-        mock_get_forward_context.return_value = mock_forward_context
+@pytest.mark.parametrize("with_gate", [False, True])
+def test_shared_experts_part2_applies_optional_gate(with_gate):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    runner._shared_experts = SimpleNamespace(
+        act_fn=nn.Identity(),
+        down_proj=_Projection(),
+        expert_gate=_Gate() if with_gate else None,
+    )
+    hidden_states = torch.randn(3, 4)
+    shared_gate_up = torch.randn(3, 4)
 
-        mock_npu_dynamic_quant.return_value = (
-            torch.randint(-128, 127, (10, 20), dtype=torch.int8),
-            torch.rand(10, 1, dtype=torch.float32),
-        )
+    output = runner._shared_experts_part2(hidden_states, shared_gate_up)
 
-        mock_npu_grouped_matmul.side_effect = [
-            [torch.randint(-2147483648, 2147483647, (10, 40), dtype=torch.int32)],
-            [torch.randn(10, 20, dtype=torch.bfloat16)],
-        ]
+    expected = shared_gate_up * 2.0 + 1.0
+    if with_gate:
+        expected = expected * 0.5
+    torch.testing.assert_close(output, expected)
 
-        mock_npu_dequant.return_value = (
-            torch.randn(10, 40, dtype=torch.bfloat16),
-            torch.randn(10, 1, dtype=torch.float32),
-        )
 
-        hidden_states = torch.randn(10, 20, dtype=torch.bfloat16)
-        w1 = torch.randint(-128, 127, (5, 20, 40), dtype=torch.int8)
-        w1_scale = torch.randn(5, 40, dtype=torch.float32)
-        w2 = torch.randint(-128, 127, (5, 40, 20), dtype=torch.int8)
-        w2_scale = torch.randn(5, 20, dtype=torch.bfloat16)
-        group_list = torch.tensor([2, 4, 6, 8, 10], dtype=torch.int64)
+@pytest.mark.parametrize("has_shared_experts", [False, True])
+def test_shared_forward_impl_returns_current_runner_contract(monkeypatch, has_shared_experts):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    runner._shared_experts = object() if has_shared_experts else None
+    hidden_states = torch.randn(2, 4)
+    router_logits = torch.randn(2, 3)
+    routed_out = torch.randn(2, 4)
+    shared_out = torch.randn(2, 4)
+    routed_result = SimpleNamespace(
+        routed_out=routed_out,
+        before_dispatch_evt=None,
+        before_gmm2_evt=None,
+        before_combine_evt=None,
+        swiglu_limit=0.0,
+    )
+    runner.no_shared_forward_impl = MagicMock(return_value=routed_result)
+    runner._forward_shared_experts = MagicMock(return_value=shared_out)
+    current_stream = MagicMock()
 
-        result = unified_apply_mlp(
-            mlp_compute_input=build_mlp_compute_input_fixture(
-                hidden_states=hidden_states,
-                w1=w1,
-                w2=w2,
-                group_list=group_list,
-                with_quant=True,
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-            )
-        )
+    monkeypatch.setattr(AscendMoERunner, "is_internal_router", property(lambda _: False))
+    monkeypatch.setattr(fused_moe_module.torch.npu, "current_stream", lambda: current_stream)
 
-        mock_get_forward_context.assert_called()
+    result = runner.shared_forward_impl(hidden_states, router_logits)
 
-        mock_npu_dynamic_quant.assert_called()
-
-        self.assertEqual(mock_npu_grouped_matmul.call_count, 2)
-
-        mock_npu_dequant.assert_called_once()
-
-        self.assertEqual(result.dtype, torch.bfloat16)
-
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
-    @patch("torch_npu.npu_grouped_matmul")
-    @patch("torch_npu.npu_swiglu")
-    @patch("torch_npu.npu_dynamic_quant")
-    def test_unified_apply_mlp_without_quantization(
-        self, mock_npu_dynamic_quant, mock_npu_swiglu, mock_npu_grouped_matmul, mock_soc_version
-    ):
-        mock_npu_grouped_matmul.side_effect = [
-            [torch.randn(10, 40, dtype=torch.float16)],
-            [torch.randn(10, 20, dtype=torch.float16)],
-        ]
-        mock_npu_swiglu.return_value = torch.randn(10, 40, dtype=torch.float16)
-        mock_npu_dynamic_quant.return_value = (MagicMock(), MagicMock())
-
-        hidden_states = torch.randn(10, 20, dtype=torch.float16)
-        w1 = torch.randn(5, 20, 40, dtype=torch.float16)
-        w2 = torch.randn(5, 40, 20, dtype=torch.float16)
-        group_list = torch.tensor([2, 4, 6, 8, 10], dtype=torch.int64)
-        topk_scales = torch.randn(10, 1, dtype=torch.float16)
-
-        result = unified_apply_mlp(
-            mlp_compute_input=build_mlp_compute_input_fixture(
-                hidden_states=hidden_states,
-                w1=w1,
-                w2=w2,
-                group_list=group_list,
-                with_quant=False,
-                topk_scales=topk_scales,
-            )
-        )
-
-        self.assertEqual(mock_npu_grouped_matmul.call_count, 2)
-        mock_npu_swiglu.assert_called_once()
-
-        self.assertEqual(result.shape, hidden_states.shape)
-        self.assertEqual(result.dtype, torch.float16)
-
-    @patch("vllm_ascend.ops.fused_moe.moe_mlp.HAS_TRITON", False)
-    @patch("vllm_ascend.ops.fused_moe.moe_mlp.get_weight_prefetch_method", return_value=MagicMock())
-    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    @patch("torch_npu.npu_grouped_matmul")
-    @patch("torch_npu.npu_swiglu")
-    @patch("torch_npu.npu_dynamic_quant")
-    def test_unified_apply_mlp_with_quantization_and_dynamic_scale(
-        self,
-        mock_npu_dynamic_quant,
-        mock_npu_swiglu,
-        mock_npu_grouped_matmul,
-        mock_get_forward_context,
-        mock_get_weight_prefetch_method,
-    ):
-        mock_forward_context = MagicMock()
-        mock_forward_context.with_quant = True
-        mock_forward_context.fused_moe_state = "NOT_MC2"
-        mock_get_forward_context.return_value = mock_forward_context
-
-        mock_npu_grouped_matmul.side_effect = [
-            [torch.randn(10, 40, dtype=torch.bfloat16)],
-            [torch.randn(10, 20, dtype=torch.bfloat16)],
-        ]
-
-        mock_npu_swiglu.return_value = torch.randn(10, 40, dtype=torch.bfloat16)
-
-        mock_npu_dynamic_quant.return_value = (
-            torch.randint(-128, 127, (10, 40), dtype=torch.int8),
-            torch.rand(10, 1, dtype=torch.float32),
-        )
-
-        hidden_states = torch.randn(10, 20, dtype=torch.bfloat16)
-        hidden_states_shape = hidden_states.shape
-        w1 = torch.randn(5, 20, 40, dtype=torch.bfloat16)
-        w1_scale = torch.randn(5, 40, dtype=torch.bfloat16)
-        w2 = torch.randn(5, 40, 20, dtype=torch.bfloat16)
-        w2_scale = torch.randn(5, 20, dtype=torch.bfloat16)
-        w1_scale_bias = torch.randn(5, 40, dtype=torch.bfloat16)
-        w2_scale_bias = torch.randn(5, 20, dtype=torch.bfloat16)
-        group_list = torch.tensor([2, 4, 6, 8, 10], dtype=torch.int64)
-        provided_dynamic_scale = torch.rand(10, 1, dtype=torch.float32)
-
-        result = unified_apply_mlp(
-            mlp_compute_input=build_mlp_compute_input_fixture(
-                hidden_states=hidden_states,
-                w1=w1,
-                w2=w2,
-                group_list=group_list,
-                with_quant=True,
-                dynamic_scale=provided_dynamic_scale,
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-                w1_scale_bias=w1_scale_bias,
-                w2_scale_bias=w2_scale_bias,
-            )
-        )
-
-        mock_get_forward_context.assert_called()
-
-        self.assertEqual(mock_npu_grouped_matmul.call_count, 2)
-        mock_npu_swiglu.assert_called_once()
-        mock_npu_dynamic_quant.assert_called_once()
-
-        self.assertEqual(result.shape, hidden_states_shape)
-        self.assertEqual(result.dtype, torch.bfloat16)
-
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType._310P)
-    @patch("torch_npu.npu_grouped_matmul")
-    @patch("torch_npu.npu_swiglu")
-    @patch("torch_npu.npu_dynamic_quant")
-    def test_unified_apply_mlp_without_quantization_310p(
-        self, mock_npu_dynamic_quant, mock_npu_swiglu, mock_npu_grouped_matmul, mock_soc_version
-    ):
-        mock_gmm1_out = torch.randn(10, 40, dtype=torch.float16)
-        mock_gmm2_out = torch.randn(10, 20, dtype=torch.float16)
-        mock_npu_grouped_matmul.side_effect = [[mock_gmm1_out], [mock_gmm2_out]]
-
-        mock_npu_swiglu.return_value = torch.randn(10, 40, dtype=torch.float16)
-
-        mock_npu_dynamic_quant.return_value = (MagicMock(), MagicMock())
-
-        hidden_states = torch.randn(10, 20, dtype=torch.float16)
-        w1 = torch.randn(5, 20, 40, dtype=torch.float16)
-        w2 = torch.randn(5, 40, 20, dtype=torch.float16)
-        group_list = torch.tensor([2, 4, 6, 8, 10], dtype=torch.int64)
-        topk_scales = torch.randn(10, 1, dtype=torch.float16)
-
-        result = unified_apply_mlp(
-            mlp_compute_input=build_mlp_compute_input_fixture(
-                hidden_states=hidden_states,
-                w1=w1,
-                w2=w2,
-                group_list=group_list,
-                with_quant=False,
-                topk_scales=topk_scales,
-            )
-        )
-
-        self.assertEqual(mock_npu_grouped_matmul.call_count, 2)
-        mock_npu_swiglu.assert_called_once()
-
-        self.assertEqual(result.shape, hidden_states.shape)
-        self.assertEqual(result.dtype, torch.float16)
-
-    @patch("vllm_ascend.ops.fused_moe.moe_mlp.get_weight_prefetch_method", return_value=MagicMock())
-    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    @patch("torch_npu.npu_grouped_matmul")
-    @patch("torch_npu.npu_swiglu")
-    @patch("torch_npu.npu_grouped_matmul_swiglu_quant")
-    @patch("torch_npu.npu_dynamic_quant")
-    def test_unified_apply_mlp_with_quantization_and_fusion_mlp(
-        self,
-        mock_npu_dynamic_quant,
-        mock_npu_grouped_matmul_swiglu_quant,
-        mock_npu_swiglu,
-        mock_npu_grouped_matmul,
-        mock_get_forward_context,
-        mock_get_weight_prefetch_method,
-    ):
-        mock_forward_context = MagicMock()
-        mock_forward_context.with_quant = True
-        mock_forward_context.fused_moe_state = "NOT_MC2"
-        mock_get_forward_context.return_value = mock_forward_context
-
-        mock_npu_grouped_matmul_swiglu_quant.return_value = (
-            torch.randint(-128, 127, (10, 40), dtype=torch.int8),
-            torch.rand(10, 1, dtype=torch.float32),
-            torch.rand(10, 1, dtype=torch.float32),
-        )
-        mock_npu_grouped_matmul.side_effect = [[torch.randn(10, 20, dtype=torch.bfloat16)]]
-        mock_npu_swiglu.return_value = torch.randn(10, 40, dtype=torch.bfloat16)
-        mock_npu_dynamic_quant.return_value = (
-            torch.randint(-128, 127, (10, 40), dtype=torch.int8),
-            torch.rand(10, 1, dtype=torch.float32),
-        )
-
-        hidden_states = torch.randn(10, 20, dtype=torch.bfloat16)
-        hidden_states_shape = hidden_states.shape
-        w1 = torch.randn(5, 20, 40, dtype=torch.bfloat16)
-        w1_scale = torch.randn(5, 40, dtype=torch.bfloat16)
-        w2 = torch.randn(5, 40, 20, dtype=torch.bfloat16)
-        w2_scale = torch.randn(5, 20, dtype=torch.bfloat16)
-        w1_scale_bias = torch.randn(5, 40, dtype=torch.bfloat16)
-        w2_scale_bias = torch.randn(5, 20, dtype=torch.bfloat16)
-        group_list = torch.tensor([2, 4, 6, 8, 10], dtype=torch.int64)
-        provided_dynamic_scale = torch.rand(10, 1, dtype=torch.float32)
-
-        result = unified_apply_mlp(
-            mlp_compute_input=build_mlp_compute_input_fixture(
-                hidden_states=hidden_states,
-                w1=w1,
-                w2=w2,
-                group_list=group_list,
-                with_quant=True,
-                dynamic_scale=provided_dynamic_scale,
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-                w1_scale_bias=w1_scale_bias,
-                w2_scale_bias=w2_scale_bias,
-                fusion=True,
-            )
-        )
-
-        mock_get_forward_context.assert_called()
-        mock_npu_grouped_matmul.assert_called_once()
-        mock_npu_grouped_matmul_swiglu_quant.assert_called_once()
-
-        self.assertTrue(mock_forward_context.with_quant)
-        self.assertEqual(result.shape, hidden_states_shape)
-        self.assertEqual(result.dtype, torch.bfloat16)
+    runner.no_shared_forward_impl.assert_called_once_with(
+        hidden_states,
+        router_logits,
+        return_with_event=True,
+    )
+    if has_shared_experts:
+        assert result[0] is shared_out
+        assert result[1] is routed_out
+        runner._forward_shared_experts.assert_called_once()
+    else:
+        assert result is routed_out
+        runner._forward_shared_experts.assert_not_called()

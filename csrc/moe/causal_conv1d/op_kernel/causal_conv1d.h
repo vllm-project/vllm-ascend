@@ -13,14 +13,17 @@
  * \file causal_conv1d.h
  */
 
- #ifndef CAUSAL_CONV1D_H
- #define CAUSAL_CONV1D_H
+#ifndef CAUSAL_CONV1D_H
+#define CAUSAL_CONV1D_H
  
- #include "kernel_operator.h"
- #include "kernel_tiling/kernel_tiling.h"
- #include "causal_conv1d_tiling_data.h"
- #include "causal_conv1d_tiling_key.h"
- #include "causal_conv1d_common.h"
+#include "kernel_operator.h"
+#include "kernel_tiling/kernel_tiling.h"
+#include "causal_conv1d_tiling_data.h"
+#include "causal_conv1d_tiling_key.h"
+#include "causal_conv1d_common.h"
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+#include "arch35/causal_conv1d_regbase.h"
+#endif
  
  namespace NsCausalConv1d {
  
@@ -38,6 +41,7 @@
  
  inline constexpr int32_t INIT_STATE_SYNCALL_NEED_SIZE = 8;
  inline constexpr int32_t INIT_STATE_SYNCALL_MAX_BLOCKS = 64;
+ inline constexpr int64_t INT32_MAX_VALUE = 2147483647LL;
  
  struct SeqTaskWindow {
      bool valid = false;
@@ -143,6 +147,10 @@
                                                  int32_t &len) const;
      template <int32_t kWindowMode>
      __aicore__ inline bool ResolveSeqTaskWindowByMode(int32_t seq, int32_t seqLen, int32_t &start, int32_t &len) const;
+     __aicore__ inline int32_t ReadQueryStartLocValue(int32_t index) const;
+     __aicore__ inline int64_t ReadCacheIndexValue(int32_t seq) const;
+     __aicore__ inline bool ReadInitialStateModeValue(int32_t seq) const;
+     __aicore__ inline int32_t ReadNumAcceptedTokensValue(int32_t seq) const;
      __aicore__ inline bool ResolveSeqCacheIndex(int32_t seq, bool hasCacheIndices, int32_t &cacheIdx) const;
      __aicore__ inline bool ResolveSeqHasInit(int32_t seq, bool hasInitialStateMode) const;
      __aicore__ inline void MaybeWriteBackSeqSplitTailChunk(int32_t chunkStart, int32_t chunkLen, int32_t seqStart,
@@ -191,10 +199,15 @@
      GlobalTensor<T> weightGm;
      GlobalTensor<T> biasGm;
      GlobalTensor<T> convStatesGm;
-     GlobalTensor<int64_t> queryStartLocGm;
-     GlobalTensor<int64_t> cacheIndicesGm;
-     GlobalTensor<int64_t> initialStateModeGm;
-     GlobalTensor<int64_t> numAcceptedTokensGm;
+     GlobalTensor<int32_t> queryStartLocGmInt32;
+     GlobalTensor<int64_t> queryStartLocGmInt64;
+     GlobalTensor<int32_t> cacheIndicesGmInt32;
+     GlobalTensor<int64_t> cacheIndicesGmInt64;
+     GlobalTensor<bool> initialStateModeGmBool;
+     GlobalTensor<int32_t> initialStateModeGmInt32;
+     GlobalTensor<int64_t> initialStateModeGmInt64;
+     GlobalTensor<int32_t> numAcceptedTokensGmInt32;
+     GlobalTensor<int64_t> numAcceptedTokensGmInt64;
      GlobalTensor<T> yGm;
      GlobalTensor<int32_t> initStateSyncGm_;
      GlobalTensor<T> initStateWorkspaceGm_;
@@ -551,16 +564,25 @@
      LocalTensor<float> &currF = cl.currF;
      LocalTensor<T> ring = inBuf.Get<T>();
  
-     Cast(currF, ring[slotCurr * MAX_BLOCK_DIM], RoundMode::CAST_NONE, baseDim);
-     PipeBarrier<PIPE_V>();
-     MulAddDst(state0F, currF, weightF[3 * MAX_BLOCK_DIM], baseDim);
-     PipeBarrier<PIPE_V>();
- 
-     const bool hasActivation = HasActivation();
-     if (hasActivation) {
-         PipeBarrier<PIPE_V>();
-         Silu(currF, state0F, baseDim);
-     }
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+    const bool hasActivation = HasActivation();
+    if (hasActivation) {
+        ComputeFnRollingOutputRegbase<T, true>(ring[slotCurr * MAX_BLOCK_DIM], currF, state0F, weightF[3 * MAX_BLOCK_DIM], baseDim);
+    } else {
+        ComputeFnRollingOutputRegbase<T, false>(ring[slotCurr * MAX_BLOCK_DIM], currF, state0F, weightF[3 * MAX_BLOCK_DIM], baseDim);
+    }
+#else
+    Cast(currF, ring[slotCurr * MAX_BLOCK_DIM], RoundMode::CAST_NONE, baseDim);
+    PipeBarrier<PIPE_V>();
+    MulAddDst(state0F, currF, weightF[3 * MAX_BLOCK_DIM], baseDim);
+    PipeBarrier<PIPE_V>();
+
+    const bool hasActivation = HasActivation();
+    if (hasActivation) {
+        PipeBarrier<PIPE_V>();
+        Silu(currF, state0F, baseDim);
+    }
+#endif
  }
  
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
@@ -578,35 +600,40 @@
      LocalTensor<float> &currF = cl.currF;
      LocalTensor<T> ring = inBuf.Get<T>();
      constexpr int32_t w0Idx = MAX_WIDTH - kTemplateWidth;
- 
-     Cast(currF, ring[slotCurr * MAX_BLOCK_DIM], RoundMode::CAST_NONE, baseDim);
-     PipeBarrier<PIPE_V>();
- 
-     if constexpr (kTemplateWidth == 2) {
-         Mul(state0F, currF, weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
-         PipeBarrier<PIPE_V>();
-     } else if constexpr (kTemplateWidth == 3) {
-         Mul(state0F, currF, weightF[(w0Idx + 1) * MAX_BLOCK_DIM], baseDim);
-         PipeBarrier<PIPE_V>();
-         Add(state0F, state0F, state1F, baseDim);
-         PipeBarrier<PIPE_V>();
- 
-         Mul(state1F, currF, weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
-         PipeBarrier<PIPE_V>();
-     } else if constexpr (kTemplateWidth == 4) {
-         Mul(state0F, currF, weightF[(w0Idx + 2) * MAX_BLOCK_DIM], baseDim);
-         PipeBarrier<PIPE_V>();
-         Add(state0F, state0F, state1F, baseDim);
-         PipeBarrier<PIPE_V>();
- 
-         Mul(state1F, currF, weightF[(w0Idx + 1) * MAX_BLOCK_DIM], baseDim);
-         PipeBarrier<PIPE_V>();
-         Add(state1F, state1F, state2F, baseDim);
-         PipeBarrier<PIPE_V>();
- 
-         Mul(state2F, currF, weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
-         PipeBarrier<PIPE_V>();
-     }
+
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+    AdvanceFnLocalPartialsRegbase<T, kTemplateWidth>(ring[slotCurr * MAX_BLOCK_DIM], weightF[w0Idx * MAX_BLOCK_DIM], 
+        state0F, state1F, state2F, baseDim, MAX_BLOCK_DIM);
+#else
+    Cast(currF, ring[slotCurr * MAX_BLOCK_DIM], RoundMode::CAST_NONE, baseDim);
+    PipeBarrier<PIPE_V>();
+
+    if constexpr (kTemplateWidth == 2) {
+        Mul(state0F, currF, weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
+        PipeBarrier<PIPE_V>();
+    } else if constexpr (kTemplateWidth == 3) {
+        Mul(state0F, currF, weightF[(w0Idx + 1) * MAX_BLOCK_DIM], baseDim);
+        PipeBarrier<PIPE_V>();
+        Add(state0F, state0F, state1F, baseDim);
+        PipeBarrier<PIPE_V>();
+
+        Mul(state1F, currF, weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
+        PipeBarrier<PIPE_V>();
+    } else if constexpr (kTemplateWidth == 4) {
+        Mul(state0F, currF, weightF[(w0Idx + 2) * MAX_BLOCK_DIM], baseDim);
+        PipeBarrier<PIPE_V>();
+        Add(state0F, state0F, state1F, baseDim);
+        PipeBarrier<PIPE_V>();
+
+        Mul(state1F, currF, weightF[(w0Idx + 1) * MAX_BLOCK_DIM], baseDim);
+        PipeBarrier<PIPE_V>();
+        Add(state1F, state1F, state2F, baseDim);
+        PipeBarrier<PIPE_V>();
+
+        Mul(state2F, currF, weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
+        PipeBarrier<PIPE_V>();
+    }
+#endif
  }
  
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
@@ -823,8 +850,11 @@
  {
      SeqTaskWindow window;
      if constexpr (kWindowMode == SEQ_TASK_WINDOW_MODE_VARLEN) {
-         const int32_t startVal = queryStartLocGm.GetValue(seq);
-         const int32_t endVal = queryStartLocGm.GetValue(seq + 1);
+         const int32_t startVal = ReadQueryStartLocValue(seq);
+         const int32_t endVal = ReadQueryStartLocValue(seq + 1);
+         if (startVal < 0 || endVal < startVal || endVal > tilingData_->cuSeqlen) {
+             return false;
+         }
          window = BuildSeqTaskWindowVarlen(startVal, endVal);
      } else if constexpr (kWindowMode == SEQ_TASK_WINDOW_MODE_DECODE2D) {
          window = BuildSeqTaskWindowDecode2D(seq);
@@ -839,7 +869,58 @@
      len = window.len;
      return true;
  }
- 
+
+ template <CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline int32_t CAUSAL_CONV1D_CLASS::ReadQueryStartLocValue(int32_t index) const
+ {
+     if (tilingData_->queryStartLocUseInt64 != 0) {
+         const int64_t value = queryStartLocGmInt64.GetValue(index);
+         if (value < 0 || value > INT32_MAX_VALUE) {
+             return -1;
+         }
+         return static_cast<int32_t>(value);
+     }
+     return queryStartLocGmInt32.GetValue(index);
+ }
+
+ template <CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline int64_t CAUSAL_CONV1D_CLASS::ReadCacheIndexValue(int32_t seq) const
+ {
+     const int32_t offset = seq * static_cast<int32_t>(tilingData_->cacheIndicesStride);
+     if (tilingData_->cacheIndicesUseInt64 != 0) {
+         return cacheIndicesGmInt64.GetValue(offset);
+     }
+     return static_cast<int64_t>(cacheIndicesGmInt32.GetValue(offset));
+ }
+
+ template <CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline bool CAUSAL_CONV1D_CLASS::ReadInitialStateModeValue(int32_t seq) const
+ {
+     if (tilingData_->initialStateModeDtype == 2) {
+         return initialStateModeGmInt64.GetValue(seq) != 0;
+     }
+     if (tilingData_->initialStateModeDtype == 1) {
+         return initialStateModeGmInt32.GetValue(seq) != 0;
+     }
+     return initialStateModeGmBool.GetValue(seq);
+ }
+
+ template <CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline int32_t CAUSAL_CONV1D_CLASS::ReadNumAcceptedTokensValue(int32_t seq) const
+ {
+     if (tilingData_->numAcceptedTokensUseInt64 != 0) {
+         const int64_t value = numAcceptedTokensGmInt64.GetValue(seq);
+         if (value <= 0) {
+             return 0;
+         }
+         if (value > INT32_MAX_VALUE) {
+             return static_cast<int32_t>(INT32_MAX_VALUE);
+         }
+         return static_cast<int32_t>(value);
+     }
+     return numAcceptedTokensGmInt32.GetValue(seq);
+ }
+
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
  __aicore__ inline bool CAUSAL_CONV1D_CLASS::ResolveSeqCacheIndex(int32_t seq, bool hasCacheIndices,
                                                                   int32_t &cacheIdx) const
@@ -849,8 +930,11 @@
          return true;
      }
  
-     const int64_t cacheIdx64 = cacheIndicesGm.GetValue(seq);
+     const int64_t cacheIdx64 = ReadCacheIndexValue(seq);
      if (cacheIdx64 == tilingData_->padSlotId) {
+         return false;
+     }
+     if (cacheIdx64 < 0 || cacheIdx64 >= tilingData_->numCacheLines) {
          return false;
      }
      cacheIdx = static_cast<int32_t>(cacheIdx64);
@@ -860,7 +944,7 @@
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
  __aicore__ inline bool CAUSAL_CONV1D_CLASS::ResolveSeqHasInit(int32_t seq, bool hasInitialStateMode) const
  {
-     return hasInitialStateMode ? (initialStateModeGm.GetValue(seq) != 0) : false;
+     return hasInitialStateMode ? ReadInitialStateModeValue(seq) : false;
  }
  
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
@@ -924,7 +1008,7 @@
  
          int32_t stateTokenOffset = 0;
          if (isSpecDecodingGlobal) {
-             int32_t accepted = static_cast<int32_t>(numAcceptedTokensGm.GetValue(seq));
+             int32_t accepted = ReadNumAcceptedTokensValue(seq);
              stateTokenOffset = accepted - 1;
              const int32_t maxOffset = static_cast<int32_t>(tilingData_->stateLen - (width - 1));
              if (stateTokenOffset < 0) {
@@ -999,7 +1083,6 @@
  
  #undef CAUSAL_CONV1D_CLASS
  #undef CAUSAL_CONV1D_TEMPLATE_ARGS
- 
- }
- #endif
- 
+
+} // namespace NsCausalConv1d
+#endif // CAUSAL_CONV1D_H

@@ -25,6 +25,8 @@ spec:
             env:
               - name: CONFIG_YAML_PATH
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
+              - name: CONFIG_BASE_PATH
+                value: "{{ config_base_path | default("") }}"
               - name: LOG_PREFIX
                 value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
               - name: WORKSPACE
@@ -43,6 +45,10 @@ spec:
                 value: {{ runner | default("linux-aarch64-a3-0") }}
               - name: VLLM_ASCEND_VERSION
                 value: {{ vllm_ascend_ref | default("main") }}
+              - name: AOP_MULTI_ENABLED
+                value: "{{ aop_multi_enabled }}"
+              - name: GOOD_TABLE
+                value: "{{ good_table | default("/root/.cache/vllm-ascend/nightly/good_table.csv") }}"
             command:
               - sh
               - -c
@@ -96,6 +102,8 @@ spec:
             env:
               - name: CONFIG_YAML_PATH
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
+              - name: CONFIG_BASE_PATH
+                value: "{{ config_base_path | default("") }}"
               - name: LOG_PREFIX
                 value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
               - name: WORKSPACE
@@ -112,6 +120,10 @@ spec:
                 value: {{ benchmark_job_name | default("") }}
               - name: VLLM_CI_RUNNER
                 value: {{ runner | default("linux-aarch64-a3-0") }}
+              - name: AOP_MULTI_ENABLED
+                value: "{{ aop_multi_enabled }}"
+              - name: GOOD_TABLE
+                value: "{{ good_table | default("/root/.cache/vllm-ascend/nightly/good_table.csv") }}"
             command:
               - sh
               - -c

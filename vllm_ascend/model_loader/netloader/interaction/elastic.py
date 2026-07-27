@@ -32,7 +32,9 @@ class ElasticClient:
     Class for handling the client-side logic of Netloader of models.
     """
 
-    def __init__(self, sources: list[str], device_id: int, model_path: str, tp: int, pp: int):
+    def __init__(
+        self, sources: list[str], device_id: int, model_path: str, tp: int, pp: int, group_name: str = "netloader"
+    ):
         """
         Initializes the ElasticClient instance.
 
@@ -42,12 +44,14 @@ class ElasticClient:
         - model_path: The path to the model.
         - tp: Tensor parallel size.
         - pp: Pipeline parallel size.
+        - group_name: Name of the HCCL process group.
         """
         self.sources = sources
         self.device_id = device_id
         self.model_path = model_path
         self.tp = tp
         self.pp = pp
+        self.group_name = group_name
 
         self.s: socket.socket | None = None
         self.ack: tuple[str, int] | None = None
@@ -84,6 +88,17 @@ class ElasticClient:
                 self.ack = None
                 self.server_addr = None
                 self.server_port = None
+
+        if self.s is None:
+            sources_str = ", ".join(self.sources[:2])
+            if len(self.sources) > 2:
+                sources_str += f", ... (total {len(self.sources)})"
+            logger.error(
+                "All sources exhausted, no connection established for device_id=%s, model_path=%s, sources=[%s]",
+                device_id,
+                model_path,
+                sources_str,
+            )
 
     def close(self) -> None:
         """
@@ -158,7 +173,14 @@ class ElasticClient:
         free_port = find_free_port()
         data = {
             "label": "JOIN",
-            "content": {"device_id": device_id, "model_path": model_path, "tp": tp, "pp": pp, "port": free_port},
+            "content": {
+                "device_id": device_id,
+                "model_path": model_path,
+                "tp": tp,
+                "pp": pp,
+                "port": free_port,
+                "group_name": self.group_name,
+            },
         }
 
         try:
@@ -208,6 +230,7 @@ class ElasticServer:
         pp: int,
         int8_cache: str,
         int8_cache_name: list[str] | None,
+        group_name: str = "netloader",
     ):
         """
         Initializes the ElasticServer instance.
@@ -222,6 +245,7 @@ class ElasticServer:
         - pp: Pipeline parallel size.
         - int8_cache: The type of caching for int8 parameters (HBM, DRAM, or no).
         - int8_cache_name: List of parameter names to be cached.
+        - group_name: Name of the HCCL process group.
         """
         self.addr = addr
         self.port = port
@@ -235,6 +259,7 @@ class ElasticServer:
         self.model_path = model_path
         self.tp = tp
         self.pp = pp
+        self.group_name = group_name
 
         self.original_int8 = {}
         int8_pattern = "|".join(map(re.escape, int8_cache_name)) if int8_cache_name is not None else "(?:)"
@@ -314,7 +339,7 @@ class ElasticServer:
         try:
             data = json.loads(data_str)
         except Exception:
-            logger.error("Failed to load %s as JSON string", data_str)
+            logger.error("Failed to load %s as JSON string from %s", data_str, addr)
             conn.close()
             return
 
@@ -385,7 +410,12 @@ class ElasticServer:
 
         if ack["content"] and isinstance(ack["content"], dict) and "name" in ack["content"]:
             try:
-                p2psend = P2PSend(self.addr, data["content"]["port"], ack["content"]["name"])
+                p2psend = P2PSend(
+                    self.addr,
+                    data["content"]["port"],
+                    ack["content"]["name"],
+                    data["content"].get("group_name", "netloader"),
+                )
                 p2psend.send(self.model, self.original_int8)
             except Exception as e:
                 logger.error("P2PSend Failed to send model to %s, details: %s", self.addr, e)

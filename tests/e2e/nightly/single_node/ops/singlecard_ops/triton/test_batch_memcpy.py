@@ -3,6 +3,7 @@ import torch
 
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 
+
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 def test_batch_memcpy(dtype):
     element_size = 2 if dtype == torch.bfloat16 else 4
@@ -15,15 +16,11 @@ def test_batch_memcpy(dtype):
     dst_tensors_list = []
     dst_addr_list = []
     for i in range(len(sizes)):
-        src_tensors_list.append(
-            torch.rand(sizes[i].item() // element_size, dtype=dtype, device=device)
-        )
+        src_tensors_list.append(torch.rand(sizes[i].item() // element_size, dtype=dtype, device=device))
         src_addr_list.append(src_tensors_list[-1].data_ptr())
-        dst_tensors_list.append(
-            torch.empty(sizes[i].item() // element_size, dtype=dtype, device=device)
-        )
+        dst_tensors_list.append(torch.empty(sizes[i].item() // element_size, dtype=dtype, device=device))
         dst_addr_list.append(dst_tensors_list[-1].data_ptr())
-    
+
     src_addr_list = torch.tensor(src_addr_list, dtype=torch.int64, device=device)
     dst_addr_list = torch.tensor(dst_addr_list, dtype=torch.int64, device=device)
 

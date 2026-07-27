@@ -32,6 +32,8 @@ VERBOSE="false"
 OOM="false"
 THREAD_NUM=$(grep -c ^processor /proc/cpuinfo)
 MAX_JOBS=${MAX_JOBS:-}
+USE_NINJA=${USE_NINJA:-${VLLM_ASCEND_USE_NINJA:-auto}}
+CMAKE_GENERATOR_ARGS=()
 ENABLE_VALGRIND=FALSE
 ENABLE_CREATE_LIB=FALSE
 ENABLE_OPKERNEL=FALSE
@@ -42,7 +44,7 @@ ENABLE_BUILT_CUSTOM=FALSE
 ENABLE_STATIC=FALSE
 ENABLE_EXPERIMENTAL=FALSE
 ASCEND_SOC_UNITS="ascend910b"
-SUPPORT_COMPUTE_UNIT_SHORT=("ascend910b" "ascend910_93" "ascend910_95" "kirinx90")
+SUPPORT_COMPUTE_UNIT_SHORT=("ascend310p" "ascend910b" "ascend910_93" "ascend950" "kirinx90")
 CMAKE_BUILD_MODE=""
 BUILD_TYPE=""
 VERSION=""
@@ -254,7 +256,7 @@ function help_info() {
                 echo $dotted_line
                 echo "Examples:"
                 echo "    bash build.sh --run_example abs eager"
-                echo "    bash build.sh --run_example abs eager --soc=ascend910_95"
+                echo "    bash build.sh --run_example abs eager --soc=ascend950"
                 echo "    bash build.sh --run_example abs graph"
                 echo "    bash build.sh --run_example abs eager cust"
                 echo "    bash build.sh --run_example abs eager cust --vendor_name=custom"
@@ -340,12 +342,22 @@ function set_env()
         exit 1
     fi
 }
-
 function clean()
 {
     if [ -n "${BUILD_DIR}" ];then
         rm -rf ${BUILD_DIR}
     fi
+
+    if [ -z "${TEST}" ] && [ -z "${EXAMPLE}" ];then
+        if [ -n "${OUTPUT_DIR}" ];then
+            rm -rf ${OUTPUT_DIR}
+        fi
+    fi
+
+    mkdir -p ${BUILD_DIR} ${OUTPUT_DIR}
+}
+function clean_output()
+{
 
     if [ -z "${TEST}" ] && [ -z "${EXAMPLE}" ];then
         if [ -n "${OUTPUT_DIR}" ];then
@@ -377,8 +389,8 @@ function clean_third_party()
 function cmake_config()
 {
     local extra_option="$1"
-    log "Info: cmake config ${CUSTOM_OPTION} ${extra_option} ."
-    cmake ..  ${CUSTOM_OPTION} ${extra_option}
+    log "Info: cmake config generator=${CMAKE_GENERATOR_ARGS[*]:-<default>} ${CUSTOM_OPTION} ${extra_option} ."
+    cmake "${CMAKE_GENERATOR_ARGS[@]}" .. ${CUSTOM_OPTION} ${extra_option}
 }
 
 function build()
@@ -429,7 +441,7 @@ function build_example()
     fi
 
     files=($(find ../ -path "*/${EXAMPLE_NAME}/examples/${pattern}*.cpp"))
-    if [[ "$ASCEND_SOC_UNITS" == "ascend910_95" ]]; then
+    if [[ "$ASCEND_SOC_UNITS" == "ascend950" ]]; then
         files+=($(find ../ -path "*/${EXAMPLE_NAME}/examples/arch35/${pattern}*.cpp"))
     fi
     if [[ "${EXAMPLE_MODE}" == "eager" ]]; then
@@ -509,7 +521,7 @@ function gen_bisheng(){
     fi
 
     pushd ${gen_bisheng_dir}
-    $(> bisheng)
+    : > bisheng
     echo "#!/bin/bash" >> bisheng
     echo "ccache_args=""\"""${ccache_program} ${BISHENG_REAL_PATH}""\"" >> bisheng
     echo "args=""$""@" >> bisheng
@@ -539,7 +551,7 @@ function build_kernel(){
 
 build_lib() {
   echo $dotted_line
-  echo "Start to build libs ${BUILD_LIBS[@]}"
+  echo "Start to build libs ${BUILD_LIBS[*]}"
   clean
 
   if [ ! -d "${BUILD_PATH}" ]; then
@@ -554,7 +566,7 @@ build_lib() {
   done
 
   echo $dotted_line
-  echo "Build libs ${BUILD_LIBS[@]} success"
+  echo "Build libs ${BUILD_LIBS[*]} success"
   echo $dotted_line
 }
 
@@ -666,7 +678,6 @@ package_static() {
 
 function process_soc_input(){
     local input_string="$1"
-    input_string=$(echo "$input_string" | sed 's/ascend950/ascend910_95/g')
     local value_part="${input_string#*=}"
     ASCEND_SOC_UNITS="${value_part//,/;}"
 }
@@ -907,6 +918,14 @@ while [[ $# -gt 0 ]]; do
     --ccache)
         CCACHE_PROGRAM="$2"
         shift 2
+        ;;
+     --ninja)
+        USE_NINJA="true"
+        shift
+        ;;
+    --no-ninja)
+        USE_NINJA="false"
+        shift
         ;;
     -p|--package-path)
         ascend_package_path="$2"
@@ -1384,7 +1403,21 @@ CUSTOM_OPTION="${CUSTOM_OPTION} -DCUSTOM_ASCEND_CANN_PACKAGE_PATH=${ASCEND_CANN_
 
 set_env
 
-clean
+use_ninja_lower=$(echo "${USE_NINJA:-auto}" | tr '[:upper:]' '[:lower:]')
+if [[ "${use_ninja_lower}" == "0" || "${use_ninja_lower}" == "false" || "${use_ninja_lower}" == "off" || "${use_ninja_lower}" == "no" ]]; then
+    log "Info: use default CMake generator because USE_NINJA=${USE_NINJA}"
+elif command -v ninja >/dev/null 2>&1; then
+    CMAKE_GENERATOR_ARGS=(-G Ninja)
+    log "Info: use CMake generator Ninja"
+elif [[ "${use_ninja_lower}" == "1" || "${use_ninja_lower}" == "true" || "${use_ninja_lower}" == "on" || "${use_ninja_lower}" == "yes" ]]; then
+    log "Error: USE_NINJA=${USE_NINJA}, but ninja is not found."
+    exit 1
+else
+    log "Info: ninja is not found; use default CMake generator"
+fi
+
+clean_build_out
+clean_output
 
 if [ -n "${CCACHE_PROGRAM}" ]; then
     if [ "${CCACHE_PROGRAM}" == "false" ] || [ "${CCACHE_PROGRAM}" == "off" ]; then
@@ -1422,7 +1455,7 @@ build_ut() {
 
   if [ $(cmake -LA -N . | grep 'UTEST_FRAMEWORK_NEW:BOOL=' | cut -d'=' -f2) == "TRUE" ]; then
     local has_valid_target="FALSE"
-    for UT_TARGET in ${UT_TARGETS[@]} ; do
+    for UT_TARGET in "${UT_TARGETS[@]}" ; do
         if cmake --build . --target help | grep -w "$UT_TARGET"; then
             echo "Building target: $UT_TARGET."
             if ! cmake --build . --target ${UT_TARGET} ${JOB_NUM}; then

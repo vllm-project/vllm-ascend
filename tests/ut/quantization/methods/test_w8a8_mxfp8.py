@@ -47,6 +47,8 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         self.assertEqual(layer._mxfp8_original_shapes["weight"], (128, 256))
         self.assertTrue(layer._mxfp8_transformed)
         self.assertEqual(layer.weight_scale.shape, (4, 128, 2))
+        self.assertTrue(layer.weight.data.is_contiguous())
+        self.assertTrue(layer.weight_scale.data.is_contiguous())
 
     def test_restore_after_process_returns_original_shape(self):
         layer = nn.Module()
@@ -90,13 +92,11 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
     intermediate_size = 256
 
     @patch("vllm_ascend.quantization.methods.w8a8_mxfp8.ensure_mxfp8_moe_available")
-    @patch("vllm_ascend.quantization.methods.w8a8_mxfp8.get_ep_group")
     @patch("vllm_ascend.quantization.methods.w8a8_mxfp8.get_current_vllm_config")
     @patch("vllm_ascend.quantization.methods.w8a8_mxfp8.get_ascend_config")
-    def setUp(self, mock_ascend, mock_vllm, mock_ep, mock_ensure):
+    def setUp(self, mock_ascend, mock_vllm, mock_ensure):
         mock_vllm.return_value = create_mock_vllm_config()
         mock_ascend.return_value = create_mock_ascend_config()
-        mock_ep.return_value = Mock()
         mock_ensure.return_value = None
         self.scheme = AscendW8A8MXFP8DynamicFusedMoEMethod()
 
@@ -122,6 +122,10 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         self.assertTrue(hasattr(layer, "_mxfp8_original_shapes"))
         self.assertIn("w13_weight", layer._mxfp8_original_shapes)
         self.assertEqual(layer.w13_weight.shape, (original_shape[0], original_shape[2], original_shape[1]))
+        self.assertFalse(layer.w13_weight.data.is_contiguous())
+        self.assertFalse(layer.w2_weight.data.is_contiguous())
+        self.assertFalse(layer.w13_weight_scale.data.is_contiguous())
+        self.assertFalse(layer.w2_weight_scale.data.is_contiguous())
 
     def test_restore_weights_for_rl_loading(self):
         layer = create_mxfp_moe_layer(
@@ -141,6 +145,7 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
             num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
         )
         self.scheme.process_weights_after_loading(layer)
+        layer.swiglu_limit = 1000000
         x = torch.randn(tokens, self.hidden_size, dtype=torch.bfloat16)
         router_logits = torch.randn(tokens, self.num_experts, dtype=torch.float32)
         topk_weights = torch.randn(tokens, 2)

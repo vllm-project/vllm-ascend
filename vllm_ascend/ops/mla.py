@@ -42,7 +42,7 @@ class IndexerWrapper(nn.Module):
     This wrapper is currently used to solve the fp8 hard code issue of vllm's deepseek_v2.py.
     It wraps the original Indexer, inherits its module weights
     (including wq_b, wk_weights_proj or wk/weights_proj, k_norm)
-    while deletes the unused topk_indices_buffer and k_cache to save memory.
+    while deleting the unused topk_indices_buffer to save memory.
     TODO: Will be removed once original Indexer supports different quantization methods.
     """
 
@@ -57,8 +57,8 @@ class IndexerWrapper(nn.Module):
         self.wk_weights_proj = vllm_indexer.wk_weights_proj
         self.k_norm = vllm_indexer.k_norm
         self.softmax_scale = vllm_indexer.softmax_scale
+        self.k_cache = getattr(vllm_indexer, "k_cache", None)
         vllm_indexer.topk_indices_buffer = None  # delete topk_indices_buffer
-        vllm_indexer.k_cache = None  # delete k_cache
 
     def forward(self):
         return
@@ -159,7 +159,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         kv_cache: torch.Tensor | None = None,
         attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
-        hidden_dim = hidden_states.shape[-1]
+        hidden_dim = self.hidden_size
 
         if _EXTRA_CTX.flash_comm_v1_enabled and self.tp_size > 1 and self.is_vl_first_layer:
             need_gather_q_kv = False
@@ -167,7 +167,9 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             output = torch.empty((n_out, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device)
         else:
             need_gather_q_kv = _EXTRA_CTX.flash_comm_v1_enabled
-            output = torch.empty(hidden_states.shape, dtype=hidden_states.dtype, device=hidden_states.device)
+            output = torch.empty(
+                (hidden_states.shape[0], hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device
+            )
 
         torch.ops.vllm.mla_forward(hidden_states, need_gather_q_kv, output, self.prefix)
         output = output.view(-1, hidden_dim)

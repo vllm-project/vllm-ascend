@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import os
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +32,7 @@ class AscendConfig:
     def __init__(self, vllm_config: "VllmConfig"):
         self.vllm_config = vllm_config
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
+        self._check_mooncake_c8_kv_cache_quant(vllm_config)
 
         xlite_graph_config = additional_config.get("xlite_graph_config", {})
         self.xlite_graph_config = XliteGraphConfig(xlite_graph_config, vllm_config)
@@ -47,48 +49,54 @@ class AscendConfig:
         eplb_config = additional_config.get("eplb_config", {})
         self.eplb_config = EplbConfig(eplb_config)
 
-        weight_prefetch_config = additional_config.get("weight_prefetch_config", {})
-        self.weight_prefetch_config = WeightPrefetchConfig(weight_prefetch_config)
+        from vllm_ascend import envs as ascend_envs
 
-        profiling_chunk_config = additional_config.get("profiling_chunk_config", {})
-        self.profiling_chunk_config = ProfilingChunkConfig(profiling_chunk_config)
-        if self.profiling_chunk_config.enabled:
+        self.scheduler_config = SchedulerConfig(
+            additional_config,
+            balance_env_value=ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING,
+        )
+        if self.scheduler_config.profiling_chunk_config.enabled:
             max_batched = vllm_config.scheduler_config.max_num_batched_tokens
-            if max_batched < self.profiling_chunk_config.min_chunk:
+            if max_batched < self.scheduler_config.profiling_chunk_config.min_chunk:
                 logger.warning(
-                    "max_num_batched_tokens (%d) is smaller than "
-                    "profiling_chunk_config.min_chunk (%d). "
+                    "max_num_batched_tokens is smaller than profiling_chunk_config.min_chunk. "
+                    "max_num_batched_tokens=%d, min_chunk=%d. "
                     "Clamping min_chunk to %d to avoid it being silently ignored.",
                     max_batched,
-                    self.profiling_chunk_config.min_chunk,
+                    self.scheduler_config.profiling_chunk_config.min_chunk,
                     max_batched,
                 )
-                self.profiling_chunk_config.min_chunk = max_batched
-        if self.profiling_chunk_config.enabled and vllm_config.parallel_config.pipeline_parallel_size <= 1:
+                self.scheduler_config.profiling_chunk_config.min_chunk = max_batched
+        if (
+            self.scheduler_config.profiling_chunk_config.enabled
+            and vllm_config.parallel_config.pipeline_parallel_size <= 1
+        ):
             raise ValueError(
                 "profiling_chunk_config requires pipeline parallelism (pp > 1). "
                 "Please set --pipeline-parallel-size to a value greater than 1, "
                 "or disable profiling_chunk_config."
             )
 
-        from vllm_ascend import envs as ascend_envs
-
-        if self.profiling_chunk_config.enabled and ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING:
+        self.enable_flashcomm1 = self._get_config_value(
+            additional_config,
+            "enable_flashcomm1",
+            "VLLM_ASCEND_ENABLE_FLASHCOMM1",
+            ascend_envs.VLLM_ASCEND_ENABLE_FLASHCOMM1,
+        )
+        if self.scheduler_config.profiling_chunk_config.enabled and self.scheduler_config.enable_balance_scheduling:
             raise ValueError(
-                "profiling_chunk_config and balance scheduling (VLLM_ASCEND_BALANCE_SCHEDULING) "
+                "profiling_chunk_config and balance scheduling (enable_balance_scheduling) "
                 "cannot be enabled at the same time. Please disable one of them."
             )
 
         # Dump / PrecisionDebugger configuration
-        self.dump_config_path = additional_config.get("dump_config_path", None)
-        self.layer_sharding = additional_config.get("layer_sharding", None)
-        if self.layer_sharding:
-            logger.info_once(
-                "Linear layer sharding enabled with config: %s. "
-                "Note: This feature works optimally with FLASHCOMM2 and DSA-CP enabled; "
-                "using it without these features may result in significant performance degradation.",
-                str(self.layer_sharding),
-            )
+        self.dump_config_path = self._resolve_dump_config_path(additional_config)
+
+        # Log configuration
+        self.ascend_log_path = additional_config.get(
+            "ascend_log_path",
+            os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend"),
+        )
 
         self.enable_shared_expert_dp = (
             additional_config.get("enable_shared_expert_dp", False)
@@ -116,15 +124,71 @@ class AscendConfig:
                     str(vllm_config.scheduler_config.max_num_batched_tokens),
                 )
         self.multistream_overlap_shared_expert = additional_config.get("multistream_overlap_shared_expert", False)
-        self.multistream_overlap_gate = additional_config.get("multistream_overlap_gate", False)
-        # PD-disaggregated only (kv_producer/kv_consumer); invalid in PD-mixed (kv_both / no kv_transfer_config).
-        self.recompute_scheduler_enable = additional_config.get("recompute_scheduler_enable", False)
+        # PD-disaggregated D node only (kv_consumer); invalid on P nodes and in PD-mixed mode.
+        # DSV4 oproj / embedding fine-grained TP (oproj_tensor_parallel_size /
+        # embedding_tensor_parallel_size) use static, graph-stable exchange
+        # buffers and run cross-DP HCCL collectives (all_to_all / all_gather /
+        # reduce_scatter) that require uniform num_tokens across all DP ranks.
+        # Only the recompute scheduler balances num_tokens across DP ranks; the
+        # MC2 uneven-token skip path leaves each rank at its own num_tokens and
+        # would deadlock these collectives on a shape mismatch. So bind both
+        # features to recompute_scheduler_enable: they are only supported when
+        # recompute is on.
+        if (
+            self.finegrained_tp_config.oproj_tensor_parallel_size > 0
+            or self.finegrained_tp_config.embedding_tensor_parallel_size > 0
+        ) and not self.scheduler_config.recompute_scheduler_enable:
+            raise AssertionError(
+                "oproj_tensor_parallel_size / embedding_tensor_parallel_size "
+                "require recompute_scheduler_enable=true: their cross-DP HCCL "
+                "collectives need uniform num_tokens across DP ranks, which is "
+                "only guaranteed when the recompute scheduler is enabled."
+            )
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
+        self.enable_sleep_mode_extra_cleanup = additional_config.get("enable_sleep_mode_extra_cleanup", False)
+        self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
+        self.enable_prefill_mc2 = bool(additional_config.get("enable_prefill_mc2", False))
+
+        self.enable_fused_mc2 = self._get_config_value(
+            additional_config,
+            "enable_fused_mc2",
+            "VLLM_ASCEND_ENABLE_FUSED_MC2",
+            ascend_envs.VLLM_ASCEND_ENABLE_FUSED_MC2,
+        )
+        assert self.enable_fused_mc2 in (0, 1), f"enable_fused_mc2 must be 0 or 1, got {self.enable_fused_mc2}"
+        if self.enable_fused_mc2 == 1 and self.multistream_overlap_shared_expert:
+            self.multistream_overlap_shared_expert = False
+            logger.warning_once(
+                "VLLM_ASCEND_ENABLE_FUSED_MC2 (fused mc2) and multistream_overlap_shared_expert "
+                "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
+            )
+        self.enable_mlapo = self._get_config_value(
+            additional_config,
+            "enable_mlapo",
+            "VLLM_ASCEND_ENABLE_MLAPO",
+            ascend_envs.VLLM_ASCEND_ENABLE_MLAPO,
+        )
+        self.msmonitor_use_daemon = self._get_config_value(
+            additional_config,
+            "msmonitor_use_daemon",
+            "MSMONITOR_USE_DAEMON",
+            ascend_envs.MSMONITOR_USE_DAEMON,
+        )
+        self.enable_transpose_kv_cache_by_block = self._get_config_value(
+            additional_config,
+            "enable_transpose_kv_cache_by_block",
+            "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK",
+            ascend_envs.VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK,
+        )
 
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
         self.num_head_replica = 1
-        if vllm_config.kv_transfer_config is not None and not vllm_config.model_config.is_deepseek_mla:
+        if (
+            vllm_config.kv_transfer_config is not None
+            and vllm_config.model_config is not None
+            and not vllm_config.model_config.is_deepseek_mla
+        ):
             prefill_tp_size = vllm_config.kv_transfer_config.get_from_extra_config("prefill", {"tp_size": 1})["tp_size"]
             decode_tp_size = vllm_config.kv_transfer_config.get_from_extra_config("decode", {"tp_size": 1})["tp_size"]
             assert prefill_tp_size % decode_tp_size == 0, "Prefill TP size must be divisible by Decode TP size."
@@ -145,31 +209,28 @@ class AscendConfig:
 
             if self.pd_tp_ratio == 0:
                 raise AssertionError("Only support P node tp size lagger then D node tp size")
-        self.SLO_limits_for_dynamic_batch = additional_config.get("SLO_limits_for_dynamic_batch", -1)
-        from vllm_ascend.utils import get_flashcomm2_config_and_validate
-
-        self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_config_and_validate(self, vllm_config)
         # We find that _npu_paged_attention still performs better than
         # npu_fused_infer_attention_score in some cases. We allow to execute
         # _npu_paged_attention in this cases. This should be removed once
         # npu_fused_infer_attention_score performs better on all scenarios.
         self.pa_shape_list = additional_config.get("pa_shape_list", [])
-
-        # when enable_async_exponential is True, AscendSampler will be different from vllm Sampler,
-        # which make batch_invariant mode not working.
-        # so we disable async exponential when batch_invariant mode is enabled.
-        import vllm.envs as envs
-
-        self.enable_async_exponential = (
-            bool(additional_config.get("enable_async_exponential", False)) and not envs.VLLM_BATCH_INVARIANT
+        # Weight NZ mode configuration.
+        # 0: disabled, 1: only quant case enable nz (default), 2: BF16/FP16 also enable nz
+        self.weight_nz_mode = self._get_config_value(
+            additional_config,
+            "weight_nz_mode",
+            "VLLM_ASCEND_ENABLE_NZ",
+            ascend_envs.VLLM_ASCEND_ENABLE_NZ,
         )
 
-        use_sparse = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
-            vllm_config.model_config.hf_text_config, "index_topk"
-        )
+        from vllm_ascend.utils import model_uses_sfa_sparse
+
+        use_sparse = model_uses_sfa_sparse(vllm_config.model_config)
 
         self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
         if self.enable_kv_nz:
+            if vllm_config.model_config is None:
+                raise RuntimeError("enable_kv_nz requires a valid model_config.")
             if not vllm_config.model_config.is_deepseek_mla or use_sparse:
                 raise RuntimeError("enable_kv_nz is only supported for mla currently.")
             if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
@@ -177,16 +238,8 @@ class AscendConfig:
                     "enable_kv_nz is only supported in pd scenario and can only be used in D node."
                 )
 
-        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
-
-        # Disable Sparse C8 for A5
-        # A5 has not been fully validated for this path and may carry hidden risks.
-        # TODO(rjg-lyh): Enable A5 support after sufficient validation.
-        self.enable_sparse_c8 = (
-            additional_config.get("enable_sparse_c8", False)
-            and use_sparse
-            and get_ascend_device_type() != AscendDeviceType.A5
-        )
+        self.enable_sparse_c8 = additional_config.get("enable_sparse_c8", False) and use_sparse
+        self.c8_enable_reshape_optim = self.enable_sparse_c8 and additional_config.get("c8_enable_reshape_optim", False)
         quant_config = getattr(vllm_config, "quant_config", None)
         self._sparse_c8_layer_ids, self._sparse_c8_layer_names = self._parse_sparse_c8_layers_from_quant_config(
             quant_config
@@ -201,23 +254,103 @@ class AscendConfig:
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
 
+        # Per-rank token capacity after dispatch in the mega moe (dispatch_ffn_combine) fused operator.
+        # When load imbalance causes a rank to receive more tokens than this limit, the excess tokens
+        # are dropped and skipped from computation, degrading accuracy.
+        # Do not set this too large: workspace memory scales linearly with this value, which matters
+        # especially under long-context scenarios where the operator should not hold too much memory.
+        # Default 131072.
+        self.mega_moe_max_tokens = additional_config.get("mega_moe_max_tokens", 131072)
+        if not isinstance(self.mega_moe_max_tokens, int):
+            raise ValueError(
+                f"mega_moe_max_tokens must be an integer, got {type(self.mega_moe_max_tokens).__name__}: "
+                f"{self.mega_moe_max_tokens}"
+            )
+        if self.mega_moe_max_tokens <= 0:
+            raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
+
+        # Enable optimized reduce sampling scheme
+        self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
+
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()
 
-        self.hamming_sparse = additional_config.get("hamming_sparse", {"enabled": False, "sparse_json_location": ""})
-        self.enable_hamming_sparse = self.hamming_sparse["enabled"]
-        self.sparse_json = self.hamming_sparse["sparse_json_location"]
-        self._check_enable_hamming_sparse()
+        # Enable Block Verify and Entropy Verify in Rejection Sampler
+        rejection_sampler_config = additional_config.get("rejection_sampler_config", {})
+        self.rejection_sampler_config = RejectionSamplerConfig(rejection_sampler_config)
+
+    @staticmethod
+    def _get_config_value(additional_config: dict[str, Any], config_key: str, env_key: str, env_value: Any) -> Any:
+        if config_key in additional_config:
+            value = additional_config[config_key]
+            logger.info_once(f"AscendConfig.{config_key} is set from additional_config with value {value}.")
+            return value
+        if env_key in os.environ:
+            logger.info_once(
+                f"AscendConfig.{config_key} falls back to environment variable {env_key} with value {env_value}. "
+                f"Please use additional_config.{config_key} instead, because {env_key} will be removed in the "
+                "next release."
+            )
+        return env_value
+
+    @classmethod
+    def _check_mooncake_c8_kv_cache_quant(cls, vllm_config: "VllmConfig") -> None:
+        kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        if kv_transfer_config is None:
+            return
+
+        quant_config = getattr(vllm_config, "quant_config", None)
+        enable_c8_quant = getattr(quant_config, "enable_c8_quant", False)
+        if enable_c8_quant is not True:
+            return
+
+        from vllm_ascend.utils import is_gqa_backend, uses_mooncake_connector
+
+        if not is_gqa_backend(vllm_config):
+            return
+
+        if not uses_mooncake_connector(kv_transfer_config):
+            return
+
+        raise ValueError(
+            "MooncakeConnector does not support C8 KV cache quantization on GQA models. "
+            "The producer keeps KV cache in bf16 while the consumer allocates int8 KV cache, so raw "
+            "Mooncake transfer would reinterpret bf16 bytes as int8. Please disable C8 KV cache quantization "
+            "or use MooncakeLayerwiseConnector, which quantizes KV cache before transfer."
+        )
 
     def _check_mix_placement(self):
         if self.mix_placement:
             if self.enable_shared_expert_dp or self.multistream_overlap_shared_expert:
                 raise ValueError("Mix placement is not supported with shared expert DP or multistream overlap.")
 
-    def _check_enable_hamming_sparse(self):
-        if self.enable_hamming_sparse:
-            if isinstance(self.sparse_json, str) and not os.path.isfile(self.sparse_json):
-                raise ValueError("Hamming sparse config json file doesn't exist.")
+    @staticmethod
+    def _materialize_dump_config_to_file(dump_config: dict[str, Any]) -> str:
+        dump_config_dir = os.path.join(os.getcwd(), ".vllm_ascend", "msprobe")
+        os.makedirs(dump_config_dir, exist_ok=True)
+        dump_config_file_path = os.path.join(dump_config_dir, "msprobe_dump_config.json")
+        with open(dump_config_file_path, "w", encoding="utf-8") as file:
+            json.dump(dump_config, file, ensure_ascii=False, indent=2)
+        logger.info("Materialized additional_config.dump_config to file: %s", dump_config_file_path)
+        return dump_config_file_path
+
+    @classmethod
+    def _resolve_dump_config_path(cls, additional_config: dict[str, Any]) -> str | None:
+        dump_config_path = additional_config.get("dump_config_path")
+        dump_config = additional_config.get("dump_config")
+        if dump_config_path is not None and dump_config is not None:
+            raise ValueError(
+                "Only one of additional_config.dump_config_path or additional_config.dump_config can be set."
+            )
+        if dump_config is not None:
+            if not isinstance(dump_config, dict):
+                raise ValueError(f"additional_config.dump_config must be a dict, got {type(dump_config).__name__}.")
+            return cls._materialize_dump_config_to_file(dump_config)
+        if dump_config_path is not None and not isinstance(dump_config_path, str):
+            raise ValueError(
+                f"additional_config.dump_config_path must be a string, got {type(dump_config_path).__name__}."
+            )
+        return dump_config_path
 
     @staticmethod
     def _has_sparse_c8_layer_config(quant_config: Any) -> bool:
@@ -232,21 +365,24 @@ class AscendConfig:
         if not isinstance(quant_description, dict):
             return set(), set()
 
+        QUANT_SUFFIXES = (".indexer.quant_type", ".indexer.wq_b_weight")
+        VALID_QUANT_TYPES = ("INT8_DYNAMIC", "W8A8_MXFP8")
+
         layer_ids: set[int] = set()
         layer_names: set[str] = set()
-        suffix = ".indexer.quant_type"
         from vllm.model_executor.models.utils import extract_layer_index
 
         for key, value in quant_description.items():
-            if not isinstance(key, str) or not key.endswith(suffix):
+            if not isinstance(key, str):
                 continue
-            if value != "INT8_DYNAMIC":
+            matched_suffix = next((s for s in QUANT_SUFFIXES if key.endswith(s)), None)
+            if matched_suffix is None or value not in VALID_QUANT_TYPES:
                 continue
-            layer_name = key[: -len(suffix)].rstrip(".")
+            layer_name = key[: -len(matched_suffix)].rstrip(".")
             if not layer_name:
                 continue
             layer_names.add(layer_name)
-            layer_ids.update({extract_layer_index(layer_name)})
+            layer_ids.add(extract_layer_index(layer_name))
         return layer_ids, layer_names
 
     def is_sparse_c8_layer(self, layer_name: str | None) -> bool:
@@ -277,36 +413,7 @@ class AscendConfig:
         compilation_config.compile_ranges_endpoints = value
 
     def update_compile_ranges_split_points(self):
-        vllm_config = self.vllm_config
-        if self.ascend_compilation_config.enable_npugraph_ex:
-            if self.ascend_compilation_config.fuse_allreduce_rms:
-                from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THRESHOLD
-
-                new_compile_ranges_split_points = self._get_compile_ranges(vllm_config.compilation_config)
-                new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THRESHOLD)
-                new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
-                self._set_compile_ranges(vllm_config.compilation_config, new_compile_ranges_split_points)
-                logger.debug(
-                    "set compile_ranges_split_points to "
-                    "{new_compile_ranges_split_points} for matmul and allreduce fusion"
-                )
-
-        else:
-            new_compile_ranges_split_points = self._get_compile_ranges(vllm_config.compilation_config)
-            if vllm_config.additional_config.get("ascend_compilation_config", {}).get("fuse_allreduce_rms", True):
-                from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THRESHOLD
-
-                new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THRESHOLD)
-                new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
-                self._set_compile_ranges(vllm_config.compilation_config, new_compile_ranges_split_points)
-                logger.debug(
-                    "set compile_ranges_split_points to "
-                    "{new_compile_ranges_split_points} for matmul and allreduce fusion"
-                )
-
-            if len(new_compile_ranges_split_points) > len(self._get_compile_ranges(vllm_config.compilation_config)):
-                new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
-                self._set_compile_ranges(vllm_config.compilation_config, new_compile_ranges_split_points)
+        return
 
 
 class FinegrainedTPConfig:
@@ -319,17 +426,42 @@ class FinegrainedTPConfig:
         self.lmhead_tensor_parallel_size = finegrained_tp_config.get("lmhead_tensor_parallel_size", 0)
         self.embedding_tensor_parallel_size = finegrained_tp_config.get("embedding_tensor_parallel_size", 0)
         self.mlp_tensor_parallel_size = finegrained_tp_config.get("mlp_tensor_parallel_size", 0)
+        self.olora_tensor_parallel_size = finegrained_tp_config.get("olora_tensor_parallel_size", 0)
 
         enabled_configs = []
         if self.oproj_tensor_parallel_size > 0:
             enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
-            # dummy_run does not run the entire attention module in eager mode,
-            # so the o_proj tp split can only be used in graph mode.
-            if vllm_config.model_config.enforce_eager is True:
+            # wo_a/wo_b are sharded solely by the OTP group (which splits DP,
+            # orthogonal to the standard TP group), but _forward_o_proj reshapes
+            # the attention output with n_local_groups = n_groups // tp_size
+            # (standard TP). When tp_size > 1 the weight-shard and input-shard
+            # operate on different axes of the rank grid and no longer align,
+            # so oproj TP currently requires standard tp_size == 1.
+            if vllm_config.parallel_config.tensor_parallel_size > 1:
+                raise AssertionError(
+                    "oproj_tensor_parallel_size currently requires "
+                    "tensor_parallel_size == 1, got "
+                    f"{vllm_config.parallel_config.tensor_parallel_size}."
+                )
+            # The static all_to_all / reduce_scatter exchange buffers used by
+            # _forward_o_proj are sized for graph replay and require ACL graph
+            # capture; dummy_run does not run the entire attention module in
+            # eager mode, so o_proj tp split can only be used in graph mode.
+            if vllm_config.model_config and vllm_config.model_config.enforce_eager:
                 raise AssertionError("oproj_tensor_parallel_size is only supported in graph mode")
             if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
+                )
+        if self.olora_tensor_parallel_size > 0:
+            enabled_configs.append(f"olora_tensor_parallel_size={self.olora_tensor_parallel_size}")
+            # dummy_run does not run the entire attention module in eager mode,
+            # so the o_lora tp split can only be used in graph mode.
+            if vllm_config.model_config and vllm_config.model_config.enforce_eager:
+                raise AssertionError("olora_tensor_parallel_size is only supported in graph mode")
+            if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
+                raise AssertionError(
+                    "olora_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
                 )
         if self.lmhead_tensor_parallel_size > 0:
             enabled_configs.append(f"lmhead_tensor_parallel_size={self.lmhead_tensor_parallel_size}")
@@ -342,10 +474,18 @@ class FinegrainedTPConfig:
             self.lmhead_tensor_parallel_size,
             self.embedding_tensor_parallel_size,
             self.mlp_tensor_parallel_size,
+            self.olora_tensor_parallel_size,
         ]
         for module_tp_size in module_tp_sizes:
+            # If it is a dense model, then expert parallel is not needed,
+            # and data parallel is also not needed. If the data parallel size is set
+            # to greater than 1 in the model launch configuration, its value will be changed to 1 later.
+            # This will cause an issue when finegrained tp is enabled, as it
+            # cannot be split into the data parallel communication group, leading to an error.
+            if module_tp_size > 0 and not vllm_config.model_config.is_moe:
+                raise AssertionError("The finegrained tp sizes can be enabled only for MOE models.")
             if module_tp_size > 0 and vllm_config.parallel_config.data_parallel_size % module_tp_size != 0:
-                raise AssertionError("module tp sizes must divide data_parallel_size")
+                raise AssertionError("finegrained tp sizes must divide by data_parallel_size.")
         if any(size > 0 for size in module_tp_sizes) and enabled_configs:
             logger.info("finegrained_tp_config enabled: %s", ", ".join(enabled_configs))
 
@@ -365,7 +505,6 @@ class AscendCompilationConfig:
         enable_static_kernel: bool = False,
         fuse_norm_quant: bool = True,
         fuse_qknorm_rope: bool = True,
-        fuse_allreduce_rms: bool = False,
         **kwargs,
     ):
         """
@@ -388,13 +527,22 @@ class AscendCompilationConfig:
                 Default: True
             fuse_qknorm_rope (bool): Whether to enable qknorm and rope fusion optimization.
                 Default: True
-            fuse_allreduce_rms (bool): Whether to enable allreduce and addrmsnorm fusion optimization.
-                Default: False
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
+        from vllm_ascend.utils import is_310p
+
+        if is_310p():
+            if enable_npugraph_ex:
+                logger.warning("npugraph_ex is not supported on Ascend 310P. Disabling it.")
+            if enable_static_kernel:
+                logger.warning(
+                    "static kernel requires npugraph_ex, which is not supported on Ascend 310P. Disabling it."
+                )
+            enable_npugraph_ex = False
+            enable_static_kernel = False
+
         self.fuse_norm_quant = fuse_norm_quant
         self.fuse_qknorm_rope = fuse_qknorm_rope
-        self.fuse_allreduce_rms = fuse_allreduce_rms
         self.enable_npugraph_ex = enable_npugraph_ex
         self.enable_static_kernel = enable_static_kernel
         self.fuse_muls_add = kwargs.get("fuse_muls_add", True)
@@ -429,10 +577,8 @@ class XliteGraphConfig:
         self.enabled = xlite_graph_config.get("enabled", False)
         self.full_mode = xlite_graph_config.get("full_mode", False)
         if self.enabled:
-            if bool(vllm_config.speculative_config):
-                raise RuntimeError(
-                    "Xlite graph mode is not compatible with speculative decoding. Please disable speculative decoding."
-                )
+            if bool(vllm_config.speculative_config) and vllm_config.speculative_config.num_speculative_tokens != 1:
+                raise RuntimeError("Xlite graph mode only support speculative decoding with num_speculative_tokens=1.")
             if vllm_config.parallel_config.pipeline_parallel_size > 1:
                 raise RuntimeError(
                     "Xlite graph mode is not compatible with pipeline parallelism. "
@@ -440,29 +586,10 @@ class XliteGraphConfig:
                 )
             if vllm_config.cache_config.block_size != 128:
                 logger.warning(
-                    "Current cache block size is %s, which may not be optimal or compatible with xlite graph mode. "
-                    "The recommended block size for xlite graph mode is 128.",
+                    "Current cache block size may not be optimal for xlite graph mode. "
+                    "current_block_size=%d, recommended_block_size=128.",
                     vllm_config.cache_config.block_size,
                 )
-
-
-class WeightPrefetchConfig:
-    """
-    Configuration Object for weight_prefetch_config from additional_config
-    """
-
-    prefetch_ratio: dict = {
-        "attn": {
-            "qkv": 1.0,
-            "o": 1.0,
-        },
-        "moe": {"gate_up": 0.8},
-        "mlp": {"gate_up": 1.0, "down": 1.0},
-    }
-
-    def __init__(self, weight_prefetch_config: dict):
-        self.enabled = weight_prefetch_config.get("enabled", False)
-        self.prefetch_ratio = weight_prefetch_config.get("prefetch_ratio", self.prefetch_ratio)
 
 
 class ProfilingChunkConfig:
@@ -473,11 +600,11 @@ class ProfilingChunkConfig:
 
     Usage (online)::
 
-        vllm serve <model> --additional-config '{"profiling_chunk_config": {"enabled": true}}'
+        vllm serve <model> --additional-config '{"scheduler_config": {"profiling_chunk_config": {"enabled": true}}}'
 
     Usage (offline)::
 
-        llm = LLM(model, additional_config={"profiling_chunk_config": {"enabled": true}})
+        llm = LLM(model, additional_config={"scheduler_config": {"profiling_chunk_config": {"enabled": true}}})
     """
 
     def __init__(self, config: dict | None = None):
@@ -493,6 +620,7 @@ class ProfilingChunkConfig:
         # the start to skip online calibration entirely and rely solely on
         # the startup profiling model (avoids per-step sync overhead).
         self.need_timing: bool = config.get("need_timing", self.enabled)
+        self.max_fit_chunk: int = int(config.get("max_fit_chunk", 30))
         self._validate()
 
     def _validate(self):
@@ -500,6 +628,135 @@ class ProfilingChunkConfig:
             raise ValueError(f"profiling_chunk_config.smooth_factor must be in (0, 1], got {self.smooth_factor}")
         if self.min_chunk <= 0:
             raise ValueError(f"profiling_chunk_config.min_chunk must be positive, got {self.min_chunk}")
+        if self.max_fit_chunk <= 5:
+            raise ValueError(f"Recommend to use at least 30 data points for fitting, got {self.max_fit_chunk}")
+
+
+class BatchJobSchedConfig:
+    """Configuration for batch-job-aware scheduler.
+
+    All parameters can be configured via ``additional_config.batch_job_sched_config``
+    in the vLLM config.
+
+    Usage (offline)::
+
+        llm = LLM(model, additional_config={"batch_job_sched_config": {"enabled": true}})
+    """
+
+    def __init__(self, config: dict | None = None):
+        if config is None:
+            config = {}
+
+        # Enable batch-job-aware scheduler
+        self.enabled: bool = config.get("enabled", False)
+
+        # Maximum number of tracked jobs (0 = unlimited)
+        self.max_jobs: int = int(config.get("max_jobs", 20))
+
+        # Extra block margin added to the reserve as safety buffer
+        self.reserve_margin_blocks: int = int(config.get("reserve_margin_blocks", 2))
+
+        # Maximum number of blocks that can be reserved
+        self.reserve_max_blocks: int = int(config.get("reserve_max_blocks", 8))
+
+        # Threshold for prioritizing long vs short decode jobs
+        self.low_available_tokens_threshold: int = int(config.get("low_available_tokens_threshold", 4096))
+
+        # Threshold for identifying short decoding jobs
+        self.short_decode_token_threshold: int = int(config.get("short_decode_token_threshold", 32))
+
+        self._validate()
+
+    def _validate(self) -> None:
+        """Validate the validity of configuration parameters."""
+        if self.max_jobs < 0:
+            raise ValueError(f"batch_job_sched_config.max_jobs must be non-negative, got {self.max_jobs}")
+        if self.reserve_margin_blocks < 0:
+            raise ValueError(
+                f"batch_job_sched_config.reserve_margin_blocks must be non-negative, got {self.reserve_margin_blocks}"
+            )
+        if self.reserve_max_blocks <= 0:
+            raise ValueError(
+                f"batch_job_sched_config.reserve_max_blocks must be positive, got {self.reserve_max_blocks}"
+            )
+        if self.low_available_tokens_threshold <= 0:
+            raise ValueError(
+                f"batch_job_sched_config.low_available_tokens_threshold must be positive, "
+                f"got {self.low_available_tokens_threshold}"
+            )
+        if self.short_decode_token_threshold <= 0:
+            raise ValueError(
+                f"batch_job_sched_config.short_decode_token_threshold must be positive, "
+                f"got {self.short_decode_token_threshold}"
+            )
+
+
+class RejectionSamplerConfig:
+    """Configuration for Block Verify and Entropy Verify in Rejection Sampler.
+
+    Block Verify improves acceptance rate by evaluating all draft tokens
+    as a block using cumulative probability products. Entropy Verify
+    adjusts the acceptance threshold based on the entropy of the target
+    distribution, allowing higher acceptance for high-entropy (uncertain)
+    tokens and stricter rejection for low-entropy (confident) tokens.
+
+    Usage (online)::
+
+        vllm serve <model> --additional-config \
+            '{"rejection_sampler_config": {"enable_block_verify": true, \
+            "enable_entropy_verify": true, "posterior_threshold": 0.95, \
+            "posterior_alpha": 0.4}}'
+
+    Usage (offline)::
+
+        llm = LLM(
+            model,
+            additional_config={
+                "rejection_sampler_config": {
+                    "enable_block_verify": true,
+                    "enable_entropy_verify": true,
+                    "posterior_threshold": 0.95,
+                    "posterior_alpha": 0.4,
+                }
+            },
+        )
+    """
+
+    def __init__(self, config: dict | None = None):
+        if config is None:
+            config = {}
+        self.enable_block_verify: bool = config.get("enable_block_verify", False)
+        self.enable_entropy_verify: bool = config.get("enable_entropy_verify", False)
+        self.posterior_threshold: float = config.get("posterior_threshold", 0.95)
+        self.posterior_alpha: float = config.get("posterior_alpha", 0.4)
+        self._validate()
+
+    def _validate(self):
+        if not isinstance(self.enable_block_verify, bool):
+            raise ValueError(
+                f"rejection_sampler_config.enable_block_verify must be a bool, "
+                f"got {type(self.enable_block_verify).__name__}"
+            )
+        if not isinstance(self.enable_entropy_verify, bool):
+            raise ValueError(
+                f"rejection_sampler_config.enable_entropy_verify must be a bool, "
+                f"got {type(self.enable_entropy_verify).__name__}"
+            )
+        if not isinstance(self.posterior_threshold, (int, float)):
+            raise ValueError(
+                f"rejection_sampler_config.posterior_threshold must be a float, "
+                f"got {type(self.posterior_threshold).__name__}"
+            )
+        if not isinstance(self.posterior_alpha, (int, float)):
+            raise ValueError(
+                f"rejection_sampler_config.posterior_alpha must be a float, got {type(self.posterior_alpha).__name__}"
+            )
+        if not (0 < self.posterior_threshold <= 1):
+            raise ValueError(
+                f"rejection_sampler_config.posterior_threshold must be in (0, 1], got {self.posterior_threshold}"
+            )
+        if self.posterior_alpha < 0:
+            raise ValueError(f"rejection_sampler_config.posterior_alpha must be >= 0, got {self.posterior_alpha}")
 
 
 class EplbConfig:
@@ -510,11 +767,12 @@ class EplbConfig:
     _defaults = {
         "dynamic_eplb": False,
         "expert_map_path": None,
-        "expert_heat_collection_interval": 400,
-        "algorithm_execution_interval": 30,
+        "expert_heat_collection_interval": 600,
+        "algorithm_execution_interval": 50,
         "expert_map_record_path": None,
         "num_redundant_experts": 0,
-        "eplb_policy_type": 1,
+        "eplb_policy_type": 2,
+        "eplb_heat_collection_stage": "all",
     }
 
     def __init__(self, user_config: dict | None = None):
@@ -560,9 +818,114 @@ class EplbConfig:
                 os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1")
                 or os.getenv("EXPERT_MAP_RECORD", "false") == "true"
             ), "The environment variable DYNAMIC_EPLB or EXPERT_MAP_RECORD of the EPLB must be set to true."
+        if self.eplb_heat_collection_stage not in ["all", "prefill", "decode"]:
+            raise ValueError('eplb_heat_collection_stage must be one of ["all", "prefill", "decode"]')
 
         logger.info("Dynamic EPLB is %s", self.config["dynamic_eplb"])
         logger.info("The number of redundant experts is %s", self.config["num_redundant_experts"])
+
+
+class ShortRequestFirstConfig:
+    """Configuration object for ``additional_config["scheduler_config"]["short_request_first_config"]``."""
+
+    _defaults = {
+        "enabled": False,
+        "threshold": 256,
+        "long_max_wait_ms": 0.0,
+    }
+
+    def __init__(self, user_config: dict | None = None):
+        user_config = user_config or {}
+        unknown = set(user_config) - set(self._defaults)
+        if unknown:
+            raise ValueError(f"Unknown short_request_first_config keys: {sorted(unknown)}")
+
+        source = user_config
+
+        self.enabled = bool(source.get("enabled", self._defaults["enabled"]))
+        self.threshold = int(source.get("threshold", self._defaults["threshold"]))
+        self.long_max_wait_ms = float(source.get("long_max_wait_ms", self._defaults["long_max_wait_ms"]))
+        self._validate_config()
+
+    def _validate_config(self):
+        if self.threshold < 0:
+            raise ValueError(f"short_request_first_config.threshold must be a non-negative int; got {self.threshold}")
+        if self.long_max_wait_ms < 0:
+            raise ValueError(f"short_request_first_config.long_max_wait_ms must be >= 0; got {self.long_max_wait_ms}")
+
+
+class SchedulerConfig:
+    """Configuration object for ``additional_config[\"scheduler_config\"]``."""
+
+    def __init__(self, additional_config: dict[str, Any], balance_env_value: Any):
+        scheduler_config = additional_config.get("scheduler_config")
+        if scheduler_config is None:
+            scheduler_config = {}
+        elif not isinstance(scheduler_config, dict):
+            raise ValueError(
+                f"additional_config.scheduler_config must be a dict, got {type(scheduler_config).__name__}."
+            )
+        self.enable_balance_scheduling = self._get_config_value(
+            scheduler_config,
+            additional_config,
+            "enable_balance_scheduling",
+            balance_env_value,
+            "VLLM_ASCEND_BALANCE_SCHEDULING",
+        )
+        self.recompute_scheduler_enable = self._get_config_value(
+            scheduler_config,
+            additional_config,
+            "recompute_scheduler_enable",
+            False,
+        )
+        self.short_request_first_config = ShortRequestFirstConfig(
+            self._get_config_value(scheduler_config, additional_config, "short_request_first_config", {})
+        )
+        self.profiling_chunk_config = ProfilingChunkConfig(
+            self._get_config_value(scheduler_config, additional_config, "profiling_chunk_config", {})
+        )
+        self.batch_job_sched_config = BatchJobSchedConfig(
+            self._get_config_value(scheduler_config, additional_config, "batch_job_sched_config", {})
+        )
+
+    @staticmethod
+    def _get_config_value(
+        scheduler_config: dict[str, Any],
+        additional_config: dict[str, Any],
+        config_key: str,
+        default: Any,
+        env_key: str | None = None,
+    ) -> Any:
+        if config_key in scheduler_config:
+            if config_key in additional_config:
+                logger.warning_once(
+                    "additional_config.%s is deprecated and ignored because "
+                    "additional_config.scheduler_config.%s is set.",
+                    config_key,
+                    config_key,
+                )
+            return scheduler_config[config_key]
+
+        if config_key in additional_config:
+            logger.warning_once(
+                "additional_config.%s is deprecated; use additional_config.scheduler_config.%s instead.",
+                config_key,
+                config_key,
+            )
+            return additional_config[config_key]
+
+        if env_key is not None and env_key in os.environ:
+            logger.info_once(
+                "AscendConfig.scheduler_config.%s falls back to environment variable %s with value %s. "
+                "Please use additional_config.scheduler_config.%s instead, because %s will be removed in the "
+                "next release.",
+                config_key,
+                env_key,
+                default,
+                config_key,
+                env_key,
+            )
+        return default
 
 
 _ASCEND_CONFIG: AscendConfig | None = None
@@ -585,19 +948,27 @@ def init_ascend_config(vllm_config):
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
     refresh = additional_config.get("refresh", False) if additional_config else False
     global _ASCEND_CONFIG
-    if _ASCEND_CONFIG is not None and not refresh and _is_ascend_config_initialized(_ASCEND_CONFIG):
+    if (
+        _ASCEND_CONFIG is not None
+        and not refresh
+        and _is_ascend_config_initialized(_ASCEND_CONFIG)
+        and getattr(_ASCEND_CONFIG, "vllm_config", None) is vllm_config
+    ):
         return _ASCEND_CONFIG
     new_config = AscendConfig(vllm_config)
     if _is_ascend_config_initialized(new_config):
         _ASCEND_CONFIG = new_config
     else:
-        logger.warning("Ascend config instance is not fully initialized; skip singleton cache update.")
+        logger.warning("Ascend config instance is not fully initialized. action: skip singleton cache update. ")
     return new_config
 
 
 def clear_ascend_config():
     global _ASCEND_CONFIG
     _ASCEND_CONFIG = None
+    from vllm_ascend.utils import clear_enable_sp
+
+    clear_enable_sp()
 
 
 def get_ascend_config():

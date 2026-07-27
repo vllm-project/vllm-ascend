@@ -23,6 +23,7 @@
 
 
 import torch
+import torch_npu
 from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEAllGatherCombineMetadata, MoETokenDispatchInput
@@ -59,14 +60,21 @@ class TokenDispatcherWithAllGather310(TokenDispatcherWithAllGather):
             first_expert_idx = 0
             last_expert_idx = self.num_experts_local
 
-        sorted_hidden_states, expanded_row_idx, expert_tokens = self.moe_init_routing(
+        assert hidden_states.shape[-1] % 16 == 0, (
+            f"The last dim of hidden_states {hidden_states.shape[-1]} should be aligned with 16."
+        )
+        sorted_hidden_states, expanded_row_idx, expert_tokens, _ = torch_npu.npu_moe_init_routing_v2(
             hidden_states,
             topk_ids,
             active_num=num_tokens * self.top_k,
+            expert_num=self.num_experts_local,
+            drop_pad_mode=0,
             active_expert_range=[first_expert_idx, last_expert_idx],
+            quant_mode=-1,
+            row_idx_type=0,
         )
         expert_tokens = expert_tokens.to(torch.int64)
-        group_list_type = 1  # `count` mode
+        group_list_type = 0  # `cumsum` mode
 
         return MoETokenDispatchOutput(
             hidden_states=sorted_hidden_states,
@@ -78,45 +86,3 @@ class TokenDispatcherWithAllGather310(TokenDispatcherWithAllGather):
                 restore_shape=restore_shape,
             ),
         )
-
-    def moe_init_routing(self, x, expert_idx, active_num, active_expert_range):
-        """
-        Initialize routing for Mixture of Experts (MoE) model by organizing tokens
-        according to their assigned experts and preparing data structures for
-        efficient expert computation.
-
-        Args:
-            x (torch.Tensor): Input tensor containing token representations
-            expert_idx (torch.Tensor): Tensor containing expert indices for each token
-            active_num (int): Number of active experts or None
-            active_expert_range (tuple): Range (start, end) of active experts
-
-        Returns:
-            tuple: A tuple containing:
-                   - expanded_x: Subset of input tensor for active experts
-                   - expanded_row_idx: Mapping indices for token positions
-                   - expert_tokens_count: Count of tokens assigned to each expert
-        """
-        MAX_INT32 = torch.iinfo(torch.int32).max
-        expert_start, expert_end = active_expert_range
-        num_rows = x.shape[0]
-        k = expert_idx.shape[-1]
-        expert_idx_flat = expert_idx.flatten()
-        mask = (expert_idx_flat >= expert_start) & (expert_idx_flat < expert_end)
-        actual_expert_total_num = mask.sum().item()
-        expert_idx_flat = torch.where(
-            ~mask, torch.full_like(expert_idx_flat, MAX_INT32, dtype=torch.int32), expert_idx_flat
-        )
-        sorted_idx = torch.argsort(expert_idx_flat, stable=True)
-        sorted_expert_idx = expert_idx_flat[sorted_idx]
-        expanded_row_idx = torch.full((num_rows * k,), -1, dtype=torch.int32, device=expert_idx.device)
-        expanded_row_idx[sorted_idx[:actual_expert_total_num]] = torch.arange(
-            actual_expert_total_num, dtype=torch.int32, device=expert_idx.device
-        )
-        expert_tokens_count = torch.bincount(
-            sorted_expert_idx[:actual_expert_total_num] - expert_start, minlength=expert_end - expert_start
-        )
-        active_num = min(active_num or actual_expert_total_num, actual_expert_total_num)
-        expanded_x = x[sorted_idx[:active_num] // k]
-
-        return expanded_x, expanded_row_idx, expert_tokens_count
