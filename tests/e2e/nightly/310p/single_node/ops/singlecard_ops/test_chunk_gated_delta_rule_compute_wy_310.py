@@ -84,6 +84,11 @@ def test_compute_wy_matches_torch_reference_qwen35_heads():
     ref = chunk_mod._compute_kernel_inputs_from_torch_wy(q, k, v, g, beta, CHUNK_SIZE)
     out = torch.ops._C_ascend.chunk_gated_delta_rule_compute_wy(q, k, v, g, beta, CHUNK_SIZE)
     _assert_compute_wy_close(out, ref)
+    expected = tuple(tensor.cpu() for tensor in out)
+    for _ in range(20):
+        repeated = torch.ops._C_ascend.chunk_gated_delta_rule_compute_wy(q, k, v, g, beta, CHUNK_SIZE)
+        for actual, expected_tensor in zip(repeated, expected):
+            torch.testing.assert_close(actual.cpu(), expected_tensor, rtol=0, atol=0)
     print("✓ test_compute_wy_matches_torch_reference_qwen35_heads passed")
 
 

@@ -70,6 +70,7 @@ class WyCubeGemm {
   __aicore__ inline void GemmATransB(LocalTensor<float> cUb, const LocalTensor<half> aUb, const LocalTensor<half> bUb,
                                      uint32_t kDim, uint32_t aLda, uint32_t bLda)
   {
+    WaitVToMte3();
     CopyHalfRowsToGm(aGm_, aUb, WY_CUBE_CHUNK, kDim, aLda);
     CopyHalfRowsToGm(bGm_, bUb, WY_CUBE_CHUNK, kDim, bLda);
     PipeBarrier<PIPE_ALL>();
@@ -92,6 +93,7 @@ class WyCubeGemm {
   {
     Cast(halfScratch, pUb, RoundMode::CAST_NONE, WY_CUBE_CHUNK * WY_CUBE_CHUNK);
     PipeBarrier<PIPE_V>();
+    WaitVToMte3();
     CopyHalfRowsToGm(aGm_, halfScratch, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     CopyHalfRowsToGm(bGm_, halfScratch, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     PipeBarrier<PIPE_ALL>();
@@ -115,6 +117,7 @@ class WyCubeGemm {
   {
     Cast(halfScratch, pUb, RoundMode::CAST_NONE, WY_CUBE_CHUNK * WY_CUBE_CHUNK);
     PipeBarrier<PIPE_V>();
+    WaitVToMte3();
     CopyHalfRowsToGm(aGm_, halfScratch, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
     SetFlag<HardEvent::MTE3_V>(evt);
@@ -128,6 +131,7 @@ class WyCubeGemm {
                                       LocalTensor<float> floatScratch, uint32_t nDim, uint32_t rLda, bool useU)
   {
     CastFloatRowsToHalfContiguous(halfScratch, rUb, WY_CUBE_CHUNK, nDim, rLda);
+    WaitVToMte3();
     CopyHalfRowsToGm(bGm_, halfScratch, WY_CUBE_CHUNK, nDim, nDim);
     PipeBarrier<PIPE_ALL>();
 
@@ -163,6 +167,13 @@ class WyCubeGemm {
   }
 
  private:
+  __aicore__ inline void WaitVToMte3() const
+  {
+    event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
+    SetFlag<HardEvent::V_MTE3>(evt);
+    WaitFlag<HardEvent::V_MTE3>(evt);
+  }
+
   __aicore__ inline void WaitFixpipeToMte2() const
   {
     event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::FIX_MTE2));
