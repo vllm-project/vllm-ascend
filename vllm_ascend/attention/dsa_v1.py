@@ -10,6 +10,7 @@ import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -1442,6 +1443,15 @@ class AscendDSAImpl(DSAAttentionImpl):
             getattr(ascend_config, "enable_dsv4_dsa_limit_core", False)
             and getattr(getattr(ascend_config, "ascend_compilation_config", None), "enable_npugraph_ex", False)
         )
+        if self.enable_dsv4_dsa_limit_core:
+            logger.info_once(
+                "DSV4 DSA A3 limit-core enabled: compressor_stream=%d AIC/%d AIV, "
+                "indexer/main branch=%d AIC/%d AIV.",
+                DSV4_DSA_A3_COMPRESSOR_AIC_NUM,
+                DSV4_DSA_A3_COMPRESSOR_AIV_NUM,
+                DSV4_DSA_A3_INDEXER_AIC_NUM,
+                DSV4_DSA_A3_INDEXER_AIV_NUM,
+            )
         self.vllm_config = get_current_vllm_config()
 
         # indexer param

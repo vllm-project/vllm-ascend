@@ -1082,8 +1082,8 @@ def _get_limit_core_scope():
         scope = getattr(module, "scope", None)
         limit_core_num = getattr(scope, "limit_core_num", None)
         if limit_core_num is not None:
-            return limit_core_num
-    return None
+            return module_name, limit_core_num
+    return None, None
 
 
 def limit_core_num(enabled: bool, aic_num: int, aiv_num: int):
@@ -1092,12 +1092,13 @@ def limit_core_num(enabled: bool, aic_num: int, aiv_num: int):
     """
     if not enabled:
         return nullcontext()
-    limit_core_scope = _get_limit_core_scope()
+    module_name, limit_core_scope = _get_limit_core_scope()
     if limit_core_scope is None:
         raise RuntimeError(
             "enable_dsv4_dsa_limit_core requires npugraph_ex.scope.limit_core_num "
             "or torchair.scope.limit_core_num, but neither is available."
         )
+    logger.info_once("Ascend limit-core uses %s.scope.limit_core_num.", module_name)
     return limit_core_scope(aic_num, aiv_num)
 
 
