@@ -174,6 +174,27 @@ class CompressAttentionManager(FullAttentionManager):
             req_blocks.extend(new_blocks)
             return new_blocks
 
+    def allocate_external_computed_blocks(
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        # Compress-MLA: scale tokens by 1/compress_ratio, matching
+        # allocate_new_blocks / allocate_new_computed_blocks. Without this
+        # override the base class allocates uncompressed block_ids for the PD
+        # remote-KV path (e.g. 4 blocks for a ~104-token prompt at
+        # compress_ratio=4), which overflow the (correctly compressed)
+        # block_table row and crash the D node with
+        # "could not broadcast (4,) into (2,)".
+        num_local_computed_tokens //= self.compress_ratio
+        num_external_computed_tokens //= self.compress_ratio
+        super().allocate_external_computed_blocks(
+            request_id,
+            num_local_computed_tokens,
+            num_external_computed_tokens,
+        )
+
     def cache_blocks(
         self,
         request: Request,
