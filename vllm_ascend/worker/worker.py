@@ -600,7 +600,7 @@ class NPUWorker(WorkerBase):
             if keep_device_kv_cache:
                 needed_dram_size_bytes = self.available_kv_cache_memory_bytes
             else:
-                kv_cache_spec = getattr(self, "kv_cache_spec", None) or self.get_kv_cache_spec(),
+                kv_cache_spec = getattr(self, "kv_cache_spec", None) or self.get_kv_cache_spec()
                 host_device_memory_usage_ratio = get_host_device_memory_usage_ratio(kv_cache_spec)
                 needed_dram_size_bytes = host_device_memory_usage_ratio * self.available_kv_cache_memory_bytes
             if needed_dram_size_bytes > sparse_kv_offload_config.dram_size_per_dp_GB * 1024 * 1024 * 1024:
