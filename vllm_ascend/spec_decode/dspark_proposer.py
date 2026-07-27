@@ -17,6 +17,7 @@ from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.llm_base_proposer import greedy_sample
 from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample
 
+
 class AscendDSparkProposer(AscendDflashProposer):
     """DeepSeek V4 DSpark block proposer.
 
@@ -67,9 +68,9 @@ class AscendDSparkProposer(AscendDflashProposer):
         self.positions = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
         self._slot_mapping_buffer = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
         self._request_slots_buffer = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
-        self._dspark_window_offsets = torch.arange(self._dspark_window_size, dtype=torch.int64, device=self.device).view(
-            1, -1
-        )
+        self._dspark_window_offsets = torch.arange(
+            self._dspark_window_size, dtype=torch.int64, device=self.device
+        ).view(1, -1)
         window_shape = (self.max_graph_batch_size, self._dspark_window_size)
         self._dspark_context_cache_indices_buffer = torch.zeros(window_shape, dtype=torch.int64, device=self.device)
         self._dspark_context_cache_valid_buffer = torch.zeros(window_shape, dtype=torch.bool, device=self.device)
@@ -407,6 +408,8 @@ class AscendDSparkProposer(AscendDflashProposer):
                 self._dspark_req_id_to_slot[req_id] = slot
                 self._dspark_slots_to_reset.append(slot)
             slots.append(self._dspark_req_id_to_slot[req_id])
+        if len(slots) != len(set(slots)):
+            raise RuntimeError("Duplicate DSpark request cache slots in the active batch")
         return slots
 
     def _copy_dspark_block_table(
@@ -693,11 +696,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         for req_idx in range(num_reqs):
             generator_idx = runner_idx_mapping_cpu[req_idx] if runner_idx_mapping_cpu is not None else req_idx
             generator = sampling_metadata.generators.get(generator_idx)
-            seed_values.append(
-                int(generator.initial_seed())
-                if generator is not None
-                else base_seed + req_idx
-            )
+            seed_values.append(int(generator.initial_seed()) if generator is not None else base_seed + req_idx)
         seeds = self._dspark_sampling_seed_buffer[:num_reqs]
         seed_values_cpu = torch.tensor(seed_values, dtype=torch.int64, device="cpu")
         seeds.copy_(seed_values_cpu)
