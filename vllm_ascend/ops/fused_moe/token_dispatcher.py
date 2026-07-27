@@ -398,10 +398,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             first_expert_idx = 0
             last_expert_idx = self.num_experts_local
             global_num_experts = self.num_experts_local
-        sorted_hidden_states, expanded_row_idx, expert_tokens, dynamic_scale = DeviceOperator.npu_moe_init_routing(
-            hidden_states,
-            topk_ids,
-            scale=dynamic_scale,
+        routing_kwargs = dict(
             active_num=num_tokens * self.top_k,
             expert_num=global_num_experts,
             expert_tokens_num_type=1,
@@ -410,6 +407,32 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             quant_mode=quant_mode,
             act_quant_type=act_quant_type,
         )
+        route_mxfp8_activation = (
+            quant_type == QuantType.W4A8MXFP
+            and dynamic_scale is not None
+            and hidden_states.dtype == torch.float8_e4m3fn
+        )
+        if route_mxfp8_activation:
+            sorted_hidden_states, expanded_row_idx, expert_tokens, _ = DeviceOperator.npu_moe_init_routing(
+                hidden_states.view(torch.bfloat16),
+                topk_ids,
+                **{**routing_kwargs, "scale": None, "quant_mode": -1, "act_quant_type": None},
+            )
+            sorted_hidden_states = sorted_hidden_states.view(hidden_states.dtype)
+            scale_shape = dynamic_scale.shape[1:]
+            routed_scale, _, _, _ = DeviceOperator.npu_moe_init_routing(
+                dynamic_scale.reshape(dynamic_scale.shape[0], -1).to(torch.bfloat16),
+                topk_ids,
+                **{**routing_kwargs, "scale": None, "quant_mode": -1, "act_quant_type": None},
+            )
+            dynamic_scale = routed_scale.to(dynamic_scale.dtype).view(-1, *scale_shape)
+        else:
+            sorted_hidden_states, expanded_row_idx, expert_tokens, dynamic_scale = DeviceOperator.npu_moe_init_routing(
+                hidden_states,
+                topk_ids,
+                scale=dynamic_scale,
+                **routing_kwargs,
+            )
         expert_tokens = expert_tokens.to(torch.int64)
         group_list_type = 1  # `count` mode
 
