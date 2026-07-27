@@ -1002,17 +1002,12 @@ def causal_conv1d_prefill_qkv_pack_npu(
     state_dtype = conv_state_q.dtype
     input_dtypes = (q.dtype, k.dtype, v.dtype)
     supports_state_dtype = all(
-        input_dtype == state_dtype
-        or (
-            state_dtype == torch.float32
-            and input_dtype in (torch.float16, torch.bfloat16)
-        )
+        input_dtype == state_dtype or (state_dtype == torch.float32 and input_dtype in (torch.float16, torch.bfloat16))
         for input_dtype in input_dtypes
     )
     if not supports_state_dtype:
         raise ValueError(
-            "fused qkv prefill conv supports matching input/state dtypes or "
-            "FP16/BF16 inputs with FP32 conv states"
+            "fused qkv prefill conv supports matching input/state dtypes or FP16/BF16 inputs with FP32 conv states"
         )
     if conv_state_q.dim() != 3 or conv_state_q.shape[1] < 3 or conv_state_q.shape[2] != dim:
         raise ValueError("conv_state layout must be (num_cache_lines, >=3, dim)")
@@ -1122,6 +1117,7 @@ def causal_conv1d_prefill_qkv_pack_npu(
         BLOCK_N=block_n,
     )
     return q_out, k_out, v_out
+
 
 @triton.jit(
     do_not_specialize=[
