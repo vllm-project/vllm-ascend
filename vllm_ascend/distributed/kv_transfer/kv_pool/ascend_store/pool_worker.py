@@ -62,9 +62,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     _circular_shift,
     record_failed_blocks,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_config import (
-    get_layer_load_start_block,
-    get_layerwise_config,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+    build_layerwise_cache_layout,
 )
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
@@ -370,11 +369,11 @@ class KVPoolWorker:
         self.independent_layers: list[int] = []
         self.prefetch_layer_map: dict[int, int] = {}
         if self.use_gva_layerwise:
-            layerwise_config = get_layerwise_config(self.num_layers, self._extra_config)
-            self.layerwise_offload = layerwise_config.has_layer_reuse
-            self.independent_layers = layerwise_config.independent_layers
-            self.prefetch_layer_map = layerwise_config.prefetch_layer_map
-            self.num_prefetch_layers = layerwise_config.num_prefetch_layers
+            cache_layout = build_layerwise_cache_layout(self.num_layers, self._extra_config)
+            self.layerwise_offload = cache_layout.has_layer_reuse
+            self.independent_layers = cache_layout.independent_layers
+            self.prefetch_layer_map = cache_layout.prefetch_layer_map
+            self.num_prefetch_layers = cache_layout.num_prefetch_layers
         else:
             self.num_prefetch_layers = int(self._extra_config.get("layerwise_prefetch_layers", 1))
         self.sync_save_events: list[torch.npu.Event] | None = None
@@ -1032,12 +1031,10 @@ class KVPoolWorker:
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
             cached_tokens = request.load_spec.kvpool_cached_tokens
-            load_start_block = get_layer_load_start_block(
-                layer_id,
-                self.independent_layers,
-                request.load_spec.vllm_cached_tokens,
-                block_size,
-                self.layerwise_offload,
+            load_start_block = (
+                request.load_spec.vllm_cached_tokens // block_size
+                if not self.layerwise_offload or layer_id in self.independent_layers
+                else 0
             )
             cached_full_blocks = cached_tokens // block_size
             full_blocks = min(cached_full_blocks, len(request.block_hashes))

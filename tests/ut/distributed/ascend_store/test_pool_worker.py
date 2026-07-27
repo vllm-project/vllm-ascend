@@ -1399,6 +1399,31 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker._process_load_for_layer_batch([req], 0)
         self.assertEqual(len(worker.layer_load_tasks[0]), 0)
 
+    def test_reused_layer_loads_full_cached_prefix(self):
+        worker = self._make_worker()
+        worker.layerwise_offload = True
+        worker.independent_layers = [0]
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=["h0", "h1"],
+            load_spec=LoadSpec(
+                vllm_cached_tokens=16,
+                kvpool_cached_tokens=32,
+                can_load=True,
+                token_len=32,
+            ),
+        )
+
+        worker._process_load_for_layer_batch([request], 0)
+        worker._process_load_for_layer_batch([request], 1)
+
+        independent_range = worker.layer_load_tasks[0][0].block_ranges[0]
+        reused_range = worker.layer_load_tasks[1][0].block_ranges[0]
+        self.assertEqual((independent_range.start_block, independent_range.end_block), (1, 2))
+        self.assertEqual((reused_range.start_block, reused_range.end_block), (0, 2))
+
 
 class TestKVPoolWorkerTpMismatch(unittest.TestCase):
     """Tests for TP-asymmetric prefill/decode strided KV transfer.

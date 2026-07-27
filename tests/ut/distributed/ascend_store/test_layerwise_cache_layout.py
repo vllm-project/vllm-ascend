@@ -1,10 +1,13 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 from vllm.v1.kv_cache_interface import KVCacheTensor
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
+    build_layerwise_cache_layout,
+    get_gva_layerwise_config,
 )
 
 
@@ -56,3 +59,90 @@ def test_base_layers_are_merged_into_shared_slots():
         ["model.layers.1.self_attn", "model.layers.3.self_attn"],
         ["model.layers.2.self_attn", "model.layers.4.self_attn"],
     ]
+
+
+def test_default_layout_keeps_one_buffer_per_layer():
+    layout = build_layerwise_cache_layout(27)
+
+    assert layout.has_layer_reuse is False
+    assert layout.num_shared_buffers == 27
+    assert layout.num_prefetch_layers == 8
+    assert layout.independent_layers == [0, 26]
+    assert len(layout.storage_indices) == 27
+
+
+def test_reuse_layout_matches_round_robin_storage_slots():
+    layout = build_layerwise_cache_layout(27, {"layerwise_num_shared_buffers": 6})
+
+    assert layout.has_layer_reuse is True
+    assert layout.prefetch_layer_map[7] == 1
+    assert layout.prefetch_layer_map[8] == 2
+    assert layout.storage_indices[:2] == [[0], [26]]
+    assert layout.storage_indices[2] == [1, 7, 13, 19, 25]
+    assert sorted(layer for slot in layout.storage_indices for layer in slot) == list(range(27))
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("3,5,10", [3, 5, 10]),
+        ("-1", [26]),
+        ([1, 4], [1, 4]),
+        ("all", list(range(27))),
+    ],
+)
+def test_independent_layer_parsing(value, expected):
+    layout = build_layerwise_cache_layout(27, {"layerwise_independent_layers": value})
+
+    assert layout.independent_layers == expected
+
+
+def test_invalid_layout_config_is_rejected():
+    with pytest.raises(TypeError):
+        build_layerwise_cache_layout(27, {"layerwise_num_shared_buffers": True})
+    with pytest.raises(ValueError):
+        build_layerwise_cache_layout(27, {"layerwise_num_shared_buffers": 0})
+    with pytest.raises(ValueError):
+        build_layerwise_cache_layout(27, {"layerwise_independent_layers": 27})
+
+
+def test_prefetch_count_can_be_overridden():
+    layout = build_layerwise_cache_layout(
+        27,
+        {
+            "layerwise_num_shared_buffers": 6,
+            "layerwise_prefetch_layers": 3,
+        },
+    )
+
+    assert layout.num_prefetch_layers == 3
+
+
+def test_gva_config_is_scoped_to_memcache_layerwise_connector():
+    ascend_store_config = {
+        "backend": "memcache",
+        "use_layerwise": True,
+        "layerwise_num_shared_buffers": 2,
+    }
+    multi_config = SimpleNamespace(
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={
+            "connectors": [
+                {
+                    "kv_connector": "OtherConnector",
+                    "kv_connector_extra_config": {"use_layerwise": True},
+                },
+                {
+                    "kv_connector": "AscendStoreConnector",
+                    "kv_connector_extra_config": ascend_store_config,
+                },
+            ]
+        },
+    )
+    unsupported = SimpleNamespace(
+        kv_connector="AscendStoreConnector",
+        kv_connector_extra_config={"backend": "mooncake", "use_layerwise": True},
+    )
+
+    assert get_gva_layerwise_config(multi_config) is ascend_store_config
+    assert get_gva_layerwise_config(unsupported) is None
