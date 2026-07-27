@@ -50,6 +50,7 @@ _REPRO_CASES = [
     ([2, 192], 0.0, "small_192_misaligned"),
     ([4, 192], 0.0, "small_192_misaligned_4rows"),
     ([8, 384], 0.0, "small_384_aligned"),
+    ([1, 256], 0.0, "single_row_256_aligned"),
 ]
 
 
