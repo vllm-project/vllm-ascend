@@ -98,7 +98,7 @@ def _mock_client_socket(mock_socket, recv_return=None, recv_side_effect=None, ca
 
 def test_elastic_client_register():
     sources = ["127.0.0.1:12345"]
-    sent_payloads = []
+    sent_payloads: list[dict] = []
 
     with patch("socket.socket") as mock_socket:
         mock_socket_instance = _mock_client_socket(

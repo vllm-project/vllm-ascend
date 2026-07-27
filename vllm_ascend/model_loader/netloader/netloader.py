@@ -202,12 +202,8 @@ class ModelNetLoaderElastic(BaseModelLoader):
             "Waiting for all target netloader ranks before loading draft model (int8_cache=%s)",
             int8_cache,
         )
-        barrier_start = time.perf_counter()
         torch.distributed.barrier()
-        logger.info(
-            "Target netloader barrier before draft model time: %s",
-            time.perf_counter() - barrier_start,
-        )
+        logger.info("Target netloader barrier before draft model done")
 
     @staticmethod
     def _get_static_forward_context(vllm_config: VllmConfig):
@@ -339,14 +335,12 @@ class ModelNetLoaderElastic(BaseModelLoader):
                     model = initialize_model(vllm_config=vllm_config, model_config=model_config, prefix=prefix)
 
                 if load_int8_cache == "no":
-                    start_client_process_weights = time.perf_counter()
                     with pre_transfer_weight_processing(model):
                         process_weights_after_loading(model, model_config, torch.device(device_config.device))
                     synchronize_npu(device_config.device_type)
                     manifest_count = cache_processed_layout_transfer_manifest(model)
                     logger.info(
-                        "Netloader client pre-recv process_weights time: %s, rank: %s, manifest=%s",
-                        time.perf_counter() - start_client_process_weights,
+                        "Netloader client pre-recv process_weights done, rank: %s, manifest=%s",
                         device_id,
                         manifest_count,
                     )
@@ -382,8 +376,11 @@ class ModelNetLoaderElastic(BaseModelLoader):
                     group_name="netloader_draft" if is_draft else "netloader",
                     int8_cache=load_int8_cache,
                 )
-                end_elastic_load = time.perf_counter()
-                logger.info("Elastic load time: %s, rank: %s", end_elastic_load - start_elastic_load, device_id)
+                logger.info(
+                    "Elastic load time: %s, rank: %s",
+                    time.perf_counter() - start_elastic_load,
+                    device_id,
+                )
                 need_process_weights_after_loading = load_int8_cache != "no"
 
                 if model is None:
@@ -402,15 +399,9 @@ class ModelNetLoaderElastic(BaseModelLoader):
                     if device_config.device_type == "npu":
                         logger.info("Empty NPU cache")
                         torch.npu.empty_cache()
-                        for _ in range(3):
-                            gc.collect()
-                            torch.npu.empty_cache()
                     elif device_config.device_type == "cuda":
                         logger.info("Empty CUDA cache")
                         torch.cuda.empty_cache()
-                        for _ in range(3):
-                            gc.collect()
-                            torch.cuda.empty_cache()
 
                     if not is_draft:
                         ModelNetLoaderElastic._target_elastic_fallback = True
@@ -422,14 +413,12 @@ class ModelNetLoaderElastic(BaseModelLoader):
                     ModelNetLoaderElastic._target_elastic_fallback = False
 
         if load_int8_cache == "no" and need_process_weights_after_loading:
-            start_seed_process_weights = time.perf_counter()
             process_weights_after_loading(model, model_config, torch.device(device_config.device))
             synchronize_npu(device_config.device_type)
             manifest_count = cache_processed_layout_transfer_manifest(model)
             need_process_weights_after_loading = False
             logger.info(
-                "Netloader seed process_weights time: %s, rank: %s, manifest=%s",
-                time.perf_counter() - start_seed_process_weights,
+                "Netloader seed process_weights done, rank: %s, manifest=%s",
                 device_id,
                 manifest_count,
             )
@@ -483,7 +472,6 @@ class ModelNetLoaderElastic(BaseModelLoader):
                         logger.error("Unknown error: %s", e)
 
                 try:
-                    start_elastic_server = time.perf_counter()
                     elastic_server = ElasticServer(
                         driver_ip,
                         listen_port,
@@ -496,22 +484,10 @@ class ModelNetLoaderElastic(BaseModelLoader):
                         self.int8_cache_name,
                         group_name=group_name,
                     )
-                    server_init_time = time.perf_counter() - start_elastic_server
                     if load_int8_cache == "no":
-                        start_manifest_registration = time.perf_counter()
                         elastic_server.register_transfer_manifest(model)
-                        logger.info(
-                            "Netloader transfer manifest registration time: %s, rank: %s",
-                            time.perf_counter() - start_manifest_registration,
-                            device_id,
-                        )
-                    start_handler = time.perf_counter()
                     elastic_server.start()
-                    logger.info(
-                        "Elastic server start time: %s, rank: %s",
-                        server_init_time + (time.perf_counter() - start_handler),
-                        device_id,
-                    )
+                    logger.info("Elastic server started, rank: %s, group: %s", device_id, group_name)
                     if is_draft:
                         self._draft_elastic_server = elastic_server
                     else:
@@ -522,14 +498,9 @@ class ModelNetLoaderElastic(BaseModelLoader):
             logger.info("Skip to start Netloader server")
 
         if need_process_weights_after_loading:
-            start_final_process_weights = time.perf_counter()
             process_weights_after_loading(model, model_config, torch.device(device_config.device))
             synchronize_npu(device_config.device_type)
-            logger.info(
-                "Netloader final process_weights time: %s, rank: %s",
-                time.perf_counter() - start_final_process_weights,
-                device_id,
-            )
+            logger.info("Netloader final process_weights done, rank: %s", device_id)
 
         if not is_draft:
             self._sync_target_netloader_before_draft(vllm_config, self.int8_cache)

@@ -17,6 +17,7 @@
 import json
 from functools import wraps
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -558,7 +559,7 @@ def test_load_draft_model_port_offset_and_group_name(
 ):
     dummy_model = _patch_loader_common(monkeypatch)
     captured = {}
-    elastic_server_instances = []
+    elastic_server_instances: list[Any] = []
 
     def capture_elastic_load(**kwargs):
         captured.update(kwargs)

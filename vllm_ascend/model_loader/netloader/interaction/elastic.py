@@ -43,14 +43,24 @@ def _recv_json_message(sock: socket.socket, max_size: int = 64 * 1024 * 1024) ->
         buffer.extend(chunk)
         if len(buffer) > max_size:
             raise RuntimeError(f"JSON message exceeds max size {max_size} bytes")
-        try:
-            payload = json.loads(buffer.decode("utf-8"))
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(payload, dict):
-            raise RuntimeError(f"Expected JSON object, got {type(payload)}")
-        return payload
-    raise RuntimeError("Incomplete JSON message received from server")
+        if buffer.rstrip().endswith((b"}", b"]")):
+            try:
+                payload = json.loads(buffer.decode("utf-8"))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                raise RuntimeError(f"Expected JSON object, got {type(payload)}")
+            return payload
+
+    if not buffer:
+        raise RuntimeError("Incomplete JSON message received from server")
+    try:
+        payload = json.loads(buffer.decode("utf-8"))
+    except json.JSONDecodeError as e:
+        raise RuntimeError("Incomplete JSON message received from server") from e
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Expected JSON object, got {type(payload)}")
+    return payload
 
 
 def _parse_transfer_shape_manifest(raw_manifest: object) -> dict[str, tuple[int, ...]] | None:
@@ -237,7 +247,14 @@ class ElasticClient:
         except Exception as e:
             raise RuntimeError(f"Receive data from server fails, detail: {e}")
 
-        logger.info("Receive ack: %s", ack)
+        content = ack.get("content") if isinstance(ack, dict) else None
+        transfer_shapes = content.get("transfer_shapes") if isinstance(content, dict) else None
+        logger.info(
+            "Receive ack: label=%s name=%s transfer_shape_count=%s",
+            ack.get("label") if isinstance(ack, dict) else None,
+            content.get("name") if isinstance(content, dict) else None,
+            len(transfer_shapes) if isinstance(transfer_shapes, dict) else 0,
+        )
 
         if (
             "label" in ack

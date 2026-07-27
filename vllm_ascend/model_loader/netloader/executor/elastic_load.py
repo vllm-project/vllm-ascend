@@ -14,6 +14,7 @@
 # limitations under the License.
 #
 
+import math
 import time
 from typing import Any
 
@@ -29,12 +30,8 @@ from .netloader_pg import destroy_stateless_process_group, stateless_init_proces
 _NETLOADER_TRANSFER_ITEMS_ATTR = "_netloader_processed_layout_transfer_items"
 
 
-def _is_tensor_on_transfer_device(tensor: torch.Tensor) -> bool:
-    return tensor.device.type == "npu"
-
-
 def _is_transferable_tensor(tensor: torch.Tensor) -> bool:
-    return not tensor.is_meta and tensor.numel() > 0 and _is_tensor_on_transfer_device(tensor)
+    return not tensor.is_meta and tensor.numel() > 0 and tensor.device.type == "npu"
 
 
 def _iter_tensors_in_value(prefix: str, value: Any, visited_object_ids: set[int], scan_objects: bool = False):
@@ -154,13 +151,6 @@ def build_transfer_shape_manifest(
     return {name: tuple(tensor.shape) for name, tensor in transfer_items}
 
 
-def _numel_from_shape(shape: tuple[int, ...]) -> int:
-    numel = 1
-    for dim in shape:
-        numel *= dim
-    return numel
-
-
 def reshape_tensor_to_manifest_shape(
     name: str,
     tensor: torch.Tensor,
@@ -170,7 +160,7 @@ def reshape_tensor_to_manifest_shape(
     if manifest_shape is None or tuple(tensor.shape) == manifest_shape:
         return True
 
-    if tensor.numel() != _numel_from_shape(manifest_shape):
+    if tensor.numel() != math.prod(manifest_shape):
         logger.error(
             "Weight shape mismatch for %s, local shape %s cannot view as manifest shape %s",
             name,
@@ -219,6 +209,37 @@ def reshape_transfer_items_to_manifest(
     return True
 
 
+def validate_transfer_items_numel_against_manifest(
+    transfer_items: list[tuple[str, torch.Tensor]],
+    transfer_shape_manifest: dict[str, tuple[int, ...]] | None,
+) -> bool:
+    """Fail-fast before HCCL: local tensors must match seed manifest numel.
+
+    Shape/view may differ; mismatched numel would size the recv buffer wrong and
+    can hang or corrupt during transfer. Post-recv reshape still handles view align.
+    """
+    if not transfer_shape_manifest:
+        return True
+
+    for name, tensor in transfer_items:
+        manifest_shape = transfer_shape_manifest.get(name)
+        if manifest_shape is None:
+            logger.error("Missing manifest shape for transfer tensor %s before HCCL", name)
+            return False
+        manifest_numel = math.prod(manifest_shape)
+        if tensor.numel() != manifest_numel:
+            logger.error(
+                "Weight numel mismatch before HCCL for %s: local shape %s (numel=%s) vs manifest shape %s (numel=%s)",
+                name,
+                tuple(tensor.shape),
+                tensor.numel(),
+                manifest_shape,
+                manifest_numel,
+            )
+            return False
+    return True
+
+
 def _get_send_transfer_items(
     model,
     send_processed_weights: bool,
@@ -241,17 +262,6 @@ def _get_recv_transfer_items(model, transfer_processed_layout: bool) -> list[tup
             return cached_items
         return _collect_processed_layout_tensors(model)
     return list(_iter_raw_recv_transfer_params(model))
-
-
-def _log_transfer_plan(role: str, transfer_count: int, group_name: str, processed_layout: bool, addr: str) -> None:
-    logger.info(
-        "[netloader_p2p] %s transfer=%s group=%s processed_layout=%s addr=%s",
-        role,
-        transfer_count,
-        group_name,
-        processed_layout,
-        addr,
-    )
 
 
 def _get_npu_format_int(tensor: torch.Tensor) -> int | None:
@@ -321,49 +331,11 @@ def _hccl_transfer_tensor(tensor: torch.Tensor) -> torch.Tensor:
     return _cast_tensor_to_fractal_nd(tensor)
 
 
-def _ensure_contiguous_tensor(tensor: torch.Tensor) -> torch.Tensor:
-    """Raw-layout send payload: only enforce contiguity, no NZ↔ND cast."""
-    return tensor if tensor.is_contiguous() else tensor.contiguous()
-
-
-def _format_transfer_tensor(name: str, tensor: torch.Tensor, index: int | None = None) -> str:
-    """Compact tensor identity for failure logs."""
-    index_prefix = f"index={index}, " if index is not None else ""
-    return (
-        f"{index_prefix}name={name}, shape={tuple(tensor.shape)}, dtype={tensor.dtype}, "
-        f"contiguous={tensor.is_contiguous()}, device={tensor.device}"
-    )
-
-
 def synchronize_npu(device_type: str | None = None) -> None:
     """Synchronize NPU when the active device type is NPU."""
     if device_type is not None and device_type != "npu":
         return
     torch_npu.npu.synchronize()
-
-
-def _log_transfer_order_mismatch(
-    local_names: list[str],
-    server_names: list[str],
-    group_name: str,
-) -> None:
-    if local_names == server_names:
-        return
-
-    first_mismatch_index = next(
-        (index for index, pair in enumerate(zip(local_names, server_names, strict=False)) if pair[0] != pair[1]),
-        min(len(local_names), len(server_names)),
-    )
-    logger.warning(
-        "[netloader_p2p] transfer order mismatch group=%s local_count=%s server_count=%s "
-        "first_index=%s local=%s server=%s",
-        group_name,
-        len(local_names),
-        len(server_names),
-        first_mismatch_index,
-        local_names[first_mismatch_index] if first_mismatch_index < len(local_names) else None,
-        server_names[first_mismatch_index] if first_mismatch_index < len(server_names) else None,
-    )
 
 
 def _prepare_hccl_recv_buffer(tensor: torch.Tensor) -> tuple[torch.Tensor, bool]:
@@ -379,13 +351,6 @@ def _prepare_hccl_recv_buffer(tensor: torch.Tensor) -> tuple[torch.Tensor, bool]
     return tensor, False
 
 
-def _prepare_raw_hccl_recv_buffer(tensor: torch.Tensor) -> torch.Tensor:
-    """Raw-layout recv: reuse storage after making it contiguous in-place."""
-    if not tensor.is_contiguous():
-        tensor.data = tensor.contiguous()
-    return tensor
-
-
 def _finalize_hccl_recv_buffer(
     tensor: torch.Tensor,
     recv_buffer: torch.Tensor,
@@ -395,83 +360,6 @@ def _finalize_hccl_recv_buffer(
     if not restore_fractal_nz:
         return
     tensor.data = _cast_tensor_to_fractal_nz(recv_buffer)
-
-
-def _barrier_after_p2p_transfer(process_group, device_index: int) -> None:
-    """Handshake both netloader P2P ranks after the transfer loop."""
-    torch.distributed.barrier(group=process_group, device_ids=[device_index])
-
-
-def _run_p2p_transfer_loop(
-    process_group,
-    processed_layout: bool,
-    transfer_fn,
-    device_index: int,
-) -> None:
-    """Run the tensor loop, then barrier; sync style depends on layout path."""
-    if processed_layout:
-        transfer_fn()
-        _barrier_after_p2p_transfer(process_group, device_index)
-        synchronize_npu()
-        return
-
-    trans_stream = torch_npu.npu.Stream()
-    with torch_npu.npu.stream(trans_stream):
-        transfer_fn()
-        _barrier_after_p2p_transfer(process_group, device_index)
-        torch_npu.npu.synchronize(trans_stream)
-
-
-def _recv_one_transfer_tensor(
-    receiver_pg,
-    name: str,
-    tensor: torch.Tensor,
-    index: int,
-    *,
-    processed_layout: bool,
-) -> None:
-    try:
-        if processed_layout:
-            recv_buffer, restore_fractal_nz = _prepare_hccl_recv_buffer(tensor)
-            receiver_pg.recv([recv_buffer], 1, 0).wait()
-            _finalize_hccl_recv_buffer(tensor, recv_buffer, restore_fractal_nz)
-        else:
-            recv_buffer = _prepare_raw_hccl_recv_buffer(tensor)
-            receiver_pg.recv([recv_buffer], 1, 0).wait()
-    except Exception as exc:
-        logger.error(
-            "[netloader_p2p] recv failed at %s: %s",
-            _format_transfer_tensor(name, tensor, index),
-            exc,
-        )
-        raise
-
-
-def _send_one_transfer_tensor(
-    sender_pg,
-    name: str,
-    tensor_ref: torch.Tensor,
-    index: int,
-    *,
-    processed_layout: bool,
-    model_device,
-    int8_params: dict,
-) -> None:
-    try:
-        if not processed_layout and name in int8_params:
-            payload = int8_params[name].to(model_device)
-        elif processed_layout:
-            payload = _hccl_transfer_tensor(tensor_ref)
-        else:
-            payload = _ensure_contiguous_tensor(tensor_ref)
-        sender_pg.send([payload], 0, 0).wait()
-    except Exception as exc:
-        logger.error(
-            "[netloader_p2p] send failed at %s: %s",
-            _format_transfer_tensor(name, tensor_ref, index),
-            exc,
-        )
-        raise
 
 
 class P2PLoad:
@@ -521,7 +409,23 @@ class P2PLoad:
         transfer_count = 0
         recv_addr = f"{self.source_ip}:{self.source_port}"
         try:
-            start_init_process_group = time.perf_counter()
+            start_recv = time.perf_counter()
+            transfer_items = _get_recv_transfer_items(model, self.transfer_processed_layout)
+            transfer_count = len(transfer_items)
+
+            if self.transfer_processed_layout and not validate_transfer_items_numel_against_manifest(
+                transfer_items,
+                self.transfer_shape_manifest,
+            ):
+                logger.error(
+                    "[netloader_p2p] abort recv before HCCL due to numel/manifest mismatch "
+                    "transfer=%s group=%s addr=%s",
+                    transfer_count,
+                    self.group_name,
+                    recv_addr,
+                )
+                return None
+
             receiver_pg = stateless_init_process_group(
                 host=self.world_name.split(":")[0],
                 port=self.source_port,
@@ -529,50 +433,43 @@ class P2PLoad:
                 world_size=2,
                 group_name=self.group_name,
             )
-            logger.info(
-                "[netloader_p2p] init_process_group time: %s, group=%s, addr=%s",
-                time.perf_counter() - start_init_process_group,
-                self.group_name,
-                recv_addr,
-            )
-
-            start_get_transfer_items = time.perf_counter()
-            transfer_items = _get_recv_transfer_items(model, self.transfer_processed_layout)
-            get_transfer_items_time = time.perf_counter() - start_get_transfer_items
-            transfer_count = len(transfer_items)
-            _log_transfer_plan("recv", transfer_count, self.group_name, self.transfer_processed_layout, recv_addr)
-            if self.transfer_shape_manifest:
-                _log_transfer_order_mismatch(
-                    [name for name, _ in transfer_items],
-                    list(self.transfer_shape_manifest.keys()),
-                    self.group_name,
-                )
 
             model_device = next(model.parameters()).device
             device_index = model_device.index if model_device.index is not None else torch.npu.current_device()
-            start_hccl_recv = time.perf_counter()
 
-            def _recv_loop() -> None:
+            def _recv_all() -> None:
                 for index, (name, tensor) in enumerate(transfer_items):
-                    _recv_one_transfer_tensor(
-                        receiver_pg,
-                        name,
-                        tensor,
-                        index,
-                        processed_layout=self.transfer_processed_layout,
-                    )
+                    try:
+                        if self.transfer_processed_layout:
+                            recv_buffer, restore_fractal_nz = _prepare_hccl_recv_buffer(tensor)
+                            receiver_pg.recv([recv_buffer], 1, 0).wait()
+                            _finalize_hccl_recv_buffer(tensor, recv_buffer, restore_fractal_nz)
+                        else:
+                            if not tensor.is_contiguous():
+                                tensor.data = tensor.contiguous()
+                            receiver_pg.recv([tensor], 1, 0).wait()
+                    except Exception as exc:
+                        logger.error(
+                            "[netloader_p2p] recv failed at index=%s name=%s shape=%s: %s",
+                            index,
+                            name,
+                            tuple(tensor.shape),
+                            exc,
+                        )
+                        raise
 
-            _run_p2p_transfer_loop(
-                receiver_pg,
-                self.transfer_processed_layout,
-                _recv_loop,
-                device_index,
-            )
-            hccl_recv_time = time.perf_counter() - start_hccl_recv
-
-            post_recv_reshape_time = 0.0
             if self.transfer_processed_layout:
-                start_post_recv_reshape = time.perf_counter()
+                _recv_all()
+                torch.distributed.barrier(group=receiver_pg, device_ids=[device_index])
+                synchronize_npu()
+            else:
+                trans_stream = torch_npu.npu.Stream()
+                with torch_npu.npu.stream(trans_stream):
+                    _recv_all()
+                    torch.distributed.barrier(group=receiver_pg, device_ids=[device_index])
+                    torch_npu.npu.synchronize(trans_stream)
+
+            if self.transfer_processed_layout:
                 if not reshape_transfer_items_to_manifest(
                     transfer_items,
                     self.transfer_shape_manifest,
@@ -585,14 +482,10 @@ class P2PLoad:
                         recv_addr,
                     )
                     return None
-                post_recv_reshape_time = time.perf_counter() - start_post_recv_reshape
 
             logger.info(
-                "[netloader_p2p] HCCL recv time: %s, get_transfer_items time: %s, post-recv reshape time: %s, "
-                "transfer=%s group=%s processed_layout=%s addr=%s",
-                hccl_recv_time,
-                get_transfer_items_time,
-                post_recv_reshape_time,
+                "[netloader_p2p] HCCL recv time: %s, transfer=%s group=%s processed_layout=%s addr=%s",
+                time.perf_counter() - start_recv,
                 transfer_count,
                 self.group_name,
                 self.transfer_processed_layout,
@@ -663,19 +556,13 @@ class P2PSend:
         transfer_count = 0
         send_addr = f"{self.listen_ip}:{self.listen_port}"
         try:
-            start_init_process_group = time.perf_counter()
+            start_send = time.perf_counter()
             sender_pg = stateless_init_process_group(
                 host=self.comm_name.split(":")[0],
                 port=self.listen_port,
                 rank=1,
                 world_size=2,
                 group_name=self.group_name,
-            )
-            logger.info(
-                "[netloader_p2p] init_process_group time: %s, group=%s, addr=%s",
-                time.perf_counter() - start_init_process_group,
-                self.group_name,
-                send_addr,
             )
 
             transfer_items = _get_send_transfer_items(
@@ -684,32 +571,42 @@ class P2PSend:
                 registered_transfer_items,
             )
             transfer_count = len(transfer_items)
-            _log_transfer_plan("send", transfer_count, self.group_name, self.send_processed_weights, send_addr)
-
-            start_hccl_send = time.perf_counter()
-
-            def _send_loop() -> None:
-                for index, (name, tensor_ref) in enumerate(transfer_items):
-                    _send_one_transfer_tensor(
-                        sender_pg,
-                        name,
-                        tensor_ref,
-                        index,
-                        processed_layout=self.send_processed_weights,
-                        model_device=model_device,
-                        int8_params=int8_params,
-                    )
-
             device_index = model_device.index if model_device.index is not None else torch.npu.current_device()
-            _run_p2p_transfer_loop(
-                sender_pg,
-                self.send_processed_weights,
-                _send_loop,
-                device_index,
-            )
+
+            def _send_all() -> None:
+                for index, (name, tensor_ref) in enumerate(transfer_items):
+                    try:
+                        if not self.send_processed_weights and name in int8_params:
+                            payload = int8_params[name].to(model_device)
+                        elif self.send_processed_weights:
+                            payload = _hccl_transfer_tensor(tensor_ref)
+                        else:
+                            payload = tensor_ref if tensor_ref.is_contiguous() else tensor_ref.contiguous()
+                        sender_pg.send([payload], 0, 0).wait()
+                    except Exception as exc:
+                        logger.error(
+                            "[netloader_p2p] send failed at index=%s name=%s shape=%s: %s",
+                            index,
+                            name,
+                            tuple(tensor_ref.shape),
+                            exc,
+                        )
+                        raise
+
+            if self.send_processed_weights:
+                _send_all()
+                torch.distributed.barrier(group=sender_pg, device_ids=[device_index])
+                synchronize_npu()
+            else:
+                trans_stream = torch_npu.npu.Stream()
+                with torch_npu.npu.stream(trans_stream):
+                    _send_all()
+                    torch.distributed.barrier(group=sender_pg, device_ids=[device_index])
+                    torch_npu.npu.synchronize(trans_stream)
+
             logger.info(
                 "[netloader_p2p] HCCL send time: %s, transfer=%s group=%s processed_layout=%s addr=%s",
-                time.perf_counter() - start_hccl_send,
+                time.perf_counter() - start_send,
                 transfer_count,
                 self.group_name,
                 self.send_processed_weights,
