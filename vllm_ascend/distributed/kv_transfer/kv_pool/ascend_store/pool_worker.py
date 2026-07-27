@@ -364,7 +364,7 @@ class KVPoolWorker:
                 phys_to_layer_idx: dict[int, int] = {}
                 for layer_name in group_spec.layer_names:
                     physical_layer = self._extract_physical_layer_index(layer_name)
-                    if physical_layer >= getattr(self.hf_config, "num_hidden_layers", self.num_layers):
+                    if physical_layer >= self.num_layers:
                         continue
                     if physical_layer not in phys_to_layer_idx:
                         phys_to_layer_idx[physical_layer] = len(phys_to_layer_idx)
