@@ -25,7 +25,7 @@ on:
       target_branch:
         description: 'Target branch for the upstream PR'
         required: false
-        default: 'main'
+        default: 'releases/v0.23.0'
         type: string
 
 concurrency:
@@ -46,14 +46,15 @@ jobs:
         with:
           repository: vllm-ascend-ci/vllm-ascend
           token: ${{ secrets.PAT_TOKEN }}
+          # The CI fork only has main; the target release is checked out below.
           ref: main
 
       - name: Setup git and branch
         run: |
-          TARGET_BRANCH="${{ inputs.target_branch || 'main' }}"
-          echo "TARGET_BRANCH=${TARGET_BRANCH}" >> $GITHUB_ENV
+          TARGET_BRANCH="${{ inputs.target_branch || 'releases/v0.23.0' }}"
+          echo "TARGET_BRANCH=${TARGET_BRANCH}" >> "$GITHUB_ENV"
           BRANCH_NAME="auto-pr/doc-translate-$(date +%Y%m%d%H%M%S)"
-          echo "BRANCH_NAME=${BRANCH_NAME}" >> $GITHUB_ENV
+          echo "BRANCH_NAME=${BRANCH_NAME}" >> "$GITHUB_ENV"
 
           git remote add upstream "https://github.com/${{ env.UPSTREAM_REPO }}.git"
           git fetch upstream
@@ -61,9 +62,9 @@ jobs:
           git config user.email "${{ github.actor }}@users.noreply.github.com"
           git checkout -B "${BRANCH_NAME}" "upstream/${TARGET_BRANCH}"
 
-          # Use latest translation script from upstream/main
-          git checkout upstream/main -- .github/workflows/scripts/po_translate.py
-          git checkout upstream/main -- docs/requirements-docs.txt
+          # Use the translation script compatible with the v0.23.0 docs
+          git checkout upstream/releases/v0.23.0 -- .github/workflows/scripts/po_translate.py
+          git checkout upstream/releases/v0.23.0 -- docs/requirements-docs.txt
           git restore --staged .github/workflows/scripts/po_translate.py docs/requirements-docs.txt
 
       - name: Setup Python
@@ -90,11 +91,11 @@ jobs:
 
           if [ -z "$po_files" ]; then
             echo "No PO files to translate"
-            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
           else
             echo "PO files: $po_files"
-            echo "has_changes=true" >> $GITHUB_OUTPUT
-            echo "files=$po_files" >> $GITHUB_OUTPUT
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            echo "files=$po_files" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Translate PO files
@@ -138,7 +139,7 @@ jobs:
             echo "file_list<<EOF"
             echo "$file_list"
             echo "EOF"
-          } >> $GITHUB_OUTPUT
+          } >> "$GITHUB_OUTPUT"
 
       - name: Commit and push
         if: steps.detect.outputs.has_changes == 'true'
