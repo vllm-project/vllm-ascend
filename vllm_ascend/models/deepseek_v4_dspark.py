@@ -359,19 +359,22 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         paged_tokens = kv_cache.flatten(start_dim=2)
         context_kv = paged_tokens[safe_block_ids, block_offsets, : self.head_dim]
 
-        self._dspark_kv_cache[request_slots] = 0
-        self._dspark_cache_positions[request_slots] = -1
         slot_indices = request_slots.view(-1, 1).expand_as(context_positions)
-        cache_indices = context_positions.clamp_min(0).remainder(self.window_size)
-        flat_valid = cache_valid.reshape(-1)
-        self._dspark_kv_cache[
-            slot_indices.reshape(-1)[flat_valid],
-            cache_indices.reshape(-1)[flat_valid],
-        ] = context_kv.reshape(-1, self.head_dim)[flat_valid].to(self._dspark_kv_cache.dtype)
-        self._dspark_cache_positions[
-            slot_indices.reshape(-1)[flat_valid],
-            cache_indices.reshape(-1)[flat_valid],
-        ] = context_positions.to(torch.int32).reshape(-1)[flat_valid]
+        cache_indices = context_positions.remainder(self.window_size)
+
+        masked_context_kv = torch.where(
+            cache_valid.unsqueeze(-1),
+            context_kv,
+            torch.zeros_like(context_kv),
+        ).to(self._dspark_kv_cache.dtype)
+        self._dspark_kv_cache[slot_indices, cache_indices] = masked_context_kv
+
+        masked_context_positions = torch.where(
+            cache_valid,
+            context_positions.to(torch.int32),
+            torch.full_like(context_positions, -1, dtype=torch.int32),
+        )
+        self._dspark_cache_positions[slot_indices, cache_indices] = masked_context_positions
 
     def _get_dspark_fused_attention_metadata(
         self,
