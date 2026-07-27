@@ -264,10 +264,9 @@ class TestAscendSFACacheComposition(TestBase):
                 indexer_k_cache = torch.empty(2, 16, 1, 128, dtype=torch.int8)
                 indexer_scale_cache = torch.empty(2, 16, 1, 1, dtype=torch.float16)
                 kv_cache = (*main_cache, indexer_k_cache, indexer_scale_cache)
-                impl = SimpleNamespace(
-                    enable_sparse_sfa_c8=enable_sfa_c8,
-                    use_torch_npu_lightning_indexer=False,
-                )
+                impl = AscendSFAImpl.__new__(AscendSFAImpl)
+                impl.enable_sparse_sfa_c8 = enable_sfa_c8
+                impl.use_torch_npu_lightning_indexer = False
                 mock_indexer.reset_mock()
 
                 result = BaseDeviceAdaptor.indexer_select_post_process(
