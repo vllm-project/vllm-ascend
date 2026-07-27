@@ -354,11 +354,11 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
     ):
         quant_type = token_dispatch_input.quant.quant_type
         dynamic_scale = token_dispatch_input.routing.pertoken_scale
-        unquantized_mxfp4_dispatch = quant_type == QuantType.MXFP4 and dynamic_scale is None
-        # Without prepare-stage scales, MXFP4 stays unquantized in dispatch and
+        unquantized_mxfp_dispatch = quant_type in (QuantType.MXFP4, QuantType.W4A8MXFP) and dynamic_scale is None
+        # Without prepare-stage scales, MXFP stays unquantized in dispatch and
         # is quantized again inside the MLP path.
         with_quant = token_dispatch_input.quant.dispatch_with_quant and quant_type != QuantType.W8A8FP8
-        with_quant = with_quant and not unquantized_mxfp4_dispatch
+        with_quant = with_quant and not unquantized_mxfp_dispatch
         is_mxfp = token_dispatch_input.quant.is_mxfp
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
@@ -366,7 +366,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         expert_map = token_dispatch_input.routing.expert_map
         act_quant_type = (
             token_dispatch_input.quant.mxfp.act_quant_type
-            if token_dispatch_input.quant.mxfp is not None and not unquantized_mxfp4_dispatch
+            if token_dispatch_input.quant.mxfp is not None and not unquantized_mxfp_dispatch
             else None
         )
         global_redundant_expert_num = token_dispatch_input.routing.global_redundant_expert_num
