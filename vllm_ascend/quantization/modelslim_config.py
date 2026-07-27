@@ -595,7 +595,7 @@ class AscendModelSlimConfig(QuantizationConfig):
                     ".v_proj.kv_cache_offset": ".attn.v_cache_offset",
                 }
             )
-        if self.enable_c8_quant:
+        if self.enable_c8_fp8_quant:
             suffix_map.update(
                 {
                     ".k_proj.kv_cache_scale": ".attn.k_cache_scale",
@@ -624,18 +624,6 @@ class AscendModelSlimConfig(QuantizationConfig):
             return QuantizationConfig.get_cache_scale_mapper()
         cache_scale_mapper = WeightsMapper(orig_to_new_suffix=suffix_map)
         return cache_scale_mapper | QuantizationConfig.get_cache_scale_mapper()
-
-    @staticmethod
-    def get_cache_scale_mapper() -> "WeightsMapper":
-        """Map C8 checkpoint KV-cache scale/offset names to vLLM parameter names."""
-        orig_to_new_regex = {
-            re.compile(r"\.k_proj\.kv_cache_scale$"): r".attn.k_cache_scale",
-            re.compile(r"\.k_proj\.kv_cache_offset$"): r".attn.k_cache_offset",
-            re.compile(r"\.v_proj\.kv_cache_scale$"): r".attn.v_cache_scale",
-            re.compile(r"\.v_proj\.kv_cache_offset$"): r".attn.v_cache_offset",
-        }
-        c8_mapper = WeightsMapper(orig_to_new_substr=orig_to_new_regex)
-        return c8_mapper | QuantizationConfig.get_cache_scale_mapper()
 
     def _has_quant_weight(self, prefix: str, packed_modules_mapping: Mapping[str, list[str]]) -> bool:
         proj_name = prefix.split(".")[-1]
