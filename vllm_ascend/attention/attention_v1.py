@@ -953,8 +953,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # change key/value shape
             _, block_size, _, _ = self.key_cache.shape  # type: ignore
             if self.enable_c8_fp8_quant:
-                key = self.key_cache.permute(0, 2, 1, 3).contiguous()
-                value = self.value_cache.permute(0, 2, 1, 3).contiguous()
+                key = self.key_cache.permute(0, 2, 1, 3).contiguous()  # type: ignore[union-attr]
+                value = self.value_cache.permute(0, 2, 1, 3).contiguous()  # type: ignore[union-attr]
             else:
                 key = self._nz_5d_view(self.key_cache, block_size)
                 value = self._nz_5d_view(self.value_cache, block_size)
@@ -1179,8 +1179,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         dequant_args = {}
         input_layout = "TND"
         if self.enable_c8_fp8_quant and layer is not None:
-            key = self.key_cache.permute(0, 2, 1, 3).contiguous()
-            value = self.value_cache.permute(0, 2, 1, 3).contiguous()
+            key = self.key_cache.permute(0, 2, 1, 3).contiguous()  # type: ignore[union-attr]
+            value = self.value_cache.permute(0, 2, 1, 3).contiguous()  # type: ignore[union-attr]
             input_layout = "BNSD"
             query = query.unsqueeze(2)
             output = output.unsqueeze(2)
@@ -1287,11 +1287,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 weak_ref_tensors(layer._c8_v_aq_scale_nz_bnsd),
                 None,
                 True,
-            )
+            )  # type: ignore[assignment]
         else:
-            v2_attn_params = v2_attn_params + (None, None, None, None, False)
+            v2_attn_params = v2_attn_params + (None, None, None, None, False)  # type: ignore[assignment]
         layer_name = self._graph_metadata_layer_name(layer) if self._use_layer_aware_fia_graph_replay else None
-        v2_attn_params = v2_attn_params + (layer_name,)
+        v2_attn_params = v2_attn_params + (layer_name,)  # type: ignore[assignment]
         graph_params.attn_params[num_tokens].append(v2_attn_params)
         torch.npu.graph_task_group_begin(stream)
         torch_npu.npu_fused_infer_attention_score_v2.out(
@@ -2522,8 +2522,8 @@ class AscendC8Fp8AttentionBackendImpl(AscendAttentionBackendImpl):
         num_block, block_size, _, _ = self.key_cache.shape  # type: ignore[attr-defined]
         batch_size = len(attn_metadata.seq_lens_list)
 
-        k_cache_pa = self.key_cache.permute(0, 2, 1, 3).contiguous()
-        v_cache_pa = self.value_cache.permute(0, 2, 1, 3).contiguous()
+        k_cache_pa = self.key_cache.permute(0, 2, 1, 3).contiguous()  # type: ignore[union-attr]
+        v_cache_pa = self.value_cache.permute(0, 2, 1, 3).contiguous()  # type: ignore[union-attr]
 
         attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
             query[:batch_size].unsqueeze(2),
@@ -2565,8 +2565,8 @@ class AscendC8Fp8AttentionBackendImpl(AscendAttentionBackendImpl):
 
         if num_decode_tokens > 0:
             num_block, block_size, _, _ = self.key_cache.shape  # type: ignore[attr-defined]
-            kv_k = self.key_cache.permute(0, 2, 1, 3).contiguous()
-            kv_v = self.value_cache.permute(0, 2, 1, 3).contiguous()
+            kv_k = self.key_cache.permute(0, 2, 1, 3).contiguous()  # type: ignore[union-attr]
+            kv_v = self.value_cache.permute(0, 2, 1, 3).contiguous()  # type: ignore[union-attr]
 
             attn_out, _ = torch_npu.npu_fused_infer_attention_score_v2(
                 query[:num_decode_tokens].unsqueeze(2),
