@@ -237,11 +237,7 @@ The symbols configuration file defines which functions/methods to profile and su
 
 ##### File Name and Loading
 
-<<<<<<< HEAD
-- Default load path:`~/.config/vllm_ascend/service_profiling_symbols.MAJOR.MINOR.PATCH.yaml`( According to the installed version of vllm )
-=======
 - Default load path: `~/.config/vllm_ascend/service_profiling_symbols.MAJOR.MINOR.PATCH.yaml` (According to the installed version of vLLM)
->>>>>>> 1e5c79e1f... aidd low error mod
 
 If you need to customize the profiling points, it is highly recommended to copy a symbol configuration file to your working directory and point to it with the `PROFILING_SYMBOLS_PATH` environment variable.
 
