@@ -15,7 +15,10 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM quay.io/ascend/cann:9.1.0-beta.1-310p-openeuler24.03-py3.12
+ARG CANN_QUAY_URL="quay.io/ascend/cann"
+ARG CANN_VERSION="9.1.0-beta.1"
+ARG BASE_OS="openeuler24.03"
+FROM ${CANN_QUAY_URL}:${CANN_VERSION}-310p-${BASE_OS}-py3.12
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 
@@ -101,6 +104,24 @@ RUN echo '#!/bin/bash' > /usr/local/bin/entrypoint.sh && \
     echo 'exec "$@"' >> /usr/local/bin/entrypoint.sh && \
     chmod +x /usr/local/bin/entrypoint.sh
 
+# ===== Conditional installation based on BUILD_TYPE =====
+# All ARG definitions are in the same stage for better maintainability
+ARG BUILD_TYPE="release"
+ARG TORCH_NPU_VERSION="26.1.0"
+ARG TORCH_NPU_DATE="20260715.4"
+
+# Install daily packages only when BUILD_TYPE is set to "daily"
+RUN if [ "$BUILD_TYPE" = "daily" ]; then \
+        echo "Download, extract and install torch-npu..." && \
+        mkdir -p /tmp/torch_npu && \
+        wget -O /tmp/torch_npu/torch_npu.tar.gz "https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.10.0-${TORCH_NPU_VERSION}/${TORCH_NPU_DATE}/pytorch_v2.10.0-${TORCH_NPU_VERSION}_py312.tar.gz" && \
+        tar -xzf /tmp/torch_npu/torch_npu.tar.gz -C /tmp/torch_npu && \
+        python3 -m pip install /tmp/torch_npu/torch_npu-2.10.0*_$(uname -m).whl --force-reinstall --extra-index https://download.pytorch.org/whl/cpu/ && \
+        echo "Clean up temporary files..." && \
+        rm -rf /tmp/torch_npu; \
+    else \
+        echo "Building release version without daily packages"; \
+    fi
 # Set entrypoint and default command
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 

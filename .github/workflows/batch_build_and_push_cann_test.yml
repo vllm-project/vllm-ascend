@@ -1,0 +1,106 @@
+name: Batch Build and Publish CANN Test Image
+
+on:
+  pull_request:
+    branches:
+      - 'main'
+      - 'releases/*'
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      cann_version:
+        description: 'CANN Version (e.g. 9.1.0.B120)'
+        required: true
+        type: string
+        default: '9.1.0.B120'
+      py_version:
+        description: 'Python Version (e.g. 3.12.13)'
+        required: true
+        type: string
+        default: '3.12.13'
+      os_version_ubuntu:
+        description: 'Ubuntu OS Version (e.g. 24.04)'
+        required: true
+        type: string
+        default: '24.04'
+      os_version_openeuler:
+        description: 'openEuler OS Version (e.g. 24.03-lts-sp4)'
+        required: true
+        type: string
+        default: '24.03-lts-sp4'
+
+concurrency:
+  group: batch-cann-test
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    if: ${{ !(github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'image-build-cann')) }}
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      cann_version: ${{ steps.set-matrix.outputs.cann_version }}
+      py_version: ${{ steps.set-matrix.outputs.py_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Generate matrix
+        id: set-matrix
+        env:
+          CANN_VERSION: ${{ inputs.cann_version }}
+          PY_VERSION: ${{ inputs.py_version }}
+          UBUNTU_OS_VERSION: ${{ inputs.os_version_ubuntu }}
+          OPENEULER_OS_VERSION: ${{ inputs.os_version_openeuler }}
+        run: |
+          CANN_VERSION="${CANN_VERSION:-9.1.0.B120}"
+          PY_VERSION="${PY_VERSION:-3.12.13}"
+          PY_SHORT="${PY_VERSION%.*}"
+          UBUNTU_OS_VERSION="${UBUNTU_OS_VERSION:-24.04}"
+          OPENEULER_OS_VERSION="${OPENEULER_OS_VERSION:-24.03-lts-sp4}"
+
+          MATRIX_JSON=$(jq -n -c \
+            --arg cann_version "$CANN_VERSION" \
+            --arg py_short "$PY_SHORT" \
+            --arg ubuntu_os "$UBUNTU_OS_VERSION" \
+            --arg openeuler_os "$OPENEULER_OS_VERSION" \
+            -f /dev/stdin <<'JQ'
+            {
+              include: [
+                {chip:"a3",   soc:"A3",   os:"ubuntu",    dockerfile:"Dockerfile.ubuntu.cann.test",   os_version:$ubuntu_os},
+                {chip:"a3",   soc:"A3",   os:"openeuler", dockerfile:"Dockerfile.openeuler.cann.test", os_version:$openeuler_os},
+                {chip:"910b", soc:"910b", os:"ubuntu",    dockerfile:"Dockerfile.ubuntu.cann.test",   os_version:$ubuntu_os},
+                {chip:"910b", soc:"910b", os:"openeuler", dockerfile:"Dockerfile.openeuler.cann.test", os_version:$openeuler_os},
+                {chip:"950",  soc:"950",  os:"ubuntu",    dockerfile:"Dockerfile.ubuntu.cann.test",   os_version:$ubuntu_os},
+                {chip:"950",  soc:"950",  os:"openeuler", dockerfile:"Dockerfile.openeuler.cann.test", os_version:$openeuler_os},
+                {chip:"310p", soc:"310p", os:"ubuntu",    dockerfile:"Dockerfile.ubuntu.cann.test",   os_version:$ubuntu_os},
+                {chip:"310p", soc:"310p", os:"openeuler", dockerfile:"Dockerfile.openeuler.cann.test", os_version:$openeuler_os}
+              ] | map(. + {tag: ($cann_version + "-" + .chip + "-" + .os + .os_version + "-py" + $py_short)})
+            }
+          JQ
+          )
+
+          {
+            echo "matrix<<EOF"
+            echo "$MATRIX_JSON"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "cann_version=${CANN_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "py_version=${PY_VERSION}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    strategy:
+      max-parallel: 2
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    uses: ./.github/workflows/build_and_push_cann_test.yml
+    with:
+      cann_tag: ${{ matrix.tag }}
+      cann_version: ${{ needs.prepare.outputs.cann_version }}
+      py_version: ${{ needs.prepare.outputs.py_version }}
+      os_version: ${{ matrix.os_version }}
+      soc: ${{ matrix.soc }}
+      dockerfile: ${{ matrix.dockerfile }}
+      push: ${{ github.event_name != 'pull_request' }}
+    secrets: inherit
