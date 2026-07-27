@@ -2143,7 +2143,7 @@ class MooncakeConnectorWorker:
             # assigned to previous layers. If the layer id has been assigned, we treat the current layer as
             # an eagle layer and assign a new layer id starting from total_layers.
             for layer_name in group_spec.layer_names:
-                if "mtp" in layer_name:
+                if "mtp" in layer_name or "eagle" in layer_name:
                     layer_idx = next_mtp_layer_idx
                     next_mtp_layer_idx += 1
                 else:
