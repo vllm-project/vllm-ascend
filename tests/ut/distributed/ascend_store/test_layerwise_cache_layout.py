@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 
 from vllm.v1.kv_cache_interface import KVCacheTensor
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_kv_cache import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
 )
 
@@ -42,10 +42,7 @@ def test_no_reuse_skips_topology_validation():
 
 
 def test_base_layers_are_merged_into_shared_slots():
-    original_tensors = [
-        KVCacheTensor(size=16, shared_by=[f"model.layers.{layer}.self_attn"])
-        for layer in range(6)
-    ]
+    original_tensors = [KVCacheTensor(size=16, shared_by=[f"model.layers.{layer}.self_attn"]) for layer in range(6)]
     kv_cache_config = SimpleNamespace(
         kv_cache_tensors=original_tensors,
         kv_cache_groups=[object()],
