@@ -68,10 +68,11 @@ class ExpertOffloadManager:
         # all_reduce -> global hotness. Stable-slot placement uses prev_log2phy
         # (keep experts on same rank in their slot) + hotness (order new experts).
         self._mc_prev_log2phy = {}      # layer_idx -> prev step's log2phy (CPU)
-        self._mc_freq = {}              # layer_idx -> local freq np[num_experts]
-        self._mc_step = {}              # layer_idx -> step counter
-        self._mc_global_hotness = None  # np[num_experts], refreshed every interval
-        self._mc_allreduce_interval = 32
+        # LRC hotness policy (same one single-card uses: recent freq + EMA +
+        # age), fed the GLOBAL active set each step. Built lazily in
+        # _gather_global_counts_and_hotness. Replaces the old crude local-freq
+        # + 32-step all_reduce hotness, which was stale and had no EMA/age.
+        self._mc_lrc = None
 
         # Per-layer cap on experts actually H2D-loaded by _do_prefetch: only
         # the top-N highest-confidence predicted experts are loaded, the rest
@@ -1504,11 +1505,13 @@ class ExpertOffloadManager:
                 self.num_total_experts, top, uniq)
 
     def _gather_global_counts_and_hotness(self, layer_idx, topk_ids_h, cpu_group):
-        """CPU bincount + gloo all_reduce -> global expert counts, plus the
-        two-timescale LRU freq/hotness update (gated by cache_policy_enabled).
-        gloo runs on the cpu_group so it is stream/graph-independent and safe
-        inside the host callback. Returns (global_counts, cache_on, hotness,
-        prev_log2phy)."""
+        """CPU bincount + gloo all_reduce -> global expert counts, then update
+        the LRC hotness policy (the same one single-card uses: recent freq +
+        EMA + age) from the GLOBAL active set and return its per-expert
+        hotness. global_counts is all-reduced EVERY step (identical across
+        ranks after the mc2_mask filter), so the LRC state + hotness are too
+        -> placement/eviction stay deterministic. gloo runs on cpu_group
+        (stream/graph-independent, safe inside the host callback)."""
         import numpy as np
         from vllm_ascend.expert_offload.multi_card_planner import (
             local_expert_counts_cpu, gather_global_counts_cpu)
@@ -1517,20 +1520,25 @@ class ExpertOffloadManager:
         cache_on = self.offload_config.cache_policy_enabled
         if not cache_on:
             return global_counts, cache_on, None, None
-        step = self._mc_step.get(layer_idx, 0) + 1
-        self._mc_step[layer_idx] = step
-        freq = self._mc_freq.setdefault(
-            layer_idx, np.zeros(self.num_total_experts, dtype=np.int32))
-        # bincount (vectorised) replaces a per-element Python accumulate loop.
-        ids = topk_ids_h.reshape(-1).to(torch.int64).numpy()
-        freq += np.bincount(ids, minlength=self.num_total_experts).astype(np.int32)
-        if self.ep_size > 1 and step % self._mc_allreduce_interval == 0:
-            import torch.distributed as dist
-            ft = torch.from_numpy(freq.copy())
-            dist.all_reduce(ft, op=dist.ReduceOp.SUM, group=cpu_group)
-            self._mc_global_hotness = ft.numpy()
-            freq[:] = 0
-        return (global_counts, cache_on, self._mc_global_hotness,
+        # Build the per-layer LRC policy lazily. Fed the GLOBAL active set
+        # (== the token's topk for single-batch decode), it evolves
+        # identically to single-card's policy -> same hotness -> the
+        # multi-card placement/eviction decisions match single-card quality.
+        # Replaces the old crude local-freq + 32-step all_reduce hotness
+        # (stale, no EMA/age/router).
+        if self._mc_lrc is None:
+            from vllm_ascend.expert_offload.lrc_policy import LRCExpertCachePolicy
+            # num_layers=1 then grow via add_layer() (LRC requires >= 1).
+            self._mc_lrc = LRCExpertCachePolicy(
+                num_layers=1, num_experts=self.num_total_experts,
+                cache_size=self.num_device_experts, topk=self.topk)
+        while len(self._mc_lrc.layer_states) <= layer_idx:
+            self._mc_lrc.add_layer()
+        active = global_counts.nonzero(as_tuple=True)[0].tolist()
+        if active:
+            self._mc_lrc.observe(layer_idx, [tuple(int(e) for e in active)])
+        hotness = self._mc_lrc.hotness_array(layer_idx)
+        return (global_counts, cache_on, hotness,
                 self._mc_prev_log2phy.get(layer_idx))
 
     def _compute_resident_hits(self, layer_idx, my_experts, cache_on,

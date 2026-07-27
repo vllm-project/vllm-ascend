@@ -157,6 +157,22 @@ class LRCExpertCachePolicy:
             - self.age_weight * age
         )
 
+    def hotness_array(self, layer_idx: int) -> np.ndarray:
+        """Vectorized per-expert hotness for a layer (len == num_experts).
+
+        Same scoring as :meth:`hotness` but computed over the whole array at
+        once (used by the multi-card planner, which needs scores for all
+        experts each step for placement/eviction ordering)."""
+        state = self.layer_states[layer_idx]
+        last_used = np.asarray(state.last_used, dtype=np.float32)
+        age = np.where(last_used < 0.0, 0.0, state.step - last_used)
+        return (
+            self.recent_weight * np.asarray(state.freq, dtype=np.float32)
+            + self.ema_weight * state.ema
+            + self.router_weight * np.asarray(state.router_score, dtype=np.float32)
+            - self.age_weight * age
+        )
+
     def layer_step(self, layer_idx: int) -> int:
         return self.layer_states[layer_idx].step
 
