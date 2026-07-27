@@ -50,7 +50,7 @@ from vllm_ascend.attention.msa_m3_triton import (
     minimax_m3_index_score,
     minimax_m3_index_topk,
 )
-from vllm_ascend.attention.msa_m3_npu import (
+from vllm_ascend.attention.msa_m3_npu_new import (
     minimax_m3_sparse_attn as minimax_m3_sparse_attn_ascendc,
     minimax_m3_sparse_attn_decode as minimax_m3_sparse_attn_decode_ascendc
 )
