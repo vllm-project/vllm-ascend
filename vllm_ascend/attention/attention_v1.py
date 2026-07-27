@@ -1196,9 +1196,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             is_single_token_decode = (
                 attn_metadata.attn_state == AscendAttentionState.DecodeOnly and attn_metadata.max_query_len == 1
             )
-            sparse_mode = 0 if is_single_token_decode else (
-                4 if self.sliding_window is not None else 3
-            )
+            sparse_mode = 0 if is_single_token_decode else (4 if self.sliding_window is not None else 3)
         if use_max_workspace:
             # See full_graph_fia: this path needs the max workspace across layer
             # variants sharing the same graph size.
@@ -2381,9 +2379,12 @@ class AscendC8Fp8AttentionBackendImpl(AscendAttentionBackendImpl):
                     return output
                 if attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
                     attn_output = self._forward_c8_fp8_chunked_prefill(
-                        query, float_key, float_value, attn_metadata,
+                        query,
+                        float_key,
+                        float_value,
+                        attn_metadata,
                         output_padded if output_padded is not None else output,
-                        layer
+                        layer,
                     )
                 else:
                     attn_output = self._forward_c8_fp8_fused_infer_attention(
@@ -2418,8 +2419,7 @@ class AscendC8Fp8AttentionBackendImpl(AscendAttentionBackendImpl):
         return cache.view(-1, self.num_kv_heads, self.head_size // NZ_FMT_LAST_DIM, block_size, NZ_FMT_LAST_DIM)
 
     def _prepare_c8_fp8_scales(self, layer: AttentionLayer, device: torch.device) -> None:
-        """Shard per-channel C8 FP8 scales to this TP rank.
-        """
+        """Shard per-channel C8 FP8 scales to this TP rank."""
         if hasattr(layer, "_c8_fp8_scales_prepared"):
             return
 
@@ -2471,9 +2471,7 @@ class AscendC8Fp8AttentionBackendImpl(AscendAttentionBackendImpl):
 
         if key.dtype == torch.float8_e4m3fn:
             n_ids = flat_ids.shape[0]
-            gather_idx = flat_ids.view(n_ids, 1, 1, 1).expand(
-                -1, block_size, self.num_kv_heads, self.head_size
-            )
+            gather_idx = flat_ids.view(n_ids, 1, 1, 1).expand(-1, block_size, self.num_kv_heads, self.head_size)
             gathered_k = torch.gather(key, 0, gather_idx).to(torch.bfloat16)
             gathered_v = torch.gather(value, 0, gather_idx).to(torch.bfloat16)
         else:
@@ -2650,8 +2648,7 @@ class AscendC8Fp8AttentionBackendImpl(AscendAttentionBackendImpl):
         output: torch.Tensor,
         layer: AttentionLayer,
     ):
-        """C8 FIA V1 TND for prefill states.
-        """
+        """C8 FIA V1 TND for prefill states."""
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
 
         actual_seq_qlen = attn_metadata.actual_seq_lengths_q
@@ -2731,4 +2728,5 @@ class AscendC8Fp8AttentionBackendImpl(AscendAttentionBackendImpl):
             )
 
             notify_kv_cache_written()
+
         return query, key, value, output

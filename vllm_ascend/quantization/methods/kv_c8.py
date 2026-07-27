@@ -177,13 +177,12 @@ class AscendC8Fp8KVCacheAttentionMethod(AscendAttentionScheme):
 
     def create_weights(self, layer: torch.nn.Module) -> None:
         # C8 FP8 always set kv_cache to fp8
-        logger.info_once(
-            f"[vllm-ascend/C8_FP8_KV] setting kv_cache_torch_dtype to torch.float8_e4m3fn"
-        )
+        logger.info_once("[vllm-ascend/C8_FP8_KV] setting kv_cache_torch_dtype to torch.float8_e4m3fn")
         layer.kv_cache_torch_dtype = torch.float8_e4m3fn
 
         if hasattr(layer, "impl"):
             from vllm_ascend.attention.attention_v1 import AscendC8Fp8AttentionBackendImpl
+
             layer.impl.__class__ = AscendC8Fp8AttentionBackendImpl
 
         dtype = torch.get_default_dtype()
@@ -213,4 +212,5 @@ class AscendC8Fp8KVCacheAttentionMethod(AscendAttentionScheme):
             "not be called. C8 KV cache quantization is handled by the "
             "attention backend."
         )
+
         raise RuntimeError(err_msg)
