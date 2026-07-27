@@ -52,6 +52,7 @@ dout = "dout"
 Pn = "Pn"
 arange = "arange"
 ptd = "ptd"
+GLOABL = "GLOABL"
 
 [type.py]
 extend-glob = []

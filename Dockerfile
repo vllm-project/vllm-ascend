@@ -51,7 +51,7 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
       git clone --depth 1 -b $VLLM_TAG $VLLM_REPO /vllm-workspace/vllm; \
     fi
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
-RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index https://download.pytorch.org/whl/cpu/ && \
+RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index-url https://download.pytorch.org/whl/cpu/ && \
     python3 -m pip uninstall -y triton && \
     python3 -m pip cache purge
 
@@ -68,7 +68,7 @@ RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pyp
     export VLLM_BATCH_INVARIANT=1 && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
-    python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/ && \
+    python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url https://download.pytorch.org/whl/cpu/ && \
     python3 -m pip uninstall -y triton triton-ascend && \
     python3 -m pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
     python3 -m pip cache purge
@@ -113,7 +113,7 @@ RUN if [ "$BUILD_TYPE" = "daily" ]; then \
         mkdir -p /tmp/torch_npu && \
         wget -O /tmp/torch_npu/torch_npu.tar.gz "https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.10.0-${TORCH_NPU_VERSION}/${TORCH_NPU_DATE}/pytorch_v2.10.0-${TORCH_NPU_VERSION}_py312.tar.gz" && \
         tar -xzf /tmp/torch_npu/torch_npu.tar.gz -C /tmp/torch_npu && \
-        python3 -m pip install /tmp/torch_npu/torch_npu-2.10.0*_$(uname -m).whl --force-reinstall --extra-index https://download.pytorch.org/whl/cpu/ && \
+        python3 -m pip install /tmp/torch_npu/torch_npu-2.10.0*_$(uname -m).whl --force-reinstall --extra-index-url https://download.pytorch.org/whl/cpu/ && \
         echo "Clean up temporary files..." && \
         rm -rf /tmp/torch_npu; \
     else \
