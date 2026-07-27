@@ -245,17 +245,19 @@ class TestProfilingChunkManager(TestBase):
 
 
 class TestProfilingChunkScheduler(TestBase):
+    @patch("vllm_ascend.patch.platform.patch_balance_schedule.init_ascend_config")
     @patch("vllm_ascend.ascend_config.AscendConfig.__init__", MagicMock(return_value=None))
     @patch("vllm_ascend.ascend_config.get_ascend_config")
     @patch("vllm.config.ModelConfig.__post_init__", MagicMock())
     @patch("vllm.config.VllmConfig.__post_init__", MagicMock())
     @patch("vllm.config.device.DeviceConfig.__post_init__", MagicMock())
-    def create_scheduler(self, mock_get_ascend_config):
+    def create_scheduler(self, mock_get_ascend_config, mock_init_ascend_config):
         profiling_cfg = MagicMock()
         profiling_cfg.enabled = True
         profiling_cfg.smooth_factor = 0.8
         profiling_cfg.min_chunk = 256
         mock_get_ascend_config.return_value.scheduler_config.profiling_chunk_config = profiling_cfg
+        mock_init_ascend_config.return_value.scheduler_config.short_request_first_config.enabled = False
 
         mock_hf_config = MagicMock()
         mock_hf_config.model_type = "qwen3"
