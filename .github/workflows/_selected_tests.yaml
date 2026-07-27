@@ -152,7 +152,7 @@ jobs:
             *) echo "arch=$ARCH" >> $GITHUB_OUTPUT ;;
           esac
 
-      - uses: dorny/paths-filter@v4
+      - uses: dorny/paths-filter@v4.0.2
         id: csrc-filter
         if: ${{ matrix.group.npu_type != 'cpu' }}
         with:

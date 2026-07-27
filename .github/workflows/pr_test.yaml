@@ -117,7 +117,7 @@ jobs:
           path: ./vllm-empty
           ref: ${{ steps.vllm.outputs.main_commit }}
 
-      - uses: dorny/paths-filter@v4
+      - uses: dorny/paths-filter@v4.0.2
         id: filter
         with:
           filters: |
@@ -186,7 +186,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: dorny/paths-filter@v4
+      - uses: dorny/paths-filter@v4.0.2
         id: filter
         with:
           filters: |
