@@ -39,7 +39,7 @@ Kimi K3 is validated on Atlas 800 A3 (64G × 16). Select the image that matches 
 | Host operating system | Image |
 | --- | --- |
 | Ubuntu | `quay.io/ascend/vllm-ascend:kimi-k3-a3` |
-| openEuler | `quay.io/ascend/vllm-ascend:kimi-k3-openeuler` |
+| openEuler | `quay.io/ascend/vllm-ascend:kimi-k3-a3-openeuler` |
 
 Run the following command on each node:
 
@@ -47,7 +47,7 @@ Run the following command on each node:
 # Ubuntu:
 export IMAGE=quay.io/ascend/vllm-ascend:kimi-k3-a3
 # openEuler:
-# export IMAGE=quay.io/ascend/vllm-ascend:kimi-k3-openeuler
+# export IMAGE=quay.io/ascend/vllm-ascend:kimi-k3-a3-openeuler
 docker run --rm \
     --name vllm-ascend \
     --shm-size=1g \
