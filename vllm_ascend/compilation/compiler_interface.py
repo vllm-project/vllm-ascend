@@ -28,12 +28,25 @@ from torch._inductor.compile_fx import graph_returns_tuple, make_graph_return_tu
 from torch._inductor.decomposition import select_decomp_table
 from torch.fx import GraphModule
 from vllm.compilation.compiler_interface import CompilerInterface
+from vllm.compilation.passes.inductor_pass import pass_context
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import AscendCompilationConfig, get_ascend_config
 from vllm_ascend.utils import COMPILATION_PASS_KEY
+
+
+class _RangeBoundFusionPass:
+    """Run a deferred backend pass under the range that created it."""
+
+    def __init__(self, manager: Callable, compile_range: Range) -> None:
+        self.manager = manager
+        self.compile_range = Range(compile_range.start, compile_range.end)
+
+    def __call__(self, graph, example_inputs=None, compiler_config=None):
+        with pass_context(self.compile_range):
+            return self.manager(graph, example_inputs, compiler_config)
 
 
 def compile_fx(graph: GraphModule, example_inputs: list, inner_compile: Callable, decompositions: dict) -> Callable:
@@ -51,9 +64,10 @@ def fusion_pass_compile(
     compile_range: Range,
     key: str | None = None,
 ) -> tuple[Callable | None, Any | None]:
+    range_bound_pass = _RangeBoundFusionPass(compiler_config[COMPILATION_PASS_KEY], compile_range)
+
     def compile_inner(graph, example_inputs):
-        current_pass_manager = compiler_config[COMPILATION_PASS_KEY]
-        graph = current_pass_manager(graph)
+        graph = range_bound_pass(graph, example_inputs)
         return graph
 
     decompositions = select_decomp_table()
@@ -84,6 +98,7 @@ def _configure_backend(
     ascend_compilation_config: AscendCompilationConfig,
     vllm_config: VllmConfig,
     process_kwargs_options: Callable | None = None,
+    graph_fusion_manager: Callable | None = None,
 ) -> None:
     if ascend_compilation_config.enable_static_kernel:
         # npugraph_ex's static_kernel requires LOCAL_WORLD_SIZE to determine the
@@ -119,6 +134,8 @@ def _configure_backend(
             "clone_input": False,
             "clone_output": False,
         }
+        if graph_fusion_manager is not None:
+            options["post_grad_custom_post_pass"] = graph_fusion_manager
         if ascend_compilation_config.enable_static_kernel:
             logger.info_once(
                 "enable_static_kernel is enabled, static shape kernel will be used to accelerate aclgraph execution.",
@@ -160,6 +177,10 @@ def npugraph_ex_compile(
     try:
         import npugraph_ex as nge
 
+        graph_fusion_manager = compiler_config.get(COMPILATION_PASS_KEY)
+        if graph_fusion_manager is not None:
+            graph_fusion_manager = _RangeBoundFusionPass(graph_fusion_manager, compile_range)
+
         cache_path = os.path.join(cache_dir, key) if (cache_dir and key) else None
         torch.npu.set_compile_mode(jit_compile=False)
         config = nge.CompilerConfig()
@@ -170,7 +191,11 @@ def npugraph_ex_compile(
         except ImportError:
             from npugraph_ex.configs.npugraphex_config import _process_kwargs_options
         _configure_backend(
-            config, ascend_compilation_config, vllm_config, process_kwargs_options=_process_kwargs_options
+            config,
+            ascend_compilation_config,
+            vllm_config,
+            process_kwargs_options=_process_kwargs_options,
+            graph_fusion_manager=graph_fusion_manager,
         )
         import npugraph_ex.npu_fx_compiler as nfx
 
@@ -201,11 +226,15 @@ def npugraph_ex_compile(
 
         nfx._NpuFxCompiler._get_compiled_gm = patched_get_compiled_gm
         backend = nge.get_npu_backend(compiler_config=config)
-        # torch.compile requires the output of the fx graph to be a tuple
-        if not graph_returns_tuple(graph):
-            compiled_fn = make_graph_return_tuple(graph, example_inputs, backend)
-        else:
-            compiled_fn = backend(graph, example_inputs)
+        # NGE's inner AOT cache hashes callback bytecode but not callback state,
+        # so range-bound passes can otherwise reuse an artifact from another
+        # compile range. vLLM's range-aware artifact cache remains enabled.
+        with torch._functorch.config.patch(enable_autograd_cache=False):
+            # torch.compile requires the output of the fx graph to be a tuple
+            if not graph_returns_tuple(graph):
+                compiled_fn = make_graph_return_tuple(graph, example_inputs, backend)
+            else:
+                compiled_fn = backend(graph, example_inputs)
         nfx._NpuFxCompiler._get_compiled_gm = _original_get_compiled_gm
         return compiled_fn, (key, cache_path)
     except ImportError:
@@ -232,6 +261,19 @@ class AscendCompiler(CompilerInterface):
 
     name = "AscendCompiler"
 
+    def _copy_pristine_graph(self, graph: fx.GraphModule, key: str | None) -> fx.GraphModule:
+        # PiecewiseBackend reuses the same GraphModule across compile ranges.
+        # Some NPU compilation passes mutate that module despite the caller-side
+        # deepcopy, so retain one source graph per piecewise subgraph.
+        if not hasattr(self, "_pristine_graphs"):
+            self._pristine_graphs: dict[str | int, fx.GraphModule] = {}
+        graph_key: str | int = (
+            key.rsplit("_subgraph_", 1)[-1] if key and "_subgraph_" in key else id(graph)
+        )
+        if graph_key not in self._pristine_graphs:
+            self._pristine_graphs[graph_key] = copy.deepcopy(graph)
+        return copy.deepcopy(self._pristine_graphs[graph_key])
+
     # TODO(wxs): add passes related to compilation in compute_hash
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         self.vllm_config = vllm_config
@@ -244,6 +286,7 @@ class AscendCompiler(CompilerInterface):
             "torch_npu_version": torch_npu.__version__,
             "enable_npugraph_ex": ascend_compilation_config.enable_npugraph_ex,
             "enable_static_kernel": ascend_compilation_config.enable_static_kernel,
+            "fuse_allreduce_rms": ascend_compilation_config.fuse_allreduce_rms,
         }
         logger.info("AscendCompiler hash factors: %s", factors)
         return sha256(str(factors).encode(), usedforsecurity=False).hexdigest()[:10]
@@ -260,9 +303,7 @@ class AscendCompiler(CompilerInterface):
         compile_range: Range,
         key: str | None = None,
     ) -> tuple[Callable | None, Any | None]:
-        # inductor can inplace modify the graph, so we need to copy it
-        # see https://github.com/pytorch/pytorch/issues/138980
-        graph = copy.deepcopy(graph)
+        graph = self._copy_pristine_graph(graph, key)
 
         from torch._guards import detect_fake_mode
 
@@ -311,11 +352,11 @@ class AscendCompiler(CompilerInterface):
                 "npugraph_ex cache miss for key %s (file absent or not saved), recompiling",
                 key,
             )
-            # Mirror the same pre-processing done in compile(): deepcopy the graph
-            # to prevent make_graph_return_tuple from mutating the caller's copy,
+            # Mirror the same pre-processing done in compile(): restore the pristine
+            # range-independent graph before make_graph_return_tuple can mutate it,
             # and re-wrap FakeTensor inputs under the current fake mode to avoid
             # "fake mode mismatch" in aot_module_simplified.
-            graph = copy.deepcopy(graph)
+            graph = self._copy_pristine_graph(graph, key)
             from torch._guards import detect_fake_mode
 
             current_fake_mode = detect_fake_mode()
