@@ -57,6 +57,7 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     RegisterRegions,
@@ -2113,6 +2114,8 @@ class MooncakeConnectorWorker:
         )
 
     def _get_spec_total_num_kv_heads(self, spec: Any, layer_idx: int) -> int | None:
+        if isinstance(spec, (MLAAttentionSpec, AscendSlidingWindowMLASpec, AscendSFAIndexerCacheSpec)):
+            return 1
         local_num_kv_heads = self._get_spec_num_key_value_heads(spec)
         if local_num_kv_heads is None or isinstance(spec, MLAAttentionSpec):
             return local_num_kv_heads
@@ -2289,6 +2292,7 @@ class MooncakeConnectorWorker:
         # layer indices: {group_id: (group_spec, [layer_idx0, layer_idx1, ...])}.
         self.kv_group2layeridx = self._build_kv_group2layeridx()
         self._is_hma_required = self._is_hma_required or self._requires_group_aware_attention_transfer()
+        logger.info(f'{self._is_hma_required=}')
         has_mamba_group = self._has_mamba_group()
         layer_name_to_idx = {
             layer_name: layer_idx
