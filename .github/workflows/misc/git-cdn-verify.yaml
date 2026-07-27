@@ -1,0 +1,77 @@
+name: git-cdn-verify
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/misc/git-cdn-verify.yaml'
+
+jobs:
+  verify-git-cdn:
+    name: "git-cdn anonymous clone verification (aarch64)"
+    runs-on: linux-aarch64-cpu-2-gitcdn-test
+
+    steps:
+      - name: Verify git-cdn redirect in .gitconfig
+        run: |
+          echo "=== Checking /root/.gitconfig for git-cdn insteadOf ==="
+          cat /root/.gitconfig
+          echo ""
+          echo "=== Verifying insteadOf rule exists ==="
+          grep -q 'insteadOf.*https://github.com/' /root/.gitconfig || {
+            echo "ERROR: insteadOf rule not found in /root/.gitconfig"
+            exit 1
+          }
+          grep -q 'git-cdn-service.git-cdn.svc.cluster.local' /root/.gitconfig || {
+            echo "ERROR: git-cdn service URL not found in insteadOf rule"
+            exit 1
+          }
+          echo "PASS: git-cdn insteadOf rule is present"
+
+      - name: Test anonymous git clone via git-cdn
+        run: |
+          echo "=== Cloning a public repo via git-cdn (no PAT) ==="
+          git clone --depth=1 https://github.com/ascend-gha-runners/vllm-ascend.git /tmp/test-clone 2>&1 | tee /tmp/clone-output.txt
+          echo ""
+          echo "=== Verifying clone succeeded ==="
+          test -d /tmp/test-clone/.git || {
+            echo "ERROR: Clone failed — .git directory not found"
+            exit 1
+          }
+          echo "PASS: Anonymous clone via git-cdn succeeded"
+
+      - name: Test git fetch via git-cdn
+        run: |
+          echo "=== Testing git fetch (update) via git-cdn ==="
+          cd /tmp/test-clone
+          git fetch --depth=1 origin main 2>&1 | tee /tmp/fetch-output.txt
+          echo "PASS: git fetch via git-cdn succeeded"
+
+      - name: Verify no PAT in clone output
+        run: |
+          echo "=== Checking that no PAT token appears in clone logs ==="
+          # The git-cdn insteadOf should redirect https://github.com/ → http://git-cdn-service:8000/
+          # If PAT were being used, we'd see "x-access-token" in the URL or auth headers
+          grep -q 'x-access-token' /tmp/clone-output.txt && {
+            echo "ERROR: PAT token detected in clone output — should be anonymous"
+            exit 1
+          } || echo "PASS: No PAT in clone output (anonymous clone confirmed)"
+
+      - name: Summary
+        run: |
+          echo "=========================================="
+          echo "  git-cdn Verification Summary"
+          echo "=========================================="
+          echo ""
+          echo "Runner: linux-aarch64-cpu-2-gitcdn-test"
+          echo "Cluster: gy-006"
+          echo "git-cdn: grouperenault (ENFORCE_AUTH=False)"
+          echo ""
+          echo "All tests passed:"
+          echo "  ✓ insteadOf rule present in .gitconfig"
+          echo "  ✓ Anonymous clone via git-cdn succeeded"
+          echo "  ✓ git fetch via git-cdn succeeded"
+          echo "  ✓ No PAT token in clone output"
+          echo ""
+          echo "git-cdn is working correctly for public repos."
+          echo "=========================================="
