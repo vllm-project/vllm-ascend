@@ -7,11 +7,11 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheTensor, Uniform
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+    _validate_layerwise_reuse_layout,
     apply_layerwise_kv_cache_plan,
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
     get_gva_layerwise_config,
-    validate_layerwise_reuse_layout,
 )
 
 
@@ -275,7 +275,7 @@ def test_multi_group_accepts_sfa_main_and_indexer():
         scale_dtype=torch.float16,
     )
 
-    validate_layerwise_reuse_layout(
+    _validate_layerwise_reuse_layout(
         SimpleNamespace(kv_cache_groups=[object(), object()]),
         {
             main_name: main_spec,
@@ -304,7 +304,7 @@ def test_multi_group_rejects_non_sfa_topology():
         NotImplementedError,
         match="only for separated SFA main/indexer caches",
     ):
-        validate_layerwise_reuse_layout(
+        _validate_layerwise_reuse_layout(
             SimpleNamespace(kv_cache_groups=[object(), object()]),
             {layer_name: full_spec},
             {0: {"main": layer_name}},
@@ -331,7 +331,7 @@ def test_multi_group_requires_mla_main_for_indexer():
     )
 
     with pytest.raises(NotImplementedError, match="unsupported cache specs"):
-        validate_layerwise_reuse_layout(
+        _validate_layerwise_reuse_layout(
             SimpleNamespace(kv_cache_groups=[object(), object()]),
             {
                 main_name: main_spec,
