@@ -1,5 +1,6 @@
 import importlib
 import math
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, cast
 
 import vllm.envs as envs
@@ -93,6 +94,11 @@ class KVPoolScheduler:
             "consumer_is_to_put", False
         )
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
+        # Async external-KV lookup (vLLM PR #45659). When enabled, the blocking
+        # ZMQ lookup RPC runs in a background thread and ``get_num_new_matched_tokens``
+        # returns ``None`` while it is in flight, so the scheduler thread is not
+        # blocked. Defaults to off to preserve the current (synchronous) behavior.
+        self.lookup_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("lookup_async", False)
         self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "save_decode_cache", False
         )
@@ -492,13 +498,53 @@ class KVPoolScheduler:
         ]
         return tuple(clipped) if isinstance(block_ids, tuple) else clipped
 
+    def on_new_request(self, request: "Request") -> None:
+        """Warm up the external-KV lookup as soon as a request is enqueued.
+
+        With async lookup enabled, the blocking ZMQ RPC otherwise only starts
+        when the scheduler first calls ``get_num_new_matched_tokens``, which
+        then returns ``None`` and defers the request by (at least) one
+        scheduler step -- regressing TTFT. Prefetching here overlaps the
+        round-trip with the request's queue-wait so the hit count is usually
+        ready by the time it is first considered for scheduling.
+
+        The guard conditions mirror the path in ``get_num_new_matched_tokens``
+        that actually issues ``client.lookup`` (same ``token_len`` and
+        ``block_hashes``), so we never submit a lookup that will not be
+        consumed there.
+        """
+        if not self.lookup_async:
+            return
+        # Only the plain (non-layerwise) store path uses the async client.
+        if self.use_gva_layerwise or self.use_layerwise:
+            return
+        if self.kv_role == "kv_consumer" and not self.consumer_is_to_load:
+            return
+        if self._discard_partial_chunks:
+            token_len = self._floor_to_cache_transfer_granularity(len(request.prompt_token_ids))
+        else:
+            token_len = len(request.prompt_token_ids)
+        if token_len < self.cache_transfer_granularity:
+            return
+        if self.client is None:
+            self.client = LookupKeyClient(self.vllm_config)
+        self.client.prefetch(
+            request.request_id,
+            token_len,
+            request.block_hashes,
+            self.kv_cache_group_ids,
+        )
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> tuple[int, bool]:
+    ) -> tuple[int | None, bool]:
         """
         Check for external KV cache hit.
+
+        Returns ``(None, False)`` when an async lookup is still in flight,
+        signaling the scheduler to retry this request on a later step.
 
         Args:
             request (Request): the request object.
@@ -531,11 +577,23 @@ class KVPoolScheduler:
             else:
                 if self.client is None:
                     self.client = LookupKeyClient(self.vllm_config)
-                num_external_hit_tokens = self.client.lookup(
+                # ``lookup`` returns ``int | None``; keep it in a local so
+                # ``num_external_hit_tokens`` stays a plain ``int`` (as produced
+                # by the layerwise paths above) after the None check below.
+                async_hit_tokens = self.client.lookup(
+                    request.request_id,
                     token_len,
                     request.block_hashes,
                     self.kv_cache_group_ids,
+                    non_block=self.lookup_async,
                 )
+                if async_hit_tokens is None:
+                    # Async lookup still in flight; ask the scheduler to retry
+                    # this request on a later step. All vllm-ascend scheduler
+                    # paths (base / recompute / profiling-chunk / balance) treat
+                    # a None hit count as "not ready yet".
+                    return None, False
+                num_external_hit_tokens = async_hit_tokens
 
         if num_external_hit_tokens == 0:
             return 0, False
@@ -911,6 +969,9 @@ class KVPoolScheduler:
         force_skip_save = self.kv_role == "kv_consumer" and not self.consumer_is_to_put
 
         for finished_req_id in scheduler_output.finished_req_ids:
+            if self.client is not None:
+                # Cancel/drop any in-flight async lookup for the finished request.
+                self.client.discard(finished_req_id)
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
             self._unfinished_request_ids.discard(finished_req_id)
@@ -1109,14 +1170,19 @@ class LookupKeyClient:
             zmq.REQ,  # type: ignore[attr-defined]
             bind=False,
         )
+        # Async lookup support (mirrors vLLM PR #45659). A single-worker
+        # executor moves the blocking ZMQ send/recv off the scheduler thread
+        # while serializing access to the non-thread-safe REQ socket (which
+        # requires strict send->recv alternation).
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="AscendStoreLookupClient")
+        self.futures: dict[str, Future[int]] = {}
 
-    def lookup(
+    def _lookup(
         self,
         token_len: int,
         block_hashes: list[BlockHash],
-        kv_cache_group_ids: list[int] | None = None,
+        kv_cache_group_ids: list[int],
     ) -> int:
-        kv_cache_group_ids = kv_cache_group_ids or [0]
         hash_strs = [h.hex() for h in block_hashes]
         hash_frames = self.encoder.encode(hash_strs)
         kv_group_frames = self.encoder.encode(kv_cache_group_ids)
@@ -1127,7 +1193,74 @@ class LookupKeyClient:
         result = int.from_bytes(resp, "big")
         return result
 
+    def lookup(
+        self,
+        req_id: str,
+        token_len: int,
+        block_hashes: list[BlockHash],
+        kv_cache_group_ids: list[int] | None = None,
+        non_block: bool = False,
+    ) -> int | None:
+        """Look up the external KV hit length for ``req_id``.
+
+        When ``non_block`` is True, returns ``None`` while the lookup is still
+        running in the background so the caller retries on a later step;
+        otherwise blocks until the result is ready.
+        """
+        # Copy the mutable inputs so the background thread reads a stable
+        # snapshot even if the request's block_hashes grow in the meantime.
+        future = self.futures.get(req_id)
+        if future is None:
+            future = self.executor.submit(
+                self._lookup,
+                token_len,
+                list(block_hashes),
+                list(kv_cache_group_ids or [0]),
+            )
+            self.futures[req_id] = future
+        if non_block and not future.done():
+            return None
+        try:
+            return future.result()
+        except Exception as e:
+            logger.error("Async AscendStore lookup failed for %s: %s", req_id, e)
+            return 0
+        finally:
+            del self.futures[req_id]
+
+    def prefetch(
+        self,
+        req_id: str,
+        token_len: int,
+        block_hashes: list[BlockHash],
+        kv_cache_group_ids: list[int] | None = None,
+    ) -> None:
+        """Warm up a lookup in the background without consuming its result.
+
+        Submitting the ZMQ round-trip as soon as the request arrives lets it
+        overlap with the time the request spends waiting in the scheduler
+        queue, so the later ``lookup()`` call (from
+        ``get_num_new_matched_tokens``) reuses the already in-flight (usually
+        finished) future instead of starting a fresh round-trip and deferring
+        the request by a scheduler step. Idempotent per ``req_id``.
+        """
+        if req_id in self.futures:
+            return
+        self.futures[req_id] = self.executor.submit(
+            self._lookup,
+            token_len,
+            list(block_hashes),
+            list(kv_cache_group_ids or [0]),
+        )
+
+    def discard(self, req_id: str) -> None:
+        """Drop any cached/in-flight lookup for ``req_id`` (e.g. on abort)."""
+        future = self.futures.pop(req_id, None)
+        if future is not None:
+            future.cancel()
+
     def close(self):
+        self.executor.shutdown(wait=False, cancel_futures=True)
         self.socket.close(linger=0)
 
 

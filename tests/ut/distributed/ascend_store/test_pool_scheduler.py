@@ -257,6 +257,10 @@ class TestKVPoolScheduler(unittest.TestCase):
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_get_num_new_matched_tokens_async(self, mock_client_cls):
+        # NOTE: ``load_async`` controls asynchronous *loading* of KV blocks and
+        # surfaces as the second (``load_kv_async``) return value. It is distinct
+        # from ``lookup_async`` (asynchronous prefix *lookup*), which is covered
+        # by the tests below.
         config = self._make_config(extra_config={"load_async": True})
         scheduler = KVPoolScheduler(config, use_layerwise=False)
         mock_client_cls.return_value.lookup.return_value = 48
@@ -270,6 +274,141 @@ class TestKVPoolScheduler(unittest.TestCase):
         need, is_async = scheduler.get_num_new_matched_tokens(request, 0)
         self.assertEqual(need, 48)
         self.assertTrue(is_async)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_get_num_new_matched_tokens_lookup_sync_is_blocking(self, mock_client_cls):
+        # Default (``lookup_async`` unset): the lookup is issued with
+        # ``non_block=False`` so a concrete hit count is returned in one step.
+        config = self._make_config(block_size=16)
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+        mock_client_cls.return_value.lookup.return_value = 48
+
+        request = MagicMock()
+        request.prompt_token_ids = list(range(64))
+        request.num_tokens = 64
+        request.request_id = "r1"
+        request.block_hashes = [b"h"] * 4
+
+        need, _ = scheduler.get_num_new_matched_tokens(request, 16)
+        self.assertEqual(need, 32)
+        self.assertFalse(scheduler.client.lookup.call_args.kwargs["non_block"])
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_get_num_new_matched_tokens_lookup_async_in_flight(self, mock_client_cls):
+        # ``lookup_async=True`` and the background lookup has not finished yet:
+        # the client returns ``None`` and the scheduler must propagate
+        # ``(None, False)`` so the request is retried on a later step rather
+        # than scheduled with a wrong hit count.
+        config = self._make_config(block_size=16, extra_config={"lookup_async": True})
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+        mock_client_cls.return_value.lookup.return_value = None
+
+        request = MagicMock()
+        request.prompt_token_ids = list(range(64))
+        request.num_tokens = 64
+        request.request_id = "r1"
+        request.block_hashes = [b"h"] * 4
+
+        result = scheduler.get_num_new_matched_tokens(request, 0)
+        self.assertEqual(result, (None, False))
+        # The lookup was requested in non-blocking mode ...
+        self.assertTrue(scheduler.client.lookup.call_args.kwargs["non_block"])
+        # ... and no load spec is created while the lookup is still pending.
+        self.assertNotIn("r1", scheduler.load_specs)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_get_num_new_matched_tokens_lookup_async_ready(self, mock_client_cls):
+        # ``lookup_async=True`` and the background lookup has completed: behaves
+        # like the synchronous hit path, but the lookup is still non-blocking.
+        config = self._make_config(block_size=16, extra_config={"lookup_async": True})
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+        mock_client_cls.return_value.lookup.return_value = 48
+
+        request = MagicMock()
+        request.prompt_token_ids = list(range(64))
+        request.num_tokens = 64
+        request.request_id = "r1"
+        request.block_hashes = [b"h"] * 4
+
+        need, _ = scheduler.get_num_new_matched_tokens(request, 16)
+        self.assertEqual(need, 32)
+        self.assertTrue(scheduler.client.lookup.call_args.kwargs["non_block"])
+        self.assertIn("r1", scheduler.load_specs)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_on_new_request_prefetches_when_lookup_async(self, mock_client_cls):
+        # With ``lookup_async`` enabled, enqueuing a request warms up the lookup
+        # so it overlaps queue-wait. The prefetch args must mirror the ones the
+        # consuming ``get_num_new_matched_tokens`` path would use.
+        config = self._make_config(block_size=16, extra_config={"lookup_async": True})
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+        client = MagicMock()
+        scheduler.client = client
+
+        request = MagicMock()
+        request.prompt_token_ids = list(range(64))
+        request.request_id = "r1"
+        request.block_hashes = [b"h"] * 4
+
+        scheduler.on_new_request(request)
+
+        expected_token_len = scheduler._floor_to_cache_transfer_granularity(64)
+        client.prefetch.assert_called_once_with(
+            "r1",
+            expected_token_len,
+            request.block_hashes,
+            scheduler.kv_cache_group_ids,
+        )
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_on_new_request_noop_when_not_lookup_async(self, mock_client_cls):
+        # Async lookup disabled (default): no prefetch is issued.
+        config = self._make_config(block_size=16)
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+        client = MagicMock()
+        scheduler.client = client
+
+        request = MagicMock()
+        request.prompt_token_ids = list(range(64))
+        request.request_id = "r1"
+        request.block_hashes = [b"h"] * 4
+
+        scheduler.on_new_request(request)
+        client.prefetch.assert_not_called()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_on_new_request_noop_for_consumer_without_load(self, mock_client_cls):
+        # A kv_consumer that does not load from the pool must not prefetch,
+        # mirroring the guard in ``get_num_new_matched_tokens``.
+        config = self._make_config(kv_role="kv_consumer", block_size=16, extra_config={"lookup_async": True})
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+        client = MagicMock()
+        scheduler.client = client
+
+        request = MagicMock()
+        request.prompt_token_ids = list(range(64))
+        request.request_id = "r1"
+        request.block_hashes = [b"h"] * 4
+
+        scheduler.on_new_request(request)
+        client.prefetch.assert_not_called()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_on_new_request_noop_when_too_short(self, mock_client_cls):
+        # Prompts below the cache-transfer granularity are never looked up, so
+        # they must not be prefetched either.
+        config = self._make_config(block_size=64, extra_config={"lookup_async": True})
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+        client = MagicMock()
+        scheduler.client = client
+
+        request = MagicMock()
+        request.prompt_token_ids = list(range(32))
+        request.request_id = "r1"
+        request.block_hashes = [b"h"] * 2
+
+        scheduler.on_new_request(request)
+        client.prefetch.assert_not_called()
 
 
 class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
@@ -424,9 +563,58 @@ class TestLookupKeyClient(unittest.TestCase):
         mock_socket.recv.return_value = (32).to_bytes(4, "big")
 
         client = LookupKeyClient(config)
-        result = client.lookup(64, [b"\xaa\xbb"])
+        # Synchronous path: blocks on the background future and returns the hit.
+        result = client.lookup("req0", 64, [b"\xaa\xbb"])
         self.assertEqual(result, 32)
         mock_socket.send_multipart.assert_called_once()
+        # Future is cleared once its result has been consumed.
+        self.assertNotIn("req0", client.futures)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")
+    def test_lookup_async(self, mock_zmq, mock_make_socket):
+        config = MagicMock()
+        config.parallel_config.data_parallel_rank = 0
+        config.kv_transfer_config.kv_connector_extra_config = {}
+        mock_make_socket.return_value = MagicMock()
+
+        client = LookupKeyClient(config)
+        # Drive the executor deterministically so the test is not timing-based.
+        client.executor = MagicMock()
+        fake_future = MagicMock()
+        client.executor.submit.return_value = fake_future
+
+        # First non-blocking call: lookup still running -> returns None and the
+        # future is retained for a later retry.
+        fake_future.done.return_value = False
+        self.assertIsNone(client.lookup("r1", 64, [b"h"], non_block=True))
+        self.assertIn("r1", client.futures)
+        client.executor.submit.assert_called_once()
+
+        # Later step: result ready -> returns it and drops the future. The
+        # in-flight future is reused (submit not called again).
+        fake_future.done.return_value = True
+        fake_future.result.return_value = 48
+        self.assertEqual(client.lookup("r1", 64, [b"h"], non_block=True), 48)
+        self.assertNotIn("r1", client.futures)
+        client.executor.submit.assert_called_once()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")
+    def test_discard(self, mock_zmq, mock_make_socket):
+        config = MagicMock()
+        config.parallel_config.data_parallel_rank = 0
+        config.kv_transfer_config.kv_connector_extra_config = {}
+        mock_make_socket.return_value = MagicMock()
+
+        client = LookupKeyClient(config)
+        fake_future = MagicMock()
+        client.futures["r1"] = fake_future
+        client.discard("r1")
+        self.assertNotIn("r1", client.futures)
+        fake_future.cancel.assert_called_once()
+        # Discarding an unknown request is a no-op.
+        client.discard("missing")
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")

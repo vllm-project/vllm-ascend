@@ -123,7 +123,17 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     # Scheduler Side Methods
     ############################################################
 
-    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
+    def on_new_request(self, request: "Request") -> None:
+        # Scheduler-side hook: prefetch the external-KV lookup so it overlaps
+        # with the request's queue-wait (see KVPoolScheduler.on_new_request).
+        scheduler = getattr(self, "connector_scheduler", None)
+        if scheduler is not None:
+            scheduler.on_new_request(request)
+
+    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int | None, bool]:
+        # ``None`` is returned while an async external-KV lookup is still in
+        # flight, signaling the scheduler to retry this request on a later step
+        # (see ``KVPoolScheduler.get_num_new_matched_tokens``).
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(request, num_computed_tokens)
 
