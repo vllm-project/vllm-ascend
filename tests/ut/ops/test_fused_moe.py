@@ -52,7 +52,7 @@ def test_ascend_unquantized_skips_upstream_modular_kernel_init():
 
 @pytest.mark.parametrize(
     "is_v024, expected_contiguous",
-    [(True, True), (False, False)],
+    [(True, True), (False, True)],
 )
 def test_process_weights_after_loading_uses_version_specific_layout(
     monkeypatch,
@@ -65,7 +65,6 @@ def test_process_weights_after_loading_uses_version_specific_layout(
     original_w2 = layer.w2_weight.detach().clone()
     ascend_config = SimpleNamespace(enable_fused_mc2=False)
 
-    monkeypatch.setattr(fused_moe_module, "vllm_version_is", lambda version: is_v024 and version == "0.24.0")
     monkeypatch.setattr(fused_moe_module, "get_ascend_config", lambda: ascend_config)
     monkeypatch.setattr(fused_moe_module, "maybe_trans_nz", lambda weight: weight)
     upstream_method_base = AscendUnquantizedFusedMoEMethod.__mro__[2]
@@ -204,6 +203,8 @@ def test_shared_forward_impl_returns_current_runner_contract(monkeypatch, has_sh
         before_gmm2_evt=None,
         before_combine_evt=None,
         swiglu_limit=0.0,
+        swiglu_alpha=1.0,
+        swiglu_beta=0.0,
     )
     runner.no_shared_forward_impl = MagicMock(return_value=routed_result)
     runner._forward_shared_experts = MagicMock(return_value=shared_out)

@@ -324,10 +324,10 @@ class TestAscendMLAImpl(TestBase):
         self.assertIsNotNone(decode_res)
         self.assertIsNone(prefill_res)
 
-    @patch("torch_npu.npu_scatter_pa_kv_cache")
+    @patch("torch_npu._npu_reshape_and_cache")
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
-    def test_mla_preprocess_pcp(self, mock_maybe_all_gather_and_maybe_unpad, mock_npu_scatter_pa_kv_cache):
+    def test_mla_preprocess_pcp(self, mock_maybe_all_gather_and_maybe_unpad, mock_npu_reshape_and_cache):
         self.impl.num_kv_heads = 1
         self.impl.num_heads = 16
         self.impl.qk_rope_head_dim = 64
@@ -488,7 +488,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(result.shape[0], B)
         self.assertEqual(result.shape[1], self.impl.v_head_dim)
 
-    @patch("torch_npu.npu_gather_pa_kv_cache")
+    @patch("torch_npu.atb.npu_paged_cache_load")
     @patch("torch_npu.npu_attention_update")
     @patch("torch_npu.npu_fused_infer_attention_score")
     @patch_distributed_groups(dcp_size=2, pcp_size=2)

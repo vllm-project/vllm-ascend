@@ -376,6 +376,27 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_kv_quant_sparse_flash_attenti
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, softmax_max, softmax_sum);
 }
 
+at::Tensor npu_sparse_attention_score_meta(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
+    const at::Tensor &select_idx, const at::Tensor &block_table,
+    const c10::optional<at::Tensor> &select_num_idx,
+    const c10::optional<at::Tensor> &q_dequant_scale,
+    const c10::optional<at::Tensor> &k_dequant_scale,
+    const c10::optional<at::Tensor> &v_dequant_scale,
+    const c10::optional<at::Tensor> &actual_seq_lengths,
+    const c10::optional<at::Tensor> &actual_seq_lengths_kv,
+    c10::string_view q_input_layout, c10::string_view kv_input_layout,
+    int64_t num_key_value_heads, double scale_value, int64_t block_size, int64_t top_k,
+    int64_t inner_precise)
+{
+    TORCH_CHECK(std::string(q_input_layout) == "TND",
+                "npu_sparse_attention_score only supports query TND layout");
+    at::ScalarType out_dtype = (query.scalar_type() == at::kFloat8_e4m3fn)
+                                   ? at::kHalf
+                                   : query.scalar_type();
+    return at::empty_symint(query.sym_sizes(), query.options().dtype(out_dtype).device(c10::kMeta));
+}
+
 std::tuple<at::Tensor, at::Tensor> matmul_allreduce_add_rmsnorm_meta(
     const at::Tensor &x1,
     const at::Tensor &x2,
@@ -1797,6 +1818,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("store_kv_block", &vllm_ascend::meta::store_kv_block);
     // npu_fused_gdn_gating
     ops.impl("npu_fused_gdn_gating", &vllm_ascend::meta::npu_fused_gdn_gating_meta);
+    // npu_sparse_attention_score
+    ops.impl("npu_sparse_attention_score", &vllm_ascend::meta::npu_sparse_attention_score_meta);
 }
 }
 #endif

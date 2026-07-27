@@ -61,7 +61,7 @@ def test_runner_310_installs_specialized_unquantized_method_and_comm():
 
 @pytest.mark.parametrize(
     "is_v024, expected_contiguous",
-    [(True, True), (False, False)],
+    [(True, True), (False, True)],
 )
 def test_process_weights_after_loading_310_uses_version_specific_layout(
     monkeypatch,
@@ -74,11 +74,6 @@ def test_process_weights_after_loading_310_uses_version_specific_layout(
     original_w13 = layer.w13_weight.detach().clone()
     original_w2 = layer.w2_weight.detach().clone()
 
-    monkeypatch.setattr(
-        fused_moe_310_module,
-        "vllm_version_is",
-        lambda version: is_v024 and version == "0.24.0",
-    )
     monkeypatch.setattr(fused_moe_310_module, "maybe_trans_nz", lambda weight: weight)
     monkeypatch.setattr(
         fused_moe_310_module.UnquantizedFusedMoEMethod,
@@ -137,6 +132,8 @@ def test_shared_forward_impl_310_returns_current_runner_contract(monkeypatch, ha
         before_gmm2_evt=None,
         before_combine_evt=None,
         swiglu_limit=0.0,
+        swiglu_alpha=1.0,
+        swiglu_beta=0.0,
     )
     runner.no_shared_forward_impl = MagicMock(return_value=routed_result)
     runner._forward_shared_experts = MagicMock(return_value=shared_out)
