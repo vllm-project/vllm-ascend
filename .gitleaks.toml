@@ -53,11 +53,10 @@ useDefault = true
 [[allowlists]]
 paths = ["^vllm-empty/"]
 
-# Allow tilingKey generic-api-key false positives in specified files
+# Allow tilingKey generic-api-key false positives in the specified file
 [[allowlists]]
 paths = [
-    "^csrc/notify_dispatch/op_host/notify_dispatch_tiling.cpp",
-    "^tests/ut/spec_decode/test_eagle_proposer.py"
+    "^csrc/notify_dispatch/op_host/notify_dispatch_tiling.cpp"
 ]
 rules = ["generic-api-key"]
 

@@ -584,3 +584,9 @@ msgid ""
 msgstr ""
 "|长上下文（1M）|1P1D部署|32 (A3)|DeepSeek-V4-Flash-w8a8-mtp|P节点和D节点均使用dp16 "
 "tp1；平衡延迟与吞吐量|"
+
+msgid "=== \"A2 series with dspark\""
+msgstr "=== \"A2系列搭配dspark\""
+
+msgid "tps more than 50+ ,its reach  2X speed of dsv4f with mtp"
+msgstr "tps超过50+，其速度达到dsv4f搭配mtp的2倍"

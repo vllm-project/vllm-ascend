@@ -263,13 +263,15 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         )
         if self.reorder_batch_threshold != 1:  # type: ignore
             speculative_config = self.vllm_config.speculative_config
-            if (
-                speculative_config is not None
-                and speculative_config.num_speculative_tokens is not None
-                and hasattr(speculative_config, "method")
-                and speculative_config.method == "dflash"
-            ):
-                self.reorder_batch_threshold = 1 + speculative_config.num_speculative_tokens
+            method = getattr(speculative_config, "method", None)
+            num_spec = getattr(speculative_config, "num_speculative_tokens", None)
+            if num_spec is not None:
+                # dflash counts the base token in addition to the N speculative
+                # tokens; dspark's threshold is just N by design.
+                if method == "dflash":
+                    self.reorder_batch_threshold = 1 + num_spec
+                elif method == "dspark":
+                    self.reorder_batch_threshold = num_spec
 
     def _copy_sequence_indices_to_device(
         self,

@@ -132,56 +132,49 @@ def read_recommended(recommendations_file):
 # ============================================================
 
 
+def normalize_test_path(test_path):
+    """Return a stable comparison key for a pytest path or node ID."""
+    normalized = test_path.strip().replace("\\", "/").removeprefix("./")
+    file_path, separator, test_name = normalized.partition("::")
+    file_path = file_path.removesuffix(".py")
+    return f"{file_path}{separator}{test_name}" if separator else file_path
+
+
 def match_failed_vs_recommended(failed, recommended):
     """
     Two-level matching:
-      Level 1 - Exact: "tests/foo.py::test_bar" in both lists
-      Level 2 - File-level: recommended "tests/foo.py" (no function)
+      Level 1 - File-level: recommended "tests/foo.py" (no function)
                   matches failed "tests/foo.py::anything"
+      Level 2 - Exact: "tests/foo.py::test_bar" in both lists
 
     Returns {"hit": [...], "miss": [...], "untested": [...]}
       hit:       failed AND recommended
       miss:      failed but NOT recommended
       untested:  recommended but NOT in failed list
     """
-    rec_set = set(recommended)
-
-    # Map: file_path -> original recommended string
-    rec_files = {}
-    for r in recommended:
-        file_part = r.split("::")[0] if "::" in r else r
-        rec_files[file_part] = r
+    recommended_files = {normalize_test_path(item) for item in recommended if "::" not in item}
+    recommended_functions = {normalize_test_path(item) for item in recommended if "::" in item}
 
     hit = []
     miss = []
-    hit_set = set()
 
-    for f in failed:
-        matched = False
-
-        # Exact match
-        if f in rec_set:
-            hit.append(f)
-            hit_set.add(f)
-            matched = True
+    normalized_failed = {item: normalize_test_path(item) for item in failed}
+    for original, normalized in normalized_failed.items():
+        failed_file = normalized.split("::", 1)[0]
+        if failed_file in recommended_files or normalized in recommended_functions:
+            hit.append(original)
         else:
-            # File-level match
-            file_part = f.split("::")[0] if "::" in f else f
-            if file_part in rec_files:
-                hit.append(f)
-                hit_set.add(f)
-                matched = True
-
-        if not matched:
-            miss.append(f)
+            miss.append(original)
 
     # Recommended but not failed
-    failed_files = {f.split("::")[0] if "::" in f else f for f in failed}
+    failed_functions = set(normalized_failed.values())
+    failed_files = {item.split("::", 1)[0] for item in failed_functions}
     untested = []
-    for r in recommended:
-        rf = r.split("::")[0] if "::" in r else r
-        if rf not in failed_files and r not in hit_set:
-            untested.append(r)
+    for item in recommended:
+        normalized = normalize_test_path(item)
+        has_failure = normalized in failed_functions if "::" in item else normalized in failed_files
+        if not has_failure:
+            untested.append(item)
 
     return {"hit": hit, "miss": miss, "untested": untested}
 
@@ -236,11 +229,13 @@ def generate_report(failed, recommended, matched, log_dir, recommendations_sourc
     out.append(f"## Recommended Test Cases（ {len(recommended)} total）")
     out.append("")
     if recommended:
-        failed_file_set = {f.split("::")[0] if "::" in f else f for f in failed}
-        for i, r in enumerate(recommended, 1):
-            rf = r.split("::")[0] if "::" in r else r
-            tag = " **[Already Failed]**" if rf in failed_file_set else ""
-            out.append(f"{i}. `{r}`{tag}")
+        normalized_failed = {normalize_test_path(item) for item in failed}
+        failed_file_set = {item.split("::", 1)[0] for item in normalized_failed}
+        for i, item in enumerate(recommended, 1):
+            normalized = normalize_test_path(item)
+            has_failure = normalized in normalized_failed if "::" in item else normalized in failed_file_set
+            tag = " **[Already Failed]**" if has_failure else ""
+            out.append(f"{i}. `{item}`{tag}")
         out.append("")
     else:
         out.append("> No recommended test cases")

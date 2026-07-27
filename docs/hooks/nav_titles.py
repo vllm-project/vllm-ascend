@@ -85,14 +85,6 @@ TITLES = {
         "en": "Dynamic Chunked Pipeline Parallel",
         "zh": "动态分块流水线并行",
     },
-    "tutorials/features/long_sequence_context_parallel_multi_node.md": {
-        "en": "Long Sequence Context Parallel (Multi Node)",
-        "zh": "长序列上下文并行（多节点）",
-    },
-    "tutorials/features/long_sequence_context_parallel_single_node.md": {
-        "en": "Long Sequence Context Parallel (Single Node)",
-        "zh": "长序列上下文并行（单节点）",
-    },
     "tutorials/features/pd_colocated_mooncake_multi_instance.md": {
         "en": "PD Colocated (Mooncake, Multi-Instance)",
         "zh": "PD 共置（Mooncake，多实例）",
@@ -203,6 +195,10 @@ TITLES = {
     "user_guide/feature_guide/quantization.md": {"en": "Quantization", "zh": "量化"},
     "user_guide/feature_guide/rfork.md": {"en": "RFork", "zh": "RFork"},
     "user_guide/feature_guide/sequence_parallelism.md": {"en": "Sequence Parallelism", "zh": "序列并行"},
+    "user_guide/feature_guide/short_request_first.md": {
+        "en": "ShortRequestFirst Prefill Scheduling",
+        "zh": "ShortRequestFirst 预填充调度",
+    },
     "user_guide/feature_guide/sleep_mode.md": {"en": "Sleep Mode", "zh": "休眠模式"},
     "user_guide/feature_guide/speculative_decoding.md": {"en": "Speculative Decoding", "zh": "推测解码"},
     "user_guide/feature_guide/structured_output.md": {"en": "Structured Output", "zh": "结构化输出"},

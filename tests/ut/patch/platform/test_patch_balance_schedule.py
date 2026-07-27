@@ -43,7 +43,7 @@ import subprocess
 import textwrap
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -52,9 +52,12 @@ import pytest
 # the pristine classes/file paths first.
 import vllm.v1.core.sched.scheduler as _upstream_sched_mod
 import vllm.v1.engine.core as _upstream_engine_mod
+from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.scheduler import Scheduler as _UpstreamScheduler
 from vllm.v1.engine.core import DPEngineCoreProc as _UpstreamDPEngineCoreProc
 from vllm.v1.engine.core import EngineCoreProc as _UpstreamEngineCoreProc
+
+from vllm_ascend.core.short_request_first_scheduler import ShortRequestFirstRequestQueue
 
 _UPSTREAM_SCHED_FILE = _upstream_sched_mod.__file__
 
@@ -122,6 +125,89 @@ def test_balance_config_fallback_accepts_legacy_top_level_config():
 
     with patch("vllm_ascend.ascend_config.get_ascend_config", side_effect=RuntimeError):
         assert _balance_scheduling_enabled(vllm_config) is True
+
+
+@pytest.mark.parametrize("balance_enabled", [False, True])
+def test_balance_scheduler_installs_short_request_first_queue(monkeypatch, balance_enabled):
+    def fake_scheduler_init(self, *args, **kwargs):
+        del kwargs
+        self.vllm_config = args[0]
+        self.policy = SchedulingPolicy.FCFS
+        self.waiting = create_request_queue(self.policy)
+        self.skipped_waiting = create_request_queue(self.policy)
+
+    ascend_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(
+            enable_balance_scheduling=balance_enabled,
+            short_request_first_config=SimpleNamespace(
+                enabled=True,
+                threshold=256,
+                long_max_wait_ms=0.0,
+            ),
+        )
+    )
+    monkeypatch.setattr(BalanceScheduler.__bases__[0], "__init__", fake_scheduler_init)
+
+    with (
+        patch(
+            "vllm_ascend.patch.platform.patch_balance_schedule.init_ascend_config",
+            return_value=ascend_config,
+        ),
+        patch(
+            "vllm_ascend.ascend_config.get_ascend_config",
+            return_value=ascend_config,
+        ),
+    ):
+        scheduler = BalanceScheduler(
+            SimpleNamespace(
+                additional_config={},
+                parallel_config=SimpleNamespace(data_parallel_size=1),
+            ),
+            MagicMock(),
+            MagicMock(),
+            16,
+        )
+
+    assert isinstance(scheduler.waiting, ShortRequestFirstRequestQueue)
+    assert scheduler._balance_enabled is balance_enabled
+
+
+def test_balance_scheduler_does_not_import_sfr_when_disabled(monkeypatch):
+    def fake_scheduler_init(self, *args, **kwargs):
+        del kwargs
+        self.vllm_config = args[0]
+        self.policy = SchedulingPolicy.FCFS
+        self.waiting = create_request_queue(self.policy)
+
+    ascend_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(
+            enable_balance_scheduling=False,
+            short_request_first_config=SimpleNamespace(enabled=False),
+        )
+    )
+    monkeypatch.setattr(BalanceScheduler.__bases__[0], "__init__", fake_scheduler_init)
+
+    with (
+        patch(
+            "vllm_ascend.patch.platform.patch_balance_schedule.init_ascend_config",
+            return_value=ascend_config,
+        ),
+        patch("builtins.__import__", wraps=__import__) as import_mock,
+    ):
+        scheduler = BalanceScheduler(
+            SimpleNamespace(
+                additional_config={},
+                parallel_config=SimpleNamespace(data_parallel_size=1),
+            ),
+            MagicMock(),
+            MagicMock(),
+            16,
+        )
+
+    assert not any(
+        call.args[0] == "vllm_ascend.core.short_request_first_scheduler" for call in import_mock.call_args_list
+    )
+    assert not isinstance(scheduler.waiting, ShortRequestFirstRequestQueue)
 
 
 # ---------------------------------------------------------------------------
