@@ -25,6 +25,8 @@ test_cases:
       - "12"
       - "--gpu-memory-utilization"
       - "0.9"
+      - "--quantization"
+      - "ascend"
       - "--trust-remote-code"
       - "--enable-expert-parallel"
       - "--no-enable-prefix-caching"
