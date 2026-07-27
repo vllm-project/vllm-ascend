@@ -2325,7 +2325,9 @@ class AscendC8Fp8AttentionBackendImpl(AscendAttentionBackendImpl):
             self._layer_name = layer.layer_name
 
         if output_scale is not None or output_block_scale is not None:
-            raise NotImplementedError("fused output quantization is not yet supported for Ascend8Fp8AttentionBackendImpl")
+            raise NotImplementedError(
+                "fused output quantization is not yet supported for Ascend8Fp8AttentionBackendImpl"
+            )
 
         num_tokens = query.shape[0]
         if attn_metadata is None:
@@ -2522,8 +2524,8 @@ class AscendC8Fp8AttentionBackendImpl(AscendAttentionBackendImpl):
         num_block, block_size, _, _ = self.key_cache.shape  # type: ignore[attr-defined]
         batch_size = len(attn_metadata.seq_lens_list)
 
-        k_cache_pa = self.key_cache.permute(0, 2, 1, 3).contiguous()  # (num_blocks, num_kv_heads, block_size, head_size)
-        v_cache_pa = self.value_cache.permute(0, 2, 1, 3).contiguous()  # (num_blocks, num_kv_heads, block_size, head_size)
+        k_cache_pa = self.key_cache.permute(0, 2, 1, 3).contiguous()
+        v_cache_pa = self.value_cache.permute(0, 2, 1, 3).contiguous()
 
         attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
             query[:batch_size].unsqueeze(2),
@@ -2565,8 +2567,8 @@ class AscendC8Fp8AttentionBackendImpl(AscendAttentionBackendImpl):
 
         if num_decode_tokens > 0:
             num_block, block_size, _, _ = self.key_cache.shape  # type: ignore[attr-defined]
-            kv_k = self.key_cache.permute(0, 2, 1, 3).contiguous()  # (num_blocks, num_kv_heads, block_size, head_size)
-            kv_v = self.value_cache.permute(0, 2, 1, 3).contiguous()  # (num_blocks, num_kv_heads, block_size, head_size)
+            kv_k = self.key_cache.permute(0, 2, 1, 3).contiguous()
+            kv_v = self.value_cache.permute(0, 2, 1, 3).contiguous()
 
             attn_out, _ = torch_npu.npu_fused_infer_attention_score_v2(
                 query[:num_decode_tokens].unsqueeze(2),
