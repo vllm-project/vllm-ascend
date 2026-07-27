@@ -336,7 +336,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
     def process_weights_after_loading(self, layer):
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
-        # TODO(zzzzwwjj): Currently, `torch_npu.npu_grouped_matmul_swiglu_quant`
+        # TODO(zzzzwwjj): Currently, `grouped_matmul_swiglu_quant_v2`
         # can only support weight nz.
         if self.quant_type == QuantType.W8A8:
             layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)

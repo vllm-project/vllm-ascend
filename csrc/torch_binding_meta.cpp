@@ -35,7 +35,6 @@
 
 namespace vllm_ascend {
 namespace meta {
-const int64_t INT4_NUMS_IN_INT32 = 8;
 constexpr int64_t DSA_SLOT_MAPPING_FLAT = 1;
 constexpr int64_t DSA_SLOT_MAPPING_BLOCK_OFFSET = 2;
 
@@ -112,48 +111,6 @@ void device_print_meta(c10::string_view msg)
 void device_print_tensor_meta(const at::Tensor& tensor)
 {
     (void)tensor;
-}
-
-std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
-    const at::Tensor &x, const at::Tensor &weight, const at::Tensor &weight_scale, const at::Tensor &x_scale,
-    const at::Tensor &group_list, const c10::optional<at::Tensor> &bias, const c10::optional<at::Tensor> &offset,
-    double swiglu_limit)
-{
-    auto m = x.sym_size(0);
-    auto n = weight.sym_size(2);
-    bool is_a8w4 = x.dtype() == at::kChar && weight.dtype() == at::kInt;
-    if (is_a8w4) {
-        n *= c10::SymInt(INT4_NUMS_IN_INT32);
-    }
-    c10::SymDimVector output_shape = {m, n / c10::SymInt(2)};
-    c10::SymDimVector scale_shape = {m};
-    c10::SymDimVector scalar_shape;
-    at::Tensor output = at::empty_symint(output_shape, x.options().dtype(c10::ScalarType::Char));
-    at::Tensor output_scale = at::empty_symint(scale_shape, x.options().dtype(c10::ScalarType::Float));
-    at::Tensor output_offset = at::empty_symint(scalar_shape, x.options().dtype(c10::ScalarType::Float));
-    return {output, output_scale, output_offset};
-}
-
-std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weight_nz_tensor_list_meta(
-    const at::Tensor & x,
-    const at::TensorList & weight,
-    const at::TensorList & weight_scale,
-    const at::Tensor & x_scale,
-    const at::Tensor & group_list,
-    const c10::optional<at::Tensor> & bias,
-    const c10::optional<at::Tensor> & offset,
-    double swiglu_limit)
-{
-    auto m = x.sym_size(0);
-    auto n = weight[0].sym_size(1);
-
-    c10::SymDimVector output_shape = {m, n / c10::SymInt(2)};
-    c10::SymDimVector scale_shape = {m};
-    at::Tensor output = at::empty_symint(output_shape, x.options().dtype(c10::ScalarType::Char));
-    at::Tensor output_scale = at::empty_symint(scale_shape, x.options().dtype(c10::ScalarType::Float));
-    at::Tensor output_offset = at::empty_symint(scale_shape, x.options().dtype(c10::ScalarType::Float));
-
-    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, output_scale, output_offset);
 }
 
 std::tuple<at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_v2_meta(
@@ -1511,12 +1468,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     // batch_matmul_transpose
     ops.impl("batch_matmul_transpose", &vllm_ascend::meta::batch_matmul_transpose);
 #endif
-    // grouped_matmul_swiglu_quant_weight_nz meta implementation
-    ops.impl("grouped_matmul_swiglu_quant_weight_nz", &vllm_ascend::meta::grouped_matmul_swiglu_quant);
-    // grouped_matmul_swiglu_quant meta implementation
-    ops.impl("grouped_matmul_swiglu_quant", &vllm_ascend::meta::grouped_matmul_swiglu_quant);
-    // Grouped matmul swiglu quant weight nz tensor list
-    ops.impl("grouped_matmul_swiglu_quant_weight_nz_tensor_list", &vllm_ascend::meta::grouped_matmul_swiglu_quant_weight_nz_tensor_list_meta);
     // Grouped matmul swiglu quant v2
     ops.impl("grouped_matmul_swiglu_quant_v2", &vllm_ascend::meta::grouped_matmul_swiglu_quant_v2_meta);
     // Lightning indexer

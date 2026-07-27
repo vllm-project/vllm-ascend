@@ -248,17 +248,19 @@ def quant_apply_mlp(
     if w1_scale_bias is None and w1_offset is None and is_mc2 and not is_gelu_activation:
         if _custom_gmm_swiglu_enabled(fusion, dynamic_eplb, activation) and not use_mxfp_quant:
             # gmm1: gate_up_proj & act_fn: swiglu
-            hidden_states, swiglu_out_scale, _ = torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz_tensor_list(
+            hidden_states, swiglu_out_scale = torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2(
                 x=hidden_states,
                 weight=w1,
                 weight_scale=w1_scale,
                 x_scale=pertoken_scale,
                 group_list=cumsum_group_list(group_list, group_list_type, 0),
+                weight_assist_matrix=None,
+                group_list_type=0,
                 swiglu_limit=swiglu_limit,
             )
         elif use_gmm_swiglu_quant_fusion and activation != MoEActivation.SWIGLUSTEP:
             # gmm1: gate_up_proj & act_fn: swiglu
-            hidden_states, swiglu_out_scale, _ = DeviceOperator.npu_grouped_matmul_swiglu_quant(
+            hidden_states, swiglu_out_scale = DeviceOperator.npu_grouped_matmul_swiglu_quant(
                 x=hidden_states,
                 weight=_require_single_tensor_for_swiglu_quant(w1, name="w1"),
                 group_list=cumsum_group_list(group_list, group_list_type, 0),
@@ -455,17 +457,18 @@ def quant_apply_mlp(
             and not is_gelu_activation
         ):
             # gmm1: gate_up_proj & act_fn: swiglu
-            hidden_states, swiglu_out_scale, _ = torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz_tensor_list(
+            hidden_states, swiglu_out_scale = torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2(
                 x=hidden_states,
                 weight=w1,
                 weight_scale=w1_scale,
                 x_scale=pertoken_scale,
                 group_list=cumsum_group_list(group_list, group_list_type, 0),
-                bias=bias1,
+                weight_assist_matrix=bias1,
+                group_list_type=0,
                 swiglu_limit=swiglu_limit,
             )
         elif use_gmm_swiglu_quant_fusion and activation != MoEActivation.SWIGLUSTEP and not is_gelu_activation:
-            hidden_states, swiglu_out_scale, _ = DeviceOperator.npu_grouped_matmul_swiglu_quant(
+            hidden_states, swiglu_out_scale = DeviceOperator.npu_grouped_matmul_swiglu_quant(
                 x=hidden_states,
                 weight=_require_single_tensor_for_swiglu_quant(w1, name="w1"),
                 group_list=cumsum_group_list(group_list, group_list_type, 0),

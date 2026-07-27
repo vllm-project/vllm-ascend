@@ -35,7 +35,6 @@
 #include "mla_preprocess/mla_preprocess_torch_adpt.h"
 #endif
 #include "mc2/dispatch_ffn_combine/dispatch_ffn_combine_torch_adpt.h"
-#include "gmm/grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
 #include "attention/lightning_indexer/lightning_indexer_torch_adpt.h"
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
@@ -2021,28 +2020,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def("get_npu_storage_shape(Tensor tensor) -> int[]");
     ops.impl("get_npu_storage_shape", c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::get_npu_storage_shape);
-
-    ops.def(
-        "grouped_matmul_swiglu_quant(Tensor x, Tensor weight, Tensor weight_scale, Tensor x_scale,"
-        "                            Tensor group_list, *, Tensor? bias=None,"
-        "                            Tensor? offset=None, float swiglu_limit=0.0) ->"
-        "                            (Tensor output, Tensor output_scale, Tensor output_offset)");
-    ops.impl("grouped_matmul_swiglu_quant", torch::kPrivateUse1, &vllm_ascend::grouped_matmul_swiglu_quant);
-
-    ops.def(
-        "grouped_matmul_swiglu_quant_weight_nz(Tensor x, Tensor weight, Tensor weight_scale, Tensor x_scale,"
-        "                                      Tensor group_list, *, Tensor? bias=None,"
-        "                                      Tensor? offset=None, float swiglu_limit=0.0) -> "
-        "                                      (Tensor output, Tensor output_scale, Tensor output_offset)");
-    ops.impl("grouped_matmul_swiglu_quant_weight_nz", torch::kPrivateUse1, &vllm_ascend::grouped_matmul_swiglu_quant_weight_nz);
-
-    ops.def(
-        "grouped_matmul_swiglu_quant_weight_nz_tensor_list(Tensor x, Tensor[] weight, Tensor[] weight_scale, Tensor x_scale,"
-        "                                                  Tensor group_list, *,"
-        "                                                  Tensor? bias=None, Tensor? offset=None, float swiglu_limit=0.0) ->"
-        "                                                  (Tensor output, Tensor output_scale, Tensor output_offset)"
-    );
-    ops.impl("grouped_matmul_swiglu_quant_weight_nz_tensor_list", torch::kPrivateUse1, &vllm_ascend::grouped_matmul_swiglu_quant_weight_nz_tensor_list);
 
     ops.def(
         "grouped_matmul_swiglu_quant_v2(Tensor x, Tensor[] weight, Tensor[] weight_scale, Tensor x_scale,  Tensor group_list,  Tensor? smooth_scale=None,"

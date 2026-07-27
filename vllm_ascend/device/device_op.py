@@ -223,13 +223,13 @@ class BaseDeviceAdaptor:
         if use_mxfp_quant:
             raise RuntimeError("MXFP MoE quantization is only supported on Ascend A5.")
 
-        return torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz(
+        return torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2(
             x=x,
-            weight=weight,
-            weight_scale=weight_scale,
+            weight=[weight],
+            weight_scale=[weight_scale],
             x_scale=x_scale,
             group_list=group_list,
-            bias=bias,
+            weight_assist_matrix=[bias] if bias is not None else None,
             swiglu_limit=swiglu_limit,
         )
 
@@ -1188,7 +1188,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                     quant_dtype=torch.float8_e4m3fn,
                     dequant_dtype=torch.float32,
                 )
-                return out, out_scale, None
+                return out, out_scale
             else:
                 return torch_npu.npu_grouped_matmul_swiglu_quant_v2(
                     x=x,
@@ -1255,7 +1255,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 weight_scale_dtype=torch_npu.float8_e8m0fnu,
                 x_scale_dtype=torch_npu.float8_e8m0fnu,
             )
-        return out, A5DeviceAdaptor.maybe_normalize_mxfp_scale_layout(out_scale), None
+        return out, A5DeviceAdaptor.maybe_normalize_mxfp_scale_layout(out_scale)
 
     @staticmethod
     def get_quant_gmm2_kwargs(

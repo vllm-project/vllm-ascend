@@ -100,7 +100,7 @@ def process_groups(
 
 
 @torch.inference_mode()
-def test_gmm_swiglu_quant_weight_nz_tensor_list():
+def test_grouped_matmul_swiglu_quant_v2_multi_tensor():
     M, K, E, N = 8192, 7168, 4, 4096
 
     # x (M, K) - int8
@@ -126,7 +126,7 @@ def test_gmm_swiglu_quant_weight_nz_tensor_list():
     group_list = torch.tensor([2048, 4096, 6144, 8192], dtype=torch.int64)
 
     output_cpu, output_scale_cpu = process_groups(x, weight, weight_scale, x_scale, group_list)
-    output_npu, output_scale_npu, _ = torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz_tensor_list(
+    output_npu, output_scale_npu = torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2(
         x.npu(), weight_nz_npu, weight_scale_npu, x_scale.npu(), group_list.npu()
     )
     output_npu_valid = output_npu[: group_list[-1], :]
