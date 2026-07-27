@@ -114,7 +114,7 @@ templates:
 
   - node_index: 1
     envs:
-      <<: *env_prefill
+      <<: *env_decode
     server_cmd_template:
       - --host
       - "0.0.0.0"
