@@ -201,6 +201,39 @@
 #       Remove this patch once the supported vLLM version contains the upstream
 #       GLM47 inline zero-argument streaming parser fix.
 #
+# ** 7c. Files: platform/patch_kimi_k3_renderer.py,
+#               platform/patch_kimi_k3_parsers.py,
+#               platform/kimi_k3_xtml.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.renderers.registry`,
+#      `vllm.entrypoints.serve.render.serving.OpenAIServingRender`,
+#      `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat.chat_completion_full_generator`,
+#      `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat.chat_completion_stream_generator`,
+#      `vllm.entrypoints.openai.responses.serving.OpenAIServingResponses._create_responses`,
+#      `vllm.parser.ParserManager`,
+#      `vllm.reasoning.ReasoningParserManager`,
+#      `vllm.tool_parsers.ToolParserManager`,
+#    Why:
+#       Kimi K3 intentionally uses a tokenizer-owned Python XTML encoder and
+#       has no Jinja chat template. The supported vLLM revision requires a
+#       Jinja template in its default HF renderer, has no `kimi_k3` parser, and
+#       does not pass all K3 request controls to the custom encoder.
+#    How:
+#       Register explicit `tokenizer_mode=kimi_k3` tokenizer and renderer
+#       entries, call
+#       `TikTokenTokenizer.apply_chat_template(tokenize=True)` directly with
+#       server-owned multimodal prompts, and map typed request controls only on
+#       K3 serving instances. One K3-local incremental XTML parser handles both
+#       full and streaming reasoning, response, and tools while preserving the
+#       original `tool_choice`. Required and named calls stay on the XTML path
+#       rather than generic JSON grammar and fail explicitly if no valid call is
+#       produced.
+#    Related PR (if no, explain why):
+#       No. These are intentionally K3-local vLLM v0.23 compatibility patches.
+#    Future Plan:
+#       Remove these patches once the supported vLLM version provides native
+#       Kimi K3 rendering and parser registration.
+#
 # ** 10a. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`

@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.ops.activation import SituActivationConfig
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEFusedExpertsInput,
@@ -287,6 +288,12 @@ class FusedMC2CommImpl(MoECommMethod):
         self,
         fused_experts_input: MoEFusedExpertsInput,
     ):
+        # The monolithic MC2 kernels include SwiGLU and cannot express SiTU.
+        # Keep MC2 dispatch/combine, but decompose the expert MLP through the
+        # base implementation (dispatch -> GMM1 -> SiTU -> GMM2 -> combine).
+        if isinstance(fused_experts_input.activation, SituActivationConfig):
+            return super().fused_experts(fused_experts_input)
+
         assert not (fused_experts_input.weights.w1_scale is None or fused_experts_input.weights.w2_scale is None), (
             "w1_scale and w2_scale cannot be None for FusedMC2CommImpl."
         )

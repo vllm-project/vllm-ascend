@@ -1,4 +1,5 @@
 import os
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -609,6 +610,84 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
     def tearDown(self):
         self.parent_init_patcher.stop()
 
+    @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla", side_effect=AssertionError("RoPE cache used"))
+    def test_kimi_k3_prefill_metadata_uses_identity_without_indexing_rope_cache(self, mock_rope_getter):
+        self.mock_vllm_config.model_config.hf_text_config.mla_use_rope = False
+        builder = AscendMLAMetadataBuilder(
+            kv_cache_spec=self.kv_cache_spec,
+            layer_names=["layer_0"],
+            vllm_config=self.mock_vllm_config,
+            device=self.mock_device,
+        )
+        builder.num_actual_tokens = 3
+        builder.num_decodes = 0
+        builder.num_decode_tokens = 0
+        builder.query_lens = torch.tensor([3])
+        builder.seq_lens = torch.tensor([3])
+        builder.block_table = torch.zeros((1, 2))
+        builder.attn_mask_builder = MagicMock()
+        builder.build_chunked_metadata = MagicMock(return_value=None)
+        positions = torch.tensor([100_000, 500_000, 900_000])
+        common_attn_metadata = MagicMock(
+            query_start_loc=torch.tensor([0, 3]),
+            positions=positions,
+        )
+        identity_cos = torch.ones(4, 1, 1, 32)
+        identity_sin = torch.zeros_like(identity_cos)
+
+        with (
+            patch("vllm_ascend.ops.rotary_embedding._cos_mla", identity_cos),
+            patch("vllm_ascend.ops.rotary_embedding._sin_mla", identity_sin),
+            patch("vllm_ascend.ops.rotary_embedding._cos_cache", None),
+            patch("vllm_ascend.ops.rotary_embedding._sin_cache", None),
+        ):
+            metadata = builder.build_prefill_metadata(0, common_attn_metadata)
+
+        mock_rope_getter.assert_not_called()
+        torch.testing.assert_close(metadata.input_positions, positions)
+        torch.testing.assert_close(metadata.cos, torch.ones(3, 1, 1, 32))
+        torch.testing.assert_close(metadata.sin, torch.zeros(3, 1, 1, 32))
+
+    @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla", side_effect=AssertionError("RoPE cache used"))
+    def test_kimi_k3_decode_metadata_uses_identity_without_indexing_rope_cache(self, mock_rope_getter):
+        self.mock_vllm_config.model_config.hf_text_config.mla_use_rope = False
+        builder = AscendMLAMetadataBuilder(
+            kv_cache_spec=self.kv_cache_spec,
+            layer_names=["layer_0"],
+            vllm_config=self.mock_vllm_config,
+            device=self.mock_device,
+        )
+        builder.num_actual_tokens = 2
+        builder.num_decode_tokens = 2
+        builder.num_decodes = 2
+        builder.graph_pad_size = 2
+        builder.seq_lens = torch.tensor([101, 202])
+        builder.slot_mapping = torch.tensor([0, 1])
+        builder.block_table = torch.zeros((2, 2))
+        builder.attn_mask_builder = MagicMock()
+        positions = torch.tensor([100_000, 900_000])
+        common_attn_metadata = MagicMock(
+            num_reqs=2,
+            query_start_loc_cpu=torch.tensor([0, 1, 2]),
+            positions=positions,
+            decode_token_per_req=1,
+        )
+        identity_cos = torch.ones(4, 1, 1, 32)
+        identity_sin = torch.zeros_like(identity_cos)
+
+        with (
+            patch("vllm_ascend.ops.rotary_embedding._cos_mla", identity_cos),
+            patch("vllm_ascend.ops.rotary_embedding._sin_mla", identity_sin),
+            patch("vllm_ascend.ops.rotary_embedding._cos_cache", None),
+            patch("vllm_ascend.ops.rotary_embedding._sin_cache", None),
+        ):
+            metadata = builder.build_decode_metadata(0, common_attn_metadata)
+
+        mock_rope_getter.assert_not_called()
+        torch.testing.assert_close(metadata.input_positions, positions)
+        torch.testing.assert_close(metadata.cos, torch.ones(2, 1, 1, 32))
+        torch.testing.assert_close(metadata.sin, torch.zeros(2, 1, 1, 32))
+
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.attention_mask.get_pcp_group")
     @patch("vllm.distributed.parallel_state.get_pcp_group")
@@ -1067,6 +1146,172 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.num_heads_padded, 256)
         self.assertEqual(self.impl.head_padding, 0)
 
+    @patch("vllm_ascend.attention.mla_v1.enable_fa_quant", return_value=True)
+    @patch("vllm_ascend.attention.mla_v1.enabling_mlapo", return_value=True)
+    @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
+    def test_kimi_k3_no_rope_disables_fused_rotary_preprocess(
+        self,
+        mock_get_current_vllm_config,
+        mock_enabling_mlapo,
+        mock_enable_fa_quant,
+    ):
+        mock_get_current_vllm_config.return_value = self.impl.vllm_config
+        kwargs = {
+            "kv_lora_rank": 32,
+            "qk_nope_head_dim": 64,
+            "qk_rope_head_dim": 32,
+            "qk_head_dim": 96,
+            "v_head_dim": 128,
+            "q_lora_rank": 64,
+            "q_proj": MagicMock(),
+            "q_b_proj": MagicMock(),
+            "kv_b_proj": MagicMock(),
+            "o_proj": MagicMock(),
+            "kv_a_proj_with_mqa": MagicMock(),
+            "fused_qkv_a_proj": MagicMock(),
+            "kv_a_layernorm": MagicMock(),
+            "rotary_emb": None,
+            "use_mla_rope": False,
+        }
+
+        impl = AscendMLAImpl(
+            num_heads=12,
+            head_size=96,
+            scale=0.1,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="auto",
+            blocksparse_params=None,
+            logits_soft_cap=None,
+            attn_type=None,
+            kv_sharing_target_layer_name=None,
+            **kwargs,
+        )
+
+        self.assertFalse(impl.fa_quant_layer)
+        self.assertFalse(impl.enable_mlapo)
+
+    @patch("vllm_ascend.attention.mla_v1.maybe_save_kv_layer_to_connector")
+    @patch("vllm_ascend.attention.mla_v1.get_weight_prefetch_method", return_value=MagicMock())
+    @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
+    def test_kimi_k3_gate_gathers_tokens_before_local_head_projection(
+        self,
+        mock_gather_unpad,
+        mock_get_weight_prefetch_method,
+        mock_save_kv,
+    ):
+        num_tokens = 2
+        hidden_states = torch.randn(num_tokens, 16)
+        self.impl.num_heads = 12
+        self.impl.num_kv_heads = 12
+        self.impl.v_head_dim = 128
+        self.impl.use_output_gate = True
+        self.impl.enable_mlapo = False
+        self.impl.layer_sharding_kwargs = []
+        gate_logits = torch.randn(num_tokens, 12 * 128)
+        self.impl.g_proj = MagicMock(return_value=(gate_logits,))
+        qkv_lora = torch.randn(
+            num_tokens,
+            self.impl.q_lora_rank + self.impl.kv_lora_rank + self.impl.qk_rope_head_dim,
+        )
+        self.impl.fused_qkv_a_proj = MagicMock(return_value=(qkv_lora,))
+        self.impl.q_a_layernorm = MagicMock(side_effect=lambda value: value)
+        projected = torch.randn(num_tokens, 16)
+        self.impl.o_proj = MagicMock(return_value=(projected,))
+        self.impl.o_proj.weight = MagicMock()
+        attn_metadata = MagicMock(
+            num_actual_tokens=num_tokens,
+            num_decodes=0,
+            num_prefills=0,
+            num_decode_tokens=0,
+        )
+        output = torch.empty_like(projected)
+        kv_cache = (torch.empty(1, 4), torch.empty(1, 4))
+        mock_gather_unpad.side_effect = lambda value, enabled: value.flip(0) if enabled else value
+
+        with (
+            patch("vllm_ascend.attention.mla_v1._EXTRA_CTX", SimpleNamespace(num_tokens=num_tokens)),
+            patch("vllm_ascend.attention.mla_v1.notify_kv_cache_written"),
+        ):
+            self.impl.forward(
+                "model.layers.3.self_attn.attn",
+                hidden_states,
+                kv_cache,
+                attn_metadata,
+                need_gather_q_kv=True,
+                output=output,
+            )
+
+        self.impl.g_proj.assert_called_once()
+        torch.testing.assert_close(self.impl.g_proj.call_args.args[0], hidden_states.flip(0))
+        gathered_widths = [call.args[0].shape[-1] for call in mock_gather_unpad.call_args_list]
+        gathered_flags = [call.args[1] for call in mock_gather_unpad.call_args_list]
+        self.assertEqual(gathered_widths, [16, self.impl.q_lora_rank, 64])
+        self.assertEqual(gathered_flags, [True, True, True])
+
+    @patch("vllm_ascend.attention.mla_v1.maybe_save_kv_layer_to_connector")
+    @patch("vllm_ascend.attention.mla_v1.get_weight_prefetch_method", return_value=MagicMock())
+    @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad", side_effect=lambda value, enabled: value)
+    def test_kimi_k3_gate_is_local_head_shaped_and_applied_before_o_proj(
+        self,
+        mock_gather_unpad,
+        mock_get_weight_prefetch_method,
+        mock_save_kv,
+    ):
+        num_tokens = 2
+        local_heads = 12
+        self.impl.num_heads = local_heads
+        self.impl.num_kv_heads = local_heads
+        self.impl.v_head_dim = 128
+        self.impl.use_output_gate = True
+        self.impl.enable_mlapo = False
+        hidden_states = torch.randn(num_tokens, 16)
+        gate_logits = torch.randn(num_tokens, local_heads * self.impl.v_head_dim)
+        attention_output = torch.randn_like(gate_logits)
+        self.impl.g_proj = MagicMock(return_value=(gate_logits,))
+        prefill_result = PrefillMLAPreprocessResult(
+            q_nope=MagicMock(),
+            q_pe=MagicMock(),
+            k_nope=MagicMock(),
+            k_pe=MagicMock(),
+            value=MagicMock(),
+        )
+        self.impl._mla_preprocess = MagicMock(return_value=(None, prefill_result))
+        self.impl._forward_prefill = MagicMock(return_value=attention_output)
+        projected = torch.randn(num_tokens, 16)
+        self.impl.o_proj = MagicMock(return_value=(projected,))
+        self.impl.o_proj.weight = MagicMock()
+        attn_metadata = MagicMock(
+            num_actual_tokens=num_tokens,
+            num_decodes=0,
+            num_prefills=1,
+            num_decode_tokens=0,
+        )
+        output = torch.empty_like(projected)
+        kv_cache = (torch.empty(1, 4), torch.empty(1, 4))
+
+        with patch("vllm_ascend.attention.mla_v1._EXTRA_CTX", SimpleNamespace(num_tokens=num_tokens)):
+            self.impl.forward(
+                "model.layers.3.self_attn.attn",
+                hidden_states,
+                kv_cache,
+                attn_metadata,
+                need_gather_q_kv=True,
+                output=output,
+            )
+
+        o_proj_input = self.impl.o_proj.call_args.args[0]
+        expected = attention_output * torch.sigmoid(gate_logits)
+        self.assertEqual(o_proj_input.shape, (num_tokens, local_heads * 128))
+        torch.testing.assert_close(o_proj_input, expected)
+        torch.testing.assert_close(output, projected)
+        mock_gather_unpad.assert_called_once()
+        torch.testing.assert_close(mock_gather_unpad.call_args.args[0], hidden_states)
+        self.assertTrue(mock_gather_unpad.call_args.args[1])
+        self.impl.g_proj.assert_called_once()
+        torch.testing.assert_close(self.impl.g_proj.call_args.args[0], hidden_states)
+
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
     def test_init_head_padding_for_non_power_of_two(self, mock_get_current_vllm_config):
         """Test head padding computation for num_heads that are not power of 2 (e.g. GLM-4.7-Flash with 20 heads)."""
@@ -1198,6 +1443,22 @@ class TestAscendMLAImpl(TestBase):
 
         self.assertEqual(result.shape, (batch_size, seq_len, dim))
         mock_npu_interleave_rope.assert_called_once()
+
+    @patch("torch_npu.npu_interleave_rope")
+    def test_kimi_k3_rope_single_bypasses_dimension_reordering(self, mock_npu_interleave_rope):
+        self.impl.use_mla_rope = False
+        q_pe = torch.randn(2, 12, 64)
+
+        result = self.impl.rope_single(q_pe, MagicMock(), MagicMock())
+
+        self.assertIs(result, q_pe)
+        mock_npu_interleave_rope.assert_not_called()
+
+    def test_kimi_k3_context_parallel_inherits_no_rope_query_and_decode_kv_paths(self):
+        from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaCPImpl
+
+        self.assertIs(AscendMlaCPImpl.rope_single, AscendMLAImpl.rope_single)
+        self.assertIs(AscendMlaCPImpl.exec_kv_decode, AscendMLAImpl.exec_kv_decode)
 
     def test_forward_mha_not_implemented(self):
         layer_name = "layer_0"
@@ -2140,6 +2401,77 @@ class TestAscendMLAImpl(TestBase):
 
         self.assertEqual(k_pe.shape[-1], self.impl.qk_rope_head_dim)
         self.assertEqual(k_nope.shape[-1], self.impl.kv_lora_rank)
+
+    @patch("torch_npu.npu_kv_rmsnorm_rope_cache")
+    @patch("vllm_ascend.attention.mla_v1.DeviceOperator.reshape_and_cache")
+    def test_kimi_k3_exec_kv_prefill_caches_raw_position_slice(
+        self,
+        mock_reshape_and_cache,
+        mock_kv_rmsnorm_rope_cache,
+    ):
+        self.impl.use_mla_rope = False
+        self.impl.num_kv_heads = 2
+        self.impl.kv_lora_rank = 4
+        self.impl.qk_rope_head_dim = 2
+        kv_no_split = torch.arange(24, dtype=torch.float32).view(2, 2, 6)
+        kv_c = kv_no_split[..., :4]
+        raw_k_pe = kv_no_split[..., 4:]
+        kv_c_normed = kv_c + 100
+        self.impl.kv_a_layernorm = MagicMock(return_value=kv_c_normed)
+        kv_cache = (MagicMock(name="latent_cache"), MagicMock(name="position_cache"))
+        slots = torch.tensor([3, 7])
+
+        k_pe, k_nope = self.impl.exec_kv_prefill(
+            kv_no_split,
+            MagicMock(),
+            MagicMock(),
+            kv_cache,
+            slots,
+        )
+
+        torch.testing.assert_close(k_pe, raw_k_pe)
+        torch.testing.assert_close(k_nope, kv_c_normed)
+        mock_kv_rmsnorm_rope_cache.assert_not_called()
+        cache_call = mock_reshape_and_cache.call_args.kwargs
+        torch.testing.assert_close(cache_call["key"], kv_c_normed)
+        torch.testing.assert_close(cache_call["value"], raw_k_pe)
+        self.assertIs(cache_call["key_cache"], kv_cache[0])
+        self.assertIs(cache_call["value_cache"], kv_cache[1])
+        self.assertIs(cache_call["slot_mapping"], slots)
+
+    @patch("torch_npu.npu_kv_rmsnorm_rope_cache")
+    @patch("vllm_ascend.attention.mla_v1.DeviceOperator.reshape_and_cache")
+    def test_kimi_k3_exec_kv_decode_returns_full_raw_position_cache(
+        self,
+        mock_reshape_and_cache,
+        mock_kv_rmsnorm_rope_cache,
+    ):
+        self.impl.use_mla_rope = False
+        self.impl.num_kv_heads = 1
+        self.impl.kv_lora_rank = 4
+        self.impl.qk_rope_head_dim = 2
+        kv_no_split = torch.arange(12, dtype=torch.float32).view(2, 1, 6)
+        kv_c_normed = kv_no_split[..., :4] + 100
+        raw_k_pe = kv_no_split[..., 4:]
+        self.impl.kv_a_layernorm = MagicMock(return_value=kv_c_normed)
+        kv_cache = (MagicMock(name="latent_cache"), MagicMock(name="position_cache"))
+        slots = torch.tensor([3, 7])
+
+        k_pe_cache, k_nope_cache = self.impl.exec_kv_decode(
+            kv_no_split,
+            MagicMock(),
+            MagicMock(),
+            kv_cache,
+            slots,
+        )
+
+        self.assertIs(k_pe_cache, kv_cache[1])
+        self.assertIs(k_nope_cache, kv_cache[0])
+        mock_kv_rmsnorm_rope_cache.assert_not_called()
+        cache_call = mock_reshape_and_cache.call_args.kwargs
+        torch.testing.assert_close(cache_call["key"], kv_c_normed)
+        torch.testing.assert_close(cache_call["value"], raw_k_pe)
+        self.assertIs(cache_call["slot_mapping"], slots)
 
     @patch("torch_npu.npu_kv_rmsnorm_rope_cache")
     def test_exec_kv_prefill_with_fa_quant(self, mock_kv_rmsnorm_rope_cache):

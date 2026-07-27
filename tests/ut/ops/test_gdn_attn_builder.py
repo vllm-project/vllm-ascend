@@ -831,6 +831,48 @@ def test_mamba_align_cache_indices_follow_device_seq_lens(monkeypatch: pytest.Mo
     )
 
 
+def test_mamba_align_prefill_marks_only_prefix_hit_as_initial_state(monkeypatch: pytest.MonkeyPatch):
+    _patch_missing_runtime_cdiv(monkeypatch)
+    batch_spec = BatchSpec(
+        seq_lens=[12, 4],
+        query_lens=[4, 4],
+        name="align_prefix_hit_and_cold_prefill",
+    )
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec=batch_spec,
+        block_size=4,
+        device=torch.device("cpu"),
+    )
+    common_attn_metadata.block_table_tensor = torch.arange(40, 60, dtype=torch.int32).view(2, 10)
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=0,
+        mamba_cache_mode="align",
+        block_size=4,
+    )
+
+    attn_metadata = builder.build(0, common_attn_metadata)
+
+    assert torch.equal(
+        attn_metadata.prefill_state_indices,
+        torch.tensor([42, 50], dtype=torch.int32),
+    )
+    assert torch.equal(
+        attn_metadata.prefill_has_initial_state,
+        torch.tensor([True, False]),
+    )
+    conv1d_meta = attn_metadata.non_spec_prefill_metadata.causal_conv1d
+    assert torch.equal(
+        _cache_index_first_column(conv1d_meta.cache_indices),
+        attn_metadata.prefill_state_indices,
+    )
+    assert torch.equal(
+        conv1d_meta.initial_state_mode,
+        attn_metadata.prefill_has_initial_state,
+    )
+
+
 def test_builder_builds_prebuilt_chunk_metadata_with_prefill_query_start_loc(monkeypatch):
     _patch_missing_runtime_cdiv(monkeypatch)
     batch_spec = BatchSpec(

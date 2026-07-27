@@ -102,7 +102,8 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
 
     quant_type: QuantType = QuantType.W4A8MXFP
 
-    def __init__(self):
+    def __init__(self, *, use_weight_packed: bool = False):
+        self.use_weight_packed = use_weight_packed
         self.ep_group = get_ep_group()
 
         vllm_config = get_current_vllm_config()
@@ -114,16 +115,29 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         )
         self.dynamic_eplb = ascend_config.eplb_config.dynamic_eplb
 
-    @staticmethod
     def get_weight(
-        num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
+        self,
+        num_experts: int,
+        intermediate_size_per_partition: int,
+        hidden_sizes: int,
+        params_dtype: torch.dtype,
     ) -> dict[str, Any]:
         param_dict = {}
-        param_dict["w13_weight"] = torch.empty(
-            num_experts, 2 * intermediate_size_per_partition, hidden_sizes // 2, dtype=torch.uint8
+
+        w13_weight_name = "w13_weight_packed" if self.use_weight_packed else "w13_weight"
+        w2_weight_name = "w2_weight_packed" if self.use_weight_packed else "w2_weight"
+
+        param_dict[w13_weight_name] = torch.empty(
+            num_experts,
+            2 * intermediate_size_per_partition,
+            hidden_sizes // 2,
+            dtype=torch.uint8,
         )
-        param_dict["w2_weight"] = torch.empty(
-            num_experts, hidden_sizes, intermediate_size_per_partition // 2, dtype=torch.uint8
+        param_dict[w2_weight_name] = torch.empty(
+            num_experts,
+            hidden_sizes,
+            intermediate_size_per_partition // 2,
+            dtype=torch.uint8,
         )
         return param_dict
 
@@ -208,8 +222,14 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 hidden_states=x,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
+                w1=getattr(
+                    layer,
+                    "w13_weight_packed" if self.use_weight_packed else "w13_weight",
+                ),
+                w2=getattr(
+                    layer,
+                    "w2_weight_packed" if self.use_weight_packed else "w2_weight",
+                ),
                 quant_type=self.quant_type,
                 dynamic_eplb=self.dynamic_eplb,
                 expert_map=expert_map,
@@ -231,14 +251,22 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         )
 
     def process_weights_after_loading(self, layer):
-        layer.w13_weight.data = torch_npu.npu_format_cast(
-            layer.w13_weight.data, 29, customize_dtype=torch.float8_e4m3fn, input_dtype=torch_npu.float4_e2m1fn_x2
+        w13_weight = getattr(
+            layer,
+            "w13_weight_packed" if self.use_weight_packed else "w13_weight",
         )
-        layer.w2_weight.data = torch_npu.npu_format_cast(
-            layer.w2_weight.data, 29, customize_dtype=torch.float8_e4m3fn, input_dtype=torch_npu.float4_e2m1fn_x2
+        w2_weight = getattr(
+            layer,
+            "w2_weight_packed" if self.use_weight_packed else "w2_weight",
         )
-        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
-        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
+        w13_weight.data = torch_npu.npu_format_cast(
+            w13_weight.data, 29, customize_dtype=torch.float8_e4m3fn, input_dtype=torch_npu.float4_e2m1fn_x2
+        )
+        w2_weight.data = torch_npu.npu_format_cast(
+            w2_weight.data, 29, customize_dtype=torch.float8_e4m3fn, input_dtype=torch_npu.float4_e2m1fn_x2
+        )
+        w13_weight.data = w13_weight.data.transpose(1, 2)
+        w2_weight.data = w2_weight.data.transpose(1, 2)
         g, n, k = layer.w13_weight_scale.shape
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g, n, k // 2, 2).transpose(-3, -2)
         g, n, k = layer.w2_weight_scale.shape

@@ -64,7 +64,15 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     sfa_dcp_replicated_indexer_size: int = 1
 
     @property
-    def page_size_bytes(self) -> int:
+    def real_page_size_bytes(self) -> int:
+        """Return the unpadded bytes used by the Ascend MLA layout.
+
+        ``AttentionSpec.page_size_bytes`` owns the common
+        ``page_size_padded`` contract used by the hybrid KV-cache allocator.
+        Keep the Ascend-specific layout calculation in the corresponding
+        ``real_page_size_bytes`` hook so MLA+Mamba models can use that common
+        alignment path just like standard-attention hybrids such as Qwen3.5.
+        """
         if self.cache_sparse_sfa_c8:
             assert self.sparse_head_dim is not None
             assert len(self.sparse_head_dim) == 3
@@ -189,8 +197,8 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
-        assert all(isinstance(spec, MLAAttentionSpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be MLAAttentionSpec."
+        assert all(isinstance(spec, cls) for spec in specs), (
+            "All attention layers in the same KV cache group must use AscendMLAAttentionSpec."
         )
         layout_set = {
             (
@@ -223,19 +231,54 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         assert len(sfa_dcp_replicated_indexer_size_set) == 1, (
             "All attention layers in the same KV cache group must use the same SFA DCP replicated indexer size."
         )
+        common_field_names = (
+            "head_size_v",
+            "kv_quant_mode",
+            "page_size_padded",
+            "alignment",
+            "compress_ratio",
+            "model_version",
+            "c8_k_cache_dtype",
+            "c8_k_scale_cache_dtype",
+        )
+        common_fields = {field_name: {getattr(spec, field_name) for spec in specs} for field_name in common_field_names}
+        assert all(len(values) == 1 for values in common_fields.values()), (
+            "All attention layers in the same KV cache group must use the same MLA cache metadata."
+        )
+        sliding_window = cls.merge_window_sizes(
+            {spec.sliding_window for spec in specs if spec.sliding_window is not None}
+        )
+        attention_chunk_size = cls.merge_window_sizes(
+            {spec.attention_chunk_size for spec in specs if spec.attention_chunk_size is not None}
+        )
+        assert (sliding_window is not None) + (attention_chunk_size is not None) <= 1, (
+            "Model with both sliding window and chunked local MLA layers is not supported."
+        )
 
+        first_spec = specs[0]
         return cls(
-            block_size=specs[0].block_size,
-            num_kv_heads=specs[0].num_kv_heads,
-            head_size=specs[0].head_size,
-            scale_dim=specs[0].scale_dim,
-            scale_dtype=specs[0].scale_dtype,
-            sparse_head_dim=specs[0].sparse_head_dim,
-            dtype=specs[0].dtype,
-            cache_dtype_str=cache_dtype_str_set.pop(),
-            cache_sparse_sfa_c8=specs[0].cache_sparse_sfa_c8,
-            cache_sparse_li_c8=specs[0].cache_sparse_li_c8,
-            sfa_dcp_replicated_indexer_size=sfa_dcp_replicated_indexer_size_set.pop(),
+            block_size=first_spec.block_size,
+            num_kv_heads=first_spec.num_kv_heads,
+            head_size=first_spec.head_size,
+            head_size_v=first_spec.head_size_v,
+            scale_dim=first_spec.scale_dim,
+            scale_dtype=first_spec.scale_dtype,
+            sparse_head_dim=first_spec.sparse_head_dim,
+            dtype=first_spec.dtype,
+            kv_quant_mode=first_spec.kv_quant_mode,
+            page_size_padded=first_spec.page_size_padded,
+            sliding_window=sliding_window,
+            attention_chunk_size=attention_chunk_size,
+            cache_dtype_str=first_spec.cache_dtype_str,
+            alignment=first_spec.alignment,
+            compress_ratio=first_spec.compress_ratio,
+            # Inherited MLA metadata used by the DeepSeek V4 cache layout.
+            model_version=first_spec.model_version,
+            cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
+            cache_sparse_li_c8=first_spec.cache_sparse_li_c8,
+            c8_k_cache_dtype=first_spec.c8_k_cache_dtype,
+            c8_k_scale_cache_dtype=first_spec.c8_k_scale_cache_dtype,
+            sfa_dcp_replicated_indexer_size=first_spec.sfa_dcp_replicated_indexer_size,
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:

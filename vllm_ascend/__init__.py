@@ -38,6 +38,13 @@ def _ensure_global_patch():
 def register():
     """Register the NPU platform."""
 
+    # Platform discovery happens before ModelConfig is constructed.  Register
+    # K3 here as well as in the global patch path so both CLI and subprocess
+    # entry points see the config before AutoConfig.from_pretrained is called.
+    from vllm_ascend.transformers_utils.configs.kimi_k3 import register_kimi_k3_config
+
+    register_kimi_k3_config()
+
     return "vllm_ascend.platform.NPUPlatform"
 
 

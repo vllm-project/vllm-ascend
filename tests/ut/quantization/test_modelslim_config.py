@@ -10,13 +10,18 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.linear import LinearBase
+from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.modelslim_config import (
     MODELSLIM_CONFIG_FILENAME,
     AscendModelSlimConfig,
+    _get_packed_modules_mapping_for_hf_config,
+    get_linear_quant_type,
+    get_packed_modules_mapping,
 )
+from vllm_ascend.transformers_utils.configs.kimi_k3 import KimiK3TextConfig
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, vllm_version_is
 
 
@@ -63,6 +68,120 @@ class TestAscendModelSlimConfig(TestBase):
         config = AscendModelSlimConfig.from_config(self.sample_config)
         self.assertIsInstance(config, AscendModelSlimConfig)
         self.assertEqual(config.quant_description, self.sample_config)
+
+    def test_kimi_k3_packed_module_quant_types(self):
+        mapping = get_packed_modules_mapping("kimi_k3")
+        description = {
+            "language_model.model.layers.0.mlp.gate_proj.weight": "FLOAT",
+            "language_model.model.layers.0.mlp.up_proj.weight": "FLOAT",
+            "language_model.model.layers.1.block_sparse_moe.experts.0.w1.weight": "W4A8_DYNAMIC",
+            "language_model.model.layers.1.block_sparse_moe.experts.0.w2.weight": "W4A8_DYNAMIC",
+            "language_model.model.layers.1.block_sparse_moe.experts.0.w3.weight": "W4A8_DYNAMIC",
+            "language_model.model.layers.3.self_attn.q_a_proj.weight": "FLOAT",
+            "language_model.model.layers.3.self_attn.kv_a_proj_with_mqa.weight": "FLOAT",
+        }
+
+        assert (
+            get_linear_quant_type(
+                description,
+                "language_model.model.layers.0.mlp.gate_up_proj",
+                mapping,
+            )
+            == "FLOAT"
+        )
+        assert (
+            get_linear_quant_type(
+                description,
+                "language_model.model.layers.1.block_sparse_moe.experts",
+                mapping,
+            )
+            == "W4A8_DYNAMIC"
+        )
+        assert (
+            get_linear_quant_type(
+                description,
+                "language_model.model.layers.3.self_attn.fused_qkv_a_proj",
+                mapping,
+            )
+            == "FLOAT"
+        )
+
+    def test_kimi_k3_inner_config_get_quant_method_uses_k3_mapping(self):
+        description = {
+            "model.layers.0.mlp.gate_proj.weight": "W8A8_DYNAMIC",
+            "model.layers.0.mlp.up_proj.weight": "W8A8_DYNAMIC",
+            "model.layers.1.block_sparse_moe.experts.0.w1.weight": "W4A8_DYNAMIC",
+            "model.layers.1.block_sparse_moe.experts.0.w2.weight": "W4A8_DYNAMIC",
+            "model.layers.1.block_sparse_moe.experts.0.w3.weight": "W4A8_DYNAMIC",
+            "model.layers.3.self_attn.q_a_proj.weight": "W8A8_DYNAMIC",
+            "model.layers.3.self_attn.kv_a_proj_with_mqa.weight": "W8A8_DYNAMIC",
+        }
+        config = AscendModelSlimConfig(description)
+        vllm_config = MagicMock()
+        vllm_config.model_config.hf_config = KimiK3TextConfig(
+            linear_attn_config={
+                "kda_layers": [1],
+                "full_attn_layers": [2],
+                "use_full_rank_gate": True,
+            }
+        )
+        linear = MagicMock(spec=LinearBase)
+        fused_moe = MagicMock(spec=FusedMoE)
+        fused_moe.moe_config = MagicMock(spec=FusedMoEConfig)
+
+        with (
+            patch(
+                "vllm_ascend.quantization.modelslim_config.get_current_vllm_config",
+                return_value=vllm_config,
+            ),
+            patch(
+                "vllm_ascend.quantization.modelslim_config.create_scheme_for_layer",
+                return_value=MagicMock(),
+            ) as create_scheme,
+            patch(
+                "vllm_ascend.quantization.method_adapters.AscendLinearMethod",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "vllm_ascend.quantization.method_adapters.AscendFusedMoEMethod",
+                return_value=MagicMock(),
+            ),
+        ):
+            temporary_g_a = config.get_quant_method(
+                linear,
+                "model.layers.0.self_attn.g_a_proj",
+            )
+            temporary_g_b = config.get_quant_method(
+                linear,
+                "model.layers.0.self_attn.g_b_proj",
+            )
+            config.get_quant_method(linear, "model.layers.0.mlp.gate_up_proj")
+            config.get_quant_method(
+                linear,
+                "model.layers.3.self_attn.fused_qkv_a_proj",
+            )
+            config.get_quant_method(
+                fused_moe,
+                "model.layers.1.block_sparse_moe.experts",
+            )
+
+        assert isinstance(temporary_g_a, AscendUnquantizedLinearMethod)
+        assert isinstance(temporary_g_b, AscendUnquantizedLinearMethod)
+        assert config.packed_modules_mapping == get_packed_modules_mapping("kimi_k3")
+        assert [call.args[2] for call in create_scheme.call_args_list] == [
+            "linear",
+            "linear",
+            "moe",
+        ]
+
+    def test_kimi_k3_mapping_does_not_change_plain_kimi_linear_or_k2(self):
+        assert _get_packed_modules_mapping_for_hf_config(KimiLinearConfig()) == {}
+        assert _get_packed_modules_mapping_for_hf_config(KimiK3TextConfig()) == get_packed_modules_mapping("kimi_k3")
+        assert get_packed_modules_mapping("kimi_k2")["experts"] == [
+            "experts.0.gate_proj",
+            "experts.0.up_proj",
+            "experts.0.down_proj",
+        ]
 
     @patch("torch.npu.is_available")
     def test_override_quantization_method(self, mock_is_available):

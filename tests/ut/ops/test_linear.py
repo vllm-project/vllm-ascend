@@ -7,6 +7,7 @@ import torch
 from tests.ut.base import TestBase
 from vllm_ascend import ascend_config
 from vllm_ascend.distributed import parallel_state
+from vllm_ascend.ops import linear_op
 from vllm_ascend.ops.linear import (
     AscendMergedColumnParallelLinear,
     AscendReplicatedLinear,
@@ -166,6 +167,65 @@ class TestAscendReplicatedLinear(BaseLinearTest):
             output_size=8,
         )
         self.assertTrue(isinstance(linear.quant_method, AscendUnquantizedLinearMethod))
+
+
+class TestSharedExpertParallelSelection(unittest.TestCase):
+    def _get_parallel_op(self, *, shared_expert_dp: bool, prefix: str, direct: str):
+        tp_group = MagicMock(rank_in_group=1, world_size=4)
+        with (
+            patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=tp_group),
+            patch(
+                "vllm_ascend.ops.linear_op.shared_expert_dp_enabled",
+                return_value=shared_expert_dp,
+            ),
+            patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
+            patch(
+                "vllm_ascend.ops.linear_op.enable_dsa_cp_with_layer_shard",
+                return_value=False,
+            ),
+            patch("vllm_ascend.ops.linear_op.oproj_tp_enable", return_value=False),
+            patch("vllm_ascend.ops.linear_op.mlp_tp_enable", return_value=False),
+            patch("vllm_ascend.ops.linear_op.matmul_allreduce_enable", return_value=False),
+            patch("vllm_ascend.ops.linear_op.flashcomm2_enable", return_value=False),
+            patch(
+                "vllm_ascend.ops.linear_op.flashcomm2_oshard_manager.flashcomm2_oshard_enable",
+                return_value=False,
+            ),
+            patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True),
+        ):
+            return linear_op.get_parallel_op(
+                disable_tp=False,
+                prefix=prefix,
+                layer=MagicMock(),
+                direct=direct,
+            )
+
+    def test_flashcomm_without_shared_expert_dp_keeps_tp_shards(self):
+        for direct, prefix in (
+            ("column", "model.layers.0.mlp.shared_experts.gate_up_proj"),
+            ("row", "model.layers.0.mlp.shared_experts.down_proj"),
+        ):
+            with self.subTest(direct=direct):
+                custom_op, tp_rank, tp_size = self._get_parallel_op(
+                    shared_expert_dp=False,
+                    prefix=prefix,
+                    direct=direct,
+                )
+
+                self.assertIsNone(custom_op)
+                self.assertEqual(tp_rank, 1)
+                self.assertEqual(tp_size, 4)
+
+    def test_shared_expert_dp_replicates_weights(self):
+        custom_op, tp_rank, tp_size = self._get_parallel_op(
+            shared_expert_dp=True,
+            prefix="model.layers.0.mlp.shared_experts.gate_up_proj",
+            direct="column",
+        )
+
+        self.assertIsNone(custom_op)
+        self.assertEqual(tp_rank, 0)
+        self.assertEqual(tp_size, 1)
 
 
 if __name__ == "__main__":

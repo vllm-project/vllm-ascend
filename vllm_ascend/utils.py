@@ -706,6 +706,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
     from vllm_ascend.ops.conv import AscendConv3dLayer
     from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+    from vllm_ascend.ops.kimi_kda import AscendKimiGatedDeltaNetAttention
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
         AscendColumnParallelLinear,
@@ -758,6 +759,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "RelPosAttention": AscendRelPosAttention,
         "CustomQwen2Decoder": AscendCustomQwen2Decoder,
         "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
+        "KimiGatedDeltaNetAttention": AscendKimiGatedDeltaNetAttention,
         "BailingMoELinearAttention": AscendBailingMoELinearAttention,
     }
     if vllm_version_is("0.23.0"):
@@ -901,6 +903,11 @@ def enable_sp_by_pass():
 
 
 def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
+    """Return whether FlashComm1 sequence parallelism is enabled.
+
+    ``enable_shared_expert_dp`` is retained for compatibility with existing
+    callers but no longer changes the FlashComm1 setting.
+    """
     global _ENABLE_SP
     if vllm_config is None:
         try:
@@ -922,16 +929,15 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
             except RuntimeError:
                 _ENABLE_SP = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
 
-        if not _ENABLE_SP and enable_shared_expert_dp:
-            _ENABLE_SP = True
-            logger.info("shared_expert_dp requires enable_sp=True. enable_sp has been set to True.")
-
     return bool(_ENABLE_SP)
 
 
 # TODO remove it after vllm has this func
 def shared_expert_dp_enabled() -> bool:
-    return get_ascend_config().enable_shared_expert_dp or enable_sp() or enable_sp_by_pass()
+    # The graph SP pass still requires replicated shared experts. FlashComm1
+    # handles TP-sharded shared experts explicitly and must not enable shared
+    # expert DP as a side effect.
+    return get_ascend_config().enable_shared_expert_dp or enable_sp_by_pass()
 
 
 def is_moe_model(vllm_config: VllmConfig):

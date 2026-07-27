@@ -22,7 +22,12 @@ from vllm.config import KVTransferConfig, VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import clear_ascend_config, get_ascend_config, init_ascend_config
-from vllm_ascend.utils import clear_enable_sp, enable_sp, get_flashcomm2_config_and_validate
+from vllm_ascend.utils import (
+    clear_enable_sp,
+    enable_sp,
+    get_flashcomm2_config_and_validate,
+    shared_expert_dp_enabled,
+)
 
 
 class TestAscendConfig(TestBase):
@@ -336,6 +341,39 @@ class TestAscendConfig(TestBase):
             ascend_config = init_ascend_config(test_vllm_config)
         self.assertTrue(ascend_config.enable_flashcomm1)
         self.assertTrue(enable_sp(test_vllm_config))
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_shared_expert_dp_does_not_enable_flashcomm1(self, mock_check_and_update_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.tensor_parallel_size = 2
+        test_vllm_config.parallel_config.enable_expert_parallel = True
+        test_vllm_config.additional_config = {
+            "enable_flashcomm1": False,
+            "enable_shared_expert_dp": True,
+        }
+
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertTrue(ascend_config.enable_shared_expert_dp)
+        self.assertFalse(enable_sp(test_vllm_config))
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_flashcomm1_does_not_enable_shared_expert_dp(self, mock_check_and_update_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.tensor_parallel_size = 2
+        test_vllm_config.parallel_config.enable_expert_parallel = True
+        test_vllm_config.additional_config = {
+            "enable_flashcomm1": True,
+            "enable_shared_expert_dp": False,
+        }
+
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertTrue(ascend_config.enable_flashcomm1)
+        self.assertFalse(ascend_config.enable_shared_expert_dp)
+        self.assertFalse(shared_expert_dp_enabled())
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

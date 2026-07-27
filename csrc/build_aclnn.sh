@@ -123,16 +123,21 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "hc_post"
         "inplace_partial_rotary_mul"
         "rms_norm_dynamic_quant"
+        "dequant_situ_quant"
         "dequant_swiglu_quant"
         "grouped_matmul_swiglu_quant"
         "grouped_matmul_swiglu_quant_v2"
         "hamming_dist_top_k"
         "reshape_and_cache_bnsd"
         "recurrent_gated_delta_rule"
+        "recurrent_kda"
         "fused_gdn_gating"
         "ngram_spec_decode"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
+        "chunk_kda_fwd"
+        "kda_gate_cumsum"
+        "kda_layout_swap12"
         "store_kv_block"
         "store_kv_block_metadata"
     )
@@ -176,16 +181,21 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "hc_post"
         "inplace_partial_rotary_mul"
         "rms_norm_dynamic_quant"
+        "dequant_situ_quant"
         "dequant_swiglu_quant"
         "grouped_matmul_swiglu_quant"
         "grouped_matmul_swiglu_quant_v2"
         "hamming_dist_top_k"
         "reshape_and_cache_bnsd"
         "recurrent_gated_delta_rule"
+        "recurrent_kda"
         "fused_gdn_gating"
         "ngram_spec_decode"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
+        "chunk_kda_fwd"
+        "kda_gate_cumsum"
+        "kda_layout_swap12"
         "store_kv_block"
         "store_kv_block_metadata"
     )
@@ -213,12 +223,17 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "hc_post"
         "hc_pre"
         "swiglu_group_quant"
+        "situ_mx_quant"
         "load_index_kv_cache"
         "indexer_compress_epilog_v2"
         "causal_conv1d"
         "recurrent_gated_delta_rule"
+        "recurrent_kda"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
+        "chunk_kda_fwd"
+        "kda_gate_cumsum"
+        "kda_layout_swap12"
         "store_kv_block"
         "store_kv_block_metadata"
     )
@@ -253,8 +268,13 @@ log_selected_ops
   log "subshell cwd before cd=$(pwd)"
   cd "${ROOT_DIR}/csrc"
   log "subshell cwd after cd=$(pwd)"
-  log "preserving csrc/build and cleaning output dirs"
-  rm -rf -- output build_out
+  # The CANN op generator does not model every op definition and kernel source
+  # as a dependency of the generated ACLNN/proto/kernel artifacts. Reusing the
+  # build tree can therefore package stale signatures or binaries after a
+  # source update. Editable builds must regenerate the custom-op package from
+  # one consistent source snapshot.
+  log "cleaning custom-op build dirs to regenerate ACLNN/proto/kernel artifacts"
+  rm -rf -- build output build_out
 
   : "${CUSTOM_OPS:?CUSTOM_OPS is not set}"
   : "${SOC_VERSION:?SOC_VERSION is not set}"
