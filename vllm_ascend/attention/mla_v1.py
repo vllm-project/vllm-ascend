@@ -1635,7 +1635,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         o_proj_input = torch.empty(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
 
         # MLA Preprocess
-        if self.fa_quant_layer or (self.enable_mlapo and attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS):
+        if self.fa_quant_layer or (
+            self.enable_mlapo
+            and attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
+            and attn_metadata.num_prefills == 0
+        ):
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states.contiguous(), need_gather_q_kv
             )
