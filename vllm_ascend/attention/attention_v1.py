@@ -2728,5 +2728,5 @@ class AscendC8Fp8AttentionBackendImpl(AscendAttentionBackendImpl):
             )
 
             notify_kv_cache_written()
-            
+
         return query, key, value, output
