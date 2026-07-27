@@ -137,6 +137,7 @@ def get_kv_cache_groups(
 ) -> list[KVCacheGroupSpec]:
     return get_kv_cache_config_builder(vllm_config).get_kv_cache_groups(vllm_config, kv_cache_spec)
 
+from vllm_ascend.worker.sentinel.npu_worker_sentinel import WorkerSentinel
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
@@ -243,6 +244,8 @@ class NPUWorker(GPUWorker):
         if "UnquantizedLinearMethod" in WEIGHT_LOADER_V2_SUPPORTED:
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
+        self.worker_sentinel: WorkerSentinel | None = None
+
         self._static_kernel_runtime_initialized = False
         self._kvpp_cache_allocation_plan: KVPPPhysicalCachePlan | None = None
 
@@ -277,7 +280,8 @@ class NPUWorker(GPUWorker):
         raise NotImplementedError("GPUWorker._scoped_allocator_max_split is not validated on Ascend.")
 
     def handle_ft_command(self, ft_request):
-        raise NotImplementedError("GPUWorker.handle_ft_command is not validated on Ascend.")
+        assert self.worker_sentinel is not None
+        return self.worker_sentinel.handle_command(ft_request)
 
     def _compile_or_warm_up_model(self) -> CompilationTimes:
         raise NotImplementedError("GPUWorker._compile_or_warm_up_model is not validated on Ascend.")
@@ -513,6 +517,10 @@ class NPUWorker(GPUWorker):
         # shift self.local_rank by dp_local_rank * tp_pp_world_size so
         # that each DP group binds to a distinct set of NPUs.
         parallel_config = self.parallel_config
+        if self.parallel_config.enable_fault_tolerance:
+            import torch_npu
+
+            torch_npu.npu.set_op_timeout_ms(get_ascend_config().operator_timeout_ms)
         if (
             parallel_config.distributed_executor_backend not in ("ray", "external_launcher")
             and parallel_config.data_parallel_backend != "ray"
@@ -607,6 +615,8 @@ class NPUWorker(GPUWorker):
 
         # Initialize the distributed environment.
         self._init_worker_distributed_environment()
+        if self.parallel_config.enable_fault_tolerance:
+            self.worker_sentinel = WorkerSentinel(worker=self, device=device)
         # Set random seed.
         set_random_seed(self.model_config.seed)
         # Initialize device properties used by triton kernels.
