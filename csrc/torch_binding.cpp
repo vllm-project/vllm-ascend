@@ -48,6 +48,7 @@
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
+#include "common/aicpu/aclnn_frequency_regulator.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -2049,6 +2050,14 @@ std::vector<int64_t> get_npu_storage_shape(const at::Tensor& tensor)
     return std::vector<int64_t>(desc.storage_sizes_.begin(), desc.storage_sizes_.end());
 }
 
+at::Tensor run_frequency_regulator(int64_t freq, const at::Tensor& tensor)
+{
+    auto out = at::empty({1}, at::TensorOptions().dtype(at::kUInt32).device(tensor.device()));
+    uint32_t freq_val = static_cast<uint32_t>(freq);
+    EXEC_NPU_CMD(aclnnFrequencyRegulator, freq_val, out);
+    return tensor;
+}
+
 
 } // namespace vllm_ascend
 
@@ -2743,5 +2752,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "store_kv_block(Tensor key_in, Tensor key_cache_in, Tensor group_len, Tensor group_key_idx,Tensor group_key_cache_idx, int block_size=0) -> ()"
     );
     ops.impl("store_kv_block", torch::kPrivateUse1, &vllm_ascend::store_kv_block);
+        
+    ops.def(
+        "run_frequency_regulator(int freq, Tensor device) -> Tensor"
+    );
+    ops.impl("run_frequency_regulator", torch::kPrivateUse1, &vllm_ascend::run_frequency_regulator);
 }
 #endif
