@@ -48,7 +48,7 @@ concurrency:
 
 jobs:
   select-tests:
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-8-hk
     outputs:
       test_groups: ${{ steps.scope.outputs.test_groups }}
       has_tests: ${{ steps.scope.outputs.has_tests }}
@@ -58,6 +58,13 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      - name: Cleanup stale vllm-ascend-ci fork branches
+        continue-on-error: true
+        uses: ./.github/actions/cleanup-fork-branches
+        with:
+          prefix: 'auto/update-estimated-times-'
+          token: ${{ secrets.PAT_TOKEN }}
 
       - uses: actions/setup-python@v6
         with:
@@ -122,7 +129,7 @@ jobs:
   update-estimated-times:
     needs: [run-tests-main, run-tests-release]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-8-hk
     steps:
       - uses: actions/checkout@v7
         with:

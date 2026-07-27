@@ -119,6 +119,13 @@ jobs:
           token: ${{ secrets.PAT_TOKEN }}
           fetch-depth: 0
 
+      - name: Cleanup stale vllm-ascend-ci fork branches
+        continue-on-error: true
+        uses: ./.github/actions/cleanup-fork-branches
+        with:
+          prefix: 'cherry-pick/pr-'
+          token: ${{ secrets.PAT_TOKEN }}
+
       - name: Cherry-pick and create PR
         id: cherry
         env:

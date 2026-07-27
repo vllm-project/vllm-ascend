@@ -50,6 +50,13 @@ jobs:
           token: ${{ secrets.PAT_TOKEN }}
           ref: ${{ inputs.target_branch || 'main' }}
 
+      - name: Cleanup stale vllm-ascend-ci fork branches
+        continue-on-error: true
+        uses: ./.github/actions/cleanup-fork-branches
+        with:
+          prefix: 'auto-pr/doc-translate-'
+          token: ${{ secrets.PAT_TOKEN }}
+
       - name: Setup git and branch
         run: |
           TARGET_BRANCH="${{ inputs.target_branch || 'main' }}"
