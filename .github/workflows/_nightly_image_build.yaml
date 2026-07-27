@@ -167,7 +167,7 @@ jobs:
           docker build "${BUILD_ARGS[@]}" -t "$IMAGE" .
 
           # Export outputs for merge job
-          {
+          exec >> $GITHUB_OUTPUT
           echo "swr_registry=${SWR_REGISTRY}"
           echo "swr_temp_registry=${SWR_TEMP_REGISTRY}"
           echo "tag_prefix=${TAG_PREFIX}"
@@ -179,7 +179,6 @@ jobs:
           else
             echo "swr_logged_in=false"
           fi
-        } >> $GITHUB_OUTPUT
 
       - name: Push image to SWR temp
         if: ${{ github.repository_owner == 'du-ping1' && (steps.login-swr.conclusion == 'success' || steps.login-swr-daily.conclusion == 'success') }}

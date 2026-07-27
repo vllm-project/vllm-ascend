@@ -27,4 +27,5 @@ self-hosted-runner:
 # actionlint v1.7.7 still enforces the old limit, so ignore the false positive.
 ignore:
   - path: ".github/workflows/schedule_image_build_and_push.yaml"
-    message: "too many inputs for workflow_dispatch event"
+    checks:
+      - events
