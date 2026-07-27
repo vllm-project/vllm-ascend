@@ -2,6 +2,7 @@ import torch
 import torch_npu
 from vllm.triton_utils import tl, triton
 
+
 @triton.jit
 def ngram_spec_decode_kernel(
     token_ids_ptr,
