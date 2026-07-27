@@ -99,33 +99,14 @@ class AscendSampler(Sampler):
         # TODO: support logprobs_mode in vllm-ascend
         super().__init__(logprobs_mode=logprobs_mode)
         self.topk_topp_sampler = AscendTopKTopPSampler(logprobs_mode=logprobs_mode)
-        self.async_exponential_event = torch.npu.Event()
         logger.debug(
             "[sample/sampler] AscendSampler initialized. logprobs_mode=%s, triton_available=%s",
             logprobs_mode,
             HAS_TRITON,
         )
 
-    def set_q_event(self, q, event):
-        self.topk_topp_sampler.set_q_event(q, event)
-
     def prepare_sampling(self, top_k):
         self.topk_topp_sampler.prepare_sampling(top_k)
-
-    def do_async_exponential(self, b_s, head_dim, generators):
-        # Calculating exponential randoms in a different stream
-        # and overlapping with model executing.
-        with torch.npu.stream(global_stream()):
-            global_stream().wait_stream(torch.npu.current_stream())
-            q = torch.empty((b_s, head_dim), device="npu", dtype=torch.float32)
-            # Goes to async exponential with AI-CPU exponential or default exponential.
-            if len(generators) != q.shape[0]:
-                q.exponential_()
-            if generators:
-                for i, generator in generators.items():
-                    q[i].exponential_(generator=generator)
-            self.async_exponential_event.record()
-        self.set_q_event(q, self.async_exponential_event)
 
     def apply_logits_processors(
         self,
@@ -134,9 +115,7 @@ class AscendSampler(Sampler):
         predict_bonus_token: bool,
     ) -> torch.Tensor:
         if not get_ascend_config().enable_reduce_sample:
-            return super().apply_logits_processors(
-                logits, sampling_metadata, predict_bonus_token
-            )
+            return super().apply_logits_processors(logits, sampling_metadata, predict_bonus_token)
 
         # When enable_reduce_sample is active, temporarily change the class
         # of MinTokensLogitsProcessor / LogitBiasLogitsProcessor instances
@@ -147,21 +126,15 @@ class AscendSampler(Sampler):
         procs = sampling_metadata.logitsprocs
         swaps = []
         for p in procs.non_argmax_invariant + procs.argmax_invariant:
-            if isinstance(p, MinTokensLogitsProcessor) and not isinstance(
-                p, AscendMinTokensLogitsProcessor
-            ):
+            if isinstance(p, MinTokensLogitsProcessor) and not isinstance(p, AscendMinTokensLogitsProcessor):
                 swaps.append((p, p.__class__))
                 p.__class__ = AscendMinTokensLogitsProcessor
-            elif isinstance(p, LogitBiasLogitsProcessor) and not isinstance(
-                p, AscendLogitBiasLogitsProcessor
-            ):
+            elif isinstance(p, LogitBiasLogitsProcessor) and not isinstance(p, AscendLogitBiasLogitsProcessor):
                 swaps.append((p, p.__class__))
                 p.__class__ = AscendLogitBiasLogitsProcessor
 
         try:
-            return super().apply_logits_processors(
-                logits, sampling_metadata, predict_bonus_token
-            )
+            return super().apply_logits_processors(logits, sampling_metadata, predict_bonus_token)
         finally:
             for p, orig_cls in swaps:
                 p.__class__ = orig_cls
@@ -194,12 +167,6 @@ class AscendTopKTopPSampler(TopKTopPSampler):
         super().__init__(**kwargs)
         self.apply_top_k_top_p = apply_top_k_top_p
         self.top_k = None
-
-    def set_q_event(self, q, event):
-        # Pass in async exponential results.
-        # Also pass in event to prevent synchronize errors.
-        self.q = q
-        self.async_event = event
 
     def prepare_sampling(self, top_k):
         if top_k is not None:
@@ -244,14 +211,6 @@ class AscendTopKTopPSampler(TopKTopPSampler):
                 logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
             probs = logits.softmax(dim=-1, dtype=torch.float32)
-            if get_ascend_config().enable_async_exponential:
-                # Add synchronize to prevent synchronize error.
-                logger.debug_once(
-                    "[sample/sampler] Using async-exponential sampling path. "
-                    "Pre-computed exponential randoms from separate stream will be used.",
-                )
-                self.async_event.synchronize()
-                return probs.div_(self.q).argmax(dim=-1).view(-1), logits_to_return
             return random_sample(probs, generators), logits_to_return
 
 
@@ -402,9 +361,7 @@ class AscendMinTokensLogitsProcessor(MinTokensLogitsProcessor):
             return logits
         if get_ascend_config().enable_reduce_sample:
             V_local = logits.shape[-1]
-            local_req, local_tok, _ = _convert_logits_slice_to_local(
-                self.logits_slice, V_local
-            )
+            local_req, local_tok, _ = _convert_logits_slice_to_local(self.logits_slice, V_local)
             logits.index_put_((local_req, local_tok), self.neg_inf_tensor)
             return logits
         return super().apply(logits)
@@ -419,9 +376,7 @@ class AscendLogitBiasLogitsProcessor(LogitBiasLogitsProcessor):
             return logits
         if get_ascend_config().enable_reduce_sample:
             V_local = logits.shape[-1]
-            local_req, local_tok, in_shard = _convert_logits_slice_to_local(
-                self.logits_slice, V_local
-            )
+            local_req, local_tok, in_shard = _convert_logits_slice_to_local(self.logits_slice, V_local)
             logits[local_req, local_tok] += self.bias_tensor[in_shard]
             return logits
         return super().apply(logits)
