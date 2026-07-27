@@ -20,6 +20,7 @@ on:
       - 'main'
       - 'releases/*'
     types: [ labeled ]
+  # actionlint: ignore: events
   workflow_dispatch:
     inputs:
       tag:
