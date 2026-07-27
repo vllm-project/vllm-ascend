@@ -162,6 +162,8 @@ class AscendConfig:
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
         self.enable_sleep_mode_extra_cleanup = additional_config.get("enable_sleep_mode_extra_cleanup", False)
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
+        self.enable_dsv4_dsa_limit_core = bool(additional_config.get("enable_dsv4_dsa_limit_core", False))
+        self._check_dsv4_dsa_limit_core(vllm_config, additional_config)
         self.enable_prefill_mc2 = bool(additional_config.get("enable_prefill_mc2", False))
 
         self.enable_matmul_allreduce = self._get_config_value(
@@ -367,6 +369,24 @@ class AscendConfig:
         if self.mix_placement:
             if self.enable_shared_expert_dp or self.multistream_overlap_shared_expert:
                 raise ValueError("Mix placement is not supported with shared expert DP or multistream overlap.")
+
+    def _check_dsv4_dsa_limit_core(self, vllm_config: "VllmConfig", additional_config: dict[str, Any]) -> None:
+        if not self.enable_dsv4_dsa_limit_core:
+            return
+        if not self.multistream_dsv4_dsa_overlap:
+            raise ValueError("enable_dsv4_dsa_limit_core requires multistream_dsv4_dsa_overlap=True.")
+        if bool(additional_config.get("enable_pypto", False)):
+            raise ValueError("enable_dsv4_dsa_limit_core does not support enable_pypto=True.")
+
+        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+        if get_ascend_device_type() != AscendDeviceType.A3:
+            raise ValueError("enable_dsv4_dsa_limit_core only supports Ascend A3.")
+        if not self.ascend_compilation_config.enable_npugraph_ex:
+            raise ValueError("enable_dsv4_dsa_limit_core requires ascend_compilation_config.enable_npugraph_ex=True.")
+        model_config = getattr(vllm_config, "model_config", None)
+        if model_config is not None and getattr(model_config, "enforce_eager", False):
+            raise ValueError("enable_dsv4_dsa_limit_core requires graph mode and does not support enforce_eager=True.")
 
     def _check_enable_hamming_sparse(self):
         if self.enable_hamming_sparse:

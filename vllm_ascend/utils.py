@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import functools
+import importlib
 import json
 import math
 import os
@@ -1069,6 +1070,35 @@ def npu_stream_switch(target_stream: torch.npu.Stream, *, enabled: bool = True):
         return nullcontext()
     assert target_stream is not None
     return torch.npu.stream(target_stream)
+
+
+@lru_cache(maxsize=1)
+def _get_limit_core_scope():
+    for module_name in ("npugraph_ex", "torchair"):
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            continue
+        scope = getattr(module, "scope", None)
+        limit_core_num = getattr(scope, "limit_core_num", None)
+        if limit_core_num is not None:
+            return limit_core_num
+    return None
+
+
+def limit_core_num(enabled: bool, aic_num: int, aiv_num: int):
+    """
+    Limit AI Core / AI Vector usage for graph scope operators when enabled.
+    """
+    if not enabled:
+        return nullcontext()
+    limit_core_scope = _get_limit_core_scope()
+    if limit_core_scope is None:
+        raise RuntimeError(
+            "enable_dsv4_dsa_limit_core requires npugraph_ex.scope.limit_core_num "
+            "or torchair.scope.limit_core_num, but neither is available."
+        )
+    return limit_core_scope(aic_num, aiv_num)
 
 
 def create_hccl_pg_options(group_name: str):

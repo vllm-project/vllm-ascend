@@ -22,7 +22,7 @@ from vllm.config import KVTransferConfig, VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import clear_ascend_config, get_ascend_config, init_ascend_config
-from vllm_ascend.utils import clear_enable_sp, enable_sp, get_flashcomm2_config_and_validate
+from vllm_ascend.utils import AscendDeviceType, clear_enable_sp, enable_sp, get_flashcomm2_config_and_validate
 
 
 class TestAscendConfig(TestBase):
@@ -44,11 +44,12 @@ class TestAscendConfig(TestBase):
         total_num_attention_heads: int = 32,
         total_num_kv_heads: int = 8,
         is_deepseek_mla: bool = False,
+        enforce_eager: bool = True,
     ):
         return SimpleNamespace(
             is_deepseek_mla=is_deepseek_mla,
             use_mla=is_deepseek_mla,
-            enforce_eager=True,
+            enforce_eager=enforce_eager,
             model_arch_config=SimpleNamespace(total_num_attention_heads=total_num_attention_heads),
             get_total_num_kv_heads=lambda: total_num_kv_heads,
         )
@@ -61,6 +62,7 @@ class TestAscendConfig(TestBase):
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
         self.assertTrue(ascend_config.multistream_dsv4_dsa_overlap)
+        self.assertFalse(ascend_config.enable_dsv4_dsa_limit_core)
         self.assertFalse(ascend_config.enable_kv_nz)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
@@ -90,6 +92,7 @@ class TestAscendConfig(TestBase):
         self.assertEqual(ascend_config.eplb_config.num_redundant_experts, 2)
         self.assertTrue(ascend_config.multistream_overlap_shared_expert)
         self.assertFalse(ascend_config.multistream_dsv4_dsa_overlap)
+        self.assertFalse(ascend_config.enable_dsv4_dsa_limit_core)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertFalse(ascend_compilation_config.fuse_norm_quant)
@@ -99,6 +102,76 @@ class TestAscendConfig(TestBase):
 
         ascend_fusion_config = ascend_config.ascend_fusion_config
         self.assertFalse(ascend_fusion_config.fusion_ops_gmmswigluquant)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    def test_init_ascend_config_enable_dsv4_dsa_limit_core(
+        self,
+        mock_get_device_type,
+        mock_fix_incompatible_config,
+    ):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.model_config = self._make_model_config(enforce_eager=False)
+        test_vllm_config.additional_config = {
+            "enable_dsv4_dsa_limit_core": True,
+            "multistream_dsv4_dsa_overlap": True,
+            "refresh": True,
+        }
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertTrue(ascend_config.enable_dsv4_dsa_limit_core)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    def test_init_ascend_config_rejects_dsv4_dsa_limit_core_on_non_a3(
+        self,
+        mock_get_device_type,
+        mock_fix_incompatible_config,
+    ):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.model_config = self._make_model_config(enforce_eager=False)
+        test_vllm_config.additional_config = {
+            "enable_dsv4_dsa_limit_core": True,
+            "refresh": True,
+        }
+        with self.assertRaisesRegex(ValueError, "only supports Ascend A3"):
+            init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    def test_init_ascend_config_rejects_dsv4_dsa_limit_core_without_multistream(
+        self,
+        mock_get_device_type,
+        mock_fix_incompatible_config,
+    ):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.model_config = self._make_model_config(enforce_eager=False)
+        test_vllm_config.additional_config = {
+            "enable_dsv4_dsa_limit_core": True,
+            "multistream_dsv4_dsa_overlap": False,
+            "refresh": True,
+        }
+        with self.assertRaisesRegex(ValueError, "requires multistream_dsv4_dsa_overlap=True"):
+            init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    def test_init_ascend_config_rejects_dsv4_dsa_limit_core_in_eager_mode(
+        self,
+        mock_get_device_type,
+        mock_fix_incompatible_config,
+    ):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.model_config = self._make_model_config(enforce_eager=True)
+        test_vllm_config.additional_config = {
+            "enable_dsv4_dsa_limit_core": True,
+            "refresh": True,
+        }
+        with self.assertRaisesRegex(ValueError, "does not support enforce_eager=True"):
+            init_ascend_config(test_vllm_config)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
