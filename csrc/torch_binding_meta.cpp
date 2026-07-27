@@ -339,6 +339,12 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_kv_quant_sparse_flash_attenti
     TORCH_CHECK(layout_query_str == "BSND" || layout_query_str == "TND",
                 "The layout of query only support BSND and TND, but got ",
                 layout_query_str);
+    for (int64_t i = 0; i < query.dim(); i++) {
+        const auto query_size_i = query.size(i); // symbolic-meta-ok: concrete size check validates input shape.
+        TORCH_CHECK(query_size_i > 0, "All values within query's shape should be greater "
+                                      "than 0, but shape[", i, "] is ", query_size_i);
+    }
+
     c10::SymDimVector output_size;
     if (layout_query_str == "BSND") {
         TORCH_CHECK(query.dim() == DIM_4,
@@ -538,7 +544,8 @@ at::Tensor npu_causal_conv1d_custom_meta(
     const c10::optional<at::Tensor>& num_accepted_tokens_opt,
     int64_t  activation_mode,
     int64_t  pad_slot_id,
-    int64_t  run_mode)
+    int64_t  run_mode,
+    int64_t  head_num)
 {
     return output;
 }
@@ -596,6 +603,45 @@ at::Tensor npu_recurrent_gated_delta_rule_meta(
     auto options = value.options().dtype(at::ScalarType::BFloat16);
     at::Tensor output = at::empty_symint(value.sym_sizes(), options);
     return output;
+}
+
+at::Tensor npu_solve_tri_meta(
+    const at::Tensor& x,
+    c10::optional<at::IntArrayRef> cu_seqlens,
+    c10::optional<at::IntArrayRef> chunk_indices,
+    c10::string_view layout)
+{
+    (void)cu_seqlens;
+    (void)chunk_indices;
+    (void)layout;
+    return at::empty_symint(x.sym_sizes(), x.options());
+}
+
+std::tuple<at::Tensor, at::Tensor> npu_recompute_wu_fwd_meta(
+    const at::Tensor& k,
+    const at::Tensor& v,
+    const at::Tensor& beta,
+    const at::Tensor& a,
+    const at::Tensor& g,
+    c10::optional<at::IntArrayRef> cu_seqlens,
+    c10::optional<at::IntArrayRef> chunk_indices,
+    int64_t chunk_size)
+{
+    (void)beta;
+    (void)a;
+    (void)g;
+    (void)cu_seqlens;
+    (void)chunk_indices;
+    (void)chunk_size;
+    at::SmallVector<c10::SymInt, 4> w_size = {
+        v.sym_size(0),
+        v.sym_size(1),
+        v.sym_size(2),
+        k.sym_size(3),
+    };
+    at::Tensor w = at::empty_symint(c10::SymIntArrayRef(w_size), k.options());
+    at::Tensor u = at::empty_symint(v.sym_sizes(), v.options());
+    return std::make_tuple(w, u);
 }
 
 std::vector<at::Tensor> moe_grouped_matmul_meta(
@@ -1623,6 +1669,10 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
      // store_kv_block
     ops.impl("store_kv_block_pre", &vllm_ascend::meta::store_kv_block_metadata);
     ops.impl("store_kv_block", &vllm_ascend::meta::store_kv_block);
+    // npu_solve_tri
+    ops.impl("npu_solve_tri", &vllm_ascend::meta::npu_solve_tri_meta);
+    // npu_recompute_wu_fwd
+    ops.impl("npu_recompute_wu_fwd", &vllm_ascend::meta::npu_recompute_wu_fwd_meta);
 }
 }
 #endif

@@ -130,7 +130,9 @@ struct BlockSchedulerGdnFwdH {
         kHeadDim = gdnFwdHTilingData->kHeadDim;
         vHeadDim = gdnFwdHTilingData->vHeadDim;
         chunkSize = gdnFwdHTilingData->chunkSize;
-        initalStateStride0 = gdnFwdHTilingData->initalStateStride0;
+        // The head-major kernel receives contiguous [N, H, K, V] states.
+        // The new shared tiling struct no longer carries a separate stride.
+        initalStateStride0 = vHeadDim;
         isVariedLen = gdnFwdHTilingData->isVariedLen;
         shapeBatch = gdnFwdHTilingData->shapeBatch;
         tokenBatch = gdnFwdHTilingData->tokenBatch;

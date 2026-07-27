@@ -30,7 +30,6 @@ from vllm_ascend.device.mxfp_compat import (
     SCALE_DTYPES,
 )
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
-from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
@@ -884,36 +883,6 @@ class BaseDeviceAdaptor:
         return A
 
     @staticmethod
-    def solve_tril_16x16(
-        A,
-        Ad,
-        cu_seqlens,
-        chunk_indices,
-        T,
-        H,
-        BT,
-        LARGE_BLOCK_T,
-        NT,
-        B,
-    ):
-        extract_slice_stride_1 = LARGE_BLOCK_T // 32
-        solve_tril_16x16_kernel[NT, B * H](
-            A=A,
-            Ad=Ad,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
-            T=T,
-            H=H,
-            BT=BT,
-            LARGE_BLOCK_T=LARGE_BLOCK_T,
-            EXTRACT_SLICE_STRIDE_1=extract_slice_stride_1,
-            num_warps=1,
-            num_stages=4,
-        )
-
-        return Ad
-
-    @staticmethod
     def npu_gemma_rms_norm(x, weight, variance_epsilon):
         x, _ = torch.ops._C_ascend.npu_gemma_rms_norm(x, weight, variance_epsilon)
         return x
@@ -1763,35 +1732,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             disable_tightly_coupled_buffer_reuse=True,
         )
         return A
-
-    @staticmethod
-    def solve_tril_16x16(
-        A,
-        Ad,
-        cu_seqlens,
-        chunk_indices,
-        T,
-        H,
-        BT,
-        LARGE_BLOCK_T,
-        NT,
-        B,
-    ):
-        solve_tril_16x16_kernel[NT, B * H](
-            A=A,
-            Ad=Ad,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
-            T=T,
-            H=H,
-            BT=BT,
-            LARGE_BLOCK_T=LARGE_BLOCK_T,
-            EXTRACT_SLICE_STRIDE_1=1,
-            num_warps=1,
-            num_stages=4,
-        )
-
-        return Ad
 
     @staticmethod
     def npu_gemma_rms_norm(x, weight, variance_epsilon):

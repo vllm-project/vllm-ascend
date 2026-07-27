@@ -65,8 +65,10 @@ class _GDNForwardWrapper(nn.Module):
         self.norm = _Norm()
         self.out_proj = _OutputProjection()
         self.conv1d = nn.Conv1d(1, 2, kernel_size=2)
+        self.num_k_heads = 1
         self.num_v_heads = 1
         self.tp_size = 1
+        self.head_k_dim = 2
         self.head_v_dim = 2
         self.activation = None
         self.register_buffer("A_log", torch.zeros(1))
@@ -164,7 +166,9 @@ def test_connector_observes_updated_gdn_state_for_each_compiled_call():
     def chunk_attention(**kwargs):
         initial_state = kwargs["initial_state"]
         value = kwargs["v"]
-        return value + 1, initial_state + 1
+        # The head-major chunk path returns BTHD after its final output layout
+        # conversion, while it receives V as BHTD.
+        return value.movedim(1, 2).contiguous() + 1, initial_state + 1
 
     gating = (
         torch.zeros(1, 2, 1),

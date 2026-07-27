@@ -12,13 +12,15 @@
  * \brief
  */
 
-// #include "chunk_gated_delta_rule_fwd_h.h"
-#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 200
 #include "arch20/compat_310p.h"
 #include "arch20/gemm/kernel/gdn_fwd_h_kernel.hpp"
+#elif defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+#include "arch35/gemm/kernel/gdn_fwd_h_kernel.hpp"
 #else
-#include "arch22/gemm/kernel/gdn_fwd_h_kernel.hpp"
+#include "gemm/kernel/gdn_fwd_h_kernel.hpp"
 #endif
+
 #include "lib/matmul_intf.h"
 
 using namespace Catlass;
@@ -33,9 +35,9 @@ extern "C" __global__ __aicore__ void chunk_gated_delta_rule_fwd_h(GM_ADDR k, GM
     GM_ADDR user = AscendC::GetUserWorkspace(workspace);
 
     __gm__ ChunkGatedDeltaRuleFwdHTilingData *__restrict gdnFwdHTilingData = reinterpret_cast<__gm__ ChunkGatedDeltaRuleFwdHTilingData *__restrict>(tiling);
-
     using workspaceType = float;
     // dtype: 0 - fp16, 1 - bf16, 2 - fp32
+    // The 310P unified-core implementation only supports the FP16 variants.
 #ifndef CATLASS_UNIFIED_CORE
     if (gdnFwdHTilingData->dataType == 1) {
         if (gdnFwdHTilingData->stateDataType == 2) {

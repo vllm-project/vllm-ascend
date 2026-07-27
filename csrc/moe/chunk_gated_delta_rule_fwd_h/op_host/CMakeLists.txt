@@ -4,6 +4,11 @@ get_filename_component(CATLASS_INCLUDE_DIR_ABS ${CATLASS_INCLUDE_DIR} ABSOLUTE)
 
 set(COMMON_KERNEL_UTILS_DIR "${CMAKE_SOURCE_DIR}/moe/common")
 get_filename_component(COMMON_KERNEL_UTILS_DIR_ABS ${COMMON_KERNEL_UTILS_DIR} ABSOLUTE)
+set(chunk_gated_delta_rule_fwd_h_depends
+    third_party/catlass/include/catlass
+    third_party/catlass/include/tla
+    moe/common/kernel_utils
+    CACHE INTERNAL "Dependencies for chunk_gated_delta_rule_fwd_h")
 
 add_op_to_compiled_list()
 

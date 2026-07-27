@@ -284,6 +284,12 @@ inline FnHostPlan ChooseFnHostPlan(gert::TilingContext *context, const CausalCon
         plan.baseDimChoice = ChooseFnTokenDimCoSplitBaseDimChoice(context, tiling.dim, ubSize, coreNum);
     }
 
+    if (tiling.isOutReshape) {
+        int64_t headDim = tiling.dim / tiling.headNum;
+        plan.baseDimChoice.baseDim = (plan.baseDimChoice.baseDim / headDim) * headDim;
+        plan.baseDimChoice.baseDimCnt = CeilDivInt64(tiling.dim, plan.baseDimChoice.baseDim);
+    }
+
     if (plan.baseDimChoice.baseDim <= 0 || plan.baseDimChoice.baseDimCnt <= 0) {
         return {};
     }
