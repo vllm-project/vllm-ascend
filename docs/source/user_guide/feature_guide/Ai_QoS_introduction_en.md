@@ -22,7 +22,7 @@
 
 ## Build AI QoS Module
 
-Build and install the AI QoS extension before using `tools/ai_qos.py`.
+Build and install the AI QoS extension before running `python -m tools.ai_qos`.
 The DSMI include‑file (dsmi_common_interface.h) and library‑file (libdrvdsmi_host.so) paths are environment-dependent. Locate the paths on your machine first, then replace `YOUR_DSMI_INCLUDE_DIR` and `YOUR_DSMI_LIBRARY_FILE` in the command (for example, `/usr/local/Ascend/driver/include` and `/usr/local/Ascend/driver/lib64/driver/libdrvdsmi_host.so`).
 
 In most deployments, these commands are executed inside a container. When creating the container, make sure the DSMI header/library directories are mounted into the container filesystem; otherwise CMake cannot find the files.
@@ -46,7 +46,7 @@ cmake --install tools/ai_qos/build
 ​### 1) Auto mode
 
 ```bash
-python tools/ai_qos.py
+python -m tools.ai_qos
 ```
 
 ​AI QoS auto mode automatically classifies the priorities of different types of traffic and generates QoS tags. It also prints the UB switch configuration. You can copy the outputs and log in to the UB switch to configure the QoS configurations of UB switch. This configuration will overwrite the current QoS configuration on the UB switch. If there is any existing QoS configuration, please back it up in advance.
@@ -54,7 +54,7 @@ python tools/ai_qos.py
 ​### 2) Manual mode
 
 ```bash
-​python tools/ai_qos.py --mode manual --AIV {priority} --SDMA {priority} --PCIEDMA {priority}
+python -m tools.ai_qos --mode manual --AIV {priority} --SDMA {priority} --PCIEDMA {priority}
 ```
 
 ​AI QoS manual mode calculates the QoS tags of traffic based on the priority of different types of traffic set by users, and generates and prints the UB switch configuration.You can copy the outputs and log in to the UB switch to configure the QoS configurations of UB switch. This configuration will overwrite the current QoS configuration on the UB switch. If there is any existing QoS configuration, please back it up in advance.
@@ -69,7 +69,7 @@ python tools/ai_qos.py
 **How to disable AI QoS**:
 
 ```bash
-​python tools/ai_qos.py unset
+python -m tools.ai_qos unset
 ```
 
 ​The command for disabling the AI QoS feature on the UB Switch will be printed on the screen. Please log in to the UB Switch and execute the command printed on the screen to complete the feature disabling.
