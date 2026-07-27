@@ -67,6 +67,39 @@ from vllm_ascend.utils import weak_ref_tensors
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
+# Cached: on the per-decode-step graph-replay path.
+_TARGET_NUM_LAYERS: int | None = None
+
+
+def _get_target_num_layers(vllm_config: VllmConfig) -> int:
+    # Must match the expression *_eagle*.py use for `start_layer_id`.
+    global _TARGET_NUM_LAYERS
+    if _TARGET_NUM_LAYERS is None:
+        _TARGET_NUM_LAYERS = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+    return _TARGET_NUM_LAYERS
+
+
+def _select_target_fia_keys(attn_keys: list[str], graph_param_count: int, num_target_layers: int) -> list[str]:
+    """Drop draft-model layer keys so the count tiles graph_param_count evenly.
+
+    EAGLE3's draft decoder continues the target's layer numbering (target
+    0..27, draft at 28+), so it shares the target's module prefix and can only
+    be told apart by layer index.
+    """
+    if not attn_keys or graph_param_count % len(attn_keys) == 0:
+        return attn_keys
+
+    import regex as re
+
+    def layer_index_of(key: str) -> int | None:
+        match = re.search(r"(?:^|\.)layers\.(\d+)(?:\.|$)", key)
+        return int(match.group(1)) if match else None
+
+    target_keys = [key for key in attn_keys if (idx := layer_index_of(key)) is not None and idx < num_target_layers]
+
+    if target_keys and len(target_keys) != len(attn_keys) and graph_param_count % len(target_keys) == 0:
+        return target_keys
+    return attn_keys
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -698,19 +731,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 # layer-specific metadata lookup below prevents global/sliding
                 # window layers from accidentally sharing the same metadata.
                 attn_keys = [attn_keys[index % num_layers] for index in range(graph_param_count)]
-            elif graph_param_count > num_layers and num_layers:
-                # cudagraph_specialize_lora captures one full set of self-attn
-                # FIA ops per LoRA specialization, so graph_param_count is a
-                # multiple of the self-attn layer count. Replicate the keys
-                # block-wise (same scheme as the draft path above) so every
-                # captured op pairs with the correct layer's metadata.
-                assert graph_param_count % num_layers == 0, (
+            else:
+                # Replay pairs captured ops with metadata by POSITION here, and
+                # cudagraph_specialize_lora captures one self-attn sweep per LoRA
+                # specialization, so tile the target layers to the op count.
+                # EAGLE3 also adds a draft key to attn_metadata; drop it first.
+                base = _select_target_fia_keys(attn_keys, graph_param_count, _get_target_num_layers(vllm_config))
+                assert graph_param_count % len(base) == 0, (
                     f"graph_param_count ({graph_param_count}) is not a multiple of "
-                    f"num_layers ({num_layers}); block-wise key replication would "
-                    f"mismatch captured ops with metadata. This is an unexpected "
-                    f"capture state under LoRA + TP graph mode."
+                    f"FIA layer count ({len(base)}) after excluding draft-model "
+                    f"layers; block-wise key replication would mismatch captured "
+                    f"ops with metadata. This is an unexpected capture state under "
+                    f"LoRA + TP graph mode."
                 )
-                attn_keys = attn_keys * (graph_param_count // num_layers)
+                attn_keys = base * (graph_param_count // len(base))
             attn_count = 0
             layer_count = 0
             with torch.npu.stream(update_stream):
