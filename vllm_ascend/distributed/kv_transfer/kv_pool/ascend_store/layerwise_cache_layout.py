@@ -31,13 +31,9 @@ def apply_layerwise_kv_cache_plan(
     if len(old_tensors) <= 1:
         return
     if any(len(tensor.shared_by) != 1 for tensor in old_tensors):
-        raise NotImplementedError(
-            "Layerwise KV cache reuse requires one KV cache tensor descriptor per layer."
-        )
+        raise NotImplementedError("Layerwise KV cache reuse requires one KV cache tensor descriptor per layer.")
     if len(old_tensors) != base_layers:
-        raise NotImplementedError(
-            "Layerwise KV cache reuse currently supports base transformer layers only."
-        )
+        raise NotImplementedError("Layerwise KV cache reuse currently supports base transformer layers only.")
 
     layer_names = [tensor.shared_by[0] for tensor in old_tensors]
     new_tensors = []
