@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+"""Triton-Ascend Mamba state-copy and precision-fix kernels."""
+
 from vllm.triton_utils import tl, triton
 
 
