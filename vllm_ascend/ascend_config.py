@@ -423,6 +423,8 @@ class AscendConfig:
     msmonitor_use_daemon: bool = False
     enable_transpose_kv_cache_by_block: bool = True
     weight_nz_mode: int = 1
+    # NPU operator timeout (ms) used by fault tolerance retry; 0 = disable.
+    operator_timeout_ms: int = 0
 
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
     ascend_compilation_config: AscendCompilationConfig = dataclasses.field(default_factory=AscendCompilationConfig)
@@ -579,6 +581,8 @@ class AscendConfig:
             logger.warning_once(
                 "MegaMoe is not supported for this model config; additional_config.enable_fused_mc2 will be set to 0."
             )
+        # operator_timeout_ms is a declared AscendConfig field; it is populated
+        # from additional_config via the factory kwargs (see init_ascend_config).
 
         # mlapo_keep_prefill_weights preconditions: the prefill weights are only
         # freed by MLAPO in the MLA attention path, so the keep switch is only
