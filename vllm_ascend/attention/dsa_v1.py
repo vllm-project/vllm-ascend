@@ -49,14 +49,35 @@ else:
 BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
 
-_DSV4_DSA_OVERLAP_STREAM = None
+_DSV4_DSA_MLA_STREAM = None
+_DSV4_DSA_COMPRESSOR_STREAM = None
+_DSV4_DSA_INDEXER_STREAM = None
 
 
-def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
-    global _DSV4_DSA_OVERLAP_STREAM
-    if _DSV4_DSA_OVERLAP_STREAM is None:
-        _DSV4_DSA_OVERLAP_STREAM = torch_npu.npu.Stream()
-    return _DSV4_DSA_OVERLAP_STREAM
+def dsv4_dsa_mla_stream() -> torch.npu.Stream:
+    global _DSV4_DSA_MLA_STREAM
+    if _DSV4_DSA_MLA_STREAM is None:
+        _DSV4_DSA_MLA_STREAM = torch_npu.npu.Stream()
+    return _DSV4_DSA_MLA_STREAM
+
+
+def dsv4_dsa_compressor_stream() -> torch.npu.Stream:
+    global _DSV4_DSA_COMPRESSOR_STREAM
+    if _DSV4_DSA_COMPRESSOR_STREAM is None:
+        _DSV4_DSA_COMPRESSOR_STREAM = torch_npu.npu.Stream()
+    return _DSV4_DSA_COMPRESSOR_STREAM
+
+
+def dsv4_dsa_indexer_stream() -> torch.npu.Stream:
+    global _DSV4_DSA_INDEXER_STREAM
+    if _DSV4_DSA_INDEXER_STREAM is None:
+        _DSV4_DSA_INDEXER_STREAM = torch_npu.npu.Stream()
+    return _DSV4_DSA_INDEXER_STREAM
+
+
+def _record_tensor_stream(tensor: object, stream: torch.npu.Stream) -> None:
+    if isinstance(tensor, torch.Tensor):
+        tensor.record_stream(stream)
 
 
 # mypy: disable-error-code="has-type"
@@ -87,7 +108,7 @@ def rotate_activation(x: torch.Tensor, hadamard: torch.Tensor) -> torch.Tensor:
 def hadamard_linear(x: torch.Tensor, hadamard: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...], int]:
     """
     Part 1 of rotate_activation: Execute F.linear (matrix multiplication).
-    This runs in main stream, parallel with aux_stream kv_scatter.
+    This runs in main stream, parallel with indexer_stream kv_scatter.
 
     Returns:
         Tuple of (linear_output, original_shape, original_dim)
@@ -106,7 +127,7 @@ def hadamard_linear(x: torch.Tensor, hadamard: torch.Tensor) -> tuple[torch.Tens
 def hadamard_scale(out: torch.Tensor, x_shape: tuple[int, ...], dim: int, scale: float = 1.0) -> torch.Tensor:
     """
     Part 2 of rotate_activation: Execute scale multiplication and reshape.
-    This runs in main stream after aux_stream completes.
+    This runs in main stream after indexer_stream completes.
     """
     out = out * scale
     return out[..., :dim].reshape(*x_shape)
@@ -1740,7 +1761,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         Only the tail wait_stream ensures scatter is complete.
         """
         main_stream = torch.npu.current_stream()
-        aux_stream = dsv4_dsa_overlap_stream()
+        aux_stream = dsv4_dsa_mla_stream()
 
         is_w8a8 = _is_w8a8_dynamic(self.wq_b)
 
@@ -2023,13 +2044,14 @@ class AscendDSAImpl(DSAAttentionImpl):
             )
 
             # For multistream_dsv4_dsa_overlap with compress_ratio=4:
-            # aux_stream: indexer_weights_proj (parallel with main q_quant + kv_scatter)
-            # main stream: compressed_kv -> q_quant -> kv_scatter -> wait aux_stream -> lightning_indexer
+            # indexer_stream: indexer_weights_proj (parallel with main q_quant + kv_scatter)
+            # main stream: compressed_kv -> q_quant -> kv_scatter -> wait indexer_stream -> lightning_indexer
             if self.multistream_dsv4_dsa_overlap and self.compress_ratio == 4 and not self.skip_topk:
                 main_stream = torch.npu.current_stream()
-                aux_stream = dsv4_dsa_overlap_stream()
+                indexer_stream = dsv4_dsa_indexer_stream()
                 e_compressed_kv_done = main_stream.record_event()
-                with npu_stream_switch(aux_stream, enabled=True):
+                _record_tensor_stream(hidden_states, indexer_stream)
+                with npu_stream_switch(indexer_stream, enabled=True):
                     torch.npu.current_stream().wait_event(e_compressed_kv_done)
                     weights_proj_output = self.weights_proj(hidden_states)
                     weights_proj_output.record_stream(main_stream)
@@ -2042,8 +2064,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                 DeviceOperator.dsa_kv_compress_scatter(compress_kv_cache, compressed_kv, compress_slot_mapping)
 
             if self.multistream_dsv4_dsa_overlap and self.compress_ratio == 4 and not self.skip_topk:
-                # Wait aux_stream weights_proj done, then compute dot
-                main_stream.wait_stream(aux_stream)
+                # Wait indexer_stream weights_proj done, then compute dot
+                main_stream.wait_stream(indexer_stream)
                 weights = weights_proj_output * (self.indexer_softmax_scale * self.indexer_heads**-0.5)
                 # lightning_indexer
                 indexer_scale_prefill_metadata = _require_prefill_metadata(indexer_kv_scale_metadata)
@@ -2296,14 +2318,19 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             if run_multistream_qli:
                 main_stream = torch.npu.current_stream()
-                aux_stream = dsv4_dsa_overlap_stream()
+                compressor_stream = dsv4_dsa_compressor_stream()
                 e_compressor_inputs_ready = main_stream.record_event()
-                hidden_states.record_stream(aux_stream)
-                compress_cos.record_stream(aux_stream)
-                compress_sin.record_stream(aux_stream)
-                compress_slot_mapping.record_stream(aux_stream)
+                _record_tensor_stream(hidden_states, compressor_stream)
+                _record_tensor_stream(compress_cos, compressor_stream)
+                _record_tensor_stream(compress_sin, compressor_stream)
+                _record_tensor_stream(compress_slot_mapping, compressor_stream)
+                _record_tensor_stream(state_cache, compressor_stream)
+                _record_tensor_stream(compress_kv_cache, compressor_stream)
+                _record_tensor_stream(compressor_state_decode_metadata.block_table, compressor_stream)
+                _record_tensor_stream(actual_seq_lengths_query, compressor_stream)
+                _record_tensor_stream(common_decode_metadata.start_pos, compressor_stream)
 
-                with npu_stream_switch(aux_stream, enabled=True):
+                with npu_stream_switch(compressor_stream, enabled=True):
                     torch.npu.current_stream().wait_event(e_compressor_inputs_ready)
                     compressed_kv = torch.ops._C_ascend.compressor(
                         hidden_states,
@@ -2391,7 +2418,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                     cmp_ratio=4,
                     return_value=False,
                 )
-                main_stream.wait_stream(aux_stream)
+                main_stream.wait_stream(compressor_stream)
 
             if self.compress_ratio == 4 and self.use_index_cache:
                 self._update_indexcache_topk_indices(compress_topk_idxs, offset=0)
@@ -2728,7 +2755,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         (_, _, indexer_kv_state_metadata, indexer_kv_scale_metadata, _) = attn_metadata
 
         main_stream = torch.npu.current_stream()
-        aux_stream = dsv4_dsa_overlap_stream()
+        indexer_stream = dsv4_dsa_indexer_stream()
 
         # ===== Part0: Pre-compute on main =====
         if _is_w8a8_dynamic(self.inderxer_wq_b) and qr_pertoken_scale is not None:
@@ -2783,13 +2810,16 @@ class AscendDSAImpl(DSAAttentionImpl):
             kv = rotate_activation(kv, indexer_kv_scale_metadata.hadamard)
 
         # ===== Part1: matmul[C] ∥ kv_quant[V] + scatter_k_cache[AIV] =====
-        # Record event before main stream operations for aux_stream to wait
+        # Record event before main stream operations for indexer_stream to wait
         e_kv_ready = main_stream.record_event()
 
         # Aux: kv_quant + scatter_k_cache (parallel with main matmul + rope)
         if kv is not None:
-            kv.record_stream(aux_stream)
-            with npu_stream_switch(aux_stream, enabled=True):
+            _record_tensor_stream(kv, indexer_stream)
+            _record_tensor_stream(slot_mapping_indexer, indexer_stream)
+            _record_tensor_stream(indexer_k_cache, indexer_stream)
+            _record_tensor_stream(indexer_full_cache, indexer_stream)
+            with npu_stream_switch(indexer_stream, enabled=True):
                 torch.npu.current_stream().wait_event(e_kv_ready)
                 kv, kv_scale = DeviceOperator.indexer_quant_scatter_part1(
                     kv, indexer_k_cache, indexer_full_cache, slot_mapping_indexer
@@ -2809,7 +2839,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             q = self.cv_inderxer_wq_b.matmul(qr_quant_ready, qr_scale_ready)  # qr_matmul
 
         if kv is not None:
-            main_stream.wait_stream(aux_stream)
+            main_stream.wait_stream(indexer_stream)
 
         q = q.view(-1, self.indexer_heads, self.indexcom_head_dim)
 
@@ -2822,9 +2852,9 @@ class AscendDSAImpl(DSAAttentionImpl):
             partial_slice=[self.indexcom_head_dim - self.rope_head_dim, self.indexcom_head_dim],
         )
 
-        # Wait for aux_stream kv_scatter to complete before proceeding
+        # Wait for indexer_stream kv_scatter to complete before proceeding
         if kv is not None:
-            main_stream.wait_stream(aux_stream)
+            main_stream.wait_stream(indexer_stream)
 
         e_rope_done = main_stream.record_event()
 
@@ -2833,19 +2863,22 @@ class AscendDSAImpl(DSAAttentionImpl):
         # and scale_cache in one fused operation, so Part3 is skipped
         # (kv_scale is None on A5 from indexer_quant_scatter_part1).
         if kv is not None and kv_scale is not None:
-            with npu_stream_switch(aux_stream, enabled=True):
+            _record_tensor_stream(kv_scale, indexer_stream)
+            _record_tensor_stream(indexer_scale_cache, indexer_stream)
+            _record_tensor_stream(slot_mapping_indexer, indexer_stream)
+            with npu_stream_switch(indexer_stream, enabled=True):
                 torch.npu.current_stream().wait_event(e_rope_done)
                 DeviceOperator.dsa_indexer_scatter_scale_part3(kv_scale, indexer_scale_cache, slot_mapping_indexer)
 
         # Main: q_hadamard[Part1 - linear] (directly submit, C/AIV different engines dispatch naturally)
-        # Part1: F.linear - parallel with aux_stream kv_scatter
+        # Part1: F.linear - parallel with indexer_stream kv_scatter
         hidden_size = q.size(-1)
         q_linear, q_shape, q_dim = hadamard_linear(q, indexer_kv_scale_metadata.hadamard)
 
         if kv is not None:
-            main_stream.wait_stream(aux_stream)
+            main_stream.wait_stream(indexer_stream)
 
-        # Main: q_hadamard[Part2 - scale] (after aux_stream completes)
+        # Main: q_hadamard[Part2 - scale] (after indexer_stream completes)
         # Part2: scale * reshape - dot multiplication
         q = hadamard_scale(q_linear, q_shape, q_dim, scale=hidden_size**-0.5)
 
