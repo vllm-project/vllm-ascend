@@ -2292,7 +2292,6 @@ class MooncakeConnectorWorker:
         # layer indices: {group_id: (group_spec, [layer_idx0, layer_idx1, ...])}.
         self.kv_group2layeridx = self._build_kv_group2layeridx()
         self._is_hma_required = self._is_hma_required or self._requires_group_aware_attention_transfer()
-        logger.info(f'{self._is_hma_required=}')
         has_mamba_group = self._has_mamba_group()
         layer_name_to_idx = {
             layer_name: layer_idx
