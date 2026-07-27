@@ -361,8 +361,6 @@ class FusedMC2CommImpl(MoECommMethod):
         fused_experts_input: MoEFusedExpertsInput,
         topk_ids: torch.Tensor,
     ):
-        assert fused_experts_input.weights.w1_scale is not None
-        assert fused_experts_input.weights.w2_scale is not None
         # TokenDispatcherWithMC2 carries global_bs (used below for the mc2_mask
         # branch); assert the subtype so mypy resolves it off the base class.
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
@@ -409,6 +407,8 @@ class FusedMC2CommImpl(MoECommMethod):
         l1_bias = fused_experts_input.weights.w1_scale_bias
         l2_bias = fused_experts_input.weights.w2_scale_bias
 
+        print("mega")
+
         out, expert_tokens = self.mega_moe(
             fused_experts_input.hidden_states,
             topk_ids.to(torch.int32),
@@ -416,8 +416,8 @@ class FusedMC2CommImpl(MoECommMethod):
             weight1,
             weight2,
             self._mega_moe_symm_buffer,
-            l1_weights_sf=weight_scales1,
-            l2_weights_sf=weight_scales2,
+            l1_weights_sf=None,
+            l2_weights_sf=None,
             l1_bias=l1_bias,
             l2_bias=l2_bias,
             x_active_mask=x_active_mask,
@@ -452,6 +452,7 @@ class FusedMC2CommImpl(MoECommMethod):
         expert_tokens = None
         if get_ascend_config().enable_fused_mc2 == 1:
             if _MEGA_MOE_SUPPORTED:
+                print("here")
                 out, expert_tokens = self._apply_cann_mega_moe(fused_experts_input, topk_ids)
             else:
                 assert not (
