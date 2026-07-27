@@ -20,8 +20,7 @@ on:
       - 'main'
       - 'releases/*'
     types: [ labeled ]
-  # actionlint: ignore: events
-  workflow_dispatch:
+  workflow_dispatch:  # actionlint: ignore
     inputs:
       tag:
         description: 'Docker tag for build results (mutually exclusive with branch)'
