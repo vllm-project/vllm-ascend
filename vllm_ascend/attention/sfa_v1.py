@@ -27,7 +27,6 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import MLAPO_MAX_SUPPORTED_TOKENS
 from vllm_ascend.attention.sfa_prefetch import (
-    GROUP_GATHER_OPERATOR_MAX_LAYERS,
     build_sfa_prefetch_plan,
     get_layer_index,
     get_layer_name_with_index,
@@ -189,6 +188,7 @@ class AscendSFAMetadata:
     seq_lens: torch.Tensor
     seq_lens_cpu: torch.Tensor
     cum_query_lens: torch.Tensor
+    cum_query_lens_list: list[int]
     block_table: torch.Tensor
     sin: torch.Tensor
     cos: torch.Tensor
@@ -459,6 +459,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             num_input_tokens=common_attn_metadata.num_input_tokens,
             num_actual_tokens=num_actual_tokens,
             cum_query_lens=cum_query_lens,
+            cum_query_lens_list=cum_query_lens.tolist(),
             seq_lens=seq_lens,
             seq_lens_cpu=seq_lens_cpu,
             slot_mapping=slot_mapping,
@@ -2158,9 +2159,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                         block_table=None,
                         block_size=0,
                         softmax_lse_flag=True,
-                        actual_seq_lengths=attn_metadata.cum_query_lens_list[
-                            :num_actual
-                        ],
+                        actual_seq_lengths=attn_metadata.cum_query_lens_list[:num_actual],
                         actual_seq_lengths_kv=[
                             kv_len * (index + 1)
                             for index in range(num_actual)
@@ -2246,8 +2245,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 gather_stream = AscendSFAImpl._gather_stream
                 with torch_npu.npu.stream(gather_stream):
                     num_prefetch_layers = len(self.prefetch_target_kv_caches)
-                    assert 1 <= num_prefetch_layers <= GROUP_GATHER_OPERATOR_MAX_LAYERS
                     target_kv_caches = self.prefetch_target_kv_caches
+                    # The Ascend C binding has three cache-output pairs.
                     prefetch_outputs = [
                         (
                             AscendSFAImpl._prefetched_kv[index][
@@ -2257,8 +2256,13 @@ class AscendSFAImpl(MLAAttentionImpl):
                                 :num_actual_tokens
                             ],
                         )
-                        for index in range(GROUP_GATHER_OPERATOR_MAX_LAYERS)
+                        for index in range(3)
                     ]
+                    if num_prefetch_layers > len(prefetch_outputs):
+                        raise ValueError(
+                            "SFA prefetch group has more target layers than "
+                            "the grouped gather operator input slots."
+                        )
                     ctkv_0, kpe_0 = target_kv_caches[0]
                     ctkv_1, kpe_1 = (
                         target_kv_caches[1]

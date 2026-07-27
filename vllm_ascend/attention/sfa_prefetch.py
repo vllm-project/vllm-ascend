@@ -2,8 +2,6 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 
-GROUP_GATHER_OPERATOR_MAX_LAYERS = 3
-
 
 def get_layer_index(layer_name: str) -> int:
     """Extract the index from a model.layers.<index> module path."""
@@ -100,12 +98,6 @@ def _build_plan(
         )
         if not target_layer_ids:
             continue
-        if len(target_layer_ids) > GROUP_GATHER_OPERATOR_MAX_LAYERS:
-            raise ValueError(
-                "SFA prefetch group has %d target layers, but the grouped "
-                "gather operator supports at most %d."
-                % (len(target_layer_ids), GROUP_GATHER_OPERATOR_MAX_LAYERS)
-            )
         roles[producer_layer_id] = SfaPrefetchRole(
             target_layer_ids=target_layer_ids
         )
