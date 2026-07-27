@@ -2225,6 +2225,14 @@ class NPUModelRunner(GPUModelRunner):
 
         if self.execute_model_state is None:
             # Nothing to do (PP non-final rank case), output isn't used.
+            # Receive the previous sampled/draft frame from the last PP rank
+            # when direct PP transport is active so downstream input
+            # preparation (e.g. PCP) sees the same state on every PP rank.
+            if (
+                (self.use_async_scheduling or self.use_pp_mtp_broadcast)
+                and get_pp_group().world_size > 1
+            ):
+                self._pp_receive_prev_sampled_token_ids_to_input_batch()
             if not kv_connector_output:
                 return None  # noqa
             # In case of PP with kv transfer, we need to pass through the
@@ -2397,6 +2405,15 @@ class NPUModelRunner(GPUModelRunner):
             ):
                 global_stream().wait_event(self.sampling_done_event)
                 self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
+
+        # Broadcast the sampled/draft frame from the last PP rank when direct
+        # PP transport is active, avoiding scheduler/engine IPC for MTP state.
+        if self.use_async_scheduling or self.use_pp_mtp_broadcast:
+            pp = get_pp_group()
+            if pp.world_size > 1 and pp.is_last_rank:
+                self._pp_broadcast_prev_sampled_token_ids(sampler_output.sampled_token_ids)
+                if self.use_async_spec_decode or self.use_pp_mtp_broadcast:
+                    self._pp_broadcast_draft_token_ids()
 
         if not self.use_async_scheduling:
             if self.routed_experts_initialized:
@@ -3769,6 +3786,7 @@ class NPUModelRunner(GPUModelRunner):
         if (
             self.speculative_config
             and self.drafter is not None
+            and get_pp_group().is_last_rank
             and (
                 self.speculative_config.use_eagle()
                 or self.speculative_config.uses_draft_model()
