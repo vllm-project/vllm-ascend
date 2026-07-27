@@ -23,6 +23,7 @@ The table below is the release compatibility matrix for vLLM Ascend release.
 
 | vLLM Ascend | vLLM              | Python          | Stable CANN |        PyTorch/torch_npu        |   Triton Ascend   |    Mooncake  |
 |-------------|-------------------|-----------------|-------------|---------------------------------|-------------------|--------------|
+| v0.23.0rc1  | v0.23.0           | >= 3.10, < 3.13 | 9.0.1       | 2.10.0 / 2.10.0.post2           | 3.2.1             | v0.3.11.post1 |
 | v0.22.1rc1  | v0.22.1           | >= 3.10, < 3.13 | 9.0.0       | 2.10.0 / 2.10.0                 | 3.2.1             | v0.3.9       |
 | v0.21.0rc1  | v0.21.0           | >= 3.10, < 3.13 | 9.0.0       | 2.10.0 / 2.10.0                 | 3.2.1             | v0.3.9       |
 | v0.20.2rc1  | v0.20.2           | >= 3.10, < 3.12 | 9.0.0       | 2.10.0 / 2.10.0                 | 3.2.1             | v0.3.8.post1 |
@@ -74,6 +75,7 @@ For main branch of vLLM Ascend, we usually make it compatible with the latest vL
 
 | Date       | Event                                     |
 |------------|-------------------------------------------|
+| 2026.07.20 | Release candidates, v0.23.0rc1            |
 | 2026.06.30 | Release candidates, v0.22.1rc1            |
 | 2026.06.16 | Release candidates, v0.21.0rc1            |
 | 2026.06.03 | Release candidates, v0.20.2rc1            |
@@ -140,6 +142,7 @@ Usually, each minor version of vLLM (such as 0.7) corresponds to a vLLM Ascend v
 | Branch     | State        | Note                                                     |
 | ---------- | ------------ | -------------------------------------------------------- |
 | main       | Maintained   | CI commitment for vLLM main branch and vLLM {{main_vllm_tag}}  tag |
+| releases/v0.23.0 | Maintained | CI commitment for vLLM 0.23.0 version                |
 | releases/v0.18.0 | Maintained | CI commitment for vLLM 0.18.0 version                |
 | releases/v0.13.0 | Maintained | CI commitment for vLLM 0.13.0 version                |
 | v0.11.0-dev| Maintained   | CI commitment for vLLM 0.11.0 version |

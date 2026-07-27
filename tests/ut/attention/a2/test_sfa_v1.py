@@ -75,6 +75,42 @@ class TestAscendSFABackend(TestBase):
         self.assertIsNotNone(impl_cls)
 
 
+class TestAscendSFABytePackedGather(TestBase):
+    @patch("vllm_ascend.attention.sfa_v1.get_tp_group")
+    def test_byte_packed_gather_preserves_mixed_dtype_tensors(self, mock_get_tp_group):
+        mock_get_tp_group.return_value = SimpleNamespace(world_size=1)
+        sfa_kv = torch.arange(12, dtype=torch.float16).view(2, 6)
+        k_li = torch.arange(16, dtype=torch.int8).view(2, 1, 8)
+        k_li_scale = torch.arange(2, dtype=torch.float32).view(2, 1)
+
+        gathered, handle, metadata = AscendSFAImpl._all_gather_byte_packed_async(
+            [
+                ("sfa_kv", sfa_kv),
+                ("k_li", k_li),
+                ("k_li_scale", k_li_scale),
+            ],
+            async_op=True,
+        )
+
+        self.assertIsNone(handle)
+        self.assertEqual(gathered.dtype, torch.int8)
+        restored = AscendSFAImpl._restore_byte_gathered_tensors(gathered, metadata)
+        for name, expected in (("sfa_kv", sfa_kv), ("k_li", k_li), ("k_li_scale", k_li_scale)):
+            self.assertEqual(restored[name].shape, expected.shape)
+            self.assertEqual(restored[name].dtype, expected.dtype)
+            self.assertTrue(torch.equal(restored[name], expected))
+
+    def test_byte_packed_gather_rejects_mismatched_token_counts(self):
+        with self.assertRaisesRegex(RuntimeError, "different token counts"):
+            AscendSFAImpl._all_gather_byte_packed_async(
+                [
+                    ("sfa_kv", torch.zeros(2, 6, dtype=torch.float16)),
+                    ("k_li", torch.zeros(3, 8, dtype=torch.int8)),
+                ],
+                async_op=True,
+            )
+
+
 class TestAscendSFADeviceOperator(TestBase):
     def _make_common_inputs(self):
         ql_nope = torch.randn(3, 4, 8)
@@ -227,7 +263,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
 
     def test_execute_kv_quant_sparse_flash_attention(self):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
-        impl.use_sparse_c8_sfa = True
+        impl.enable_sparse_sfa_c8 = True
         impl.scale = 0.125
         impl.sfa_qsfa_tile_size = 128
         impl.qk_rope_head_dim = 16
@@ -249,7 +285,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
             patch(
                 "vllm_ascend.device.device_op.torch_npu.npu_kv_quant_sparse_flash_attention",
                 create=True,
-                side_effect=AssertionError("C8 SFA must use the custom op"),
+                side_effect=AssertionError("Base must use _C_ascend custom op"),
             ),
         ):
             result = impl._execute_sparse_flash_attention_process(
@@ -272,7 +308,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
 
     def test_prolog_v3_enables_packed_int8_kv_cache(self):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
-        impl.use_sparse_c8_sfa = True
+        impl.enable_sparse_sfa_c8 = True
         impl.has_indexer = True
         impl.sfa_qsfa_tile_size = 128
         impl.sfa_qsfa_k_nope_clip_alpha = torch.ones(1)

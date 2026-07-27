@@ -464,6 +464,12 @@ class KVCacheRecvingThread(threading.Thread):
         self.remote_block_stride_per_addr: dict[str, dict[int, list[list[int]]]] = SizedDict()
         self.remote_kv_group2layeridx: dict[str, dict[int, dict[int, tuple[dict[str, Any], list[int]]]]] = SizedDict()
         self.remote_metadata_lock = threading.Lock()
+        # Reformat metadata keyed by request_id then CP shard index. Populated by the
+        # last TP-offset pull task for each shard; applied once all pull tasks finish.
+        self.pending_reformat: defaultdict[str, dict[int, list[tuple[int, list[list[int]], int, list[int]]]]] = (
+            defaultdict(dict)
+        )
+        self.pending_reformat_lock = threading.Lock()
 
         self.request_queue: queue.Queue[Any] = queue.Queue()
         first_kv_cache = next(iter(self.kv_caches.values()), None)
@@ -558,6 +564,7 @@ class KVCacheRecvingThread(threading.Thread):
         remote_port_send_num: dict[int, RemotePortInfo] | None = None,
         num_computed_tokens: int = 0,
         all_task_done: bool = False,
+        shard_idx: int = 0,
         local_block_ids_replicate_k: BlockIds | None = None,
         remote_block_ids_replicate_k: BlockIds | None = None,
     ):
@@ -578,6 +585,7 @@ class KVCacheRecvingThread(threading.Thread):
             "num_computed_tokens": num_computed_tokens,
             "remote_port_send_num": remote_port_send_num,
             "all_task_done": all_task_done,
+            "shard_idx": shard_idx,
             "remote_block_size": remote_block_size,
         }
         logger.debug("Adding request %s to the queue.Trans info:%s", request_id, trans_info)
@@ -717,7 +725,24 @@ class KVCacheRecvingThread(threading.Thread):
                     self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
                     logger.exception("Failed to transfer KV cache for request %s: %s", remote_request_id, e)
         finally:
-            if self._mark_request_task_done(request_id, all_task_done):
+            all_tasks_done = self._mark_request_task_done(request_id, all_task_done)
+            if all_tasks_done:
+                if transfer_failed or self._is_failed_recv_request(request_id):
+                    with self.pending_reformat_lock:
+                        self.pending_reformat.pop(request_id, None)
+                else:
+                    try:
+                        self._reformat_pending_kv_caches(request_id)
+                    except Exception as e:
+                        transfer_failed = True
+                        self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
+                        with self.pending_reformat_lock:
+                            self.pending_reformat.pop(request_id, None)
+                        logger.exception(
+                            "Failed to reformat KV cache after all pulls for request %s: %s",
+                            remote_request_id,
+                            e,
+                        )
                 self.task_tracker.update_done_task_count(request_id)
                 with self.proc_not_transfer_request_lock:
                     self.proc_not_transfer_request.pop(remote_request_id, None)
@@ -958,6 +983,38 @@ class KVCacheRecvingThread(threading.Thread):
         for reformat_group, is_group_transfer_end in attention_group_reformat_block_ids:
             if is_group_transfer_end:
                 ready_attention_group_reformat_block_ids.append(reformat_group)
+        if ready_attention_group_reformat_block_ids:
+            shard_idx = int(req_meta.get("shard_idx", 0))
+            self._stash_pending_reformat(
+                req_meta["request_id"],
+                shard_idx,
+                ready_attention_group_reformat_block_ids,
+            )
+
+    def _stash_pending_reformat(
+        self,
+        request_id: str,
+        shard_idx: int,
+        ready_attention_group_reformat_block_ids: list[tuple[int, list[list[int]], int, list[int]]],
+    ) -> None:
+        with self.pending_reformat_lock:
+            self.pending_reformat[request_id][shard_idx] = ready_attention_group_reformat_block_ids
+
+    def _reformat_pending_kv_caches(self, request_id: str) -> None:
+        with self.pending_reformat_lock:
+            shard_reformats = self.pending_reformat.pop(request_id, {})
+        for shard_idx in sorted(shard_reformats):
+            logger.debug(
+                "Reformatting KV cache after all pulls completed. request_id=%s shard_idx=%s",
+                request_id,
+                shard_idx,
+            )
+            self._apply_kv_cache_reformat(shard_reformats[shard_idx])
+
+    def _apply_kv_cache_reformat(
+        self,
+        ready_attention_group_reformat_block_ids: list[tuple[int, list[list[int]], int, list[int]]],
+    ) -> None:
         if not ready_attention_group_reformat_block_ids:
             return
 
@@ -3399,6 +3456,7 @@ class MooncakeConnectorWorker:
                             pcp_dcp_rank == len(remote_handshake_port_list) - 1
                             and remote_tp_offset == len(remote_ports) - 1
                         ),
+                        shard_idx=pcp_dcp_rank,
                         remote_block_size=meta.remote_block_size,
                         local_block_ids_replicate_k=local_block_ids_replicate_k_for_port,
                         remote_block_ids_replicate_k=remote_block_ids_replicate_k_for_port,

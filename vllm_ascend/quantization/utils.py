@@ -129,7 +129,7 @@ def detect_quantization_method(model: str, revision: str | None = None) -> str |
                     return COMPRESSED_TENSORS_METHOD
             if isinstance(quant_cfg, dict):
                 quant_method = quant_cfg.get("quant_method", "")
-                if quant_method == FP8_METHOD:
+                if quant_method == FP8_METHOD and get_ascend_device_type() == AscendDeviceType.A5:
                     return FP8_METHOD
         except (json.JSONDecodeError, OSError):
             pass

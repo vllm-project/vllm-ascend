@@ -245,10 +245,10 @@ vllm serve Eco-Tech/Qwen3.6-35B-A3B-w8a8 \
   --max-num-seqs 16 \
   --served-model-name qwen3.6 \
   --dtype float16 \
-  --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}' \
+  --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}' \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}' \
   --quantization ascend \
-  --max-model-len 16384 \
+  --max-model-len 20480 \
   --no-enable-prefix-caching
 ```
 
@@ -256,10 +256,9 @@ vllm serve Eco-Tech/Qwen3.6-35B-A3B-w8a8 \
 
 - `--tensor-parallel-size 2` maps the model across two Atlas inference devices. Adjust it together with `ASCEND_RT_VISIBLE_DEVICES` according to the available devices and memory.
 - `--dtype float16` is used for Atlas inference products to match the Atlas inference execution path.
-- `--max-model-len 16384` is intentionally conservative. On Atlas inference products, large context lengths allocate large attention masks, so do not rely on automatic max-model-len detection.
 - `--max-num-seqs 16` limits concurrent active requests to reduce KV cache and graph capture pressure on Atlas inference products.
 - `--gpu-memory-utilization` controls KV cache capacity. Reduce it if startup or runtime requests report OOM.
-- `--additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}'` disables norm-quant fusion for the Atlas inference products serving path.
+- `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required because `enable_npugraph_ex` is not supported on Atlas inference products.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}'` enables decode ACLGraph replay and explicitly limits capture sizes for Atlas inference products.
 - `--no-enable-prefix-caching` is the default recommendation for this Atlas inference products example to reduce memory pressure.
 - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.

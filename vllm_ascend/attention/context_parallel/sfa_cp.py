@@ -1013,7 +1013,7 @@ class AscendSFADCPImpl(AscendSFAImpl):
         assert valid_block_ids is not None and block_table is not None
         kv = torch.index_select(kv_cache[0], 0, valid_block_ids)
         split_sizes: tuple[int, ...]
-        if self.use_sparse_c8_sfa:
+        if self.enable_sparse_sfa_c8:
             # Sparse C8 stores nope, rope, and quantization data in one packed
             # SFA KV cache. The remaining cache entries belong to the indexer
             # and must not participate in the DCP SFA KV all-gather.
