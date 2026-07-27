@@ -1084,6 +1084,7 @@ class KVPoolWorker:
 
             all_group_gvas: list[np.ndarray] = []
             all_group_block_ids: list[np.ndarray] = []
+            all_group_save_keys: list[str] = []
             for group_id in range(self.num_kv_cache_groups):
                 group_block_size = self.grouped_block_size[group_id]
                 cache_family = self._get_group_family(self.kv_cache_group_families, group_id)
@@ -1151,6 +1152,7 @@ class KVPoolWorker:
                         if gva > 0:
                             block_gvas[pos] = gva
                             self._allocated_gvas[key] = gva
+                            all_group_save_keys.append(key)
 
                 logger.info(
                     "alloc_gvas: req=%s group=%d eff_bs=%d save_blocks=[%d,%d) "
@@ -1175,6 +1177,7 @@ class KVPoolWorker:
                 all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
 
             if all_group_gvas:
+                request.save_keys = all_group_save_keys
                 request.block_gvas_by_group_np = all_group_gvas
                 request.block_ids_by_group_np = all_group_block_ids
                 request.block_gvas_np = all_group_gvas[0]

@@ -898,6 +898,7 @@ class ReqMeta:
 
     last_block_gva: int | None = None
     partial_block_index: int | None = None
+    save_keys: list[str] | None = None
     load_keys: list[str] | None = None
 
     starts: list[int] | None = None
@@ -1059,6 +1060,7 @@ class SharedBlockData:
     block_gvas_arr: np.ndarray
     req_ids: list[str]
     is_last_chunks: list[bool | None]
+    save_keys: list[str] = field(default_factory=list)
     load_keys: list[str] = field(default_factory=list)
 
 
