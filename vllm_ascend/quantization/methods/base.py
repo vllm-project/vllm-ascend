@@ -68,6 +68,7 @@ class TPWeightSwitchState:
 
     gather_parts: dict[str, TPWeightGatherPart] = field(default_factory=dict)
     repeat_parts: dict[str, TPWeightRepeatPart] = field(default_factory=dict)
+    handles: list[torch.distributed.Work] = field(default_factory=list)
 
 
 def get_moe_num_logical_experts(
@@ -297,11 +298,12 @@ class AscendLinearScheme(ABC):
         group: Any,
         *,
         async_op: bool = True,
-    ) -> list[torch.distributed.Work | None]:
+    ) -> None:
         """All-gather every TP-sharded tensor in ``state``."""
         from vllm_ascend.distributed.utils import all_gather_async
 
-        handles: list[torch.distributed.Work | None] = []
+        if state.handles:
+            raise RuntimeError("TP weight all-gather is still pending; wait before launching another one.")
         for part in state.gather_parts.values():
             _, handle = all_gather_async(
                 part.gather_input,
@@ -309,14 +311,16 @@ class AscendLinearScheme(ABC):
                 output=part.gather_output,
                 async_op=async_op,
             )
-            handles.append(handle)
-        return handles
+            if handle is not None:
+                state.handles.append(handle)
 
     @staticmethod
-    def wait_tp_weight_all_gather(handles: list[torch.distributed.Work | None]) -> None:
-        for handle in handles:
-            if handle is not None:
+    def wait_tp_weight_all_gather(state: TPWeightSwitchState) -> None:
+        try:
+            for handle in state.handles:
                 handle.wait()
+        finally:
+            state.handles.clear()
 
     def switch_tp_weight(
         self,

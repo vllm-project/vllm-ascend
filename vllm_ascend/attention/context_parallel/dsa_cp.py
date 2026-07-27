@@ -1211,30 +1211,22 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
     def _maybe_all_gather_o_proj_full_weight(
         self,
         enabled: bool,
-    ) -> list[torch.distributed.Work | None]:
-        if not enabled:
-            return []
-        self._enable_o_proj_tp_full_weight_switch()
-        handles = []
-        handles.extend(
-            self.wo_a_tp_weight_scheme.all_gather_tp_weight(
-                self.wo_a_tp_weight_state,
-                self.tp_group,
-            )
-        )
-        handles.extend(
-            self.wo_b_tp_weight_scheme.all_gather_tp_weight(
-                self.wo_b_tp_weight_state,
-                self.tp_group,
-            )
-        )
-        return handles
-
-    def _switch_o_proj_to_full_weight(
-        self,
-        handles: list[torch.distributed.Work | None],
     ) -> None:
-        AscendLinearScheme.wait_tp_weight_all_gather(handles)
+        if not enabled:
+            return
+        self._enable_o_proj_tp_full_weight_switch()
+        self.wo_a_tp_weight_scheme.all_gather_tp_weight(
+            self.wo_a_tp_weight_state,
+            self.tp_group,
+        )
+        self.wo_b_tp_weight_scheme.all_gather_tp_weight(
+            self.wo_b_tp_weight_state,
+            self.tp_group,
+        )
+
+    def _switch_o_proj_to_full_weight(self) -> None:
+        self.wo_a_tp_weight_scheme.wait_tp_weight_all_gather(self.wo_a_tp_weight_state)
+        self.wo_b_tp_weight_scheme.wait_tp_weight_all_gather(self.wo_b_tp_weight_state)
         self.wo_a_tp_weight_scheme.switch_tp_weight(
             self.wo_a,
             self.wo_a_tp_weight_state,
@@ -1292,7 +1284,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 AscendAttentionState.SpecDecoding,
             }
         )
-        local_attn_output, o_proj_full_handles = self._forward(
+        local_attn_output = self._forward(
             layer_name,
             hidden_states,
             kv_cache,
@@ -1310,7 +1302,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
 
         # o
         if full_gather_wo_a_enabled:
-            self._switch_o_proj_to_full_weight(o_proj_full_handles)
+            self._switch_o_proj_to_full_weight()
         o_proj_groups = self.n_group if full_gather_wo_a_enabled else self.n_local_groups
         try:
             if get_ascend_device_type() in {AscendDeviceType.A5}:
@@ -1453,7 +1445,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
 
-        o_proj_full_handles = self._maybe_all_gather_o_proj_full_weight(full_gather_wo_a_enabled)
+        self._maybe_all_gather_o_proj_full_weight(full_gather_wo_a_enabled)
 
         kv = self.wkv(hidden_states_cache)
         kv = self.kv_norm(kv)
@@ -1587,7 +1579,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 cmp_mask_mode=3,
                 **common_attn_kwargs,
             )[0]
-        return attn_output, o_proj_full_handles
+        return attn_output
 
     def _restore_tp_head_layout(
         self,

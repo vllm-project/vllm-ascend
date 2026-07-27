@@ -1043,7 +1043,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         attn_output: torch.Tensor,
         output: torch.Tensor,
         o_proj_full_handle: torch.distributed.Work | None,
-        o_proj_full_param_handles: list[torch.distributed.Work | None] | None,
         should_shard_weight: bool,
     ) -> tuple[torch.Tensor, bool]:
         """
@@ -1054,7 +1053,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             linear_method = self._get_o_proj_linear_method()
             if isinstance(linear_method, AscendLinearScheme):
                 assert self.o_proj_tp_weight_state is not None
-                linear_method.wait_tp_weight_all_gather(o_proj_full_param_handles or [])
+                linear_method.wait_tp_weight_all_gather(self.o_proj_tp_weight_state)
                 linear_method.switch_tp_weight(
                     self.o_proj,
                     self.o_proj_tp_weight_state,
@@ -1070,9 +1069,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                 # Wait for the completion of o_proj weight all-gather operation
                 if o_proj_full_handle is not None:
                     o_proj_full_handle.wait()
-                for handle in o_proj_full_param_handles or []:
-                    if handle is not None:
-                        handle.wait()
 
                 # Temporarily switch o_proj to the gathered full-weight view for
                 # prefill/mixed DSA-CP, whose attention output is not TP-sharded.
@@ -1656,11 +1652,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         torch.Tensor | None,
         torch.Tensor | None,
         torch.distributed.Work | None,
-        list[torch.distributed.Work | None] | None,
     ]:
         """Store KV produced by native preprocessing for C8 and DSA-CP paths."""
         o_proj_full_handle = None
-        o_proj_full_param_handles = None
 
         if self.enable_sparse_sfa_c8 and not self.enable_dsa_cp:
             assert k_pe is not None
@@ -1692,7 +1686,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 linear_method = self._get_o_proj_linear_method()
                 if isinstance(linear_method, AscendLinearScheme):
                     assert self.o_proj_tp_weight_state is not None
-                    o_proj_full_param_handles = linear_method.all_gather_tp_weight(
+                    linear_method.all_gather_tp_weight(
                         self.o_proj_tp_weight_state,
                         get_tp_group(),
                     )
@@ -1741,7 +1735,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                         slot_mapping=slot_mapping_sfa[: attn_metadata.num_actual_tokens],
                     )
 
-        return k_pe, k_nope, k_li, o_proj_full_handle, o_proj_full_param_handles
+        return k_pe, k_nope, k_li, o_proj_full_handle
 
     def _get_sfa_kv_slot_mapping(
         self,
@@ -1846,7 +1840,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Asynchronously all-gather o_proj for DSA-CP prefill. This applies to
         # both a mixed-role instance and a PD-disaggregated P node.
         o_proj_full_handle = None
-        o_proj_full_param_handles = None
         # Prefill/mixed DSA-CP computes o_proj with a temporary full weight.
         # Decode keeps the original TP path and only exchanges activations.
         full_gather_o_proj_enabled = (
@@ -1956,7 +1949,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                 k_nope,
                 k_li,
                 o_proj_full_handle,
-                o_proj_full_param_handles,
             ) = self._maybe_store_kvcache_for_c8_n_dsacp(
                 k_pe,
                 k_nope,
@@ -2067,7 +2059,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                 attn_output=attn_output,
                 output=output,
                 o_proj_full_handle=o_proj_full_handle,
-                o_proj_full_param_handles=o_proj_full_param_handles,
                 should_shard_weight=full_gather_o_proj_enabled,
             )
             if not require_o_proj_forward:
