@@ -1,9 +1,6 @@
 import torch
 import torch_npu
-import triton
-import triton.language as tl
-import triton.runtime.driver as driver
-
+from vllm.triton_utils import tl, triton
 
 @triton.jit
 def ngram_spec_decode_kernel(
@@ -198,7 +195,7 @@ def triton_ngram_spec_decode(
     k,
 ):
     device = torch_npu.npu.current_device()
-    properties = driver.active.utils.get_device_properties(device)
+    properties = triton.runtime.driver.active.utils.get_device_properties(device)
     vectorcore_num = properties["num_vectorcore"]
 
     batch_size = token_ids.shape[0]
