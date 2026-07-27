@@ -56,7 +56,6 @@ BUILD_METADATA_STEP_DECODE = 1
 _DSV4_DSA_OVERLAP_STREAM = None
 _DSV4_DSA_MX_FUSION_GATE_LOGGED = False
 _DSV4_DSA_MX_FUSION_DISPATCH_LOGGED = False
-_DSV4_DSA_MX_FUSION_FALLBACK_LOGGED = False
 
 
 def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
@@ -142,22 +141,15 @@ def _rms_norm_dynamic_mx_quant(
     weight: torch.Tensor,
     eps: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    global _DSV4_DSA_MX_FUSION_DISPATCH_LOGGED, _DSV4_DSA_MX_FUSION_FALLBACK_LOGGED
-    backend = "torch.ops.npu"
-    try:
-        out = torch.ops.npu.npu_rms_norm_dynamic_mx_quant(
-            x,
-            weight,
-            epsilon=eps,
-            dst_type=torch.float8_e4m3fn,
-        )
-    except (AttributeError, TypeError):
-        # Some torch_npu builds expose only a 2-argument wrapper; it still
-        # dispatches the fused operator but uses operator defaults.
-        backend = "torch_npu fallback"
-        out = torch_npu.npu_rms_norm_dynamic_mx_quant(x, weight)
+    global _DSV4_DSA_MX_FUSION_DISPATCH_LOGGED
+    out = torch.ops.npu.npu_rms_norm_dynamic_mx_quant(
+        x,
+        weight,
+        epsilon=eps,
+        dst_type=torch.float8_e4m3fn,
+    )
     output, scale = out[0], out[1]
-    if backend == "torch.ops.npu" and not _DSV4_DSA_MX_FUSION_DISPATCH_LOGGED:
+    if not _DSV4_DSA_MX_FUSION_DISPATCH_LOGGED:
         logger.info(
             "DSA RMSNormDynamicMXQuant fusion completed: backend=torch.ops.npu, input_shape=%s, "
             "weight_shape=%s, output_shape=%s, scale_shape=%s, eps=%s",
@@ -168,16 +160,6 @@ def _rms_norm_dynamic_mx_quant(
             eps,
         )
         _DSV4_DSA_MX_FUSION_DISPATCH_LOGGED = True
-    elif backend == "torch_npu fallback" and not _DSV4_DSA_MX_FUSION_FALLBACK_LOGGED:
-        logger.info(
-            "DSA RMSNormDynamicMXQuant fusion completed: backend=torch_npu fallback, input_shape=%s, "
-            "weight_shape=%s, output_shape=%s, scale_shape=%s",
-            tuple(x.shape),
-            tuple(weight.shape),
-            tuple(output.shape),
-            tuple(scale.shape),
-        )
-        _DSV4_DSA_MX_FUSION_FALLBACK_LOGGED = True
     return output, scale
 
 
