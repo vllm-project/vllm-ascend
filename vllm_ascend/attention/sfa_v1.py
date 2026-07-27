@@ -188,7 +188,6 @@ class AscendSFAMetadata:
     seq_lens: torch.Tensor
     seq_lens_cpu: torch.Tensor
     cum_query_lens: torch.Tensor
-    cum_query_lens_list: list[int]
     block_table: torch.Tensor
     sin: torch.Tensor
     cos: torch.Tensor
@@ -459,7 +458,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             num_input_tokens=common_attn_metadata.num_input_tokens,
             num_actual_tokens=num_actual_tokens,
             cum_query_lens=cum_query_lens,
-            cum_query_lens_list=cum_query_lens.tolist(),
             seq_lens=seq_lens,
             seq_lens_cpu=seq_lens_cpu,
             slot_mapping=slot_mapping,
@@ -2137,20 +2135,22 @@ class AscendSFAImpl(MLAAttentionImpl):
                     )
 
                     kv_len = self.prefetch_topk_size
-                    contiguous_kv = prefetched_kv.reshape(
-                        num_actual * kv_len, 1, self.kv_lora_rank
-                    ).contiguous()
+                    dense_kv = prefetched_kv.unsqueeze(2).contiguous()
+                    valid_kv_lengths = [
+                        min(seq_len, kv_len)
+                        for seq_len in attn_metadata.seq_lens_cpu[
+                            :num_actual
+                        ].tolist()
+                    ]
                     attn_output, _ = torch_npu.npu_fused_infer_attention_score(
-                        ql_nope[:num_actual],
-                        contiguous_kv,
-                        contiguous_kv,
+                        ql_nope[:num_actual].unsqueeze(1),
+                        dense_kv,
+                        dense_kv,
                         num_heads=self.num_heads,
                         num_key_value_heads=1,
-                        input_layout="TND",
-                        query_rope=q_pe[:num_actual],
-                        key_rope=prefetched_k_pe.reshape(
-                            num_actual * kv_len, 1, self.qk_rope_head_dim
-                        ).contiguous(),
+                        input_layout="BSND",
+                        query_rope=q_pe[:num_actual].unsqueeze(1),
+                        key_rope=prefetched_k_pe.unsqueeze(2).contiguous(),
                         atten_mask=None,
                         sparse_mode=0,
                         scale=self.scale,
@@ -2159,12 +2159,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                         block_table=None,
                         block_size=0,
                         softmax_lse_flag=True,
-                        actual_seq_lengths=attn_metadata.cum_query_lens_list[:num_actual],
-                        actual_seq_lengths_kv=[
-                            kv_len * (index + 1)
-                            for index in range(num_actual)
-                        ],
+                        actual_seq_lengths=[1] * num_actual,
+                        actual_seq_lengths_kv=valid_kv_lengths,
                     )
+                    attn_output = attn_output.squeeze(1)
                     if num_actual < num_input_tokens:
                         padded = attn_output.new_zeros(
                             num_input_tokens, *attn_output.shape[1:]
@@ -2243,6 +2241,12 @@ class AscendSFAImpl(MLAAttentionImpl):
                 if AscendSFAImpl._gather_stream is None:
                     AscendSFAImpl._gather_stream = torch_npu.npu.Stream()
                 gather_stream = AscendSFAImpl._gather_stream
+                # The grouped gather consumes top-k indices produced on the
+                # main stream and reuses shared output buffers read by FIA on
+                # that stream. Make both dependencies explicit before
+                # launching the next asynchronous prefetch. Operations
+                # enqueued after this producer can still overlap the gather.
+                gather_stream.wait_stream(torch_npu.npu.current_stream())
                 with torch_npu.npu.stream(gather_stream):
                     num_prefetch_layers = len(self.prefetch_target_kv_caches)
                     target_kv_caches = self.prefetch_target_kv_caches
