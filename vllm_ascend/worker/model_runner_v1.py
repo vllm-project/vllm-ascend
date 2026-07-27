@@ -1259,19 +1259,13 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.seq_lens[num_reqs:].fill_(0)
 
-        # In async spec decode mode, optimistic_seq_lens_cpu assumes all
-        # tokens from the previous speculative step were accepted. Correct it
-        # on CPU using the valid-sampled-token counts that are already copied
-        # asynchronously for scheduler bookkeeping. This avoids an extra
-        # NPU->CPU seq_lens copy and the synchronize() in attention metadata.
-        # Mirrors update_num_computed_tokens_for_batch_change on the GPU side.
-        async_spec_decode_active = (
-            self.use_async_spec_decode
-            and valid_sampled_token_count_gpu is not None
-            and prev_req_id_to_index
-        )
-        if self._needs_seq_lens_cpu_sync and async_spec_decode_active:
-            self._correct_optimistic_seq_lens_cpu(num_reqs)
+        # In async spec decode mode, optimistic_seq_lens_cpu is an upper
+        # bound (it assumes all previous drafts were accepted). This is
+        # acceptable: the GPU seq_lens (computed from the corrected
+        # num_computed_tokens above) is authoritative for the attention
+        # kernel, while the CPU mirror only drives metadata construction
+        # (max_seq_len, kernel launch) where a slightly larger value is safe.
+        # No D2H copy or CPU-side correction is needed.
 
         # For non-PCP, compute slot_mapping on GPU. PCP slot_mapping was
         # already computed on GPU before PCP split the positions.
