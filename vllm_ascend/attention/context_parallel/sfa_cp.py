@@ -20,6 +20,7 @@ from vllm_ascend.attention.sfa_v1 import (
     DCPContext,
     DCPGatherContext,
     DSACPContext,
+    _ByteGatherPart,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enabling_mlapo, split_decodes_and_prefills
 from vllm_ascend.device.device_op import DeviceOperator
@@ -1252,13 +1253,16 @@ class AscendSFADCPImpl(AscendSFAImpl):
         k_nope: torch.Tensor | None,
         knope_scale: torch.Tensor | None,
         k_li: torch.Tensor | None,
-        fused_kv_no_split: torch.Tensor | None,
+        k_li_scale: torch.Tensor | None,
+        kv_gathered_bytes: torch.Tensor | None,
         kv_ag_handle: torch.distributed.Work | None,
+        kv_gather_metadata: tuple[_ByteGatherPart, ...] | None,
         kv_cache: tuple[torch.Tensor, ...] | None,
         slot_mapping_sfa: torch.Tensor,
         attn_metadata: M,
         full_gather_o_proj_enabled: bool,
     ) -> tuple[
+        torch.Tensor | None,
         torch.Tensor | None,
         torch.Tensor | None,
         torch.Tensor | None,
@@ -1270,8 +1274,10 @@ class AscendSFADCPImpl(AscendSFAImpl):
             k_nope,
             knope_scale,
             k_li,
-            fused_kv_no_split,
+            k_li_scale,
+            kv_gathered_bytes,
             kv_ag_handle,
+            kv_gather_metadata,
             kv_cache,
             slot_mapping_sfa,
             attn_metadata,
