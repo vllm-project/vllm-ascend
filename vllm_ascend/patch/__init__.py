@@ -576,6 +576,21 @@
 #       the code path that actually needs ray), so importing the IPC engine no
 #       longer requires the optional ray dependency.
 #
+# ** 22. File: platform/patch_qwen3vl_processor.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3_vl.Qwen3VLProcessingInfo.get_hf_processor`
+#    Why:
+#       Move image/video rescale+normalize off the HF processor (CPU) onto the
+#       device (NPU). The APIServer owns multimodal preprocessing, so this must
+#       be a platform patch; otherwise CPU still normalizes and the worker
+#       normalizes again (token drift).
+#    How：
+#       Force image/video processor do_rescale=False and do_normalize=False.
+#       Device-side fused normalize is applied in worker/patch_qwen3vl.py.
+#    Future Plan:
+#       Remove when upstream vLLM applies equivalent device-side preprocess for
+#       Qwen3-VL / Qwen3.5.
+#
 # * Worker Patch:
 # ===============
 # Entries are listed in alphabetical order by file name.
@@ -1012,6 +1027,21 @@
 #       when using mrope.
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for this fused kernel.
+#   4. `Qwen3VLForConditionalGeneration.__init__`,
+#      `Qwen3VLForConditionalGeneration._process_image_input`,
+#      `Qwen3VLForConditionalGeneration._process_video_input`,
+#      and Qwen3.5 / Qwen3.5-MoE `__init__`
+#    Why:
+#       Apply fused rescale+normalize on device before ViT, after HF processor
+#       rescale/normalize is disabled by platform/patch_qwen3vl_processor.py.
+#       Qwen3.5 reimplements __init__ without calling Qwen3VL.__init__, so it
+#       must be patched separately.
+#    How：
+#       Cache preprocess params in init; reshape pixel_values and run
+#       rescale_and_normalize on NPU before the vision tower.
+#    Future Plan:
+#       Remove when upstream vLLM applies equivalent device-side preprocess for
+#       Qwen3-VL / Qwen3.5.
 #
 # ** 21. File: worker/patch_rejection_sampler.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
