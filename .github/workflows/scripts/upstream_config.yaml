@@ -1146,6 +1146,18 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/parser/engine/test_qwen3.py
     estimated_time: 20
+  - name: tests/entrypoints/openai/responses/test_namespace_tool_separator.py
+    estimated_time: 20
+  - name: tests/entrypoints/scale_out/token_in_token_out/test_serving_multimodal_tokens.py
+    estimated_time: 20
+  - name: tests/entrypoints/scale_out/token_in_token_out/test_serving_tokens.py
+    estimated_time: 20
+  - name: tests/entrypoints/scale_out/render/test_render_multimodal.py
+    estimated_time: 20
+  - name: tests/entrypoints/multimodal/openai/chat_completion/test_audio_in_video.py
+    estimated_time: 20
+  - name: tests/entrypoints/multimodal/openai/responses/test_image.py
+    estimated_time: 20
 e2e-upstream_online_1:
   - name: tests/model_executor/model_loader/runai_streamer_loader/test_runai_model_streamer_s3.py
     estimated_time: 20
