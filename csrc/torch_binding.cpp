@@ -40,9 +40,11 @@
 #include "gmm/grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
 #include "attention/lightning_indexer/lightning_indexer_torch_adpt.h"
+#include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
+#include "attention/sparse_attention_score_prefill/sparse_attention_score_prefill_torch_adpt.h"
+#include "attention/k2q_csr/k2q_csr_torch_adpt.h"
 #include "mc2/matmul_allreduce_add_rmsnorm/matmul_allreduce_add_rmsnorm_torch_adpt.h"
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
-#include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
 #include "moe/moe_init_routing_custom/moe_init_routing_custom_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
@@ -66,6 +68,10 @@
 #include <vector>
 
 namespace vllm_ascend {
+
+// Required by EXEC_NPU_CMD hash helpers in aclnn_torch_adapter/op_api_common.h
+thread_local char g_hashBuf[kHashBufSize];
+thread_local int g_hashOffset = 0;
 
 namespace {
 
@@ -2501,6 +2507,25 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> (Tensor sparse_indices, Tensor sparse_values)"
     );
     ops.impl("npu_lightning_indexer", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer);
+
+    // k2q_csr: q2k -> k2q CSR (Meta/Hist/RowPrefix/TilePrefix/Scatter)
+    ops.def(
+        "npu_k2q_csr(Tensor q2k, Tensor cu_seqlens, Tensor cu_block_lens, "
+        "int order_method=0, int total_rows=-1, int max_kv=-1, int use_simt=0, "
+        "int q_global_offset=0) "
+        "-> (Tensor row_ptr, Tensor q_ind, Tensor slot)"
+    );
+    ops.impl("npu_k2q_csr", torch::kPrivateUse1, &vllm_ascend::npu_k2q_csr);
+
+    ops.def(
+        "npu_sparse_attention_score_prefill(Tensor query, Tensor key, Tensor value,"
+        "                           Tensor block_table,Tensor k2q_row_ptr,Tensor k2q_q_indices,Tensor k2q_slot_indices,"
+        "                           int num_key_value_heads, float scale_value,"
+        "                           int block_size, int top_k, int inner_precise, *,"
+        "                           Tensor? actual_seq_lengths=None, Tensor? actual_seq_lengths_kv=None"
+        "                           ) -> Tensor "
+    );
+    ops.impl("npu_sparse_attention_score_prefill", torch::kPrivateUse1, &vllm_ascend::npu_sparse_attention_score_prefill);
 
     ops.def(
         "npu_sparse_flash_attention(Tensor query, Tensor key, Tensor value,"

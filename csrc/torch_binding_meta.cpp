@@ -386,6 +386,27 @@ std::tuple<at::Tensor, at::Tensor> matmul_allreduce_add_rmsnorm_meta(
         return {output, add_out};
     }
 
+at::Tensor npu_sparse_attention_score_prefill_meta(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
+    const at::Tensor &block_table,
+    const at::Tensor &k2q_row_ptr,
+    const at::Tensor &k2q_q_indices,
+    const at::Tensor &k2q_slot_indices,
+    int64_t num_key_value_heads, double scale_value, int64_t block_size,
+    int64_t top_k, int64_t inner_precise,
+    const c10::optional<at::Tensor> &actual_seq_lengths,
+    const c10::optional<at::Tensor> &actual_seq_lengths_kv
+    )
+{
+
+    for (size_t i = 0; i < query.sizes().size(); i++) {
+        TORCH_CHECK(query.size(i) > 0, "All values within query's shape should be greater "
+                                       "than 0, but shape[", i, "] is ", query.size(i));
+    }
+    at::Tensor output = at::empty(query.sizes(), query.options().dtype(query.dtype()));
+    return output;
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_moe_init_routing_custom_meta(
     const at::Tensor &x, const at::Tensor &expert_idx,
     const c10::optional<at::Tensor> &scale, const c10::optional<at::Tensor> &offset, int64_t active_num,
@@ -1631,6 +1652,37 @@ at::Tensor npu_lightning_indexer_quant_meta(
     return lightning_indexer_quant_output;
 }
 
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_k2q_csr_meta(
+    const at::Tensor &q2k,
+    const at::Tensor &cu_seqlens,
+    const at::Tensor &cu_block_lens,
+    int64_t order_method,
+    int64_t total_rows,
+    int64_t max_kv,
+    int64_t use_simt,
+    int64_t q_global_offset = 0)
+{
+    (void)cu_seqlens;
+    (void)cu_block_lens;
+    (void)order_method;
+    (void)max_kv;
+    (void)use_simt;
+    (void)q_global_offset;
+
+    TORCH_CHECK(q2k.dim() == 3, "q2k must be 3-D [H, T, topk]");
+    const int64_t H = q2k.size(0);
+    const int64_t T = q2k.size(1);
+    const int64_t topk = q2k.size(2);
+    // ACLGraph capture should pass total_rows explicitly; fallback keeps shape valid.
+    const int64_t tr = total_rows >= 0 ? total_rows : 1;
+    auto opts = q2k.options().dtype(at::kInt);
+    at::Tensor row_ptr = at::empty({H, tr + 1}, opts);
+    at::Tensor q_ind = at::empty({H, T * topk}, opts);
+    at::Tensor slot = at::empty({H, T * topk}, opts);
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(row_ptr, q_ind, slot);
+}
+
 void npu_scatter_nd_update_v2_meta(
     at::Tensor& var,
     const at::Tensor& indices,
@@ -1822,6 +1874,10 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
     // Sparse attention score
     ops.impl("npu_sparse_attention_score", &vllm_ascend::meta::npu_sparse_attention_score_meta);
+    // npu_k2q_csr
+    ops.impl("npu_k2q_csr", &vllm_ascend::meta::npu_k2q_csr_meta);
+    // Sparse attention score prefill
+    ops.impl("npu_sparse_attention_score_prefill", &vllm_ascend::meta::npu_sparse_attention_score_prefill_meta);
     // MoE dispatch-ffn-combine
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
     // matmul allreduce add rmsnorm

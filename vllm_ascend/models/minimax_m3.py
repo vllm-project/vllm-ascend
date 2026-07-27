@@ -100,6 +100,7 @@ from vllm.model_executor.models.utils import (
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
 
 from vllm_ascend.attention.msa_m3 import MiniMaxM3SparseAttention
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.minimax_m3_vit import MiniMaxVLVisionModel
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -162,16 +163,62 @@ def _get_rope_parameters(config: PretrainedConfig) -> dict[str, Any] | None:
     return rope_parameters
 
 
+def _is_w8a8_mxfp8_linear(layer: nn.Module) -> bool:
+    quant_method = getattr(layer, "quant_method", None)
+    quant_scheme = getattr(quant_method, "quant_method", quant_method)
+    return (
+        quant_scheme is not None
+        and quant_scheme.__class__.__name__
+        == "AscendW8A8MXFP8DynamicLinearMethod"
+    )
+
+
 class MiniMaxM3SwiGLUOAI(nn.Module):
     """MiniMax-M3 SwiGLU-OAI activation for packed gate/up outputs."""
 
-    def __init__(self, alpha: float, beta: float, limit: float):
+    def __init__(
+        self,
+        alpha: float,
+        beta: float,
+        limit: float,
+        use_mx_quant: bool = False,
+    ):
         super().__init__()
         self.alpha = float(alpha)
         self.beta = float(beta)
         self.limit = float(limit)
+        self.use_mx_quant = use_mx_quant
+        if self.use_mx_quant and not hasattr(
+            torch.ops._C_ascend, "swiglu_mx_quant"
+        ):
+            raise RuntimeError(
+                "swiglu_mx_quant is unavailable in the current Ascend "
+                "custom op runtime."
+            )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if self.use_mx_quant:
+            quantized_x, scale = torch.ops._C_ascend.swiglu_mx_quant(
+                x=x,
+                group_index=None,
+                dst_type=torch.float8_e4m3fn,
+                activate_dim=-1,
+                activate_left=True,
+                swiglu_mode=1,
+                clamp_limit=self.limit,
+                glu_alpha=self.alpha,
+                glu_bias=self.beta,
+                group_mode=0,
+                axis=-1,
+                round_mode="rint",
+                scale_alg=0,
+                max_dtype_value=0.0,
+            )
+            scale = DeviceOperator.maybe_normalize_mxfp_scale_layout(scale)
+            assert scale is not None
+            return quantized_x, scale
         if get_ascend_device_type() == AscendDeviceType.A5:
             d = x.shape[-1] // 2
             gate = torch.clamp(x[..., :d], max=self.limit)
@@ -185,6 +232,7 @@ class MiniMaxM3SwiGLUOAI(nn.Module):
             bias=self.beta,
             interleaved=False,
         )
+
 
 class MiniMaxM3MLP(nn.Module):
     def __init__(
@@ -217,10 +265,20 @@ class MiniMaxM3MLP(nn.Module):
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act == "swigluoai":
+            use_mx_quant = (
+                get_ascend_device_type() == AscendDeviceType.A5
+                and _is_w8a8_mxfp8_linear(self.gate_up_proj)
+                and _is_w8a8_mxfp8_linear(self.down_proj)
+            )
+            if use_mx_quant:
+                logger.info_once(
+                    "Using swiglu_mx_quant for MiniMax-M3 W8A8-MXFP8 MLPs."
+                )
             self.act_fn = MiniMaxM3SwiGLUOAI(
                 alpha=config.swiglu_alpha,
                 beta=getattr(config, "swiglu_beta", 1.0),
                 limit=config.swiglu_limit,
+                use_mx_quant=use_mx_quant,
             )
         else:
             raise ValueError(
@@ -460,6 +518,10 @@ class MiniMaxM3Attention(nn.Module):
                 cos_sin_cache=self.rotary_emb.cos_sin_cache,
                 positions=positions,
             )
+        attn_output = self.attn(q, k, v)
+
+        output, _ = self.o_proj(attn_output)
+        return output
 
 
 class MiniMaxM3DecoderLayer(nn.Module):
