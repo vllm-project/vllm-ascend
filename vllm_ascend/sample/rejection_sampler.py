@@ -6,7 +6,7 @@ from dataclasses import replace
 import torch
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
-from vllm.triton_utils import HAS_TRITON
+from vllm_ascend.utils import supports_triton
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -56,7 +56,7 @@ class AscendRejectionSampler(RejectionSampler):
             return logits
 
         """Use Triton-Ascend penalties on NPU when Triton is available; else vLLM default."""
-        if not HAS_TRITON:
+        if not supports_triton():
             logger.warning_once(
                 "[sample/rejection_sampler] Triton not available, falling back to vLLM default "
                 "penalty implementation in rejection sampler. Rejection sampling performance "
@@ -94,7 +94,7 @@ class AscendRejectionSampler(RejectionSampler):
             "ascend_optimizations_enabled=%s, triton_available=%s, "
             "reduce_sample=%s",
             self._ascend_optimizations_enabled,
-            HAS_TRITON,
+            supports_triton(),
             get_ascend_config().enable_reduce_sample,
         )
 
@@ -491,7 +491,7 @@ def rejection_sample(
         sampling_metadata.all_greedy,
         sampling_metadata.all_random,
         get_ascend_config().enable_reduce_sample,
-        HAS_TRITON,
+        supports_triton(),
     )
 
     if using_entropy_verify and ori_target_logits is not None:
@@ -511,7 +511,7 @@ def rejection_sample(
         is_greedy = None
     else:
         is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
-    if HAS_TRITON:
+    if supports_triton():
         grid, block_size = cal_grid_and_block_size(batch_size)
 
     if using_block_verify or using_entropy_verify:
@@ -524,7 +524,7 @@ def rejection_sample(
             posterior_threshold,
             posterior_alpha,
             target_indices is not None,
-            HAS_TRITON,
+            supports_triton(),
             sampling_metadata.all_greedy,
             sampling_metadata.all_random,
         )
@@ -536,7 +536,7 @@ def rejection_sample(
         else:
             target_argmax = target_logits.argmax(dim=-1).view(-1)
 
-        if HAS_TRITON:
+        if supports_triton():
             rejection_greedy_sample_with_triton(
                 output_token_ids,
                 num_draft_tokens,
@@ -612,7 +612,7 @@ def rejection_sample(
 
         if not using_block_verify:
             # Rejection sampling for random sampling requests with selected logits
-            if HAS_TRITON:
+            if supports_triton():
                 rejection_random_sample_kernel[(grid,)](
                     output_token_ids,
                     cu_num_draft_tokens,
@@ -664,7 +664,7 @@ def rejection_sample(
         else:
             # MagicMTP: Improving acceptance rate with Block Verify.
             # Entropy_verify: Improving acceptance rate with entropy Verify.
-            if HAS_TRITON:
+            if supports_triton():
                 rejection_random_sample_block_verify_kernel[(grid,)](
                     output_token_ids,
                     cu_num_draft_tokens,
@@ -754,7 +754,7 @@ def rejection_sample(
         )
 
         if not using_block_verify:
-            if HAS_TRITON:
+            if supports_triton():
                 rejection_random_sample_kernel[(grid,)](
                     output_token_ids,
                     cu_num_draft_tokens,
@@ -804,7 +804,7 @@ def rejection_sample(
                     ori_target_probs=ori_target_probs,
                 )
         else:
-            if HAS_TRITON:
+            if supports_triton():
                 rejection_random_sample_block_verify_kernel[(grid,)](
                     output_token_ids,
                     cu_num_draft_tokens,
@@ -886,7 +886,7 @@ def expand_batch_to_tokens(
     batch_size = x.shape[0]
     assert cu_num_tokens.shape[0] == batch_size
     expanded_x = x.new_empty(num_tokens)
-    if HAS_TRITON:
+    if supports_triton():
         expand_triton(batch_size, expanded_x, x, cu_num_tokens, replace_from, replace_to, max_num_tokens=MAX_SPEC_LEN)
     else:
         expand_pytorch(
@@ -933,7 +933,7 @@ def sample_recovered_tokens(
         q[i] = torch.where(has_draft_mask[i], temp_q, q[i])
 
     recovered_token_ids = torch.empty_like(draft_token_ids)
-    if HAS_TRITON:
+    if supports_triton():
         sample_recovered_tokens_kernel[(batch_size, max_spec_len)](
             recovered_token_ids,
             cu_num_draft_tokens,

@@ -22,13 +22,13 @@ import torch
 import torch_npu
 import vllm.envs as envs
 from vllm.logger import logger
-from vllm.triton_utils import HAS_TRITON
+from vllm_ascend.utils import supports_triton
 
 # in case recursive call in reduce_sum.
 torch_sum = torch.sum
 
 
-if HAS_TRITON:
+if supports_triton():
     from vllm_ascend.ops.triton.batch_invariant.matmul import (
         addmm_batch_invariant,
         bmm_batch_invariant,
@@ -100,12 +100,12 @@ def enable_batch_invariant_mode():
     _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
     logger.debug(
         "Batch-invariant op registration: Triton=%s, AscendC=%s",
-        HAS_TRITON,
+        supports_triton(),
         HAS_ASCENDC_BATCH_INVARIANT,
     )
 
     # Register operators only implemented in triton.
-    if HAS_TRITON:
+    if supports_triton():
         _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, "NPU")
         _batch_invariant_LIB.impl("aten::bmm", bmm_batch_invariant, "NPU")
         _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant, "NPU")
@@ -127,7 +127,7 @@ def enable_batch_invariant_mode():
         torch.sum = reduce_sum
 
     # register triton implementations if ascendc is not available.
-    elif HAS_TRITON:
+    elif supports_triton():
         _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, "NPU")
         _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, "NPU")
 
@@ -149,7 +149,7 @@ def init_batch_invariance():
     environment variable to enable automatically.
     """
     if envs.VLLM_BATCH_INVARIANT:
-        if HAS_TRITON or HAS_ASCENDC_BATCH_INVARIANT:
+        if supports_triton() or HAS_ASCENDC_BATCH_INVARIANT:
             logger.info(
                 "Enabling batch-invariant mode for vLLM on Ascend NPU.",
             )

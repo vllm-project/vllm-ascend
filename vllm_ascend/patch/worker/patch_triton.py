@@ -8,6 +8,7 @@ from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.layernorm_guard import LayerNormFn
 from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_recurrent_gated_delta_rule_fwd_kernel
 from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_npu
+from vllm_ascend.utils import supports_triton
 
 triton.next_power_of_2 = next_power_of_2
 
@@ -21,8 +22,9 @@ vllm.model_executor.layers.fla.ops.chunk_gated_delta_rule = chunk_gated_delta_ru
 # On NPU platforms without an active Triton backend (e.g. 310P), replace the
 # Triton-based fused_post_conv_prep with a pure-PyTorch fallback so that
 # qwen_gdn_linear_attn's from-import picks up the replacement before model
-# load.
-if not HAS_TRITON:
+# load.  Use supports_triton() instead of HAS_TRITON so that 310P never
+# enters Triton paths even when Triton-Ascend is installed.
+if not supports_triton():
     import torch
     import torch.nn.functional as _F
 

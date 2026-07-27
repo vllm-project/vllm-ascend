@@ -444,9 +444,9 @@ class NPUWorker(WorkerBase):
         # This lazy import avoids torch_npu re-initialization in patch
         # Note that this should be imported after torch.npu.set_device
         # to avoid repeated set_device in extra processes
-        from vllm.triton_utils import HAS_TRITON
+        from vllm_ascend.utils import supports_triton
 
-        if HAS_TRITON:
+        if supports_triton():
             import torch_npu._inductor  # noqa: F401
 
         gc.collect()

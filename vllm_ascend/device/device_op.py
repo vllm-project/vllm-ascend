@@ -20,7 +20,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 import torch_npu
-from vllm.triton_utils import HAS_TRITON
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, supports_triton
 
 from vllm_ascend.device import utils as device_utils
 from vllm_ascend.device.mxfp_compat import (
@@ -32,12 +32,11 @@ from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
 DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
 
-if HAS_TRITON:
+if supports_triton():
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
 else:
     triton_q_rms = None  # type: ignore

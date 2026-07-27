@@ -15,11 +15,9 @@
 # limitations under the License.
 #
 
-from vllm.triton_utils import HAS_TRITON
+from vllm_ascend.utils import is_310p, supports_triton
 
-from vllm_ascend.utils import is_310p
-
-if HAS_TRITON:
+if supports_triton():
     import vllm_ascend.patch.worker.patch_triton
     import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
 

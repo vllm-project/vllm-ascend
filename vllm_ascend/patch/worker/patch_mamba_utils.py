@@ -16,11 +16,11 @@ from vllm.v1.worker.mamba_utils import MambaCopyBuffers
 
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 from vllm_ascend.ops.triton.mamba.postprocess import postprocess_mamba_fused_kernel
-from vllm_ascend.utils import is_310p
+from vllm_ascend.utils import supports_triton
 
 
 def _can_launch_triton_batch_memcpy() -> bool:
-    return not is_310p()
+    return supports_triton()
 
 
 def _batch_memcpy_triton(src_ptrs, dst_ptrs, sizes):

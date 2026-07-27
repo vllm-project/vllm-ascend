@@ -68,9 +68,9 @@ class AscendSwigluStepAndMul:
         # silu + clamp + mul into a single launch (see
         # vllm_ascend/ops/triton/activation/swiglustep.py). Numerically
         # equivalent to forward_native below.
-        from vllm.triton_utils import HAS_TRITON
+        from vllm_ascend.utils import supports_triton
 
-        if HAS_TRITON:
+        if supports_triton():
             from vllm_ascend.ops.triton.activation.swiglustep import (
                 swiglustep_forward_triton,
             )

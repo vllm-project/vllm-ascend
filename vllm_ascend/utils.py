@@ -145,6 +145,20 @@ def is_310p():
     return get_ascend_device_type() == AscendDeviceType._310P
 
 
+def supports_triton() -> bool:
+    """Return True if Triton kernels can be executed on the current device.
+
+    On 310P hardware, Triton is fundamentally unsupported regardless of
+    whether Triton-Ascend is installed in the environment. On other Ascend
+    devices (A2/A3/A5), Triton availability depends on the software
+    environment (HAS_TRITON from upstream vllm).
+    """
+    if is_310p():
+        return False
+    from vllm.triton_utils import HAS_TRITON
+    return HAS_TRITON
+
+
 _IS_RC_DEVICE: bool | None = None
 
 

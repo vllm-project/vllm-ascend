@@ -19,7 +19,7 @@ import torch
 import torch_npu
 from torch.nn.functional import pad
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.triton_utils import HAS_TRITON
+from vllm_ascend.utils import supports_triton
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
@@ -378,7 +378,7 @@ def quant_apply_mlp(
                 approximate = "tanh" if activation == MoEActivation.GELU_TANH else "none"
                 hidden_states = torch.nn.functional.gelu(gate, approximate=approximate) * up
                 hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
-            elif HAS_TRITON:
+            elif supports_triton():
                 from vllm_ascend.ops.triton.activation.swiglu_quant import swiglu_quant
 
                 hidden_states, swiglu_out_scale = swiglu_quant(
