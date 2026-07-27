@@ -63,18 +63,24 @@ class AscendDSparkProposer(AscendDflashProposer):
         self.use_cuda_graph = False
         # Max query tokens depend on whether sampling from anchor or not.
         self.max_query_tokens = self.max_batch_size * self.num_query_per_req
-        # Position ids for the draft query block [max_query_tokens].
+        # These are sliced by ``num_input_tokens`` (the padded query count) just
+        # like the inherited ``self.input_ids`` (``max_num_tokens``); size them
+        # to cover both the valid query data and any padded graph size so
+        # ``self.positions[:num_input_tokens]`` never truncates below the query
+        # length and breaks RoPE (see AscendDflashProposer.__init__).
+        query_buffer_len = max(self.max_query_tokens, self.max_num_tokens)
+        # Position ids for the draft query block.
         # Overrides dflash:49; v2 uses input_buffers.positions.
         self.positions = torch.zeros(
-            self.max_query_tokens,
+            query_buffer_len,
             dtype=torch.int32,
             device=device,
         )
-        # Primary-group query slot mapping buffer [max_query_tokens].
+        # Primary-group query slot mapping buffer.
         # Overrides dflash:37; v2 uses BlockTables.slot_mappings. Per-non-
         # primary-gid buffers live in _per_group_query_slot_mapping_buffers.
         self._slot_mapping_buffer = torch.zeros(
-            self.max_query_tokens,
+            query_buffer_len,
             dtype=torch.int32,
             device=device,
         )

@@ -28,6 +28,19 @@ class AscendDflashProposer(AscendEagleProposer):
         self.max_query_tokens = self.max_batch_size * (1 + self.num_speculative_tokens)
         self.max_positions = self.max_num_tokens + self.max_query_tokens
 
+        # ``self.positions`` / ``self._slot_mapping_buffer`` are the query-side
+        # buffers sliced by ``num_input_tokens`` in ``_run_merged_draft`` /
+        # ``_pad_draft_buffers`` -- exactly like the inherited ``self.input_ids``
+        # (sized ``max_num_tokens``). ``num_input_tokens`` is the query token
+        # count padded up to a runner cudagraph capture size, which is bounded
+        # by ``max_num_tokens`` and can exceed ``max_query_tokens``. If these
+        # buffers were only ``max_query_tokens`` long, ``self.positions[:num_input_tokens]``
+        # would silently truncate below ``input_ids[:num_input_tokens]`` and RoPE
+        # would fail its ``positions.shape[0] == num_tokens`` check. Size them to
+        # cover both the valid query data (``max_query_tokens``) and the padded
+        # graph size (``max_num_tokens``).
+        query_buffer_len = max(self.max_query_tokens, self.max_num_tokens)
+
         self._context_slot_mapping_buffers = torch.zeros(
             self.max_num_tokens,
             dtype=torch.int32,
@@ -35,7 +48,7 @@ class AscendDflashProposer(AscendEagleProposer):
         )
 
         self._slot_mapping_buffer = torch.zeros(
-            self.max_query_tokens,
+            query_buffer_len,
             dtype=torch.int32,
             device=device,
         )
@@ -47,7 +60,7 @@ class AscendDflashProposer(AscendEagleProposer):
         )
 
         self.positions = torch.zeros(
-            self.max_query_tokens,
+            query_buffer_len,
             dtype=torch.int32,
             device=device,
         )
