@@ -714,8 +714,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 before_gmm2_evt=fused_experts_results.before_gmm2_evt,
                 before_combine_evt=fused_experts_results.before_combine_evt,
                 swiglu_limit=fused_experts_results.swiglu_limit,
-                swiglu_alpha=fused_experts_results.swiglu_alpha,
-                swiglu_beta=fused_experts_results.swiglu_beta,
+                swiglu_alpha=getattr(fused_experts_results, "swiglu_alpha", 1.0),
+                swiglu_beta=getattr(fused_experts_results, "swiglu_beta", 0.0),
             )
         else:
             # The vLLM FusedMoE forward_impl does not return events.
@@ -870,8 +870,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 before_gmm2=fused_moe_results.before_gmm2_evt,
                 before_combine=fused_moe_results.before_combine_evt,
                 swiglu_limit=fused_moe_results.swiglu_limit,
-                swiglu_alpha=fused_moe_results.swiglu_alpha,
-                swiglu_beta=fused_moe_results.swiglu_beta,
+                swiglu_alpha=getattr(fused_moe_results, "swiglu_alpha", 1.0),
+                swiglu_beta=getattr(fused_moe_results, "swiglu_beta", 0.0),
             ),
         )
         return shared_out, routed_out

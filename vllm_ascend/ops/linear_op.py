@@ -449,8 +449,7 @@ _MULTIMODAL_ENCODER_PREFIX_PARTS = (
 
 
 def _should_skip_sp_for_multimodal_encoder(prefix: str) -> bool:
-    prefix_parts = prefix.split(".")
-    return any(part in prefix_parts for part in _MULTIMODAL_ENCODER_PREFIX_PARTS)
+    return any(part in prefix for part in _MULTIMODAL_ENCODER_PREFIX_PARTS)
 
 
 def _get_column_parallel_op(
