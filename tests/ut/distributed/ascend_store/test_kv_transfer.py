@@ -27,6 +27,7 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     ChunkedTokenDatabase,
+    GroupTransferData,
     KeyMetadata,
     LayerLoadTask,
     LayerSaveTask,
@@ -477,6 +478,7 @@ class TestGVALayerSendingThread(unittest.TestCase):
         thread, store, slot_free = self._make_thread(builders=builders)
         call_order = []
         store.store.batch_copy.side_effect = lambda *_args: call_order.append("copy") or 0
+        store.batch_write_finish.side_effect = lambda *_args: call_order.append("finish") or [0, 0]
         thread.pd_transfer_waiter = lambda _layer_id: call_order.append("pd")
         attention_recorded = threading.Event()
         attention_recorded.set()
@@ -488,13 +490,17 @@ class TestGVALayerSendingThread(unittest.TestCase):
             LayerTransferTask(
                 layer_id=0,
                 block_ranges=[],
-                transfer_data=MagicMock(),
+                transfer_data=GroupTransferData(
+                    block_ids_arr=np.asarray([group_id]),
+                    base_gvas_arr=np.asarray([100 + group_id]),
+                    keys=[f"k{group_id}"],
+                ),
                 completion=TransferCompletion(["r1"], [True]),
-                finished_req_ids={"r1"} if group_id == 1 else set(),
                 group_id=group_id,
             )
             for group_id in range(2)
         ]
+        thread.prepare_layerwise_tasks([tasks])
         thread.add_stored_request("r1")
         thread.add_stored_request("r1")
         request = LayerSaveTask(layer_id=0, transfer_tasks=tasks)
@@ -508,9 +514,66 @@ class TestGVALayerSendingThread(unittest.TestCase):
             [16, 32],
             0,
         )
-        self.assertEqual(call_order, ["copy", "pd", "attention"])
+        store.batch_write_finish.assert_called_once_with(["k0", "k1"], [0, 0])
+        self.assertEqual(call_order, ["copy", "finish", "pd", "attention"])
         self.assertEqual(thread.get_and_clear_finished_requests(), {"r1"})
         self.assertTrue(slot_free.is_set())
+
+    def test_write_finish_is_assigned_to_last_actual_save(self):
+        thread, _, _ = self._make_thread()
+        transfer_data = GroupTransferData(
+            block_ids_arr=np.asarray([0]),
+            base_gvas_arr=np.asarray([100]),
+            keys=["k0"],
+        )
+        first_task = LayerTransferTask(
+            layer_id=0,
+            block_ranges=[],
+            transfer_data=transfer_data,
+            completion=TransferCompletion(["r1"], [False]),
+        )
+        last_task = LayerTransferTask(
+            layer_id=2,
+            block_ranges=[],
+            transfer_data=transfer_data,
+            completion=TransferCompletion(["r1"], [False]),
+        )
+
+        thread.prepare_layerwise_tasks([[first_task], [], [last_task]])
+
+        self.assertEqual(first_task.write_finish_keys, [])
+        self.assertEqual(last_task.write_finish_keys, ["k0"])
+
+    def test_write_finish_failure_does_not_complete_request(self):
+        builder = MagicMock()
+        builder.build_addrs.return_value = LayerTransferArrays(
+            np.asarray([10]),
+            np.asarray([16]),
+            np.asarray([100]),
+        )
+        thread, store, slot_free = self._make_thread(builders=[builder])
+        store.batch_write_finish.return_value = [1]
+        task = LayerTransferTask(
+            layer_id=0,
+            block_ranges=[],
+            transfer_data=GroupTransferData(
+                block_ids_arr=np.asarray([0]),
+                base_gvas_arr=np.asarray([100]),
+                keys=["k0"],
+            ),
+            completion=TransferCompletion(["r1"], [True]),
+        )
+        thread.prepare_layerwise_tasks([[task]])
+        thread.add_stored_request("r1")
+        request = LayerSaveTask(layer_id=0, transfer_tasks=[task])
+        thread.request_queue.put(request)
+
+        with self.assertRaisesRegex(RuntimeError, "batch_write_finish failed"):
+            thread._handle_request(request)
+
+        self.assertEqual(thread.stored_requests["r1"], 1)
+        self.assertEqual(thread.get_and_clear_finished_requests(), set())
+        self.assertFalse(slot_free.is_set())
 
     def test_copy_failure_does_not_release_slot_or_complete_request(self):
         builder = MagicMock()

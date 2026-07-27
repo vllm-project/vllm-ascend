@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheTensor
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheTensor, UniformTypeKVCacheSpecs
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
@@ -163,6 +163,41 @@ def test_gva_config_is_scoped_to_memcache_layerwise_connector():
 
     assert get_gva_layerwise_config(multi_config) is ascend_store_config
     assert get_gva_layerwise_config(unsupported) is None
+
+
+def test_equal_tensor_sizes_reject_incompatible_cache_specs():
+    layer_names = [f"model.layers.{layer}.self_attn" for layer in range(4)]
+    first_spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=8,
+        head_size_v=8,
+        dtype=torch.int8,
+    )
+    incompatible_spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=2,
+        head_size=4,
+        head_size_v=4,
+        dtype=torch.int8,
+    )
+    layer_specs = {layer_name: first_spec for layer_name in layer_names}
+    layer_specs[layer_names[2]] = incompatible_spec
+    kv_cache_config = SimpleNamespace(
+        kv_cache_tensors=[KVCacheTensor(size=32, shared_by=[layer_name]) for layer_name in layer_names],
+        kv_cache_groups=[
+            SimpleNamespace(
+                layer_names=layer_names,
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=2,
+                    kv_cache_specs=layer_specs,
+                ),
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="identical main cache specs"):
+        apply_layerwise_kv_cache_plan(kv_cache_config, _make_vllm_config(4, 1))
 
 
 def test_partial_layout_skips_tensor_merge():

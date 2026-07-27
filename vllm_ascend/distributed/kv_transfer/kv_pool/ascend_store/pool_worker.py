@@ -1177,7 +1177,9 @@ class KVPoolWorker:
                     # starts), and the layers between here and layer_id mask the
                     # transfer. Binding layer_id's own gate would serialize the copy
                     # against layer_id's attention and leave no overlap.
-                    attention_start_gate = get_attention_compute_start_gate(reuse_mate + 1)
+                    if reuse_mate + 1 < layer_id:
+                        # An adjacent target cannot wait on its own attention gate.
+                        attention_start_gate = get_attention_compute_start_gate(reuse_mate + 1)
             recv_thread.add_request(
                 LayerLoadTask(  # type: ignore[arg-type]
                     wait_for_save_layer=reuse_mate,

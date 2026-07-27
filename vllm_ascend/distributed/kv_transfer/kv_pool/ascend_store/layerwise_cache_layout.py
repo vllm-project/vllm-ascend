@@ -298,6 +298,9 @@ def apply_layerwise_kv_cache_plan(
             slot_sizes = {tensor.size for tensor in component_tensors}
             if len(slot_sizes) != 1:
                 raise ValueError(f"Layers sharing a layerwise slot must have equal {component} tensor sizes.")
+            reference_spec = layer_specs[shared_by[0]]
+            if any(layer_specs[layer_name] != reference_spec for layer_name in shared_by[1:]):
+                raise ValueError(f"Layers sharing a layerwise slot must have identical {component} cache specs.")
             new_tensors.append(
                 KVCacheTensor(
                     shared_by=shared_by,

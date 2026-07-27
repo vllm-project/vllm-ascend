@@ -142,6 +142,14 @@ class MemcacheBackend(Backend):
         assert self.store is not None
         return self.store.batch_alloc(keys, sizes)
 
+    def batch_write_finish(self, keys: list[str], results: list[int]) -> list[int]:
+        assert self.store is not None
+        finish = getattr(self.store, "batch_write_finish", None)
+        if finish is None:
+            # Older memcache releases made writes visible in batch_copy.
+            return [0] * len(keys)
+        return finish(keys, results)
+
     def batch_add_lease(self, keys: list[str], lease_ttl_ms: int = 0) -> list[int]:
         assert self.store is not None
         return self.store.batch_add_lease(keys, lease_ttl_ms)

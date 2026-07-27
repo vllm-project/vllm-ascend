@@ -1052,6 +1052,7 @@ class GroupTransferData:
 
     block_ids_arr: np.ndarray
     base_gvas_arr: np.ndarray
+    keys: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1097,6 +1098,7 @@ class LayerTransferTask:
     # Requests whose final actual transfer is this task. Populated once during
     # asynchronous preparation; usually empty for all but one task per request.
     finished_req_ids: set[str] = field(default_factory=set)
+    write_finish_keys: list[str] = field(default_factory=list)
     group_id: int = 0
     layer_idx_in_group: int = 0
     uses_hbm_tail: bool = False

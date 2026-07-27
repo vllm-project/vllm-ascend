@@ -238,6 +238,7 @@ class LayerwiseTransferPreparer:
                 GroupTransferData(
                     block_ids_arr=np.asarray(block_ids, dtype=np.int64),
                     base_gvas_arr=allocated_gvas_np[key_slices_by_group[group_id]],
+                    keys=alloc_keys[key_slices_by_group[group_id]],
                 ),
                 completions_by_group[group_id],
             )

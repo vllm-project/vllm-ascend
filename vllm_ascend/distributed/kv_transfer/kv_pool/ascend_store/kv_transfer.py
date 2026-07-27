@@ -1165,6 +1165,20 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         layer_tasks: list[list[LayerTransferTask]],
     ) -> None:
         _mark_last_transfer_tasks(layer_tasks, "save")
+        last_task = None
+        keys_by_group: dict[int, list[str]] = {}
+        for tasks in layer_tasks:
+            for task in tasks:
+                task.write_finish_keys.clear()
+                last_task = task
+                if task.transfer_data is None:
+                    raise RuntimeError(
+                        f"Layerwise save data was not prepared for layer {task.layer_id}, group {task.group_id}"
+                    )
+                keys_by_group[task.group_id] = task.transfer_data.keys
+        if last_task is not None:
+            # A GVA contains all layers, so publish it after the last actual copy.
+            last_task.write_finish_keys.extend(key for keys in keys_by_group.values() for key in keys)
 
     def _wait_attention_done(self, physical_layer: int) -> None:
         # slot_free also requires the compute stream to be past this layer's
@@ -1205,6 +1219,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         all_sizes = []
         all_req_ids = []
         finished_req_ids: set[str] = set()
+        write_finish_keys: list[str] = []
         for task in transfer_tasks:
             if task.layer_id != physical_layer:
                 raise RuntimeError(
@@ -1223,6 +1238,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             arrays = builder.build_addrs(transfer_data, task.layer_idx_in_group)
             all_req_ids.extend(completion.req_ids)
             finished_req_ids.update(task.finished_req_ids)
+            write_finish_keys.extend(task.write_finish_keys)
             all_gvas.append(arrays.gvas_array)
             all_addrs.append(arrays.addr_array)
             all_sizes.append(arrays.size_array)
@@ -1249,6 +1265,16 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 )
             if res != 0:
                 raise RuntimeError(f"Layerwise {physical_layer} save batch_copy failed with return code {res}")
+            if write_finish_keys:
+                finish_results = self.m_store.batch_write_finish(
+                    write_finish_keys,
+                    [0] * len(write_finish_keys),
+                )
+                if len(finish_results) != len(write_finish_keys) or any(result != 0 for result in finish_results):
+                    raise RuntimeError(
+                        f"Layerwise save batch_write_finish failed: "
+                        f"expected={len(write_finish_keys)}, results={finish_results}"
+                    )
         if self.pd_transfer_waiter is not None:
             self.pd_transfer_waiter(physical_layer)
         self._wait_attention_done(physical_layer)

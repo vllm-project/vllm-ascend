@@ -935,6 +935,22 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertEqual(task.wait_for_save_layer, 0)
         self.assertEqual(task.transfer_tasks, [])
 
+    def test_adjacent_reused_layer_does_not_wait_on_its_own_attention_gate(self):
+        worker = self._make_worker()
+        worker.num_layers = 2
+        worker.current_layer = 0
+        worker.next_layer_to_submit = 1
+        worker.num_prefetch_layers = 1
+        worker.prefetch_layer_map = {1: 0}
+        worker.layer_load_tasks = [[], [MagicMock()]]
+        worker.kv_recv_thread = MagicMock()
+
+        worker._submit_ready_layer_loads()
+
+        task = worker.kv_recv_thread.add_request.call_args.args[0]
+        self.assertEqual(task.wait_for_save_layer, 0)
+        self.assertIsNone(task.attention_start_gate)
+
     def test_final_save_keeps_reuse_gate_for_receive_thread(self):
         worker = self._make_worker()
         worker.num_layers = 3
