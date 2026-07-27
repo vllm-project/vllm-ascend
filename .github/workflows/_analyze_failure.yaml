@@ -79,7 +79,7 @@ jobs:
         with:
           pattern: ${{ inputs.log_artifact_pattern }}
           path: ./test-logs
-          merge-multiple: true
+          merge-multiple: false
         continue-on-error: true
 
       - name: Show downloaded logs structure
