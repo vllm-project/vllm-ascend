@@ -236,6 +236,7 @@ templates:
             }
         }'
 
+
 benchmarks:
       acc_aime2025:
         case_type: accuracy
