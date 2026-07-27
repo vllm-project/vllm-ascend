@@ -113,11 +113,14 @@ def pytest_collection_modifyitems(config, items):
     """Remove tests whose hardware / NPU-count markers don't match the
     current environment (or CLI override when ``--requires-*`` is set).
 
-    Because this runs at collection time, ``pytest --collect-only``
-    natively shows only the tests that would actually execute — without
-    needing a separate dry-run mode.
+    Collection-time filtering only applies in ``--collect-only`` mode,
+    to give an accurate preview.  During normal test runs, all items
+    pass through collection and incompatible tests are skipped at
+    ``pytest_runtest_setup`` (``pytest.skip()``, exit code 0), making
+    the skip reason visible in the output.
     """
-    items[:] = [item for item in items if _matches_hardware(item) and _matches_npu_count(item)]
+    if config.option.collectonly:
+        items[:] = [item for item in items if _matches_hardware(item) and _matches_npu_count(item)]
 
 
 # ── Predicates (shared by collection-time filter and runtime safety net) ─────
