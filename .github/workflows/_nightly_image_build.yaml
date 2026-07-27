@@ -167,17 +167,19 @@ jobs:
           docker build "${BUILD_ARGS[@]}" -t "$IMAGE" .
 
           # Export outputs for merge job
-          echo "swr_registry=${SWR_REGISTRY}" >> $GITHUB_OUTPUT
-          echo "swr_temp_registry=${SWR_TEMP_REGISTRY}" >> $GITHUB_OUTPUT
-          echo "tag_prefix=${TAG_PREFIX}" >> $GITHUB_OUTPUT
-          echo "full_tag=${FULL_TAG}" >> $GITHUB_OUTPUT
-          echo "build_type=${{ inputs.build_type }}" >> $GITHUB_OUTPUT
+          {
+          echo "swr_registry=${SWR_REGISTRY}"
+          echo "swr_temp_registry=${SWR_TEMP_REGISTRY}"
+          echo "tag_prefix=${TAG_PREFIX}"
+          echo "full_tag=${FULL_TAG}"
+          echo "build_type=${{ inputs.build_type }}"
 
-          if [ "${{ github.repository_owner }}" = "du-ping1" ] && [ "${{ steps.login-swr.outcome == 'success' || steps.login-swr-daily.outcome == 'success' }}" = "true" ]; then
-            echo "swr_logged_in=true" >> $GITHUB_OUTPUT
+          if [ "${{ github.repository_owner }}" = "vllm-project" ] && [ "${{ steps.login-swr.outcome == 'success' || steps.login-swr-daily.outcome == 'success' }}" = "true" ]; then
+            echo "swr_logged_in=true"
           else
-            echo "swr_logged_in=false" >> $GITHUB_OUTPUT
+            echo "swr_logged_in=false"
           fi
+        } >> $GITHUB_OUTPUT
 
       - name: Push image to SWR temp
         if: ${{ github.repository_owner == 'du-ping1' && (steps.login-swr.conclusion == 'success' || steps.login-swr-daily.conclusion == 'success') }}

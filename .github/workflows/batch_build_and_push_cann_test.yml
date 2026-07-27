@@ -84,9 +84,9 @@ jobs:
             echo "matrix<<EOF"
             echo "$MATRIX_JSON"
             echo "EOF"
+            echo "cann_version=${CANN_VERSION}"
+            echo "py_version=${PY_VERSION}"
           } >> "$GITHUB_OUTPUT"
-          echo "cann_version=${CANN_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "py_version=${PY_VERSION}" >> "$GITHUB_OUTPUT"
 
   build:
     needs: prepare

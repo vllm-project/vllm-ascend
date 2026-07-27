@@ -128,12 +128,12 @@ on:
         type: string
         default: ''
     secrets:
-        QUAY_PASSWORD:
-            description: 'Quay password for pushing images'
-            required: false
-        QUAY_TEMP_PASSWORD:
-            description: 'Quay password for pushing temp tag digests'
-            required: false
+      QUAY_PASSWORD:
+        description: 'Quay password for pushing images'
+        required: false
+      QUAY_TEMP_PASSWORD:
+        description: 'Quay password for pushing temp tag digests'
+        required: false
 
 env:
   QUAY_REPO: ${{ inputs.quay_repo }}
@@ -158,9 +158,7 @@ jobs:
           - arch: linux/arm64
             runner: ubuntu-22.04-arm
             tag: arm64
-
     steps:
-
     - name: Validate inputs (workflow_dispatch only)
       if: ${{ github.event_name == 'workflow_dispatch' }}
       run: |

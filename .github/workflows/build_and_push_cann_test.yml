@@ -39,6 +39,9 @@ on:
       HW_TOKEN_DAILY:
         description: 'Huawei Cloud SWR token for daily'
         required: true
+      QUAY_DAILY_PASSWORD:
+        description: 'Quay password for daily'
+        required: true
   workflow_dispatch:
     inputs:
       cann_tag:
