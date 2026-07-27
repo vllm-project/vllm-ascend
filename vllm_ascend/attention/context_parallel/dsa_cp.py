@@ -1191,7 +1191,6 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             pool=AscendDSACPImpl.o_proj_full_pools,
             pool_key_prefix=(type(linear_method).__qualname__, name, "dsa_cp_o_proj"),
             clone_tp_tensors=True,
-            purpose="dsa_cp_o_proj",
         )
         return linear_method, state
 

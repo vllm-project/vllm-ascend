@@ -175,26 +175,6 @@ class AscendLinearScheme(ABC):
         """
         return
 
-    def get_tp_weight_gather_specs(
-        self,
-        layer: torch.nn.Module,
-        purpose: str | None = None,
-    ) -> tuple[TPWeightGatherSpec, ...]:
-        """Return TP all-gather specs for this quantization scheme.
-
-        Subclasses own the concrete attribute list because processed weight and
-        scale layouts differ by quantization type.
-        """
-        return self.tp_weight_gather_specs
-
-    def get_tp_weight_repeat_specs(
-        self,
-        layer: torch.nn.Module,
-        purpose: str | None = None,
-    ) -> tuple[TPWeightRepeatSpec, ...]:
-        """Return TP repeat specs for this quantization scheme."""
-        return self.tp_weight_repeat_specs
-
     @staticmethod
     def split_tensor_for_tp(
         tensor: torch.Tensor,
@@ -214,40 +194,6 @@ class AscendLinearScheme(ABC):
         shard = tensor.narrow(dim, tp_rank * shard_size, shard_size)
         return shard.contiguous() if contiguous else shard
 
-    @staticmethod
-    def _make_full_shape(shape: tuple[int, ...], tp_size: int, dim: int) -> tuple[int, ...]:
-        full_shape = list(shape)
-        full_shape[dim] *= tp_size
-        return tuple(full_shape)
-
-    @staticmethod
-    def _move_gather_dim_to_front(tensor: torch.Tensor, dim: int) -> torch.Tensor:
-        if dim == 0:
-            return tensor
-        return torch.movedim(tensor, dim, 0).contiguous()
-
-    @staticmethod
-    def _restore_gather_dim_from_front(tensor: torch.Tensor, dim: int) -> torch.Tensor:
-        if dim == 0:
-            return tensor
-        return torch.movedim(tensor, 0, dim)
-
-    @staticmethod
-    def _get_or_create_pool_tensor(
-        pool: dict[Any, torch.Tensor] | None,
-        key: Any,
-        shape: tuple[int, ...],
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> torch.Tensor:
-        if pool is None:
-            return torch.empty(shape, dtype=dtype, device=device)
-        pooled = pool.get(key)
-        if pooled is None:
-            pooled = torch.empty(shape, dtype=dtype, device=device)
-            pool[key] = pooled
-        return pooled
-
     def enable_tp_weight_switch(
         self,
         layer: torch.nn.Module,
@@ -256,7 +202,6 @@ class AscendLinearScheme(ABC):
         pool: dict[Any, torch.Tensor] | None = None,
         pool_key_prefix: Any | None = None,
         clone_tp_tensors: bool = False,
-        purpose: str | None = None,
     ) -> TPWeightSwitchState:
         """Enable TP/full weight switching for one linear layer.
 
@@ -265,8 +210,8 @@ class AscendLinearScheme(ABC):
         switch a layer out of its normal TP layout.
         """
         state = TPWeightSwitchState()
-        gather_specs = self.get_tp_weight_gather_specs(layer, purpose=purpose)
-        repeat_specs = self.get_tp_weight_repeat_specs(layer, purpose=purpose)
+        gather_specs = self.tp_weight_gather_specs
+        repeat_specs = self.tp_weight_repeat_specs
 
         for spec in gather_specs:
             tensor = getattr(layer, spec.attr_name, None)
@@ -286,8 +231,13 @@ class AscendLinearScheme(ABC):
             if clone_tp_tensors:
                 with torch.no_grad():
                     tensor.set_(tp_tensor)
-            full_shape = self._make_full_shape(tuple(tp_tensor.shape), tp_size, dim)
-            gather_input = self._move_gather_dim_to_front(tp_tensor, dim)
+            full_shape_list = list(tp_tensor.shape)
+            full_shape_list[dim] *= tp_size
+            full_shape = tuple(full_shape_list)
+            if dim == 0:
+                gather_input = tp_tensor
+            else:
+                gather_input = torch.movedim(tp_tensor, dim, 0).contiguous()
             gather_shape = (full_shape[dim], *full_shape[:dim], *full_shape[dim + 1 :])
             pool_key = (
                 pool_key_prefix,
@@ -298,14 +248,17 @@ class AscendLinearScheme(ABC):
                 dim,
                 full_shape,
             )
-            gather_output = self._get_or_create_pool_tensor(
-                pool,
-                pool_key,
-                gather_shape,
-                tp_tensor.dtype,
-                tp_tensor.device,
-            )
-            full_tensor = self._restore_gather_dim_from_front(gather_output, dim)
+            if pool is None:
+                gather_output = torch.empty(gather_shape, dtype=tp_tensor.dtype, device=tp_tensor.device)
+            else:
+                gather_output = pool.get(pool_key)
+                if gather_output is None:
+                    gather_output = torch.empty(gather_shape, dtype=tp_tensor.dtype, device=tp_tensor.device)
+                    pool[pool_key] = gather_output
+            if dim == 0:
+                full_tensor = gather_output
+            else:
+                full_tensor = torch.movedim(gather_output, 0, dim)
             state.gather_parts[spec.attr_name] = TPWeightGatherPart(
                 spec=spec,
                 tp_tensor=tp_tensor,

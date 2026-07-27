@@ -979,7 +979,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                 self.tp_size,
                 pool=AscendSFAImpl.o_proj_full_pools,
                 pool_key_prefix=(type(linear_method).__qualname__, "sfa_o_proj"),
-                purpose="sfa_dsa_cp_o_proj",
             )
             self._o_proj_tp_weight_switch_enabled = True
             return
