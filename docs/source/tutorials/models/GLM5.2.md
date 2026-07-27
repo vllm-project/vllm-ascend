@@ -176,7 +176,7 @@ The parameters are explained as follows:
     1. If the GPU memory is insufficient for the sequence length, enable the DCP configuration. However, enabling the DCP configuration will affect the TPOT performance.
     2. If the GPU memory is sufficient, you are advised not to enable the DCP configuration.
 
-### 5.2Multi-node Deployment
+### 5.2 Multi-node Deployment
 
 If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
 
