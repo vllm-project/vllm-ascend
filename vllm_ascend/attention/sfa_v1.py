@@ -1,6 +1,7 @@
 import enum
+import typing
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import scipy  # type: ignore
 import torch
@@ -79,7 +80,7 @@ class PreprocessType(enum.Enum):
     MLAPO = "mlapo"
 
 
-class _ByteGatherPart(NamedTuple):
+class _ByteGatherPart(typing.NamedTuple):
     name: str
     shape: tuple[int, ...]
     dtype: torch.dtype
@@ -93,7 +94,7 @@ O_PROJ_ACLNN_INPUT_PARAMS = (
 )
 
 
-class DCPGatherContext(NamedTuple):
+class DCPGatherContext(typing.NamedTuple):
     """State needed to finish an async fused DCP all-gather."""
 
     # The gathered fused tensor.
