@@ -152,12 +152,12 @@
 #      `vllm.v1.engine.core.resolve_kv_cache_block_sizes`
 #    Why:
 #       vLLM PR #40860 added a restriction that hybrid KV cache groups with
-#       multiple block sizes do not support context parallelism (dcp/pcp > 1).
+#       multiple block sizes do not support decode context parallelism.
 #       This restriction is correct for CUDA but not for Ascend, which
 #       implements context parallelism for MLA and SWA-MLA layers separately.
 #    How：
 #       Monkey-patch resolve_kv_cache_block_sizes to handle the multiple-groups
-#       + CP case by returning lcm(block_sizes) * dcp * pcp as scheduler_block_size
+#       + DCP case by returning lcm(block_sizes) * dcp as scheduler_block_size
 #       instead of raising ValueError.
 #    Related PR (if no, explain why):
 #       vLLM PR #40860 ([Feat] DeepSeek V4 Rebased).
@@ -198,7 +198,7 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.single_type_kv_cache_manager.MambaManager`
 #    Why:
-#       1. Upstream hybrid prefix cache lookup does not support PCP/DCP.
+#       1. Upstream hybrid prefix cache lookup does not support DCP.
 #       2. Upstream MambaManager#get_num_blocks_to_allocate give the
 #          wrong number of blocks when an external cache hit occurred
 #    How:
@@ -210,8 +210,8 @@
 #       1. https://github.com/vllm-project/vllm/pull/40996
 #       2. https://github.com/vllm-project/vllm/pull/46892
 #    Future Plan:
-#       1. Upstream PR #40996 adds hybrid prefix cache lookup for DCP only; PCP is
-#          not supported yet. Remove this patch once upstream supports both PCP and DCP.
+#       1. Remove this patch once the supported upstream revision includes
+#          hybrid prefix cache lookup for DCP.
 #       2. Remove this patch once upstream accept 46892 pr or fixed the bug by other pr.
 #
 # ** 11. File: platform/patch_minimax_m2_config.py**
@@ -1218,3 +1218,26 @@
 #       make UvaBuffer a dummy class, mimic the interface of vllm UvaBuffer.
 #    Future Plan:
 #       Remove this patch when NPU support UVA.
+#
+# ** 36. File: hunyuan_vl_processor_compat.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.hunyuan_vision.HunYuanVLProcessingInfo.get_hf_processor`
+#      and the vLLM processor lazy registry
+#    Why:
+#       The supported vLLM refs currently straddle the HunyuanVL processor
+#       cleanup. v0.25.1 still bundles the processor and retains stale
+#       lazy-registry entries, while the verified main ref uses the native
+#       Transformers processor and has the upstream registry cleanup.
+#    How:
+#       Normalize the processor registry, loader, and tokenizer schema on both
+#       refs, and preserve the correct image-token protocol for each lane.
+#    Related PR:
+#       1. https://github.com/vllm-project/vllm/pull/47872
+#       2. https://github.com/vllm-project/vllm/pull/47867
+#    Future Plan:
+#       Remove this patch and delete the `install_hunyuan_vl_processor_compat()`
+#       call from `vllm_ascend/__init__.py` only after both supported vLLM refs
+#       contain `4a6440acefbd4d977620bdb6dfb7fb325cd9bda7` (vLLM PR #47867,
+#       merged into vLLM main at 2026-07-11 07:56:14 UTC), or an equivalent
+#       fix, and the supported HunyuanOCR tokenizer artifacts expose the named
+#       special-token schema required by Transformers 5.13.

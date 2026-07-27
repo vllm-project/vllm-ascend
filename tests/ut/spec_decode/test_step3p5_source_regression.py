@@ -60,9 +60,9 @@ def test_step3p5_first_pass_forwards_rejected_token_counts() -> None:
     assert "num_rejected_tokens_gpu" in [arg.arg for arg in set_inputs.args.args]
     assert "num_rejected_tokens_gpu=num_rejected_tokens_gpu" in _src(propose)
 
-    # Guard against the override creeping back: the previous step3p5 simple-path
-    # was byte-equivalent to the base's `not needs_extra_input_slots and
-    # pcp_size <= 1` branch, so a re-override is almost certainly redundant.
+    # Guard against the override creeping back: the previous Step3.5
+    # implementation duplicated the base simple path, so a re-override is
+    # almost certainly redundant.
     step_methods = {n.name for n in _class(STEP3P5, "AscendStep3p5MTPProposer").body if isinstance(n, ast.FunctionDef)}
     assert "set_inputs_first_pass" not in step_methods
 
