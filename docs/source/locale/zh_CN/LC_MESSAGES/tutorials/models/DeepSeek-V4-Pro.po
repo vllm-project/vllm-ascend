@@ -1,14 +1,8 @@
-# SOME DESCRIPTIVE TITLE.
-# Copyright (C) 2025, vllm-ascend team
-# This file is distributed under the same license as the vllm-ascend
-# package.
-# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
-#
 msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-02 07:02+0000\n"
+"POT-Creation-Date: 2026-07-27 10:18+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -137,7 +131,9 @@ msgid ""
 "Select an image based on your machine type and start the docker image on "
 "your node, refer to [using docker](../../installation.md#set-up-using-"
 "docker)."
-msgstr "根据机器类型选择镜像并在节点上启动docker镜像，参考[使用docker](../../installation.md#set-up-using-docker)。"
+msgstr ""
+"根据机器类型选择镜像并在节点上启动docker镜像，参考[使用docker](../../installation.md#set-up-"
+"using-docker)。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md
 msgid "A3 series"
@@ -200,8 +196,8 @@ msgid ""
 "800 A3 (128G × 8) nodes or 4 Atlas 800 A2 (64G × 8) nodes. Run the "
 "following scripts on each node respectively."
 msgstr ""
-"量化模型`DeepSeek-V4-Pro-w4a8-mtp`至少需要2个Atlas 800 A3(128G × 8)节点或4个Atlas 800"
-" A2(64G × 8)节点。请分别在每个节点上运行以下脚本。"
+"量化模型`DeepSeek-V4-Pro-w4a8-mtp`至少需要2个Atlas 800 A3(128G × 8)节点或4个Atlas 800 "
+"A2(64G × 8)节点。请分别在每个节点上运行以下脚本。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:150
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:309
@@ -226,7 +222,9 @@ msgid ""
 "`--data-parallel-start-rank` specifies the starting data parallel rank of"
 " the current node. Each node must be set to a unique value (e.g., Node0 ="
 " 0, Node1 = 1)."
-msgstr "`--data-parallel-start-rank`指定当前节点的数据并行起始rank。每个节点必须设置为唯一值(例如，Node0 = 0, Node1 = 1)。"
+msgstr ""
+"`--data-parallel-start-rank`指定当前节点的数据并行起始rank。每个节点必须设置为唯一值(例如，Node0 = 0, "
+"Node1 = 1)。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:430
 msgid ""
@@ -258,7 +256,9 @@ msgid ""
 "`--compilation-config '{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}'` "
 "enables full ACL graph execution in the decode phase to reduce scheduling"
 " latency."
-msgstr "`--compilation-config '{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}'`在解码阶段启用完整ACL图执行以减少调度延迟。"
+msgstr ""
+"`--compilation-config "
+"'{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}'`在解码阶段启用完整ACL图执行以减少调度延迟。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:435
 msgid ""
@@ -313,7 +313,9 @@ msgid ""
 "node groups, each configured independently. This architecture is "
 "recommended for production deployments with concurrent multi-user "
 "workloads, where stable latency and high throughput are both required."
-msgstr "在标准部署模式下，Prefill(提示处理)和Decode(令牌生成)任务在同一组NPU上运行。PD(Prefill-Decode)分离通过在专用节点组上分别运行Prefill和Decode来解决此问题，每个节点组独立配置。此架构推荐用于具有并发多用户工作负载的生产部署，其中需要稳定的延迟和高吞吐量。"
+msgstr ""
+"在标准部署模式下，Prefill(提示处理)和Decode(令牌生成)任务在同一组NPU上运行。PD(Prefill-"
+"Decode)分离通过在专用节点组上分别运行Prefill和Decode来解决此问题，每个节点组独立配置。此架构推荐用于具有并发多用户工作负载的生产部署，其中需要稳定的延迟和高吞吐量。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:468
 msgid ""
@@ -330,9 +332,6 @@ msgid ""
 "This section shows the deployment guide of DeepSeek-V4-Pro on Atlas 800 "
 "A3 (128G × 8) multi-node environment with 1P1D for better performance."
 msgstr "本节展示在Atlas 800 A3(128G × 8)多节点环境中使用1P1D部署DeepSeek-V4-Pro的指南，以获得更佳性能。"
-
-msgid ""
-msgstr ""
 
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:474
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:850
@@ -562,12 +561,15 @@ msgid ""
 msgstr "`VLLM_ASCEND_ENABLE_FUSED_MC2=1`：启用Fused MC2融合算子以加速预填充节点(A3系列)上的通信。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1177
+#, fuzzy
 msgid ""
 "`recompute_scheduler_enable: true`: enables the recomputation scheduler. "
 "When the KV Cache of the decode node is insufficient, requests will be "
 "sent to the prefill node to recompute the KV Cache. In the PD separation "
-"scenario, it is recommended to enable this configuration on decode nodes."
-msgstr "`recompute_scheduler_enable: true`：启用重计算调度器。当解码节点的KV Cache不足时，请求将被发送到预填充节点以重新计算KV Cache。在PD分离场景中，建议在解码节点上启用此配置。"
+"scenario, enable this configuration only on decode nodes."
+msgstr ""
+"`recompute_scheduler_enable: true`：启用重计算调度器。当解码节点的KV "
+"Cache不足时，请求将被发送到预填充节点以重新计算KV Cache。在PD分离场景中，建议在解码节点上启用此配置。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1178
 msgid ""
@@ -727,6 +729,18 @@ msgstr "9性能调优"
 msgid "9.1 Recommended Configurations"
 msgstr "9.1推荐配置"
 
+msgid ""
+msgstr ""
+"Project-Id-Version: PACKAGE VERSION\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2024-01-01 00:00+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1242
 msgid ""
 "**Note**: The following configurations are validated in specific test "
@@ -735,8 +749,7 @@ msgid ""
 "rate, precision requirements, and deployment machine ratios. It is "
 "recommended to refer to Section 9.2 for tuning based on actual "
 "conditions."
-msgstr ""
-"**注意**：以下配置在特定测试环境中验证，仅供参考。最佳配置取决于最大输入/输出长度、前缀缓存命中率、精度要求和部署机器比例等因素。建议参考第9.2节根据实际情况进行调优。"
+msgstr "**注意**：以下配置在特定测试环境中验证，仅供参考。最佳配置取决于最大输入/输出长度、前缀缓存命中率、精度要求和部署机器比例等因素。建议参考第9.2节根据实际情况进行调优。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1244
 msgid "Table 1: Scenario Overview"
@@ -902,8 +915,7 @@ msgstr "120"
 msgid ""
 "For complete startup commands and parameter descriptions, please refer to"
 " the deployment examples in [Chapter 5](#5-online-service-deployment)."
-msgstr ""
-"完整的启动命令和参数描述请参考[第5章](#5-online-service-deployment)中的部署示例。"
+msgstr "完整的启动命令和参数描述请参考[第5章](#5-online-service-deployment)中的部署示例。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1265
 msgid "**Notice:**"
@@ -915,15 +927,15 @@ msgid ""
 " usage scenario. For other settings, please refer to the [Deployment](#5"
 "-online-service-deployment) chapter."
 msgstr ""
-"`max-model-len`和`max-num-seqs`需要根据实际使用场景设置。其他设置请参考[部署](#5-online-service-deployment)章节。"
+"`max-model-len`和`max-num-seqs`需要根据实际使用场景设置。其他设置请参考[部署](#5-online-service-"
+"deployment)章节。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1269
 msgid ""
 "Currently, we support 4K prefix cache hit in an experimental manner. You "
 "only need to change the value of --block-size from 128 to 32 in the "
 "service."
-msgstr ""
-"目前，我们以实验性方式支持4K前缀缓存命中。您只需将服务中的--block-size值从128改为32即可。"
+msgstr "目前，我们以实验性方式支持4K前缀缓存命中。您只需将服务中的--block-size值从128改为32即可。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1271
 msgid "9.2 Tuning Guidelines"
@@ -938,16 +950,14 @@ msgid ""
 "Please refer to the [Public Performance Tuning "
 "Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md)"
 " for tuning methods."
-msgstr ""
-"调优方法请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。"
+msgstr "调优方法请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1277
 msgid ""
 "Please refer to the [Feature "
 "Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
-msgstr ""
-"详细功能描述请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)。"
+msgstr "详细功能描述请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1279
 msgid "10 FAQ"
@@ -959,8 +969,7 @@ msgid ""
 "please refer to the [Public "
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this "
 "chapter only covers model-specific issues."
-msgstr ""
-"常见环境、安装和通用参数问题请参考[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)；本章仅涵盖模型特定问题。"
+msgstr "常见环境、安装和通用参数问题请参考[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)；本章仅涵盖模型特定问题。"
 
 #~ msgid "Environment Preparation"
 #~ msgstr "环境准备"

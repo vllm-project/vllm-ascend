@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-02 07:02+0000\n"
+"POT-Creation-Date: 2026-07-27 10:18+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -286,8 +286,29 @@ msgstr ""
 "/vllm-project/vllm-"
 "ascend/blob/main/examples/external_online_dp/run_dp_template.sh)"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:250
+msgid ""
+"**Note**: If speculative decoding is enabled, `num_speculative_tokens` "
+"should be subject to one of the following conditions:"
+msgstr ""
+"**注意**：如果启用了推测解码，`num_speculative_tokens` 应满足以下条件之一："
+
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:252
+msgid ""
+"Hybrid Mamba models (e.g., Qwen-Next and Qwen3.5 series): "
+"`num_speculative_tokens` should be equal on P nodes and D nodes."
+msgstr ""
+"混合 Mamba 模型（例如 Qwen-Next 和 Qwen3.5 系列）：P 节点和 D 节点上的 `num_speculative_tokens` 应相等。"
+
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:253
+msgid ""
+"Other models: `num_speculative_tokens` on P nodes should be 1, and "
+"`num_speculative_tokens` on D nodes should be greater or equal to 1."
+msgstr ""
+"其他模型：P 节点上的 `num_speculative_tokens` 应为 1，D 节点上的 `num_speculative_tokens` 应大于或等于 1。"
+
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:255
 msgid "Layerwise"
 msgstr "逐层模式"
 
@@ -308,32 +329,32 @@ msgid "Decoder node 2"
 msgstr "解码节点 2"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:489
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:494
 msgid "Non-layerwise"
 msgstr "非逐层模式"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:727
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:732
 msgid "Start the service"
 msgstr "启动服务"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:740
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:745
 msgid "Example Proxy for Deployment"
 msgstr "部署示例代理"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:742
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:747
 msgid ""
 "Run a proxy server on the same node where your prefiller service instance"
 " is deployed. You can find the proxy implementation in the repository's "
 "examples directory."
 msgstr "在与预填充服务实例相同的节点上运行代理服务器。您可以在仓库的 examples 目录中找到代理实现。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:744
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:749
 msgid ""
 "We provide two different proxy implementations with distinct request "
 "routing behaviors:"
 msgstr "我们提供了两种具有不同请求路由行为的代理实现："
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:746
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:751
 msgid ""
 "**`load_balance_proxy_layerwise_server_example.py`**: Requests are first "
 "routed to the D nodes, which then forward to the P nodes as needed.This "
@@ -348,7 +369,7 @@ msgstr ""
 "/vllm-project/vllm-"
 "ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py)"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:748
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:753
 msgid ""
 "**`load_balance_proxy_server_example.py`**: Requests are first routed to "
 "the P nodes, which then forward to the D nodes for subsequent "
@@ -363,63 +384,63 @@ msgstr ""
 "/vllm-project/vllm-"
 "ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:806
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:811
 msgid "Parameter"
 msgstr "参数"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:806
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:811
 msgid "meaning"
 msgstr "含义"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:806
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:811
 msgid "--port"
 msgstr "--port"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:806
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:811
 msgid "Proxy service Port"
 msgstr "代理服务端口"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:806
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:811
 msgid "--host"
 msgstr "--host"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:806
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:811
 msgid "Proxy service Host IP"
 msgstr "代理服务主机 IP"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:806
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:811
 msgid "--prefiller-hosts"
 msgstr "--prefiller-hosts"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:806
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:811
 msgid "Hosts of prefiller nodes"
 msgstr "预填充节点的主机地址"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:806
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:811
 msgid "--prefiller-ports"
 msgstr "--prefiller-ports"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:806
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:811
 msgid "Ports of prefiller nodes"
 msgstr "预填充节点的端口"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:806
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:811
 msgid "--decoder-hosts"
 msgstr "--decoder-hosts"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:806
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:811
 msgid "Hosts of decoder nodes"
 msgstr "解码节点的主机地址"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:806
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:811
 msgid "--decoder-ports"
 msgstr "--decoder-ports"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:806
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:811
 msgid "Ports of decoder nodes"
 msgstr "解码节点的端口"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:869
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:874
 msgid ""
 "You can get the proxy program in the repository's examples, "
 "[load\\_balance\\_proxy\\_server\\_example.py](https://github.com/vllm-"
@@ -431,11 +452,11 @@ msgstr ""
 "/vllm-project/vllm-"
 "ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:871
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:876
 msgid "Benchmark"
 msgstr "基准测试"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:873
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:878
 msgid ""
 "We recommend use aisbench tool to assess performance. "
 "[aisbench](https://github.com/AISBench/benchmark) Execute the following "
@@ -445,17 +466,17 @@ msgstr ""
 "工具进行性能评估。[aisbench](https://github.com/AISBench/benchmark) 执行以下命令安装 "
 "aisbench"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:881
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:886
 msgid ""
 "You need to cancel the http proxy before assessing performance, as "
 "following"
 msgstr "在评估性能之前，需要取消 HTTP 代理，操作如下"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:889
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:894
 msgid "You can place your datasets in the dir: `benchmark/ais_bench/datasets`"
 msgstr "您可以将数据集放置在目录 `benchmark/ais_bench/datasets` 中"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:890
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:895
 msgid ""
 "You can change the configuration in the dir "
 ":`benchmark/ais_bench/benchmark/configs/models/vllm_api` Take the "
@@ -464,13 +485,13 @@ msgstr ""
 "您可以在目录 `benchmark/ais_bench/benchmark/configs/models/vllm_api` 中修改配置。以 "
 "`vllm_api_stream_chat.py` 为例"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:916
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:921
 msgid ""
 "Take gsm8k dataset for example, execute the following commands  to assess"
 " performance."
 msgstr "以 gsm8k 数据集为例，执行以下命令以评估性能。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:922
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:927
 msgid ""
 "For more details for commands and parameters for aisbench, refer to  "
 "[aisbench](https://github.com/AISBench/benchmark)"
@@ -478,15 +499,15 @@ msgstr ""
 "有关 aisbench 命令和参数的更多详细信息，请参阅 "
 "[aisbench](https://github.com/AISBench/benchmark)"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:924
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:929
 msgid "FAQ"
 msgstr "常见问题"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:926
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:931
 msgid "1. Prefiller nodes need to warmup"
 msgstr "1.预填充节点需要预热"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:928
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:933
 msgid ""
 "Since the computation of some NPU operators requires several rounds of "
 "warm-up to achieve best performance, we recommend preheating the service "
@@ -494,10 +515,10 @@ msgid ""
 "best end-to-end throughput."
 msgstr "由于某些 NPU 算子的计算需要多轮预热才能达到最佳性能，我们建议在进行性能测试前，先用一些请求对服务进行预热，以获得最佳的端到端吞吐量。"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:930
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:935
 msgid "Verification"
 msgstr "验证"
 
-#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:932
+#: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:937
 msgid "Check service health using the proxy server endpoint."
 msgstr "使用代理服务器端点检查服务健康状态。"

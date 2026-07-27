@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-02 07:02+0000\n"
+"POT-Creation-Date: 2026-07-27 10:18+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -20,8 +20,8 @@ msgstr ""
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/tutorials/models/Qwen3-Dense.md:1
-msgid "Qwen3-Dense (Qwen3-0.6B/1.7B/4B/8B/14B/32B, W8A8, W4A8, W4A4)"
-msgstr "Qwen3-Dense（Qwen3-0.6B/1.7B/4B/8B/14B/32B，W8A8，W4A8，W4A4）"
+msgid "Qwen3-Dense (Qwen3-0.6B/1.7B/4B/8B/14B/32B, W8A8, W4A8, W4A4, W8A8SC-310)"
+msgstr "Qwen3-Dense（Qwen3-0.6B/1.7B/4B/8B/14B/32B，W8A8，W4A8，W4A4，W8A8SC-310）"
 
 #: ../../source/tutorials/models/Qwen3-Dense.md:3
 msgid "1 Introduction"
@@ -35,11 +35,13 @@ msgid ""
 "advancements in reasoning, instruction-following, agent capabilities, and"
 " multilingual support. The Dense variants covered in this document "
 "include Qwen3-0.6B, 1.7B, 4B, 8B, 14B, and 32B, along with their "
-"quantized versions (W8A8, W4A8, W4A4) optimized for Ascend NPU "
-"deployment."
+"quantized versions (W8A8, W4A8, W4A4, and W8A8SC-310) optimized for "
+"Ascend NPU deployment."
 msgstr ""
 "Qwen3 是通义千问系列最新一代大语言模型，提供全面的稠密和混合专家（MoE）模型。基于大规模训练，Qwen3 "
-"在推理、指令遵循、智能体能力和多语言支持方面取得了突破性进展。本文档涵盖的 Dense 变体包括 Qwen3-0.6B、1.7B、4B、8B、14B 和 32B，以及针对 Ascend NPU 部署优化的量化版本（W8A8、W4A8、W4A4）。"
+"在推理、指令遵循、智能体能力和多语言支持方面取得了突破性进展。本文档涵盖的 Dense 变体包括 "
+"Qwen3-0.6B、1.7B、4B、8B、14B 和 32B，以及针对 Ascend NPU "
+"部署优化的量化版本（W8A8、W4A8、W4A4 和 W8A8SC-310）。"
 
 #: ../../source/tutorials/models/Qwen3-Dense.md:7
 msgid ""
@@ -50,19 +52,23 @@ msgid ""
 "service-level configurations to fit different use cases, you can ensure "
 "optimal performance across various scenarios."
 msgstr ""
-"本文档将演示在 vLLM-Ascend 环境中对 Qwen3 Dense 模型的主要验证步骤，包括支持的特性、环境准备、模型量化、单节点和多节点部署，以及精度和性能评估。通过针对不同用例定制服务级配置，您可以确保在各种场景下获得最佳性能。"
+"本文档将演示在 vLLM-Ascend 环境中对 Qwen3 Dense "
+"模型的主要验证步骤，包括支持的特性、环境准备、模型量化、单节点和多节点部署，以及精度和性能评估。通过针对不同用例定制服务级配置，您可以确保在各种场景下获得最佳性能。"
 
 #: ../../source/tutorials/models/Qwen3-Dense.md:9
 msgid ""
 "The Qwen3 Dense models are first supported in v0.8.4rc2. W8A8 "
 "quantization was first supported in v0.8.4rc2, W4A8 quantization is "
-"supported since v0.9.1rc2, and W4A4 is supported since v0.11.0rc1. This "
-"document is validated and written based on **vLLM-Ascend v0.21.0**. All "
-"**v0.21.0 and later versions** can run stably. To use the latest "
-"features, it is recommended to use the latest release candidate or "
-"official version."
+"supported since v0.9.1rc2, and W4A4 is supported since v0.11.0rc1. Atlas "
+"inference products use the W8A8SC-310 quantized weights listed in this "
+"tutorial. This document is validated and written based on **vLLM-Ascend "
+"v0.21.0**. All **v0.21.0 and later versions** can run stably. To use the "
+"latest features, it is recommended to use the latest release candidate or"
+" official version."
 msgstr ""
-"Qwen3 Dense 模型首次在 v0.8.4rc2 中支持。W8A8 量化首次在 v0.8.4rc2 中支持，W4A8 量化自 v0.9.1rc2 起支持，W4A4 自 v0.11.0rc1 起支持。本文档基于 **vLLM-Ascend v0.21.0** 验证和编写。所有 **v0.21.0 及更高版本** 均可稳定运行。要使用最新特性，建议使用最新的候选版本或正式版本。"
+"Qwen3 Dense 模型首次在 v0.8.4rc2 中支持。W8A8 量化首次在 v0.8.4rc2 中支持，W4A8 量化自 "
+"v0.9.1rc2 起支持，W4A4 自 v0.11.0rc1 起支持。Atlas 推理产品使用本教程中列出的 W8A8SC-310 量化权重。本文档基于 **vLLM-Ascend v0.21.0** "
+"验证和编写。所有 **v0.21.0 及更高版本** 均可稳定运行。要使用最新特性，建议使用最新的候选版本或正式版本。"
 
 #: ../../source/tutorials/models/Qwen3-Dense.md:11
 msgid "2 Supported Features"
@@ -117,8 +123,10 @@ msgid "Qwen3-0.6B"
 msgstr "Qwen3-0.6B"
 
 #: ../../source/tutorials/models/Qwen3-Dense.md
-msgid "1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8)"
-msgstr "1 Atlas 800I A3（64G × 16）或 1 Atlas 800I A2（64G × 8）"
+msgid ""
+"1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products "
+"(64G × 8)"
+msgstr "1 Atlas A3 推理产品（64G × 16），1 Atlas A2 推理产品（64G × 8）"
 
 #: ../../source/tutorials/models/Qwen3-Dense.md
 msgid "[Download](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B)"
@@ -165,8 +173,8 @@ msgid "[Download](https://modelers.cn/models/Modelers_Park/Qwen3-32B)"
 msgstr "[下载](https://modelers.cn/models/Modelers_Park/Qwen3-32B)"
 
 #: ../../source/tutorials/models/Qwen3-Dense.md:34
-msgid "**Quantized Versions:**"
-msgstr "**量化版本：**"
+msgid "**Quantized Versions for Atlas A2/A3 inference products:**"
+msgstr "**Atlas A2/A3 推理产品的量化版本：**"
 
 #: ../../source/tutorials/models/Qwen3-Dense.md
 msgid "Quantization"
@@ -179,6 +187,12 @@ msgstr "Qwen3-8B-W4A8"
 #: ../../source/tutorials/models/Qwen3-Dense.md
 msgid "W4A8"
 msgstr "W4A8"
+
+#: ../../source/tutorials/models/Qwen3-Dense.md
+msgid ""
+"1 Atlas A3 inference products (64G × 16) or 1 Atlas A2 inference products"
+" (64G × 8)"
+msgstr "1 Atlas A3 推理产品（64G × 16）或 1 Atlas A2 推理产品（64G × 8）"
 
 #: ../../source/tutorials/models/Qwen3-Dense.md
 msgid "[Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8)"
@@ -201,7 +215,7 @@ msgid "Qwen3-32B-W8A8"
 msgstr "Qwen3-32B-W8A8"
 
 #: ../../source/tutorials/models/Qwen3-Dense.md
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
+#: ../../source/tutorials/models/Qwen3-Dense.md:378
 msgid "W8A8"
 msgstr "W8A8"
 
@@ -210,16 +224,62 @@ msgid "[Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8)"
 msgstr "[下载](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8)"
 
 #: ../../source/tutorials/models/Qwen3-Dense.md:42
+msgid "**Quantized Versions for Atlas inference products:**"
+msgstr "**Atlas 推理产品的量化版本：**"
+
+#: ../../source/tutorials/models/Qwen3-Dense.md
+msgid "Qwen3-8B-W8A8SC"
+msgstr "Qwen3-8B-W8A8SC"
+
+#: ../../source/tutorials/models/Qwen3-Dense.md
+msgid "W8A8SC"
+msgstr "W8A8SC"
+
+#: ../../source/tutorials/models/Qwen3-Dense.md
+msgid "Atlas inference products (TP1)"
+msgstr "Atlas 推理产品（TP1）"
+
+#: ../../source/tutorials/models/Qwen3-Dense.md
+msgid ""
+"[Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-8B-"
+"w8a8sc-310-vllm)"
+msgstr "[下载](https://www.modelscope.cn/models/Eco-Tech/Qwen3-8B-w8a8sc-310-vllm)"
+
+#: ../../source/tutorials/models/Qwen3-Dense.md
+msgid "Qwen3-14B-W8A8SC"
+msgstr "Qwen3-14B-W8A8SC"
+
+#: ../../source/tutorials/models/Qwen3-Dense.md
+msgid ""
+"[Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-14B-"
+"w8a8sc-310-vllm)"
+msgstr "[下载](https://www.modelscope.cn/models/Eco-Tech/Qwen3-14B-w8a8sc-310-vllm)"
+
+#: ../../source/tutorials/models/Qwen3-Dense.md
+msgid "Qwen3-32B-W8A8SC"
+msgstr "Qwen3-32B-W8A8SC"
+
+#: ../../source/tutorials/models/Qwen3-Dense.md
+msgid "Atlas inference products (TP4)"
+msgstr "Atlas 推理产品（TP4）"
+
+#: ../../source/tutorials/models/Qwen3-Dense.md
+msgid ""
+"[Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-32B-"
+"w8a8sc-310-vllm)"
+msgstr "[下载](https://www.modelscope.cn/models/Eco-Tech/Qwen3-32B-w8a8sc-310-vllm)"
+
+#: ../../source/tutorials/models/Qwen3-Dense.md:50
 msgid ""
 "These are the recommended numbers of cards, which can be adjusted "
 "according to the actual situation."
 msgstr "这些是推荐的卡数量，可以根据实际情况进行调整。"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:44
+#: ../../source/tutorials/models/Qwen3-Dense.md:52
 msgid "3.2 Verify Multi-node Communication"
 msgstr "3.2 验证多节点通信"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:46
+#: ../../source/tutorials/models/Qwen3-Dense.md:54
 msgid ""
 "If you need to deploy a multi-node environment, verify the multi-node "
 "communication according to [Verify Multi-node Communication "
@@ -228,154 +288,172 @@ msgstr ""
 "如果需要部署多节点环境，请按照[验证多节点通信环境](../../installation.md#verify-multi-node-"
 "communication)验证多节点通信。"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:48
+#: ../../source/tutorials/models/Qwen3-Dense.md:56
 msgid "4 Installation"
 msgstr "4.安装"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:50
+#: ../../source/tutorials/models/Qwen3-Dense.md:58
 msgid "4.1 Docker Image Installation"
 msgstr "4.1 Docker 镜像安装"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:52
+#: ../../source/tutorials/models/Qwen3-Dense.md:60
 msgid "You can use the official all-in-one Docker image for Qwen3 Dense models."
 msgstr "您可以使用 Qwen3 Dense 模型的官方一体化 Docker 镜像。"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:54
+#: ../../source/tutorials/models/Qwen3-Dense.md:62
 msgid "**Docker Pull:**"
 msgstr "**Docker 拉取：**"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:62
+#: ../../source/tutorials/models/Qwen3-Dense.md:70
 msgid "**Docker Run:**"
 msgstr "**Docker 运行：**"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:64
+#: ../../source/tutorials/models/Qwen3-Dense.md:72
 msgid "Start the docker image on your each node."
 msgstr "在每个节点上启动 Docker 镜像。"
 
 #: ../../source/tutorials/models/Qwen3-Dense.md
-msgid "A3 series"
-msgstr "A3 系列"
+msgid "Atlas A3 inference products"
+msgstr "Atlas A3 推理产品"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:111
+#: ../../source/tutorials/models/Qwen3-Dense.md:119
 msgid ""
-"A3 has 8 NPUs with dual-die design (16 chips total: "
-"`/dev/davinci[0-15]`). If you are on a shared machine, map only the chips"
-" you need (e.g., `/dev/davinci[0-7]` for NPU 0-3)."
+"Atlas A3 inference products have 8 NPUs with dual-die design (16 chips "
+"total: `/dev/davinci[0-15]`). If you are on a shared machine, map only "
+"the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3)."
 msgstr ""
-"A3 有 8 个 NPU，采用双芯片设计（共 16 个芯片：`/dev/davinci[0-15]`）。如果您在共享机器上，仅映射您需要的芯片（例如，NPU 0-3 使用 `/dev/davinci[0-7]`）。"
+"Atlas A3 推理产品有 8 个 NPU，采用双芯片设计（共 16 "
+"个芯片：`/dev/davinci[0-15]`）。如果您在共享机器上，仅映射您需要的芯片（例如，NPU 0-3 使用 "
+"`/dev/davinci[0-7]`）。"
 
 #: ../../source/tutorials/models/Qwen3-Dense.md
-msgid "A2 series"
-msgstr "A2 系列"
+msgid "Atlas A2 inference products"
+msgstr "Atlas A2 推理产品"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:150
+#: ../../source/tutorials/models/Qwen3-Dense.md
+msgid "Atlas inference products"
+msgstr "Atlas 推理产品"
+
+#: ../../source/tutorials/models/Qwen3-Dense.md:191
 msgid ""
 "The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed "
 "as Python packages in site-packages."
 msgstr "默认工作目录是 `/workspace`。vLLM 和 vLLM-Ascend 作为 Python 包安装在 site-packages 中。"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:152
+#: ../../source/tutorials/models/Qwen3-Dense.md:193
 msgid ""
 "Installation Verification: After starting the container, run the "
 "following command to verify the installation:"
 msgstr "安装验证：启动容器后，运行以下命令验证安装："
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:159
+#: ../../source/tutorials/models/Qwen3-Dense.md:200
 msgid ""
 "Expected result: The container is listed with status Up. You can also "
 "verify the vllm-ascend version inside the container:"
 msgstr "预期结果：容器列出且状态为 Up。您还可以在容器内验证 vllm-ascend 版本："
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:165
+#: ../../source/tutorials/models/Qwen3-Dense.md:206
 msgid ""
 "Expected result: The version information is displayed, matching the "
 "pulled image version."
 msgstr "预期结果：显示版本信息，与拉取的镜像版本匹配。"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:167
+#: ../../source/tutorials/models/Qwen3-Dense.md:208
 msgid "4.2 Source Code Installation"
 msgstr "4.2 源码安装"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:169
-msgid "If you prefer not to use the Docker image, you can build from source:"
-msgstr "如果您不想使用 Docker 镜像，可以从源码构建："
+#: ../../source/tutorials/models/Qwen3-Dense.md:210
+msgid ""
+"If you prefer to build from source instead of using the Docker image, "
+"install vLLM-Ascend following the [Installation "
+"Guide](../../installation.md)."
+msgstr "如果您希望从源码构建而非使用 Docker 镜像，请按照[安装指南](../../installation.md)安装 vLLM-Ascend。"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:171
-msgid "Clone and install vLLM:"
-msgstr "克隆并安装 vLLM："
+#: ../../source/tutorials/models/Qwen3-Dense.md:213
+msgid ""
+"For Atlas inference products, source installation may pull in `triton` "
+"and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas "
+"inference products:"
+msgstr "对于 Atlas 推理产品，源码安装可能会引入 `triton` 和 `triton-ascend`。在 Atlas 推理产品上运行 vLLM-Ascend 之前，请先卸载它们："
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:179
-msgid "Clone and install the vLLM-Ascend repository:"
-msgstr "克隆并安装 vLLM-Ascend 仓库："
+#: ../../source/tutorials/models/Qwen3-Dense.md:221
+msgid "To verify the source installation:"
+msgstr "验证源码安装："
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:187
-msgid "**Installation Verification:**"
-msgstr "**安装验证：**"
-
-#: ../../source/tutorials/models/Qwen3-Dense.md:193
+#: ../../source/tutorials/models/Qwen3-Dense.md:227
 msgid ""
 "Expected result: The version information is displayed, confirming a "
 "successful installation."
 msgstr "预期结果：显示版本信息，确认安装成功。"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:196
+#: ../../source/tutorials/models/Qwen3-Dense.md:230
 msgid ""
 "If deploying a multi-node environment, set up the environment on each "
 "node."
 msgstr "如果要部署多节点环境，需要在每个节点上设置环境。"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:199
-msgid ""
-"For more details, please refer to the [Installation "
-"Guide](../../installation.md)."
-msgstr "更多详情，请参阅[安装指南](../../installation.md)。"
-
-#: ../../source/tutorials/models/Qwen3-Dense.md:201
+#: ../../source/tutorials/models/Qwen3-Dense.md:233
 msgid "5 Online Service Deployment"
 msgstr "5.在线服务部署"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:203
+#: ../../source/tutorials/models/Qwen3-Dense.md:235
 msgid "5.1 Single-Node Online Deployment"
 msgstr "5.1 单节点在线部署"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:205
+#: ../../source/tutorials/models/Qwen3-Dense.md:237
 msgid ""
 "Single-node deployment completes both Prefill and Decode within the same "
 "node, suitable for development, testing, and small-to-medium scale "
 "inference scenarios."
 msgstr "单节点部署在同一节点内完成 Prefill 和 Decode，适用于开发、测试以及中小规模推理场景。"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:207
+#: ../../source/tutorials/models/Qwen3-Dense.md:239
 msgid "**Start the server:**"
 msgstr "**启动服务器：**"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:208
+#: ../../source/tutorials/models/Qwen3-Dense.md:240
 msgid ""
 "The following command is an example configuration. Adjust the parameters "
 "based on your actual scenario."
 msgstr "以下命令为示例配置，请根据实际场景调整参数。"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:210
-msgid "Atlas 800I A2/A3:"
-msgstr "Atlas 800I A2/A3："
+#: ../../source/tutorials/models/Qwen3-Dense.md
+msgid "Atlas A2 inference products / Atlas A3 inference products"
+msgstr "Atlas A2 推理产品 / Atlas A3 推理产品"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:212
+#: ../../source/tutorials/models/Qwen3-Dense.md:246
 msgid "Qwen3-32B-W8A8:"
 msgstr "Qwen3-32B-W8A8："
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:235
-msgid "Atlas 800I A2/A3："
-msgstr "Atlas 800I A2/A3："
-
-#: ../../source/tutorials/models/Qwen3-Dense.md:237
+#: ../../source/tutorials/models/Qwen3-Dense.md:269
 msgid "Qwen3-32B-W4A4:"
 msgstr "Qwen3-32B-W4A4："
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:260
-msgid "Atlas 800I A2/A3： Qwen3-8B-W4A8:"
-msgstr "Atlas 800I A2/A3：Qwen3-8B-W4A8："
+#: ../../source/tutorials/models/Qwen3-Dense.md:292
+msgid "Qwen3-8B-W4A8:"
+msgstr "Qwen3-8B-W4A8："
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:276
+#: ../../source/tutorials/models/Qwen3-Dense.md:308
+msgid ""
+"Atlas inference products use the W8A8SC-310 quantized weights from the "
+"Eco-Tech official ModelScope repository. Keep an explicit `--max-model-"
+"len` for 310P deployment to avoid OOM caused by oversized attention mask "
+"allocation."
+msgstr "Atlas 推理产品使用 Eco-Tech 官方 ModelScope 仓库中的 W8A8SC-310 量化权重。对于 310P 部署，请保持显式的 `--max-model-len` 参数，以避免因注意力掩码分配过大导致 OOM。"
+
+#: ../../source/tutorials/models/Qwen3-Dense.md:310
+msgid "Qwen3-8B-W8A8SC:"
+msgstr "Qwen3-8B-W8A8SC："
+
+#: ../../source/tutorials/models/Qwen3-Dense.md:332
+msgid "Qwen3-14B-W8A8SC:"
+msgstr "Qwen3-14B-W8A8SC："
+
+#: ../../source/tutorials/models/Qwen3-Dense.md:354
+msgid "Qwen3-32B-W8A8SC:"
+msgstr "Qwen3-32B-W8A8SC："
+
+#: ../../source/tutorials/models/Qwen3-Dense.md:380
 msgid ""
 "[vLLM Serving Arguments "
 "documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments)"
@@ -385,92 +463,88 @@ msgstr ""
 "documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments)"
 " — vLLM serve 命令的附加参数详情。"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:277
+#: ../../source/tutorials/models/Qwen3-Dense.md:381
 msgid ""
 "[Environment Variables](../../user_guide/configuration/env_vars.md) — "
 "Ascend-specific environment variables (`HCCL_*`, etc.)."
 msgstr ""
-"[环境变量](../../user_guide/configuration/env_vars.md) — "
-"Ascend 特定环境变量（`HCCL_*` 等）。"
+"[环境变量](../../user_guide/configuration/env_vars.md) — Ascend "
+"特定环境变量（`HCCL_*` 等）。"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:280
+#: ../../source/tutorials/models/Qwen3-Dense.md:384
 msgid "**Service Verification:**"
 msgstr "**服务验证：**"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:282
+#: ../../source/tutorials/models/Qwen3-Dense.md:386
 msgid ""
 "If the service starts successfully, the following startup log will be "
 "displayed:"
 msgstr "如果服务启动成功，将显示以下启动日志："
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:290
+#: ../../source/tutorials/models/Qwen3-Dense.md:394
 msgid "6 Functional Verification"
 msgstr "6 功能验证"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:292
+#: ../../source/tutorials/models/Qwen3-Dense.md:396
 msgid ""
 "After the service is started, the model can be invoked by sending a "
 "prompt."
 msgstr "服务启动后，可通过发送 prompt 来调用模型。"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:294
+#: ../../source/tutorials/models/Qwen3-Dense.md:398
 msgid "**Chat Completions API:**"
 msgstr "**Chat Completions API：**"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:311
+#: ../../source/tutorials/models/Qwen3-Dense.md:415
 msgid ""
 "Expected result: HTTP 200 with a JSON response containing the `choices` "
 "field with generated text."
 msgstr "预期结果：HTTP 200，返回包含 `choices` 字段（含生成文本）的 JSON 响应。"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:313
+#: ../../source/tutorials/models/Qwen3-Dense.md:417
 msgid "7 Accuracy Evaluation"
 msgstr "7 精度评估"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:315
-#: ../../source/tutorials/models/Qwen3-Dense.md:370
+#: ../../source/tutorials/models/Qwen3-Dense.md:419
+#: ../../source/tutorials/models/Qwen3-Dense.md:466
 msgid "Using AISBench"
 msgstr "使用 AISBench"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:317
+#: ../../source/tutorials/models/Qwen3-Dense.md:421
 msgid ""
-"For details, please refer to [Using "
+"For setup details, including installation, dataset download, and "
+"configuration, please refer to [Using "
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md)."
 msgstr ""
-"详细信息请参考[使用 AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
+"有关安装、数据集下载和配置等设置详情，请参考[使用 AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:319
-msgid "Install from source:"
-msgstr "从源码安装："
-
-#: ../../source/tutorials/models/Qwen3-Dense.md:327
-#: ../../source/tutorials/models/Qwen3-Dense.md:374
+#: ../../source/tutorials/models/Qwen3-Dense.md:423
+#: ../../source/tutorials/models/Qwen3-Dense.md:470
 msgid ""
 "The following is an example configuration for the accuracy evaluation "
 "config file:"
 msgstr "以下是精度评估配置文件的示例配置："
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:329
+#: ../../source/tutorials/models/Qwen3-Dense.md:425
 msgid "**Accuracy Evaluation Config File:**"
 msgstr "**精度评估配置文件：**"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:360
+#: ../../source/tutorials/models/Qwen3-Dense.md:456
 msgid "**Run the accuracy evaluation using the aime2025 dataset as an example:**"
 msgstr "**以 aime2025 数据集为例运行精度评估：**"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:366
+#: ../../source/tutorials/models/Qwen3-Dense.md:462
 msgid ""
 "The --models parameter value corresponds to the abbr field in the "
 "configuration file above. Adjust max_out_len, batch_size, and dataset "
 "tasks based on your scenario."
-msgstr ""
-"--models 参数值对应上述配置文件中的 abbr 字段。请根据实际场景调整 max_out_len、batch_size 和数据集任务。"
+msgstr "--models 参数值对应上述配置文件中的 abbr 字段。请根据实际场景调整 max_out_len、batch_size 和数据集任务。"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:368
+#: ../../source/tutorials/models/Qwen3-Dense.md:464
 msgid "8 Performance Evaluation"
 msgstr "8 性能评估"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:372
+#: ../../source/tutorials/models/Qwen3-Dense.md:468
 msgid ""
 "For setup details, including installation, dataset download, and "
 "configuration, please refer to [Using "
@@ -481,53 +555,53 @@ msgstr ""
 "进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation)。"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:405
+#: ../../source/tutorials/models/Qwen3-Dense.md:501
 msgid "**Run the performance evaluation using the GSM8K dataset as an example:**"
 msgstr "**以 GSM8K 数据集为例运行性能评估：**"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:411
+#: ../../source/tutorials/models/Qwen3-Dense.md:507
 msgid "Using vLLM Benchmark"
 msgstr "使用 vLLM 基准测试"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:413
+#: ../../source/tutorials/models/Qwen3-Dense.md:509
 msgid ""
 "Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) "
 "for more details."
 msgstr "更多详细信息请参考 [vLLM 基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:415
+#: ../../source/tutorials/models/Qwen3-Dense.md:511
 msgid "There are three `vllm bench` subcommands:"
 msgstr "有三个 `vllm bench` 子命令："
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:417
+#: ../../source/tutorials/models/Qwen3-Dense.md:513
 msgid "`latency`: Benchmark the latency of a single batch of requests."
 msgstr "`latency`：基准测试单批次请求的延迟。"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:418
+#: ../../source/tutorials/models/Qwen3-Dense.md:514
 msgid "`serve`: Benchmark the online serving throughput."
 msgstr "`serve`：基准测试在线服务的吞吐量。"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:419
+#: ../../source/tutorials/models/Qwen3-Dense.md:515
 msgid "`throughput`: Benchmark offline inference throughput."
 msgstr "`throughput`：基准测试离线推理的吞吐量。"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:421
+#: ../../source/tutorials/models/Qwen3-Dense.md:517
 msgid "Take `serve` as an example:"
 msgstr "以 `serve` 为例："
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:436
+#: ../../source/tutorials/models/Qwen3-Dense.md:532
 msgid "After several minutes, you will get the performance evaluation result."
 msgstr "大约几分钟后，即可获得性能评估结果。"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:438
+#: ../../source/tutorials/models/Qwen3-Dense.md:534
 msgid "9 Performance Tuning"
 msgstr "9 性能调优"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:440
+#: ../../source/tutorials/models/Qwen3-Dense.md:536
 msgid "9.1 Recommended Configurations"
 msgstr "9.1 推荐配置"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:442
+#: ../../source/tutorials/models/Qwen3-Dense.md:538
 msgid ""
 "**Note**: The following configurations are validated in specific test "
 "environments and are for reference only. The optimal configuration "
@@ -536,449 +610,449 @@ msgid ""
 "recommended to refer to Section 9.2 for tuning based on actual "
 "conditions."
 msgstr ""
-"**注意**：以下配置在特定测试环境中验证，仅供参考。最佳配置取决于最大输入/输出长度、前缀缓存命中率、精度要求和部署机器比例等因素。建议参考第 9.2 节根据实际情况进行调优。"
+"**注意**：以下配置在特定测试环境中验证，仅供参考。最佳配置取决于最大输入/输出长度、前缀缓存命中率、精度要求和部署机器比例等因素。建议参考第 "
+"9.2 节根据实际情况进行调优。"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:444
+#: ../../source/tutorials/models/Qwen3-Dense.md:540
 msgid "Table 1: Scenario Overview"
 msgstr "表 1：场景概览"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
+#: ../../source/tutorials/models/Qwen3-Dense.md:378
 msgid "Scenario"
 msgstr "场景"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
+#: ../../source/tutorials/models/Qwen3-Dense.md:378
 msgid "Deployment Mode"
 msgstr "部署模式"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
+#: ../../source/tutorials/models/Qwen3-Dense.md:378
 msgid "*Total NPUs"
 msgstr "*NPU 总数"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
+#: ../../source/tutorials/models/Qwen3-Dense.md:378
 msgid "Weight Version"
 msgstr "权重版本"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
+#: ../../source/tutorials/models/Qwen3-Dense.md:378
 msgid "Key Considerations"
 msgstr "关键考量"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
+#: ../../source/tutorials/models/Qwen3-Dense.md:378
 msgid "High Throughput"
 msgstr "高吞吐"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
+#: ../../source/tutorials/models/Qwen3-Dense.md:378
 msgid "Single-Node (TP4)"
 msgstr "单节点 (TP4)"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
-msgid "4 (A3)"
-msgstr "4 (A3)"
+#: ../../source/tutorials/models/Qwen3-Dense.md:378
+msgid "4 (Atlas A3 inference products)"
+msgstr "4 (Atlas A3 推理产品)"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
+#: ../../source/tutorials/models/Qwen3-Dense.md:378
 msgid "4-card TP maximizes concurrent request processing"
 msgstr "4卡 TP 最大化并发请求处理"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
+#: ../../source/tutorials/models/Qwen3-Dense.md:378
 msgid "Long Context"
 msgstr "长上下文"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
+#: ../../source/tutorials/models/Qwen3-Dense.md:378
 msgid "4-card TP extends context window for long sequences"
 msgstr "4卡 TP 扩展长序列的上下文窗口"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
+#: ../../source/tutorials/models/Qwen3-Dense.md:378
 msgid "Low Latency"
 msgstr "低延迟"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
+#: ../../source/tutorials/models/Qwen3-Dense.md:378
 msgid "Single-Node (TP8)"
 msgstr "单节点 (TP8)"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
-msgid "8 (A3)"
-msgstr "8 (A3)"
+#: ../../source/tutorials/models/Qwen3-Dense.md:378
+msgid "8 (Atlas A3 inference products)"
+msgstr "8 (Atlas A3 推理产品)"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
+#: ../../source/tutorials/models/Qwen3-Dense.md:378
 msgid "8-card TP reduces per-token latency for interactive responses"
 msgstr "8卡 TP 降低交互式响应的每 token 延迟"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:452
+#: ../../source/tutorials/models/Qwen3-Dense.md:548
 msgid "`*Total NPUs` indicates the total number of NPUs used across all nodes."
 msgstr "`*NPU 总数`表示所有节点使用的 NPU 总数。"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:454
+#: ../../source/tutorials/models/Qwen3-Dense.md:550
 msgid "Table 2: Detailed Node Configuration"
 msgstr "表 2：详细节点配置"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
+#: ../../source/tutorials/models/Qwen3-Dense.md:378
 msgid "Configuration"
 msgstr "配置"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
+#: ../../source/tutorials/models/Qwen3-Dense.md:378
 msgid "#NPUs"
 msgstr "#NPU"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
+#: ../../source/tutorials/models/Qwen3-Dense.md:378
 msgid "TP"
 msgstr "TP"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
+#: ../../source/tutorials/models/Qwen3-Dense.md:378
 msgid "DP"
 msgstr "DP"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
+#: ../../source/tutorials/models/Qwen3-Dense.md:378
 msgid "FUSED_MC2"
 msgstr "FUSED_MC2"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
+#: ../../source/tutorials/models/Qwen3-Dense.md:378
 msgid "EP Switch"
 msgstr "EP 开关"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
+#: ../../source/tutorials/models/Qwen3-Dense.md:378
 msgid "Async Scheduling"
 msgstr "异步调度"
 
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
-msgid "Single-Node"
-msgstr "单节点"
-
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
-msgid "4"
-msgstr "4"
-
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
-msgid "1"
-msgstr "1"
-
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
-msgid "Off"
-msgstr "关闭"
-
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
-msgid "On"
-msgstr "开启"
-
-#: ../../source/tutorials/models/Qwen3-Dense.md:274
-msgid "8"
-msgstr "8"
-
-#: ../../source/tutorials/models/Qwen3-Dense.md:462
-msgid ""
-"For detailed parameter descriptions, please refer to the deployment "
-"examples in [Section 5](#5-online-service-deployment)"
 msgstr ""
-"有关详细参数说明，请参考[第 5 节](#5-online-service-deployment)中的部署示例。"
-
-#: ../../source/tutorials/models/Qwen3-Dense.md:464
-msgid "<u>High Throughput Configuration:</u>"
-msgstr "<u>高吞吐配置：</u>"
-
-#: ../../source/tutorials/models/Qwen3-Dense.md:490
-msgid "<u>Long Context Configuration:</u>"
-msgstr "<u>长上下文配置：</u>"
-
-#: ../../source/tutorials/models/Qwen3-Dense.md:518
-msgid "<u>Low Latency Configuration:</u>"
-msgstr "<u>低延迟配置：</u>"
-
-#: ../../source/tutorials/models/Qwen3-Dense.md:543
-msgid "9.2 Tuning Guidelines"
-msgstr "9.2 调优指南"
-
-#: ../../source/tutorials/models/Qwen3-Dense.md:545
-msgid "9.2.1 General Tuning Reference"
-msgstr "9.2.1 通用调优参考"
-
-#: ../../source/tutorials/models/Qwen3-Dense.md:547
-msgid ""
-"Please refer to the [Public Performance Tuning "
-"Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md)"
-" for tuning methods. Please refer to the [Feature "
-"Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
-"feature descriptions."
-msgstr ""
-"调优方法请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。"
-"详细功能描述请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)。"
-
-#: ../../source/tutorials/models/Qwen3-Dense.md:550
-msgid "10 FAQ"
-msgstr "10 常见问题"
-
-#: ../../source/tutorials/models/Qwen3-Dense.md:552
-msgid ""
-"For common environment, installation, and general parameter issues, "
-"please refer to the [vLLM-Ascend "
-"FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This "
-"section only covers issues specific to Qwen3 Dense models."
-msgstr ""
-"常见环境、安装和通用参数问题请参考 [vLLM-Ascend "
-"常见问题](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。本节仅涵盖 Qwen3 Dense 模型的特定问题。"
-
-#~ msgid ""
-#~ "Welcome to the tutorial on optimizing"
-#~ " Qwen Dense models in the vLLM-"
-#~ "Ascend environment. This guide will help"
-#~ " you configure the most effective "
-#~ "settings for your use case, with "
-#~ "practical examples that highlight key "
-#~ "optimization points. We will also "
-#~ "explore how adjusting service parameters "
-#~ "can maximize throughput performance across "
-#~ "various scenarios."
-#~ msgstr ""
-#~ "欢迎阅读在 vLLM-Ascend 环境中优化 Qwen Dense "
-#~ "模型的教程。本指南将帮助您为使用场景配置最有效的设置，并通过突出关键优化点的实际示例进行说明。我们还将探讨如何调整服务参数以在各种场景下最大化吞吐量性能。"
-
-#~ msgid ""
-#~ "This document will show the main "
-#~ "verification steps of the model, "
-#~ "including supported features, feature "
-#~ "configuration, environment preparation, accuracy "
-#~ "and performance evaluation."
-#~ msgstr "本文档将展示模型的主要验证步骤，包括支持的特性、特性配置、环境准备、精度评估和性能评估。"
-
-#~ msgid ""
-#~ "The Qwen3 Dense models are first "
-#~ "supported in [v0.8.4rc2](https://github.com/vllm-"
-#~ "project/vllm-"
-#~ "ascend/blob/main/docs/source/user_guide/release_notes.md#v084rc2---"
-#~ "20250429). This example requires version "
-#~ "**v0.11.0rc2**. Earlier versions may lack "
-#~ "certain features."
-#~ msgstr ""
-#~ "Qwen3 Dense 模型从 [v0.8.4rc2](https://github.com"
-#~ "/vllm-project/vllm-"
-#~ "ascend/blob/main/docs/source/user_guide/release_notes.md#v084rc2---"
-#~ "20250429) 版本开始首次支持。本示例需要 **v0.11.0rc2** "
-#~ "版本。较早版本可能缺少某些功能。"
-
-#~ msgid "Environment Preparation"
-#~ msgstr "环境准备"
-
-#~ msgid ""
-#~ "`Qwen3-0.6B`(BF16 version): require 1 Atlas"
-#~ " 800 A3 (64G × 2) card or "
-#~ "1 Atlas 800I A2 (64G × 1) "
-#~ "card. [Download model "
-#~ "weight](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B)"
-#~ msgstr ""
-#~ "`Qwen3-0.6B`（BF16 版本）：需要 1 张 Atlas 800"
-#~ " A3（64G × 2）卡或 1 张 Atlas 800I"
-#~ " A2（64G × "
-#~ "1）卡。[下载模型权重](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B)"
-
-#~ msgid ""
-#~ "`Qwen3-1.7B`(BF16 version): require 1 Atlas"
-#~ " 800 A3 (64G × 2) card or "
-#~ "1 Atlas 800I A2 (64G × 1) "
-#~ "card. [Download model "
-#~ "weight](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B)"
-#~ msgstr ""
-#~ "`Qwen3-1.7B`（BF16 版本）：需要 1 张 Atlas 800"
-#~ " A3（64G × 2）卡或 1 张 Atlas 800I"
-#~ " A2（64G × "
-#~ "1）卡。[下载模型权重](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B)"
-
-#~ msgid ""
-#~ "`Qwen3-4B`(BF16 version): require 1 Atlas "
-#~ "800 A3 (64G × 2) card or 1"
-#~ " Atlas 800I A2 (64G × 1) card."
-#~ " [Download model "
-#~ "weight](https://modelers.cn/models/Modelers_Park/Qwen3-4B)"
-#~ msgstr ""
-#~ "`Qwen3-4B`（BF16 版本）：需要 1 张 Atlas 800 "
-#~ "A3（64G × 2）卡或 1 张 Atlas 800I "
-#~ "A2（64G × "
-#~ "1）卡。[下载模型权重](https://modelers.cn/models/Modelers_Park/Qwen3-4B)"
-
-#~ msgid ""
-#~ "`Qwen3-8B`(BF16 version): require 1 Atlas "
-#~ "800 A3 (64G × 2) card or 1"
-#~ " Atlas 800I A2 (64G × 1) card."
-#~ " [Download model "
-#~ "weight](https://modelers.cn/models/Modelers_Park/Qwen3-8B)"
-#~ msgstr ""
-#~ "`Qwen3-8B`（BF16 版本）：需要 1 张 Atlas 800 "
-#~ "A3（64G × 2）卡或 1 张 Atlas 800I "
-#~ "A2（64G × "
-#~ "1）卡。[下载模型权重](https://modelers.cn/models/Modelers_Park/Qwen3-8B)"
-
-#~ msgid ""
-#~ "`Qwen3-14B`(BF16 version): require 1 Atlas "
-#~ "800 A3 (64G × 2) card or 2"
-#~ " Atlas 800I A2 (64G × 1) cards."
-#~ " [Download model "
-#~ "weight](https://modelers.cn/models/Modelers_Park/Qwen3-14B)"
-#~ msgstr ""
-#~ "`Qwen3-14B`（BF16 版本）：需要 1 张 Atlas 800"
-#~ " A3（64G × 2）卡或 2 张 Atlas 800I"
-#~ " A2（64G × "
-#~ "1）卡。[下载模型权重](https://modelers.cn/models/Modelers_Park/Qwen3-14B)"
-
-#~ msgid ""
-#~ "`Qwen3-32B`(BF16 version): require 2 Atlas "
-#~ "800 A3 (64G × 4) cards or 4"
-#~ " Atlas 800I A2 (64G × 4) cards."
-#~ " [Download model "
-#~ "weight](https://modelers.cn/models/Modelers_Park/Qwen3-32B)"
-#~ msgstr ""
-#~ "`Qwen3-32B`（BF16 版本）：需要 2 张 Atlas 800"
-#~ " A3（64G × 4）卡或 4 张 Atlas 800I"
-#~ " A2（64G × "
-#~ "4）卡。[下载模型权重](https://modelers.cn/models/Modelers_Park/Qwen3-32B)"
-
-#~ msgid ""
-#~ "`Qwen3-32B-W8A8`(Quantized version): require 2"
-#~ " Atlas 800 A3 (64G × 4) cards"
-#~ " or 4 Atlas 800I A2 (64G × "
-#~ "4) cards. [Download model "
-#~ "weight](https://www.modelscope.cn/models/vllm-ascend/Qwen3"
-#~ "-32B-W8A8)"
-#~ msgstr ""
-#~ "`Qwen3-32B-W8A8`（量化版本）：需要 2 张 Atlas 800"
-#~ " A3（64G × 4）卡或 4 张 Atlas 800I"
-#~ " A2（64G × 4）卡。[下载模型权重](https://www.modelscope.cn/models"
-#~ "/vllm-ascend/Qwen3-32B-W8A8)"
-
-#~ msgid ""
-#~ "You can use our official docker "
-#~ "image for supporting Qwen3 Dense models."
-#~ " Currently, we provide the all-in-"
-#~ "one images.[Download "
-#~ "images](https://quay.io/repository/ascend/vllm-ascend?tab=tags)"
-#~ msgstr ""
-#~ "您可以使用官方 Docker 镜像来支持 Qwen3 Dense "
-#~ "模型。目前，我们提供一体化镜像。[下载镜像](https://quay.io/repository/ascend/vllm-"
-#~ "ascend?tab=tags)"
-
-#~ msgid "Docker Pull (by tag)"
-#~ msgstr "Docker 拉取（按标签）"
-
-#~ msgid ""
-#~ "The default workdir is `/workspace`, "
-#~ "vLLM and vLLM Ascend code are "
-#~ "placed in `/vllm-workspace` and "
-#~ "installed in [development "
-#~ "mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html)"
-#~ " (`pip install -e`) to help developer"
-#~ " immediately take place changes without "
-#~ "requiring a new installation."
-#~ msgstr ""
-#~ "默认工作目录为 `/workspace`，vLLM 和 vLLM Ascend "
-#~ "代码位于 `/vllm-"
-#~ "workspace`，并以[开发模式](https://setuptools.pypa.io/en/latest/userguide/development_mode.html)（`pip"
-#~ " install -e`）安装，以帮助开发者无需重新安装即可立即应用更改。"
-
-#~ msgid ""
-#~ "In the [Run docker container](./Qwen3-Dense.md"
-#~ "#run-docker-container), detailed explanations "
-#~ "are provided through specific examples."
-#~ msgstr "在[运行 Docker 容器](./Qwen3-Dense.md#run-docker-container)中，通过具体示例提供了详细说明。"
-
-#~ msgid ""
-#~ "In this section, we will demonstrate "
-#~ "best practices for adjusting hyperparameters"
-#~ " in vLLM-Ascend to maximize inference"
-#~ " throughput performance. By tailoring "
-#~ "service-level configurations to fit "
-#~ "different use cases, you can ensure "
-#~ "that your system performs optimally "
-#~ "across various scenarios. We will guide"
-#~ " you through how to fine-tune "
-#~ "hyperparameters based on observed phenomena,"
-#~ " such as max_model_len, max_num_batched_tokens,"
-#~ " and cudagraph_capture_sizes, to achieve "
-#~ "the best performance."
-#~ msgstr ""
-#~ "在本节中，我们将演示在 vLLM-Ascend "
-#~ "中调整超参数以最大化推理吞吐量性能的最佳实践。通过针对不同使用场景定制服务级配置，您可以确保系统在各种场景下都能以最佳性能运行。我们将指导您如何根据观察到的现象（如"
-#~ " max_model_len、max_num_batched_tokens 和 "
-#~ "cudagraph_capture_sizes）来微调超参数，以获得最佳性能。"
-
-#~ msgid "The specific example scenario is as follows:"
-#~ msgstr "具体示例场景如下："
-
-#~ msgid "The machine environment is an Atlas 800 A3 (64G*16)"
-#~ msgstr "机器环境为 Atlas 800 A3（64G*16）"
-
-#~ msgid ""
-#~ "The data scenario is a fixed-"
-#~ "length input of 3.5K and an output"
-#~ " of 1.5K."
-#~ msgstr "数据场景为固定长度输入 3.5K，输出 1.5K。"
-
-#~ msgid "The parallel configuration requirement is DP=1&TP=4"
-#~ msgstr "并行配置要求为 DP=1&TP=4"
-
-#~ msgid ""
-#~ "If the machine environment is an "
-#~ "**Atlas 800I A2(64G*8)**, the deployment "
-#~ "approach stays identical."
-#~ msgstr "如果机器环境为 **Atlas 800I A2（64G*8）**，部署方法保持不变。"
-
-#~ msgid "Run docker container"
-#~ msgstr "运行 Docker 容器"
-
-#~ msgid ""
-#~ "vllm-ascend/Qwen3-32B-W8A8 is the "
-#~ "default model path, replace this with"
-#~ " your actual path."
-#~ msgstr "vllm-ascend/Qwen3-32B-W8A8 是默认模型路径，请将其替换为您的实际路径。"
-
-#~ msgid "v0.11.0rc2-a3 is image tag, replace this with your actual tag."
-#~ msgstr "v0.11.0rc2-a3 是镜像标签，请将其替换为您的实际标签。"
-
-#~ msgid "replace this with your actual port: '-p 8113:8113'."
-#~ msgstr "请将 '-p 8113:8113' 替换为您的实际端口。"
-
-#~ msgid "replace this with your actual card: '--device /dev/davinci0'."
-#~ msgstr "请将 '--device /dev/davinci0' 替换为您的实际卡设备。"
-
-#~ msgid "Online Inference on Multi-NPU"
-#~ msgstr "多 NPU 在线推理"
-
-#~ msgid "Run the following script to start the vLLM server on Multi-NPU."
-#~ msgstr "运行以下脚本在多 NPU 上启动 vLLM 服务器。"
-
-#~ msgid ""
-#~ "This script is configured to achieve "
-#~ "optimal performance under the above "
-#~ "specific example scenarios,with batchsize ="
-#~ " 72 on two A3 cards."
-#~ msgstr "此脚本配置为在上述特定示例场景下实现最佳性能，在两块 A3 卡上 batchsize = 72。"
-
-#~ msgid ""
-#~ "If the model is not a quantized"
-#~ " model, remove the `--quantization ascend`"
-#~ " parameter."
-#~ msgstr "如果模型不是量化模型，请移除 `--quantization ascend` 参数。"
-
-#~ msgid ""
-#~ "**[Optional]** `--additional-config "
-#~ "'{\"pa_shape_list\":[48,64,72,80]}'`: `pa_shape_list` "
-#~ "specifies the batch sizes where you "
-#~ "want to switch to the PA operator."
-#~ " This is a temporary tuning knob. "
-#~ "Currently, the attention operator dispatch "
-#~ "defaults to the FIA operator. In "
-#~ "some batch-size (concurrency) settings, "
-#~ "FIA may have suboptimal performance. By"
-#~ " setting `pa_shape_list`, when the runtime"
-#~ " batch size matches one of the "
-#~ "listed values, vLLM-Ascend will replace"
-#~ " FIA with the PA operator to "
-#~ "prevent performance degradation. In the "
-#~ "future, FIA will be optimized for "
-#~ "these scenarios and this parameter will"
-#~ " be removed."
-#~ msgstr ""
-#~ "**[可选]** `--additional-config "
-#~ "'{\"pa_shape_list\":[48,64,72,80]}'`：`pa_shape_list` 指定要切换到 "
-#~ "PA 算子的批次大小。这是一个临时调优参数。目前，注意力算子调度默认使用 FIA "
-#~ "算子。在某些批次大小（并发）设置下，FIA 可能性能不佳。通过设置 "
-#~ "`pa_shape_list`，当运行时批次大小与列表中的某个值匹配时，vLLM-Ascend 将使用 "
-#~ "PA 算子替换 FIA 以防止性能下降。未来，FIA "
-#~ "将针对这些场景进行优化，此参数将被移除。"
+"#: ../../source/tutorials/models/Qwen3-Dense.md:378\n"
+"msgid \"Single-Node\"\n"
+"msgstr \"单节点\"\n"
+"\n"
+"#: ../../source/tutorials/models/Qwen3-Dense.md:378\n"
+"msgid \"4\"\n"
+"msgstr \"4\"\n"
+"\n"
+"#: ../../source/tutorials/models/Qwen3-Dense.md:378\n"
+"msgid \"1\"\n"
+"msgstr \"1\"\n"
+"\n"
+"#: ../../source/tutorials/models/Qwen3-Dense.md:378\n"
+"msgid \"Off\"\n"
+"msgstr \"关闭\"\n"
+"\n"
+"#: ../../source/tutorials/models/Qwen3-Dense.md:378\n"
+"msgid \"On\"\n"
+"msgstr \"开启\"\n"
+"\n"
+"#: ../../source/tutorials/models/Qwen3-Dense.md:378\n"
+"msgid \"8\"\n"
+"msgstr \"8\"\n"
+"\n"
+"#: ../../source/tutorials/models/Qwen3-Dense.md:558\n"
+"msgid \"\"\n"
+"\"For detailed parameter descriptions, please refer to the deployment \"\n"
+"\"examples in [Section 5](#5-online-service-deployment)\"\n"
+"msgstr \"有关详细参数说明，请参考[第 5 节](#5-online-service-deployment)中的部署示例。\"\n"
+"\n"
+"#: ../../source/tutorials/models/Qwen3-Dense.md:560\n"
+"msgid \"<u>High Throughput Configuration:</u>\"\n"
+"msgstr \"<u>高吞吐配置：</u>\"\n"
+"\n"
+"#: ../../source/tutorials/models/Qwen3-Dense.md:586\n"
+"msgid \"<u>Long Context Configuration:</u>\"\n"
+"msgstr \"<u>长上下文配置：</u>\"\n"
+"\n"
+"#: ../../source/tutorials/models/Qwen3-Dense.md:614\n"
+"msgid \"<u>Low Latency Configuration:</u>\"\n"
+"msgstr \"<u>低延迟配置：</u>\"\n"
+"\n"
+"#: ../../source/tutorials/models/Qwen3-Dense.md:639\n"
+"msgid \"9.2 Tuning Guidelines\"\n"
+"msgstr \"9.2 调优指南\"\n"
+"\n"
+"#: ../../source/tutorials/models/Qwen3-Dense.md:641\n"
+"msgid \"9.2.1 General Tuning Reference\"\n"
+"msgstr \"9.2.1 通用调优参考\"\n"
+"\n"
+"#: ../../source/tutorials/models/Qwen3-Dense.md:643\n"
+"msgid \"\"\n"
+"\"Please refer to the [Public Performance Tuning \"\n"
+"\"Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md)\"\n"
+"\" for tuning methods. Please refer to the [Feature \"\n"
+"\"Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed \"\n"
+"\"feature descriptions.\"\n"
+"msgstr \"调优方法请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。详细功能描述请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)。\"\n"
+"\n"
+"#: ../../source/tutorials/models/Qwen3-Dense.md:646\n"
+"msgid \"10 FAQ\"\n"
+"msgstr \"10 常见问题\"\n"
+"\n"
+"#: ../../source/tutorials/models/Qwen3-Dense.md:648\n"
+"msgid \"\"\n"
+"\"For common environment, installation, and general parameter issues, \"\n"
+"\"please refer to the [vLLM-Ascend \"\n"
+"\"FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This \"\n"
+"\"section only covers issues specific to Qwen3 Dense models.\"\n"
+"msgstr \"\"\n"
+"\"常见环境、安装和通用参数问题请参考 [vLLM-Ascend \"\n"
+"\"常见问题](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。本节仅涵盖 \"\n"
+"\"Qwen3 Dense 模型的特定问题。\"\n"
+"\n"
+"#~ msgid \"\"\n"
+"#~ \"Welcome to the tutorial on optimizing\"\n"
+"#~ \" Qwen Dense models in the vLLM-\"\n"
+"#~ \"Ascend environment. This guide will help\"\n"
+"#~ \" you configure the most effective \"\n"
+"#~ \"settings for your use case, with \"\n"
+"#~ \"practical examples that highlight key \"\n"
+"#~ \"optimization points. We will also \"\n"
+"#~ \"explore how adjusting service parameters \"\n"
+"#~ \"can maximize throughput performance across \"\n"
+"#~ \"various scenarios.\"\n"
+"#~ msgstr \"\"\n"
+"#~ \"欢迎阅读在 vLLM-Ascend 环境中优化 Qwen Dense \"\n"
+"#~ \"模型的教程。本指南将帮助您为使用场景配置最有效的设置，并通过突出关键优化点的实际示例进行说明。我们还将探讨如何调整服务参数以在各种场景下最大化吞吐量性能。\"\n"
+"\n"
+"#~ msgid \"\"\n"
+"#~ \"This document will show the main \"\n"
+"#~ \"verification steps of the model, \"\n"
+"#~ \"including supported features, feature \"\n"
+"#~ \"configuration, environment preparation, accuracy \"\n"
+"#~ \"and performance evaluation.\"\n"
+"#~ msgstr \"本文档将展示模型的主要验证步骤，包括支持的特性、特性配置、环境准备、精度评估和性能评估。\"\n"
+"\n"
+"#~ msgid \"\"\n"
+"#~ \"The Qwen3 Dense models are first \"\n"
+"#~ \"supported in [v0.8.4rc2](https://github.com/vllm-\"\n"
+"#~ \"project/vllm-\"\n"
+"#~ \"ascend/blob/main/docs/source/user_guide/release_notes.md#v084rc2---\"\n"
+"#~ \"20250429). This example requires version \"\n"
+"#~ \"**v0.11.0rc2**. Earlier versions may lack \"\n"
+"#~ \"certain features.\"\n"
+"#~ msgstr \"\"\n"
+"#~ \"Qwen3 Dense 模型从 [v0.8.4rc2](https://github.com\"\n"
+"#~ \"/vllm-project/vllm-\"\n"
+"#~ \"ascend/blob/main/docs/source/user_guide/release_notes.md#v084rc2---\"\n"
+"#~ \"20250429) 版本开始首次支持。本示例需要 **v0.11.0rc2** \"\n"
+"#~ \"版本。较早版本可能缺少某些功能。\"\n"
+"\n"
+"#~ msgid \"Environment Preparation\"\n"
+"#~ msgstr \"环境准备\"\n"
+"\n"
+"#~ msgid \"\"\n"
+"#~ \"`Qwen3-0.6B`(BF16 version): require 1 Atlas\"\n"
+"#~ \" 800 A3 (64G × 2) card or \"\n"
+"#~ \"1 Atlas 800I A2 (64G × 1) \"\n"
+"#~ \"card. [Download model \"\n"
+"#~ \"weight](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B)\"\n"
+"#~ msgstr \"\"\n"
+"#~ \"`Qwen3-0.6B`（BF16 版本）：需要 1 张 Atlas 800\"\n"
+"#~ \" A3（64G × 2）卡或 1 张 Atlas 800I\"\n"
+"#~ \" A2（64G × \"\n"
+"#~ \"1）卡。[下载模型权重](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B)\"\n"
+"\n"
+"#~ msgid \"\"\n"
+"#~ \"`Qwen3-1.7B`(BF16 version): require 1 Atlas\"\n"
+"#~ \" 800 A3 (64G × 2) card or \"\n"
+"#~ \"1 Atlas 800I A2 (64G × 1) \"\n"
+"#~ \"card. [Download model \"\n"
+"#~ \"weight](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B)\"\n"
+"#~ msgstr \"\"\n"
+"#~ \"`Qwen3-1.7B`（BF16 版本）：需要 1 张 Atlas 800\"\n"
+"#~ \" A3（64G × 2）卡或 1 张 Atlas 800I\"\n"
+"#~ \" A2（64G × \"\n"
+"#~ \"1）卡。[下载模型权重](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B)\"\n"
+"\n"
+"#~ msgid \"\"\n"
+"#~ \"`Qwen3-4B`(BF16 version): require 1 Atlas \"\n"
+"#~ \"800 A3 (64G × 2) card or 1\"\n"
+"#~ \" Atlas 800I A2 (64G × 1) card.\"\n"
+"#~ \" [Download model \"\n"
+"#~ \"weight](https://modelers.cn/models/Modelers_Park/Qwen3-4B)\"\n"
+"#~ msgstr \"\"\n"
+"#~ \"`Qwen3-4B`（BF16 版本）：需要 1 张 Atlas 800 \"\n"
+"#~ \"A3（64G × 2）卡或 1 张 Atlas 800I \"\n"
+"#~ \"A2（64G × \"\n"
+"#~ \"1）卡。[下载模型权重](https://modelers.cn/models/Modelers_Park/Qwen3-4B)\"\n"
+"\n"
+"#~ msgid \"\"\n"
+"#~ \"`Qwen3-8B`(BF16 version): require 1 Atlas \"\n"
+"#~ \"800 A3 (64G × 2) card or 1\"\n"
+"#~ \" Atlas 800I A2 (64G × 1) card.\"\n"
+"#~ \" [Download model \"\n"
+"#~ \"weight](https://modelers.cn/models/Modelers_Park/Qwen3-8B)\"\n"
+"#~ msgstr \"\"\n"
+"#~ \"`Qwen3-8B`（BF16 版本）：需要 1 张 Atlas 800 \"\n"
+"#~ \"A3（64G × 2）卡或 1 张 Atlas 800I \"\n"
+"#~ \"A2（64G × \"\n"
+"#~ \"1）卡。[下载模型权重](https://modelers.cn/models/Modelers_Park/Qwen3-8B)\"\n"
+"\n"
+"#~ msgid \"\"\n"
+"#~ \"`Qwen3-14B`(BF16 version): require 1 Atlas \"\n"
+"#~ \"800 A3 (64G × 2) card or 2\"\n"
+"#~ \" Atlas 800I A2 (64G × 1) cards.\"\n"
+"#~ \" [Download model \"\n"
+"#~ \"weight](https://modelers.cn/models/Modelers_Park/Qwen3-14B)\"\n"
+"#~ msgstr \"\"\n"
+"#~ \"`Qwen3-14B`（BF16 版本）：需要 1 张 Atlas 800\"\n"
+"#~ \" A3（64G × 2）卡或 2 张 Atlas 800I\"\n"
+"#~ \" A2（64G × \"\n"
+"#~ \"1）卡。[下载模型权重](https://modelers.cn/models/Modelers_Park/Qwen3-14B)\"\n"
+"\n"
+"#~ msgid \"\"\n"
+"#~ \"`Qwen3-32B`(BF16 version): require 2 Atlas \"\n"
+"#~ \"800 A3 (64G × 4) cards or 4\"\n"
+"#~ \" Atlas 800I A2 (64G × 4) cards.\"\n"
+"#~ \" [Download model \"\n"
+"#~ \"weight](https://modelers.cn/models/Modelers_Park/Qwen3-32B)\"\n"
+"#~ msgstr \"\"\n"
+"#~ \"`Qwen3-32B`（BF16 版本）：需要 2 张 Atlas 800\"\n"
+"#~ \" A3（64G × 4）卡或 4 张 Atlas 800I\"\n"
+"#~ \" A2（64G × \"\n"
+"#~ \"4）卡。[下载模型权重](https://modelers.cn/models/Modelers_Park/Qwen3-32B)\"\n"
+"\n"
+"#~ msgid \"\"\n"
+"#~ \"`Qwen3-32B-W8A8`(Quantized version): require 2\"\n"
+"#~ \" Atlas 800 A3 (64G × 4) cards\"\n"
+"#~ \" or 4 Atlas 800I A2 (64G × \"\n"
+"#~ \"4) cards. [Download model \"\n"
+"#~ \"weight](https://www.modelscope.cn/models/vllm-ascend/Qwen3\"\n"
+"#~ \"-32B-W8A8)\"\n"
+"#~ msgstr \"\"\n"
+"#~ \"`Qwen3-32B-W8A8`（量化版本）：需要 2 张 Atlas 800\"\n"
+"#~ \" A3（64G × 4）卡或 4 张 Atlas 800I\"\n"
+"#~ \" A2（64G × 4）卡。[下载模型权重](https://www.modelscope.cn/models\"\n"
+"#~ \"/vllm-ascend/Qwen3-32B-W8A8)\"\n"
+"\n"
+"#~ msgid \"\"\n"
+"#~ \"You can use our official docker \"\n"
+"#~ \"image for supporting Qwen3 Dense models.\"\n"
+"#~ \" Currently, we provide the all-in-\"\n"
+"#~ \"one images.[Download \"\n"
+"#~ \"images](https://quay.io/repository/ascend/vllm-ascend?tab=tags)\"\n"
+"#~ msgstr \"\"\n"
+"#~ \"您可以使用官方 Docker 镜像来支持 Qwen3 Dense \"\n"
+"#~ \"模型。目前，我们提供一体化镜像。[下载镜像](https://quay.io/repository/ascend/vllm-\"\n"
+"#~ \"ascend?tab=tags)\"\n"
+"\n"
+"#~ msgid \"Docker Pull (by tag)\"\n"
+"#~ msgstr \"Docker 拉取（按标签）\"\n"
+"\n"
+"#~ msgid \"\"\n"
+"#~ \"The default workdir is `/workspace`, \"\n"
+"#~ \"vLLM and vLLM Ascend code are \"\n"
+"#~ \"placed in `/vllm-workspace` and \"\n"
+"#~ \"installed in [development \"\n"
+"#~ \"mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html)\"\n"
+"#~ \" (`pip install -e`) to help developer\"\n"
+"#~ \" immediately take place changes without \"\n"
+"#~ \"requiring a new installation.\"\n"
+"#~ msgstr \"\"\n"
+"#~ \"默认工作目录为 `/workspace`，vLLM 和 vLLM Ascend \"\n"
+"#~ \"代码位于 `/vllm-\"\n"
+"#~ \"workspace`，并以[开发模式](https://setuptools.pypa.io/en/latest/userguide/development_mode.html)（`pip\"\n"
+"#~ \" install -e`）安装，以帮助开发者无需重新安装即可立即应用更改。\"\n"
+"\n"
+"#~ msgid \"\"\n"
+"#~ \"In the [Run docker container](./Qwen3-Dense.md\"\n"
+"#~ \"#run-docker-container), detailed explanations \"\n"
+"#~ \"are provided through specific examples.\"\n"
+"#~ msgstr \"在[运行 Docker 容器](./Qwen3-Dense.md#run-docker-container)中，通过具体示例提供了详细说明。\"\n"
+"\n"
+"#~ msgid \"\"\n"
+"#~ \"In this section, we will demonstrate \"\n"
+"#~ \"best practices for adjusting hyperparameters\"\n"
+"#~ \" in vLLM-Ascend to maximize inference\"\n"
+"#~ \" throughput performance. By tailoring \"\n"
+"#~ \"service-level configurations to fit \"\n"
+"#~ \"different use cases, you can ensure \"\n"
+"#~ \"that your system performs optimally \"\n"
+"#~ \"across various scenarios. We will guide\"\n"
+"#~ \" you through how to fine-tune \"\n"
+"#~ \"hyperparameters based on observed phenomena,\"\n"
+"#~ \" such as max_model_len, max_num_batched_tokens,\"\n"
+"#~ \" and cudagraph_capture_sizes, to achieve \"\n"
+"#~ \"the best performance.\"\n"
+"#~ msgstr \"\"\n"
+"#~ \"在本节中，我们将演示在 vLLM-Ascend \"\n"
+"#~ \"中调整超参数以最大化推理吞吐量性能的最佳实践。通过针对不同使用场景定制服务级配置，您可以确保系统在各种场景下都能以最佳性能运行。我们将指导您如何根据观察到的现象（如\"\n"
+"#~ \" max_model_len、max_num_batched_tokens 和 \"\n"
+"#~ \"cudagraph_capture_sizes）来微调超参数，以获得最佳性能。\"\n"
+"\n"
+"#~ msgid \"The specific example scenario is as follows:\"\n"
+"#~ msgstr \"具体示例场景如下：\"\n"
+"\n"
+"#~ msgid \"The machine environment is an Atlas 800 A3 (64G*16)\"\n"
+"#~ msgstr \"机器环境为 Atlas 800 A3（64G*16）\"\n"
+"\n"
+"#~ msgid \"\"\n"
+"#~ \"The data scenario is a fixed-\"\n"
+"#~ \"length input of 3.5K and an output\"\n"
+"#~ \" of 1.5K.\"\n"
+"#~ msgstr \"数据场景为固定长度输入 3.5K，输出 1.5K。\"\n"
+"\n"
+"#~ msgid \"The parallel configuration requirement is DP=1&TP=4\"\n"
+"#~ msgstr \"并行配置要求为 DP=1&TP=4\"\n"
+"\n"
+"#~ msgid \"\"\n"
+"#~ \"If the machine environment is an \"\n"
+"#~ \"**Atlas 800I A2(64G*8)**, the deployment \"\n"
+"#~ \"approach stays identical.\"\n"
+"#~ msgstr \"如果机器环境为 **Atlas 800I A2（64G*8）**，部署方法保持不变。\"\n"
+"\n"
+"#~ msgid \"Run docker container\"\n"
+"#~ msgstr \"运行 Docker 容器\"\n"
+"\n"
+"#~ msgid \"\"\n"
+"#~ \"vllm-ascend/Qwen3-32B-W8A8 is the \"\n"
+"#~ \"default model path, replace this with\"\n"
+"#~ \" your actual path.\"\n"
+"#~ msgstr \"vllm-ascend/Qwen3-32B-W8A8 是默认模型路径，请将其替换为您的实际路径。\"\n"
+"\n"
+"#~ msgid \"v0.11.0rc2-a3 is image tag, replace this with your actual tag.\"\n"
+"#~ msgstr \"v0.11.0rc2-a3 是镜像标签，请将其替换为您的实际标签。\"\n"
+"\n"
+"#~ msgid \"replace this with your actual port: '-p 8113:8113'.\"\n"
+"#~ msgstr \"请将 '-p 8113:8113' 替换为您的实际端口。\"\n"
+"\n"
+"#~ msgid \"replace this with your actual card: '--device /dev/davinci0'.\"\n"
+"#~ msgstr \"请将 '--device /dev/davinci0' 替换为您的实际卡设备。\"\n"
+"\n"
+"#~ msgid \"Online Inference on Multi-NPU\"\n"
+"#~ msgstr \"多 NPU 在线推理\"\n"
+"\n"
+"#~ msgid \"Run the following script to start the vLLM server on Multi-NPU.\"\n"
+"#~ msgstr \"运行以下脚本在多 NPU 上启动 vLLM 服务器。\"\n"
+"\n"
+"#~ msgid \"\"\n"
+"#~ \"This script is configured to achieve \"\n"
+"#~ \"optimal performance under the above \"\n"
+"#~ \"specific example scenarios,with batchsize =\"\n"
+"#~ \" 72 on two A3 cards.\"\n"
+"#~ msgstr \"此脚本配置为在上述特定示例场景下实现最佳性能，在两块 A3 卡上 batchsize = 72。\"\n"
+"\n"
+"#~ msgid \"\"\n"
+"#~ \"If the model is not a quantized\"\n"
+"#~ \" model, remove the `--quantization ascend`\"\n"
+"#~ \" parameter.\"\n"
+"#~ msgstr \"如果模型不是量化模型，请移除 `--quantization ascend` 参数。\"\n"
+"\n"
+"#~ msgid \"\"\n"
+"#~ \"**[Optional]** `--additional-config \"\n"
+"#~ \"'{\\\"pa_shape_list\\\":[48,64,72,80]}'`: `pa_shape_list` \"\n"
+"#~ \"specifies the batch sizes where you \"\n"
+"#~ \"want to switch to the PA operator.\"\n"
+"#~ \" This is a temporary tuning knob. \"\n"
+"#~ \"Currently, the attention operator dispatch \"\n"
+"#~ \"defaults to the FIA operator. In \"\n"
+"#~ \"some batch-size (concurrency) settings, \"\n"
+"#~ \"FIA may have suboptimal performance. By\"\n"
+"#~ \" setting `pa_shape_list`, when the runtime\"\n"
+"#~ \" batch size matches one of the \"\n"
+"#~ \"listed values, vLLM-Ascend will replace\"\n"
+"#~ \" FIA with the PA operator to \"\n"
+"#~ \"prevent performance degradation. In the \"\n"
+"#~ \"future, FIA will be optimized for \"\n"
+"#~ \"these scenarios and this parameter will\"\n"
+"#~ \" be removed.\"\n"
+"#~ msgstr \"\"\n"
+"#~ \"**[可选]** `--additional-config \"\n"
+"#~ \"'{\\\"pa_shape_list\\\":[48,64,72,80]}'`：`pa_shape_list` 指定要切换到 \"\n"
+"#~ \"PA 算子的批次大小。这是一个临时调优参数。目前，注意力算子调度默认使用 FIA \"\n"
+"#~ \"算子。在某些批次大小（并发）设置下，FIA 可能性能不佳。通过设置 \"\n"
+"#~ \"`pa_shape_list`，当运行时批次大小与列表中的某个值匹配时，vLLM-Ascend 将使用 \"\n"
+"#~ \"PA 算子替换 FIA 以防止性能下降。未来，FIA \"\n"
+"#~ \"将针对这些场景进行优化，此参数将被移除。\"\n"
 
 #~ msgid ""
 #~ "If the ultimate performance is desired,"
@@ -1374,8 +1448,8 @@ msgstr ""
 #~ "gate_up_proj and down_proj in the MLP"
 #~ " to 18MB. The reason for this "
 #~ "is that, at this value, the vector"
-#~ " computations of RMSNorm and SiLU can "
-#~ "effectively hide the prefetch stream, "
+#~ " computations of RMSNorm and SiLU can"
+#~ " effectively hide the prefetch stream, "
 #~ "thereby accelerating the Matmul computations"
 #~ " of the two linear layers."
 #~ msgstr ""
@@ -1487,3 +1561,51 @@ msgstr ""
 #~ "需要注意的是，如果启用了 FlashComm_v1，此列表中的值必须是 TP "
 #~ "大小的整数倍。任何不满足此条件的值将被自动过滤掉。因此，我建议在启用 FlashComm_v1 后，根据 "
 #~ "TP 大小逐步增加并发数。"
+
+#~ msgid "A3 series"
+#~ msgstr "A3 系列"
+
+#~ msgid "A2 series"
+#~ msgstr "A2 系列"
+
+#~ msgid "If you prefer not to use the Docker image, you can build from source:"
+#~ msgstr "如果您不想使用 Docker 镜像，可以从源码构建："
+
+#~ msgid "Clone and install vLLM:"
+#~ msgstr "克隆并安装 vLLM："
+
+#~ msgid "Clone and install the vLLM-Ascend repository:"
+#~ msgstr "克隆并安装 vLLM-Ascend 仓库："
+
+#~ msgid "**Installation Verification:**"
+#~ msgstr "**安装验证：**"
+
+#~ msgid ""
+#~ "For more details, please refer to "
+#~ "the [Installation Guide](../../installation.md)."
+#~ msgstr "更多详情，请参阅[安装指南](../../installation.md)。"
+
+#~ msgid "Atlas 800I A2/A3:"
+#~ msgstr "Atlas 800I A2/A3："
+
+#~ msgid "Atlas 800I A2/A3："
+#~ msgstr "Atlas 800I A2/A3："
+
+#~ msgid "Atlas 800I A2/A3： Qwen3-8B-W4A8:"
+#~ msgstr "Atlas 800I A2/A3：Qwen3-8B-W4A8："
+
+#~ msgid ""
+#~ "For details, please refer to [Using "
+#~ "AISBench](../../developer_guide/evaluation/using_ais_bench.md)."
+#~ msgstr ""
+#~ "详细信息请参考[使用 "
+#~ "AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
+
+#~ msgid "Install from source:"
+#~ msgstr "从源码安装："
+
+#~ msgid "4 (A3)"
+#~ msgstr "4 (A3)"
+
+#~ msgid "8 (A3)"
+#~ msgstr "8 (A3)"
