@@ -1479,8 +1479,8 @@ class NPUModelRunner(GPUModelRunner):
             )
         elif isinstance(self.drafter, AscendSuffixDecodingProposer):
             draft_token_ids = self.drafter.propose(
-                valid_sampled_token_ids,
                 num_speculative_tokens=scheduler_output.num_spec_tokens_to_schedule,
+                sampled_token_ids=valid_sampled_token_ids,
             )
         elif isinstance(self.drafter, AscendNgramProposerNPU):
             batch_size = min(self.input_batch.num_reqs,
