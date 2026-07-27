@@ -1,9 +1,8 @@
 import torch
-import torch.nn as nn
+import torch_npu
 import triton
 import triton.language as tl
 import triton.runtime.driver as driver
-import torch_npu
 
 
 @triton.jit
@@ -27,9 +26,7 @@ def ngram_spec_decode_kernel(
     pid = tl.program_id(0)
     num_cores = tl.num_programs(0)
 
-    BLOCK: tl.constexpr = (
-        1024 if max_n <= 5 else (512 if max_n <= 10 else (256 if max_n <= 16 else 128))
-    )
+    BLOCK: tl.constexpr = 1024 if max_n <= 5 else (512 if max_n <= 10 else (256 if max_n <= 16 else 128))
     NUM_BLOCKS: tl.constexpr = (max_seq_len + BLOCK - 1) // BLOCK
     NO_MATCH_F: tl.constexpr = 1.0e9
 
@@ -50,9 +47,7 @@ def ngram_spec_decode_kernel(
             valid_count = 0
         else:
             is_valid = (sampled_vals != -1) & (sampled_vals < vocab_size)
-            filtered = tl.where(
-                is_valid, sampled_vals, tl.full([max_new_tokens], -1, tl.int32)
-            )
+            filtered = tl.where(is_valid, sampled_vals, tl.full([max_new_tokens], -1, tl.int32))
             valid_count = tl.sum(tl.cast(is_valid, tl.int32))
 
         tl.store(raw_valid_count_ptr + batch_idx, valid_count)
@@ -145,16 +140,14 @@ def ngram_spec_decode_kernel(
 
                 # Per-block best: longest L, tie-break earliest pos.
                 block_best_len = tl.max(L, axis=0)
-                eq_best = L == block_best_len
+                eq_best = block_best_len == L
                 has_match = block_best_len > 0.0
                 cand_pos = tl.where(eq_best & has_match, pos_f, NO_MATCH_F)
                 block_best_pos = tl.min(cand_pos, axis=0)
 
                 # Reduce into the global best (longer wins; equal -> earlier pos).
                 new_better = block_best_len > g_best_len
-                same_earlier = (
-                    block_best_len == g_best_len
-                ) & (block_best_pos < g_best_pos)
+                same_earlier = (block_best_len == g_best_len) & (block_best_pos < g_best_pos)
                 update = new_better | same_earlier
                 g_best_len = tl.where(update, block_best_len, g_best_len)
                 g_best_pos = tl.where(update, block_best_pos, g_best_pos)
@@ -218,31 +211,18 @@ def triton_ngram_spec_decode(
     if isinstance(sampled_token_ids, list):
         max_len = max((len(sublist) for sublist in sampled_token_ids), default=0)
         max_len = max(max_len, 1)
-        padded_list = [
-            sublist + [-1] * (max_len - len(sublist))
-            for sublist in sampled_token_ids
-        ]
-        sampled_token_ids = torch.tensor(
-            padded_list, dtype=torch.int32, device=device
-        )
+        padded_list = [sublist + [-1] * (max_len - len(sublist)) for sublist in sampled_token_ids]
+        sampled_token_ids = torch.tensor(padded_list, dtype=torch.int32, device=device)
     sampled_token_ids = sampled_token_ids[:batch_size]
     max_new_tokens = sampled_token_ids.shape[1]
 
-    base = torch.empty(
-        batch_size * 3 + batch_size * k, dtype=torch.int32, device=device
-    )
+    base = torch.empty(batch_size * 3 + batch_size * k, dtype=torch.int32, device=device)
     next_token_ids = base[0 * batch_size : 1 * batch_size]
     num_valid_draft_tokens = base[1 * batch_size : 2 * batch_size]
     valid_sampled_tokens_count = base[2 * batch_size : 3 * batch_size]
-    draft_token_ids = base[
-        3 * batch_size : 3 * batch_size + batch_size * k
-    ].reshape(batch_size, k)
+    draft_token_ids = base[3 * batch_size : 3 * batch_size + batch_size * k].reshape(batch_size, k)
 
-    grid = (
-        batch_size
-        if batch_size < vectorcore_num
-        else vectorcore_num,
-    )
+    grid = (batch_size if batch_size < vectorcore_num else vectorcore_num,)
 
     ngram_spec_decode_kernel[grid](
         token_ids,
