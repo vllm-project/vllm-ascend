@@ -307,6 +307,50 @@ def test_stable_slot_hotness_orders_new():
     _check(int(p.log2phy[4]) >= 0 and int(p.log2phy[5]) >= 0, "4,5 both placed")
 
 
+def test_retention_keeps_inactive_expert():
+    """LRU retention: an expert active at step0, inactive at step1, active
+    again at step2 stays in its slot at step2 (cache HIT, no re-H2D). The old
+    _assign_slots_stable reset each step and dropped it -> step2 was a miss."""
+    print("test_retention_keeps_inactive_expert")
+    counts0 = torch.tensor([1, 0, 0], dtype=torch.int64)  # expert 0 active
+    p0 = mcp.plan_placement(counts0, ep_size=2, num_device_experts=4)
+    phys0 = int(p0.log2phy[0])
+    _check(phys0 >= 0, f"step0 expert 0 placed (phys {phys0})")
+    # step1: expert 0 INACTIVE (expert 1 active instead). prev = p0.
+    counts1 = torch.tensor([0, 1, 0], dtype=torch.int64)
+    p1 = mcp.plan_placement(counts1, ep_size=2, num_device_experts=4,
+                            prev_log2phy=p0.log2phy)
+    _check(int(p1.log2phy[0]) == phys0,
+           f"step1 expert 0 RETAINED at phys {phys0} though inactive "
+           f"(got {int(p1.log2phy[0])})")
+    # step2: expert 0 active again -> same slot (hit).
+    counts2 = torch.tensor([1, 0, 0], dtype=torch.int64)
+    p2 = mcp.plan_placement(counts2, ep_size=2, num_device_experts=4,
+                            prev_log2phy=p1.log2phy)
+    _check(int(p2.log2phy[0]) == phys0,
+           f"step2 expert 0 cache HIT at phys {phys0} (got {int(p2.log2phy[0])})")
+
+
+def test_retention_evicts_coldest_when_full():
+    """When slots are full and a new active expert needs one, the coldest
+    non-active resident is evicted (hotness-driven), hotter ones retained."""
+    print("test_retention_evicts_coldest_when_full")
+    # rank0 full: experts 0,1,2,3 in slots 0-3 (num_device_experts=4 per rank)
+    prev = torch.full((8,), -1, dtype=torch.int32)
+    prev[0] = 0; prev[1] = 1; prev[2] = 2; prev[3] = 3
+    # new active expert 4; hotness makes expert 0 the coldest
+    counts = torch.tensor([0, 0, 0, 0, 1, 0, 0, 0], dtype=torch.int64)
+    hot = [1.0] * 8
+    hot[0] = 0.0  # expert 0 coldest -> should be evicted
+    p = mcp.plan_placement(counts, ep_size=2, num_device_experts=4,
+                           prev_log2phy=prev, hotness=hot)
+    _check(int(p.log2phy[4]) >= 0, "new active expert 4 placed")
+    _check(int(p.log2phy[0]) == -1,
+           f"coldest expert 0 evicted (got {int(p.log2phy[0])})")
+    for e in [1, 2, 3]:
+        _check(int(p.log2phy[e]) >= 0, f"hotter expert {e} retained")
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

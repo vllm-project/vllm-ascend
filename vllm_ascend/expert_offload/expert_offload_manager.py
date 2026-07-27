@@ -1460,8 +1460,15 @@ class ExpertOffloadManager:
             return
 
         my_experts = placement.per_rank_experts[self.ep_rank]
+        # active_set = this step's token topk (the NEEDED experts). Only these
+        # count in the hit/miss metric — retained-but-unneeded experts stay
+        # cached but aren't counted as hits — matching single-card's
+        # needed-based rate so multi vs single hit rates are comparable now
+        # that placement retains a persistent hot set across steps.
+        active_set = (set(global_counts.nonzero(as_tuple=True)[0].tolist())
+                      if global_counts is not None else None)
         resident_map, hits, misses = self._compute_resident_hits(
-            layer_idx, my_experts, cache_on)
+            layer_idx, my_experts, cache_on, active_set)
         if misses:
             self._h2d_load_mc_misses(layer, layer_idx, misses, resident_map)
         if self._debug:
@@ -1526,13 +1533,21 @@ class ExpertOffloadManager:
         return (global_counts, cache_on, self._mc_global_hotness,
                 self._mc_prev_log2phy.get(layer_idx))
 
-    def _compute_resident_hits(self, layer_idx, my_experts, cache_on):
-        """Split this rank's placed experts into cache hits (expert already
-        resident in the same slot) vs misses (need H2D). Returns
-        (resident_map, hits, misses). Skips -1 slots (stable-slot gaps)."""
+    def _compute_resident_hits(self, layer_idx, my_experts, cache_on,
+                               active_set=None):
+        """Split this rank's ACTIVE placed experts into cache hits (expert
+        already resident in its assigned slot) vs misses (need H2D). Returns
+        (resident_map, hits, misses).
+
+        Only ACTIVE experts (in ``active_set`` = this step's token topk) are
+        counted: retained-but-not-needed experts stay cached but don't count
+        as hits, mirroring single-card's (needed ∩ on_device)/needed so the
+        hit rate is comparable across configs. ``active_set=None`` counts all
+        (backward-compatible fallback)."""
         if not cache_on:
-            # No cache: every expert is a miss (full H2D every step).
-            misses = [(s, int(e)) for s, e in enumerate(my_experts) if e >= 0]
+            # No cache: every (active) expert is a miss (full H2D every step).
+            misses = [(s, int(e)) for s, e in enumerate(my_experts)
+                      if e >= 0 and (active_set is None or int(e) in active_set)]
             return {}, [], misses
         resident_map = self._mc_resident.setdefault(layer_idx, {})
         hits, misses = [], []
@@ -1540,6 +1555,8 @@ class ExpertOffloadManager:
             if eid < 0:
                 continue
             eid = int(eid)
+            if active_set is not None and eid not in active_set:
+                continue  # retained but not needed this step: cached, not counted
             (hits if resident_map.get(slot) == eid else misses).append((slot, eid))
         return resident_map, hits, misses
 

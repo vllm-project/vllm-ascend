@@ -203,28 +203,54 @@ def plan_placement(
 
 def _assign_slots_stable(active_r, rank, num_device_experts,
                          prev_log2phy=None, hotness=None):
-    """Assign slot indices to ``active_r`` (experts already assigned to ``rank``).
+    """Assign slot indices on ``rank``, RETAINING the previous resident set
+    (LRU-style) so recurring experts stay cached across steps — not just the
+    current topk.
 
-    Stable: experts that were on ``rank`` last step (per ``prev_log2phy``) keep
-    their previous slot. New experts (not on this rank last step, or no prev)
-    fill freed slots, ordered by hotness desc. Returns a list of length up to
-    ``num_device_experts`` where each element is an expert id or -1 (empty slot).
+    1. Carry over experts that were resident on this rank last step (from
+       ``prev_log2phy``) into their previous slots. This is the persistent
+       hot set: an expert used a few steps ago stays in its slot instead of
+       being re-H2D'd when it reappears.
+    2. Place ``active_r``: already-resident -> keep slot (cache hit); new ->
+       a free slot; if full, evict the coldest NON-active resident (hotness).
+
+    The full result (retained + active) flows into ``log2phy`` so the next
+    step's ``prev_log2phy`` carries retained experts forward — retention is
+    self-sustaining. Returns a list of length up to ``num_device_experts``
+    (expert id or -1).
     """
     result = [-1] * num_device_experts
-    new = []
-    for eid in active_r:
-        prev_phys = (int(prev_log2phy[eid]) if (prev_log2phy is not None
-                      and eid < len(prev_log2phy)) else -1)
-        if prev_phys >= 0 and prev_phys // num_device_experts == rank:
-            slot = prev_phys % num_device_experts
-            if 0 <= slot < num_device_experts and result[slot] == -1:
-                result[slot] = eid
-                continue
-        new.append(eid)
+    # 1. Retain previous residents on this rank (persistent hot set).
+    if prev_log2phy is not None:
+        prev_list = (prev_log2phy.tolist()
+                     if hasattr(prev_log2phy, "tolist") else prev_log2phy)
+        for eid, pid in enumerate(prev_list):
+            pid = int(pid)
+            if pid >= 0 and pid // num_device_experts == rank:
+                slot = pid % num_device_experts
+                if 0 <= slot < num_device_experts and result[slot] == -1:
+                    result[slot] = int(eid)
+    resident = {eid: s for s, eid in enumerate(result) if eid >= 0}
+    active_set = {int(e) for e in active_r}
+    # 2. Place active experts not already resident (resident ones are hits).
+    new_active = [int(e) for e in active_r if int(e) not in resident]
     if hotness is not None:
-        new.sort(key=lambda e: -float(hotness[e]))
-    free = [i for i in range(num_device_experts) if result[i] == -1]
-    for eid, slot in zip(new, free):
+        new_active.sort(key=lambda e: -float(hotness[e]))
+    for eid in new_active:
+        free = next((s for s in range(num_device_experts)
+                     if result[s] == -1), None)
+        if free is not None:
+            result[free] = eid
+            continue
+        # No free slot: evict the coldest NON-active resident.
+        evictees = [s for s in range(num_device_experts)
+                    if result[s] >= 0 and result[s] not in active_set]
+        if not evictees:
+            break  # every slot holds an active expert this step; can't place
+        if hotness is not None:
+            slot = min(evictees, key=lambda s: float(hotness[int(result[s])]))
+        else:
+            slot = evictees[0]
         result[slot] = eid
     while result and result[-1] == -1:
         result.pop()
