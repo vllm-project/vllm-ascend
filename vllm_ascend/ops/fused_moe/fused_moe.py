@@ -215,7 +215,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             num_tokens = topk_ids.size(0)
             if getattr(layer, 'enable_multi_card', False):
                 mgr.update_weights_multi_card(layer, topk_ids, log2phy,
-                                              topk_weights, hidden_states=x)
+                                              topk_weights, hidden_states=x,
+                                              mc2_mask=mc2_mask)
             else:
                 mgr.update_weights(layer, topk_ids, log2phy, topk_weights,
                                    hidden_states=x)

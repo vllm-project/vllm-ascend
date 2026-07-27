@@ -374,6 +374,14 @@ class ExpertOffloadManager:
         self.topk_weights_h = torch.zeros(
             [self.offload_threshold, self.topk],
             dtype=torch.float32, device="cpu", pin_memory=True)
+        # Per-rank active-token mask (1=real, 0=pad), mirrored to pinned CPU so
+        # the multi-card host callback can drop pad rows before counting. Under
+        # single-batch TP, ranks past the real-token count route zero-hidden
+        # PAD tokens whose topk is garbage; without this filter they pollute
+        # global_counts (placement), the LRU freq, and hit/miss stats.
+        self.mc2_mask_h = torch.zeros(
+            self.offload_threshold, dtype=torch.int32,
+            device="cpu", pin_memory=True)
         self.log2phy_h = torch.zeros(ntotal, dtype=torch.int32,
                                      device='cpu', pin_memory=True)
         self.log2phy_np = self.log2phy_h.numpy()
@@ -1259,7 +1267,8 @@ class ExpertOffloadManager:
         log2phy.copy_(log2phy_h, non_blocking=_EXTRA_CTX.capturing)
 
     def update_weights_multi_card(self, layer, topk_ids, log2phy,
-                                  topk_weights=None, hidden_states=None):
+                                  topk_weights=None, hidden_states=None,
+                                  mc2_mask=None):
         """Multi-card EP offload: planner decides global placement; this rank
         H2D-loads only its assigned experts and writes the placement into
         ``log2phy`` (which the MC2 dispatcher then consumes).
@@ -1336,12 +1345,29 @@ class ExpertOffloadManager:
         log2phy_h = self.log2phy_h
         topk_ids_h.copy_(topk_ids, non_blocking=_EXTRA_CTX.capturing)
         log2phy_h.copy_(log2phy, non_blocking=_EXTRA_CTX.capturing)
+        # Mirror the per-rank active-token mask to pinned CPU on the same
+        # stream as topk_ids_h, so the host callback (graph replay) reads it
+        # after the copy lands — same ordering contract as topk_ids_h. None
+        # means all-active (e.g. non-uniform global_bs path): no filtering,
+        # fully backward compatible.
+        if mc2_mask is not None:
+            mc2_mask_h = self.mc2_mask_h[:num_tokens]
+            # Cast bool->int32 on the NPU first: a direct bool D2H on the
+            # captured stream forces a sync ("stream is captured", rtMemcpy
+            # 107027) because Ascend has no async bool memcpy path. int32 D2H
+            # is the same async path topk_ids_h.copy_ already uses, so it
+            # records cleanly into the graph.
+            mc2_mask_h.copy_(mc2_mask.to(torch.int32),
+                             non_blocking=_EXTRA_CTX.capturing)
+        else:
+            mc2_mask_h = None
         current_compute_stream = torch_npu.npu.current_stream()
         subscribed = get_subscribed_compute_streams()
         if current_compute_stream not in subscribed:
             torch_npu.npu._subscribe_report(current_compute_stream)
             subscribed.add(current_compute_stream)
-        args = (topk_ids_h, log2phy_h, layer, layer_idx, per_rank_slots, False)
+        args = (topk_ids_h, log2phy_h, layer, layer_idx, per_rank_slots, False,
+                mc2_mask_h)
         if _EXTRA_CTX.capturing:
             torch_npu.npu._launch_host_func(
                 current_compute_stream, self._update_weights_multi_card, args)
@@ -1381,16 +1407,32 @@ class ExpertOffloadManager:
         the compute stream), and writes placement.log2phy into the pinned
         log2phy_h (the wrapper H2D-copies it back to the NPU tensor).
         """
-        (topk_ids_h, log2phy_h, layer, layer_idx, per_rank_slots, is_prefetch) = args
+        (topk_ids_h, log2phy_h, layer, layer_idx, per_rank_slots, is_prefetch,
+         mc2_mask_h) = args
         from vllm_ascend.expert_offload.multi_card_planner import plan_placement
         from vllm.distributed.parallel_state import get_ep_group
         cpu_group = get_ep_group().cpu_group if self.ep_size > 1 else None
 
+        # Drop pad-token rows (mc2_mask==0) BEFORE any counting / placing / LRU.
+        # Under single-batch TP the ranks past the real-token count hold PAD
+        # tokens (zero hidden) whose topk is garbage; counting them inflates
+        # global_counts (-> wrong placement + wasted H2D), corrupts the LRU
+        # freq, and distorts hit/miss stats. An all-pad rank contributes an
+        # empty [0, topk] view -> zero local counts; the all_reduce still
+        # carries the real ranks' counts, and the global placement still
+        # assigns that rank the real experts MC2 dispatches to it. mc2_mask_h
+        # None -> all-active (backward compatible).
+        if mc2_mask_h is not None:
+            topk_for_count = topk_ids_h[mc2_mask_h.bool()]
+        else:
+            topk_for_count = topk_ids_h
+
         if self._debug:
-            self._log_mc_router_observation(layer_idx, topk_ids_h)
+            self._log_mc_router_observation(layer_idx, topk_for_count)
 
         global_counts, cache_on, hotness, prev_log2phy = \
-            self._gather_global_counts_and_hotness(layer_idx, topk_ids_h, cpu_group)
+            self._gather_global_counts_and_hotness(layer_idx, topk_for_count,
+                                                    cpu_group)
 
         # Plan placement: stable slot (prev_log2phy) + hotness (new order).
         placement = plan_placement(global_counts, self.ep_size, per_rank_slots,
@@ -1767,8 +1809,14 @@ class ExpertOffloadManager:
         self._is_prefetch = True
         if self.enable_multi_card:
             per_rank_slots = self.num_device_experts // self.ep_size
+            # mc2_mask_h=None: prefetch predicts the NEXT layer whose
+            # active-token mask isn't known yet, so don't filter. Prefetch
+            # placement is corrected by the next layer's reactive update
+            # (which does filter), and prefetch calls are excluded from
+            # hit-rate stats via is_prefetch=True.
             return self._update_weights_multi_card, (
-                topk_ids_h, log2phy_h, next_layer, next_idx, per_rank_slots, True)
+                topk_ids_h, log2phy_h, next_layer, next_idx, per_rank_slots,
+                True, None)
         return self._update_weights, (
             topk_ids_h, log2phy_np, next_layer, next_idx, topk_weights_h,
             self._is_prefetch)
