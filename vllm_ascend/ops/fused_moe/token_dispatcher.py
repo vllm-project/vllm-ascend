@@ -27,6 +27,7 @@ import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
+from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
@@ -51,6 +52,7 @@ from vllm_ascend.utils import (
 
 EXPERT_TOKEN_NUMS_TYPE_CUMSUM = 0
 EXPERT_TOKEN_NUMS_TYPE_COUNT = 1
+_ALLGATHER_MXFP_DISPATCH_GATE_LOGGED = False
 
 
 def _get_expert_token_nums_type(token_dispatch_input: MoETokenDispatchInput) -> int:
@@ -412,6 +414,25 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             and dynamic_scale is not None
             and hidden_states.dtype == torch.float8_e4m3fn
         )
+        global _ALLGATHER_MXFP_DISPATCH_GATE_LOGGED
+        if not _ALLGATHER_MXFP_DISPATCH_GATE_LOGGED:
+            logger.info(
+                "MoE AllGather MXFP dispatch gate: quant_type=%s, with_quant=%s, "
+                "quant_mode=%s, act_quant_type=%s, hidden_dtype=%s, hidden_shape=%s, "
+                "dynamic_scale_dtype=%s, dynamic_scale_shape=%s, expert_map=%s, "
+                "route_mxfp8_activation=%s",
+                quant_type,
+                with_quant,
+                quant_mode,
+                act_quant_type,
+                hidden_states.dtype,
+                tuple(hidden_states.shape),
+                None if dynamic_scale is None else dynamic_scale.dtype,
+                None if dynamic_scale is None else tuple(dynamic_scale.shape),
+                expert_map is not None,
+                route_mxfp8_activation,
+            )
+            _ALLGATHER_MXFP_DISPATCH_GATE_LOGGED = True
         if route_mxfp8_activation:
             sorted_hidden_states, expanded_row_idx, expert_tokens, _ = DeviceOperator.npu_moe_init_routing(
                 hidden_states.view(torch.bfloat16),
