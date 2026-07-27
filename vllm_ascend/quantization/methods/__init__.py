@@ -39,6 +39,7 @@ from .base import (
     TPWeightGatherSpec,
     TPWeightRepeatPart,
     TPWeightRepeatSpec,
+    TPWeightSwitchMixin,
     TPWeightSwitchState,
 )
 
@@ -88,6 +89,7 @@ __all__ = [
     "TPWeightGatherSpec",
     "TPWeightRepeatPart",
     "TPWeightRepeatSpec",
+    "TPWeightSwitchMixin",
     "TPWeightSwitchState",
     # Registry functions
     "register_scheme",
