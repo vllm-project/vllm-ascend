@@ -122,7 +122,7 @@ def generate_non_decreasing_sequence(length, upper_limit):
 
 
 @torch.inference_mode()
-def test_grouped_matmul_swiglu_quant_kernel():
+def test_grouped_matmul_swiglu_quant_v2_single_tensor():
     E = 16
     M = 512
     K = 7168
@@ -145,13 +145,14 @@ def test_grouped_matmul_swiglu_quant_kernel():
         x.cpu(), weight_ori, weight_scale, pertoken_scale.cpu(), bias.cpu(), group_list.cpu()
     )
 
-    output, output_scale, _ = torch.ops._C_ascend.grouped_matmul_swiglu_quant(
+    output, output_scale = torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2(
         x=x,
-        weight=pack_weight,
-        bias=bias,
+        weight=[pack_weight],
+        weight_assist_matrix=[bias],
         group_list=group_list,
-        weight_scale=scale_uint64_tensor,
+        weight_scale=[scale_uint64_tensor],
         x_scale=pertoken_scale,
+        dequant_mode=1,
     )
     torch.testing.assert_close(output_golden, output.cpu(), atol=1, rtol=0.005)
     torch.testing.assert_close(output_scale_golden, output_scale.cpu(), atol=1, rtol=0.005)
