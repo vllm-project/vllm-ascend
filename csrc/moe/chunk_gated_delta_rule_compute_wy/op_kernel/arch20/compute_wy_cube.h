@@ -39,7 +39,7 @@ class WyCubeGemm {
   __aicore__ inline void Init(const TCubeTiling *attnTiling, const TCubeTiling *squareTiling,
                               const TCubeTiling *applyUTiling, const TCubeTiling *applyWTiling, TPipe *pipe,
                               LocalTensor<uint8_t> localWs, uint32_t localWsBytes, GM_ADDR workspace,
-                              uint32_t perCoreBytes, uint32_t usedCoreNum)
+                              uint64_t workspaceOffset, uint32_t perCoreBytes, uint32_t usedCoreNum)
   {
     pipe_ = pipe;
     perCoreBytes_ = perCoreBytes;
@@ -57,10 +57,9 @@ class WyCubeGemm {
     localWs_ = localWs;
     (void)localWsBytes;
 
-    constexpr uint64_t kSysWorkspace = 16ULL * 1024ULL * 1024ULL;
     const uint32_t blockIdx = GetBlockIdx() % usedCoreNum_;
     const uint64_t coreBase =
-        kSysWorkspace + static_cast<uint64_t>(blockIdx) * static_cast<uint64_t>(perCoreBytes_);
+        workspaceOffset + static_cast<uint64_t>(blockIdx) * static_cast<uint64_t>(perCoreBytes_);
     aGm_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(workspace + coreBase + WY_CUBE_STAGING_A_OFF));
     bGm_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(workspace + coreBase + WY_CUBE_STAGING_B_OFF));
     cGm_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(workspace + coreBase + WY_CUBE_STAGING_C_OFF));
@@ -81,7 +80,7 @@ class WyCubeGemm {
     mmAttn_.SetTensorA(aGm_, false);
     mmAttn_.SetTensorB(bGm_, true);
     mmAttn_.IterateAll(cGm_);
-    WaitFixpipeToMte2();
+    WaitMte3ToMte2();
     PipeBarrier<PIPE_ALL>();
 
     CopyFloatRowsFromGm(cUb, cGm_, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
@@ -104,7 +103,7 @@ class WyCubeGemm {
     mmSquare_.SetTensorA(aGm_, false);
     mmSquare_.SetTensorB(bGm_, false);
     mmSquare_.IterateAll(cGm_);
-    WaitFixpipeToMte2();
+    WaitMte3ToMte2();
     PipeBarrier<PIPE_ALL>();
 
     CopyFloatRowsFromGm(pUb, cGm_, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
@@ -150,7 +149,7 @@ class WyCubeGemm {
       mmApplyW_.SetTensorB(bGm_, false);
       mmApplyW_.IterateAll(cGm_);
     }
-    WaitFixpipeToMte2();
+    WaitMte3ToMte2();
     PipeBarrier<PIPE_ALL>();
 
     // C[64,nDim] from GM -> floatScratch, then R += C
@@ -174,11 +173,11 @@ class WyCubeGemm {
     WaitFlag<HardEvent::V_MTE3>(evt);
   }
 
-  __aicore__ inline void WaitFixpipeToMte2() const
+  __aicore__ inline void WaitMte3ToMte2() const
   {
-    event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::FIX_MTE2));
-    SetFlag<HardEvent::FIX_MTE2>(evt);
-    WaitFlag<HardEvent::FIX_MTE2>(evt);
+    event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_MTE2));
+    SetFlag<HardEvent::MTE3_MTE2>(evt);
+    WaitFlag<HardEvent::MTE3_MTE2>(evt);
   }
 
   __aicore__ inline void WaitMte2ToV() const

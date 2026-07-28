@@ -23,7 +23,7 @@ struct alignas(8) ChunkGatedDeltaRuleComputeWyTilingData {
     uint32_t localWorkspaceSize;
     uint32_t perCoreWorkspaceBytes;
     uint32_t usedCoreNum;
-    uint32_t reserved0;
+    uint64_t workspaceOffset;
     TCubeTiling mmAttn;
     TCubeTiling mmSquare;
     TCubeTiling mmApplyU;
