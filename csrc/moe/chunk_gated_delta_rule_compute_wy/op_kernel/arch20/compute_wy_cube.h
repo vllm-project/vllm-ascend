@@ -72,6 +72,7 @@ class WyCubeGemm {
     WaitVToMte3();
     CopyHalfRowsToGm(aGm_, aUb, WY_CUBE_CHUNK, kDim, aLda);
     CopyHalfRowsToGm(bGm_, bUb, WY_CUBE_CHUNK, kDim, bLda);
+    WaitMte3ToMte2();
     PipeBarrier<PIPE_ALL>();
 
     mmAttn_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, static_cast<int>(kDim));
@@ -95,6 +96,7 @@ class WyCubeGemm {
     WaitVToMte3();
     CopyHalfRowsToGm(aGm_, halfScratch, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     CopyHalfRowsToGm(bGm_, halfScratch, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
+    WaitMte3ToMte2();
     PipeBarrier<PIPE_ALL>();
 
     mmSquare_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
@@ -118,9 +120,9 @@ class WyCubeGemm {
     PipeBarrier<PIPE_V>();
     WaitVToMte3();
     CopyHalfRowsToGm(aGm_, halfScratch, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
-    event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
-    SetFlag<HardEvent::MTE3_V>(evt);
-    WaitFlag<HardEvent::MTE3_V>(evt);
+    // Apply matmul reads A from GM via MTE2, so we must gate MTE3 write completion
+    // with MTE3->MTE2 instead of MTE3->V.
+    WaitMte3ToMte2();
   }
 
   // R = R + P @ R for one RHS block (U or W). Assumes P already on aGm_ (UploadP).
@@ -132,6 +134,7 @@ class WyCubeGemm {
     CastFloatRowsToHalfContiguous(halfScratch, rUb, WY_CUBE_CHUNK, nDim, rLda);
     WaitVToMte3();
     CopyHalfRowsToGm(bGm_, halfScratch, WY_CUBE_CHUNK, nDim, nDim);
+    WaitMte3ToMte2();
     PipeBarrier<PIPE_ALL>();
 
     if (useU) {

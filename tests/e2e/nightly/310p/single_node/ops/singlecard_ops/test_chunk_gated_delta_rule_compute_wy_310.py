@@ -92,6 +92,20 @@ def test_compute_wy_matches_torch_reference_qwen35_heads():
     print("✓ test_compute_wy_matches_torch_reference_qwen35_heads passed")
 
 
+def test_compute_wy_qwen35_production_shape_is_deterministic():
+    """Regression: production-like long prefill must be bitwise deterministic."""
+    enable_custom_op()
+    q, k, v, g, beta = _make_inputs(batch=1, tokens=1536, q_heads=8, v_heads=16, k_dim=128, v_dim=128)
+    assert chunk_mod._can_use_npu_compute_wy(q, k, v, g, beta, CHUNK_SIZE)
+
+    baseline = torch.ops._C_ascend.chunk_gated_delta_rule_compute_wy(q, k, v, g, beta, CHUNK_SIZE)
+    expected = tuple(tensor.cpu() for tensor in baseline)
+    for _ in range(5):
+        repeated = torch.ops._C_ascend.chunk_gated_delta_rule_compute_wy(q, k, v, g, beta, CHUNK_SIZE)
+        for actual, expected_tensor in zip(repeated, expected):
+            torch.testing.assert_close(actual.cpu(), expected_tensor, rtol=0, atol=0)
+
+
 def test_chunk_gated_delta_rule_310_uses_npu_wy(monkeypatch):
     enable_custom_op()
     q, k, v, g, beta = _make_inputs(batch=1, tokens=128, q_heads=2, v_heads=2)
