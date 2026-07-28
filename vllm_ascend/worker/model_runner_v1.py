@@ -1461,10 +1461,6 @@ class NPUModelRunner(GPUModelRunner):
                 k=self.drafter.k,
             )
 
-            # # only async scheduling, set prev_sampled_token_ids，
-            # if self.use_async_scheduling:
-            #     self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
-
             # Communicate verified token count to scheduler for async scheduling.
             self._copy_valid_sampled_token_count(
                 next_token_ids, valid_sampled_tokens_count
