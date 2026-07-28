@@ -331,17 +331,22 @@ jobs:
         env:
           FIXED_BASE_REF: ${{ needs.resolve-source.outputs.base_ref }}
           FIXED_BASE_SHA: ${{ needs.resolve-source.outputs.base_sha }}
+          SOURCE_REF: ${{ needs.resolve-source.outputs.source_ref }}
         run: |
           set -eu
           BRANCH="main2main_auto_$(date +%Y-%m-%d_%H-%M)"
+          UPSTREAM_BASE_SHA="${FIXED_BASE_SHA:-$SOURCE_REF}"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" || \
+            git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
           git checkout -B "$BRANCH"
           if [ -n "$FIXED_BASE_SHA" ]; then
-            git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" || \
-              git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
             git fetch upstream "$FIXED_BASE_REF"
-            git cat-file -e "${FIXED_BASE_SHA}^{commit}"
             git rebase "$FIXED_BASE_SHA"
           fi
+          git cat-file -e "${UPSTREAM_BASE_SHA}^{commit}"
+          # main2main_flow uses upstream/main as its squash baseline. Keep the
+          # ref on the resolved snapshot instead of fetching a moving main.
+          git update-ref refs/remotes/upstream/main "$UPSTREAM_BASE_SHA"
           BASE_SHA=$(git rev-parse HEAD)
           echo "name=${BRANCH}" >> "$GITHUB_OUTPUT"
           echo "base_sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"
