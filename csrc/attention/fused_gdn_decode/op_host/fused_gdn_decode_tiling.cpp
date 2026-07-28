@@ -26,6 +26,7 @@ constexpr uint64_t TILING_BF16_STATE_BF16 = 3;
 constexpr uint64_t TILING_FP16_STATE_FP16 = 4;
 constexpr uint64_t UB_ALIGN_BYTES = 256;
 constexpr uint64_t SCALAR_UB_ELEMS = 192;
+constexpr uint32_t MIN_SUPPORTED_K = 64;
 
 uint32_t CeilDiv(uint32_t x, uint32_t y)
 {
@@ -119,6 +120,10 @@ ge::graphStatus FusedGdnDecodeTilingFunc(gert::TilingContext *context)
                 v, k);
         return ge::GRAPH_FAILED;
     }
+    if (k < MIN_SUPPORTED_K) {
+        OP_LOGE("FusedGdnDecode", "unsupported K=%u, expected K >= %u", k, MIN_SUPPORTED_K);
+        return ge::GRAPH_FAILED;
+    }
     const uint32_t qkDim = mixedDim - hv * v;
     if ((qkDim % (2 * k)) != 0) {
         OP_LOGE("FusedGdnDecode", "invalid qkDim/k: qkDim=%u k=%u", qkDim, k);
@@ -159,15 +164,24 @@ ge::graphStatus FusedGdnDecodeTilingFunc(gert::TilingContext *context)
     }
     const ge::DataType mixedDtype = mixedDesc->GetDataType();
     const ge::DataType stateDtype = stateDesc->GetDataType();
-    const uint32_t stateBytes = stateDtype == ge::DT_FLOAT ? 4 : 2;
 
-    uint64_t tilingKey = TILING_BF16_STATE_FP32;
-    if (mixedDtype == ge::DT_FLOAT16 && stateDtype == ge::DT_FLOAT) {
+    uint64_t tilingKey = 0;
+    uint32_t stateBytes = 0;
+    if (mixedDtype == ge::DT_BF16 && stateDtype == ge::DT_FLOAT) {
+        tilingKey = TILING_BF16_STATE_FP32;
+        stateBytes = sizeof(float);
+    } else if (mixedDtype == ge::DT_FLOAT16 && stateDtype == ge::DT_FLOAT) {
         tilingKey = TILING_FP16_STATE_FP32;
+        stateBytes = sizeof(float);
     } else if (mixedDtype == ge::DT_BF16 && stateDtype == ge::DT_BF16) {
         tilingKey = TILING_BF16_STATE_BF16;
+        stateBytes = sizeof(uint16_t);
     } else if (mixedDtype == ge::DT_FLOAT16 && stateDtype == ge::DT_FLOAT16) {
         tilingKey = TILING_FP16_STATE_FP16;
+        stateBytes = sizeof(uint16_t);
+    } else {
+        OP_LOGE("FusedGdnDecode", "unsupported dtype combination: mixed=%d state=%d", mixedDtype, stateDtype);
+        return ge::GRAPH_FAILED;
     }
 
     float scale = 1.0f;
@@ -184,6 +198,12 @@ ge::graphStatus FusedGdnDecodeTilingFunc(gert::TilingContext *context)
     }
 
     const uint32_t bv = SelectBv(k, v, stateBytes, ubSize);
+    const uint64_t requiredUbBytes = EstimateUbBytes(k, v, bv, stateBytes);
+    if (requiredUbBytes >= ubSize) {
+        OP_LOGE("FusedGdnDecode", "required UB size %llu exceeds available UB size %llu",
+                static_cast<unsigned long long>(requiredUbBytes), static_cast<unsigned long long>(ubSize));
+        return ge::GRAPH_FAILED;
+    }
     const uint32_t vTiles = CeilDiv(v, bv);
     const uint32_t totalTasks = batch * hv;
     const uint32_t maxTasksPerBlock = CeilDiv(totalTasks, aivNum);

@@ -23,6 +23,7 @@ at::Tensor npu_fused_gdn_decode(
     TORCH_CHECK(a.dim() == 2 && b.dim() == 2, "a and b must be [B, HV]");
     TORCH_CHECK(A_log.dim() == 1 && dt_bias.dim() == 1, "A_log and dt_bias must be [HV]");
     TORCH_CHECK(state.dim() == 4, "state must be [slots, HV, V, K]");
+    TORCH_CHECK(state.is_contiguous(), "state must be contiguous");
     TORCH_CHECK(ssm_state_indices.dim() == 1, "ssm_state_indices must be [B]");
     TORCH_CHECK(mixed_qkv.size(0) == a.size(0) && a.sizes() == b.sizes(),
                 "mixed_qkv/a/b batch or shape mismatch.");
