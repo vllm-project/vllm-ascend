@@ -502,7 +502,6 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
 
     def test_mtp3_placeholder_metadata_is_preserved_before_sanitizing_forward(self):
         runner = self._build_runner()
-        runner.pcp_size = 1
         runner.arange_np = np.arange(8, dtype=np.int32)
         runner._arange_scratch = np.empty(8, dtype=np.int32)
         runner.input_ids = SimpleNamespace(
@@ -516,7 +515,6 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         spec_decode_metadata = runner._calc_spec_decode_metadata(
             num_draft_tokens=np.array([3], dtype=np.int32),
             cu_num_scheduled_tokens=np.array([4], dtype=np.int32),
-            num_pcp_pads=None,
         )
         runner._sanitize_placeholder_input_ids_for_forward(
             scheduler_output,
@@ -589,7 +587,6 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         runner.use_async_scheduling = False
         runner.num_spec_tokens = 0
         runner._draft_token_ids = None
-        runner.pcp_size = 1
         runner.supports_mm_inputs = False
         runner.model_config.is_encoder_decoder = False
         runner.synchronize_input_prep = nullcontext
@@ -627,7 +624,6 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         runner.use_async_scheduling = False
         runner.num_spec_tokens = 0
         runner._draft_token_ids = None
-        runner.pcp_size = 1
         runner.supports_mm_inputs = False
         runner.model_config.is_encoder_decoder = False
         runner.synchronize_input_prep = nullcontext
