@@ -50,9 +50,10 @@ DSparkFusedAttentionMetadata = tuple[int, torch.Tensor, torch.Tensor, torch.Tens
 class DSparkDecodeMetadata:
     cos: RopeDataProxy
     sin: RopeDataProxy
-    context_cache_indices: torch.Tensor | None
-    context_cache_valid: torch.Tensor | None
-    context_request_slots: torch.Tensor | None
+    context_cache_indices: torch.Tensor
+    context_cache_valid: torch.Tensor
+    context_request_slots: torch.Tensor
+    padding_kv: torch.Tensor
 
 
 DSparkContextStoreIndices = dict[str, typing.Any]
@@ -236,6 +237,13 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         )
         self.window_size = int(self.window_size)
         self.pa_block_size = int(self.dsa_attn.swa_cache_layer.block_size)
+        self._dspark_total_tokens = self.window_size + self.block_size
+        self._dspark_blocks_per_request = (
+            self._dspark_total_tokens + self.pa_block_size - 1
+        ) // self.pa_block_size
+        self._dspark_padding_tokens = (
+            self._dspark_blocks_per_request * self.pa_block_size - self._dspark_total_tokens
+        )
         scheduler_config = getattr(vllm_config, "scheduler_config", None)
         max_request_slots = max(
             1,
@@ -524,36 +532,25 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         self,
         q: torch.Tensor,
         draft_kv: torch.Tensor,
-        draft_positions: torch.Tensor,
-        request_slots: torch.Tensor,
-        context_cache_indices: torch.Tensor | None = None,
-        context_cache_valid: torch.Tensor | None = None,
-        context_request_slots: torch.Tensor | None = None,
+        context_cache_indices: torch.Tensor,
+        context_cache_valid: torch.Tensor,
+        context_request_slots: torch.Tensor,
+        padding_kv: torch.Tensor,
     ) -> torch.Tensor:
-        batch_size, draft_len = q.shape[:2]
-
-        if context_cache_indices is None or context_cache_valid is None or context_request_slots is None:
-            block_start = draft_positions[:, :1].to(torch.int64)
-            context_end = block_start - 1
-            context_start = torch.clamp(context_end + 1 - self.window_size, min=0)
-            ctx_positions = context_start + self._dspark_window_offsets
-            context_cache_valid = ctx_positions <= context_end
-            context_cache_indices = ctx_positions.remainder(self.window_size)
-            context_request_slots = (
-                request_slots[:, :1].to(device=draft_kv.device, dtype=torch.int64).expand(-1, self.window_size)
-            )
+        batch_size = q.shape[0]
         ctx_kv = self._dspark_kv_cache[context_request_slots, context_cache_indices]
         ctx_kv = torch.where(context_cache_valid.unsqueeze(-1), ctx_kv, torch.zeros_like(ctx_kv))
 
-        total_tokens = self.window_size + draft_len
-        blocks_per_request = (total_tokens + self.pa_block_size - 1) // self.pa_block_size
-        padded_tokens = blocks_per_request * self.pa_block_size
-        if padded_tokens > total_tokens:
-            pad = draft_kv.new_zeros((batch_size, padded_tokens - total_tokens, self.head_dim))
-            kv = torch.cat([ctx_kv, draft_kv, pad], dim=1)
+        if self._dspark_padding_tokens > 0:
+            kv = torch.cat([ctx_kv, draft_kv, padding_kv], dim=1)
         else:
             kv = torch.cat([ctx_kv, draft_kv], dim=1)
-        kv = kv.view(batch_size * blocks_per_request, self.pa_block_size, 1, self.head_dim).contiguous()
+        kv = kv.view(
+            batch_size * self._dspark_blocks_per_request,
+            self.pa_block_size,
+            1,
+            self.head_dim,
+        ).contiguous()
 
         output = torch.empty_like(q)
         torch.ops.vllm.dspark_sparse_attn_sharedkv(
@@ -577,16 +574,13 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         dspark_metadata: DSparkDecodeMetadata | None = None,
     ) -> torch.Tensor:
         if dspark_metadata is None:
-            rope_cos_sin = None
-            context_cache_indices = None
-            context_cache_valid = None
-            context_request_slots = None
-        else:
-            layer_name = self.rotary_emb.layername
-            rope_cos_sin = (dspark_metadata.cos[layer_name], dspark_metadata.sin[layer_name])
-            context_cache_indices = dspark_metadata.context_cache_indices
-            context_cache_valid = dspark_metadata.context_cache_valid
-            context_request_slots = dspark_metadata.context_request_slots
+            raise RuntimeError("DSpark decode metadata was not prepared before attention forward.")
+        layer_name = self.rotary_emb.layername
+        rope_cos_sin = (dspark_metadata.cos[layer_name], dspark_metadata.sin[layer_name])
+        context_cache_indices = dspark_metadata.context_cache_indices
+        context_cache_valid = dspark_metadata.context_cache_valid
+        context_request_slots = dspark_metadata.context_request_slots
+        padding_kv = dspark_metadata.padding_kv
         qr = self.q_norm(self.wq_a(hidden_states))
         q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
         q = self.q_norm_without_weight(q)
@@ -606,18 +600,13 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         batch_size = positions.numel() // self.block_size
         q = q.view(batch_size, self.block_size, self.n_local_heads, self.head_dim)
         draft_kv = shared_kv.view(batch_size, self.block_size, self.head_dim)
-        draft_positions = positions.view(batch_size, self.block_size)
-        if request_slots is None:
-            request_slots = torch.zeros_like(positions, dtype=torch.int32)
-        request_slots = request_slots.view(batch_size, self.block_size)
         out = self._dspark_attention_from_cache(
             q,
             draft_kv,
-            draft_positions,
-            request_slots,
             context_cache_indices,
             context_cache_valid,
             context_request_slots,
+            padding_kv,
         ).flatten(0, 1)
 
         out = _apply_dsv4_rope(
@@ -768,6 +757,18 @@ class DeepseekV4DSparkModel(nn.Module):
         shared_fused_attn_metadata_cache: dict[tuple[object, ...], DSparkFusedAttentionMetadata] = {}
         for layer in self.layers.values():
             layer.self_attn._dspark_fused_attn_metadata_cache = shared_fused_attn_metadata_cache
+        first_attn = first_layer.self_attn
+        self.register_buffer(
+            "_dspark_padding_kv",
+            first_attn._dspark_kv_cache.new_zeros(
+                (
+                    first_attn._dspark_kv_cache.shape[0],
+                    first_attn._dspark_padding_tokens,
+                    first_attn.head_dim,
+                )
+            ),
+            persistent=False,
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         if self.embed_tokens is None:
@@ -859,6 +860,8 @@ class DeepseekV4DSparkModel(nn.Module):
         context_cache_valid: torch.Tensor | None = None,
         context_request_slots: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if context_cache_indices is None or context_cache_valid is None or context_request_slots is None:
+            raise RuntimeError("DSpark context cache metadata was not prepared before model forward.")
         if inputs_embeds is None:
             inputs_embeds = self.embed_input_ids(input_ids)
         hidden_states = inputs_embeds.unsqueeze(-2).repeat(1, self.hc_mult, 1)
@@ -869,6 +872,7 @@ class DeepseekV4DSparkModel(nn.Module):
             context_cache_indices=context_cache_indices,
             context_cache_valid=context_cache_valid,
             context_request_slots=context_request_slots,
+            padding_kv=self._dspark_padding_kv[: context_cache_indices.shape[0]],
         )
         for layer in self.layers.values():
             hidden_states = layer(
