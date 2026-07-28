@@ -647,50 +647,59 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.prefill_context_parallel_metadata = pcp_manager.long_seq_metadata
 
             assert len(self.draft_attn_groups) > 0
-            builder = self.draft_attn_groups[0].get_metadata_builder()
-            kv_cache_spec = self.draft_attn_groups[0].kv_cache_spec
             # update the tensor's address for each step.
             for draft_index in range(self.num_speculative_tokens):
-                common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
+                step_metadata = self.shallow_copy_metadata(common_attn_metadata)
                 extra_attn_metadata_args: dict = {}
                 if self.use_compress:
                     extra_attn_metadata_args.update(
                         prefill_ratio_to_sas_metadata=dict(),
                         decode_ratio_to_sas_metadata=dict(),
                         common_ratio_to_sas_metadata=dict(),
-                        block_size=kv_cache_spec.block_size,
+                        block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
                     )
                 # Set the real slot_mapping.
-                slot_mapping_lens = common_attn_metadata.slot_mapping.shape[0]
-                self.slot_mapping_group[draft_index][:slot_mapping_lens].copy_(common_attn_metadata.slot_mapping)
+                slot_mapping_lens = step_metadata.slot_mapping.shape[0]
+                self.slot_mapping_group[draft_index][:slot_mapping_lens].copy_(step_metadata.slot_mapping)
                 self.slot_mapping_group[draft_index][slot_mapping_lens:].fill_(PADDING_SLOT_ID)
-                common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_index]
-                self.seq_lens_group[draft_index][:num_reqs].copy_(common_attn_metadata.seq_lens)
+                step_metadata.slot_mapping = self.slot_mapping_group[draft_index]
+                self.seq_lens_group[draft_index][:num_reqs].copy_(step_metadata.seq_lens)
                 self.seq_lens_group[draft_index][num_reqs:].fill_(0)
-                common_attn_metadata.seq_lens = self.seq_lens_group[draft_index][:num_reqs]
-                self.query_start_loc_group[draft_index][: num_reqs + 1].copy_(common_attn_metadata.query_start_loc)
+                step_metadata.seq_lens = self.seq_lens_group[draft_index][:num_reqs]
+                self.query_start_loc_group[draft_index][: num_reqs + 1].copy_(step_metadata.query_start_loc)
                 self.query_start_loc_group[draft_index][num_reqs + 1 :].fill_(0)
-                common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_index][: num_reqs + 1]
+                step_metadata.query_start_loc = self.query_start_loc_group[draft_index][: num_reqs + 1]
                 if self.pcp_size * self.dcp_size > 1 and draft_index > 0:
                     assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
-                    common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:num_reqs]
-                if not self.use_compress or draft_index == 0:
-                    attn_metadata_eagle = builder.build_for_graph_capture(
-                        common_attn_metadata,
-                        AscendAttentionState.SpecDecoding
-                        if self.method == "mtp"
-                        else AscendAttentionState.ChunkedPrefill,
-                        **extra_attn_metadata_args,
-                    )
-                else:
-                    attn_metadata_eagle = builder.build_for_drafting(
-                        common_attn_metadata,
-                        draft_index,
-                        **extra_attn_metadata_args,
-                    )
+                    step_metadata.block_table_tensor = self.block_table_tensor_clone[:num_reqs]
+
+                # Build per-group metadata with correct block_table for
+                # multi-group KV cache models (e.g. Gemma4 MTP).
                 per_layer_attn_metadata = dict()
-                for layer_name in self.attn_layer_names:
-                    per_layer_attn_metadata[layer_name] = attn_metadata_eagle
+                for attn_group in self.draft_attn_groups:
+                    gid = attn_group.kv_cache_group_id
+                    grp_cm = step_metadata
+                    per_group_bt = getattr(self, "_per_group_block_tables", {}).get(gid)
+                    if per_group_bt is not None:
+                        grp_cm = copy.copy(step_metadata)
+                        grp_cm.block_table_tensor = per_group_bt[:num_reqs]
+                    grp_builder = attn_group.get_metadata_builder()
+                    if not self.use_compress or draft_index == 0:
+                        grp_meta = grp_builder.build_for_graph_capture(
+                            grp_cm,
+                            AscendAttentionState.SpecDecoding
+                            if self.method == "mtp"
+                            else AscendAttentionState.ChunkedPrefill,
+                            **extra_attn_metadata_args,
+                        )
+                    else:
+                        grp_meta = grp_builder.build_for_drafting(
+                            grp_cm,
+                            draft_index,
+                            **extra_attn_metadata_args,
+                        )
+                    for layer_name in attn_group.layer_names:
+                        per_layer_attn_metadata[layer_name] = grp_meta
                 multi_steps_attn_metadata.append(per_layer_attn_metadata)
 
         model_positions = self._get_positions(num_tokens)
@@ -1017,7 +1026,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         **draft_cp_kwargs,
                         attn_group=attn_group,
                     )
-                    for layer_name in self.attn_layer_names:
+                    for layer_name in attn_group.layer_names:
                         per_layer_attn_metadata[layer_name] = attn_metadata
                 multi_steps_attn_metadata.append(per_layer_attn_metadata)
 
@@ -1573,6 +1582,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         assert attn_group is not None, "vllm-ascend v0.17.0rc1 requires attn_group"
         common_attn_metadata = self.shallow_copy_metadata(old_common_metadata)
 
+        # Per-group block_table swap for multi-group KV cache models
+        # (e.g. Gemma4 MTP).  Each KV cache group has its own physical
+        # cache and needs the corresponding block_table.
+        gid = attn_group.kv_cache_group_id
+        per_group_bt = getattr(self, "_per_group_block_tables", {}).get(gid)
+        if per_group_bt is not None:
+            common_attn_metadata.block_table_tensor = per_group_bt[
+                : common_attn_metadata.num_reqs
+            ]
+
         if draft_index == 1:
             if aclgraph_runtime_mode == CUDAGraphMode.FULL:
                 common_attn_metadata.num_reqs = input_batch_size
@@ -1610,8 +1629,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.graph_pad_size = -1
             common_attn_metadata.num_input_tokens = input_batch_size
 
-        # The loop part
-        used_update_positions += 1
+        # The loop part.
+        # MTP (constant_draft_positions) predicts all draft tokens from
+        # the same target position — skip position advancing.
+        if not self.constant_draft_positions:
+            used_update_positions += 1
 
         # Clone the data so that when calculating the data at position 2 and position 3
         # in the merged graph, it does not affect position 1
@@ -1646,21 +1668,27 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # operations in case they are modified in next step's `prepare_input`
         # of main model.
         # Increment the sequence lengths.
-        common_attn_metadata.seq_lens[:batch_size] += 1
+        # MTP (constant_draft_positions) keeps the same seq_lens as
+        # the target's last position — no increment between draft steps.
+        if not self.constant_draft_positions:
+            common_attn_metadata.seq_lens[:batch_size] += 1
         # For the requests that exceed the max model length, we set the
         # sequence length to 1 to minimize their overheads in attention.
         exceeds_mask = common_attn_metadata.seq_lens[:batch_size] > self.max_model_len
         common_attn_metadata.seq_lens[:batch_size].masked_fill_(exceeds_mask, 1)
         if common_attn_metadata.seq_lens_cpu is not None:
-            common_attn_metadata.seq_lens_cpu[:batch_size] = common_attn_metadata.seq_lens_cpu[:batch_size] + 1
+            if not self.constant_draft_positions:
+                common_attn_metadata.seq_lens_cpu[:batch_size] = common_attn_metadata.seq_lens_cpu[:batch_size] + 1
             exceeds_mask_cpu = common_attn_metadata.seq_lens_cpu[:batch_size] > self.max_model_len
             common_attn_metadata.seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask_cpu, 1)
         if common_attn_metadata._seq_lens_cpu is not None:
-            common_attn_metadata._seq_lens_cpu[:batch_size] = common_attn_metadata._seq_lens_cpu[:batch_size] + 1
+            if not self.constant_draft_positions:
+                common_attn_metadata._seq_lens_cpu[:batch_size] = common_attn_metadata._seq_lens_cpu[:batch_size] + 1
             exceeds_mask_internal_cpu = common_attn_metadata._seq_lens_cpu[:batch_size] > self.max_model_len
             common_attn_metadata._seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask_internal_cpu, 1)
         if common_attn_metadata.num_computed_tokens_cpu is not None:
-            common_attn_metadata.num_computed_tokens_cpu[:batch_size] += 1
+            if not self.constant_draft_positions:
+                common_attn_metadata.num_computed_tokens_cpu[:batch_size] += 1
         if self.uses_mrope:
             common_attn_metadata.positions[:batch_size].copy_(clamped_positions[0])
         else:
@@ -2159,6 +2187,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         assert len(self.draft_attn_groups) > 0
         per_layer_attn_metadata: dict[str, Any] = {}
         for attn_group in self.draft_attn_groups:
+            gid = attn_group.kv_cache_group_id
+            # Per-group block_table swap for multi-group KV cache models
+            # (e.g. Gemma4 MTP has separate sliding and full_attention
+            # groups with different physical caches).  Without this swap
+            # every group reads the first group's block_table, causing
+            # full_attention layers to read K/V from wrong blocks.
+            cm = common_attn_metadata
+            per_group_bt = getattr(self, "_per_group_block_tables", {}).get(gid)
+            if per_group_bt is not None:
+                cm = copy.copy(common_attn_metadata)
+                cm.block_table_tensor = per_group_bt[: common_attn_metadata.num_reqs]
             builder = attn_group.get_metadata_builder()
             extra_attn_metadata_args: dict = {}
             if self.use_compress:
@@ -2169,20 +2208,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     block_size=attn_group.kv_cache_spec.block_size,
                 )
             if self.method == "dspark":
-                gid = attn_group.kv_cache_group_id
-                common_attn_metadata = copy.copy(common_attn_metadata)
                 block_table = getattr(self, "_per_group_block_table_buffers", {}).get(gid)
                 if block_table is not None:
-                    common_attn_metadata.block_table_tensor = block_table[: common_attn_metadata.num_reqs]
+                    cm.block_table_tensor = block_table[: common_attn_metadata.num_reqs]
                 slot_mapping = self._per_group_query_slot_mapping_buffers[gid]
                 if slot_mapping is not None:
-                    common_attn_metadata.slot_mapping = slot_mapping[:num_input_tokens]
+                    cm.slot_mapping = slot_mapping[:num_input_tokens]
                 attn_metadata = builder.build_for_drafting(
-                    common_attn_metadata, draft_index=1, **extra_attn_metadata_args
+                    cm, draft_index=1, **extra_attn_metadata_args
                 )
             else:
                 attn_metadata = builder.build(
-                    0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args
+                    0, cm, self.runner.get_model(), **extra_attn_metadata_args
                 )
             if hasattr(attn_metadata, "causal") and not attn_metadata.causal:
                 attn_metadata.attn_mask = None
