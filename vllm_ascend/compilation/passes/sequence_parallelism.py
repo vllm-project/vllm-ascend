@@ -350,6 +350,15 @@ class SequenceParallelismPass(VllmInductorPass):
         logger.debug("before apply replacement %s", graph.graph)
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
+        if self.matched_count:
+            logger.info(
+                "Sequence parallelism pass replaced %s patterns; using SP.",
+                self.matched_count,
+            )
+        else:
+            logger.warning(
+                "Sequence parallelism pass replaced 0 patterns; falling back to TP mode."
+            )
         logger.debug("after apply replacement %s", graph.graph)
 
         from torch._inductor.pattern_matcher import PatternPrettyPrinter
@@ -369,4 +378,12 @@ class SequenceParallelismPass(VllmInductorPass):
         """
         applicable = compile_range.start >= self.min_tokens
         logger.debug("SequenceParallelismPass compile_range=%r applicable=%r", compile_range, applicable)
+        if not applicable:
+            logger.warning(
+                "Sequence parallelism pass skipped for compile_range=%r because start=%s is below "
+                "sp_min_token_num=%s; falling back to TP mode.",
+                compile_range,
+                compile_range.start,
+                self.min_tokens,
+            )
         return applicable
