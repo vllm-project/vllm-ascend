@@ -85,7 +85,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         )
         self._dspark_capture_sizes: list[int] = []
         self._dspark_block_table_buffer: torch.Tensor | None = None
-        self._dspark_block_table_tensor: torch.Tensor | None = None
         scheduler_config = getattr(vllm_config, "scheduler_config", None)
         self._dspark_max_request_slots = max(
             1, int(getattr(scheduler_config, "max_num_seqs", self.max_batch_size) or self.max_batch_size)
@@ -261,7 +260,6 @@ class AscendDSparkProposer(AscendDflashProposer):
             dtype=torch.int32,
             device=self.device,
         )
-        self._dspark_block_table_tensor = self._dspark_block_table_buffer
         self._draft_attn_layer_names = set(cache_layer_names)
         self.attn_layer_names = cache_layer_names
         self.piece_all_attn_layer_name = [[] for _ in range(self.num_speculative_tokens)]
@@ -417,29 +415,28 @@ class AscendDSparkProposer(AscendDflashProposer):
         block_table: torch.Tensor | None,
         seq_lens: torch.Tensor | None = None,
     ) -> None:
-        block_table_buffer = self._dspark_block_table_buffer
-        if block_table_buffer is None:
-            self._dspark_block_table_tensor = block_table
+        if self._dspark_block_table_buffer is None:
+            if block_table is not None:
+                raise RuntimeError("DSpark block table buffer is not initialized.")
             return
-        block_table_buffer.fill_(-1)
+        self._dspark_block_table_buffer.fill_(-1)
         if block_table is not None:
-            num_rows = min(block_table.shape[0], block_table_buffer.shape[0])
+            num_rows = min(block_table.shape[0], self._dspark_block_table_buffer.shape[0])
             if seq_lens is not None:
                 num_rows = min(num_rows, seq_lens.shape[0])
-            num_cols = min(block_table.shape[1], block_table_buffer.shape[1])
-            block_table_buffer[:num_rows, :num_cols].copy_(block_table[:num_rows, :num_cols])
+            num_cols = min(block_table.shape[1], self._dspark_block_table_buffer.shape[1])
+            self._dspark_block_table_buffer[:num_rows, :num_cols].copy_(block_table[:num_rows, :num_cols])
             if seq_lens is not None and num_rows > 0:
                 valid_block_counts = torch.div(
-                    seq_lens[:num_rows].to(device=block_table_buffer.device, dtype=torch.int64)
+                    seq_lens[:num_rows].to(device=self._dspark_block_table_buffer.device, dtype=torch.int64)
                     + self.kernel_block_size
                     - 1,
                     self.kernel_block_size,
                     rounding_mode="floor",
                 )
-                block_indices = torch.arange(num_cols, device=block_table_buffer.device).view(1, -1)
+                block_indices = torch.arange(num_cols, device=self._dspark_block_table_buffer.device).view(1, -1)
                 invalid_blocks = block_indices >= valid_block_counts.view(-1, 1)
-                block_table_buffer[:num_rows, :num_cols].masked_fill_(invalid_blocks, -1)
-        self._dspark_block_table_tensor = block_table_buffer
+                self._dspark_block_table_buffer[:num_rows, :num_cols].masked_fill_(invalid_blocks, -1)
 
     def set_inputs_first_pass(
         self,
@@ -608,7 +605,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             "inputs_embeds": None,
             "request_slots": self._request_slots_buffer[:num_input_tokens],
             "slot_mapping": self._slot_mapping_buffer[:num_input_tokens],
-            "block_table": self._dspark_block_table_tensor,
+            "block_table": self._dspark_block_table_buffer,
             "context_cache_indices": context_cache_indices,
             "context_cache_valid": context_cache_valid,
             "context_request_slots": context_request_slots,
@@ -637,7 +634,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             self._context_slot_mapping_buffer[:num_context],
         )
         self.model.model.sync_context_cache_from_paged(
-            self._dspark_block_table_tensor,
+            self._dspark_block_table_buffer,
             self._dspark_context_lens,
             self._dspark_context_request_slots,
         )
