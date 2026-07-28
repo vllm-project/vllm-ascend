@@ -1,15 +1,11 @@
 from collections import OrderedDict
 from dataclasses import dataclass
 
-from vllm.config import VllmConfig
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
-from vllm.logger import init_logger
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.request import Request
 
-from vllm_ascend.ascend_config import get_score_encoder_cache_config
-
-logger = init_logger(__name__)
+from vllm_ascend.ascend_config import get_ascend_config, get_score_encoder_cache_config
 
 
 @dataclass
@@ -44,9 +40,10 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
        from occupying the cache for too long
     """
 
-    def __init__(self, cache_size: int, vllm_config: VllmConfig):
+    def __init__(self, cache_size: int):
         super().__init__(cache_size)
 
+        vllm_config = get_ascend_config().vllm_config
         score_encoder_cache_config = get_score_encoder_cache_config(vllm_config)
         # ---------------- NPU cache ----------------
         self.cache_size = cache_size
@@ -140,8 +137,9 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
         if ent_value < threshold:
             return False
 
-        free_slots = max(self.cache_size * self.watermark - self.npu_num_free_slots,
-                         ent.num_embeds - self.npu_num_free_slots)
+        free_slots = max(
+            self.cache_size * self.watermark - self.npu_num_free_slots, ent.num_embeds - self.npu_num_free_slots
+        )
 
         i = 0
         while free_slots > 0:
@@ -215,11 +213,11 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
             self._check_invariant()
 
     def can_allocate(
-            self,
-            request: Request,
-            input_id: int,
-            encoder_compute_budget: int,
-            num_embeds_to_schedule: int,
+        self,
+        request: Request,
+        input_id: int,
+        encoder_compute_budget: int,
+        num_embeds_to_schedule: int,
     ) -> bool:
         """
         Determine whether CPU cache space can be allocated for the current input.
@@ -358,7 +356,7 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
 
         # ---------- CPU ----------
         cpu_sum = sum(ent.num_embeds for ent in self.cpu_cache.values())
-        assert (cpu_sum + self.cpu_num_free_slots == self.cpu_cache_size), (
+        assert cpu_sum + self.cpu_num_free_slots == self.cpu_cache_size, (
             f"cpu_sum + cpu_num_free_slots != cpu_cache_size, "
             f"cpu_sum={cpu_sum}, "
             f"cpu_num_free_slots={self.cpu_num_free_slots}, "
@@ -366,10 +364,7 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
         )
 
         cpu_freeable_sum = sum(ent.num_embeds for ent in self.cpu_freeable.values())
-        assert (
-                self.cpu_num_freeable_slots
-                == self.cpu_num_free_slots + cpu_freeable_sum
-        ), (
+        assert self.cpu_num_freeable_slots == self.cpu_num_free_slots + cpu_freeable_sum, (
             f"CPU invariant broken: "
             f"freeable={self.cpu_num_freeable_slots}, "
             f"free={self.cpu_num_free_slots}, "
@@ -378,23 +373,19 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
 
         for mm_hash in self.cpu_freeable:
             assert not self.cached.get(mm_hash), (
-                f"CPU freeable entry {mm_hash} still referenced: "
-                f"{self.cached.get(mm_hash)}"
+                f"CPU freeable entry {mm_hash} still referenced: {self.cached.get(mm_hash)}"
             )
 
         # ---------- NPU ----------
         npu_sum = sum(ent.num_embeds for ent in self.npu_cache.values())
-        assert (npu_sum + self.npu_num_free_slots == self.cache_size), (
+        assert npu_sum + self.npu_num_free_slots == self.cache_size, (
             f"npu_sum + npu_num_free_slots != cache_size, "
             f"npu_sum={npu_sum}, "
             f"npu_num_free_slots={self.npu_num_free_slots}, "
             f"cache_size={self.cache_size}"
         )
         npu_freeable_sum = sum(ent.num_embeds for ent in self.npu_freeable.values())
-        assert (
-                self.npu_num_freeable_slots
-                == self.npu_num_free_slots + npu_freeable_sum
-        ), (
+        assert self.npu_num_freeable_slots == self.npu_num_free_slots + npu_freeable_sum, (
             f"NPU invariant broken: "
             f"freeable={self.npu_num_freeable_slots}, "
             f"free={self.npu_num_free_slots}, "
@@ -403,8 +394,7 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
 
         for mm_hash in self.npu_freeable:
             assert not self.cached.get(mm_hash), (
-                f"NPU freeable entry {mm_hash} still referenced: "
-                f"{self.cached.get(mm_hash)}"
+                f"NPU freeable entry {mm_hash} still referenced: {self.cached.get(mm_hash)}"
             )
 
     def reset(self) -> None:
