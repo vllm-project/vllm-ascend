@@ -1970,6 +1970,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         slot_mapping: torch.Tensor,
         launch_after_q_b=None,
         enable_limit_core: bool = False,
+        wait_kv_done: bool = True,
     ):
         """CSA decode MLA prolog with a Q_b completion launch point.
 
@@ -2047,9 +2048,10 @@ class AscendDSAImpl(DSAAttentionImpl):
             launch_after_q_b(qr, qr_pertoken_scale, main_stream, aux_stream)
 
         q = self._finish_dsa_q(q, cos, sin, enable_limit_core)
-        wait_event(True, kv_done_event)
+        if wait_kv_done:
+            wait_event(True, kv_done_event)
 
-        return q, qr, qr_pertoken_scale
+        return q, qr, qr_pertoken_scale, kv_done_event
 
     def _launch_csa_c4a_compressor(
         self,
@@ -2567,6 +2569,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         li_q_quant: torch.Tensor | None = None
         li_q_scale: torch.Tensor | None = None
         li_q_done_event: torch.npu.Event | None = None
+        li_main_result = None
 
         def launch_after_q_b(
             qr: torch.Tensor,
@@ -2574,7 +2577,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             main_stream: torch.npu.Stream,
             aux_stream: torch.npu.Stream,
         ) -> None:
-            nonlocal cmpr_done_event, li_q_quant, li_q_scale, li_q_done_event
+            nonlocal cmpr_done_event, li_q_quant, li_q_scale, li_q_done_event, li_main_result
             cmpr_done_event = self._launch_csa_c4a_compressor(
                 hidden_states,
                 compress_kv_cache,
@@ -2599,8 +2602,19 @@ class AscendDSAImpl(DSAAttentionImpl):
                 enable_limit_core,
                 hidden_states.dtype,
             )
+            li_main_result = self._run_csa_li_main_decode(
+                hidden_states,
+                indexer_state_cache,
+                indexer_k_cache,
+                indexer_scale_cache,
+                indexer_full_cache,
+                indexer_kv_state_metadata,
+                indexer_kv_scale_metadata,
+                actual_seq_lengths_query,
+                enable_limit_core,
+            )
 
-        q, _, _ = self._mla_prolog_csa_decode(
+        q, _, _, kv_done_event = self._mla_prolog_csa_decode(
             hidden_states,
             cos,
             sin,
@@ -2608,24 +2622,15 @@ class AscendDSAImpl(DSAAttentionImpl):
             swa_decode_metadata.slot_mapping,
             launch_after_q_b=launch_after_q_b,
             enable_limit_core=enable_limit_core,
+            wait_kv_done=False,
         )
 
         assert cmpr_done_event is not None
         assert li_q_quant is not None
         assert li_q_scale is not None
         assert li_q_done_event is not None
-
-        weights, indexer_k_cache, indexer_scale_cache, indexer_kv_scale_metadata = self._run_csa_li_main_decode(
-            hidden_states,
-            indexer_state_cache,
-            indexer_k_cache,
-            indexer_scale_cache,
-            indexer_full_cache,
-            indexer_kv_state_metadata,
-            indexer_kv_scale_metadata,
-            actual_seq_lengths_query,
-            enable_limit_core,
-        )
+        assert li_main_result is not None
+        weights, indexer_k_cache, indexer_scale_cache, indexer_kv_scale_metadata = li_main_result
 
         wait_event(True, li_q_done_event)
         compress_topk_idxs = self._indexer_qli(
@@ -2642,6 +2647,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             self._update_indexcache_topk_indices(compress_topk_idxs, offset=0)
 
         wait_event(True, cmpr_done_event)
+        wait_event(True, kv_done_event)
 
         attn_op = DeviceOperator.get_dsa_sparse_attn_op()
         extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()
