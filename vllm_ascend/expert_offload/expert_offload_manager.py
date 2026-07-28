@@ -209,6 +209,39 @@ class ExpertOffloadManager:
     #  Lifecycle: called during model init and after weight loading       #
     # ------------------------------------------------------------------ #
 
+    def _alloc_shared_mmap(self, layer_idx, tag, shape, dtype):
+        """Allocate a shared mmap-backed tensor — ONE copy across all ranks.
+
+        Rank 0 creates the /dev/shm file (truncate to nbytes); barrier; all
+        ranks mmap it (MAP_SHARED via ``torch.UntypedStorage.from_file``).
+        Returns a tensor of ``shape`` backed by the shared mmap. This avoids
+        each rank duplicating the full expert set (GLM EP8: 2.9TB → 365GB).
+        """
+        elem_sz = torch.empty(0, dtype=dtype).element_size()
+        nelem = 1
+        for s in shape:
+            nelem *= int(s)
+        nbytes = nelem * elem_sz
+        path = f"/dev/shm/vllm_ascend_offload_L{layer_idx}_{tag}"
+        if self.ep_rank == 0:
+            with open(path, 'wb') as f:
+                f.truncate(nbytes)
+        if self.ep_size > 1:
+            import torch.distributed as dist
+            from vllm.distributed.parallel_state import get_ep_group
+            dist.barrier(group=get_ep_group().cpu_group)
+        storage = torch.UntypedStorage.from_file(path, shared=True, nbytes=nbytes)
+        tensor = torch.empty(0, dtype=dtype).set_(storage, 0, shape)
+        if self.ep_size > 1:
+            import torch.distributed as dist
+            from vllm.distributed.parallel_state import get_ep_group
+            dist.barrier(group=get_ep_group().cpu_group)
+        # Track paths for cleanup.
+        if not hasattr(self, '_shm_paths'):
+            self._shm_paths = []
+        self._shm_paths.append(path)
+        return tensor
+
     def init_layer_cpu_buffers(self, layer, layer_moe_idx: int):
         """Allocate CPU weight + scale/offset buffers for one MoE layer.
 
@@ -222,29 +255,42 @@ class ExpertOffloadManager:
             f"MoE layers must have same expert count: {ntotal} vs {self.num_total_experts}"
 
         params_dtype = layer.w13_weight.dtype
-        # Per-expert buffer holds the *transpose-after* layout (_copy_w13_shard
-        # stores owned.t()). Derive it from the device tensor shape so packed
-        # quant weights are handled: W8A8 -> (hidden, 2*inter),
-        # W4A8_MXFP -> (hidden//2, 2*inter). Swap the last two device dims.
         w13_shape = (layer.w13_weight.shape[2], layer.w13_weight.shape[1])
         w2_shape = (layer.w2_weight.shape[2], layer.w2_weight.shape[1])
 
-        w13_list = [
-            torch.empty(w13_shape, dtype=params_dtype, device="cpu", pin_memory=True)
-            for _ in range(ntotal)
-        ]
-        w2_list = [
-            torch.empty(w2_shape, dtype=params_dtype, device="cpu", pin_memory=True)
-            for _ in range(ntotal)
-        ]
-        self.w13_weights_cpu.append(w13_list)
-        self.w2_weights_cpu.append(w2_list)
+        use_shared = self.offload_config.shared_cpu_buffer
+        if use_shared:
+            # ONE mmap-backed shared tensor per (layer, w13/w2): (ntotal, *shape).
+            # All ranks mmap the same /dev/shm file → one physical copy.
+            w13_buf = self._alloc_shared_mmap(
+                layer_moe_idx, "w13", (ntotal, *w13_shape), params_dtype)
+            w2_buf = self._alloc_shared_mmap(
+                layer_moe_idx, "w2", (ntotal, *w2_shape), params_dtype)
+            self.w13_weights_cpu.append(w13_buf)
+            self.w2_weights_cpu.append(w2_buf)
+            # Per-rank pinned staging for async H2D (mmap isn't pinned).
+            if not hasattr(self, '_w13_staging') or self._w13_staging is None:
+                self._w13_staging = torch.empty(
+                    w13_shape, dtype=params_dtype, pin_memory=True)
+                self._w2_staging = torch.empty(
+                    w2_shape, dtype=params_dtype, pin_memory=True)
+        else:
+            w13_list = [
+                torch.empty(w13_shape, dtype=params_dtype, device="cpu", pin_memory=True)
+                for _ in range(ntotal)
+            ]
+            w2_list = [
+                torch.empty(w2_shape, dtype=params_dtype, device="cpu", pin_memory=True)
+                for _ in range(ntotal)
+            ]
+            self.w13_weights_cpu.append(w13_list)
+            self.w2_weights_cpu.append(w2_list)
 
-        # Per-expert storage size in bytes. The expert shape is uniform across
-        # layers (asserted above), so this is set unconditionally on the first
-        # layer and reused. Used for raw-storage slicing during NZ paging.
-        self.w13_expert_size_bytes = w13_list[0].nelement() * w13_list[0].element_size()
-        self.w2_expert_size_bytes = w2_list[0].nelement() * w2_list[0].element_size()
+        # Per-expert storage size (works for both list[0] and big_tensor[0]).
+        first_w13 = self.w13_weights_cpu[-1][0]
+        first_w2 = self.w2_weights_cpu[-1][0]
+        self.w13_expert_size_bytes = first_w13.nelement() * first_w13.element_size()
+        self.w2_expert_size_bytes = first_w2.nelement() * first_w2.element_size()
 
         # Scale / offset CPU buffers (W8A8)
         self._init_layer_scale_buffers(layer, layer_moe_idx, ntotal)
@@ -470,9 +516,14 @@ class ExpertOffloadManager:
         """
         num_moe_layers = len(self.w13_weights_cpu)
         num_experts = len(self.w13_weights_cpu[0])
+        use_shared = self.offload_config.shared_cpu_buffer
         for layer_id in range(num_moe_layers):
-            w13 = torch.stack(self.w13_weights_cpu[layer_id]).to('npu')
-            w2 = torch.stack(self.w2_weights_cpu[layer_id]).to('npu')
+            if use_shared:
+                w13 = self.w13_weights_cpu[layer_id].to('npu')
+                w2 = self.w2_weights_cpu[layer_id].to('npu')
+            else:
+                w13 = torch.stack(self.w13_weights_cpu[layer_id]).to('npu')
+                w2 = torch.stack(self.w2_weights_cpu[layer_id]).to('npu')
             if mxfp4:
                 w13 = w13.transpose(1, 2).contiguous()
                 w2 = w2.transpose(1, 2).contiguous()
@@ -512,10 +563,10 @@ class ExpertOffloadManager:
             self.w13_expert_size_bytes = per_w13
             self.w2_expert_size_bytes = per_w2
             for expert_id in range(num_experts):
-                self.w13_weights_cpu[layer_id][expert_id].untyped_storage().copy_(
+                self._expert_dst_storage(layer_id, expert_id, 'w13').copy_(
                     w13_storage[expert_id * per_w13 : (expert_id + 1) * per_w13]
                 )
-                self.w2_weights_cpu[layer_id][expert_id].untyped_storage().copy_(
+                self._expert_dst_storage(layer_id, expert_id, 'w2').copy_(
                     w2_storage[expert_id * per_w2 : (expert_id + 1) * per_w2]
                 )
 
@@ -967,10 +1018,10 @@ class ExpertOffloadManager:
         for slot in range(ndl):
             for eid in range(min(ntotal, len(self.w13_weights_cpu[0]))):
                 self._prefill_w13[slot].untyped_storage()[eid * self.w13_expert_size_bytes : (eid + 1) * self.w13_expert_size_bytes].copy_(
-                    self.w13_weights_cpu[0][eid].untyped_storage()
+                    self._expert_src_storage(0, eid, 'w13')
                 )
                 self._prefill_w2[slot].untyped_storage()[eid * self.w2_expert_size_bytes : (eid + 1) * self.w2_expert_size_bytes].copy_(
-                    self.w2_weights_cpu[0][eid].untyped_storage()
+                    self._expert_src_storage(0, eid, 'w2')
                 )
 
             # Initialize scale/offset buffers with layer 0 data (W8A8)
@@ -1039,10 +1090,10 @@ class ExpertOffloadManager:
         with torch_npu.npu.stream(self.load_stream):
             for eid in range(ntotal):
                 self._prefill_w13[pool_slot].untyped_storage()[eid * self.w13_expert_size_bytes : (eid + 1) * self.w13_expert_size_bytes].copy_(
-                    self.w13_weights_cpu[layer_idx][eid].untyped_storage()
+                    self._expert_src_storage(layer_idx, eid, 'w13')
                 )
                 self._prefill_w2[pool_slot].untyped_storage()[eid * self.w2_expert_size_bytes : (eid + 1) * self.w2_expert_size_bytes].copy_(
-                    self.w2_weights_cpu[layer_idx][eid].untyped_storage()
+                    self._expert_src_storage(layer_idx, eid, 'w2')
                 )
 
             # W8A8 scale/offset — load into prefill buffers
@@ -1142,9 +1193,9 @@ class ExpertOffloadManager:
             for local_i in range(shard):
                 eid = base + local_i
                 self._prefill_w13[pool_slot].untyped_storage()[local_i * self.w13_expert_size_bytes : (local_i + 1) * self.w13_expert_size_bytes].copy_(
-                    self.w13_weights_cpu[layer_idx][eid].untyped_storage())
+                    self._expert_src_storage(layer_idx, eid, 'w13'))
                 self._prefill_w2[pool_slot].untyped_storage()[local_i * self.w2_expert_size_bytes : (local_i + 1) * self.w2_expert_size_bytes].copy_(
-                    self.w2_weights_cpu[layer_idx][eid].untyped_storage())
+                    self._expert_src_storage(layer_idx, eid, 'w2'))
             # quant scales / offsets / scale_bias (w4a8) — shard only
             for scale_name, prefill_list in [("w13_weight_scale", self._prefill_w13_scale),
                                              ("w2_weight_scale", self._prefill_w2_scale)]:
@@ -1378,6 +1429,34 @@ class ExpertOffloadManager:
         # MC2 dispatcher reads the fresh placement.
         log2phy.copy_(log2phy_h, non_blocking=_EXTRA_CTX.capturing)
 
+    def _expert_src_storage(self, layer_idx, eid, which='w13'):
+        """Return expert eid's bytes as UntypedStorage for H2D **read**.
+
+        Shared (mmap): copy expert view into pinned staging first (mmap isn't
+        pinned → can't async H2D directly), return staging storage.
+        Non-shared: expert tensor's own storage (already pinned).
+        """
+        cpu_buf = getattr(self, f'{which}_weights_cpu')[layer_idx]
+        if self.offload_config.shared_cpu_buffer:
+            staging = getattr(self, f'_{which}_staging')
+            staging.copy_(cpu_buf[eid])
+            return staging.untyped_storage()
+        else:
+            return cpu_buf[eid].untyped_storage()
+
+    def _expert_dst_storage(self, layer_idx, eid, which='w13'):
+        """Return expert eid's storage for fill **write**.
+
+        Shared (mmap): the expert's byte-slice of the big mmap storage.
+        Non-shared: expert tensor's own storage.
+        """
+        cpu_buf = getattr(self, f'{which}_weights_cpu')[layer_idx]
+        if self.offload_config.shared_cpu_buffer:
+            sz = getattr(self, f'{which}_expert_size_bytes')
+            return cpu_buf.untyped_storage()[eid * sz:(eid + 1) * sz]
+        else:
+            return cpu_buf[eid].untyped_storage()
+
     def _copy_quant_attrs_into_slot(self, layer, layer_idx, eid, slot):
         """Copy one expert's scale/offset/scale_bias CPU buffers into a device slot.
 
@@ -1576,12 +1655,12 @@ class ExpertOffloadManager:
                 layer.w13_weight.data.untyped_storage()[
                     slot * self.w13_expert_size_bytes:
                     (slot + 1) * self.w13_expert_size_bytes].copy_(
-                    self.w13_weights_cpu[layer_idx][eid].untyped_storage(),
+                    self._expert_src_storage(layer_idx, eid, 'w13'),
                     non_blocking=True)
                 layer.w2_weight.data.untyped_storage()[
                     slot * self.w2_expert_size_bytes:
                     (slot + 1) * self.w2_expert_size_bytes].copy_(
-                    self.w2_weights_cpu[layer_idx][eid].untyped_storage(),
+                    self._expert_src_storage(layer_idx, eid, 'w2'),
                     non_blocking=True)
                 self._copy_quant_attrs_into_slot(layer, layer_idx, eid, slot)
                 resident_map[slot] = eid
@@ -1678,10 +1757,10 @@ class ExpertOffloadManager:
                     break  # no free slots — should not happen in normal usage
                 
                 layer.w13_weight.data.untyped_storage()[slot * self.w13_expert_size_bytes : (slot + 1) * self.w13_expert_size_bytes].copy_(
-                    self.w13_weights_cpu[layer_idx][eid].untyped_storage(), non_blocking=True
+                    self._expert_src_storage(layer_idx, eid, 'w13'), non_blocking=True
                 )
                 layer.w2_weight.data.untyped_storage()[slot * self.w2_expert_size_bytes : (slot + 1) * self.w2_expert_size_bytes].copy_(
-                    self.w2_weights_cpu[layer_idx][eid].untyped_storage(), non_blocking=True
+                    self._expert_src_storage(layer_idx, eid, 'w2'), non_blocking=True
                 )
                 # Copy scales/offsets/scale_bias from CPU to NPU
                 self._copy_quant_attrs_into_slot(layer, layer_idx, eid, slot)

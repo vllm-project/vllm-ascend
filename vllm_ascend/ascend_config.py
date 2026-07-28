@@ -952,6 +952,7 @@ class ExpertOffloadConfig:
         "moe_offload_debug": False,
         "expert_prefetch_enabled": False,
         "expert_prefetch_num": 2,
+        "shared_cpu_buffer": False,
         "enable_multi_card": False,
     }
 
