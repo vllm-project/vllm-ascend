@@ -378,6 +378,33 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
         # is a single fused C++ op. This covers both normal model
         # forward and _dummy_run during profile_run.
         moe_comm_type = MoECommType.ALLTOALL
+    elif (get_ascend_config().expert_offload_config.expert_offload
+            and get_ascend_config().expert_offload_config.enable_multi_card):
+        # Multi-card offload routes by batch size AND device-buffer fit:
+        #  - DECODE (small batch): MC2 with dynamic per-layer placement
+        #    (log2phy) + the device buffer (num_device_experts slots). Used
+        #    only when (a) tokens fit the MC2 kernel hard limit (512) and
+        #    (b) the buffer can hold the active expert union (~num_tokens*topk
+        #    distinct). MC2 routes by physical id, so MC2<->buffer are paired.
+        #  - PREFILL / buffer-overflow (large batch, or union > buffer):
+        #    ALLTOALL with a per-rank EP shard in the prefill pool (full
+        #    experts). AllGather EP needs sequence parallel (enable_sp) to
+        #    cross-card gather; without SP it deadlocks, so ALLTOALL (own token
+        #    all-to-all) is correct.
+        # The buffer-fit check (b) makes the device buffer never overflow
+        # (no spread -> no MC2 deadlock), so the old ep_size*topk slot floor
+        # is unnecessary — and pad-token garbage that used to inflate the
+        # union is filtered by mc2_mask (51a6d644). num_device_experts is now
+        # a free knob: smaller => more batches take the full-expert pool.
+        _ndev = get_ascend_config().expert_offload_config.num_device_experts
+        _topk = getattr(vllm_config.model_config.hf_config,
+                        "num_experts_per_tok", 1)
+        _buffer_fits = num_tokens * _topk <= _ndev
+        if (num_tokens <= mc2_tokens_capacity and num_tokens <= 512
+                and _buffer_fits):
+            moe_comm_type = MoECommType.MC2
+        else:
+            moe_comm_type = MoECommType.ALLTOALL
     elif soc_version == AscendDeviceType.A2:
         moe_comm_type = _select_a2_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
     elif soc_version == AscendDeviceType.A3:

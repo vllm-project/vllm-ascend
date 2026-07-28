@@ -177,7 +177,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             self.tp_group_context = nullcontext()
 
-        self.use_cuda_graph = self.runner._use_aclgraph() and not self.speculative_config.enforce_eager
+        # DSA (use_compress, e.g. DeepSeek-V4) MTP draft FULL-graph capture has
+        # incomplete metadata, so force the draft to eager when compress is on;
+        # the target model can still use FULL_DECODE_ONLY graph.
+        self.use_cuda_graph = (
+            self.runner._use_aclgraph()
+            and not self.speculative_config.enforce_eager
+            and not self.use_compress
+        )
         self._raise_if_padded_drafter_batch_disabled_and_full_graph_enabled()
 
         # GLM series models: speculative decoding does not yet support running

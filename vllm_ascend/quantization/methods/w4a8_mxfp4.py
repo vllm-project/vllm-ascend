@@ -37,6 +37,24 @@ from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_lo
 from .registry import register_scheme
 
 
+def apply_mxfp4_weight_scale_layout(scale: torch.Tensor,
+                                    view_uint8: bool = False) -> torch.Tensor:
+    """MXFP4 weight-scale layout transform: ``reshape(...,n,k//2,2).transpose(-3,-2)``.
+
+    Works on a full tensor ``[g, n, k]`` or a single-expert slice ``[n, k]``
+    (the leading ``g`` dim collapses). ``view_uint8`` mirrors the DeepSeek-V4
+    DS subclass path where the loaded e8m0 scale is viewed as uint8 before the
+    transpose. Shared by the device-side ``process_weights_after_loading`` and
+    by the expert-offload manager so the CPU buffer holds the post-process byte
+    layout (avoids layout drift between the two paths).
+    """
+    *leading, n, k = scale.shape
+    out = scale.reshape(*leading, n, k // 2, 2)
+    if view_uint8:
+        out = out.view(torch.uint8)
+    return out.transpose(-3, -2)
+
+
 @register_scheme("W4A8_MXFP", "linear")
 class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
     """Linear method for Ascend W4A8_MXFP (Microscaling) quantization."""
@@ -202,14 +220,63 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         if x.dtype not in [torch.float8_e4m3fn]:
             topk_weights = topk_weights.to(x.dtype)
 
+        # Expert offload: incrementally page in needed experts, update log2phy.
+        use_prefill_pool = False
+        prefill_slot = -1
+        num_tokens = topk_ids.size(0)
+        if getattr(layer, 'enable_expert_offload', False):
+            from vllm_ascend.expert_offload import ExpertOffloadManager
+            mgr = ExpertOffloadManager.get_instance()
+            mgr.update_weights(layer, topk_ids, log2phy, topk_weights,
+                               hidden_states=x)
+            if (num_tokens > mgr.offload_threshold and mgr._prefill_initialized
+                    and not mgr._skip_prefill):
+                use_prefill_pool = True
+                try:
+                    layer_idx = mgr.moe_layers.index(layer)
+                except ValueError:
+                    layer_idx = 0
+                prefill_slot = layer_idx % len(mgr._prefill_w13)
+
         moe_comm_method = get_forward_context().moe_comm_method
-        return moe_comm_method.fused_experts(
+        if use_prefill_pool:
+            # Prefill pool: full-overwrite pool holds all experts; use it
+            # directly with an identity log2phy. W4A8_MXFP's moe path
+            # (quant_apply_mlp/gmm2) expects single tensors — gmm2 passes
+            # weight_scale=w2_scale straight to npu_grouped_matmul — so do NOT
+            # wrap in a list (unlike the W8A8 apply).
+            w1 = mgr._prefill_w13[prefill_slot]
+            w2 = mgr._prefill_w2[prefill_slot]
+            w1_scale = mgr._prefill_w13_scale[prefill_slot]
+            w2_scale = mgr._prefill_w2_scale[prefill_slot]
+            _saved_nle = layer.moe_config.num_local_experts
+            _saved_lne = layer.local_num_experts
+            ntotal = mgr.num_total_experts
+            layer.moe_config.num_local_experts = ntotal
+            layer.local_num_experts = ntotal
+            _saved_td_nel = moe_comm_method.token_dispatcher.num_experts_local
+            moe_comm_method.token_dispatcher.num_experts_local = ntotal
+            log2phy = mgr._prefill_log2phy
+        else:
+            w1 = layer.w13_weight
+            w2 = layer.w2_weight
+            w1_scale = layer.w13_weight_scale
+            w2_scale = layer.w2_weight_scale
+
+        # Trigger next-layer expert prefetch AFTER GMM kernel submission
+        # (decode path only) so compute_event captures real GMM work.
+        if (getattr(layer, 'enable_expert_offload', False)
+                and not use_prefill_pool
+                and num_tokens <= mgr.offload_threshold):
+            mgr.trigger_next_layer_prefetch(layer, x)
+            
+        final_hidden_states = moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
                 hidden_states=x,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
+                w1=w1,
+                w2=w2,
                 quant_type=self.quant_type,
                 dynamic_eplb=self.dynamic_eplb,
                 expert_map=expert_map,
@@ -224,11 +291,18 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 mxfp_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
                 mxfp_per_token_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
                 mxfp_use_bf16=(x.dtype in [torch.bfloat16, torch.float8_e4m3fn]),
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
                 swiglu_limit=layer.swiglu_limit,
             )
         )
+        
+        # Restore decode-path expert count after prefill override.
+        if use_prefill_pool:
+            layer.moe_config.num_local_experts = _saved_nle
+            layer.local_num_experts = _saved_lne
+            moe_comm_method.token_dispatcher.num_experts_local = _saved_td_nel
+        return final_hidden_states
 
     def process_weights_after_loading(self, layer):
         layer.w13_weight.data = torch_npu.npu_format_cast(
@@ -239,7 +313,5 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         )
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
-        g, n, k = layer.w13_weight_scale.shape
-        layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g, n, k // 2, 2).transpose(-3, -2)
-        g, n, k = layer.w2_weight_scale.shape
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g, n, k // 2, 2).transpose(-3, -2)
+        layer.w13_weight_scale.data = apply_mxfp4_weight_scale_layout(layer.w13_weight_scale.data)
+        layer.w2_weight_scale.data = apply_mxfp4_weight_scale_layout(layer.w2_weight_scale.data)
