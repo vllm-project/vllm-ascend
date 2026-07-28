@@ -238,11 +238,10 @@ msgstr ""
 
 msgid ""
 "| `enable_shared_expert_dp`           | bool | `False` | When the expert is "
-"shared in DP, it delivers better performance but consumes more memory. "
-"Currently only DeepSeek series models are supported. |"
+"shared in DP, it delivers better performance but consumes more memory. |"
 msgstr ""
 "| `enable_shared_expert_dp`           | bool | `False` | 当专家在 DP "
-"中共享时，性能更好但内存消耗更大。目前仅支持 DeepSeek 系列模型。 |"
+"中共享时，性能更好但内存消耗更大。 |"
 
 msgid ""
 "| `multistream_overlap_shared_expert` | bool | `False` | Whether to enable "

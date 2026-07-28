@@ -34,7 +34,7 @@ def build_local_metadata_triton(
     tl.store(local_query_start_loc_ptr + 1 + offsets, cum, mask=mask)
 
     offset = q_end - lqe
-    result = tl.where(lql > 0, seq_len - offset, 0)
+    result = tl.where((lql > 0) & (seq_len > 0), tl.maximum(seq_len - offset, 0), 0)
     tl.store(local_seq_lens_ptr + offsets, result, mask=mask)
 
     if COMPUTE_START_POS:

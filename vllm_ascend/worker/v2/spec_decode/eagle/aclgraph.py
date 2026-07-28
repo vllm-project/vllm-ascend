@@ -79,6 +79,7 @@ class EagleAclGraphManager(SpeculatorCudaGraphManager):
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture ACL graphs for Eagle."""
+
         with communicator_switch(), model_capture_wrapper(self.speculator, self.is_draft_model_prefill):
             if self.is_draft_model_prefill:
                 super().capture(
@@ -131,7 +132,6 @@ class EagleAclGraphManager(SpeculatorCudaGraphManager):
 
         ret = super().run_fullgraph(desc)
 
-        positions = self.speculator.input_buffers.positions[:num_tokens]
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
         # calculate num_tokens_across_dp.
         num_tokens_across_dp = torch.full([self.speculator.dp_size], num_tokens)
@@ -159,7 +159,6 @@ class EagleAclGraphManager(SpeculatorCudaGraphManager):
                 num_tokens,
                 self.vllm_config,
                 self.speculator.speculative_config,
-                positions.shape[0],
                 draft_attn_metadatas=draft_attn_metadatas,
             )
         return ret
