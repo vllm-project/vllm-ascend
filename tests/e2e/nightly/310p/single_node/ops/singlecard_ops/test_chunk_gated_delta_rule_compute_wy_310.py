@@ -125,6 +125,7 @@ def test_chunk_gated_delta_rule_310_uses_npu_wy(monkeypatch):
     )
 
     monkeypatch.setattr(chunk_mod, "_can_use_npu_compute_wy", lambda *args, **kwargs: False)
+
     out_ref, state_ref = chunk_mod.chunk_gated_delta_rule_310(
         q=q,
         k=k,
