@@ -297,10 +297,12 @@ class SparseKVOffloadManager:
         )
         config = offload.OffloadConfig()
         config.device_id = torch_npu.npu.current_device()
-        config.size = sparse_kv_offload_config.dram_size_per_dp_GB * 1024 * 1024 * 1024
+        config.reserve_size = sparse_kv_offload_config.dram_size_per_dp_GB * (1 << 30)
+        config.alloc_size = sparse_kv_offload_config.dram_size_per_dp_GB * (1 << 30) if self.tp_rank == 0 else 0
         config.world_size = self.tp_size
         config.rank_id = self.tp_rank
-        offload.initialize(config)
+        config.scene = offload.Scene.SHARED
+        assert offload.initialize(config) == 0, "Sparse KV offload offload.initialize failed."
         self.tp_group.barrier()
 
     def _build_cpp(self):
