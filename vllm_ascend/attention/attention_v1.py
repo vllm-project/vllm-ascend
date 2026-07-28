@@ -492,8 +492,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             page_size=block_size,
             causal=attn_metadata.causal,
         )
-        self._fa3_scheduler_metadata[num_tokens] = meta
-        return meta
+        self._fa3_scheduler_metadata[num_tokens] = (meta, cache_seqlens, cu_seqlens_q)
+        return meta, cache_seqlens, cu_seqlens_q
 
     def _graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
         layer_name = layer.layer_name if layer is not None else self._layer_name
@@ -1247,6 +1247,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         block_table: torch.Tensor | None,
         actual_seq_lengths_kv: list[int] | torch.Tensor,
         scheduler_metadata=None,
+        cache_seqlens: torch.Tensor | None = None,
+        cu_seqlens_q: torch.Tensor | None = None,
     ):
         """FA3 graph capture — NPUGraph driver-level recording.
 
@@ -1271,8 +1273,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             k_fa = key.view(num_blocks, bs, self.num_kv_heads, self.head_size)
             v_fa = value.view(num_blocks, bs, self.num_kv_heads, self.head_size)
 
-            cache_seqlens = torch.tensor(actual_seq_lengths_kv, dtype=torch.int32, device=query.device)
-            cu_seqlens_q = torch.tensor([0] + attn_metadata.actual_seq_lengths_q, dtype=torch.int32, device=query.device)
+            # Use NPU tensors from cache (pre-created during warmup) — no
+            # H2D copy or torch.tensor(... device=device) inside the graph.
+            cache_seqlens = cache_seqlens
+            cu_seqlens_q = cu_seqlens_q
             max_seqlen_q = attn_metadata.max_query_len
 
             causal = attn_metadata.causal
@@ -1408,7 +1412,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     key, value, attn_metadata, kv_cache,
                 )
                 num_tokens = attn_metadata.actual_seq_lengths_q[-1]
-                scheduler_metadata = self._get_or_build_fa3_scheduler_metadata(
+                scheduler_metadata, cache_seqlens, cu_seqlens_q = self._get_or_build_fa3_scheduler_metadata(
                     num_tokens, attn_metadata, block_size, query,
                 )
                 attn_output, num_tokens = self.full_graph_fa3(
@@ -1417,6 +1421,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     block_table=block_table,
                     actual_seq_lengths_kv=actual_seq_lengths_kv,
                     scheduler_metadata=scheduler_metadata,
+                    cache_seqlens=cache_seqlens,
+                    cu_seqlens_q=cu_seqlens_q,
                 )
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
@@ -1475,7 +1481,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 try:
                     # Build FA3 scheduler metadata (cached per num_tokens for
                     # reuse in the graph path during capture).
-                    scheduler_metadata = self._get_or_build_fa3_scheduler_metadata(
+                    scheduler_metadata, _, _ = self._get_or_build_fa3_scheduler_metadata(
                         num_tokens, attn_metadata, block_size, query,
                     )
                     attn_output = fa3_forward(
