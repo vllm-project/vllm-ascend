@@ -186,9 +186,9 @@ class SequenceParallelismMoePass(VllmInductorPass):
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
-        logger.debug("SequenceParallelismMoePass before apply replacement\n%s", graph)
+        logger.debug("SequenceParallelismMoePass before apply replacement\n%s", graph.graph)
         self.matched_count = self.patterns.apply(graph)
-        logger.debug("SequenceParallelismMoePass after apply replacement\n%s", graph)
+        logger.debug("SequenceParallelismMoePass after apply replacement\n%s", graph.graph)
         logger.debug("SequenceParallelismMoePass replaced %s patterns", self.matched_count)
         pattern_idx = 0
         for pattern_entry in self.patterns.patterns.values():

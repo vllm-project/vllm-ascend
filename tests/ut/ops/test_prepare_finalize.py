@@ -205,3 +205,21 @@ class TestPrepareAndFinalize(unittest.TestCase):
 
         result_with_tp = layer.finalize(h_out, reduce_results=True)
         self.assertEqual(result_with_tp.shape[0], 3)
+
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.enable_sp", return_value=False)
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.enable_sp_by_pass", return_value=True)
+    def test_pass_sequence_parallel_uses_ep_path(self, mock_enable_sp_by_pass, mock_enable_sp):
+        self.moe_config.is_sequence_parallel = True
+
+        layer = PrepareAndFinalizeWithAllGather(self.moe_config)
+
+        self.assertTrue(layer._use_ep_sequence_parallel())
+
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.enable_sp", return_value=False)
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.enable_sp_by_pass", return_value=True)
+    def test_pass_without_moe_sequence_parallel_uses_dp_path(self, mock_enable_sp_by_pass, mock_enable_sp):
+        self.moe_config.is_sequence_parallel = False
+
+        layer = PrepareAndFinalizeWithAllGather(self.moe_config)
+
+        self.assertFalse(layer._use_ep_sequence_parallel())
