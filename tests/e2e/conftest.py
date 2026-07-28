@@ -92,6 +92,20 @@ logger = logging.getLogger(__name__)
 _TEST_DIR = os.path.dirname(__file__)
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "long_prompt.txt")]
 
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--msa-m3-sparse-backend",
+        action="store",
+        default=os.environ.get("MINIMAX_M3_SPARSE_BACKEND", "all"),
+        choices=("all", "triton", "torch_npu"),
+        help=(
+            "MiniMax M3 sparse-attention kernel backend for "
+            "test_minimax_m3_sparse_attn.py: all, triton reference, or msa_m3_npu (torch_npu)."
+        ),
+    )
+
+
 DISAGG_EPD_PROXY_SCRIPT = (
     Path(__file__).parent.parent.parent / "examples" / "disaggregated_encoder" / "disagg_epd_proxy.py"
 )

@@ -174,6 +174,27 @@ class CompressAttentionManager(FullAttentionManager):
             req_blocks.extend(new_blocks)
             return new_blocks
 
+    def allocate_external_computed_blocks(
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        # Compress-MLA: scale tokens by 1/compress_ratio, matching
+        # allocate_new_blocks / allocate_new_computed_blocks. Without this
+        # override the base class allocates uncompressed block_ids for the PD
+        # remote-KV path (e.g. 4 blocks for a ~104-token prompt at
+        # compress_ratio=4), which overflow the (correctly compressed)
+        # block_table row and crash the D node with
+        # "could not broadcast (4,) into (2,)".
+        num_local_computed_tokens //= self.compress_ratio
+        num_external_computed_tokens //= self.compress_ratio
+        super().allocate_external_computed_blocks(
+            request_id,
+            num_local_computed_tokens,
+            num_external_computed_tokens,
+        )
+
     def cache_blocks(
         self,
         request: Request,
@@ -223,6 +244,9 @@ class CompressAttentionManager(FullAttentionManager):
         pcp_world_size: int = 1,
         drop_eagle_block: bool = False,
     ) -> tuple[list[KVCacheBlock], ...] | tuple[tuple[list[KVCacheBlock], ...], int]:
+        # Keep pcp_world_size in this override's signature for compatibility
+        # with the upstream manager interface. PCP is rejected by the platform.
+        del pcp_world_size
         eagle_drop = drop_eagle_block
         # assert isinstance(
         #     kv_cache_spec, Compress4AttentionSpec | Compress128AttentionSpec | C4IndexerSpec
@@ -231,8 +255,8 @@ class CompressAttentionManager(FullAttentionManager):
         # )
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple([] for _ in range(len(kv_cache_group_ids)))
         block_size = kv_cache_spec.block_size
-        if dcp_world_size * pcp_world_size > 1:
-            block_size *= dcp_world_size * pcp_world_size
+        if dcp_world_size > 1:
+            block_size *= dcp_world_size
         logical_block_size = block_size * kv_cache_spec.compress_ratio
         hash_block_size = block_size if vllm_version_is("0.25.1") else block_pool.hash_block_size
         logical_block_hashes = BlockHashListWithBlockSize(block_hashes, hash_block_size, logical_block_size)
