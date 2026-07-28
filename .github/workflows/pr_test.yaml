@@ -164,7 +164,7 @@ jobs:
         id: get_hash
         run: |
           HASH=$(sha256sum .pre-commit-config.yaml | awk '{print $1}')
-          echo "HASH=$HASH" >> $GITHUB_OUTPUT
+          echo "PRE_COMMIT_HASH=$HASH" >> $GITHUB_OUTPUT
 
       - name: Restore pre-commit cache
         uses: runs-on/cache/restore@v5
@@ -176,7 +176,7 @@ jobs:
           AWS_REGION: ap-southeast-1
         with:
           path: /tmp/pre-commit-cache
-          key: pre-commit-${{ steps.get_hash.outputs.HASH }}
+          key: pre-commit-${{ steps.get_hash.outputs.PRE_COMMIT_HASH }}
 
       - name: Run pre-commit
         env:
