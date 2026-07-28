@@ -35,6 +35,7 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import AutoRegress
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 
@@ -275,6 +276,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         skip_attn: bool,
         batch_desc: BatchExecutionDescriptor,
         num_tokens_across_dp: torch.Tensor | None,
+        seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     ) -> None:
         """Minimal override to handle the merged multi-step graph in FULL mode.
 
@@ -288,7 +290,10 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             assert self.decode_cudagraph_manager is not None
             self.decode_cudagraph_manager.run_fullgraph(batch_desc)
             return
-        super()._multi_step_decode(num_reqs, skip_attn, batch_desc, num_tokens_across_dp)
+        if vllm_version_is("0.25.1"):
+            super()._multi_step_decode(num_reqs, skip_attn, batch_desc, num_tokens_across_dp)
+        else:
+            super()._multi_step_decode(num_reqs, skip_attn, batch_desc, num_tokens_across_dp, seq_lens_cpu_upper_bound)
 
     def _build_draft_attn_metadata(
         self,
@@ -297,14 +302,27 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         num_tokens_padded: int,
         num_query_per_req: int = 1,
         causal: bool = True,
+        seq_lens_cpu_upper_bound: torch.Tensor | None = None,
+        step: int = 1,
     ) -> dict[str, Any] | None:
-        attn_metadata = super()._build_draft_attn_metadata(
-            num_reqs,
-            num_reqs_padded,
-            num_tokens_padded,
-            num_query_per_req,
-            causal,
-        )
+        if vllm_version_is("0.25.1"):
+            attn_metadata = super()._build_draft_attn_metadata(
+                num_reqs=num_reqs,
+                num_reqs_padded=num_reqs_padded,
+                num_tokens_padded=num_tokens_padded,
+                num_query_per_req=num_query_per_req,
+                causal=causal,
+            )
+        else:
+            attn_metadata = super()._build_draft_attn_metadata(
+                num_reqs=num_reqs,
+                num_reqs_padded=num_reqs_padded,
+                num_tokens_padded=num_tokens_padded,
+                num_query_per_req=num_query_per_req,
+                causal=causal,
+                seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                step=step,
+            )
         if attn_metadata is not None:
             # Ascend-specific: force DecodeOnly attention state for the draft model.
             for metadata in attn_metadata.values():

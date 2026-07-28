@@ -28,6 +28,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 
 
@@ -85,12 +86,22 @@ class AscendDSparkSpeculator(DSparkSpeculator):
     def build_draft_attn_metadatas(self, num_reqs_padded):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         with build_attn_metadata_wrapper():
-            attn_metadata = self._build_draft_attn_metadata(
-                num_reqs=num_reqs_padded,
-                num_reqs_padded=num_reqs_padded,
-                num_tokens_padded=num_tokens_padded,
-                causal=self._group_causal,
-            )
+            if vllm_version_is("0.25.1"):
+                attn_metadata = self._build_draft_attn_metadata(
+                    num_reqs=num_reqs_padded,
+                    num_reqs_padded=num_reqs_padded,
+                    num_tokens_padded=num_tokens_padded,
+                    causal=self._group_causal,
+                )
+            else:
+                attn_metadata = self._build_draft_attn_metadata(
+                    num_reqs=num_reqs_padded,
+                    num_reqs_padded=num_reqs_padded,
+                    num_tokens_padded=num_tokens_padded,
+                    causal=self._group_causal,
+                    seq_lens_cpu_upper_bound=None,
+                    step=self.num_query_per_req,
+                )
         return [attn_metadata]
 
     def propose(

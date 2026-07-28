@@ -117,6 +117,8 @@ def build_attn_metadata(
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
     causal: bool | Mapping[int, bool] = True,
+    seq_lens_cpu_upper_bound: torch.Tensor | None = None,
+    step: int = 1,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
@@ -127,6 +129,7 @@ def build_attn_metadata(
     if seq_lens_np is None:
         seq_lens_np = np.full(num_reqs, max_seq_len, dtype=np.int32)
     seq_lens_cpu = torch.from_numpy(seq_lens_np)[:num_reqs]
+    _seqlens_cpu_ub = seq_lens_cpu_upper_bound if seq_lens_cpu_upper_bound is not None else seq_lens_cpu
 
     attn_metadata: dict[str, Any] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
@@ -145,7 +148,7 @@ def build_attn_metadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens_cpu=seq_lens_cpu,
-            seq_lens_cpu_upper_bound=seq_lens_cpu,
+            seq_lens_cpu_upper_bound=_seqlens_cpu_ub,
             seq_lens=seq_lens[:num_reqs],
             num_reqs=num_reqs,
             num_actual_tokens=num_tokens,

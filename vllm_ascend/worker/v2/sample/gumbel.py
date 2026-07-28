@@ -60,7 +60,7 @@ def apply_temperature(
         temperature: Tensor containing the temperature value for each request.
     """
     num_tokens, vocab_size = logits.shape
-    BLOCK_SIZE = 44032
+    BLOCK_SIZE = 32768
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
     _temperature_kernel[(num_tokens, num_blocks)](
         logits,
