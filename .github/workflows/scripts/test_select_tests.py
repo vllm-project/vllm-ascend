@@ -265,7 +265,12 @@ def test_dedup_runner_resolution_and_output(tmp_path, monkeypatch, capsys):
         json.dumps(
             {
                 "cpu-runner": {"chip": "cpu", "npu_num": 0, "image_tag": "cpu-img"},
-                "a2-runner": {"chip": "a2", "npu_num": 1, "image_tag": "a2-img"},
+                "a2-runner": {
+                    "chip": "a2",
+                    "npu_num": 1,
+                    "image_tag": "a2-img",
+                    "csrc_cache_target": "a2-arm64-ubuntu",
+                },
             }
         )
     )
@@ -292,6 +297,7 @@ def test_dedup_runner_resolution_and_output(tmp_path, monkeypatch, capsys):
             "runner": "a2-runner",
             "tests": "e2e.py",
             "image_tag": "a2-img",
+            "csrc_cache_target": "a2-arm64-ubuntu",
             "partition": "1-1",
         },
     ]
@@ -299,13 +305,24 @@ def test_dedup_runner_resolution_and_output(tmp_path, monkeypatch, capsys):
         select_tests._resolve_to_runners({(2, select_tests.NpuType.A2): ["x"]}, runners)
     assert "no runner available" in capsys.readouterr().err
 
-    test_groups = [{"num_npus": 0, "npu_type": "cpu", "runner": "cpu-runner", "tests": "a b"}]
+    test_groups = [
+        {
+            "num_npus": 1,
+            "npu_type": "a2",
+            "runner": "a2-runner",
+            "tests": "a b",
+            "csrc_cache_target": "a2-arm64-ubuntu",
+        }
+    ]
     select_tests._write_output(test_groups, ["m1", "m2"])
-    assert "has_tests=true" in capsys.readouterr().out
+    output_text = capsys.readouterr().out
+    assert "has_tests=true" in output_text
+    assert 'csrc_cache_target_ids=["a2-arm64-ubuntu"]' in output_text
     output = tmp_path / "github_output"
     monkeypatch.setenv("GITHUB_OUTPUT", str(output))
     select_tests._write_output([], [])
     assert "has_tests=false" in output.read_text()
+    assert "csrc_cache_target_ids=[]" in output.read_text()
 
 
 def test_get_changed_files(monkeypatch):

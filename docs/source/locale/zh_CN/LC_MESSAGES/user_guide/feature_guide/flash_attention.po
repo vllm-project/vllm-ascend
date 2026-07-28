@@ -65,7 +65,7 @@ msgid "To enable FA3, you need to:"
 msgstr "要启用FA3，您需要："
 
 msgid "To start a vLLM server with FA3 enabled:"
-msgstr "启动启用FA3的vLLM服务器："
+msgstr "启动启用FA3的vLLM服务："
 
 msgid "Then use the OpenAI-compatible client:"
 msgstr "然后使用OpenAI兼容客户端："

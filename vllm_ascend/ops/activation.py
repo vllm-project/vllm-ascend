@@ -25,8 +25,6 @@ from vllm.model_executor.layers.activation import (
     SwigluStepAndMul,
 )
 
-from vllm_ascend.utils import get_weight_prefetch_method
-
 
 class AscendQuickGELU(QuickGELU):
     def forward_oot(self, x: torch.tensor) -> torch.Tensor:
@@ -36,23 +34,17 @@ class AscendQuickGELU(QuickGELU):
 
 class AscendSiluAndMul(SiluAndMul):
     def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
-        weight_prefetch_method = get_weight_prefetch_method()
-        weight_prefetch_method.maybe_prefetch_mlp_weight_preprocess(weight_prefetch_method.MLP_DOWN, x)
         out = torch_npu.npu_swiglu(x)
-        weight_prefetch_method.maybe_prefetch_mlp_weight_postprocess(out)
         return out
 
 
 class AscendSiluAndMulWithClamp(SiluAndMulWithClamp):
     def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
-        weight_prefetch_method = get_weight_prefetch_method()
-        weight_prefetch_method.maybe_prefetch_mlp_weight_preprocess(weight_prefetch_method.MLP_DOWN, x)
         d = x.shape[-1] // 2
         gate = torch.clamp(x[..., :d], max=self.swiglu_limit)
         up = torch.clamp(x[..., d:], min=-self.swiglu_limit, max=self.swiglu_limit)
         x = torch.cat([gate, up], dim=-1)
         out = torch_npu.npu_swiglu(x)
-        weight_prefetch_method.maybe_prefetch_mlp_weight_postprocess(out)
         return out
 
 

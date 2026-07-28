@@ -45,7 +45,6 @@ from vllm_ascend.utils import (
     bootstrap_custom_op_env,
     check_kv_extra_config,
     enable_sfa_dcp_replicated_indexer,
-    flashcomm2_enable,
     get_ascend_device_type,
     is_moe_model,
     model_uses_sfa_sparse,
@@ -335,26 +334,13 @@ class NPUPlatform(Platform):
         torch.npu.set_device(device)
 
     @classmethod
-    def _validate_layer_sharding_config(cls, vllm_config: VllmConfig) -> None:
-        additional_config = vllm_config.additional_config or {}
-        layer_sharding = additional_config.get("layer_sharding") or []
-        if not layer_sharding:
-            return
-
-        kv_transfer_config = vllm_config.kv_transfer_config
-        if kv_transfer_config is None or kv_transfer_config.kv_role != "kv_producer":
-            raise ValueError("additional_config.layer_sharding can only be enabled in PD-disaggregated's P node.")
-
-    @classmethod
     def _validate_parallel_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
-        if parallel_config.data_parallel_size > 1 and parallel_config.prefill_context_parallel_size > 1:
+        if not vllm_config.use_v2_model_runner and parallel_config.prefill_context_parallel_size > 1:
             raise ValueError(
-                "PCP (Prefill Context Parallelism) and DP (Data Parallelism) "
-                "cannot be enabled simultaneously in the current version of vLLM Ascend. "
-                f"Got data_parallel_size={parallel_config.data_parallel_size} and "
-                f"prefill_context_parallel_size={parallel_config.prefill_context_parallel_size}. "
-                "Please set either --data-parallel-size 1 or --prefill-context-parallel-size 1."
+                "PCP (Prefill Context Parallelism) is not supported by vLLM Ascend. "
+                "Please set --prefill-context-parallel-size to 1. "
+                f"Got prefill_context_parallel_size={parallel_config.prefill_context_parallel_size}."
             )
 
     @classmethod
@@ -436,7 +422,6 @@ class NPUPlatform(Platform):
 
         maybe_auto_detect_quantization(vllm_config)
 
-        cls._validate_layer_sharding_config(vllm_config)
         cls._validate_draft_decode_context_parallel_config(vllm_config)
         cls._validate_parallel_config(vllm_config)
 
@@ -519,6 +504,7 @@ class NPUPlatform(Platform):
         # is supported by vllm-ascend.
         if (
             vllm_config.parallel_config.tensor_parallel_size > 1
+            and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             and not vllm_config.model_config.enforce_eager
             and enable_sp(vllm_config)
         ):
@@ -635,7 +621,8 @@ class NPUPlatform(Platform):
         if get_ascend_device_type() != AscendDeviceType._310P:
             compilation_config.custom_ops = ["all"]
 
-        if ascend_config.enable_balance_scheduling:
+        scheduler_extension_config = ascend_config.scheduler_config
+        if scheduler_extension_config.enable_balance_scheduling:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
             if kv_transfer_config is not None and kv_role != "kv_both":
@@ -647,17 +634,37 @@ class NPUPlatform(Platform):
 
         cls._validate_kv_load_failure_policy(vllm_config)
 
-        short_request_first_config = ascend_config.short_request_first_config
+        short_request_first_config = scheduler_extension_config.short_request_first_config
         enable_short_request_first = short_request_first_config.enabled
-        short_request_first_supported_policy = vllm_config.scheduler_config.policy == "fcfs"
-        if enable_short_request_first and not short_request_first_supported_policy:
-            logger.warning_once(
-                "ShortRequestFirst scheduling currently supports only FCFS scheduler policy; "
-                "current policy=%s. The default waiting queue will be used.",
-                vllm_config.scheduler_config.policy,
-            )
+        if enable_short_request_first:
+            kv_transfer_config = vllm_config.kv_transfer_config
+            kv_role = getattr(kv_transfer_config, "kv_role", None)
+            if vllm_config.scheduler_config.policy != "fcfs":
+                raise ValueError(
+                    "ShortRequestFirst scheduling requires scheduler_config.policy='fcfs', "
+                    f"but got {vllm_config.scheduler_config.policy!r}."
+                )
+            if scheduler_extension_config.batch_job_sched_config.enabled:
+                raise ValueError(
+                    "ShortRequestFirst scheduling cannot be enabled with batch_job_sched_config. "
+                    "Please disable one of them."
+                )
+            if scheduler_extension_config.profiling_chunk_config.enabled:
+                raise ValueError(
+                    "ShortRequestFirst scheduling cannot be enabled with profiling_chunk_config. "
+                    "Please disable one of them."
+                )
+            if kv_role == "kv_consumer":
+                raise ValueError(
+                    "ShortRequestFirst scheduling is supported only on prefill or PD-mixed nodes, "
+                    "not PD-disaggregated D nodes (kv_role='kv_consumer')."
+                )
+            if vllm_config.scheduler_config.async_scheduling:
+                vllm_config.scheduler_config.scheduler_cls = (
+                    "vllm_ascend.core.short_request_first_scheduler.ShortRequestFirstAsyncScheduler"
+                )
 
-        if ascend_config.recompute_scheduler_enable:
+        if scheduler_extension_config.recompute_scheduler_enable:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
             if kv_role == "kv_producer":
@@ -667,7 +674,7 @@ class NPUPlatform(Platform):
                     "Please remove it from P-node configs and keep it only on PD-disaggregated D nodes "
                     "(kv_role='kv_consumer')."
                 )
-                ascend_config.recompute_scheduler_enable = False
+                scheduler_extension_config.recompute_scheduler_enable = False
             elif kv_transfer_config is None or kv_role != "kv_consumer":
                 raise ValueError(
                     "recompute_scheduler_enable can only be enabled on PD-disaggregated D nodes "
@@ -678,42 +685,26 @@ class NPUPlatform(Platform):
 
                 recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
                 vllm_config.scheduler_config = recompute_scheduler_config
-                if enable_short_request_first:
-                    logger.info(
-                        "Ascend ShortRequestFirst scheduler selected through recompute "
-                        "scheduler: scheduler_cls=%s, policy=%s, threshold=%d, long_max_wait_ms=%.3f",
-                        vllm_config.scheduler_config.scheduler_cls,
-                        vllm_config.scheduler_config.policy,
-                        short_request_first_config.threshold,
-                        short_request_first_config.long_max_wait_ms,
-                    )
-        elif enable_short_request_first:
-            logger.warning_once(
-                "ShortRequestFirst scheduling requires recompute_scheduler_enable=true "
-                "in additional_config. ShortRequestFirst scheduling will not be activated.",
-            )
-
-        # Extend original scheduler_config to use SchedulerDynamicBatch.
-        if ascend_config.SLO_limits_for_dynamic_batch != -1:
-            if enable_short_request_first:
-                logger.warning_once(
-                    "ShortRequestFirst scheduling is ignored because "
-                    "SLO_limits_for_dynamic_batch selects SchedulerDynamicBatch."
-                )
-            vllm_config.scheduler_config.scheduler_cls = (
-                "vllm_ascend.core.scheduler_dynamic_batch.SchedulerDynamicBatch"
-            )
-            vllm_config.scheduler_config.enable_chunked_prefill = True
-            vllm_config.scheduler_config.SLO_limits_for_dynamic_batch = ascend_config.SLO_limits_for_dynamic_batch
 
         # Use ProfilingChunkScheduler when profiling-based chunk sizing is on.
-        if ascend_config.profiling_chunk_config.enabled:
+        if scheduler_extension_config.profiling_chunk_config.enabled:
             vllm_config.scheduler_config.scheduler_cls = (
                 "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler"
             )
             import vllm_ascend.patch.platform.patch_profiling_chunk  # noqa
 
-        cp_size = parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size
+        # Extend original scheduler_config to use BatchJobAwareScheduler.
+        if scheduler_extension_config.batch_job_sched_config.enabled:
+            if vllm_config.scheduler_config.async_scheduling:
+                vllm_config.scheduler_config.scheduler_cls = (
+                    "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareAsyncScheduler"
+                )
+            else:
+                vllm_config.scheduler_config.scheduler_cls = (
+                    "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareScheduler"
+                )
+
+        cp_size = parallel_config.prefill_context_parallel_size * parallel_config.decode_context_parallel_size
         use_sparse = model_uses_sfa_sparse(model_config)
         sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(vllm_config)
         if sfa_dcp_replicated_indexer:
@@ -722,12 +713,8 @@ class NPUPlatform(Platform):
                     f"DCP for SFA is only supported when dcp_size({parallel_config.decode_context_parallel_size}) "
                     f"== tp_size({parallel_config.tensor_parallel_size})."
                 )
-            enable_sparse_c8 = vllm_config.additional_config.get("enable_sparse_c8", False) and use_sparse
-            if enable_sparse_c8 and get_ascend_device_type() == AscendDeviceType.A5:
-                raise NotImplementedError(
-                    "SFA DCP with sparse C8 LightningIndexer cache is not supported on A5 yet. "
-                    "A5 uses the fused CKV quant sparse attention path, which needs a separate DCP LSE merge."
-                )
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                raise NotImplementedError("SFA DCP with replicated indexer is not supported on A5 yet.")
 
         if (
             vllm_config.kv_transfer_config is not None
@@ -737,7 +724,7 @@ class NPUPlatform(Platform):
             raise AssertionError(
                 f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size}) "
                 f"and block_size({cache_config.block_size}) "
-                "needs to be equal if use pcp or dcp > 1 in P/D disaggregate and kv pool scenario."
+                "needs to be equal if PCP or DCP is enabled in P/D disaggregate and kv pool scenario."
             )
 
         if (
@@ -747,7 +734,7 @@ class NPUPlatform(Platform):
             and not sfa_dcp_replicated_indexer
         ):
             logger.warning_once(
-                "The current SFA's PCP implementation requires "
+                "The current SFA context-parallel implementation requires "
                 f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size})"
                 f" == block_size({cache_config.block_size}). "
                 f"Override cp_kv_cache_interleave_size to {cache_config.block_size}."
@@ -974,7 +961,6 @@ class NPUPlatform(Platform):
         moe_comm_type = select_moe_comm_method(
             num_tokens,
             vllm_config,
-            is_draft_model=is_draft_model,
         )
         moe_comm_method = get_moe_comm_method(moe_comm_type)
 
@@ -998,12 +984,9 @@ class NPUPlatform(Platform):
             mmrs_fusion = False
         else:
             flash_comm_v1_enabled = enable_sp(vllm_config) and num_tokens is not None and num_tokens > 1000
-
-        # TODO(Levi-JQ): another PR to normalize the enabling logic for sp/fc2
-        flashcomm_v2_enabled = flashcomm2_enable() and tp_world_size > 1 and num_tokens is not None
         pad_size = 0
         padded_length = None
-        if flash_comm_v1_enabled or flashcomm_v2_enabled:
+        if flash_comm_v1_enabled:
             pad_size = (tp_world_size - (num_tokens % tp_world_size)) % tp_world_size
 
         if num_tokens is None and attn_metadata is not None:
@@ -1011,7 +994,7 @@ class NPUPlatform(Platform):
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and dp_metadata is not None:
             max_tokens_across_dp = dp_metadata.num_tokens_across_dp_cpu.max().item()
-            if flash_comm_v1_enabled or flashcomm_v2_enabled:
+            if flash_comm_v1_enabled:
                 padded_length = (max_tokens_across_dp + tp_world_size - 1) // tp_world_size * tp_world_size
                 pad_size = padded_length - num_tokens
         else:
@@ -1034,7 +1017,6 @@ class NPUPlatform(Platform):
             "mmrs_fusion": mmrs_fusion,
             "num_tokens": num_tokens,
             "flash_comm_v1_enabled": flash_comm_v1_enabled,
-            "flashcomm_v2_enabled": flashcomm_v2_enabled,
             "pad_size": pad_size,
             "padded_length": padded_length,
             "max_tokens_across_dp": max_tokens_across_dp,

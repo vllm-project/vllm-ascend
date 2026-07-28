@@ -17,37 +17,19 @@
 from collections.abc import Callable
 
 import torch
-from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
 from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
-from vllm_ascend.ops.fused_moe.moe_comm_method import (
-    AllGatherCommImpl,
-    FusedExpertsResult,
-    _MoECommMethods,
-)
+from vllm_ascend.ops.fused_moe.moe_comm_method import _MoECommMethods
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import maybe_trans_nz, vllm_version_is
+from vllm_ascend.utils import maybe_trans_nz
 
 from .experts_selector import select_experts
 from .moe_comm_method import AllGatherCommImpl310
-
-if vllm_version_is("0.23.0"):
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE as _LegacyFusedMoEBase
-    from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
-else:
-    from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
-
-    try:
-        from vllm.model_executor.layers.fused_moe.layer import FusedMoE as _LegacyFusedMoEBase
-    except ImportError:
-        _LegacyFusedMoEBase = torch.nn.Module
-
-    if not isinstance(_LegacyFusedMoEBase, type):
-        _LegacyFusedMoEBase = torch.nn.Module
 
 
 class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
@@ -66,22 +48,13 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
     def process_weights_after_loading(self, layer):
         super().process_weights_after_loading(layer)
 
-        if not vllm_version_is("0.23.0"):
-            w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2)
-            w13_data = maybe_trans_nz(w13_data)
-            layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
+        w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()
+        w13_data = maybe_trans_nz(w13_data)
+        layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
 
-            w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2)
-            w2_data = maybe_trans_nz(w2_data)
-            layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
-        else:
-            w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()
-            w13_data = maybe_trans_nz(w13_data)
-            layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
-
-            w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
-            w2_data = maybe_trans_nz(w2_data)
-            layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
+        w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
+        w2_data = maybe_trans_nz(w2_data)
+        layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
     def apply(
         self,
@@ -148,228 +121,42 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
         return final_hidden_states
 
 
-if not vllm_version_is("0.23.0"):
-
-    class AscendMoERunner310(AscendMoERunner):
-        def __init__(
-            self,
+class AscendMoERunner310(AscendMoERunner):
+    def __init__(
+        self,
+        layer_name,
+        moe_config,
+        router,
+        routed_experts,
+        enable_dbo=False,
+        gate=None,
+        shared_experts=None,
+        shared_expert_gate=None,
+        routed_input_transform=None,
+        routed_output_transform=None,
+        routed_scaling_factor=1,
+        tid2eid=None,
+        n_shared_experts: int = 0,
+    ):
+        super().__init__(
             layer_name,
             moe_config,
             router,
             routed_experts,
-            enable_dbo=False,
-            gate=None,
-            shared_experts=None,
-            shared_expert_gate=None,
-            routed_input_transform=None,
-            routed_output_transform=None,
-            routed_scaling_factor=1,
-            tid2eid=None,
-            n_shared_experts: int = 0,
-        ):
-            super().__init__(
-                layer_name,
-                moe_config,
-                router,
-                routed_experts,
-                enable_dbo,
-                gate,
-                shared_experts,
-                shared_expert_gate,
-                routed_input_transform,
-                routed_output_transform,
-                routed_scaling_factor,
-                tid2eid,
-                n_shared_experts,
-            )
+            enable_dbo,
+            gate,
+            shared_experts,
+            shared_expert_gate,
+            routed_input_transform,
+            routed_output_transform,
+            routed_scaling_factor,
+            tid2eid,
+            n_shared_experts,
+        )
 
-            if routed_experts.quant_config is None:
-                routed_experts.quant_method = AscendUnquantizedFusedMoEMethod310(self.moe_config)
-                self.quant_type = self._get_quant_type()
+        if routed_experts.quant_config is None:
+            routed_experts.quant_method = AscendUnquantizedFusedMoEMethod310(self.moe_config)
+            self.quant_type = self._get_quant_type()
 
-            self.multistream_overlap_gate = False
-            self.shared_multistream_overlap_gate = False
-            self.multistream_overlap_shared_expert = False
-            _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl310(self.moe_config)
-
-
-class AscendFusedMoE310(_LegacyFusedMoEBase):
-    def __init__(self, *args, **kwargs):
-        if _LegacyFusedMoEBase is torch.nn.Module:
-            raise RuntimeError("AscendFusedMoE310 is only kept for the legacy FusedMoE class API.")
-        super().__init__(*args, **kwargs)
-
-        self._routed_input_transform = kwargs.get("routed_input_transform")
-        self._shared_experts = kwargs.get("shared_experts")
-        self.global_num_experts = kwargs["num_experts"]
-
-        if self.quant_config is None:
-            self.quant_method = AscendUnquantizedFusedMoEMethod310(self.moe_config)
-        else:
-            self.quant_method = self.quant_config.get_quant_method(self, self.layer_name)
-
-        assert self.quant_method is not None
-        # Keep base_quant_method aligned with the Ascend-replaced quant_method
-        # so FusedMoE.maybe_init_modular_kernel doesn't dispatch into the
-        # upstream UnquantizedFusedMoEMethod.maybe_make_prepare_finalize.
-        self.base_quant_method = self.quant_method
-
-        self.moe_config.tp_group = get_tp_group()
-        self.moe_config.dp_group = get_dp_group()
-        self.moe_config.ep_group = get_ep_group()
-        self.moe_config.supports_eplb = False
-
-        # init moe
-        self.global_expert_map = None
-        self.local_expert_map = None
-        if self.moe_config.ep_size > 1:
-            raise RuntimeError("Expert Parallel is not supported on 310P. Please remove --enable-expert-parallel.")
-        self.local_num_experts = self.global_num_experts
-
-        self.moe_config.num_experts = self.global_num_experts
-        self.moe_config.num_local_experts = self.local_num_experts
-        self.moe_config.global_redundant_expert_num = 0
-
-        moe_quant_params = {
-            "num_experts": self.local_num_experts,
-            "hidden_size": self.hidden_size,
-            "intermediate_size_per_partition": self.intermediate_size_per_partition,
-            "params_dtype": self.params_dtype,
-            "weight_loader": self.weight_loader,
-        }
-
-        self.quant_method.create_weights(layer=self, **moe_quant_params)
-        self.quant_type = self.get_quant_type()
-
+        self.multistream_overlap_shared_expert = False
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl310(self.moe_config)
-
-        if vllm_version_is("0.23.0"):
-            self.runner = AscendMoERunner(
-                self.layer_name,
-                self.moe_config,
-                self.router,
-                self._routed_input_transform,
-                kwargs.pop("gate", None),
-                kwargs.pop("shared_experts", None),
-                self.quant_method,
-                self.vllm_config.parallel_config.enable_dbo,
-            )
-        else:
-            self.runner = AscendMoERunner310(
-                self.layer_name,
-                self.moe_config,
-                self.router,
-                self._routed_input_transform,
-                kwargs.pop("gate", None),
-                kwargs.pop("shared_experts", None),
-                self.quant_method,
-                self.vllm_config.parallel_config.enable_dbo,
-            )
-
-    @property
-    def is_internal_router(self) -> bool:
-        # 310P Ascend path expects router logits from the model forward path.
-        return False
-
-    def init_experts_map(self, moe_config):
-        """
-        Initialize expert mapping for MoE (Mixture of Experts) model.
-
-        This function creates mappings between global expert indices and local expert indices
-        for each rank in the expert parallel group. It divides the total experts among
-        different ranks and creates both global and local expert maps that are used
-        during MoE computation to determine which experts are handled by which rank.
-
-        Args:
-            moe_config: Configuration object containing MoE parameters including
-                       number of experts, expert parallel size, and expert parallel rank.
-
-        Returns:
-            tuple: A tuple containing:
-                   - global_expert_map: Stack of expert maps for all ranks
-                   - local_expert_map: Expert map for the current rank (transferred to NPU)
-        """
-        n_experts = moe_config.num_experts
-        ep_size = moe_config.ep_size
-        all_experts = torch.arange(n_experts, dtype=torch.int32)
-        experts_groups = all_experts.chunk(ep_size)
-        global_expert_map = []
-        local_expert_map = None
-        for rankid in range(ep_size):
-            expert_map = torch.full((n_experts,), -1, dtype=torch.int32)
-            local_experts = experts_groups[rankid]
-            expert_map[local_experts] = torch.arange(local_experts.shape[0], dtype=torch.int32)
-            global_expert_map.append(expert_map)
-            if rankid == moe_config.ep_rank:
-                local_expert_map = expert_map.npu()
-        return torch.stack(global_expert_map), local_expert_map
-
-    def get_quant_type(self) -> QuantType:
-        quant_method = self.quant_method
-        if not hasattr(quant_method, "quant_method") or quant_method.quant_method is None:
-            return QuantType.NONE
-
-        method = quant_method.quant_method
-        quant_type = getattr(method, "quant_type", QuantType.NONE)
-        if quant_type not in [QuantType.NONE, QuantType.W8A8]:
-            raise RuntimeError("Only Unquant and W8A8 is supported.")
-        return quant_type
-
-    def forward_impl(  # type: ignore[override]
-        self, hidden_states: torch.Tensor, router_logits: torch.Tensor
-    ) -> torch.Tensor:
-        assert self.quant_method is not None
-        assert self.routed_scaling_factor == 1.0, "routed_scaling_factor != 1.0 is not supported."
-
-        prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
-            hidden_states=hidden_states, router_logits=router_logits, quant_type=self.quant_type
-        )
-        hidden_states = prepare_output.hidden_states
-        router_logits = prepare_output.router_logits
-        pertoken_scale = prepare_output.pertoken_scale
-        padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
-
-        # Matrix multiply.
-        fused_experts_results: FusedExpertsResult = self.quant_method.apply(
-            layer=self,
-            x=hidden_states,
-            use_grouped_topk=self.use_grouped_topk,
-            top_k=self.top_k,
-            router_logits=router_logits,
-            renormalize=self.renormalize,
-            topk_group=self.topk_group,
-            num_expert_group=self.num_expert_group,
-            custom_routing_function=self.custom_routing_function,
-            scoring_func=self.scoring_func,
-            e_score_correction_bias=self.e_score_correction_bias,
-            num_experts=self.global_num_experts,
-            expert_map=self.local_expert_map,
-            apply_router_weight_on_input=self.apply_router_weight_on_input,
-            pertoken_scale=pertoken_scale,
-        )
-
-        routed_out = _EXTRA_CTX.moe_comm_method.finalize(
-            hidden_states=fused_experts_results.routed_out,
-            reduce_results=isinstance(_EXTRA_CTX.moe_comm_method, AllGatherCommImpl),
-            padded_hidden_states_shape=padded_hidden_states_shape,
-        )
-
-        return routed_out
-
-    def _forward_shared_experts(self, hidden_states: torch.Tensor):
-        if self._shared_experts is None:
-            return None
-        return self._shared_experts(hidden_states)
-
-    def shared_forward_impl(  # type: ignore[override]
-        self, hidden_states: torch.Tensor, router_logits: torch.Tensor
-    ):
-        routed_out = AscendFusedMoE310.forward_impl(
-            self,
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-        )
-        if self._shared_experts is None:
-            return routed_out
-        shared_out = self._forward_shared_experts(hidden_states)
-        return shared_out, routed_out

@@ -23,14 +23,18 @@ import requests
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer, wait_until_npu_memory_free
-from vllm_ascend.utils import vllm_version_is
 
-pytestmark = pytest.mark.skipif(
-    not vllm_version_is("0.23.0"),
-    reason="broken on main, fix me.",
+
+@pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B")
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="eplb,dynamic_eplb",
+    parallel="TP,EP",
+    deploy="pd_mix",
+    hardware="A3",
+    quantization="BF16",
+    graph_mode="full_decode_only",
 )
-
-
 @wait_until_npu_memory_free()
 def test_moe_tp_ep_eplb_full_decode_only():
     """Verify MoE serving with TP, EP, EPLB, and full decode only."""

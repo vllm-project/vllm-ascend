@@ -1,3 +1,4 @@
+import importlib.util
 import math
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -15,12 +16,10 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_sp,
-    flashcomm2_enable,
     get_ascend_device_type,
     has_layer_idx,
     is_drafter_moe_model,
     is_moe_model,
-    speculative_enable_dispatch_gmm_combine_decode,
 )
 
 
@@ -32,6 +31,19 @@ class MoECommType(Enum):
 
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
+_CANN_MEGAMOE_SUPPORTED_QUANT_NAMES = {
+    "w8a8",
+    "w4a8",
+    "w8a8_dynamic",
+    "w4a8_dynamic",
+    "quanttype.w8a8",
+    "quanttype.w4a8",
+}
+
+_MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
+_MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
+_DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
+_MC2_TOKENS_PER_RANK_LIMIT = 512
 
 
 @contextmanager
@@ -52,6 +64,33 @@ def override_mrv2_in_profile_run(enabled: bool):
 
 def get_mrv2_in_profile_run() -> bool:
     return _MRV2_IN_PROFILE_RUN.get()
+
+
+def _cann_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
+    hf_text_config = vllm_config.model_config.hf_text_config
+    hidden_size = getattr(hf_text_config, "hidden_size", None)
+    if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
+        hidden_size = vllm_config.model_config.get_hidden_size()
+    if hidden_size is None:
+        return False
+    hidden_size = int(hidden_size)
+    # Hidden-size bounds come from the CANN MegaMoe kernel constraints:
+    # the dispatch / FFN / combine cube tiles require hidden in the closed
+    # range [1024, 8192] and a multiple of 512 (the cube K-step). Models
+    # outside this range (e.g. small Qwen variants with hidden=896, or any
+    # hidden=9216 LLaMA-style head) are silently routed back to MC2.
+    if hidden_size < 1024 or hidden_size > 8192 or hidden_size % 512 != 0:
+        return False
+
+    quant_type = getattr(
+        vllm_config.model_config.hf_text_config,
+        "moe_quantize",
+        getattr(vllm_config.model_config.hf_text_config, "quantize", None),
+    )
+    if quant_type is None:
+        return True
+    quant_name = str(getattr(quant_type, "name", quant_type)).lower()
+    return quant_name in _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES
 
 
 @contextmanager
@@ -95,7 +134,7 @@ def set_ascend_forward_context(
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 
         max_num_tokens = int(num_tokens_across_dp.max().item()) if num_tokens_across_dp is not None else num_tokens
-        moe_comm_type = select_moe_comm_method(max_num_tokens, vllm_config, is_draft_model)
+        moe_comm_type = select_moe_comm_method(max_num_tokens, vllm_config)
 
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
@@ -135,11 +174,9 @@ def set_ascend_forward_context(
         forward_context.mmrs_fusion = mmrs_fusion
         forward_context.num_tokens = num_tokens
         forward_context.flash_comm_v1_enabled = flash_comm_v1_enabled
-        # TODO(Levi-JQ): another PR to normalize the enabling logic for sp/fc2
-        forward_context.flashcomm_v2_enabled = flashcomm2_enable() and tp_world_size > 1 and num_tokens is not None
 
         forward_context.pad_size = 0
-        if forward_context.flash_comm_v1_enabled or forward_context.flashcomm_v2_enabled:
+        if forward_context.flash_comm_v1_enabled:
             pad_size = (tp_world_size - (num_tokens % tp_world_size)) % tp_world_size
             forward_context.pad_size = pad_size
 
@@ -165,7 +202,7 @@ def set_ascend_forward_context(
         if dp_world_size > 1 and forward_context.dp_metadata is not None:
             dp_meta = forward_context.dp_metadata
             max_tokens_across_dp = dp_meta.num_tokens_across_dp_cpu.max().item()
-            if forward_context.flash_comm_v1_enabled or forward_context.flashcomm_v2_enabled:
+            if forward_context.flash_comm_v1_enabled:
                 padded_length = (max_tokens_across_dp + tp_world_size - 1) // tp_world_size * tp_world_size
                 pad_size = padded_length - num_tokens
                 forward_context.padded_length = padded_length
@@ -197,9 +234,6 @@ def set_ascend_forward_context(
 
 _mc2_tokens_capacity: int | None = None
 _reserved_mc2_mask: torch.Tensor | None = None
-# dispatch_gmm_combine_decode currently rejects batch sizes above this limit
-# in its C++ tiling check (MAX_BATCH_SIZE).
-_DISPATCH_GMM_COMBINE_DECODE_MAX_TOKENS = 256
 
 
 def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len):
@@ -213,10 +247,19 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     else:
         max_num_tokens = max_num_reqs * uniform_decode_query_len
     tp_size = vllm_config.parallel_config.tensor_parallel_size
+
     # Use integer arithmetic for ceiling division.
     num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
-    # NOTE: To save memory, we cap the max number of tokens to 512.
-    num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, 512)
+    # keep the num_tokens_per_tp_rank less than fused_mc2 (mega_moe) tokens per rank limit
+    if get_ascend_config().enable_fused_mc2:
+        if _MEGA_MOE_SUPPORTED:
+            num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _MEGA_MOE_TOKENS_PER_RANK_LIMIT)
+        else:
+            num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT)
+
+    # keep the num_tokens_per_tp_rank less than mc2 tokens per rank limit
+    else:
+        num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _MC2_TOKENS_PER_RANK_LIMIT)
     _mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
 
 
@@ -261,43 +304,32 @@ def _fits_mc2_capacity(num_tokens: int, mc2_tokens_capacity: int | None) -> bool
 
 def _can_use_dispatch_ffn_combine() -> bool:
     # Legacy dispatch_ffn_combine path. Keep its EP-size limit isolated from
-    # dispatch_gmm_combine_decode and regular MC2.
+    # regular MC2.
     return get_ep_group().world_size <= 32
+
+
+def _can_use_cann_megamoe(vllm_config: VllmConfig) -> bool:
+    # CANN MegaMoe supports a wider EP-size range, but still depends on model
+    # shape and quantization constraints.
+    return _MEGA_MOE_SUPPORTED and get_ep_group().world_size <= 64 and _cann_megamoe_supported_by_config(vllm_config)
 
 
 def _fits_dispatch_ffn_combine_capacity(num_tokens: int) -> bool:
     return num_tokens <= get_ascend_config().mega_moe_max_tokens
 
 
-def _can_use_dispatch_gmm_combine_decode(
-    vllm_config: VllmConfig,
-    quant_type: str | None,
-) -> bool:
-    # Keep speculative/MTP quantization checks local to the mode 2 fused path.
-    # TODO: drop this guard when dispatch_gmm_combine_decode supports w16a16.
-    return speculative_enable_dispatch_gmm_combine_decode(vllm_config) and quant_type == "w8a8_dynamic"
-
-
-def _fits_dispatch_gmm_combine_decode_capacity(num_tokens: int) -> bool:
-    return num_tokens <= _DISPATCH_GMM_COMBINE_DECODE_MAX_TOKENS
-
-
 def _select_a3_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
-    quant_type: str | None,
     mc2_tokens_capacity: int,
     enable_fused_mc2: int,
 ) -> MoECommType:
-    if enable_fused_mc2 == 1 and _can_use_dispatch_ffn_combine() and _fits_dispatch_ffn_combine_capacity(num_tokens):
-        return MoECommType.FUSED_MC2
-
-    if (
-        enable_fused_mc2 == 2
-        and _can_use_dispatch_gmm_combine_decode(vllm_config, quant_type)
-        and _fits_dispatch_gmm_combine_decode_capacity(num_tokens)
-    ):
-        return MoECommType.FUSED_MC2
+    if enable_fused_mc2 == 1:
+        # A3 fused MoE currently means CANN MegaMoe when available, otherwise
+        # the legacy dispatch_ffn_combine path.
+        fused_path_available = _can_use_cann_megamoe(vllm_config) or _can_use_dispatch_ffn_combine()
+        if fused_path_available and _fits_dispatch_ffn_combine_capacity(num_tokens):
+            return MoECommType.FUSED_MC2
 
     if _fits_mc2_capacity(num_tokens, mc2_tokens_capacity):
         return MoECommType.MC2
@@ -327,20 +359,15 @@ def _is_effective_expert_parallel(vllm_config: VllmConfig) -> bool:
     return vllm_config.parallel_config.enable_expert_parallel and get_ep_group().world_size > 1
 
 
-def _get_moe_quant_type(vllm_config: VllmConfig) -> str | None:
-    hf_text_config = vllm_config.model_config.hf_text_config
-    return getattr(
-        hf_text_config,
-        "moe_quantize",
-        getattr(hf_text_config, "quantize", None),
-    )
+def _requires_alltoall_for_lora(vllm_config: VllmConfig) -> bool:
+    lora_config = getattr(vllm_config, "lora_config", None)
+    return lora_config is not None and vllm_config.parallel_config.enable_expert_parallel
 
 
 def _select_device_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
     soc_version: AscendDeviceType,
-    quant_type: str | None,
     mc2_tokens_capacity: int,
 ) -> MoECommType:
     if soc_version == AscendDeviceType.A2:
@@ -354,7 +381,6 @@ def _select_device_moe_comm_method(
         return _select_a3_moe_comm_method(
             num_tokens,
             vllm_config,
-            quant_type,
             mc2_tokens_capacity,
             get_ascend_config().enable_fused_mc2,
         )
@@ -395,16 +421,18 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
 
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     soc_version = get_ascend_device_type()
-    quant_type = _get_moe_quant_type(vllm_config)
 
     if not _is_effective_expert_parallel(vllm_config):
         moe_comm_type = MoECommType.ALLGATHER
+    elif _requires_alltoall_for_lora(vllm_config):
+        # LoRA + EP requires AlltoAll because the MC2/FusedMC2 paths
+        # cannot patch the single fused C++ dispatch_ffn_combine op.
+        moe_comm_type = MoECommType.ALLTOALL
     else:
         moe_comm_type = _select_device_moe_comm_method(
             num_tokens,
             vllm_config,
             soc_version,
-            quant_type,
             mc2_tokens_capacity,
         )
 
@@ -428,7 +456,6 @@ class _ExtraForwardContextProxy:
         "mmrs_fusion",
         "num_tokens",
         "flash_comm_v1_enabled",
-        "flashcomm_v2_enabled",
         "pad_size",
         "padded_length",
         "num_tokens_across_dp",

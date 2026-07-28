@@ -1,4 +1,3 @@
-import vllm
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention
 
 from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
@@ -9,11 +8,15 @@ from vllm_ascend._310p.ops.fla.idex import (
 from vllm_ascend._310p.spec_decode.llm_base_proposer_310 import AscendSpecDecodeBaseProposer310
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
-from vllm_ascend.utils import is_rc_device
+from vllm_ascend.utils import is_rc_device, vllm_version_is
 
-vllm.model_executor.layers.fla.ops.index.prepare_chunk_indices = prepare_chunk_indices_310
+if vllm_version_is("0.25.1"):
+    from vllm.model_executor.layers.fla.ops import index as fla_index  # type: ignore[import-not-found]
+else:
+    from vllm.third_party.flash_linear_attention.ops import index as fla_index
 
-vllm.model_executor.layers.fla.ops.index.prepare_chunk_offsets = prepare_chunk_offsets_310
+fla_index.prepare_chunk_indices = prepare_chunk_indices_310
+fla_index.prepare_chunk_offsets = prepare_chunk_offsets_310
 
 # 310P: protect tail slot during MTP input_ids shift to avoid GatherV2 corruption
 # caused by the NPU slice-assign writing one element past the intended range
@@ -21,6 +24,10 @@ vllm.model_executor.layers.fla.ops.index.prepare_chunk_offsets = prepare_chunk_o
 AscendSpecDecodeBaseProposer.set_inputs_first_pass = (  # type: ignore[method-assign]
     AscendSpecDecodeBaseProposer310.set_inputs_first_pass
 )
+AscendSpecDecodeBaseProposer._run_merged_draft = (  # type: ignore[method-assign]
+    AscendSpecDecodeBaseProposer310._run_merged_draft
+)
+
 # Patch _warmup_prefill_kernels to no-op on 310P: triton.next_power_of_2 does
 # not exist in the triton version used on 310P CI, and NPU does not use these
 # CUDA warmup kernel anyway.

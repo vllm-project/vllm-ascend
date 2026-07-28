@@ -60,29 +60,23 @@ Otherwise A2 falls back to `ALLGATHER`.
 
 ### A3
 
-A3 has the most complex policy because it supports regular MC2 and two fused
-MC2-like paths.
+A3 has the most complex policy because it supports regular MC2 and fused
+MoE communication paths.
 
 `enable_fused_mc2=0` disables fused MC2 selection. A3 then uses regular `MC2`
 when `num_tokens` fits regular MC2 capacity, otherwise `ALLTOALL`.
 
-`enable_fused_mc2=1` selects the legacy `dispatch_ffn_combine` path when:
+`enable_fused_mc2=1` selects an A3 fused path when `num_tokens` fits
+`mega_moe_max_tokens` and either of these capability checks passes:
 
-- EP world size is at most 32,
-- `num_tokens` fits `mega_moe_max_tokens`.
+- CANN MegaMoe is available, EP world size is at most 64, and the model shape
+  and quantization are supported.
+- The legacy `dispatch_ffn_combine` fallback is available with EP world size at
+  most 32.
 
-This path is treated as legacy and isolated in `_can_use_dispatch_ffn_combine`
-and `_fits_dispatch_ffn_combine_capacity`. Its capability checks do not affect
-`enable_fused_mc2=2` or regular MC2.
-
-`enable_fused_mc2=2` selects `dispatch_gmm_combine_decode` when:
-
-- the speculative/MTP helper allows the path,
-- MoE quantization is `w8a8_dynamic`,
-- `num_tokens` fits the `dispatch_gmm_combine_decode` batch-size capacity.
-
-The current capacity used by the selector is 256 tokens, matching the current
-C++ tiling `MAX_BATCH_SIZE` guard for `dispatch_gmm_combine_decode`.
+These checks are isolated in `_can_use_cann_megamoe`,
+`_can_use_dispatch_ffn_combine`, and `_fits_dispatch_ffn_combine_capacity` so
+fused-path constraints do not affect regular MC2.
 
 If no fused path is selected, A3 falls back to regular `MC2` within regular MC2
 capacity, otherwise `ALLTOALL`.
@@ -109,8 +103,7 @@ Regular MC2 and fused MC2 do not share a single capacity source.
 | Path | Capacity source |
 | --- | --- |
 | Regular `MC2` | `get_mc2_tokens_capacity()` |
-| `enable_fused_mc2=1` / `dispatch_ffn_combine` | `get_ascend_config().mega_moe_max_tokens` |
-| `enable_fused_mc2=2` / `dispatch_gmm_combine_decode` | current operator batch-size capacity, 256 tokens |
+| `enable_fused_mc2=1` / CANN MegaMoe or `dispatch_ffn_combine` | `get_ascend_config().mega_moe_max_tokens` |
 
 Keeping these capacities separate is important. Regular MC2 buffer sizing is
 also used by profile runs and `TokenDispatcherWithMC2` global batch sizing, so
@@ -124,11 +117,10 @@ fused operator limits must not overwrite regular MC2 capacity.
 | Value | Meaning |
 | --- | --- |
 | `0` | Do not select fused MC2. Use regular hardware policy. |
-| `1` | Allow legacy `dispatch_ffn_combine` on A3 when its capability and capacity checks pass. |
-| `2` | Allow `dispatch_gmm_combine_decode` on A3 when its capability, quantization, and capacity checks pass. |
+| `1` | Allow A3 CANN MegaMoe or legacy `dispatch_ffn_combine` when capability and capacity checks pass. |
 
-`mega_moe_max_tokens` controls the per-rank token capacity for the
-`dispatch_ffn_combine` path. Raising it increases workspace memory use.
+`mega_moe_max_tokens` controls the per-rank token capacity for the fused
+MoE path. Raising it increases workspace memory use.
 
 ## Extension Rules
 
