@@ -20,6 +20,7 @@
 import copy
 import gc
 import logging
+import os
 from types import NoneType
 from typing import Any
 
@@ -121,6 +122,21 @@ class NPUWorker(WorkerBase):
         from vllm_ascend.logger import configure_ascend_file_logging
 
         configure_ascend_file_logging()
+
+        # Since vLLM PR #45026, vLLM no longer sets device control env vars
+        # internally, and RayExecutorV2 sets
+        # RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1 to prevent Ray
+        # from setting it. Without ASCEND_RT_VISIBLE_DEVICES, aclInit()
+        # (triggered by check_ascend_device_type below) defaults to device 0,
+        # which may be assigned to another DP rank, causing
+        # ACL_ERROR_INVALID_DEVICE (error code 107001).
+        # Set the env var before aclInit() so the correct NPU is visible.
+        assigned = vllm_config.parallel_config.assigned_physical_gpu_ids
+        if assigned is not None and local_rank < len(assigned):
+            device_env = current_platform.device_control_env_var
+            if device_env and device_env not in os.environ:
+                os.environ[device_env] = str(assigned[local_rank])
+
         check_ascend_device_type()
 
         super().__init__(
