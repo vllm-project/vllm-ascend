@@ -876,7 +876,6 @@ def main():
                 overridden.setdefault(override_key, []).extend(tests)
         all_groups = overridden
 
-
     if skip_tests:
         for key in list(all_groups.keys()):
             filtered: list[str] = []
