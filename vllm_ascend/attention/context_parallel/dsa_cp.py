@@ -1,4 +1,3 @@
-import logging
 import math
 from dataclasses import dataclass
 from typing import ClassVar, TypeVar
@@ -9,6 +8,7 @@ import torch.nn.functional as F
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tp_group
+from vllm.logger import init_logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
@@ -32,8 +32,7 @@ from vllm_ascend.utils import (
     olora_tp_enable,
 )
 
-
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
