@@ -1047,12 +1047,27 @@ class KVPoolWorker:
                 if can_save:
                     save_start_block = request.save_start_token // block_size
                     save_end_block = request.save_end_token // block_size
+                    partial_save_end = (
+                        request.target_token_len
+                        if self.layerwise_offload
+                        and request.num_prompt_tokens is not None
+                        and request.target_token_len < request.num_prompt_tokens
+                        and request.target_token_len % block_size
+                        else None
+                    )
+                    if partial_save_end is not None:
+                        save_end_block = (partial_save_end + block_size - 1) // block_size
                     if request.load_spec is not None and request.load_spec.can_load:
                         hit_full_blocks = request.load_spec.kvpool_cached_tokens // block_size
                         save_start_block = max(save_start_block, hit_full_blocks)
 
                     if self.use_gva_layerwise:
-                        save_end_block = min(save_end_block, group_hash_count)
+                        max_save_blocks = group_hash_count + int(partial_save_end is not None)
+                        save_end_block = min(
+                            save_end_block,
+                            max_save_blocks,
+                            len(request.block_ids_by_group_np[group_id]),
+                        )
 
                     if save_start_block < save_end_block:
                         plan.save_ranges.append(
@@ -1060,6 +1075,7 @@ class KVPoolWorker:
                                 request=request,
                                 start_block=save_start_block,
                                 end_block=save_end_block,
+                                partial_end_token=partial_save_end,
                             )
                         )
 
@@ -1070,23 +1086,43 @@ class KVPoolWorker:
                         0 if self.layerwise_offload else request.load_spec.vllm_cached_tokens // block_size
                     )
                     cached_full_blocks = cached_tokens // block_size
+                    partial_load_end = (
+                        cached_tokens
+                        if self.layerwise_offload
+                        and request.num_prompt_tokens is not None
+                        and cached_tokens < request.num_prompt_tokens
+                        and cached_tokens % block_size
+                        else None
+                    )
                     hash_count = group_hash_count if self.use_gva_layerwise else len(request.block_hashes)
-                    full_blocks = min(cached_full_blocks, hash_count)
-                    if load_start_block < full_blocks:
+                    load_end_block = cached_full_blocks
+                    if partial_load_end is not None:
+                        load_end_block += 1
+                    if self.use_gva_layerwise:
+                        load_end_block = min(
+                            load_end_block,
+                            hash_count + int(partial_load_end is not None),
+                            len(request.block_ids_by_group_np[group_id]),
+                        )
+                    else:
+                        load_end_block = min(load_end_block, hash_count)
+                    if load_start_block < load_end_block:
                         load_range = LayerBlockRange(
                             request=request,
                             start_block=load_start_block,
-                            end_block=full_blocks,
+                            end_block=load_end_block,
+                            partial_end_token=partial_load_end,
                         )
                         plan.full_load_ranges.append(load_range)
                         if self.layerwise_offload:
                             cached_start_block = request.load_spec.vllm_cached_tokens // block_size
-                            if cached_start_block < full_blocks:
+                            hbm_tail_end_block = min(cached_full_blocks, hash_count)
+                            if cached_start_block < hbm_tail_end_block:
                                 plan.hbm_tail_load_ranges.append(
                                     LayerBlockRange(
                                         request=request,
                                         start_block=max(cached_start_block, load_start_block),
-                                        end_block=full_blocks,
+                                        end_block=hbm_tail_end_block,
                                     )
                                 )
 
@@ -1136,19 +1172,19 @@ class KVPoolWorker:
                         )
                     )
 
-        save_preparation = self._layerwise_transfer_preparer.create_save_preparation(
-            plans,
-            self.layer_save_tasks,
-            self.kv_send_thread.prepare_layerwise_tasks if self.kv_send_thread is not None else None,
-        )
-        if any(self.layer_save_tasks) and self.kv_send_thread is not None:
-            self.kv_send_thread.add_request(save_preparation)
-
         self._layer_load_preparation = self._layerwise_transfer_preparer.create_load_preparation(
             plans,
             self.layer_load_tasks,
             self.kv_recv_thread.prepare_layerwise_tasks if self.kv_recv_thread is not None else None,
         )
+        save_preparation = self._layerwise_transfer_preparer.create_save_preparation(
+            plans,
+            self.layer_save_tasks,
+            self.kv_send_thread.prepare_layerwise_tasks if self.kv_send_thread is not None else None,
+            self._layer_load_preparation if any(self.layer_load_tasks) else None,
+        )
+        if any(self.layer_save_tasks) and self.kv_send_thread is not None:
+            self.kv_send_thread.add_request(save_preparation)
         if self.use_gva_layerwise and any(self.layer_load_tasks):
             assert self.kv_recv_thread is not None
             self.kv_recv_thread.add_request(self._layer_load_preparation)
@@ -1179,6 +1215,8 @@ class KVPoolWorker:
                     # against layer_id's attention and leave no overlap.
                     if reuse_mate + 1 < layer_id:
                         # An adjacent target cannot wait on its own attention gate.
+                        # TODO: Map multi-layer MTP names to physical gate indices;
+                        # a single MTP layer reused across steps is unaffected.
                         attention_start_gate = get_attention_compute_start_gate(reuse_mate + 1)
             recv_thread.add_request(
                 LayerLoadTask(  # type: ignore[arg-type]

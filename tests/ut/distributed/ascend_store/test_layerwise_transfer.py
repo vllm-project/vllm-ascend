@@ -151,3 +151,125 @@ def test_preparer_rolls_back_successful_leases_after_acquisition_failure(lease_r
     first_key = preparer.make_gva_key(0, "aa")
     backend.batch_remove_lease.assert_called_once_with([first_key])
     assert preparer.load_lease_keys_by_request == {}
+
+
+def _partial_plan():
+    request = ReqMeta(
+        "request-a",
+        token_len_chunk=16,
+        target_token_len=20,
+        num_prompt_tokens=64,
+        block_ids_by_group=[[7, 8]],
+        block_hashes=["aa"],
+        is_last_chunk=False,
+    )
+    block_range = LayerBlockRange(
+        request,
+        start_block=0,
+        end_block=2,
+        partial_end_token=20,
+    )
+    return GroupBatchPlan(
+        group_id=0,
+        block_size=16,
+        save_ranges=[block_range],
+        full_load_ranges=[block_range],
+    )
+
+
+def test_preparer_saves_partial_prefill_with_request_scoped_key():
+    backend = MagicMock()
+    backend.batch_alloc.return_value = [1_000, 2_000]
+    preparer = LayerwiseTransferPreparer(
+        backend,
+        "model",
+        0,
+        16,
+        enabled=True,
+        can_allocate=True,
+        num_groups=1,
+    )
+    preparer.configure_layout({0: [10, 20]})
+    plan = _partial_plan()
+
+    resolved = preparer.resolve_save_groups([plan])
+
+    full_key = preparer.make_gva_key(0, "aa")
+    partial_key = "model@partial@request-a@0@1@20@0"
+    backend.batch_alloc.assert_called_once_with(
+        [full_key, partial_key],
+        [30, 30],
+    )
+    np.testing.assert_array_equal(resolved[0][0].block_ids_arr, [7, 8])
+
+
+def test_preparer_loads_partial_prefill_with_same_request_scoped_key():
+    backend = MagicMock()
+    backend.batch_get_key_info.return_value = [
+        _key_info([1_000]),
+        _key_info([2_000]),
+    ]
+    backend.batch_add_lease.return_value = [0, 0]
+    preparer = LayerwiseTransferPreparer(
+        backend,
+        "model",
+        0,
+        16,
+        enabled=True,
+        can_allocate=False,
+        num_groups=1,
+    )
+    plan = _partial_plan()
+
+    resolved = preparer.resolve_load_groups([plan])
+
+    full_key = preparer.make_gva_key(0, "aa")
+    partial_key = "model@partial@request-a@0@1@20@0"
+    backend.batch_get_key_info.assert_called_once_with(
+        [full_key, partial_key],
+        flag=1,
+    )
+    backend.batch_add_lease.assert_called_once_with(
+        [full_key, partial_key],
+        5 * 60 * 1000,
+    )
+    np.testing.assert_array_equal(resolved[(0, False)][0].block_ids_arr, [7, 8])
+    np.testing.assert_array_equal(resolved[(0, False)][0].base_gvas_arr, [1_000, 2_000])
+
+
+def test_save_preparation_protects_load_keys_before_allocating():
+    backend = MagicMock()
+    load_preparation = MagicMock()
+    load_ready = False
+
+    def mark_load_ready():
+        nonlocal load_ready
+        load_ready = True
+
+    def allocate_after_load(keys, sizes):
+        assert load_ready
+        return [1_000, 2_000]
+
+    load_preparation.ensure_ready.side_effect = mark_load_ready
+    backend.batch_alloc.side_effect = allocate_after_load
+    preparer = LayerwiseTransferPreparer(
+        backend,
+        "model",
+        0,
+        16,
+        enabled=True,
+        can_allocate=True,
+        num_groups=1,
+    )
+    preparer.configure_layout({0: [10, 20]})
+
+    save_preparation = preparer.create_save_preparation(
+        [_partial_plan()],
+        [],
+        None,
+        load_preparation,
+    )
+    save_preparation.ensure_ready()
+
+    load_preparation.ensure_ready.assert_called_once_with()
+    backend.batch_alloc.assert_called_once()

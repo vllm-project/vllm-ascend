@@ -713,7 +713,7 @@ class KVPoolScheduler:
             discard_partial_chunks=self._discard_partial_chunks,
             original_block_size=self.original_block_size,
             kv_cache_group_families=self.kv_cache_group_families,
-            save_partial_block=self.layerwise_offload,
+            save_partial_prefill=(self.layerwise_offload and request_tracker.token_len < len(prompt_token_ids)),
         )
 
     def _process_new_request(
@@ -799,8 +799,8 @@ class KVPoolScheduler:
         scheduler_output: SchedulerOutput,
         force_skip_save: bool,
     ) -> ReqMeta | None:
-        # Reused buffers must save every step; otherwise only explicit
-        # save_decode_cache keeps Decode increments.
+        # Chunked-prefill increments (prompt not yet fully computed) are always
+        # saved; only decode increments are gated by save_decode_cache.
         req_tuple = self._unfinished_requests.get(req_id)
         is_decoding = req_tuple is not None and req_tuple[0].num_computed_tokens >= req_tuple[0].num_prompt_tokens
         if is_decoding and not self.save_decode_cache and not self.layerwise_offload:

@@ -930,6 +930,7 @@ class ReqMeta:
         discard_partial_chunks: bool = True,
         original_block_size: list[int] | int | None = None,
         kv_cache_group_families: list[str] | None = None,
+        save_partial_prefill: bool = False,
     ) -> ReqMeta | None:
         """Create the request metadata from a request tracker."""
         if block_hashes is None:
@@ -958,7 +959,12 @@ class ReqMeta:
         )
         if boundary_without_hash:
             num_tokens_to_save = len(block_hashes) * cache_transfer_granularity
-        skip_save = skip_save or num_tokens_to_save < chunk_boundary
+        has_partial_prefill = (
+            save_partial_prefill
+            and target_token_len % cache_transfer_granularity != 0
+            and target_token_len > num_tokens_to_save
+        )
+        skip_save = skip_save or (num_tokens_to_save < chunk_boundary and not has_partial_prefill)
         if skip_save and load_spec is None:
             return None
 
@@ -1033,6 +1039,8 @@ class LayerBlockRange:
     request: ReqMeta
     start_block: int
     end_block: int
+    # If set, the last block is an intra-request partial-prefill snapshot.
+    partial_end_token: int | None = None
 
 
 @dataclass

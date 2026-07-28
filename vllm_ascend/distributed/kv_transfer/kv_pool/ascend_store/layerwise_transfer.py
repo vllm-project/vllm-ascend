@@ -158,6 +158,20 @@ class LayerwiseTransferPreparer:
             return f"{self.model_name}@{group_id}@{block_hash_hex}@{self.head_or_tp_rank}"
         return f"{self.model_name}@{block_hash_hex}@{self.head_or_tp_rank}"
 
+    def _make_block_key(
+        self,
+        group_id: int,
+        block_range: LayerBlockRange,
+        block_index: int,
+        group_block_hashes: list,
+    ) -> str:
+        if block_range.partial_end_token is not None and block_index == block_range.end_block - 1:
+            return (
+                f"{self.model_name}@partial@{block_range.request.req_id}@{group_id}@"
+                f"{block_index}@{block_range.partial_end_token}@{self.head_or_tp_rank}"
+            )
+        return self.make_gva_key(group_id, block_hash_to_str(group_block_hashes[block_index]))
+
     def resolve_save_groups(
         self,
         plans: list[GroupBatchPlan],
@@ -200,7 +214,12 @@ class LayerwiseTransferPreparer:
                 completion.is_last_chunks.append(request.is_last_chunk)
 
                 for block_index in range(block_range.start_block, block_range.end_block):
-                    key = self.make_gva_key(group_id, block_hash_to_str(group_block_hashes[block_index]))
+                    key = self._make_block_key(
+                        group_id,
+                        block_range,
+                        block_index,
+                        group_block_hashes,
+                    )
                     key_index = key_indices.get(key)
                     if key_index is not None:
                         if alloc_sizes[key_index] != alloc_size:
@@ -321,7 +340,12 @@ class LayerwiseTransferPreparer:
                 array_start = len(block_ids)
 
                 for block_index in range(block_range.start_block, block_range.end_block):
-                    key = self.make_gva_key(group_id, block_hash_to_str(group_block_hashes[block_index]))
+                    key = self._make_block_key(
+                        group_id,
+                        block_range,
+                        block_index,
+                        group_block_hashes,
+                    )
                     key_index = key_indices.get(key)
                     if key_index is None:
                         key_index = len(keys)
@@ -443,12 +467,15 @@ class LayerwiseTransferPreparer:
         plans: list[GroupBatchPlan],
         layer_tasks: list[list[LayerTransferTask]],
         prepare_tasks: Callable[[list[list[LayerTransferTask]]], None] | None,
+        load_preparation: LayerwisePreparation | None = None,
     ) -> LayerwisePreparation:
         def prepare() -> None:
             if not self.enabled:
                 if prepare_tasks is not None:
                     prepare_tasks(layer_tasks)
                 return
+            if load_preparation is not None:
+                load_preparation.ensure_ready()
             resolved_groups = self.resolve_save_groups(plans)
             for tasks in layer_tasks:
                 for task in tasks:
