@@ -169,6 +169,8 @@ def normalize_test_path(test_path):
     normalized = test_path.strip().replace("\\", "/").removeprefix("./")
     file_path, separator, test_name = normalized.partition("::")
     file_path = file_path.removesuffix(".py")
+    if separator:
+        test_name = test_name.partition("[")[0]
     return f"{file_path}{separator}{test_name}" if separator else file_path
 
 
