@@ -40,7 +40,7 @@ _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES = {
     "quanttype.w4a8",
 }
 
-_MEGA_MOE_SUPPORTED = False
+_MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
 _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
 _MC2_TOKENS_PER_RANK_LIMIT = 512
@@ -64,9 +64,6 @@ def override_mrv2_in_profile_run(enabled: bool):
 
 def get_mrv2_in_profile_run() -> bool:
     return _MRV2_IN_PROFILE_RUN.get()
-
-
-_MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
 
 
 def _cann_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
@@ -243,7 +240,7 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     global _mc2_tokens_capacity
     if _mc2_tokens_capacity is not None:
         return
-    if get_ascend_config().enable_prefill_mc2 or get_ascend_config().enable_fused_mc2:
+    if get_ascend_config().enable_prefill_mc2:
         max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
     elif vllm_config.compilation_config.cudagraph_capture_sizes:
         max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
