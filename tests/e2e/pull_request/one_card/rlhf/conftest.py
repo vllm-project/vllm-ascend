@@ -28,8 +28,8 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Callable
 
 import requests
 
