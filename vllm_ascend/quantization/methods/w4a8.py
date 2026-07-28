@@ -581,7 +581,6 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             # AllGather=prefill) — the single source of truth — so decode and
             # prefill never disagree at the mc2_capacity/offload_threshold gap.
             if is_mc:
-                from vllm_ascend.ascend_forward_context import MoECommType
                 prefill_regime = _EXTRA_CTX.moe_comm_type != MoECommType.MC2
             else:
                 prefill_regime = num_tokens > mgr.offload_threshold
