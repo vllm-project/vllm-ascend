@@ -27,7 +27,7 @@ from typing import Any
 import torch
 from vllm.config import get_current_vllm_config
 
-from .base import AscendLinearScheme, TPWeightGatherSpec, TPWeightRepeatSpec
+from .base import AscendLinearScheme
 from .registry import register_scheme
 from .w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod, AscendW8A8DynamicLinearMethod
 from .w8a8_static import AscendW8A8LinearMethod
@@ -46,21 +46,6 @@ class AscendW8A8PDMixLinearMethod(AscendLinearScheme):
     it requires more parameters (input_scale, deq_scale, etc.) that are
     needed for static quantization during decode.
     """
-
-    tp_weight_gather_specs = (TPWeightGatherSpec("weight"),)
-    tp_weight_output_gather_specs = (
-        TPWeightGatherSpec("weight", gather_dim=1),
-        TPWeightGatherSpec("quant_bias"),
-        TPWeightGatherSpec("deq_scale"),
-        TPWeightGatherSpec("weight_scale"),
-        TPWeightGatherSpec("weight_offset"),
-    )
-    supports_tp_weight_switch = True
-    tp_weight_repeat_specs = (
-        TPWeightRepeatSpec("aclnn_input_scale"),
-        TPWeightRepeatSpec("aclnn_input_scale_reciprocal"),
-        TPWeightRepeatSpec("aclnn_input_offset"),
-    )
 
     def __init__(self):
         self._static_method = AscendW8A8LinearMethod()

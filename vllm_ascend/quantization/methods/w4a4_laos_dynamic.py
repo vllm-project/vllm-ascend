@@ -20,7 +20,7 @@ from typing import Any
 import torch
 import torch_npu
 
-from .base import AscendLinearScheme, TPWeightGatherSpec
+from .base import AscendLinearScheme
 from .registry import register_scheme
 
 
@@ -32,14 +32,6 @@ class AscendW4A4LaosDynamicLinearMethod(AscendLinearScheme):
     - Weight: 4-bit quantization (per-channel) with scale and offset, stored as int8.
     - Activation: 4-bit dynamic quantization.
     """
-
-    tp_weight_gather_specs = (TPWeightGatherSpec("weight"),)
-    tp_weight_output_gather_specs = (
-        TPWeightGatherSpec("weight", gather_dim=1),
-        TPWeightGatherSpec("weight_scale"),
-        TPWeightGatherSpec("weight_offset"),
-    )
-    supports_tp_weight_switch = True
 
     def __init__(self):
         pass
