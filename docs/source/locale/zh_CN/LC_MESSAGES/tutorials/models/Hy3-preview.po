@@ -183,12 +183,6 @@ msgstr ""
 msgid "### Using vLLM Benchmark"
 msgstr "### 使用 vLLM Benchmark"
 
-msgid ""
-"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for "
-"more details."
-msgstr ""
-"更多详细信息请参考 [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/)。"
-
 msgid "### Lightweight Online Benchmark"
 msgstr "### 轻量级在线基准测试"
 
@@ -222,3 +216,8 @@ msgid ""
 msgstr ""
 "| 随机输入长度 | 成功/总数 | 平均TTFT（毫秒） | 平均TPOT（毫秒） | 输出吞吐量（tok/s） | 总token吞吐量（tok/s）"
 " |"
+
+msgid ""
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
+"more details."
+msgstr "更多详情请参考 [vllm 基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
