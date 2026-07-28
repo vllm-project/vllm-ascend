@@ -41,6 +41,7 @@ from .deepseek_v4 import (
 
 DSPARK_WO_A_DEQUANT_BLOCK_SIZE = 128
 DSPARK_DEFAULT_BLOCK_SIZE = 5
+DSPARK_DEFAULT_NUM_LAYERS = 3
 DSPARK_SAS_OP_NAMESPACES = ("_ascend_dsv4", "_ascend_v4", "custom")
 DSparkFusedAttentionMetadata = tuple[int, torch.Tensor, torch.Tensor, torch.Tensor]
 
@@ -52,6 +53,10 @@ class DSparkDecodeMetadata:
     context_cache_indices: torch.Tensor | None
     context_cache_valid: torch.Tensor | None
     context_request_slots: torch.Tensor | None
+
+
+DSparkContextStoreIndices = dict[str, typing.Any]
+DSparkContextSyncIndices = dict[str, typing.Any]
 
 
 def _get_dspark_sas_op(name: str):
@@ -87,10 +92,8 @@ def get_dspark_num_layers(config: typing.Any) -> int:
     if hf_config is not None:
         config = hf_config
 
-    target_layer_ids = getattr(config, "dspark_target_layer_ids", None)
-    if not isinstance(target_layer_ids, list) or not target_layer_ids:
-        raise ValueError("DSpark requires a non-empty dspark_target_layer_ids list.")
-    return len(target_layer_ids)
+    num_layers = len(config.compress_ratios) - config.num_hidden_layers
+    return num_layers if num_layers > 0 else DSPARK_DEFAULT_NUM_LAYERS
 
 
 def _apply_dsv4_rope(
@@ -293,51 +296,111 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             partial_slice=[self.nope_head_dim, self.head_dim],
         ).contiguous()
 
+    def _validate_paged_cache_contract(
+        self,
+        paged_cache_shape: tuple[int, int],
+        paged_cache_device: torch.device,
+    ) -> torch.Tensor:
+        kv_cache = self._get_dspark_kv_cache()
+        if kv_cache is None:
+            raise RuntimeError("DSpark paged cache is not bound for every draft layer.")
+        if tuple(kv_cache.shape[:2]) != paged_cache_shape:
+            raise RuntimeError(
+                "DSpark paged cache shape mismatch across draft layers: "
+                f"expected {paged_cache_shape}, got {tuple(kv_cache.shape[:2])}."
+            )
+        if kv_cache.device != paged_cache_device:
+            raise RuntimeError(
+                "DSpark paged cache device mismatch across draft layers: "
+                f"expected {paged_cache_device}, got {kv_cache.device}."
+            )
+        return kv_cache
+
+    def prepare_context_store_indices(
+        self,
+        positions: torch.Tensor,
+        slot_mapping: torch.Tensor | None,
+    ) -> DSparkContextStoreIndices | None:
+        if positions.numel() == 0 or slot_mapping is None:
+            return None
+        kv_cache = self._get_dspark_kv_cache()
+        if kv_cache is None:
+            return None
+
+        valid = (positions >= 0) & (slot_mapping >= 0)
+        safe_positions = torch.where(valid, positions, torch.zeros_like(positions))
+        cache_block_size = kv_cache.shape[1]
+        slots_int64 = slot_mapping.to(device=positions.device, dtype=torch.int64)
+        block_ids = torch.div(slots_int64, cache_block_size, rounding_mode="floor")
+        block_offsets = slots_int64.remainder(cache_block_size)
+        valid &= block_ids < kv_cache.shape[0]
+        valid_token_indices = torch.nonzero(valid.reshape(-1), as_tuple=False).squeeze(-1)
+        flat_block_ids = block_ids.reshape(-1).index_select(0, valid_token_indices)
+        flat_block_offsets = block_offsets.reshape(-1).index_select(0, valid_token_indices)
+        return {
+            "safe_positions": safe_positions,
+            "valid_token_indices": valid_token_indices,
+            "flat_block_ids": flat_block_ids,
+            "flat_block_offsets": flat_block_offsets,
+            "paged_cache_shape": tuple(kv_cache.shape[:2]),
+            "paged_cache_device": kv_cache.device,
+        }
+
     def precompute_context_kv(
         self,
         main_x: torch.Tensor,
         positions: torch.Tensor,
         slot_mapping: torch.Tensor | None,
         rope_cos_sin: tuple[torch.Tensor, torch.Tensor] | None = None,
+        store_indices: DSparkContextStoreIndices | None = None,
     ) -> None:
         if positions.numel() == 0:
             return
         if slot_mapping is None:
             return
-        valid = (positions >= 0) & (slot_mapping >= 0)
-        safe_positions = torch.where(valid, positions, torch.zeros_like(positions))
+        if store_indices is None:
+            valid = (positions >= 0) & (slot_mapping >= 0)
+            safe_positions = torch.where(valid, positions, torch.zeros_like(positions))
+        else:
+            safe_positions = store_indices["safe_positions"]
         shared_kv = self._project_shared_kv(main_x, safe_positions, rope_cos_sin)
         kv_cache = self._get_dspark_kv_cache()
         if kv_cache is None:
             # KV caches are not bound during the memory profiling dummy run.
             return
 
+        if store_indices is None:
+            store_indices = self.prepare_context_store_indices(positions, slot_mapping)
+            if store_indices is None:
+                return
+        kv_cache = self._validate_paged_cache_contract(
+            store_indices["paged_cache_shape"],
+            store_indices["paged_cache_device"],
+        )
         cache_tokens = kv_cache.flatten(start_dim=2)
-        cache_block_size = kv_cache.shape[1]
-        slots_int64 = slot_mapping.to(device=shared_kv.device, dtype=torch.int64)
-        block_ids = torch.div(slots_int64, cache_block_size, rounding_mode="floor")
-        block_offsets = slots_int64.remainder(cache_block_size)
-        valid &= block_ids < kv_cache.shape[0]
-        flat_valid = valid.reshape(-1)
-        flat_block_ids = block_ids.reshape(-1)[flat_valid]
-        flat_block_offsets = block_offsets.reshape(-1)[flat_valid]
-        flat_shared_kv = shared_kv.reshape(-1, shared_kv.shape[-1])[flat_valid]
-        cache_tokens[flat_block_ids, flat_block_offsets, : self.head_dim] = flat_shared_kv.to(cache_tokens.dtype)
+        flat_shared_kv = shared_kv.reshape(-1, shared_kv.shape[-1]).index_select(
+            0,
+            store_indices["valid_token_indices"],
+        )
+        cache_tokens[
+            store_indices["flat_block_ids"],
+            store_indices["flat_block_offsets"],
+            : self.head_dim,
+        ] = flat_shared_kv.to(cache_tokens.dtype)
 
-    def sync_context_cache_from_paged(
+    def prepare_context_sync_indices(
         self,
         block_table: torch.Tensor | None,
         context_lens: torch.Tensor | None,
         request_slots: torch.Tensor | None,
-    ) -> None:
-        """Restore the position-checked proposal cache from transferable pages."""
+    ) -> DSparkContextSyncIndices | None:
         kv_cache = self._get_dspark_kv_cache()
         if kv_cache is None or block_table is None or context_lens is None or request_slots is None:
-            return
+            return None
 
         batch_size = min(block_table.shape[0], context_lens.numel(), request_slots.numel())
         if batch_size == 0:
-            return
+            return None
         context_lens = context_lens[:batch_size].to(device=kv_cache.device, dtype=torch.int64)
         request_slots = request_slots[:batch_size].to(device=kv_cache.device, dtype=torch.int64)
         context_end = context_lens.view(-1, 1) - 1
@@ -356,25 +419,55 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         cache_valid = position_valid & table_valid & (block_ids >= 0) & (block_ids < kv_cache.shape[0])
         safe_block_ids = block_ids.clamp(min=0, max=kv_cache.shape[0] - 1)
         block_offsets = context_positions.clamp_min(0).remainder(cache_block_size)
-        paged_tokens = kv_cache.flatten(start_dim=2)
-        context_kv = paged_tokens[safe_block_ids, block_offsets, : self.head_dim]
-
         slot_indices = request_slots.view(-1, 1).expand_as(context_positions)
         cache_indices = context_positions.remainder(self.window_size)
-
-        masked_context_kv = torch.where(
-            cache_valid.unsqueeze(-1),
-            context_kv,
-            torch.zeros_like(context_kv),
-        ).to(self._dspark_kv_cache.dtype)
-        self._dspark_kv_cache[slot_indices, cache_indices] = masked_context_kv
-
         masked_context_positions = torch.where(
             cache_valid,
             context_positions.to(torch.int32),
             torch.full_like(context_positions, -1, dtype=torch.int32),
         )
-        self._dspark_cache_positions[slot_indices, cache_indices] = masked_context_positions
+        return {
+            "safe_block_ids": safe_block_ids,
+            "block_offsets": block_offsets,
+            "cache_valid": cache_valid,
+            "slot_indices": slot_indices,
+            "cache_indices": cache_indices,
+            "masked_context_positions": masked_context_positions,
+            "paged_cache_shape": tuple(kv_cache.shape[:2]),
+            "paged_cache_device": kv_cache.device,
+        }
+
+    def sync_context_cache_from_paged(
+        self,
+        sync_indices: DSparkContextSyncIndices,
+    ) -> None:
+        """Restore the position-checked proposal cache from transferable pages."""
+        kv_cache = self._validate_paged_cache_contract(
+            sync_indices["paged_cache_shape"],
+            sync_indices["paged_cache_device"],
+        )
+
+        paged_tokens = kv_cache.flatten(start_dim=2)
+        context_kv = paged_tokens[
+            sync_indices["safe_block_ids"],
+            sync_indices["block_offsets"],
+            : self.head_dim,
+        ]
+
+        masked_context_kv = torch.where(
+            sync_indices["cache_valid"].unsqueeze(-1),
+            context_kv,
+            torch.zeros_like(context_kv),
+        ).to(self._dspark_kv_cache.dtype)
+        self._dspark_kv_cache[
+            sync_indices["slot_indices"],
+            sync_indices["cache_indices"],
+        ] = masked_context_kv
+
+        self._dspark_cache_positions[
+            sync_indices["slot_indices"],
+            sync_indices["cache_indices"],
+        ] = sync_indices["masked_context_positions"]
 
     def _get_dspark_fused_attention_metadata(
         self,
@@ -691,10 +784,19 @@ class DeepseekV4DSparkModel(nn.Module):
         if context_states.numel() == 0:
             return
         main_x = self.main_norm(self.main_proj(context_states))
-        safe_context_positions = torch.where(
-            context_positions >= 0,
+        first_attn = self.layers[str(self.mtp_start_layer_idx)].self_attn
+        store_indices = first_attn.prepare_context_store_indices(
             context_positions,
-            torch.zeros_like(context_positions),
+            context_slot_mapping,
+        )
+        safe_context_positions = (
+            store_indices["safe_positions"]
+            if store_indices is not None
+            else torch.where(
+                context_positions >= 0,
+                context_positions,
+                torch.zeros_like(context_positions),
+            )
         )
         rope_cos, rope_sin = get_cos_and_sin_dsa(safe_context_positions)
         for layer in self.layers.values():
@@ -705,6 +807,7 @@ class DeepseekV4DSparkModel(nn.Module):
                 context_positions,
                 context_slot_mapping,
                 rope_cos_sin,
+                store_indices,
             )
 
     def reset_request_slots(self, request_slots: torch.Tensor | None) -> None:
@@ -730,8 +833,18 @@ class DeepseekV4DSparkModel(nn.Module):
         context_lens: torch.Tensor | None,
         request_slots: torch.Tensor | None,
     ) -> None:
+        if block_table is None or context_lens is None or request_slots is None:
+            return
+        first_attn = self.layers[str(self.mtp_start_layer_idx)].self_attn
+        sync_indices = first_attn.prepare_context_sync_indices(
+            block_table,
+            context_lens,
+            request_slots,
+        )
+        if sync_indices is None:
+            return
         for layer in self.layers.values():
-            layer.self_attn.sync_context_cache_from_paged(block_table, context_lens, request_slots)
+            layer.self_attn.sync_context_cache_from_paged(sync_indices=sync_indices)
 
     def forward(
         self,
