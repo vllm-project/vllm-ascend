@@ -452,8 +452,12 @@ class NPUWorker(WorkerBase):
                 f"DP adjusted local rank {self.local_rank} is out of bounds for {visible_device_count} devices."
             )
 
-        visible_device_index = current_platform.logical_device_id_to_visible_device_id(self.local_rank)
-        device = torch.device(f"{current_platform.device_type}:{visible_device_index}")
+        # On Ascend, ASCEND_RT_VISIBLE_DEVICES is a filter (not a remapping
+        # like CUDA_VISIBLE_DEVICES), so torch.npu.set_device() expects the
+        # physical device ID, not the visible index returned by
+        # logical_device_id_to_visible_device_id().
+        physical_device_index = current_platform.device_id_to_physical_device_id(self.local_rank)
+        device = torch.device(f"{current_platform.device_type}:{physical_device_index}")
 
         torch.npu.set_device(device)
 
