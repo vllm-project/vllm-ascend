@@ -319,7 +319,8 @@ class AscendDSparkProposer(AscendDflashProposer):
         graph_batch_size = num_input_tokens // block_size
         fused_attn_metadata = self._prepare_dspark_fused_attention_metadata(graph_batch_size)
         context_cache_indices, context_cache_valid, context_request_slots = self._prepare_dspark_window_inputs(
-            num_input_tokens
+            num_input_tokens,
+            graph_batch_size,
         )
 
         with set_ascend_forward_context(
@@ -571,14 +572,17 @@ class AscendDSparkProposer(AscendDflashProposer):
     def _prepare_dspark_window_inputs(
         self,
         num_input_tokens: int,
+        batch_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         tokens_per_request = self.num_speculative_tokens
-        if num_input_tokens % tokens_per_request != 0:
+        expected_num_input_tokens = batch_size * tokens_per_request
+        if num_input_tokens != expected_num_input_tokens:
             raise ValueError(
-                f"DSpark decode requires a multiple of tokens_per_request, got "
-                f"{num_input_tokens} tokens for tokens_per_request={tokens_per_request}"
+                "DSpark decode input shape mismatch: "
+                f"num_input_tokens={num_input_tokens}, "
+                f"batch_size={batch_size}, "
+                f"tokens_per_request={tokens_per_request}."
             )
-        batch_size = num_input_tokens // tokens_per_request
         draft_positions = self.positions[:num_input_tokens].view(batch_size, tokens_per_request)
         context_end = draft_positions[:, :1].to(torch.int64) - 1
         context_start = torch.clamp(context_end + 1 - self._dspark_window_size, min=0)
@@ -601,9 +605,10 @@ class AscendDSparkProposer(AscendDflashProposer):
             self._dspark_context_request_slots_buffer[:batch_size],
         )
 
-    def build_model_inputs_first_pass(self, num_input_tokens: int) -> dict[str, Any]:
+    def build_model_inputs_first_pass(self, num_input_tokens: int, batch_size: int) -> dict[str, Any]:
         context_cache_indices, context_cache_valid, context_request_slots = self._prepare_dspark_window_inputs(
-            num_input_tokens
+            num_input_tokens,
+            batch_size,
         )
         return {
             "input_ids": self.input_ids[:num_input_tokens],
@@ -794,7 +799,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         batch_size: int,
         sampling_metadata: SamplingMetadata | None = None,
     ) -> torch.Tensor:
-        model_inputs = self.build_model_inputs_first_pass(num_input_tokens)
+        model_inputs = self.build_model_inputs_first_pass(num_input_tokens, batch_size)
         hidden_states = self.model(**model_inputs)
         return self._sample_sequential(
             batch_size,
