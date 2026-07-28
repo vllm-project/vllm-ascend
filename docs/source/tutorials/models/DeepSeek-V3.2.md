@@ -482,7 +482,7 @@ vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
     --no-enable-prefix-caching \
     --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"], "enable_dsa_cp": true}' \
     --kv-transfer-config \
-    '{"kv_connector": "MooncakeLayerwiseConnector",
+    '{"kv_connector": "MooncakeConnectorV1",
     "kv_role": "kv_producer",
     "kv_port": "30000",
     "kv_connector_extra_config": {
@@ -558,7 +558,7 @@ vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
     --no-enable-prefix-caching \
     --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"], "enable_dsa_cp": true}' \
     --kv-transfer-config \
-    '{"kv_connector": "MooncakeLayerwiseConnector",
+    '{"kv_connector": "MooncakeConnectorV1",
     "kv_role": "kv_producer",
     "kv_port": "30000",
     "kv_connector_extra_config": {
@@ -636,7 +636,7 @@ vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
     --no-enable-prefix-caching \
     --quantization ascend \
     --kv-transfer-config \
-    '{"kv_connector": "MooncakeLayerwiseConnector",
+    '{"kv_connector": "MooncakeConnectorV1",
     "kv_role": "kv_consumer",
     "kv_port": "30100",
     "kv_connector_extra_config": {
@@ -715,7 +715,7 @@ vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
     --no-enable-prefix-caching \
     --quantization ascend \
     --kv-transfer-config \
-    '{"kv_connector": "MooncakeLayerwiseConnector",
+    '{"kv_connector": "MooncakeConnectorV1",
     "kv_role": "kv_consumer",
     "kv_port": "30100",
     "kv_connector_extra_config": {
