@@ -468,6 +468,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
         is_cache = attn_metadata.attn_state != AscendAttentionState.PrefillNoCache
         if not is_cache:
             return None
+
+        # FA3's get_scheduler_metadata appears to launch device-side kernels
+        # internally; all tensor arguments must reside on the NPU to avoid
+        # AICPU ComputeFAMetadataPv crashes (errorCode=0x2a).
+        device = query.device
+        cache_seqlens = attn_metadata.seq_lens
+        if cache_seqlens.device != device:
+            cache_seqlens = cache_seqlens.to(device=device)
+        cu_seqlens_q = attn_metadata.query_start_loc
+        if cu_seqlens_q.device != device:
+            cu_seqlens_q = cu_seqlens_q.to(device=device)
+
         return get_scheduler_metadata(
             batch_size=len(attn_metadata.seq_lens_list),
             max_seqlen_q=attn_metadata.max_query_len,
@@ -1479,7 +1491,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         cache_mode=is_cache,
                         block_table=block_table if is_cache else None,
                         seq_lens_list=actual_seq_lengths_kv if is_cache else None,
-                        scheduler_metadata=scheduler_metadata,
                     )
                 except (ImportError, ValueError, RuntimeError, TypeError):
                     # FA3 unavailable for this invocation (e.g. head_dim too
