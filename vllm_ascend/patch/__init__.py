@@ -585,8 +585,10 @@
 #       be a platform patch; otherwise CPU still normalizes and the worker
 #       normalizes again (token drift).
 #    How：
-#       Force image/video processor do_rescale=False and do_normalize=False.
-#       Device-side fused normalize is applied in worker/patch_qwen3vl.py.
+#       Record what the image/video processor was configured to do, then force
+#       do_rescale=False and do_normalize=False. worker/patch_qwen3vl.py reads
+#       the recorded flags so the device applies exactly the same math, and can
+#       stay idle when this patch did not run.
 #    Future Plan:
 #       Remove when upstream vLLM applies equivalent device-side preprocess for
 #       Qwen3-VL / Qwen3.5.
@@ -1030,15 +1032,18 @@
 #   4. `Qwen3VLForConditionalGeneration.__init__`,
 #      `Qwen3VLForConditionalGeneration._process_image_input`,
 #      `Qwen3VLForConditionalGeneration._process_video_input`,
-#      and Qwen3.5 / Qwen3.5-MoE `__init__`
+#      and Qwen3-VL-MoE / Qwen3.5 / Qwen3.5-MoE `__init__`
 #    Why:
 #       Apply fused rescale+normalize on device before ViT, after HF processor
 #       rescale/normalize is disabled by platform/patch_qwen3vl_processor.py.
-#       Qwen3.5 reimplements __init__ without calling Qwen3VL.__init__, so it
-#       must be patched separately.
+#       Qwen3-VL-MoE, Qwen3.5 and Qwen3.5-MoE reimplement __init__ without
+#       calling Qwen3VL.__init__, so each must be patched separately.
 #    How：
-#       Cache preprocess params in init; reshape pixel_values and run
-#       rescale_and_normalize on NPU before the vision tower.
+#       Cache preprocess params in init; view pixel_values as NCHW with the
+#       temporal patches folded into the height axis (the packed layout is
+#       [channel][temporal][ph][pw], so reshaping straight to a per-patch NCHW
+#       would normalize the wrong channels) and run rescale_and_normalize on
+#       NPU before the vision tower.
 #    Future Plan:
 #       Remove when upstream vLLM applies equivalent device-side preprocess for
 #       Qwen3-VL / Qwen3.5.

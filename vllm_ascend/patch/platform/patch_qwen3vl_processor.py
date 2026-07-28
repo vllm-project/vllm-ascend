@@ -22,20 +22,34 @@ it again, which changes tokens.
 
 from vllm.model_executor.models.qwen3_vl import Qwen3VLProcessingInfo
 
+# Attribute holding the flags the HF processor was configured with before they
+# were turned off here. The worker patch reads them so the device path applies
+# exactly what HF would have applied, and so it can tell "HF was disabled by us"
+# apart from "this patch never ran".
+ORIG_PREPROCESS_FLAGS_ATTR = "_ascend_orig_preprocess_flags"
+
+
+def _disable_sub_processor(sub_processor) -> None:
+    if sub_processor is None:
+        return
+    if not hasattr(sub_processor, ORIG_PREPROCESS_FLAGS_ATTR):
+        setattr(
+            sub_processor,
+            ORIG_PREPROCESS_FLAGS_ATTR,
+            {
+                "do_rescale": bool(getattr(sub_processor, "do_rescale", False)),
+                "do_normalize": bool(getattr(sub_processor, "do_normalize", False)),
+            },
+        )
+    if hasattr(sub_processor, "do_rescale"):
+        sub_processor.do_rescale = False
+    if hasattr(sub_processor, "do_normalize"):
+        sub_processor.do_normalize = False
+
 
 def _disable_processor_rescale_normalize(processor):
-    image_processor = getattr(processor, "image_processor", None)
-    if image_processor is not None:
-        if hasattr(image_processor, "do_rescale"):
-            image_processor.do_rescale = False
-        if hasattr(image_processor, "do_normalize"):
-            image_processor.do_normalize = False
-    video_processor = getattr(processor, "video_processor", None)
-    if video_processor is not None:
-        if hasattr(video_processor, "do_rescale"):
-            video_processor.do_rescale = False
-        if hasattr(video_processor, "do_normalize"):
-            video_processor.do_normalize = False
+    _disable_sub_processor(getattr(processor, "image_processor", None))
+    _disable_sub_processor(getattr(processor, "video_processor", None))
     return processor
 
 

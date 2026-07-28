@@ -1,8 +1,10 @@
-from functools import lru_cache
+import importlib
+from functools import lru_cache, wraps
+from typing import NamedTuple
 
 import torch
-from torchvision.transforms import v2  # type: ignore[import-untyped]
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.logger import logger
 from vllm.model_executor.models.qwen3 import Qwen3Attention
 from vllm.model_executor.models.qwen3_moe import Qwen3MoeAttention
 from vllm.model_executor.models.qwen3_vl import (
@@ -15,6 +17,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding
+from vllm_ascend.patch.platform.patch_qwen3vl_processor import ORIG_PREPROCESS_FLAGS_ATTR
 
 
 def tensor_parallel_wrap(func):
@@ -122,29 +125,32 @@ patch_qwen3_vl_moe_pp_layer_range()
 # ---------------------------------------------------------------------------
 
 
-def _rescale(image: torch.Tensor, scale: float) -> torch.Tensor:
-    return image * scale
-
-
-def _normalize(image: torch.Tensor, mean, std) -> torch.Tensor:
-    return v2.functional.normalize(image, mean, std)
-
-
 @lru_cache(maxsize=10)
 def _fuse_mean_std_and_rescale_factor(
-    do_normalize: bool | None = None,
-    image_mean: float | tuple[float, ...] | None = None,
-    image_std: float | tuple[float, ...] | None = None,
-    do_rescale: bool | None = None,
-    rescale_factor: float | None = None,
+    do_normalize: bool,
+    image_mean: tuple[float, ...] | None,
+    image_std: tuple[float, ...] | None,
+    do_rescale: bool,
+    rescale_factor: float | None,
     device: torch.device | None = None,
 ) -> tuple:
-    if do_rescale and do_normalize:
+    """Build device-side mean/std, folding the rescale factor into them.
+
+    ``(x * s - mean) / std`` equals ``(x - mean / s) / (std / s)``, so when both
+    steps are enabled the rescale collapses into the normalize and only one pass
+    over the tensor is needed. Cached so the mean/std tensors are built once
+    instead of being copied from host on every forward.
+    """
+    if not do_normalize:
+        return None, None, do_rescale
+    mean = torch.tensor(image_mean, device=device, dtype=torch.float32)
+    std = torch.tensor(image_std, device=device, dtype=torch.float32)
+    if do_rescale:
         assert rescale_factor is not None
-        image_mean = torch.tensor(image_mean, device=device) * (1.0 / rescale_factor)
-        image_std = torch.tensor(image_std, device=device) * (1.0 / rescale_factor)
+        mean = mean / rescale_factor
+        std = std / rescale_factor
         do_rescale = False
-    return image_mean, image_std, do_rescale
+    return mean.view(1, -1, 1, 1), std.view(1, -1, 1, 1), do_rescale
 
 
 def rescale_and_normalize(
@@ -152,12 +158,12 @@ def rescale_and_normalize(
     do_rescale: bool,
     rescale_factor: float,
     do_normalize: bool,
-    image_mean: float | tuple[float, ...],
-    image_std: float | tuple[float, ...],
+    image_mean: tuple[float, ...],
+    image_std: tuple[float, ...],
     dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
-    """Rescale and normalize images on device (fused when both are enabled)."""
-    image_mean, image_std, do_rescale = _fuse_mean_std_and_rescale_factor(
+    """Rescale and normalize NCHW images on device (fused when both are on)."""
+    mean, std, do_rescale = _fuse_mean_std_and_rescale_factor(
         do_normalize=do_normalize,
         image_mean=image_mean,
         image_std=image_std,
@@ -166,79 +172,120 @@ def rescale_and_normalize(
         device=images.device,
     )
     if do_normalize:
-        images = _normalize(images.to(dtype=torch.float32), image_mean, image_std)
+        images = (images.to(dtype=torch.float32) - mean) / std
     elif do_rescale:
-        images = _rescale(images.to(dtype=torch.float32), rescale_factor)
+        images = images.to(dtype=torch.float32) * rescale_factor
     return images.to(dtype)
+
+
+class _VLPreprocessConfig(NamedTuple):
+    channel: int
+    patch_size: int
+    temporal_patch_size: int
+    do_rescale: bool
+    rescale_factor: float | None
+    do_normalize: bool
+    image_mean: tuple[float, ...]
+    image_std: tuple[float, ...]
+
+
+_PREPROCESS_ATTR = "_ascend_vl_preprocess"
 
 
 def _image_post_process_config(self, vision_config, model_config) -> None:
     image_processor = MULTIMODAL_REGISTRY.create_processor(model_config).info.get_hf_processor().image_processor
-    self.channel = vision_config.in_channels
-    self.patch_size = vision_config.patch_size
-    self.temporal_patch_size = vision_config.temporal_patch_size
-    # HF processor side is disabled (platform patch); always apply on device.
-    self.do_rescale = True
-    self.do_normalize = True
-    self.rescale_factor = image_processor.rescale_factor
-    self.image_mean = tuple(image_processor.image_mean)
-    self.image_std = tuple(image_processor.image_std)
+    flags = getattr(image_processor, ORIG_PREPROCESS_FLAGS_ATTR, None)
+    if flags is None:
+        # The platform patch never ran, so HF is still rescaling/normalizing on
+        # the host. Doing nothing here is what keeps values from being
+        # normalized twice; the request stays correct, just without the speedup.
+        logger.warning(
+            "Qwen3-VL HF processor still applies rescale/normalize on host, "
+            "skipping device-side preprocess to avoid normalizing twice."
+        )
+        flags = {"do_rescale": False, "do_normalize": False}
+    setattr(
+        self,
+        _PREPROCESS_ATTR,
+        _VLPreprocessConfig(
+            channel=vision_config.in_channels,
+            patch_size=vision_config.patch_size,
+            temporal_patch_size=vision_config.temporal_patch_size,
+            do_rescale=flags["do_rescale"],
+            rescale_factor=getattr(image_processor, "rescale_factor", None),
+            do_normalize=flags["do_normalize"],
+            image_mean=tuple(image_processor.image_mean),
+            image_std=tuple(image_processor.image_std),
+        ),
+    )
 
 
 def _apply_rescale_normalize(self, pixel_values: torch.Tensor) -> torch.Tensor:
-    if not hasattr(self, "channel"):
+    cfg = getattr(self, _PREPROCESS_ATTR, None)
+    if cfg is None:
         _image_post_process_config(self, self.config.vision_config, self.model_config)
-    # Keep raw integer/float range until after fp32 normalize; do not cast
-    # uint8 -> bf16 before normalize (avoids precision / scale surprises).
-    pixel_values = pixel_values.to(dtype=torch.float32).reshape(-1, self.channel, self.patch_size, self.patch_size)
+        cfg = getattr(self, _PREPROCESS_ATTR)
+    if not (cfg.do_rescale or cfg.do_normalize):
+        return pixel_values.to(self.visual.dtype)
+
+    # Each row packs one patch as [channel][temporal][ph][pw] (see the flatten
+    # step in the HF image/video processors), so folding temporal into the
+    # height axis exposes the channel axis to mean/std without moving any data.
+    # Reshaping straight to (-1, channel, ph, pw) would instead line temporal
+    # slices up under the channel axis and normalize the wrong channels.
+    pixel_values = pixel_values.reshape(
+        -1,
+        cfg.channel,
+        cfg.temporal_patch_size * cfg.patch_size,
+        cfg.patch_size,
+    )
+    # Keep the raw integer/float range until after the fp32 normalize; casting
+    # uint8 -> bf16 first would lose precision before the scale is applied.
     pixel_values = rescale_and_normalize(
         pixel_values,
-        self.do_rescale,
-        self.rescale_factor,
-        self.do_normalize,
-        self.image_mean,
-        self.image_std,
+        cfg.do_rescale,
+        cfg.rescale_factor,
+        cfg.do_normalize,
+        cfg.image_mean,
+        cfg.image_std,
         dtype=self.visual.dtype,
     )
     return pixel_values.reshape(
         -1,
-        self.channel * self.temporal_patch_size * self.patch_size * self.patch_size,
+        cfg.channel * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size,
     )
 
 
-_orig_qwen3vl_init = Qwen3VLForConditionalGeneration.__init__
+def _hook_preprocess_config(cls) -> None:
+    orig_init = cls.__init__
 
-
-def _patched_qwen3vl_init(self, *, vllm_config, prefix: str = "model"):
-    _orig_qwen3vl_init(self, vllm_config=vllm_config, prefix=prefix)
-    _image_post_process_config(self, self.config.vision_config, self.model_config)
-
-
-Qwen3VLForConditionalGeneration.__init__ = _patched_qwen3vl_init
-
-# Qwen3.5 / Qwen3.5-MoE reimplement __init__ without calling Qwen3VL.__init__,
-# so they must be patched separately.
-try:
-    from vllm.model_executor.models.qwen3_5 import (
-        Qwen3_5ForConditionalGeneration,
-        Qwen3_5MoeForConditionalGeneration,
-    )
-
-    _orig_qwen35_init = Qwen3_5ForConditionalGeneration.__init__
-    _orig_qwen35_moe_init = Qwen3_5MoeForConditionalGeneration.__init__
-
-    def _patched_qwen35_init(self, *, vllm_config, prefix: str = "model"):
-        _orig_qwen35_init(self, vllm_config=vllm_config, prefix=prefix)
+    # vLLM decides how to construct a model by looking for `vllm_config` and
+    # `prefix` in the __init__ signature, so the wrapper has to keep reporting
+    # the wrapped signature -- `functools.wraps` is what makes that work.
+    @wraps(orig_init)
+    def patched_init(self, *args, **kwargs):
+        orig_init(self, *args, **kwargs)
         _image_post_process_config(self, self.config.vision_config, self.model_config)
 
-    def _patched_qwen35_moe_init(self, *, vllm_config, prefix: str = "model"):
-        _orig_qwen35_moe_init(self, vllm_config=vllm_config, prefix=prefix)
-        _image_post_process_config(self, self.config.vision_config, self.model_config)
+    cls.__init__ = patched_init
 
-    Qwen3_5ForConditionalGeneration.__init__ = _patched_qwen35_init
-    Qwen3_5MoeForConditionalGeneration.__init__ = _patched_qwen35_moe_init
-except Exception:
-    pass
+
+# Qwen3-VL-MoE, Qwen3.5 and Qwen3.5-MoE each define their own __init__ that
+# bypasses Qwen3VLForConditionalGeneration.__init__, so hooking the base class
+# alone would leave them falling back to the lazy path on the first request.
+_hook_preprocess_config(Qwen3VLForConditionalGeneration)
+for _module_name, _class_names in (
+    ("vllm.model_executor.models.qwen3_vl_moe", ("Qwen3VLMoeForConditionalGeneration",)),
+    ("vllm.model_executor.models.qwen3_5", ("Qwen3_5ForConditionalGeneration", "Qwen3_5MoeForConditionalGeneration")),
+):
+    try:
+        _module = importlib.import_module(_module_name)
+    except ImportError:
+        continue
+    for _class_name in _class_names:
+        _cls = getattr(_module, _class_name, None)
+        if _cls is not None and "__init__" in _cls.__dict__:
+            _hook_preprocess_config(_cls)
 
 
 def _patched_process_image_input(self, image_input):
