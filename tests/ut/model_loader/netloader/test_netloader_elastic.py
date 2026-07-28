@@ -171,6 +171,10 @@ class FakeP2PParam:
     def __init__(self, name):
         self.name = name
         self.device = torch.device("cpu")
+        self.shape = (1,)
+
+    def is_contiguous(self):
+        return True
 
     def contiguous(self):
         return f"{self.name}:contiguous"
@@ -298,7 +302,8 @@ def test_p2p_send_skips_aclnn_params_only_for_raw_weights():
         ).send(model, {})
 
     payloads = [call.args[0][0] for call in sender_pg.send.call_args_list]
-    assert payloads == ["weight:contiguous"]
+    assert len(payloads) == 1
+    assert payloads[0] is model.params["weight"]
 
 
 def test_processed_layout_transfer_items_include_module_attribute_tensors(monkeypatch):
@@ -433,7 +438,7 @@ def test_finalize_hccl_recv_buffer_restores_fractal_nz(mock_cast_nz):
     _finalize_hccl_recv_buffer(tensor, recv_buffer, restore_fractal_nz=True)
 
     mock_cast_nz.assert_called_once_with(recv_buffer)
-    assert tensor.data is nz_tensor
+    assert torch.equal(tensor, nz_tensor)
 
 
 @patch("vllm_ascend.model_loader.netloader.executor.elastic_load.torch_npu.npu_format_cast")
@@ -562,7 +567,10 @@ def test_recv_json_message_reads_large_payload():
 def test_client_handler_valid_join(server_config, mock_model, server_int8_cache, join_content, send_processed_weights):
     server_config["model"] = mock_model
     server_config["int8_cache"] = server_int8_cache
-    with patch("vllm_ascend.model_loader.netloader.interaction.elastic.P2PSend") as mock_p2p_send:
+    with (
+        patch("vllm_ascend.model_loader.netloader.interaction.elastic.socket.socket"),
+        patch("vllm_ascend.model_loader.netloader.interaction.elastic.P2PSend") as mock_p2p_send,
+    ):
         mock_conn = MagicMock()
         mock_addr = ("192.168.1.1", 12345)
         mock_conn.recv.return_value = json.dumps({"label": "JOIN", "content": join_content}).encode("utf-8")
@@ -574,7 +582,7 @@ def test_client_handler_valid_join(server_config, mock_model, server_int8_cache,
         server.register_handler(mock_conn, mock_addr)
 
         expected_ack = {"label": "JOIN_ACK", "content": {"name": "192.168.1.1:12345"}}
-        mock_conn.send.assert_called_once_with(json.dumps(expected_ack).encode("utf-8"))
+        mock_conn.sendall.assert_called_once_with(json.dumps(expected_ack).encode("utf-8"))
         mock_p2p_send.assert_called_once_with(
             "127.0.0.1",
             9090,
@@ -593,7 +601,10 @@ def test_client_handler_valid_join(server_config, mock_model, server_int8_cache,
 
 def test_client_handler_rejects_int8_cache_mismatch(server_config, mock_model):
     server_config["model"] = mock_model
-    with patch("vllm_ascend.model_loader.netloader.interaction.elastic.P2PSend") as mock_p2p_send:
+    with (
+        patch("vllm_ascend.model_loader.netloader.interaction.elastic.socket.socket"),
+        patch("vllm_ascend.model_loader.netloader.interaction.elastic.P2PSend") as mock_p2p_send,
+    ):
         mock_conn = MagicMock()
         mock_addr = ("192.168.1.1", 12345)
         mismatch_data = {
@@ -615,14 +626,14 @@ def test_client_handler_rejects_int8_cache_mismatch(server_config, mock_model):
             "label": "JOIN_NACK",
             "content": "Received int8_cache no does not consist with this server dram",
         }
-        mock_conn.send.assert_called_once_with(json.dumps(expected_ack).encode("utf-8"))
+        mock_conn.sendall.assert_called_once_with(json.dumps(expected_ack).encode("utf-8"))
         mock_p2p_send.assert_not_called()
         mock_conn.close.assert_called_once()
 
 
 # Test mismatched JOIN requests
 def test_client_handler_mismatch(server_config):
-    with patch("socket.socket"):
+    with patch("vllm_ascend.model_loader.netloader.interaction.elastic.socket.socket"):
         server = ElasticServer(**server_config)
         mock_conn = MagicMock()
         mock_addr = ("192.168.1.1", 12345)
@@ -663,7 +674,7 @@ def test_client_handler_mismatch(server_config):
             "label": "JOIN_NACK",
             "content": (f"Received data {mismatch_tuple} does not consist with this server {server_tuple}"),
         }
-        mock_conn.send.assert_called_once_with(json.dumps(expected_ack).encode("utf-8"))
+        mock_conn.sendall.assert_called_once_with(json.dumps(expected_ack).encode("utf-8"))
         mock_conn.close.assert_called_once()
 
 
@@ -681,7 +692,10 @@ def test_client_handler_mismatch(server_config):
     ],
 )
 def test_client_handler_invalid_requests(server_config, invalid_data, should_send):
-    with patch("socket.socket"), capture_elastic_logs() as log_capture_string:
+    with (
+        patch("vllm_ascend.model_loader.netloader.interaction.elastic.socket.socket"),
+        capture_elastic_logs() as log_capture_string,
+    ):
         server = ElasticServer(**server_config)
         mock_conn = MagicMock()
         mock_addr = ("192.168.1.1", 12345)
@@ -698,9 +712,9 @@ def test_client_handler_invalid_requests(server_config, invalid_data, should_sen
                 "label": "JOIN_NACK",
                 "content": f"Received data does not contain required fields: {invalid_data}",
             }
-            mock_conn.send.assert_called_once_with(json.dumps(expected_ack).encode("utf-8"))
+            mock_conn.sendall.assert_called_once_with(json.dumps(expected_ack).encode("utf-8"))
         else:
-            mock_conn.send.assert_not_called()
+            mock_conn.sendall.assert_not_called()
 
         log_output = log_capture_string.getvalue()
 

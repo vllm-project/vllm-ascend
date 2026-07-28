@@ -37,16 +37,12 @@ from .load import elastic_load
 from .utils import find_free_port, is_valid_path_prefix
 
 DRAFT_PORT_OFFSET = 10000
+MAX_FREE_PORT_RETRIES = 5
 
 
 @contextmanager
 def pre_transfer_weight_processing(model: nn.Module):
-    """Unwrap FusedMoE shared-expert validation during pre-transfer process_weights."""
-    try:
-        from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE  # type: ignore[attr-defined]
-    except ImportError:
-        AscendFusedMoE = None  # type: ignore[misc, assignment]
-
+    """Unwrap MoE shared-expert validation during pre-transfer process_weights."""
     try:
         from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
     except ImportError:
@@ -70,13 +66,8 @@ def pre_transfer_weight_processing(model: nn.Module):
         quant_method.process_weights_after_loading = original_process_weights
 
     for module in model.modules():
-        if AscendFusedMoE is not None and isinstance(module, AscendFusedMoE):
-            quant_method = getattr(module, "quant_method", None) or getattr(module, "_quant_method", None)
-            _unwrap_quant_method(quant_method)
-
-        runner = getattr(module, "runner", None)
-        if AscendMoERunner is not None and isinstance(runner, AscendMoERunner):
-            _unwrap_quant_method(getattr(runner, "_quant_method", None))
+        if AscendMoERunner is not None and isinstance(module, AscendMoERunner):
+            _unwrap_quant_method(module._quant_method)
 
     try:
         yield
@@ -190,20 +181,19 @@ class ModelNetLoaderElastic(BaseModelLoader):
         return getattr(model_config, "runner_type", None) == "draft"
 
     @staticmethod
-    def _sync_target_netloader_before_draft(vllm_config: VllmConfig, int8_cache: str) -> None:
-        if int8_cache == "no":
-            return
+    def _sync_target_netloader_before_draft(vllm_config: VllmConfig) -> None:
         if getattr(vllm_config, "speculative_config", None) is None:
             return
         if not torch.distributed.is_available() or not torch.distributed.is_initialized():
             return
 
-        logger.info(
-            "Waiting for all target netloader ranks before loading draft model (int8_cache=%s)",
-            int8_cache,
-        )
+        logger.info("Waiting for all target netloader ranks before loading draft model")
+        barrier_start = time.perf_counter()
         torch.distributed.barrier()
-        logger.info("Target netloader barrier before draft model done")
+        logger.info(
+            "Target netloader barrier before draft model time: %s",
+            time.perf_counter() - barrier_start,
+        )
 
     @staticmethod
     def _get_static_forward_context(vllm_config: VllmConfig):
@@ -335,15 +325,23 @@ class ModelNetLoaderElastic(BaseModelLoader):
                     model = initialize_model(vllm_config=vllm_config, model_config=model_config, prefix=prefix)
 
                 if load_int8_cache == "no":
-                    with pre_transfer_weight_processing(model):
-                        process_weights_after_loading(model, model_config, torch.device(device_config.device))
-                    synchronize_npu(device_config.device_type)
-                    manifest_count = cache_processed_layout_transfer_manifest(model)
-                    logger.info(
-                        "Netloader client pre-recv process_weights done, rank: %s, manifest=%s",
-                        device_id,
-                        manifest_count,
-                    )
+                    try:
+                        with pre_transfer_weight_processing(model):
+                            process_weights_after_loading(model, model_config, torch.device(device_config.device))
+                        synchronize_npu(device_config.device_type)
+                        manifest_count = cache_processed_layout_transfer_manifest(model)
+                        logger.info(
+                            "Netloader client pre-recv process_weights done, rank: %s, manifest=%s",
+                            device_id,
+                            manifest_count,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Netloader pre-recv process_weights failed, rank: %s, fallback to DefaultModelLoader: %s",
+                            device_id,
+                            exc,
+                        )
+                        model = None
                 start_elastic_load = time.perf_counter()
 
                 # Narrowed by has_valid_source above.
@@ -364,18 +362,22 @@ class ModelNetLoaderElastic(BaseModelLoader):
                         for s in sources
                         if isinstance(s, dict) and "device_id" in s
                     ]
+                    if any(int(addr.rsplit(":", 1)[1]) > 65535 for s in sources for addr in s.get("sources", [])):
+                        logger.warning("Skip draft elastic load: source port exceeds 65535")
+                        model = None
 
                 elastic_model = model
-                model = elastic_load(
-                    model=elastic_model,
-                    device_id=device_id,
-                    model_path=model_config.model,
-                    sources=sources,
-                    tp=parallel_config.tensor_parallel_size,
-                    pp=parallel_config.pipeline_parallel_size,
-                    group_name="netloader_draft" if is_draft else "netloader",
-                    int8_cache=load_int8_cache,
-                )
+                if model is not None:
+                    model = elastic_load(
+                        model=elastic_model,
+                        device_id=device_id,
+                        model_path=model_config.model,
+                        sources=sources,
+                        tp=parallel_config.tensor_parallel_size,
+                        pp=parallel_config.pipeline_parallel_size,
+                        group_name="netloader_draft" if is_draft else "netloader",
+                        int8_cache=load_int8_cache,
+                    )
                 logger.info(
                     "Elastic load time: %s, rank: %s",
                     time.perf_counter() - start_elastic_load,
@@ -437,63 +439,83 @@ class ModelNetLoaderElastic(BaseModelLoader):
             else:
                 if self.listen_port is None:
                     listen_port = find_free_port()
+                    for _ in range(MAX_FREE_PORT_RETRIES):
+                        if listen_port <= 65535 - DRAFT_PORT_OFFSET:
+                            break
+                        listen_port = find_free_port()
+                    else:
+                        logger.warning(
+                            "Failed to find listen port <= %s after %s retries; skip Netloader server",
+                            65535 - DRAFT_PORT_OFFSET,
+                            MAX_FREE_PORT_RETRIES,
+                        )
+                        listen_port = -1
                 else:
                     listen_port = self.listen_port + device_id
                 if is_draft:
                     listen_port += DRAFT_PORT_OFFSET
-                self.listen_port = listen_port
+                if listen_port < 1024 or listen_port > 65535:
+                    logger.warning(
+                        "Skip %s Netloader server due to invalid listen port: %s",
+                        "draft" if is_draft else "target",
+                        listen_port,
+                    )
+                else:
+                    self.listen_port = listen_port
 
-                group_name = "netloader_draft" if is_draft else "netloader"
+                    group_name = "netloader_draft" if is_draft else "netloader"
 
-                logger.info(
-                    "Start elastic Netloader server, rank: %s, listen port: %s:%s, group: %s",
-                    device_id,
-                    driver_ip,
-                    listen_port,
-                    group_name,
-                )
-
-                if self.output_prefix is not None and not is_draft:
-                    try:
-                        with open(self.output_prefix + str(device_id) + ".txt", "w") as file:
-                            file.write(f"{driver_ip}:{listen_port}")
-                        logger.info(
-                            "Successfully wrote server address to file: %s", self.output_prefix + str(device_id)
-                        )
-                    except FileNotFoundError:
-                        logger.error("File path %s does not exist.", self.output_prefix + str(device_id))
-                    except PermissionError:
-                        logger.error("No permission to write to file %s.", self.output_prefix + str(device_id))
-                    except OSError as e:
-                        logger.error(
-                            "I/O error occurred while writing to file %s: %s", self.output_prefix + str(device_id), e
-                        )
-                    except Exception as e:
-                        logger.error("Unknown error: %s", e)
-
-                try:
-                    elastic_server = ElasticServer(
+                    logger.info(
+                        "Start elastic Netloader server, rank: %s, listen port: %s:%s, group: %s",
+                        device_id,
                         driver_ip,
                         listen_port,
-                        model,
-                        device_id,
-                        model_config.model,
-                        parallel_config.tensor_parallel_size,
-                        parallel_config.pipeline_parallel_size,
-                        load_int8_cache,
-                        self.int8_cache_name,
-                        group_name=group_name,
+                        group_name,
                     )
-                    if load_int8_cache == "no":
-                        elastic_server.register_transfer_manifest(model)
-                    elastic_server.start()
-                    logger.info("Elastic server started, rank: %s, group: %s", device_id, group_name)
-                    if is_draft:
-                        self._draft_elastic_server = elastic_server
-                    else:
-                        self._target_elastic_server = elastic_server
-                except Exception as e:
-                    logger.error("Failed to start Netloader server for rank: %s, details: %s", device_id, e)
+
+                    if self.output_prefix is not None and not is_draft:
+                        try:
+                            with open(self.output_prefix + str(device_id) + ".txt", "w") as file:
+                                file.write(f"{driver_ip}:{listen_port}")
+                            logger.info(
+                                "Successfully wrote server address to file: %s", self.output_prefix + str(device_id)
+                            )
+                        except FileNotFoundError:
+                            logger.error("File path %s does not exist.", self.output_prefix + str(device_id))
+                        except PermissionError:
+                            logger.error("No permission to write to file %s.", self.output_prefix + str(device_id))
+                        except OSError as e:
+                            logger.error(
+                                "I/O error occurred while writing to file %s: %s",
+                                self.output_prefix + str(device_id),
+                                e,
+                            )
+                        except Exception as e:
+                            logger.error("Unknown error: %s", e)
+
+                    try:
+                        elastic_server = ElasticServer(
+                            driver_ip,
+                            listen_port,
+                            model,
+                            device_id,
+                            model_config.model,
+                            parallel_config.tensor_parallel_size,
+                            parallel_config.pipeline_parallel_size,
+                            load_int8_cache,
+                            self.int8_cache_name,
+                            group_name=group_name,
+                        )
+                        if load_int8_cache == "no":
+                            elastic_server.register_transfer_manifest(model)
+                        elastic_server.start()
+                        logger.info("Elastic server started, rank: %s, group: %s", device_id, group_name)
+                        if is_draft:
+                            self._draft_elastic_server = elastic_server
+                        else:
+                            self._target_elastic_server = elastic_server
+                    except Exception as e:
+                        logger.error("Failed to start Netloader server for rank: %s, details: %s", device_id, e)
         else:
             logger.info("Skip to start Netloader server")
 
@@ -503,7 +525,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
             logger.info("Netloader final process_weights done, rank: %s", device_id)
 
         if not is_draft:
-            self._sync_target_netloader_before_draft(vllm_config, self.int8_cache)
+            self._sync_target_netloader_before_draft(vllm_config)
 
         if model is None:
             logger.error("NetLoader elastic loads model fails")

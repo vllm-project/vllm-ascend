@@ -366,11 +366,12 @@ class ElasticServer:
             return
 
         cached_items = get_cached_processed_layout_transfer_items(model)
-        self._registered_transfer_items = register_processed_layout_transfer_items(model)
-        self._registered_transfer_shapes = build_transfer_shape_manifest(self._registered_transfer_items)
+        registered_items = register_processed_layout_transfer_items(model)
+        self._registered_transfer_items = registered_items
+        self._registered_transfer_shapes = build_transfer_shape_manifest(registered_items)
         logger.info(
             "[netloader_p2p] registered transfer manifest count=%s cache_hit=%s rank=%s group=%s",
-            len(self._registered_transfer_items),
+            len(registered_items),
             cached_items is not None,
             self.device_id,
             self.group_name,

@@ -265,9 +265,9 @@ def test_remove_new_static_forward_context_keys_preserves_baseline(monkeypatch):
 def test_pre_transfer_weight_processing_unwraps_and_restores_quant_methods():
     import vllm_ascend.ops.fused_moe.fused_moe as fused_moe_module
 
-    class _FakeAscendFusedMoE:
+    class _FakeAscendMoERunner:
         def __init__(self, quant_method):
-            self.quant_method = quant_method
+            self._quant_method = quant_method
 
     calls = []
 
@@ -280,34 +280,42 @@ def test_pre_transfer_weight_processing_unwraps_and_restores_quant_methods():
         original_process_weights(*args, **kwargs)
 
     quant_method = SimpleNamespace(process_weights_after_loading=wrapped_process_weights)
-    fused_moe_layer = _FakeAscendFusedMoE(quant_method)
+    moe_runner = _FakeAscendMoERunner(quant_method)
     other_layer = SimpleNamespace()
 
     class _FakeModule:
         def modules(self):
-            return iter([self, fused_moe_layer, other_layer])
+            return iter([self, moe_runner, other_layer])
 
     fake_module = _FakeModule()
 
     missing_marker = object()
-    real_fused_moe_cls = getattr(fused_moe_module, "AscendFusedMoE", missing_marker)
-    fused_moe_module.AscendFusedMoE = _FakeAscendFusedMoE
+    real_moe_runner_cls = getattr(fused_moe_module, "AscendMoERunner", missing_marker)
+    fused_moe_module.AscendMoERunner = _FakeAscendMoERunner
     try:
         with pre_transfer_weight_processing(fake_module):
-            assert quant_method.process_weights_after_loading is original_process_weights
+            calls.clear()
             quant_method.process_weights_after_loading()
-            assert quant_method.process_weights_after_loading is wrapped_process_weights
             assert calls == ["original"]
 
+        calls.clear()
+        quant_method.process_weights_after_loading()
+        assert calls == ["wrapped", "original"]
+
+        calls.clear()
         with pytest.raises(RuntimeError, match="boom"), pre_transfer_weight_processing(fake_module):
-            assert quant_method.process_weights_after_loading is original_process_weights
+            quant_method.process_weights_after_loading()
+            assert calls == ["original"]
             raise RuntimeError("boom")
-        assert quant_method.process_weights_after_loading is wrapped_process_weights
+
+        calls.clear()
+        quant_method.process_weights_after_loading()
+        assert calls == ["wrapped", "original"]
     finally:
-        if real_fused_moe_cls is missing_marker:
-            delattr(fused_moe_module, "AscendFusedMoE")
+        if real_moe_runner_cls is missing_marker:
+            delattr(fused_moe_module, "AscendMoERunner")
         else:
-            fused_moe_module.AscendFusedMoE = real_fused_moe_cls
+            fused_moe_module.AscendMoERunner = real_moe_runner_cls
 
 
 @patch("vllm_ascend.model_loader.netloader.netloader.logger")
@@ -339,11 +347,11 @@ def test_target_elastic_failure_sets_fallback_flag(mock_logger, monkeypatch):
     )
     monkeypatch.setattr(
         "vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic._snapshot_static_forward_context_keys",
-        lambda vllm_config: {},
+        lambda *args, **kwargs: {},
     )
     monkeypatch.setattr(
         "vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic._remove_new_static_forward_context_keys",
-        lambda vllm_config, snapshots: None,
+        lambda *args, **kwargs: None,
     )
     _install_elastic_server(monkeypatch)
 
@@ -470,15 +478,9 @@ def test_seed_process_weights_order_depends_on_int8_cache(mock_logger, monkeypat
     assert calls == expected_calls
 
 
-@pytest.mark.parametrize(
-    "int8_cache,expect_barrier",
-    [
-        ("dram", True),
-        ("no", False),
-    ],
-)
+@pytest.mark.parametrize("int8_cache", ["dram", "no"])
 @patch("vllm_ascend.model_loader.netloader.netloader.logger")
-def test_target_model_barrier_before_draft_depends_on_int8_cache(mock_logger, monkeypatch, int8_cache, expect_barrier):
+def test_target_model_barrier_before_draft(mock_logger, monkeypatch, int8_cache):
     dummy_model = _patch_loader_common(monkeypatch)
     monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.elastic_load", lambda **kwargs: dummy_model)
     _install_elastic_server(monkeypatch)
@@ -495,7 +497,7 @@ def test_target_model_barrier_before_draft_depends_on_int8_cache(mock_logger, mo
     vllm_config.speculative_config = object()
     loader.load_model(vllm_config, DummyModelConfig())
 
-    assert barrier_calls == (["barrier"] if expect_barrier else [])
+    assert barrier_calls == ["barrier"]
 
 
 @patch("vllm_ascend.model_loader.netloader.netloader.logger")

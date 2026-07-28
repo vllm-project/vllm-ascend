@@ -100,6 +100,9 @@ def _collect_processed_layout_tensors(model: Module) -> list[tuple[str, torch.Te
             if attr_name.startswith("_") or isinstance(attr_value, Module):
                 continue
 
+            # Attention impl objects store derived tensors (e.g. W_UV/W_UK_T) on plain Python
+            # attributes; only "impl" needs deep scan. Other attrs are direct tensors,
+            # list/dict containers, or nn.Module children already covered above.
             scan_objects = attr_name == "impl"
             for tensor_name, tensor in _iter_tensors_in_value(attr_name, attr_value, set(), scan_objects):
                 full_name = f"{module_prefix}.{tensor_name}" if module_prefix else tensor_name
