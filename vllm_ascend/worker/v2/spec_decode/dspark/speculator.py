@@ -15,7 +15,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
+from collections.abc import Mapping
 from typing import Any, cast
 
 import torch
@@ -28,7 +28,10 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
+from vllm_ascend.worker.v2.attn_utils import (
+    build_attn_metadata,
+    build_attn_metadata_wrapper,
+)
 
 
 class AscendDSparkSpeculator(DSparkSpeculator):
@@ -92,6 +95,49 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 causal=self._group_causal,
             )
         return [attn_metadata]
+    
+    def _build_draft_attn_metadata(
+        self,
+        num_reqs: int,
+        num_reqs_padded: int,
+        num_tokens_padded: int,
+        num_query_per_req: int | None = None,
+        causal: bool | Mapping[int, bool] = False,
+    ) -> dict[str, Any] | None:
+        if not self.draft_attn_layer_names:
+            return None
+        assert num_query_per_req is None
+        num_query_per_req = self.num_query_per_req
+
+        query_start_loc_cpu = (
+            torch.clamp(self.arange[: num_reqs_padded + 1], max=num_reqs)
+            * num_query_per_req
+        )
+        block_tables = [
+            x[:num_reqs_padded] for x in self.block_tables.input_block_tables
+        ]
+        slot_mappings = self.block_tables.slot_mappings[:, :num_tokens_padded]
+        attn_metadata = build_attn_metadata(
+            attn_groups=self.attn_groups,
+            num_reqs=num_reqs_padded,
+            num_tokens=num_tokens_padded,
+            query_start_loc_gpu=self.input_buffers.query_start_loc[
+                : num_reqs_padded + 1
+            ],
+            query_start_loc_cpu=query_start_loc_cpu,
+            max_query_len=num_query_per_req,
+            seq_lens=self.input_buffers.seq_lens[:num_reqs_padded],
+            max_seq_len=self.draft_max_seq_len,
+            block_tables=block_tables,
+            slot_mappings=slot_mappings,
+            kv_cache_config=self.kv_cache_config,
+            causal=causal,
+            positions=self.input_buffers.positions[:num_tokens_padded],
+            num_input_tokens=num_tokens_padded,
+            for_drafting=True,
+            draft_index=1,
+        )
+        return attn_metadata
 
     def propose(
         self,
