@@ -1,4 +1,5 @@
 import math
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, TypeAlias
 
@@ -52,6 +53,7 @@ BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
 
 _DSV4_DSA_OVERLAP_STREAM = None
+_DSV4_DSA_COMPRESSOR_STREAM = None
 
 
 def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
@@ -59,6 +61,39 @@ def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
     if _DSV4_DSA_OVERLAP_STREAM is None:
         _DSV4_DSA_OVERLAP_STREAM = torch_npu.npu.Stream()
     return _DSV4_DSA_OVERLAP_STREAM
+
+
+def dsv4_dsa_compressor_stream() -> torch.npu.Stream:
+    global _DSV4_DSA_COMPRESSOR_STREAM
+    if _DSV4_DSA_COMPRESSOR_STREAM is None:
+        _DSV4_DSA_COMPRESSOR_STREAM = torch_npu.npu.Stream()
+    return _DSV4_DSA_COMPRESSOR_STREAM
+
+
+def record_event(enabled: bool, event: torch.npu.Event | None) -> None:
+    if enabled and event is not None:
+        event.record()
+
+
+def wait_event(enabled: bool, event: torch.npu.Event | None) -> None:
+    if enabled and event is not None:
+        torch.npu.current_stream().wait_event(event)
+
+
+def record_stream(enabled: bool, stream: torch.npu.Stream | None, *tensors: torch.Tensor | None) -> None:
+    if not enabled or stream is None:
+        return
+    for tensor in tensors:
+        if tensor is not None:
+            tensor.record_stream(stream)
+
+
+def limit_core_num(enabled: bool, aic_num: int, aiv_num: int):
+    if not enabled:
+        return nullcontext()
+    import torchair as tng
+
+    return tng.scope.limit_core_num(aic_num, aiv_num)
 
 
 # mypy: disable-error-code="has-type"
@@ -1445,6 +1480,12 @@ class AscendDSAImpl(DSAAttentionImpl):
         ascend_config = get_ascend_config()
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
         self.vllm_config = get_current_vllm_config()
+        self._csa_events: dict[str, torch.npu.Event] = {}
+        self._a3_total_aic_num = 24
+        self._a3_aiv_to_aic_ratio = 2
+        self._csa_compressor_aic_num = 16
+        self._csa_q_aic_num = self._a3_total_aic_num - self._csa_compressor_aic_num
+        self._csa_kv_aic_num = self._a3_total_aic_num // 2
 
         # indexer param
         if self.indexer is not None:
@@ -1489,6 +1530,25 @@ class AscendDSAImpl(DSAAttentionImpl):
             "use_index_cache",
             False,
         )
+
+    def _enable_csa_multistream(self, is_prefill: bool) -> bool:
+        return (
+            self.multistream_dsv4_dsa_overlap
+            and self.compress_ratio == 4
+            and not is_prefill
+            and not self.skip_topk
+            and get_ascend_device_type() not in {AscendDeviceType.A5}
+        )
+
+    def _enable_csa_limit_core(self, is_prefill: bool) -> bool:
+        return self._enable_csa_multistream(is_prefill) and get_ascend_device_type() == AscendDeviceType.A3
+
+    def _csa_event(self, name: str) -> torch.npu.Event:
+        event = self._csa_events.get(name)
+        if event is None:
+            event = torch.npu.Event()
+            self._csa_events[name] = event
+        return event
 
     @staticmethod
     def update_graph_params(
@@ -1879,6 +1939,300 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         return q, qr, qr_pertoken_scale
 
+    def _finish_dsa_q(
+        self,
+        q: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        enable_limit_core: bool = False,
+    ) -> torch.Tensor:
+        with limit_core_num(
+            enable_limit_core,
+            self._csa_q_aic_num,
+            self._csa_q_aic_num * self._a3_aiv_to_aic_ratio,
+        ):
+            q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
+            torch.ops._C_ascend.inplace_partial_rotary_mul(
+                q.unsqueeze(1),
+                cos,
+                sin,
+                rotary_mode="interleave",
+                partial_slice=[self.nope_head_dim, self.head_dim],
+            )
+        return q
+
+    def _mla_prolog_csa_decode(
+        self,
+        hidden_states: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        swa_kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        launch_after_q_b=None,
+        enable_limit_core: bool = False,
+    ):
+        """CSA decode MLA prolog with a Q_b completion launch point.
+
+        The launch hook is invoked after Q_b matmul is submitted and before
+        Q RMS/RoPE, matching the CSA stream start point used by recipes.
+        """
+        main_stream = torch.npu.current_stream()
+        aux_stream = dsv4_dsa_overlap_stream()
+        kv_done_event = self._csa_event("kv_done")
+
+        is_w8a8 = _is_w8a8_dynamic(self.wq_b)
+
+        q_quant, q_pertoken_scale = self.cv_wq_a.quantize(hidden_states)
+        e_q_quant_done = main_stream.record_event()
+
+        record_stream(True, aux_stream, hidden_states)
+        with npu_stream_switch(aux_stream, enabled=True):
+            torch.npu.current_stream().wait_event(e_q_quant_done)
+            kv_quant, kv_pertoken_scale = self.cv_wkv.quantize(hidden_states)
+
+        wq_a_result = self.cv_wq_a.matmul(q_quant, q_pertoken_scale)
+        main_stream.wait_stream(aux_stream)
+
+        e_part2_start = main_stream.record_event()
+        with npu_stream_switch(aux_stream, enabled=True):
+            torch.npu.current_stream().wait_event(e_part2_start)
+            kv = self.cv_wkv.matmul(kv_quant, kv_pertoken_scale)
+
+        if is_w8a8:
+            qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
+                wq_a_result, self.q_norm.weight, epsilon=self.eps
+            )
+            q_b_quant, q_b_scale = qr, qr_pertoken_scale
+        else:
+            qr = self.q_norm(wq_a_result)
+            qr_pertoken_scale = None
+            q_b_quant, q_b_scale = qr, None
+
+        main_stream.wait_stream(aux_stream)
+
+        e_part3_start = main_stream.record_event()
+        with npu_stream_switch(aux_stream, enabled=True):
+            torch.npu.current_stream().wait_event(e_part3_start)
+            with limit_core_num(
+                enable_limit_core,
+                self._csa_kv_aic_num,
+                self._csa_kv_aic_num * self._a3_aiv_to_aic_ratio,
+            ):
+                kv = self.kv_norm(kv)
+                assert self.rope_head_dim is not None
+                kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
+                torch.ops._C_ascend.inplace_partial_rotary_mul(
+                    kv.unsqueeze(1),
+                    cos,
+                    sin,
+                    rotary_mode="interleave",
+                    partial_slice=[self.nope_head_dim, self.head_dim],
+                )
+                DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, slot_mapping)
+            record_event(True, kv_done_event)
+
+        if is_w8a8:
+            q = torch_npu.npu_quant_matmul(
+                q_b_quant,
+                self.wq_b.weight,
+                self.wq_b.weight_scale,
+                pertoken_scale=q_b_scale,
+                bias=self.wq_b.bias,
+                output_dtype=hidden_states.dtype,
+            ).unflatten(-1, (self.n_local_heads, self.head_dim))
+        else:
+            q = self.cv_wq_b.matmul(q_b_quant, q_b_scale).unflatten(-1, (self.n_local_heads, self.head_dim))
+
+        if launch_after_q_b is not None:
+            launch_after_q_b(qr, qr_pertoken_scale, main_stream, aux_stream)
+
+        q = self._finish_dsa_q(q, cos, sin, enable_limit_core)
+        wait_event(True, kv_done_event)
+
+        return q, qr, qr_pertoken_scale
+
+    def _launch_csa_c4a_compressor(
+        self,
+        hidden_states: torch.Tensor,
+        compress_kv_cache: torch.Tensor,
+        state_cache: torch.Tensor,
+        compressor_state_block_table: torch.Tensor,
+        actual_seq_lengths_query: torch.Tensor,
+        start_pos: torch.Tensor,
+        compress_sin: torch.Tensor,
+        compress_cos: torch.Tensor,
+        compress_slot_mapping: torch.Tensor,
+        enable_limit_core: bool,
+    ) -> torch.npu.Event:
+        compressor_stream = dsv4_dsa_compressor_stream()
+        cmpr_start_event = self._csa_event("c4a_cmpr_start")
+        cmpr_done_event = self._csa_event("c4a_cmpr_done")
+        coff = 2 if self.compressor_overlap else 1
+
+        record_stream(True, compressor_stream, hidden_states)
+        record_event(True, cmpr_start_event)
+        with npu_stream_switch(compressor_stream, enabled=True):
+            wait_event(True, cmpr_start_event)
+            with limit_core_num(
+                enable_limit_core,
+                self._csa_compressor_aic_num,
+                self._csa_compressor_aic_num * self._a3_aiv_to_aic_ratio,
+            ):
+                compressed_kv = torch.ops._C_ascend.compressor(
+                    hidden_states,
+                    self.compressor_wkv.weight,
+                    self.compressor_wgate.weight,
+                    state_cache.squeeze(-2),
+                    self.compressor_ape,
+                    self.compressor_norm.weight,
+                    compress_sin.view(-1, compress_sin.shape[-1]),
+                    compress_cos.view(-1, compress_cos.shape[-1]),
+                    state_block_table=compressor_state_block_table,
+                    cu_seqlens=actual_seq_lengths_query,
+                    seqused=None,
+                    start_pos=start_pos,
+                    rope_head_dim=self.rope_head_dim,
+                    cmp_ratio=self.compress_ratio,
+                    coff=coff,
+                    norm_eps=self.compressor_norm_eps,
+                    rotary_mode=2,
+                    cache_mode=1,
+                )
+
+                if compressed_kv.shape[0] > 0:
+                    DeviceOperator.dsa_kv_compress_scatter(compress_kv_cache, compressed_kv, compress_slot_mapping)
+            record_event(True, cmpr_done_event)
+        return cmpr_done_event
+
+    def _launch_csa_li_query(
+        self,
+        qr: torch.Tensor,
+        qr_pertoken_scale: torch.Tensor | None,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        indexer_kv_scale_metadata,
+        cmpr_done_event: torch.npu.Event,
+        main_stream: torch.npu.Stream,
+        aux_stream: torch.npu.Stream,
+        enable_limit_core: bool,
+        output_dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.npu.Event]:
+        li_q_start_event = self._csa_event("li_q_start")
+        li_q_done_event = self._csa_event("li_q_done")
+        record_stream(True, aux_stream, qr, qr_pertoken_scale)
+        record_event(True, li_q_start_event)
+
+        q_quant = None
+        q_scale = None
+        with npu_stream_switch(aux_stream, enabled=True):
+            wait_event(True, li_q_start_event)
+            with limit_core_num(
+                enable_limit_core,
+                self._csa_q_aic_num,
+                self._csa_q_aic_num * self._a3_aiv_to_aic_ratio,
+            ):
+                if _is_w8a8_dynamic(self.inderxer_wq_b) and qr_pertoken_scale is not None:
+                    q = torch_npu.npu_quant_matmul(
+                        qr,
+                        self.inderxer_wq_b.weight,
+                        self.inderxer_wq_b.weight_scale,
+                        pertoken_scale=qr_pertoken_scale,
+                        bias=self.inderxer_wq_b.bias,
+                        output_dtype=output_dtype,
+                    )
+                else:
+                    q = self.inderxer_wq_b(qr)
+                q = q.view(-1, self.indexer_heads, self.indexcom_head_dim)
+                torch.ops._C_ascend.inplace_partial_rotary_mul(
+                    q.unsqueeze(1),
+                    cos,
+                    sin,
+                    rotary_mode="interleave",
+                    partial_slice=[self.indexcom_head_dim - self.rope_head_dim, self.indexcom_head_dim],
+                )
+                q = rotate_activation(q, indexer_kv_scale_metadata.hadamard)
+
+            wait_event(True, cmpr_done_event)
+            with limit_core_num(
+                enable_limit_core,
+                self._csa_q_aic_num,
+                self._csa_q_aic_num * self._a3_aiv_to_aic_ratio,
+            ):
+                q_quant, q_scale = DeviceOperator.indexer_quantize_query(q)
+            record_stream(True, main_stream, q_quant, q_scale)
+            record_event(True, li_q_done_event)
+
+        assert q_quant is not None
+        assert q_scale is not None
+        return q_quant, q_scale, li_q_done_event
+
+    def _run_csa_li_main_decode(
+        self,
+        hidden_states: torch.Tensor,
+        indexer_state_cache: torch.Tensor,
+        indexer_k_cache: torch.Tensor,
+        indexer_scale_cache: torch.Tensor,
+        indexer_full_cache: torch.Tensor | None,
+        indexer_kv_state_metadata,
+        indexer_kv_scale_metadata,
+        actual_seq_lengths_query: torch.Tensor,
+        enable_limit_core: bool,
+    ):
+        indexer_state_decode_metadata = _require_decode_metadata(indexer_kv_state_metadata)
+        indexer_scale_decode_metadata = _require_decode_metadata(indexer_kv_scale_metadata)
+        compressed_cos, compressed_sin, slot_mapping_indexer = self._compute_compressor_metadata(
+            indexer_scale_decode_metadata,
+        )
+        coff = 2 if self.compressor_overlap else 1
+
+        with limit_core_num(
+            enable_limit_core,
+            self._csa_compressor_aic_num,
+            self._csa_compressor_aic_num * self._a3_aiv_to_aic_ratio,
+        ):
+            weights = self.weights_proj(hidden_states) * (self.indexer_softmax_scale * self.indexer_heads**-0.5)
+            kv = torch.ops._C_ascend.compressor(
+                hidden_states,
+                self.indexcom_wkv.weight,
+                self.indexcom_wgate.weight,
+                indexer_state_cache.squeeze(-2),
+                self.indexcom_ape,
+                self.indexcom_norm.weight,
+                compressed_sin.view(-1, compressed_sin.shape[-1]),
+                compressed_cos.view(-1, compressed_cos.shape[-1]),
+                state_block_table=indexer_state_decode_metadata.block_table,
+                cu_seqlens=actual_seq_lengths_query,
+                seqused=None,
+                start_pos=indexer_scale_decode_metadata.start_pos,
+                rope_head_dim=self.rope_head_dim,
+                cmp_ratio=self.compress_ratio,
+                coff=coff,
+                norm_eps=self.compressor_norm_eps,
+                rotary_mode=2,
+                cache_mode=1,
+            )
+
+            if kv.numel() == 0:
+                kv = None
+            elif self.indexcom_rotate:
+                kv = rotate_activation(kv, indexer_kv_scale_metadata.hadamard)
+
+            if kv is not None:
+                _, kv_scale = DeviceOperator.indexer_quant_scatter_part1(
+                    kv,
+                    indexer_k_cache,
+                    indexer_full_cache,
+                    slot_mapping_indexer,
+                )
+                if kv_scale is not None:
+                    DeviceOperator.dsa_indexer_scatter_scale_part3(
+                        kv_scale,
+                        indexer_scale_cache,
+                        slot_mapping_indexer,
+                    )
+
+        return weights, indexer_k_cache, indexer_scale_cache, indexer_kv_scale_metadata
+
     def _forward_prefill(
         self,
         layer_name,
@@ -2181,6 +2535,138 @@ class AscendDSAImpl(DSAAttentionImpl):
                 )[0]
         return attn_output
 
+    def _forward_decode_csa_multistream(
+        self,
+        hidden_states: torch.Tensor,
+        compress_kv_cache: torch.Tensor,
+        swa_kv_cache: torch.Tensor,
+        state_cache: torch.Tensor,
+        indexer_state_cache: torch.Tensor,
+        indexer_k_cache: torch.Tensor,
+        indexer_scale_cache: torch.Tensor,
+        indexer_full_cache: torch.Tensor | None,
+        compressor_attn_metadata,
+        compressor_kv_state_metadata,
+        indexer_kv_state_metadata,
+        indexer_kv_scale_metadata,
+        swa_decode_metadata: AscendDSADecodeMetadata,
+        common_decode_metadata: AscendDSADecodeMetadata,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        actual_seq_lengths_query: torch.Tensor,
+        actual_seq_lengths_key: torch.Tensor,
+    ):
+        enable_limit_core = self._enable_csa_limit_core(is_prefill=False)
+        compressor_decode_metadata = _require_decode_metadata(compressor_attn_metadata)
+        compressor_state_decode_metadata = _require_decode_metadata(compressor_kv_state_metadata)
+        compress_cos, compress_sin, compress_slot_mapping = self._compute_compressor_metadata(
+            compressor_decode_metadata,
+        )
+
+        cmpr_done_event: torch.npu.Event | None = None
+        li_q_quant: torch.Tensor | None = None
+        li_q_scale: torch.Tensor | None = None
+        li_q_done_event: torch.npu.Event | None = None
+
+        def launch_after_q_b(
+            qr: torch.Tensor,
+            qr_pertoken_scale: torch.Tensor | None,
+            main_stream: torch.npu.Stream,
+            aux_stream: torch.npu.Stream,
+        ) -> None:
+            nonlocal cmpr_done_event, li_q_quant, li_q_scale, li_q_done_event
+            cmpr_done_event = self._launch_csa_c4a_compressor(
+                hidden_states,
+                compress_kv_cache,
+                state_cache,
+                compressor_state_decode_metadata.block_table,
+                actual_seq_lengths_query,
+                common_decode_metadata.start_pos,
+                compress_sin,
+                compress_cos,
+                compress_slot_mapping,
+                enable_limit_core,
+            )
+            li_q_quant, li_q_scale, li_q_done_event = self._launch_csa_li_query(
+                qr,
+                qr_pertoken_scale,
+                cos,
+                sin,
+                indexer_kv_scale_metadata,
+                cmpr_done_event,
+                main_stream,
+                aux_stream,
+                enable_limit_core,
+                hidden_states.dtype,
+            )
+
+        q, _, _ = self._mla_prolog_csa_decode(
+            hidden_states,
+            cos,
+            sin,
+            swa_kv_cache,
+            swa_decode_metadata.slot_mapping,
+            launch_after_q_b=launch_after_q_b,
+            enable_limit_core=enable_limit_core,
+        )
+
+        assert cmpr_done_event is not None
+        assert li_q_quant is not None
+        assert li_q_scale is not None
+        assert li_q_done_event is not None
+
+        weights, indexer_k_cache, indexer_scale_cache, indexer_kv_scale_metadata = self._run_csa_li_main_decode(
+            hidden_states,
+            indexer_state_cache,
+            indexer_k_cache,
+            indexer_scale_cache,
+            indexer_full_cache,
+            indexer_kv_state_metadata,
+            indexer_kv_scale_metadata,
+            actual_seq_lengths_query,
+            enable_limit_core,
+        )
+
+        wait_event(True, li_q_done_event)
+        compress_topk_idxs = self._indexer_qli(
+            li_q_quant,
+            weights,
+            li_q_scale,
+            indexer_k_cache,
+            indexer_scale_cache,
+            indexer_kv_scale_metadata,
+            with_prefill=False,
+        )
+
+        if self.use_index_cache:
+            self._update_indexcache_topk_indices(compress_topk_idxs, offset=0)
+
+        wait_event(True, cmpr_done_event)
+
+        attn_op = DeviceOperator.get_dsa_sparse_attn_op()
+        extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()
+        return attn_op(
+            q,
+            ori_kv=swa_kv_cache,
+            cmp_kv=compress_kv_cache,
+            cmp_sparse_indices=compress_topk_idxs,
+            ori_block_table=swa_decode_metadata.block_table,
+            cmp_block_table=compressor_decode_metadata.block_table,
+            cu_seqlens_q=actual_seq_lengths_query,
+            seqused_kv=actual_seq_lengths_key,
+            sinks=self.attn_sink,
+            metadata=compressor_decode_metadata.sas_metadata,
+            softmax_scale=self.softmax_scale,
+            cmp_ratio=self.compress_ratio,
+            ori_mask_mode=4,
+            cmp_mask_mode=3,
+            ori_win_left=self.window_size - 1,
+            ori_win_right=0,
+            layout_q="TND",
+            layout_kv="PA_ND",
+            **extra_attn_kwargs,
+        )[0]
+
     def _forward_decode(
         self,
         layer_name,
@@ -2197,9 +2683,13 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         if self.compress_ratio == 4:
             # sorted keys: [attn, compressor.state_cache, indexer.compressor.state_cache, indexer.k_cache, swa_cache]
-            (compressor_attn_metadata, compressor_kv_state_metadata, _, indexer_kv_scale_metadata, swa_metadata) = (
-                attn_metadata
-            )
+            (
+                compressor_attn_metadata,
+                compressor_kv_state_metadata,
+                indexer_kv_state_metadata,
+                indexer_kv_scale_metadata,
+                swa_metadata,
+            ) = attn_metadata
             compress_common_attn_metadata = compressor_attn_metadata
         elif self.compress_ratio == 128:
             # sorted keys: [attn, compressor.state_cache, swa_cache]
@@ -2215,6 +2705,29 @@ class AscendDSAImpl(DSAAttentionImpl):
         sin = common_decode_metadata.sin[layer_name]
         actual_seq_lengths_query = common_decode_metadata.query_start_loc
         actual_seq_lengths_key = common_decode_metadata.seq_lens
+
+        if self._enable_csa_multistream(is_prefill=False):
+            indexer_state_cache, _, _, _ = DeviceOperator.unpack_dsa_indexer_kv_cache(kv_cache)
+            return self._forward_decode_csa_multistream(
+                hidden_states,
+                compress_kv_cache,
+                swa_kv_cache,
+                state_cache,
+                indexer_state_cache,
+                indexer_k_cache,
+                indexer_scale_cache,
+                indexer_full_cache,
+                compressor_attn_metadata,
+                compressor_kv_state_metadata,
+                indexer_kv_state_metadata,
+                indexer_kv_scale_metadata,
+                swa_decode_metadata,
+                common_decode_metadata,
+                cos,
+                sin,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+            )
 
         if self.multistream_dsv4_dsa_overlap:
             # mla prolog: q + kv dual-stream parallel
