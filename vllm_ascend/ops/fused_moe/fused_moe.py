@@ -514,39 +514,17 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             if self.enable_multi_card:
                 from vllm.distributed.parallel_state import get_ep_group as _gep
                 _ep = _gep()
-                # [ep_size*topk slot sizing] Under cross-rank router FP variance,
-                # each EP rank may select a different topk set for the same
-                # token, so the all-reduced active-expert union can reach
-                # ep_size * experts_per_token. With fewer device slots than
-                # that, plan_placement overflows and falls back to the spread
-                # log2phy, which deadlocks MC2 all-to-all. Auto-bump so any
-                # ep_size is safe without manual config tuning. The manager
-                # singleton is built at model-runner load time (before this
-                # layer's __init__) and caches num_device_experts, so update it
-                # explicitly; the runner reads the bumped value below via
-                # moe_config.num_local_experts (set after this block) and
-                # _expert_map, keeping device weights and placement consistent.
-                _topk = self.moe_config.experts_per_token
-                _min_slots = _ep.world_size * _topk
-                if _offload_cfg.num_device_experts < _min_slots:
-                    _old_ndev = _offload_cfg.num_device_experts
-                    logger.warning(
-                        "[expert_offload] num_device_experts=%d is too small "
-                        "for multi-card offload at ep_size=%d: needs >= "
-                        "ep_size*topk = %d*%d = %d. With fewer device slots the "
-                        "cross-rank active-expert union overflows capacity and "
-                        "the spread fallback deadlocks MC2. Auto-adjusting "
-                        "num_device_experts %d -> %d. Set expert_offload_config"
-                        ".num_device_experts >= %d explicitly to silence this "
-                        "(and avoid the extra HBM the auto-bump costs).",
-                        _old_ndev, _ep.world_size, _ep.world_size, _topk,
-                        _min_slots, _old_ndev, _min_slots, _min_slots)
-                    _offload_cfg.num_device_experts = _min_slots
-                    from vllm_ascend.expert_offload import ExpertOffloadManager
-                    if ExpertOffloadManager._instance is not None:
-                        _mgr = ExpertOffloadManager.get_instance()
-                        _mgr.num_device_experts = _min_slots
-                        _mgr.offload_threshold = _min_slots // _mgr.topk
+                # NOTE: no ep_size*topk slot floor here. The device buffer is
+                # only used when it actually fits the active expert union —
+                # select_moe_comm_method routes to MC2+buffer iff
+                # num_tokens*topk <= num_device_experts, else ALLTOALL+prefill
+                # pool (full experts). So the buffer can never overflow and no
+                # slot floor / auto-bump is needed. The old ep_size*topk bump
+                # defended against pad-token garbage inflating the union; that
+                # garbage is now filtered by mc2_mask (51a6d644), and the
+                # buffer-fit check in select_moe_comm_method is the correct
+                # bound. offload_threshold (= num_device_experts // topk) is set
+                # in ExpertOffloadManager.__init__.
                 _per_rank = _offload_cfg.num_device_experts // _ep.world_size
                 self.log2phy = init_log2phy_for_offload_multi_card(
                     self.global_num_experts, _per_rank, _ep.world_size,
