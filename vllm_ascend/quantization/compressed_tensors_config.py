@@ -93,13 +93,14 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
     def _add_fused_moe_to_target_scheme_map(self):
         """
         Helper function to update target_scheme_map
-        since linear layers get fused into MoE modules
-        targeting 'Linear' needs to also match
-        RoutedExperts modules.
+        since layers encoded as 'Linear' or 'MoE' get
+        fused into RoutedExperts modules.  Copy their
+        scheme so RoutedExperts can find it.
         """
-        if "Linear" not in self.target_scheme_map or "RoutedExperts" in self.target_scheme_map:
-            return
-        self.target_scheme_map["RoutedExperts"] = self.target_scheme_map["Linear"]
+        for src in ("Linear", "MoE"):
+            if src in self.target_scheme_map and "RoutedExperts" not in self.target_scheme_map:
+                self.target_scheme_map["RoutedExperts"] = self.target_scheme_map[src]
+                return
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "AscendCompressedTensorsConfig":
