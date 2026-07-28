@@ -15,7 +15,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
+from collections.abc import Mapping
 from typing import Any, cast
 
 import torch

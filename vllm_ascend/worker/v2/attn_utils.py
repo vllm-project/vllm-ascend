@@ -184,6 +184,9 @@ def build_attn_metadata(
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
     causal: bool | Mapping[int, bool] = True,
+    num_reqs_actual: int | None = None,
+    for_drafting: bool = False,
+    draft_index: int = 1,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
@@ -225,6 +228,7 @@ def build_attn_metadata(
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens_cpu=seq_lens_cpu,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+            num_computed_tokens_cpu=num_computed_tokens_cpu,
             seq_lens=seq_lens[:num_reqs],
             num_reqs=num_reqs,
             num_actual_tokens=num_actual_tokens,
@@ -243,7 +247,8 @@ def build_attn_metadata(
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
-            if for_cudagraph_capture:
+            is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
+            if for_cudagraph_capture and not is_dsa_builder:
                 metadata = attn_metadata_builder.build_for_cudagraph_capture(common_attn_metadata)
             else:
                 attn_metadata_extra_kwargs = (
