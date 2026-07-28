@@ -1714,7 +1714,9 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
-            
+
+            # When `modelrunnerv2` compiles the graph, the value of `attn_metadata.attn_state` is `None`;
+            # therefore, the graph-mode condition needs to be evaluated earlier.
             if _EXTRA_CTX.capturing:
                 attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
                 output[:num_tokens] = attn_output[:num_tokens]
