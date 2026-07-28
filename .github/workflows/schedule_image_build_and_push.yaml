@@ -20,7 +20,7 @@ on:
       - 'main'
       - 'releases/*'
     types: [ labeled ]
-  workflow_dispatch:  # actionlint: ignore
+  workflow_dispatch:
     inputs:
       tag:
         description: 'Docker tag for build results (mutually exclusive with branch)'
@@ -66,61 +66,35 @@ on:
         options:
           - release
           - daily
-      memcache_version:
-        description: 'Memcache version'
+      memcache:
+        description: 'Memcache version and date (JSON array: ["version", "date"])'
         required: false
-        default: '1.2.0'
+        default: '["1.2.0", "20260725.3"]'
         type: string
-      memcache_date:
-        description: 'Memcache date'
+      memfabric:
+        description: 'Memfabric version and date (JSON array: ["version", "date"])'
         required: false
-        default: '20260725.3'
+        default: '["1.2.0", "20260725.3"]'
         type: string
-      memfabric_version:
-        description: 'Memfabric version'
+      torch_npu:
+        description: 'Torch NPU version and date (JSON array: ["version", "date"])'
         required: false
-        default: '1.2.0'
+        default: '["26.1.0", "20260715.4"]'
         type: string
-      memfabric_date:
-        description: 'Memfabric date'
+      cann:
+        description: 'CANN Quay URL and version (JSON array: ["url", "version"])'
         required: false
-        default: '20260725.3'
+        default: '["quay.io/atlas_inference/cann", "9.1.0.B120"]'
         type: string
-      torch_npu_version:
-        description: 'Torch NPU version'
+      triton_ascend:
+        description: 'Triton Ascend version and package version (JSON array: ["version", "package_version"])'
         required: false
-        default: '26.1.0'
-        type: string
-      torch_npu_date:
-        description: 'Torch NPU date'
-        required: false
-        default: '20260715.4'
-        type: string
-      cann_quay_url:
-        description: 'CANN Quay URL'
-        required: false
-        default: 'quay.io/atlas_inference/cann'
-        type: string
-      cann_version:
-        description: 'CANN version'
-        required: false
-        default: '9.1.0.B120'
-        type: string
-      triton_ascend_version:
-        description: 'Triton Ascend version'
-        required: false
-        default: '26.1.0.B110'
-        type: string
-      triton_ascend_package_version:
-        description: 'Triton Ascend package version'
-        required: false
-        default: '3.2.2'
+        default: '["26.1.0.B110", "3.2.2"]'
         type: string
 
 permissions:
   packages: write
   contents: read
-
 jobs:
   image_build:
     name: ${{ matrix.build_meta.name }}
@@ -159,8 +133,8 @@ jobs:
       suffix: ${{ matrix.build_meta.suffix }}
       
       # ===== Dynamic repository and authentication based on build_type =====
-      quay_repo: ${{ inputs.build_type == 'daily' && 'quay.io/atlas_inference/vllm-ascend' || 'quay.io/mindie_ci/vllm-ascend' }}
-      quay_temp_repo: ${{ inputs.build_type == 'daily' && 'quay.io/atlas_inference/vllm-atlas-temp' || 'quay.io/mindie_ci/vllm-atlas-temp' }}
+      quay_repo: ${{ inputs.build_type == 'daily' && 'quay.io/atlas_inference/vllm-ascend' || 'quay.io/ascend/vllm-ascend' }}
+      quay_temp_repo: ${{ inputs.build_type == 'daily' && 'quay.io/atlas_inference/vllm-atlas-temp' || 'quay.io/atlas-ci/vllm-atlas-temp' }}
       quay_username: ${{ inputs.build_type == 'daily' && vars.QUAY_DAILY_USERNAME || vars.QUAY_USERNAME }}
       quay_temp_username: ${{ inputs.build_type == 'daily' && vars.QUAY_DAILY_TEMP_USERNAME || vars.QUAY_TEMP_USERNAME }}
       # ====================================================================
@@ -170,21 +144,21 @@ jobs:
       branch_ref: ${{ inputs.branch != 'none' && inputs.branch || '' }}
       schedule_tag_pattern: 'main'
       build_type: ${{ inputs.build_type || 'release' }}
-      cann_version: ${{ inputs.cann_version || '9.1.0.B120' }}
+      cann_version: ${{ fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "9.1.0.B120"]')[1] }}
       
       build_args: |
         BUILD_TYPE=${{ inputs.build_type || 'release' }}
         ${{ inputs.build_type == 'daily' && format('BASE_OS={0}', contains(matrix.build_meta.suffix, 'openeuler') && 'openeuler24.03-lts-sp4' || 'ubuntu24.04') || '' }}
-        MEMCACHE_VERSION=${{ inputs.memcache_version || '1.2.0' }}
-        MEMCACHE_DATE=${{ inputs.memcache_date || '20260725.3' }}
-        MEMFABRIC_VERSION=${{ inputs.memfabric_version || '1.2.0' }}
-        MEMFABRIC_DATE=${{ inputs.memfabric_date || '20260725.3' }}
-        TORCH_NPU_VERSION=${{ inputs.torch_npu_version || '26.1.0' }}
-        TORCH_NPU_DATE=${{ inputs.torch_npu_date || '20260715.4' }}
-        ${{ inputs.build_type == 'daily' && format('CANN_QUAY_URL={0}', inputs.cann_quay_url || 'quay.io/atlas_inference/cann') || '' }}
-        ${{ inputs.build_type == 'daily' && format('CANN_VERSION={0}', inputs.cann_version || '9.1.0.B120') || '' }}
-        TRITON_ASCEND_VERSION=${{ inputs.triton_ascend_version || '26.1.0.B110' }}
-        TRITON_ASCEND_PACKAGE_VERSION=${{ inputs.triton_ascend_package_version || '3.2.2' }}
+        MEMCACHE_VERSION=${{ fromJSON(inputs.memcache || '["1.2.0", "20260725.3"]')[0] }}
+        MEMCACHE_DATE=${{ fromJSON(inputs.memcache || '["1.2.0", "20260725.3"]')[1] }}
+        MEMFABRIC_VERSION=${{ fromJSON(inputs.memfabric || '["1.2.0", "20260725.3"]')[0] }}
+        MEMFABRIC_DATE=${{ fromJSON(inputs.memfabric || '["1.2.0", "20260725.3"]')[1] }}
+        TORCH_NPU_VERSION=${{ fromJSON(inputs.torch_npu || '["26.1.0", "20260715.4"]')[0] }}
+        TORCH_NPU_DATE=${{ fromJSON(inputs.torch_npu || '["26.1.0", "20260715.4"]')[1] }}
+        ${{ inputs.build_type == 'daily' && format('CANN_QUAY_URL={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "9.1.0.B120"]')[0]) || '' }}
+        ${{ inputs.build_type == 'daily' && format('CANN_VERSION={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "9.1.0.B120"]')[1]) || '' }}
+        TRITON_ASCEND_VERSION=${{ fromJSON(inputs.triton_ascend || '["26.1.0.B110", "3.2.2"]')[0] }}
+        TRITON_ASCEND_PACKAGE_VERSION=${{ fromJSON(inputs.triton_ascend || '["26.1.0.B110", "3.2.2"]')[1] }}
       
     secrets:
       quay_password: ${{ inputs.build_type == 'daily' && secrets.QUAY_DAILY_PASSWORD || secrets.QUAY_PASSWORD }}
@@ -228,7 +202,7 @@ jobs:
     with:
       dockerfile: ${{ matrix.build_meta.dockerfile }}
       suffix: ${{ matrix.build_meta.suffix }}
-      quay_temp_repo: ${{ inputs.build_type == 'daily' && 'quay.io/atlas_inference/vllm-atlas-temp' || 'quay.io/mindie_ci/vllm-atlas-temp' }}
+      quay_temp_repo: ${{ inputs.build_type == 'daily' && 'quay.io/atlas_inference/vllm-atlas-temp' || 'quay.io/atlas-ci/vllm-atlas-temp' }}
       quay_temp_username: ${{ inputs.build_type == 'daily' && vars.QUAY_DAILY_TEMP_USERNAME || vars.QUAY_TEMP_USERNAME }}
       should_push: true
       temp_only: true
@@ -237,20 +211,21 @@ jobs:
       workflow_dispatch_tag: ''
       branch_ref: ''
       build_type: ${{ inputs.build_type || 'release' }}
-      cann_version: ${{ inputs.cann_version || '9.1.0.B120' }}
+      cann_version: ${{ fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "9.1.0.B120"]')[1] }}
+
       build_args: |
         BUILD_TYPE=${{ inputs.build_type || 'release' }}
         ${{ inputs.build_type == 'daily' && format('BASE_OS={0}', contains(matrix.build_meta.suffix, 'openeuler') && 'openeuler24.03-lts-sp4' || 'ubuntu24.04') || '' }}
-        MEMCACHE_VERSION=${{ inputs.memcache_version || '1.2.0' }}
-        MEMCACHE_DATE=${{ inputs.memcache_date || '20260725.3' }}
-        MEMFABRIC_VERSION=${{ inputs.memfabric_version || '1.2.0' }}
-        MEMFABRIC_DATE=${{ inputs.memfabric_date || '20260725.3' }}
-        TORCH_NPU_VERSION=${{ inputs.torch_npu_version || '26.1.0' }}
-        TORCH_NPU_DATE=${{ inputs.torch_npu_date || '20260715.4' }}
-        ${{ inputs.build_type == 'daily' && format('CANN_QUAY_URL={0}', inputs.cann_quay_url || 'quay.io/atlas_inference/cann') || '' }}
-        ${{ inputs.build_type == 'daily' && format('CANN_VERSION={0}', inputs.cann_version || '9.1.0.B120') || '' }}
-        TRITON_ASCEND_VERSION=${{ inputs.triton_ascend_version || '26.1.0.B110' }}
-        TRITON_ASCEND_PACKAGE_VERSION=${{ inputs.triton_ascend_package_version || '3.2.2' }}
-      
+        MEMCACHE_VERSION=${{ fromJSON(inputs.memcache || '["1.2.0", "20260725.3"]')[0] }}
+        MEMCACHE_DATE=${{ fromJSON(inputs.memcache || '["1.2.0", "20260725.3"]')[1] }}
+        MEMFABRIC_VERSION=${{ fromJSON(inputs.memfabric || '["1.2.0", "20260725.3"]')[0] }}
+        MEMFABRIC_DATE=${{ fromJSON(inputs.memfabric || '["1.2.0", "20260725.3"]')[1] }}
+        TORCH_NPU_VERSION=${{ fromJSON(inputs.torch_npu || '["26.1.0", "20260715.4"]')[0] }}
+        TORCH_NPU_DATE=${{ fromJSON(inputs.torch_npu || '["26.1.0", "20260715.4"]')[1] }}
+        ${{ inputs.build_type == 'daily' && format('CANN_QUAY_URL={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "9.1.0.B120"]')[0]) || '' }}
+        ${{ inputs.build_type == 'daily' && format('CANN_VERSION={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "9.1.0.B120"]')[1]) || '' }}
+        TRITON_ASCEND_VERSION=${{ fromJSON(inputs.triton_ascend || '["26.1.0.B110", "3.2.2"]')[0] }}
+        TRITON_ASCEND_PACKAGE_VERSION=${{ fromJSON(inputs.triton_ascend || '["26.1.0.B110", "3.2.2"]')[1] }}
+
     secrets:
       quay_temp_password: ${{ inputs.build_type == 'daily' && secrets.QUAY_DAILY_TEMP_PASSWORD || secrets.QUAY_TEMP_PASSWORD }}
