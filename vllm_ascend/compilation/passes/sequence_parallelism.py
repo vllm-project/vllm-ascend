@@ -356,9 +356,7 @@ class SequenceParallelismPass(VllmInductorPass):
                 self.matched_count,
             )
         else:
-            logger.warning(
-                "Sequence parallelism pass replaced 0 patterns; falling back to TP mode."
-            )
+            logger.warning("Sequence parallelism pass replaced 0 patterns; falling back to TP mode.")
         logger.debug("after apply replacement %s", graph.graph)
 
         from torch._inductor.pattern_matcher import PatternPrettyPrinter
