@@ -1039,10 +1039,6 @@ def get_ascend_config():
     return _ASCEND_CONFIG
 
 def get_score_encoder_cache_config(vllm_config):
-    additional_config = (
-        vllm_config.additional_config
-        if vllm_config.additional_config is not None
-        else {}
-    )
+    additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
     cfg = additional_config.get("score_encoder_cache_config", {})
     return ScoreEncoderCacheConfig(cfg, vllm_config)
