@@ -244,7 +244,7 @@ def generate_report(failed, recommended, matched, log_dir, recommendations_sourc
     # ================================================================
     out.append("---")
     out.append("")
-    out.append(f"## Failed Test Cases（共 {len(failed)} 个）")
+    out.append(f"## Failed Test Cases（ {len(failed)} total）")
     out.append("")
     if failed:
         for i, t in enumerate(failed, 1):
