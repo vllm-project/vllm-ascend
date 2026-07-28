@@ -1,87 +1,12 @@
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.637.157 [stars_engine.cc:1548]28213 ProcLogicCqReport:Task run failed, device_id=1, stream_id=46, task_id=5346, sqe_type=0(ffts), errType=0x1(task exception), sqSwStatus=0
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.774.368 [device_error_core_proc.cc:619]28213 AddExceptionRegInfo:add error register: core_id=0, stream_id=46, task_id=5346
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.774.382 [device_error_core_proc.cc:645]28213 PrintCoreInfo:The error from device(chipId:1, dieId:0), serial number is 6, there is an exception of fftsplus aicore error, core id is 0, error code = 0, dump info: pc start: 0x12420100beec, current: 0x12420100c994, vec error info: 0, mte error info: 0xb3d9bc305f, ifu error info: 0x212c2b4674180, ccu error info: 0xde3ed28900000000, cube error info: 0, biu error info: 0, aic error mask: 0x6500020bd00028c, para base: 0x12c140084080.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.774.417 [device_error_core_proc.cc:658]28213 PrintCoreInfo:The extend info: errcode:(0, 0x8000, 0) errorStr: When the D-cache reads and writes data to the UB, the response value returned by the bus is a non-zero value. fixp_error0 info: 0x9bc305f, fixp_error1 info: 0xb3, fsmId:0, tslot:0, thread:0, ctxid:0, blk:1, sublk:0, subErrType:4.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.774.437 [device_error_core_proc.cc:732]28213 ProcessStarsCoreErrorInfo:devId=1, streamId=46, taskId=5346, MTE errorCode=0.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.774.449 [davinci_task.cc:213]28213 SetStarsResultForDavinciTask:AICORE Kernel task happen error, retCode=0x26.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.789 [davinci_kernel_task.cc:1729]28213 PreCheckTaskErr:Kernel task happen error, retCode=0x26, [aicore exception].
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.867 [davinci_kernel_task.cc:1525]28213 GetArgsInfo:[AIC_INFO] args(0 to 11) after execute:0xfee00000000, 0x12d678ca1200, 0x12d74187c000, 0x12d75b610000, 0x12d678eac000, 0x12c1c00ce000, 0x12d6792aca00, 0x12c1c1919e00, 0x12c1c0004a00, 0x12c1c0004800, 0x12d6793b4000, 0x12d6792ac000.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.873 [davinci_kernel_task.cc:1529]28213 GetArgsInfo:tilingKey = 0, print 1 Times totalLen=(12*8), argsSize=96, schemMode=0, blockDim=20
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.883 [davinci_kernel_task.cc:1609]28213 PrintErrorInfoForDavinciTask:[AIC_INFO] after execute:args print end
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.904 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[0]=0x00000006.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.907 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[1]=0000000000.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.910 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[2]=0000000000.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.913 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[3]=0000000000.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.915 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[4]=0000000000.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.918 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[5]=0000000000.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.920 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[6]=0000000000.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.922 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[7]=0000000000.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.924 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[8]=0000000000.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.926 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[9]=0000000000.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.929 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[10]=0000000000.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.931 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[11]=0000000000.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.933 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[12]=0000000000.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.935 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[13]=0000000000.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.938 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[14]=0000000000.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.940 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[15]=0000000000.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.942 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[16]=0x00000840.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.944 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[17]=0x02020004.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.947 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[18]=0x00010000.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.949 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[19]=0x00140014.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.951 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[20]=0x40084080.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.954 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[21]=0x006012c1.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.956 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[22]=0x40084080.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.958 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[23]=0x006012c1.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.960 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[24]=0x0100beec.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.963 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[25]=0x12421242.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.965 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[26]=0x0100beec.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.967 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[27]=0x0106f7f4.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.969 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[28]=0x12421242.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.972 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[29]=0x0106f7f4.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.974 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[30]=0000000000.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.976 [davinci_kernel_task.cc:1489]28213 GetMixCtxInfo:The DavinciTask Mix context-buf[31]=0000000000.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.785.979 [davinci_kernel_task.cc:1614]28213 PrintErrorInfoForDavinciTask:[AIC_INFO] after execute:mixCtx print end
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.787.277 [davinci_kernel_task.cc:1639]28213 PrintErrorInfoForDavinciTask:[DFX_INFO]Aicore kernel execute failed, device_id=1, stream_id=46, report_stream_id=46, task_id=5346, flip_num=0, fault kernel_name=_ZN9SplitFuse7FAInferIu6__bf16u6__bf16fLb1ELN12KernelCommon8FaiKenel8MaskTypeE1ELNS2_11inputLayoutE1ELN7Catlass8Epilogue8LseModeTE1ELb0EEEvmPhS8_S8_S8_S8_S8_S8_S8_S8_S8_S8_, fault kernel info ext=none, program id=299, hash=3351198932084118595.
-[ERROR] IDEDD(28073,):2026-07-28-15:33:56.787.348 [dump_args.cpp:330][tid:28213] No exception dfx info, dfxAddr[(nil)]|dfxSize[0].
-[ERROR] IDEDD(28073,):2026-07-28-15:33:56.788.631 [dump_printf.cpp:1122][tid:28213] infoAddr is null
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.789.725 [stream.cc:1473]28213 GetError:Stream Synchronize failed, stream_id=46, retCode=0x26, [aicore exception].
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.789.729 [stream.cc:1476]28213 GetError:AICORE Kernel task happen error, retCode=0x26.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.789.742 [stream.cc:1476]28213 GetError:[AIC_INFO] after execute:args print end
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.789.747 [stream.cc:1476]28213 GetError:[AIC_INFO] after execute:mixCtx print end
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.789.752 [stream.cc:1476]28213 GetError:[DFX_INFO]Aicore kernel execute failed, device_id=1, stream_id=46, report_stream_id=46, task_id=5346, flip_num=0, fault kernel_name=_ZN9SplitFuse7FAInferIu6__bf16u6__bf16fLb1ELN12KernelCommon8FaiKenel8MaskTypeE1ELNS2_11inputLayoutE1ELN7Catlass8Epilogue8LseModeTE1ELb0EEEvmPhS8_S8_S8_S8_S8_S8_S8_S8_S8_S8_, fault kernel info ext=none, program id=299, hash=3351198932084118595.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.789.758 [stream.cc:3698]28213 EnterFailureAbort:stream_id=46 enter failure abort.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.789.780 [stars_engine.cc:1439]28213 StarsResumeRtsq:stop scheduling in abort failure mode: stream_id=46, sq_id=3, sq_head=1250, task_id=5346, taskType=0.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.789.795 [stream.cc:1614]28073 SynchronizeExecutedTask:context is abort, status=0x7150026.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.789.805 [stream.cc:1668]28073 SynchronizeImpl:failed, stream_id=46, error=0x7150026
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.789.810 [api_error.cc:1029]28073 StreamSynchronize:Stream synchronize failed, stream_id=46, timeout=-1ms.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.789.824 [api_c_stream.cc:161]28073 rtStreamSynchronize:ErrCode=507015, desc=[aicore exception], InnerCode=0x7150026
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.789.829 [error_message_manage.cc:65]28073 FuncErrorReason:rtStreamSynchronize execution failed, reason=aicore exception
-[ERROR] ASCENDCL(28073,):2026-07-28-15:33:56.790.046 [stream.cpp:139]28073 aclrtSynchronizeStreamImpl:synchronize stream failed, runtime result = 507015
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.827.545 [engine.cc:142]28214 SubmitTask:context is abort, status=0x7150026.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.827.557 [context.cc:1223]28214 LaunchKernelSubmit:Failed to submit kernel task, retCode=0x7150026.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.827.584 [context.cc:1671]28214 LaunchKernel:kernel launch submit failed.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.827.596 [api_error.cc:692]28214 LaunchKernelV2:LaunchKernel failed.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.827.608 [api_c_kernel.cc:82]28214 rtsLaunchKernelWithHostArgs:ErrCode=507015, desc=[aicore exception], InnerCode=0x7150026
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.827.613 [error_message_manage.cc:65]28214 FuncErrorReason:rtsLaunchKernelWithHostArgs execution failed, reason=aicore exception
-[ERROR] ASCENDCL(28073,):2026-07-28-15:33:56.827.890 [kernel.cpp:513]28214 aclrtLaunchKernelWithHostArgsImpl:rtsLaunchKernelWithHostArgs failed, runtime result = 507015.
-[ERROR] OP(28073,):2026-07-28-15:33:56.827.912 [indv_executor.cpp:1064][NNOP][NnopbaseExecutorLaunchKernel][28214] errno[507015] OpName:[FusedInferAttentionScore_0] Check aclrtLaunchKernelWithHostArgs( funcHandle, numBlocks, stream, &cfg, executor->argsExt.args, executor->argsExt.argsSize, rtsHostPlaceHolder.data(), rtsHostPlaceHolder.size()) failed
-[ERROR] OP(28073,):2026-07-28-15:33:56.827.930 [indv_executor.cpp:1232][NNOP][NnopbaseExecutorKernelLaunch][28214] errno[361001] OpName:[FusedInferAttentionScore_0] Assert ((NnopbaseExecutorLaunchKernel(executor, stream, numBlocks)) == 0) failed
-[ERROR] OP(28073,):2026-07-28-15:33:56.827.940 [indv_executor.cpp:1322][NNOP][NnopbaseExecutorRunWithWorkspace][28214] errno[361001] OpName:[FusedInferAttentionScore_0] Check NnopbaseExecutorKernelLaunch(executor, stream) failed
-[ERROR] OP(28073,):2026-07-28-15:33:56.827.951 [individual_op_api.cpp:32][NNOP][NnopbaseOpLogE][28214] errno[361001] OpName:[FusedInferAttentionScore_0] Check NnopbaseRunWithWorkspace(executor, stream, workspace, workspaceSize) failed
-[ERROR] APP(28073,):2026-07-28-15:33:56.829.029 28214 ExecFuncOpApi:OpParamMaker.cpp:458: "[PTA]:"Custom hand error:operator():../third_party/op-plugin/op_plugin/ops/opapi/FusedInferAttentionScoreKernelNpuOpApi.cpp:425 NPU function error: call aclnnFusedInferAttentionScoreV3 failed, error code is 507015
-[ERROR] 2026-07-28-15:33:56 (PID:28073, Device:1, RankID:-1) ERR00100 PTA call acl api failed
-[Error]: The aicore execution is abnormal. 
-        Rectify the fault based on the error information in the ascend log.
-[PID: 28073] 2026-07-28-15:33:56.827.935 AclNN_Runtime_Error(EZ9903): Assert ((NnopbaseExecutorLaunchKernel(e""
-[ERROR] APP(28073,):2026-07-28-15:33:56.829.038 28214 ExecFuncOpApi:OpParamMaker.cpp:462: "[PTA]:"Custom hand fail! name=aclnnFusedInferAttentionScoreV3, ret=100000""
-[ERROR] APP(28073,):2026-07-28-15:33:56.829.045 28214 ReadQueue:NPUQueue.cpp:454: "[PTA]:"---Thread---281468696782560: device = 1, write_idx = 2910, read_idx = 2875, status = 1, ret = 100000""
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.838.942 [api_impl.cc:2255]28073 EventSynchronize:context is abort, status=0x7150026.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.838.959 [api_c.cc:764]28073 rtEventSynchronize:ErrCode=507015, desc=[aicore exception], InnerCode=0x7150026
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.838.964 [error_message_manage.cc:65]28073 FuncErrorReason:rtEventSynchronize execution failed, reason=aicore exception
-[ERROR] ASCENDCL(28073,):2026-07-28-15:33:56.839.206 [event.cpp:197]28073 aclrtSynchronizeEventImpl:wait event to be complete failed, runtime result = 507015
-[ERROR] APP(28073,):2026-07-28-15:33:56.900.022 28073 MakeSureQueueEmpty:NPUQueue.cpp:341: "[PTA]:"Inner error happened with CAN_EXIT status, detail: the current working operator name is aclnnFusedInferAttentionScoreV3""
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.900.058 [context.cc:708]28073 Synchronize:context is abort, status=0x7150026.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.900.064 [api_error.cc:2698]28073 DeviceSynchronize:Device synchronize failed.
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.900.073 [api_c_device.cc:245]28073 rtDeviceSynchronizeWithTimeout:ErrCode=507015, desc=[aicore exception], InnerCode=0x7150026
-[ERROR] RUNTIME(28073,):2026-07-28-15:33:56.900.077 [error_message_manage.cc:65]28073 FuncErrorReason:rtDeviceSynchronizeWithTimeout execution failed, reason=aicore exception
-[ERROR] ASCENDCL(28073,):2026-07-28-15:33:56.900.295 [device.cpp:198]28073 aclrtSynchronizeDeviceWithTimeoutImpl:wait for compute device to finish failed, runtime result = 507015.
+[ERROR] DRV(60569,):2026-07-28-21:14:04.867.682 [trs_sqcq.c:1054][ascend][curpid:60569,60569][drv][tsdrv][trsSqCqQueryUio]Invalid para. (devId=2; tsId=0; type=0; sqId=4294967295)
+[ERROR] RUNTIME(60569,):2026-07-28-21:14:04.867.696 [npu_driver_res.cc:610]60569 GetSqHead:[drv api] halSqCqQuery device_id=2, ts_id=0, sq_id=4294967295, drvRetCode=3.
+[ERROR] RUNTIME(60569,):2026-07-28-21:14:04.868.022 [stream.cc:1243]60569 TearDown:Get sq head failed, stream_id=12, sqId=4294967295, pendingNum=1, isForceRecycle_=1.
+[ERROR] RUNTIME(60569,):2026-07-28-21:14:04.868.036 [context.cc:547]60569 TearDownStream:Stream teardown failed, retCode=0x7020004.
+[ERROR] RUNTIME(60569,):2026-07-28-21:14:04.868.265 [api_c_standard_soc.cc:720]60569 rtStreamEndCapture:ErrCode=507903, desc=[an error has invalidated the stream capture sequence], InnerCode=0x703001a
+[ERROR] RUNTIME(60569,):2026-07-28-21:14:04.868.273 [error_message_manage.cc:65]60569 FuncErrorReason:rtStreamEndCapture execution failed, reason=an error has invalidated the stream capture sequence
+[ERROR] ASCENDCL(60569,):2026-07-28-21:14:04.868.629 [model_ri.cpp:110]60569 aclmdlRICaptureEndImpl:end capture stream failed, runtime result = 507903
+[ERROR] APP(60569,):2026-07-28-21:14:08.686.433 60569 MakeSureQueueEmpty:NPUQueue.cpp:341: "[PTA]:"Inner error happened with CAN_EXIT status, detail: the current copy params are srclen=64, dstlen=64, kind=1""
+[ERROR] APP(60569,):2026-07-28-21:14:09.593.324 60569 MakeSureQueueEmpty:NPUQueue.cpp:341: "[PTA]:"Inner error happened with CAN_EXIT status, detail: the current copy params are srclen=64, dstlen=64, kind=1""
+[ERROR] APP(60569,):2026-07-28-21:14:10.695.657 60569 MakeSureQueueEmpty:NPUQueue.cpp:341: "[PTA]:"Inner error happened with CAN_EXIT status, detail: the current copy params are srclen=64, dstlen=64, kind=1""
+[ERROR] APP(60569,):2026-07-28-21:14:10.700.461 60569 MakeSureQueueEmpty:NPUQueue.cpp:341: "[PTA]:"Inner error happened with CAN_EXIT status, detail: the current copy params are srclen=64, dstlen=64, kind=1""
+[ERROR] APP(60569,):2026-07-28-21:14:10.700.635 60569 THPModule_npu_shutdown:InitNpuBindings.cpp:82: "[PTA]:"NPUCachingAllocator::emptyCache failed""
