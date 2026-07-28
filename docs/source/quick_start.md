@@ -15,28 +15,41 @@ This section guides you through container-based environment setup and large mode
 - Atlas 800I A2 inference series (Atlas 800I A2)
 - Atlas A3 training series (Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD)
 - Atlas 800I A3 inference series (Atlas 800I A3)
-- [Experimental] Atlas inference products
+- Atlas inference products
 
 ## Requirements
 
 - OS: Linux
 - Python: >= 3.10, < 3.13
-- Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series.
+- Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series and Atlas inference products.
 - Software:
 
-    | Software      | Supported version                | Note                                      |
-    |---------------|----------------------------------|-------------------------------------------|
-    | Ascend HDK    | Refer to the documentation [CANN 9.0.1](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html) | Required for CANN |  
-    | CANN          | == 9.0.1                        | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | == 2.10.0.post2                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
-    | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
-    | NNAL          | == 9.0.1                        | Required for libatb.so, enables advanced tensor operations |
+    === "Atlas A2 inference products / Atlas A3 inference products"
+
+        | Software      | Supported version                | Note                                      |
+        |---------------|----------------------------------|-------------------------------------------|
+        | Ascend HDK    | Refer to the documentation [CANN 9.0.1](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html) | Required for CANN |
+        | CANN          | == 9.0.1                        | Required for vllm-ascend and torch-npu    |
+        | torch-npu     | == 2.10.0.post2                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+        | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
+        | NNAL          | == 9.0.1                        | Required for libatb.so, enables advanced tensor operations |
+
+    === "Atlas inference products"
+
+        | Software      | Supported version                | Note                                      |
+        |---------------|----------------------------------|-------------------------------------------|
+        | Ascend HDK    | Refer to the documentation [CANN 9.1.0-beta.1](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910beta1/releasenote/9.1.0-beta.1/release-note.md) | Required for CANN |
+        | CANN          | == 9.1.0-beta.1                 | Required for vllm-ascend and torch-npu    |
+        | torch-npu     | == 2.10.0.post2                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+        | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
+        | NNAL          | == 9.1.0-beta.1                 | Required for libatb.so, enables advanced tensor operations |
+        | triton / triton-ascend | Not supported          | Uninstalled in `Dockerfile.310p` |
 
 !!! note "Atlas inference products"
 
-    Atlas inference products use CANN 9.1.0 beta and `float16`. Use the `-310p` image suffix for Ubuntu or `-310p-openeuler` for openEuler. Atlas inference products do not support `triton` or `triton-ascend`.
+    Atlas inference products use `float16`. Use the `-310p` image suffix for Ubuntu or `-310p-openeuler` for openEuler. Atlas inference products do not support `triton` or `triton-ascend`.
 
-    Always set an explicit, conservative `max_model_len`/`--max-model-len` value on Atlas inference products, for example, `--max-model-len 16384`. The current attention path creates a causal mask whose memory usage grows quadratically with the configured context length, so automatic model-length detection can cause out-of-memory errors.
+    Atlas inference products and Atlas 200I Pro do not support `enable_npugraph_ex`. Set --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}'.
 
     Atlas 200I Pro requires additional device nodes and driver mounts. See [Set up using Docker](installation.md#set-up-using-docker) for the complete container commands.
 
