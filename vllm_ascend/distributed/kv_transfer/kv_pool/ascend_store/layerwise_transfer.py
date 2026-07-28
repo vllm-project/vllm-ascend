@@ -238,6 +238,7 @@ class LayerwiseTransferPreparer:
                 GroupTransferData(
                     block_ids_arr=np.asarray(block_ids, dtype=np.int64),
                     base_gvas_arr=allocated_gvas_np[key_slices_by_group[group_id]],
+                    keys=alloc_keys[key_slices_by_group[group_id]],
                 ),
                 completions_by_group[group_id],
             )
@@ -344,24 +345,44 @@ class LayerwiseTransferPreparer:
         base_gvas = np.empty(len(keys), dtype=np.int64)
         if keys:
             key_infos = self.m_store.batch_get_key_info(keys, flag=1)
-            lease_results = self.m_store.batch_add_lease(keys, LAYERWISE_READ_LEASE_TTL_MS)
-            if len(key_infos) != len(keys) or len(lease_results) != len(keys):
+            if len(key_infos) != len(keys):
                 raise RuntimeError(
-                    "Layerwise load preparation returned unexpected result counts: "
-                    f"keys={len(keys)}, key_infos={len(key_infos)}, leases={len(lease_results)}"
+                    "Layerwise load preparation returned an unexpected number of key infos: "
+                    f"keys={len(keys)}, key_infos={len(key_infos)}"
                 )
-            invalid_gvas = 0
+
+            invalid_gva_positions: list[int] = []
             for position, key_info in enumerate(key_infos):
                 size = key_info.size()
-                base_gvas[position] = key_info.gva_list()[0] if size and size > 0 else 0
-                invalid_gvas += base_gvas[position] == 0
-            lease_failure_count = int(np.count_nonzero(np.asarray(lease_results, dtype=np.int32)))
-            if invalid_gvas or lease_failure_count:
-                logger.error(
-                    "Layerwise load preparation has invalid entries: keys=%d invalid_gvas=%d lease_failures=%d",
-                    len(keys),
-                    invalid_gvas,
-                    lease_failure_count,
+                gva_list = key_info.gva_list()
+                base_gvas[position] = gva_list[0] if size and size > 0 and len(gva_list) > 0 else 0
+                if base_gvas[position] <= 0:
+                    invalid_gva_positions.append(position)
+            if invalid_gva_positions:
+                invalid_keys = [keys[position] for position in invalid_gva_positions[:5]]
+                raise RuntimeError(
+                    "Layerwise load preparation returned invalid GVA metadata: "
+                    f"keys={len(keys)}, invalid={len(invalid_gva_positions)}, sample={invalid_keys}"
+                )
+
+            lease_results = self.m_store.batch_add_lease(keys, LAYERWISE_READ_LEASE_TTL_MS)
+            lease_failure_positions = [
+                position for position, result in enumerate(lease_results[: len(keys)]) if result != 0
+            ]
+            if len(lease_results) != len(keys) or lease_failure_positions:
+                leased_keys = [key for key, result in zip(keys, lease_results) if result == 0]
+                if leased_keys:
+                    rollback_result = self.m_store.batch_remove_lease(leased_keys)
+                    if rollback_result != 0:
+                        logger.error(
+                            "Failed to roll back %d layerwise load leases after preparation failure: res=%d",
+                            len(leased_keys),
+                            rollback_result,
+                        )
+                raise RuntimeError(
+                    "Layerwise load lease acquisition failed: "
+                    f"keys={len(keys)}, results={len(lease_results)}, "
+                    f"failures={len(lease_failure_positions)}"
                 )
             self.register_load_leases(keys_by_request)
 

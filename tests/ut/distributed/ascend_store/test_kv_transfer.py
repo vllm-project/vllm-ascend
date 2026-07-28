@@ -27,8 +27,10 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     ChunkedTokenDatabase,
+    GroupBatchPlan,
     GroupTransferData,
     KeyMetadata,
+    LayerBlockRange,
     LayerLoadTask,
     LayerMultiBlockReqMeta,
     LayerPoolKey,
@@ -263,6 +265,56 @@ class TestLayerwiseTransferPreparer(unittest.TestCase):
             preparation.ensure_ready()
 
         self.assertEqual(task.finished_req_ids, {"r1"})
+
+    @staticmethod
+    def _make_load_plan(block_hashes):
+        requests = [
+            ReqMeta(
+                req_id=f"request-{index}",
+                token_len_chunk=16,
+                block_ids_by_group=[[index + 1]],
+                block_hashes=[block_hash],
+                is_last_chunk=True,
+            )
+            for index, block_hash in enumerate(block_hashes)
+        ]
+        return GroupBatchPlan(
+            group_id=0,
+            block_size=16,
+            full_load_ranges=[LayerBlockRange(request=request, start_block=0, end_block=1) for request in requests],
+        )
+
+    def test_rejects_invalid_gva_before_acquiring_lease(self):
+        preparer = self._make_preparer()
+        key_info = MagicMock()
+        key_info.size.return_value = 1
+        key_info.gva_list.return_value = []
+        preparer.m_store.batch_get_key_info.return_value = [key_info]
+
+        with self.assertRaisesRegex(RuntimeError, "invalid GVA metadata"):
+            preparer.resolve_load_groups([self._make_load_plan(["aa"])])
+
+        preparer.m_store.batch_add_lease.assert_not_called()
+        self.assertEqual(preparer.load_lease_keys_by_request, {})
+
+    def test_rolls_back_successful_lease_after_partial_failure(self):
+        preparer = self._make_preparer()
+        key_infos = []
+        for gva in (1000, 2000):
+            key_info = MagicMock()
+            key_info.size.return_value = 1
+            key_info.gva_list.return_value = [gva]
+            key_infos.append(key_info)
+        preparer.m_store.batch_get_key_info.return_value = key_infos
+        preparer.m_store.batch_add_lease.return_value = [0, -3102]
+        preparer.m_store.batch_remove_lease.return_value = 0
+
+        with self.assertRaisesRegex(RuntimeError, "lease acquisition failed"):
+            preparer.resolve_load_groups([self._make_load_plan(["aa", "bb"])])
+
+        first_key = preparer.make_gva_key(0, "aa")
+        preparer.m_store.batch_remove_lease.assert_called_once_with([first_key])
+        self.assertEqual(preparer.load_lease_keys_by_request, {})
 
 
 class TestLayerwiseTaskPreparation(unittest.TestCase):
@@ -813,17 +865,22 @@ class TestGVALayerSendingThread(unittest.TestCase):
             np.asarray([200]),
         )
         thread, store, layer_finished = self._make_thread(builders=builders)
+        store.batch_write_finish.return_value = [0, 0]
         tasks = [
             LayerTransferTask(
                 layer_id=0,
                 block_ranges=[],
-                transfer_data=MagicMock(),
+                transfer_data=GroupTransferData(
+                    block_ids_arr=np.asarray([group_id]),
+                    base_gvas_arr=np.asarray([100 + group_id]),
+                    keys=[f"k{group_id}"],
+                ),
                 completion=TransferCompletion(["r1"], [True]),
-                finished_req_ids={"r1"} if group_id == 1 else set(),
                 group_id=group_id,
             )
             for group_id in range(2)
         ]
+        thread.prepare_layerwise_tasks([tasks])
         thread.add_stored_request("r1")
         thread.add_stored_request("r1")
         request = LayerSaveTask(layer_id=0, transfer_tasks=tasks)
@@ -832,8 +889,40 @@ class TestGVALayerSendingThread(unittest.TestCase):
         thread._handle_request(request)
 
         store.store.batch_copy.assert_called_once_with([100, 200], [10, 20], [16, 16], 0)
+        store.batch_write_finish.assert_called_once_with(["k0", "k1"], [0, 0])
         self.assertEqual(thread.get_and_clear_finished_requests(), {"r1"})
         self.assertTrue(layer_finished.is_set())
+
+    def test_write_finish_failure_does_not_complete_request_or_layer(self):
+        builder = MagicMock()
+        builder.build_addrs.return_value = LayerTransferArrays(
+            np.asarray([10]),
+            np.asarray([16]),
+            np.asarray([100]),
+        )
+        thread, store, layer_finished = self._make_thread(builders=[builder])
+        store.batch_write_finish.return_value = [-3102]
+        task = LayerTransferTask(
+            layer_id=0,
+            block_ranges=[],
+            transfer_data=GroupTransferData(
+                block_ids_arr=np.asarray([0]),
+                base_gvas_arr=np.asarray([100]),
+                keys=["k0"],
+            ),
+            completion=TransferCompletion(["r1"], [True]),
+        )
+        thread.prepare_layerwise_tasks([[task]])
+        thread.add_stored_request("r1")
+        request = LayerSaveTask(layer_id=0, transfer_tasks=[task])
+        thread.request_queue.put(request)
+
+        with self.assertRaisesRegex(RuntimeError, "batch_write_finish failed"):
+            thread._handle_request(request)
+
+        self.assertEqual(thread.stored_requests["r1"], 1)
+        self.assertEqual(thread.get_and_clear_finished_requests(), set())
+        self.assertFalse(layer_finished.is_set())
 
     def test_missing_group_data_is_fatal(self):
         thread, _, layer_finished = self._make_thread(builders=[MagicMock()])
@@ -1115,9 +1204,7 @@ class TestGVALayerRecvingThread(unittest.TestCase):
                 "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer.time.perf_counter_ns",
                 side_effect=[0, 100_000],
             ),
-            patch(
-                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer.time.sleep"
-            ) as sleep,
+            patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer.time.sleep") as sleep,
         ):
             thread._stagger_h2d_submit(layer_id=0)
 
@@ -1132,9 +1219,7 @@ class TestGVALayerRecvingThread(unittest.TestCase):
                 "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer.time.perf_counter_ns",
                 side_effect=[0, 25_000],
             ),
-            patch(
-                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer.time.sleep"
-            ) as sleep,
+            patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer.time.sleep") as sleep,
         ):
             thread._stagger_h2d_submit(layer_id=0)
 

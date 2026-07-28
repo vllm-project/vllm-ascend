@@ -1052,6 +1052,7 @@ class GroupTransferData:
 
     block_ids_arr: np.ndarray
     base_gvas_arr: np.ndarray
+    keys: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1101,6 +1102,8 @@ class LayerTransferTask:
     layer_idx_in_group: int = 0
     uses_hbm_tail: bool = False
     preparation: LayerwisePreparation | None = None
+    # Keys published after this task completes the final copy into their GVAs.
+    write_finish_keys: list[str] = field(default_factory=list)
     # Cache for KVCacheStoreKeyLayerSendingThread:
     # maps block_range index -> list of (start, end, key_all_layers)
     cached_process_tokens: dict[int, list[tuple[int, int, list]]] | None = None
