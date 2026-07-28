@@ -342,12 +342,9 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 dim=0,
             )
 
-        # NPU copy for FA3's get_scheduler_metadata / full_graph_fa3.
-        # Must be created AFTER all padding/cat transformations so the
-        # data layout matches what _get_or_build_fa3_scheduler_metadata
-        # would have produced via .to(device) — same CPU->NPU copy,
-        # same striding, same memory ordering.  The CPU version is kept
-        # in seq_lens_cpu for any CPU-side access.
+        # NPU copy for FA3 - created AFTER all padding/cat so the data
+        # layout is identical to what _get_or_build_fa3_scheduler_metadata
+        # would produce via .to(device=query.device).
         seq_lens_cpu = seq_lens
         seq_lens = seq_lens.to(self.device)
 
@@ -478,11 +475,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if not is_cache:
             return None
 
-        # Tensors are already on NPU — seq_lens was copied in the builder
-        # (after all padding/cat transformations), and query_start_loc was
-        # built via .to(device) in the builder.  No .to() needed here.
+        # H2D copy only needed when seq_lens is still on CPU (eager warmup).
+        # During graph capture (and after the first eager warmup), seq_lens
+        # is already on the NPU — the .to() becomes a no-op and won't
+        # trigger an illegal H2D on a captured stream.
         cache_seqlens = attn_metadata.seq_lens
+        if cache_seqlens.device != query.device:
+            cache_seqlens = cache_seqlens.to(device=query.device)
         cu_seqlens_q = attn_metadata.query_start_loc
+        if cu_seqlens_q.device != query.device:
+            cu_seqlens_q = cu_seqlens_q.to(device=query.device)
 
         return get_scheduler_metadata(
             batch_size=len(attn_metadata.seq_lens_list),
@@ -1496,6 +1498,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         block_table=block_table if is_cache else None,
                         seq_lens_list=actual_seq_lengths_kv if is_cache else None,
                         scheduler_metadata=scheduler_metadata,
+                        cache_seqlens=attn_metadata.seq_lens,
+                        cu_seqlens_q=attn_metadata.query_start_loc,
                     )
                 except (ImportError, ValueError, RuntimeError, TypeError):
                     # FA3 unavailable for this invocation (e.g. head_dim too
