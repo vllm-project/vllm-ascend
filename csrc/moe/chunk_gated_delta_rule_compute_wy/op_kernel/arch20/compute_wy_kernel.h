@@ -82,7 +82,8 @@ class KernelComputeWy {
     const uint32_t localWsBytes = localWorkspaceSize_ == 0 ? (32 * 1024) : localWorkspaceSize_;
     pipe_->InitBuffer(mmLocalWsBuf_, localWsBytes);
     cubeGemm_.Init(&tiling->mmAttn, &tiling->mmSquare, &tiling->mmApplyU, &tiling->mmApplyW, pipe_,
-                   mmLocalWsBuf_.Get<uint8_t>(), localWsBytes, workspace, perCoreWorkspaceBytes_, usedCoreNum_);
+                   mmLocalWsBuf_.Get<uint8_t>(), localWsBytes, workspace, tiling->workspaceOffset,
+                   perCoreWorkspaceBytes_, usedCoreNum_);
 
     uint32_t maxAlign = (alignK_ > alignV_ ? alignK_ : alignV_);
     if (maxAlign < FIXED_CHUNK_SIZE) {

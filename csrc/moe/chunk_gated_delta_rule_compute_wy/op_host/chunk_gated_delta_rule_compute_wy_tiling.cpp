@@ -1,7 +1,5 @@
 #include "chunk_gated_delta_rule_compute_wy_tiling.h"
 
-#include <algorithm>
-
 #include <register/op_impl_registry.h>
 #include <tiling/tiling_api.h>
 
@@ -16,7 +14,6 @@ static constexpr size_t DIM_H = 2;
 static constexpr size_t DIM_D = 3;
 
 static constexpr int64_t FIXED_CHUNK = 64;
-static constexpr uint32_t SYS_WORKSPACE_SIZE = 16 * 1024 * 1024;
 static constexpr uint32_t LOCAL_WORKSPACE_BYTES = 32 * 1024;
 // Per-core GM staging: A_half(64*128) + B_half(64*128) + C_float(64*128)
 static constexpr uint32_t STAGING_A_BYTES = FIXED_CHUNK * 128 * sizeof(uint16_t);
@@ -88,9 +85,7 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleComputeWy(gert::TilingContext *context
     const int64_t totalTasks = b * hv * numChunks;
 
     const auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
-    uint32_t aicNum = ascendcPlatform.GetCoreNumAic();
-    uint32_t aivNum = ascendcPlatform.GetCoreNumAiv();
-    uint32_t usedCoreNum = std::max(aicNum, aivNum);
+    uint32_t usedCoreNum = ascendcPlatform.GetCoreNumAic();
     if (usedCoreNum == 0) {
         usedCoreNum = 1;
     }
@@ -130,13 +125,14 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleComputeWy(gert::TilingContext *context
     tiling.set_localWorkspaceSize(LOCAL_WORKSPACE_BYTES);
     tiling.set_perCoreWorkspaceBytes(PER_CORE_STAGING_BYTES);
     tiling.set_usedCoreNum(usedCoreNum);
-    tiling.set_reserved0(0);
+    const uint64_t workspaceOffset = ascendcPlatform.GetLibApiWorkSpaceSize();
+    tiling.set_workspaceOffset(workspaceOffset);
 
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
 
     size_t *workspace = context->GetWorkspaceSizes(1);
-    workspace[0] = static_cast<size_t>(SYS_WORKSPACE_SIZE) +
+    workspace[0] = static_cast<size_t>(workspaceOffset) +
                    static_cast<size_t>(usedCoreNum) * static_cast<size_t>(PER_CORE_STAGING_BYTES);
     return ge::GRAPH_SUCCESS;
 }
