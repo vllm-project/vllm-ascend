@@ -342,13 +342,22 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 dim=0,
             )
 
+        # NPU copy for FA3's get_scheduler_metadata / full_graph_fa3.
+        # Must be created AFTER all padding/cat transformations so the
+        # data layout matches what _get_or_build_fa3_scheduler_metadata
+        # would have produced via .to(device) — same CPU->NPU copy,
+        # same striding, same memory ordering.  The CPU version is kept
+        # in seq_lens_cpu for any CPU-side access.
+        seq_lens_cpu = seq_lens
+        seq_lens = seq_lens.to(self.device)
+
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
             num_decode_tokens=num_decode_tokens,
             block_tables=block_table,
             query_start_loc=query_start_loc,
             seq_lens=seq_lens,
-            seq_lens_cpu=seq_lens,
+            seq_lens_cpu=seq_lens_cpu,
             seq_lens_list=seq_lens_list,
             max_query_len=common_attn_metadata.max_query_len,
             actual_seq_lengths_q=actual_seq_lengths_q,
@@ -469,16 +478,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if not is_cache:
             return None
 
-        # FA3's get_scheduler_metadata appears to launch device-side kernels
-        # internally; all tensor arguments must reside on the NPU to avoid
-        # AICPU ComputeFAMetadataPv crashes (errorCode=0x2a).
-        device = query.device
+        # Tensors are already on NPU — seq_lens was copied in the builder
+        # (after all padding/cat transformations), and query_start_loc was
+        # built via .to(device) in the builder.  No .to() needed here.
         cache_seqlens = attn_metadata.seq_lens
-        if cache_seqlens.device != device:
-            cache_seqlens = cache_seqlens.to(device=device)
         cu_seqlens_q = attn_metadata.query_start_loc
-        if cu_seqlens_q.device != device:
-            cu_seqlens_q = cu_seqlens_q.to(device=device)
 
         return get_scheduler_metadata(
             batch_size=len(attn_metadata.seq_lens_list),
@@ -487,9 +491,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_heads_q=self.num_heads,
             num_heads_kv=self.num_kv_heads,
             headdim=self.head_size,
-            cache_seqlens=attn_metadata.seq_lens,
+            cache_seqlens=cache_seqlens,
             qkv_dtype=query.dtype,
-            cu_seqlens_q=attn_metadata.query_start_loc,
+            cu_seqlens_q=cu_seqlens_q,
             page_size=block_size,
             causal=attn_metadata.causal,
         )
@@ -1491,6 +1495,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         cache_mode=is_cache,
                         block_table=block_table if is_cache else None,
                         seq_lens_list=actual_seq_lengths_kv if is_cache else None,
+                        scheduler_metadata=scheduler_metadata,
                     )
                 except (ImportError, ValueError, RuntimeError, TypeError):
                     # FA3 unavailable for this invocation (e.g. head_dim too

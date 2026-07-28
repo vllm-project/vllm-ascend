@@ -148,6 +148,7 @@ def fa3_forward(
             softmax_scale=scale,
             causal=causal,
             window_size=window_size,
+            scheduler_metadata=scheduler_metadata,
         )
     else:
         # ---- dense prefill path (no KV cache) ----
