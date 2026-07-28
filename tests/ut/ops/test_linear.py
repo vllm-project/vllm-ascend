@@ -202,6 +202,13 @@ class TestColumnParallelOpDispatch(unittest.TestCase):
         self._patches[-1].start()
         self.assertIsNotNone(self._get_column_op("model.layers.0.self_attn.g_proj"))
 
+    def test_multimodal_encoder_prefix_skips_sp_column(self):
+        """Multimodal encoder variants should not enter the SP column path."""
+        self._patches.append(patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True))
+        self._patches[-1].start()
+        self.assertIsNone(self._get_column_op("model.vision_model_proj.indexer_proj"))
+        self.assertIsNone(self._get_column_op("model.vision_tower_encoder.qkv_proj"))
+
 
 class TestRowParallelOpDispatch(unittest.TestCase):
     """Tests for _get_row_parallel_op — mtp_block, share_expert."""
@@ -233,6 +240,13 @@ class TestRowParallelOpDispatch(unittest.TestCase):
         self._patches[-1].start()
         self.assertIsNone(self._op("model.layers.0.mlp.share_expert.down_proj"))
         self.assertIsNone(self._op("model.layers.0.mlp.shared_expert.down_proj"))
+
+    def test_multimodal_encoder_prefix_skips_sp_row(self):
+        """Multimodal encoder variants should not enter the SP row path."""
+        self._patches.append(patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True))
+        self._patches[-1].start()
+        self.assertIsNone(self._op("model.multi_modal_projector.down_proj"))
+        self.assertIsNone(self._op("model.patch_merge_mlp.out_proj"))
 
 
 class TestGetParallelOpShareExpert(unittest.TestCase):
