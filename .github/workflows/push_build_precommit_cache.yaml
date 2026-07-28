@@ -71,12 +71,6 @@ jobs:
           key: pre-commit-${{ steps.get_hash.outputs.PRE_COMMIT_HASH }}
           lookup-only: true
 
-      - name: Install pre-commit
-        if: steps.check-cache.outputs.cache-hit != 'true'
-        run: |
-          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
-          pip install pre-commit
-
       - name: Clean stale pre-commit cache
         if: steps.check-cache.outputs.cache-hit != 'true'
         run: rm -rf /tmp/pre-commit-cache
