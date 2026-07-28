@@ -50,11 +50,11 @@ def define_env(env):
     env.variables["vllm_ascend_version"] = env.variables.get("vllm_ascend_version", "v0.22.1rc1")
     env.variables["pip_vllm_ascend_version"] = env.variables.get("pip_vllm_ascend_version", "0.22.1rc1")
     env.variables["pip_vllm_version"] = env.variables.get("pip_vllm_version", "0.22.1")
-    env.variables["cann_image_tag"] = env.variables.get("cann_image_tag", "9.0.0-910b-ubuntu22.04-py3.12")
+    env.variables["cann_image_tag"] = env.variables.get("cann_image_tag", "9.0.1-910b-ubuntu22.04-py3.12")
     env.variables["main_python_version"] = env.variables.get("main_python_version", ">= 3.10, < 3.13")
-    env.variables["main_cann_version"] = env.variables.get("main_cann_version", "9.0.0")
+    env.variables["main_cann_version"] = env.variables.get("main_cann_version", "9.0.1")
     env.variables["main_pytorch_torch_npu_version"] = env.variables.get(
-        "main_pytorch_torch_npu_version", "2.10.0 / 2.10.0"
+        "main_pytorch_torch_npu_version", "2.10.0 / 2.10.0.post2"
     )
     env.variables["main_triton_ascend_version"] = env.variables.get("main_triton_ascend_version", "3.2.1")
     env.variables["main_vllm_commit"] = main_vllm_commit

@@ -123,13 +123,9 @@ def main(
     os.environ["VLLM_DP_MASTER_IP"] = dp_master_ip
     os.environ["VLLM_DP_MASTER_PORT"] = str(dp_master_port)
 
-    from vllm_ascend.utils import vllm_version_is
+    import torch
 
-    _dp_device_ids = None
-    if not vllm_version_is("0.23.0"):
-        import torch
-
-        _dp_device_ids = [str(i) for i in range(torch.npu.device_count())]
+    _dp_device_ids = [str(i) for i in range(torch.npu.device_count())]
 
     # Sample prompts.
     prompts = [

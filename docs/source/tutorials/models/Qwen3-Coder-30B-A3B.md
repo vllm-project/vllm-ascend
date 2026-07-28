@@ -46,15 +46,9 @@ If the W8A8 quantized weights are not available for direct download, you can obt
 
 You can use the official all-in-one Docker image for Qwen3 MoE models.
 
-**Docker Pull:**
+=== "A3 series"
 
-```bash
-docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
-```
-
-**Docker Run:**
-
-=== "Atlas 800I A3"
+    **Docker Run:**
 
     ```bash
 
@@ -62,9 +56,8 @@ docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
     docker run \
         --name vllm-ascend-env \
-        --shm-size=128g \
-        --net=host \
-        --privileged=true \
+        --ipc host \
+        --net host \
         --device /dev/davinci0 \
         --device /dev/davinci1 \
         --device /dev/davinci2 \
@@ -89,12 +82,6 @@ docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
         -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
         -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /usr/local/sbin:/usr/local/sbin \
-        -v /home:/home \
-        -v /data:/data \
-        -v /tmp:/tmp \
-        -v /mnt:/mnt \
-        -v /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime \
-        -v /root:/host_root \
         -it -d $IMAGE bash
     ```
 
@@ -103,7 +90,9 @@ docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
         A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
         If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
 
-=== "Atlas 800I A2"
+=== "A2 series"
+
+    **Docker Run:**
 
     ```bash
 
@@ -111,9 +100,8 @@ docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
     docker run \
         --name vllm-ascend-env \
-        --shm-size=128g \
-        --net=host \
-        --privileged=true \
+        --ipc host \
+        --net host \
         --device /dev/davinci0 \
         --device /dev/davinci1 \
         --device /dev/davinci2 \
@@ -130,14 +118,11 @@ docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
         -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
         -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /usr/local/sbin:/usr/local/sbin \
-        -v /home:/home \
-        -v /data:/data \
-        -v /tmp:/tmp \
-        -v /mnt:/mnt \
-        -v /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime \
-        -v /root:/host_root \
         -it -d $IMAGE bash
     ```
+
+!!! tip
+    The mounts above are the minimum required for NPU driver access. Add additional `-v` mounts (e.g., model weight paths, datasets) as needed for your environment.
 
 The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed as Python packages in site-packages.
 

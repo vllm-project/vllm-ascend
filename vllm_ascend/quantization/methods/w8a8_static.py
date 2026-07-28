@@ -22,7 +22,6 @@ import torch_npu
 
 from vllm_ascend.utils import (
     COMPRESSED_TENSORS_METHOD,
-    get_weight_prefetch_method,
     maybe_trans_nz,
 )
 
@@ -79,46 +78,12 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
         if x.dtype != torch.int8:
-            layer_cls_name = layer.__class__.__name__
-            weight_prefetch_method = get_weight_prefetch_method()
-            # prefetch qkvo_proj.weight preprocess
-            weight_prefetch_method.maybe_prefetch_attn_weight_preprocess(
-                layer_cls_name=layer_cls_name,
-                weight=layer.weight,
-                start_flag=x,
-            )
-            try:
-                quant_comm_config = layer._quant_comm_config
-            except AttributeError:
-                quant_comm_config = {}
-            comm_fn = quant_comm_config.get("communication_fn")
-            enable_flashcomm2_quant_comm = comm_fn is not None and (
-                "o_proj" in layer.prefix or "out_proj" in layer.prefix
-            )
-            if enable_flashcomm2_quant_comm:
-                quant_input_x = x.contiguous().view(-1, layer.aclnn_input_scale_reciprocal.size(0))
-                quant_x = torch.ops.vllm.quantize(
-                    quant_input_x,
-                    layer.aclnn_input_scale,
-                    layer.aclnn_input_scale_reciprocal,
-                    layer.aclnn_input_offset,
-                )
-                comm_input = quant_x.view(x.size(0), -1)
-                assert comm_fn is not None
-                x = comm_fn(comm_input)
-            else:
-                # quant
-                x = torch.ops.vllm.quantize(
-                    x,
-                    layer.aclnn_input_scale,
-                    layer.aclnn_input_scale_reciprocal,
-                    layer.aclnn_input_offset,
-                )
-
-            # prefetch qkvo_proj.weight postprocess
-            weight_prefetch_method.maybe_prefetch_attn_weight_postprocess(
-                layer_cls_name=layer_cls_name,
-                stop_flag=x,
+            # quant
+            x = torch.ops.vllm.quantize(
+                x,
+                layer.aclnn_input_scale,
+                layer.aclnn_input_scale_reciprocal,
+                layer.aclnn_input_offset,
             )
 
         quant_bias = layer.quant_bias if tp_rank == 0 else None

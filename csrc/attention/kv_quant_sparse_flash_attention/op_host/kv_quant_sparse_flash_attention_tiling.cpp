@@ -1669,7 +1669,6 @@ ge::graphStatus QSFAInfoParser::GetAttrParaInfo()
     opParamInfo_.tileSize = attrs->GetAttrPointer<int64_t>(TILE_SIZE_ATTR_INDEX);
     opParamInfo_.ropeHeadDim = attrs->GetAttrPointer<int64_t>(ROPE_HEAD_DIM_ATTR_INDEX);
     opParamInfo_.returnSoftmaxLse = attrs->GetAttrPointer<bool>(RETURN_SOFTMAX_LSE_ATTR_INDEX);
-    printf(" ============ tiling入口处 =========== \n");
     OP_LOGE("ccccc"," ============ tiling入口 ============");
     return ge::GRAPH_SUCCESS;
 }

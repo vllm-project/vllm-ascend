@@ -526,16 +526,14 @@ class TestNPUWorker(TestBase):
             worker.compilation_config = MagicMock()
             worker.compilation_config.cudagraph_mode = MagicMock()
             mock_model_runner = MagicMock()
-            mock_decode_token_per_req = mock_model_runner.decode_token_per_req
+            mock_uniform_decode_query_len = mock_model_runner.uniform_decode_query_len
             worker.model_runner = mock_model_runner
 
             # Test execute_dummy_batch
             worker.execute_dummy_batch()
 
             # Verify call
-            mock_model_runner._dummy_run.assert_called_once_with(
-                num_tokens=mock_decode_token_per_req, uniform_decode=True
-            )
+            mock_model_runner._dummy_run.assert_called_once_with(mock_uniform_decode_query_len, uniform_decode=True)
 
     @patch("vllm_ascend.worker.worker.memory_profiling")
     @patch("torch.npu.reset_peak_memory_stats")

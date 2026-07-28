@@ -38,6 +38,7 @@ You can use our official docker image to run `DeepSeek-V3.2` directly.
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     docker run --rm \
         --name vllm-ascend \
+        --privileged=true \
         --shm-size=1g \
         --net=host \
         --device /dev/davinci0 \
@@ -78,6 +79,7 @@ You can use our official docker image to run `DeepSeek-V3.2` directly.
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     docker run --rm \
         --name vllm-ascend \
+        --privileged=true \
         --shm-size=1g \
         --net=host \
         --device /dev/davinci0 \
@@ -509,7 +511,7 @@ Before you start, please
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
-            --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
@@ -524,7 +526,7 @@ Before you start, please
             --quantization ascend \
             --enforce-eager \
             --no-enable-prefix-caching \
-            --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"], "enable_dsa_cp": true}' \
+            --additional-config '{"enable_dsa_cp": true}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeLayerwiseConnector",
             "kv_role": "kv_producer",
@@ -582,7 +584,7 @@ Before you start, please
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
-            --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
@@ -597,7 +599,7 @@ Before you start, please
             --quantization ascend \
             --enforce-eager \
             --no-enable-prefix-caching \
-            --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"], "enable_dsa_cp": true}' \
+            --additional-config '{"enable_dsa_cp": true}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeLayerwiseConnector",
             "kv_role": "kv_producer",

@@ -97,7 +97,7 @@ class TestProfilingChunkConfig(TestBase):
         vllm_config = VllmConfig()
         vllm_config.model_config = MagicMock()
         vllm_config.additional_config = {
-            "profiling_chunk_config": {"enabled": True},
+            "scheduler_config": {"profiling_chunk_config": {"enabled": True}},
             "refresh": True,
         }
         vllm_config.parallel_config.pipeline_parallel_size = 1
@@ -114,12 +114,12 @@ class TestProfilingChunkConfig(TestBase):
         vllm_config = VllmConfig()
         vllm_config.model_config = MagicMock()
         vllm_config.additional_config = {
-            "profiling_chunk_config": {"enabled": True},
+            "scheduler_config": {"profiling_chunk_config": {"enabled": True}},
             "refresh": True,
         }
         vllm_config.parallel_config.pipeline_parallel_size = 2
         ascend_config = init_ascend_config(vllm_config)
-        self.assertTrue(ascend_config.profiling_chunk_config.enabled)
+        self.assertTrue(ascend_config.scheduler_config.profiling_chunk_config.enabled)
         clear_ascend_config()
 
     @patch("vllm.config.VllmConfig.__post_init__", MagicMock())
@@ -131,7 +131,7 @@ class TestProfilingChunkConfig(TestBase):
         vllm_config.model_config = MagicMock()
         vllm_config.additional_config = {"refresh": True}
         ascend_config = init_ascend_config(vllm_config)
-        self.assertFalse(ascend_config.profiling_chunk_config.enabled)
+        self.assertFalse(ascend_config.scheduler_config.profiling_chunk_config.enabled)
         clear_ascend_config()
 
 
@@ -245,17 +245,19 @@ class TestProfilingChunkManager(TestBase):
 
 
 class TestProfilingChunkScheduler(TestBase):
+    @patch("vllm_ascend.patch.platform.patch_balance_schedule.init_ascend_config")
     @patch("vllm_ascend.ascend_config.AscendConfig.__init__", MagicMock(return_value=None))
     @patch("vllm_ascend.ascend_config.get_ascend_config")
     @patch("vllm.config.ModelConfig.__post_init__", MagicMock())
     @patch("vllm.config.VllmConfig.__post_init__", MagicMock())
     @patch("vllm.config.device.DeviceConfig.__post_init__", MagicMock())
-    def create_scheduler(self, mock_get_ascend_config):
+    def create_scheduler(self, mock_get_ascend_config, mock_init_ascend_config):
         profiling_cfg = MagicMock()
         profiling_cfg.enabled = True
         profiling_cfg.smooth_factor = 0.8
         profiling_cfg.min_chunk = 256
-        mock_get_ascend_config.return_value = MagicMock(profiling_chunk_config=profiling_cfg)
+        mock_get_ascend_config.return_value.scheduler_config.profiling_chunk_config = profiling_cfg
+        mock_init_ascend_config.return_value.scheduler_config.short_request_first_config.enabled = False
 
         mock_hf_config = MagicMock()
         mock_hf_config.model_type = "qwen3"
