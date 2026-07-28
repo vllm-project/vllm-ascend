@@ -181,7 +181,7 @@ jobs:
           fi
 
       - name: Push image to SWR temp
-        if: ${{ github.repository_owner == 'du-ping1' && (steps.login-swr.conclusion == 'success' || steps.login-swr-daily.conclusion == 'success') }}
+        if: ${{ github.repository_owner == 'vllm-project' && (steps.login-swr.conclusion == 'success' || steps.login-swr-daily.conclusion == 'success') }}
         run: |
           SWR_TEMP_REGISTRY="${{ steps.build.outputs.swr_temp_registry }}"
           FULL_TAG="${{ steps.build.outputs.full_tag }}"
