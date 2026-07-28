@@ -157,7 +157,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
 --enable-auto-tool-choice \
 --max-num-seqs 12 \
 --max-model-len 135000 \
---max-num-batched-tokens 8192 \
+--max-num-batched-tokens 6144 \
 --trust-remote-code \
 --gpu-memory-utilization 0.92 \
 --quantization ascend \
@@ -231,7 +231,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --enable-auto-tool-choice \
     --max-num-seqs 16 \
     --max-model-len 66000 \
-    --max-num-batched-tokens 8192 \
+    --max-num-batched-tokens 6144 \
     --trust-remote-code \
     --gpu-memory-utilization 0.90 \
     --quantization ascend \
@@ -282,7 +282,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --enable-auto-tool-choice \
     --max-num-seqs 16 \
     --max-model-len 66000 \
-    --max-num-batched-tokens 8192 \
+    --max-num-batched-tokens 6144 \
     --trust-remote-code \
     --gpu-memory-utilization 0.90 \
     --quantization ascend \
@@ -331,7 +331,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     --max_model_len 40000 \
-    --max-num-batched-tokens 4096 \
+    --max-num-batched-tokens 6144 \
     --served-model-name glm-52 \
     --seed 1024 \
     --gpu-memory-utilization 0.95 \
@@ -387,7 +387,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     --max_model_len 40000 \
-    --max-num-batched-tokens 4096 \
+    --max-num-batched-tokens 6144 \
     --served-model-name glm-52 \
     --seed 1024 \
     --gpu-memory-utilization 0.95 \
@@ -690,7 +690,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 133120 \
-            --max-num-batched-tokens 164 \
+            --max-num-batched-tokens 192 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
             --additional-config '{"recompute_scheduler_enable":true, "enable_sparse_li_c8": true}' \
@@ -756,7 +756,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 133120 \
-            --max-num-batched-tokens 164 \
+            --max-num-batched-tokens 192 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
             --additional-config '{"recompute_scheduler_enable":true, "enable_sparse_li_c8": true}' \
@@ -1022,7 +1022,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     --served-model-name glm-5 \
     --async-scheduling \
     --max-model-len 256000 \
-    --max-num-batched-tokens 256 \
+    --max-num-batched-tokens 768 \
     --trust-remote-code \
     --max-num-seqs 128 \
     --gpu-memory-utilization 0.95 \
@@ -1175,7 +1175,7 @@ vllm serve <MODEL_PATH> \
   --port 9000 \
   --served-model-name glm-52 \
   --max-model-len 1024000 \
-  --max-num-batched-tokens 16384 \
+  --max-num-batched-tokens 6144 \
   --gpu-memory-utilization 0.80 \
   --api-server-count 1 \
   --max-num-seqs 32 \
@@ -1225,7 +1225,7 @@ vllm serve <MODEL_PATH> \
   --port 9000 \
   --served-model-name glm-52 \
   --max-model-len 1024000 \
-  --max-num-batched-tokens 16384 \
+  --max-num-batched-tokens 6144 \
   --gpu-memory-utilization 0.75 \
   ${server_role_args} \
   --max-num-seqs 8 \
@@ -1350,7 +1350,7 @@ vllm serve <MODEL_PATH> \
   --port 9900 \
   --served-model-name glm-52 \
   --max-model-len 1024000 \
-  --max-num-batched-tokens 128 \
+  --max-num-batched-tokens 192 \
   --gpu-memory-utilization 0.93 \
   ${server_role_args} \
   --max-num-seqs 32 \
