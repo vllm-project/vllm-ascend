@@ -171,7 +171,6 @@ msgid ""
 msgstr "**NPU FA3不支持的功能**：滑动窗口注意力、RoPE、ALiBi、Softcapping和FP8量化暂不支持。"
 
 #: ../../source/user_guide/feature_guide/flash_attention.md:43
-#, fuzzy, python-brace-format
 msgid ""
 "**Graph capture**: The tiling of `flash_attn_with_kvcache` is processed "
 "on the host side and is currently being optimized. It does not support "
@@ -272,7 +271,6 @@ msgid ""
 msgstr "**不支持滑动窗口**：FA3不支持滑动窗口注意力。需要滑动窗口的模型需使用默认FIA后端。"
 
 #: ../../source/user_guide/feature_guide/flash_attention.md:138
-#, fuzzy, python-brace-format
 msgid ""
 "**ACL graph capture not supported**: The tiling of "
 "`flash_attn_with_kvcache` is processed on the host side and currently "
@@ -336,7 +334,6 @@ msgid "**Qwen3 (MoE)**: `Qwen/Qwen3-30B-A3B`"
 msgstr "**Qwen3 (MoE)**：`Qwen/Qwen3-30B-A3B`"
 
 #: ../../source/user_guide/feature_guide/flash_attention.md:156
-#, fuzzy
 msgid ""
 "Other models have not been tested yet and will be supported in the future"
 " if not supported after being tested."

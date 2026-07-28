@@ -380,7 +380,6 @@ msgid ""
 msgstr "如果服务启动成功，将显示以下启动日志："
 
 #: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:279
-#, fuzzy
 msgid "6 Functional Verification"
 msgstr "6 功能验证"
 
@@ -399,7 +398,6 @@ msgid ""
 msgstr "预期结果：HTTP 200，JSON 响应中包含 `choices` 字段及生成的文本。"
 
 #: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:357
-#, fuzzy
 msgid "7 Accuracy Evaluation"
 msgstr "7 精度评估"
 
@@ -417,7 +415,6 @@ msgstr ""
 "的精度评估。"
 
 #: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:363
-#, fuzzy
 msgid ""
 "Refer to [Using "
 "evalscope](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_evalscope.html"
@@ -441,7 +438,6 @@ msgstr ""
 "上的结果，仅供参考。"
 
 #: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:393
-#, fuzzy
 msgid "8 Performance Evaluation"
 msgstr "8 性能评估"
 
@@ -450,7 +446,6 @@ msgid "Using vLLM Benchmark"
 msgstr "使用 vLLM 基准测试"
 
 #: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:397
-#, fuzzy
 msgid ""
 "Run performance evaluation of `Qwen3-Omni-30B-A3B-Thinking` as an "
 "example. Refer to vllm benchmark for more details. Refer to [vLLM "
@@ -481,7 +476,6 @@ msgid "Take the `serve` as an example. Run the code as follows."
 msgstr "以 `serve` 为例，运行如下代码。"
 
 #: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:450
-#, fuzzy
 msgid "9 Performance Tuning"
 msgstr "9 性能调优"
 
@@ -509,7 +503,6 @@ msgid "Scenario"
 msgstr "场景"
 
 #: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:261
-#, fuzzy
 msgid "Deployment Mode"
 msgstr "部署模式"
 
@@ -530,7 +523,6 @@ msgid "High Throughput"
 msgstr "高吞吐量"
 
 #: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:261
-#, fuzzy
 msgid "Single-Node (TP1)"
 msgstr "单节点 (TP1)"
 
@@ -551,7 +543,6 @@ msgid "Low Latency"
 msgstr "低延迟"
 
 #: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:261
-#, fuzzy
 msgid "Single-Node (TP4)"
 msgstr "单节点 (TP4)"
 

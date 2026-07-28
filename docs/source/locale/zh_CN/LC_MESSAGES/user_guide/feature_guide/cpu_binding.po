@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-22 05:29+0000\n"
+"POT-Creation-Date: 2026-07-27 10:18+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -139,20 +139,27 @@ msgstr "为获得最佳局部性，请使用在 NUMA 节点间均匀分布的 cp
 
 #: ../../source/user_guide/feature_guide/cpu_binding.md:93
 msgid ""
-"On Ascend 950, CPU binding uses deterministic global CPU slicing because "
-"Ascend 950 does not report NPU-to-CPU affinity in `npu-smi info -t topo`."
-" Ascend 950 still pins worker, ACL, and release threads and can still "
-"migrate memory pages when `migratepages` is available. Because Ascend 950"
-" skips IRQ binding, it does not reserve the first two CPUs in each NPU "
-"pool for IRQ handling. Those CPUs are assigned to the main worker "
-"instead."
+"On Ascend 950, CPU binding uses NPU-to-CPU affinity from `npu-smi info -t"
+" topo` to select the worker's affinity NUMA node. Each worker main "
+"process is pinned to one CPU cluster from that NUMA node. The cluster "
+"size is derived from `lscpu` `Thread(s) per core`: 8 CPUs when it is 1, "
+"and 16 CPUs when it is 2. Ascend 950 also pins host "
+"`uvb_poll_window_thread` threads to NUMA0 CPUs except CPU0, constrained "
+"by the current cpuset. In Docker deployments, add `--pid=host` when "
+"creating the container so vLLM Ascend can discover and bind these host "
+"threads. Ascend 950 still can migrate memory pages when `migratepages` is"
+" available, but it does not separately pin ACL/release threads and does "
+"not apply IRQ binding."
 msgstr ""
-"在 Ascend 950 上，CPU 绑定使用确定性的全局 CPU 切片，因为 Ascend 950 不在 `npu-smi info -t topo` "
-"中报告 NPU 到 CPU 的亲和性。Ascend 950 仍然绑定 worker、ACL 和 release 线程，并且在 "
-"`migratepages` 可用时仍可迁移内存页。由于 Ascend 950 跳过 IRQ 绑定，它不会在每个 NPU "
-"池中为 IRQ 处理预留前两个 CPU。这些 CPU 改为分配给主 worker。"
+"在 Ascend 950 上，CPU 绑定使用 `npu-smi info -t topo` 中的 NPU 到 CPU "
+"亲和性来选择 Worker 的亲和性 NUMA 节点。每个 Worker 主进程被绑定到该 NUMA 节点的一个 CPU "
+"集群。集群大小由 `lscpu` 的 `Thread(s) per core` 决定：当值为 1 时为 8 个 CPU，值为 2 时为 16 "
+"个 CPU。Ascend 950 还将主机 `uvb_poll_window_thread` 线程绑定到除 CPU0 之外的 NUMA0 "
+"CPU，受当前 cpuset 约束。在 Docker 部署中，创建容器时添加 `--pid=host`，以便 vLLM Ascend "
+"可以发现并绑定这些主机线程。当 `migratepages` 可用时，Ascend 950 仍然可以迁移内存页面，但它不会单独绑定 "
+"ACL/release 线程，也不应用 IRQ 绑定。"
 
-#: ../../source/user_guide/feature_guide/cpu_binding.md:100
+#: ../../source/user_guide/feature_guide/cpu_binding.md:103
 msgid ""
 "For IRQ binding, the process also needs permission to read "
 "`/proc/interrupts` and write `/proc/irq/*/smp_affinity`. If `irqbalance` "
@@ -164,28 +171,39 @@ msgstr ""
 "的权限。如果 `irqbalance` 正在运行且进程可以使用 `systemctl`，vLLM Ascend 会在应用 IRQ "
 "亲和性之前停止它。在无法使用 `systemctl` 的容器中，当 IRQ 亲和性很重要时，请在主机上停止 `irqbalance`。"
 
-#: ../../source/user_guide/feature_guide/cpu_binding.md:106
+#: ../../source/user_guide/feature_guide/cpu_binding.md:109
 msgid ""
 "Ascend 950 does not apply IRQ binding. When running on Ascend 950, the "
 "log contains `[irq] IRQ binding skipped on Ascend 950.` and no "
 "`/proc/irq/*/smp_affinity` files are written by this feature."
 msgstr ""
-"Ascend 950 不应用 IRQ 绑定。在 Ascend 950 上运行时，日志包含 `[irq] IRQ binding skipped on Ascend 950.`，"
-"并且此功能不会写入任何 `/proc/irq/*/smp_affinity` 文件。"
+"Ascend 950 不应用 IRQ 绑定。在 Ascend 950 上运行时，日志包含 `[irq] IRQ binding skipped "
+"on Ascend 950.`，并且此功能不会写入任何 `/proc/irq/*/smp_affinity` 文件。"
 
-#: ../../source/user_guide/feature_guide/cpu_binding.md:110
+#: ../../source/user_guide/feature_guide/cpu_binding.md:113
+msgid ""
+"Ascend 950 allocation logs use `worker=[...]` instead of `acl=[...]` or "
+"`release=[...]`, because ACL/release threads are not separately pinned on"
+" this device type. When UVB polling threads are found and bound, the log "
+"also reports their thread IDs and CPU pool:"
+msgstr ""
+"Ascend 950 分配日志使用 `worker=[...]` 而不是 `acl=[...]` 或 "
+"`release=[...]`，因为在此设备类型上 ACL/release 线程不会被单独绑定。当找到并绑定 UVB "
+"轮询线程时，日志还会报告它们的线程 ID 和 CPU 池："
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:123
 msgid ""
 "On the host, stop `irqbalance` before starting vLLM when you need stable "
 "IRQ affinity:"
 msgstr "在主机上，当您需要稳定的 IRQ 亲和性时，请在启动 vLLM 前停止 `irqbalance`："
 
-#: ../../source/user_guide/feature_guide/cpu_binding.md:117
+#: ../../source/user_guide/feature_guide/cpu_binding.md:130
 msgid ""
 "After the vLLM service exits, restart it if the host should return to the"
 " default IRQ balancing policy:"
 msgstr "vLLM 服务退出后，如果主机应恢复默认的 IRQ 平衡策略，请重新启动它："
 
-#: ../../source/user_guide/feature_guide/cpu_binding.md:124
+#: ../../source/user_guide/feature_guide/cpu_binding.md:137
 msgid "Troubleshooting"
 msgstr "常见问题与故障排查"
 
@@ -234,10 +252,9 @@ msgstr "`Insufficient CPUs for binding...`"
 #: ../../source/user_guide/feature_guide/cpu_binding.md
 msgid ""
 "Fewer CPUs are available than the role split requires. Devices with IRQ "
-"binding need at least 5 CPUs per logical NPU; Ascend 950 needs at least "
-"3."
-msgstr ""
-"可用 CPU 少于角色拆分所需的数量。具有 IRQ 绑定的设备每个逻辑 NPU 至少需要 5 个 CPU；Ascend 950 至少需要 3 个。"
+"binding need at least 5 CPUs per logical NPU. Ascend 950 needs one full "
+"cluster per worker."
+msgstr "可用 CPU 少于角色拆分所需的数量。具有 IRQ 绑定的设备每个逻辑 NPU 至少需要 5 个 CPU。Ascend 950 每个 Worker 需要一个完整的集群。"
 
 #: ../../source/user_guide/feature_guide/cpu_binding.md
 msgid "Expand the cpuset or reduce visible NPUs."
@@ -253,9 +270,36 @@ msgstr "拓扑亲和性不可用。"
 
 #: ../../source/user_guide/feature_guide/cpu_binding.md
 msgid ""
-"vLLM Ascend falls back to `global_slice`; check `npu-smi info -t topo` "
-"only if topology affinity is expected on this device."
-msgstr "vLLM Ascend 回退到 `global_slice`；仅当此设备上预期有拓扑亲和性时，才检查 `npu-smi info -t topo`。"
+"On Ascend 950, worker CPU binding is skipped. On other topo-affinity "
+"devices, vLLM Ascend falls back to `global_slice`. Check `npu-smi info -t"
+" topo` when topology affinity is expected."
+msgstr "在 Ascend 950 上，Worker CPU 绑定被跳过。在其他拓扑亲和性设备上，vLLM Ascend 回退到 `global_slice`。当预期有拓扑亲和性时，请检查 `npu-smi info -t topo`。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md
+msgid "`uvb_poll_window_thread not found... --pid=host`"
+msgstr "`uvb_poll_window_thread not found... --pid=host`"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md
+msgid "Ascend 950 could not see host UVB polling threads."
+msgstr "Ascend 950 无法看到主机 UVB 轮询线程。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md
+msgid "Recreate the Docker container with `--pid=host`, then restart vLLM."
+msgstr "使用 `--pid=host` 重新创建 Docker 容器，然后重启 vLLM。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md
+msgid "`failed to bind uvb_poll_window_thread... --pid=host`"
+msgstr "`failed to bind uvb_poll_window_thread... --pid=host`"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md
+msgid "Ascend 950 found a UVB polling thread but failed to bind it."
+msgstr "Ascend 950 找到了一个 UVB 轮询线程但绑定失败。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md
+msgid ""
+"Check permissions and recreate the Docker container with `--pid=host` if "
+"running in Docker."
+msgstr "检查权限，如果在 Docker 中运行，请使用 `--pid=host` 重新创建 Docker 容器。"
 
 #: ../../source/user_guide/feature_guide/cpu_binding.md
 msgid "`The 'migratepages' command is not available...`"
@@ -278,10 +322,8 @@ msgid "Ascend 950 does not use the IRQ binding step."
 msgstr "Ascend 950 不使用 IRQ 绑定步骤。"
 
 #: ../../source/user_guide/feature_guide/cpu_binding.md
-msgid ""
-"No action needed. Worker, ACL, release thread binding and memory "
-"migration still proceed."
-msgstr "无需任何操作。Worker、ACL、release 线程绑定和内存迁移仍会继续。"
+msgid "No action needed. Worker main binding and memory migration still proceed."
+msgstr "无需任何操作。Worker 主绑定和内存迁移仍会继续。"
 
 #: ../../source/user_guide/feature_guide/cpu_binding.md
 msgid "`Bind cpus failed in rank...`"
@@ -318,6 +360,21 @@ msgstr "检查 `taskset`、`lscpu`、`npu-smi`、cpuset 大小和 `/proc/irq` �
 #~ "smi installation and ensure the user "
 #~ "has sufficient execution permissions."
 #~ msgstr "验证 npu-smi 安装的完整性，并确保用户具有足够的执行权限。"
+
+msgid ""
+msgstr ""
+"项目编号：2/2\n"
+"内容类型：文本/纯文本\n"
+"内容传输编码：8bit\n"
+"生成工具：Babel 2.9.1\n"
+"语言：zh_CN\n"
+"MIME 版本：1.0\n"
+"复数形式：nplurals=1; plural=0;\n"
+"X 生成器：Sphinx 4.5.0\n"
+"最后翻译者：\n"
+"语言团队：\n"
+"PO 修订日期：2023-10-01 12:00+0000\n"
+"优先：\n"
 
 #~ msgid ""
 #~ "The CPU binding process failed (e.g.,"
@@ -419,8 +476,8 @@ msgstr "检查 `taskset`、`lscpu`、`npu-smi`、cpuset 大小和 `/proc/irq` �
 #~ msgid ""
 #~ "**Key Limitations**: ARM‑only; relies on "
 #~ "symmetric NUMA layouts; binding fails if"
-#~ " the CPU pool has fewer than 5 "
-#~ "cores; binding errors trigger a "
+#~ " the CPU pool has fewer than 5"
+#~ " cores; binding errors trigger a "
 #~ "warning log but do not terminate "
 #~ "the process."
 #~ msgstr ""
@@ -429,3 +486,27 @@ msgstr "检查 `taskset`、`lscpu`、`npu-smi`、cpuset 大小和 `/proc/irq` �
 
 #~ msgid "Fewer than 5 CPUs are available per logical NPU."
 #~ msgstr "每个逻辑 NPU 可用的 CPU 少于 5 个。"
+
+#~ msgid ""
+#~ "On Ascend 950, CPU binding uses "
+#~ "deterministic global CPU slicing because "
+#~ "Ascend 950 does not report NPU-"
+#~ "to-CPU affinity in `npu-smi info "
+#~ "-t topo`. Ascend 950 still pins "
+#~ "worker, ACL, and release threads and "
+#~ "can still migrate memory pages when "
+#~ "`migratepages` is available. Because Ascend"
+#~ " 950 skips IRQ binding, it does "
+#~ "not reserve the first two CPUs in"
+#~ " each NPU pool for IRQ handling. "
+#~ "Those CPUs are assigned to the "
+#~ "main worker instead."
+#~ msgstr ""
+#~ "在 Ascend 950 上，CPU 绑定使用确定性的全局 CPU "
+#~ "切片，因为 Ascend 950 不在 `npu-smi info"
+#~ " -t topo` 中报告 NPU 到 CPU "
+#~ "的亲和性。Ascend 950 仍然绑定 worker、ACL 和 "
+#~ "release 线程，并且在 `migratepages` 可用时仍可迁移内存页。由于 "
+#~ "Ascend 950 跳过 IRQ 绑定，它不会在每个 NPU "
+#~ "池中为 IRQ 处理预留前两个 CPU。这些 CPU 改为分配给主 "
+#~ "worker。"
