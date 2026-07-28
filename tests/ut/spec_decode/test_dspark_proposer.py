@@ -406,7 +406,10 @@ class TestDSparkInitValidation:
         speculative_config = SimpleNamespace(
             num_speculative_tokens=num_speculative_tokens,
             draft_sample_method=draft_sample_method,
-            draft_model_config=SimpleNamespace(get_hidden_size=lambda: hidden_size),
+            draft_model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(),
+                get_hidden_size=lambda: hidden_size
+            ),
         )
         return SimpleNamespace(speculative_config=speculative_config)
 
@@ -429,6 +432,7 @@ class TestDSparkInitValidation:
             self.max_num_tokens = max_num_tokens
             self.dtype = dtype
             self.device = device
+            self.draft_model_config = vllm_config.speculative_config.draft_model_config
             # present so the ``del`` in DSpark.__init__ succeeds
             self.hidden_size = 0
             self.hidden_states = None
