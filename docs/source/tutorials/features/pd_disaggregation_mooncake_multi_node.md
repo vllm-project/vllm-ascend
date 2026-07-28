@@ -239,6 +239,23 @@ Use `launch_online_dp.py` to launch external dp vllm servers.
 Modify `run_dp_template.sh` on each node.
 [run_dp_template.sh](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh)
 
+`launch_online_dp.py` starts `dp-size-local` vLLM instances and passes seven positional arguments to `run_dp_template.sh`. The examples below correspond to [Start the service](#start-the-service).
+
+| Launcher option | Template value | Meaning | Example value | Constraints |
+| --- | --- | --- | --- | --- |
+| `--dp-size` | `$3` / `--data-parallel-size` | Total DP ranks in the group. | P: `2`; D: `32` | Positive; identical within a group. Ranks must cover `[0, dp-size)` without overlap. |
+| `--tp-size` | `$7` / `--tensor-parallel-size` | NPUs used by each instance. | P: `8`; D: `1` | Positive; `dp-size-local * tp-size` must not exceed available NPUs. |
+| `--dp-size-local` | Number of template invocations | DP instances on this node. | P: `2`; D: `16` | `-1` means `dp-size`; otherwise `1 <= dp-size-local <= dp-size`. |
+| `--dp-rank-start` | `$4` / `--data-parallel-rank` = `dp-rank-start + i` | First DP rank on this node. | P: `0`; D: `0` or `16` | Non-negative; the assigned rank range must be within `dp-size` and not overlap. |
+| `--dp-address` | `$5` / `--data-parallel-address` | DP master address. | P: `192.0.0.1` or `192.0.0.2`; D: `192.0.0.3` | Reachable and identical within a DP group. |
+| `--dp-rpc-port` | `$6` / `--data-parallel-rpc-port` | DP master RPC port. | `12321` | Free, reachable port; identical within a DP group. |
+| `--vllm-start-port` | `$2` / `--port` = `vllm-start-port + i` | First local API port. | `7100`, then `7101`, ... | Consecutive free ports; must match the proxy configuration. |
+| Computed by the launcher | `$1` / `ASCEND_RT_VISIBLE_DEVICES` | NPU IDs assigned to each instance. | P: `0,...,7`, `8,...,15`; D: `0` through `15` | IDs must exist and not overlap; non-contiguous IDs require adapting the launcher. |
+
+!!! note
+
+    The launcher validates only argument types and required options. Check the remaining constraints before deployment.
+
 > **Note**: If speculative decoding is enabled, `num_speculative_tokens` should be subject to one of the following conditions:
 >
 > 1. Hybrid Mamba models (e.g., Qwen-Next and Qwen3.5 series): `num_speculative_tokens` should be equal on P nodes and D nodes.
@@ -814,14 +831,20 @@ We provide two different proxy implementations with distinct request routing beh
         7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115\
     ```
 
-|Parameter  | meaning |
-| --- | --- |
-| --port | Proxy service Port |
-| --host | Proxy service Host IP|
-| --prefiller-hosts | Hosts of prefiller nodes |
-| --prefiller-ports | Ports of prefiller nodes |
-| --decoder-hosts | Hosts of decoder nodes |
-| --decoder-ports | Ports of decoder nodes |
+Both proxies share the following backend options.
+
+| Parameter | Applies to | Default | Example value | Meaning and constraints |
+| --- | --- | --- | --- | --- |
+| `--port` | Both | `8000` | `1999` | Proxy listen port; must be free, reachable, and within `1`-`65535`. |
+| `--host` | Both | `localhost` | `192.0.0.1` | Proxy listen address. Layerwise mode requires a non-wildcard address reachable by D nodes. |
+| `--prefiller-hosts` | Both | `localhost` | `192.0.0.1 192.0.0.1 192.0.0.2 192.0.0.2` | P-instance hosts; count must equal `--prefiller-ports`. |
+| `--prefiller-ports` | Both | `8001` | `7100 7101 7100 7101` | P-instance ports; each host-port pair must be unique and reachable. |
+| `--decoder-hosts` | Both | `localhost` | Sixteen `192.0.0.3`, then sixteen `192.0.0.4` | D-instance hosts; count must equal `--decoder-ports`. |
+| `--decoder-ports` | Both | `8002` | `7100`-`7115` for each D host | D-instance ports; each host-port pair must be unique and reachable. |
+
+!!! note
+
+    The proxy scripts validate that each host list has the same length as its port list.
 
 You can get the proxy program in the repository's examples, [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
