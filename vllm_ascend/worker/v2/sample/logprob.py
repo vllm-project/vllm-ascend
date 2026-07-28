@@ -124,6 +124,7 @@ def compute_topk_logprobs(
     logprob_token_ids_state=None,
     expanded_idx_mapping: torch.Tensor | None = None,
     max_per_req_token_ids: int = 0,
+    logits_mode: bool = False,
 ) -> LogprobsTensors:
     assert num_logprobs >= 0
     batch_size, vocab_size = logits.shape
@@ -135,7 +136,10 @@ def compute_topk_logprobs(
     if num_logprobs > 0:
         topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
         logprob_token_ids = torch.cat((logprob_token_ids, topk_indices), dim=1)
-    logprobs = compute_token_logprobs(logits, logprob_token_ids)
+    if logits_mode:
+        logprobs = logits.gather(-1, logprob_token_ids).to(torch.float32)
+    else:
+        logprobs = compute_token_logprobs(logits, logprob_token_ids)
 
     token_ranks = torch.empty(
         batch_size,
