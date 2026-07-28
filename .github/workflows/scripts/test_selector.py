@@ -939,7 +939,7 @@ class TestSelector:
         print(f"\n{gran_detail_titles.get(expand_reason, 'Details')}:")
         for test_case, affected_detail, total_lines in selected[:10]:
             print(f"\n  {test_case} ({total_lines} lines):")
-            for filepath, lines in sorted(changed_files.items()):
+            for filepath, lines in sorted(affected_detail.items()):
                 line_str = self._format_line_range(sorted(lines))
                 print(f"    - {filepath}: {line_str}")
 
