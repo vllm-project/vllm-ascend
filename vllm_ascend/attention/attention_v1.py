@@ -1271,10 +1271,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             k_fa = key.view(num_blocks, bs, self.num_kv_heads, self.head_size)
             v_fa = value.view(num_blocks, bs, self.num_kv_heads, self.head_size)
 
-            cache_seqlens = attn_metadata.seq_lens
-            if cache_seqlens.device != query.device:
-                cache_seqlens = cache_seqlens.to(device=query.device, non_blocking=True)
-            cu_seqlens_q = attn_metadata.query_start_loc
+            cache_seqlens = torch.tensor(actual_seq_lengths_kv, dtype=torch.int32, device=query.device)
+            cu_seqlens_q = torch.tensor([0] + attn_metadata.actual_seq_lengths_q, dtype=torch.int32, device=query.device)
             max_seqlen_q = attn_metadata.max_query_len
 
             causal = attn_metadata.causal
