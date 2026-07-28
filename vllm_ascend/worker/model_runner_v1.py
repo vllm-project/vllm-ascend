@@ -934,11 +934,7 @@ class NPUModelRunner(GPUModelRunner):
                 cu_num_tokens,
                 self._draft_token_ids,  # type: ignore[has-type]
                 scheduler_output,
-                # Unpack the *previous* step's draft tensor, whose width is the K
-                # used last step -- may be < the configured max under dynamic SD,
-                # so use ``prev_num_spec_tokens`` (tracked in
-                # ``_copy_draft_token_ids_to_cpu``), not ``num_spec_tokens``.
-                self.prev_num_spec_tokens,  # type: ignore[has-type]
+                self.num_spec_tokens,
                 prev_positions=prev_positions_gpu,
             )
 
@@ -1167,9 +1163,7 @@ class NPUModelRunner(GPUModelRunner):
                 arange_np=self.arange_np,
                 cu_num_tokens=cu_num_tokens,
                 draft_token_ids=self._draft_token_ids,  # type: ignore[has-type]
-                # Previous step's draft width (see the other generate_pcp_mtp_input
-                # call); matters when dynamic SD varies K.
-                num_spec_tokens=self.prev_num_spec_tokens,  # type: ignore[has-type]
+                num_spec_tokens=self.num_spec_tokens,
                 prepare_input_ids=self._prepare_input_ids,
             )
         else:
