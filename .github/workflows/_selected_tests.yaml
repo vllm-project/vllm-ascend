@@ -124,10 +124,7 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty uv \
-            --timeout 300 \
-            --retry-attempts 6 \
-            pip install . \
+          VLLM_TARGET_DEVICE=empty uv pip install . \
             --index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/simple/ \
             --extra-index-url https://pypi.org/simple
           pip uninstall -y triton
