@@ -63,17 +63,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         self.use_cuda_graph = False
         # Max query tokens depend on whether sampling from anchor or not.
         self.max_query_tokens = self.max_batch_size * self.num_query_per_req
-        # DSpark is eager-only (``use_cuda_graph = False``), so there is no
-        # cudagraph padding: ``num_input_tokens`` is bounded by
-        # ``max_query_tokens`` in every path (decode uses the unpadded
-        # ``num_query_total``; ``dummy_run`` clamps via ``min(..., max_query_tokens)``
-        # and ``_sync_metadata_across_dp`` only takes a max, never pads up).
-        # ``max_query_tokens`` is therefore sufficient here -- unlike DFlash,
-        # which needs ``max(max_query_tokens, max_num_tokens)`` because its
-        # graph-padded ``num_input_tokens`` can exceed ``max_query_tokens``.
-        # (``self.input_ids``, sliced by ``num_query_total`` in the profile
-        # forward, is inherited from ``AscendDflashProposer.__init__`` already
-        # sized ``max(max_batch*(1+K), max_num_tokens)`` >= this buffer.)
         # Position ids for the draft query block [max_query_tokens].
         # Overrides dflash:49; v2 uses input_buffers.positions.
         self.positions = torch.zeros(
