@@ -342,19 +342,13 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 dim=0,
             )
 
-        # NPU copy for FA3 - created AFTER all padding/cat so the data
-        # layout is identical to what _get_or_build_fa3_scheduler_metadata
-        # would produce via .to(device=query.device).
-        seq_lens_cpu = seq_lens
-        seq_lens = seq_lens.to(self.device)
-
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
             num_decode_tokens=num_decode_tokens,
             block_tables=block_table,
             query_start_loc=query_start_loc,
             seq_lens=seq_lens,
-            seq_lens_cpu=seq_lens_cpu,
+            seq_lens_cpu=seq_lens,
             seq_lens_list=seq_lens_list,
             max_query_len=common_attn_metadata.max_query_len,
             actual_seq_lengths_q=actual_seq_lengths_q,
@@ -441,6 +435,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self._layer_name: str | None = None
         # flash-attention-npu (FA3) replacement for CANN V1 FIA in eager mode.
         self._fa3_enabled = self._check_fa3_available()
+        # FA3 scheduler metadata cache: populated during eager warmup, reused
+        # during graph capture so no H2D copy is needed inside torch.npu.graph().
+        self._fa3_scheduler_metadata: dict = {}
 
     @staticmethod
     def _check_fa3_available():
@@ -458,14 +455,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         block_size: int,
         query: torch.Tensor,
     ):
-        """Build FA3 scheduler metadata from current ``attn_metadata``.
-
-        Always constructs fresh metadata — sequence lengths and batch
-        configuration can change between iterations even when the total
-        token count (``num_tokens``) stays the same.  Caching per
-        ``num_tokens`` would return stale metadata for the new iteration,
-        causing ``ComputeFAMetadataPv`` inside FA3's kernel to crash
-        (errorCode=0x2a).
+        """Return cached FA3 scheduler metadata for *num_tokens*, building it
+        on first access during eager warmup (outside graph).  Reused during
+        graph capture so no H2D copy is needed on the captured stream.
 
         Returns ``None`` for non-cache attention states (PrefillNoCache).
         """
@@ -475,10 +467,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if not is_cache:
             return None
 
-        # H2D copy only needed when seq_lens is still on CPU (eager warmup).
-        # During graph capture (and after the first eager warmup), seq_lens
-        # is already on the NPU — the .to() becomes a no-op and won't
-        # trigger an illegal H2D on a captured stream.
+        # Cache keyed by num_tokens so graph capture reuses metadata built
+        # during eager warmup — no H2D copy needed inside torch.npu.graph().
+        if num_tokens in self._fa3_scheduler_metadata:
+            return self._fa3_scheduler_metadata[num_tokens]
+
         cache_seqlens = attn_metadata.seq_lens
         if cache_seqlens.device != query.device:
             cache_seqlens = cache_seqlens.to(device=query.device)
@@ -486,7 +479,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if cu_seqlens_q.device != query.device:
             cu_seqlens_q = cu_seqlens_q.to(device=query.device)
 
-        return get_scheduler_metadata(
+        meta = get_scheduler_metadata(
             batch_size=len(attn_metadata.seq_lens_list),
             max_seqlen_q=attn_metadata.max_query_len,
             max_seqlen_k=max(attn_metadata.seq_lens_list),
@@ -499,6 +492,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             page_size=block_size,
             causal=attn_metadata.causal,
         )
+        self._fa3_scheduler_metadata[num_tokens] = meta
+        return meta
 
     def _graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
         layer_name = layer.layer_name if layer is not None else self._layer_name
@@ -1498,8 +1493,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         block_table=block_table if is_cache else None,
                         seq_lens_list=actual_seq_lengths_kv if is_cache else None,
                         scheduler_metadata=scheduler_metadata,
-                        cache_seqlens=attn_metadata.seq_lens,
-                        cu_seqlens_q=attn_metadata.query_start_loc,
                     )
                 except (ImportError, ValueError, RuntimeError, TypeError):
                     # FA3 unavailable for this invocation (e.g. head_dim too

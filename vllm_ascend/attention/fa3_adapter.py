@@ -86,8 +86,6 @@ def fa3_forward(
     block_table: Optional[torch.Tensor] = None,
     seq_lens_list: Optional[List[int]] = None,
     scheduler_metadata=None,
-    cache_seqlens: Optional[torch.Tensor] = None,
-    cu_seqlens_q: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Unified FA3 attention forward.
 
@@ -102,11 +100,6 @@ def fa3_forward(
         by :func:`get_scheduler_metadata`) may be passed to avoid internal
         re-computation in FA3.
 
-        When *cache_seqlens* and *cu_seqlens_q* are given (pre-existing
-        tensors), they are used directly instead of allocating new tensors
-        from *seq_lens_list* / *actual_seq_lengths_q*.  This ensures that
-        *scheduler_metadata* references the same tensor objects that FA3
-        reads at runtime, avoiding stale-pointer crashes.
 
     Returns
         Tensor ``(total_tokens, num_heads, head_size)``.
@@ -141,8 +134,8 @@ def fa3_forward(
         k_fa = key.view(num_blocks, bs, num_kv_heads, head_size)
         v_fa = value.view(num_blocks, bs, num_kv_heads, head_size)
 
-        cache_seqlens = cache_seqlens if cache_seqlens is not None else torch.tensor(seq_lens_list, dtype=torch.int32, device=device)
-        cu_seqlens_q = cu_seqlens_q if cu_seqlens_q is not None else _to_cu_seqlens(actual_seq_lengths_q, device)
+        cache_seqlens = torch.tensor(seq_lens_list, dtype=torch.int32, device=device)
+        cu_seqlens_q = _to_cu_seqlens(actual_seq_lengths_q, device)
         max_seqlen_q = _max_seqlen(actual_seq_lengths_q)
 
         out = fa3_kvcache(
