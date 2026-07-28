@@ -1258,7 +1258,6 @@ After about several minutes, you can get the performance evaluation result.
 |Low Latency (3.5K)|Server / Single Machine|16|8|2|36K|3|
 |Low Latency (16K)|Server / Single Machine|16|8|2|36K|3|
 |High Throughput / Low Latency (64K)|Server / Single Machine|16|8|2|132K|3|
-
 |High Throughput (16K)|Server-P Node|16|8|2|36K|1|
 |High Throughput (16K)|Server-D Node|16|4|8|36K|1|
 |Low Latency (16K)|Server-P Node|16|8|2|36K|3|
