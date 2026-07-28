@@ -142,9 +142,7 @@ class TPWeightSwitchMixin:
         output_size = getattr(layer, "output_size", None)
         output_size_per_partition = getattr(layer, "output_size_per_partition", None)
         input_sharded = (
-            input_size is not None
-            and input_size_per_partition is not None
-            and input_size != input_size_per_partition
+            input_size is not None and input_size_per_partition is not None and input_size != input_size_per_partition
         )
         output_sharded = (
             output_size is not None
