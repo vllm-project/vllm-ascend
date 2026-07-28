@@ -45,12 +45,13 @@ class AscendDflashProposer(AscendEagleProposer):
         query_buffer_len = max(self.max_query_tokens, self.max_num_tokens)
 
         # ``self.input_ids`` is allocated by the vLLM base proposer at
-        # ``max_num_tokens``; the input-id kernel writes ``num_query_total``
-        # entries into it and the profile forward slices ``[:num_query_total]``,
-        # so it must be re-sized to ``query_buffer_len`` alongside the others.
+        # ``max_num_tokens`` (dtype int32); the input-id kernel writes
+        # ``num_query_total`` entries into it and the profile forward slices
+        # ``[:num_query_total]``, so it must be re-sized to ``query_buffer_len``
+        # alongside the others.
         self.input_ids = torch.zeros(
             query_buffer_len,
-            dtype=self.input_ids.dtype,
+            dtype=torch.int32,
             device=device,
         )
 
