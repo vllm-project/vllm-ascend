@@ -452,7 +452,7 @@ Parameter descriptions:
         --no-enable-prefix-caching \
         --additional-config '{"enable_dsa_cp": true}' \
         --kv-transfer-config \
-        '{"kv_connector": "MooncakeLayerwiseConnector",
+        '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
         "kv_port": "30000",
         "kv_connector_extra_config": {
@@ -525,7 +525,7 @@ Parameter descriptions:
         --no-enable-prefix-caching \
         --additional-config '{"enable_dsa_cp": true}' \
         --kv-transfer-config \
-        '{"kv_connector": "MooncakeLayerwiseConnector",
+        '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
         "kv_port": "30000",
         "kv_connector_extra_config": {
@@ -598,7 +598,7 @@ Parameter descriptions:
         --no-enable-prefix-caching \
         --quantization ascend \
         --kv-transfer-config \
-        '{"kv_connector": "MooncakeLayerwiseConnector",
+        '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
         "kv_port": "30100",
         "kv_connector_extra_config": {
@@ -672,7 +672,7 @@ Parameter descriptions:
         --no-enable-prefix-caching \
         --quantization ascend \
         --kv-transfer-config \
-        '{"kv_connector": "MooncakeLayerwiseConnector",
+        '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
         "kv_port": "30100",
         "kv_connector_extra_config": {
@@ -689,8 +689,8 @@ Parameter descriptions:
         --additional-config '{"recompute_scheduler_enable" : true}'
     ```
 
-Once the preparation is done, you can start the server with the following command on each node:
-Refer to [Distributed DP Server With Large-Scale Expert Parallelism](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/large_scale_ep.html) to get the detailed boot method.
+    Once the preparation is done, you can start the server with the following command on each node:
+    Refer to [Distributed DP Server With Large-Scale Expert Parallelism](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/large_scale_ep.html) to get the detailed boot method.
 
 2. run server for each node:
 
