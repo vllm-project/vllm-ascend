@@ -274,12 +274,11 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             persistent=False,
         )
 
-    def reset_request_slots(self, request_slots: torch.Tensor | None) -> None:
-        if request_slots is None or request_slots.numel() == 0:
+    def reset_request_slots(self, normalized_request_slots: torch.Tensor | None) -> None:
+        if normalized_request_slots is None or normalized_request_slots.numel() == 0:
             return
-        slots = torch.unique(request_slots.to(device=self._dspark_cache_positions.device, dtype=torch.int64))
-        self._dspark_kv_cache[slots] = 0
-        self._dspark_cache_positions[slots] = -1
+        self._dspark_kv_cache[normalized_request_slots] = 0
+        self._dspark_cache_positions[normalized_request_slots] = -1
 
     def _get_dspark_kv_cache(self) -> torch.Tensor | None:
         kv_cache = self.dsa_attn.swa_cache_layer.kv_cache
@@ -812,8 +811,13 @@ class DeepseekV4DSparkModel(nn.Module):
             )
 
     def reset_request_slots(self, request_slots: torch.Tensor | None) -> None:
+        if request_slots is None or request_slots.numel() == 0:
+            return
+        first_layer = self.layers[str(self.mtp_start_layer_idx)]
+        cache_device = first_layer.self_attn._dspark_cache_positions.device
+        normalized_request_slots = torch.unique(request_slots.to(device=cache_device, dtype=torch.int64))
         for layer in self.layers.values():
-            layer.self_attn.reset_request_slots(request_slots)
+            layer.self_attn.reset_request_slots(normalized_request_slots)
 
     def prepare_fused_attention_metadata(
         self,
