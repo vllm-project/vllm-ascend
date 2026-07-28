@@ -4,6 +4,7 @@ from vllm.v1.worker.gpu.spec_decode import rejection_sampler, rejection_sampler_
 from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
 from vllm.v1.worker.gpu.spec_decode.eagle import speculator
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import post_update
 from vllm_ascend.worker.v2.sample.bad_words import apply_bad_words
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature, gumbel_sample
@@ -20,9 +21,14 @@ penalties.apply_penalties = apply_penalties
 # because sampler.py and speculator.py are imported before this patch, they must be overridden
 sampler.gumbel_sample = gumbel_sample
 input_batch.post_update = post_update
-prompt_logprob.compute_topk_logprobs = compute_topk_logprobs
-sampler.compute_topk_logprobs = compute_topk_logprobs
-rejection_sampler.compute_topk_logprobs = compute_topk_logprobs
+if vllm_version_is("0.25.1"):
+    prompt_logprob.compute_topk_logprobs = compute_topk_logprobs
+    sampler.compute_topk_logprobs = compute_topk_logprobs
+    rejection_sampler.compute_topk_logprobs = compute_topk_logprobs
+else:
+    prompt_logprob.compute_topk_scores = compute_topk_logprobs
+    sampler.compute_topk_scores = compute_topk_logprobs
+    rejection_sampler.compute_topk_scores = compute_topk_logprobs
 states.apply_min_p = apply_min_p
 penalties.bincount = bincount
 speculator.gumbel_sample = gumbel_sample
