@@ -15,7 +15,7 @@
 
 import pytest
 
-from vllm_ascend.attention.dsa_mxfp8_fusion import can_fuse_q_norm_mx_quant
+from vllm_ascend.attention.dsa_v1 import _can_fuse_q_norm_mx_quant
 
 
 @pytest.mark.parametrize(
@@ -33,7 +33,7 @@ from vllm_ascend.attention.dsa_mxfp8_fusion import can_fuse_q_norm_mx_quant
 )
 def test_can_fuse_q_norm_mx_quant(is_mxfp8, fusion_available, qr_consumed_by_topk, expected):
     assert (
-        can_fuse_q_norm_mx_quant(
+        _can_fuse_q_norm_mx_quant(
             is_mxfp8=is_mxfp8,
             fusion_available=fusion_available,
             qr_consumed_by_topk=qr_consumed_by_topk,

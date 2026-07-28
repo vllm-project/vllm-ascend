@@ -13,7 +13,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.dsa_mxfp8_fusion import can_fuse_q_norm_mx_quant as _can_fuse_q_norm_mx_quant
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
@@ -65,6 +64,14 @@ def _is_w8a8_mxfp8_dynamic(linear) -> bool:
         return False
     inner = getattr(qm, "quant_method", None)
     return isinstance(inner, AscendW8A8MXFP8DynamicLinearMethod)
+
+
+def _can_fuse_q_norm_mx_quant(
+    is_mxfp8: bool,
+    fusion_available: bool,
+    qr_consumed_by_topk: bool,
+) -> bool:
+    return is_mxfp8 and fusion_available and not qr_consumed_by_topk
 
 
 def _rms_norm_dynamic_mx_quant(
