@@ -17,19 +17,25 @@ PROMPTS = [
 
 @wait_until_npu_memory_free(0.7)
 @pytest.mark.parametrize("model", MODELS)
-def test_deepseek_v2_lite_enable_shared_expert_dp_tp2(model: str, monkeypatch) -> None:
+@pytest.mark.parametrize("enable_flashcomm1", [False, True], ids=["shared-expert-dp-only", "with-flashcomm1"])
+def test_deepseek_v2_lite_enable_shared_expert_dp_tp2(
+    model: str,
+    enable_flashcomm1: bool,
+    monkeypatch,
+) -> None:
     # FlashComm v1 / shared-expert-DP require HCCL_OP_EXPANSION_MODE to be unset.
     monkeypatch.delenv("HCCL_OP_EXPANSION_MODE", raising=False)
 
-    # FlashComm1 + shared-expert-DP must stay numerically consistent with the
-    # plain eager baseline.  `additional_config` is excluded from the baseline
-    # by compare_logprobs, so the baseline runs without either flag.
+    # Shared-expert-DP must stay numerically consistent with the plain eager
+    # baseline both independently and together with FlashComm1.
+    # `additional_config` is excluded from the baseline by compare_logprobs, so
+    # the baseline runs without either flag.
     shared_expert_dp_config = {
-        "enable_flashcomm1": True,
+        "enable_flashcomm1": enable_flashcomm1,
         "enable_shared_expert_dp": True,
     }
 
-    # Eager mode: FlashComm1 + shared-expert-DP vs eager baseline.
+    # Eager mode: requested feature combination vs eager baseline.
     compare_logprobs(
         runner_kwargs={
             "model_name": model,
@@ -42,7 +48,7 @@ def test_deepseek_v2_lite_enable_shared_expert_dp_tp2(model: str, monkeypatch) -
         prompts=PROMPTS,
     )
 
-    # ACLGraph (FULL_DECODE_ONLY): FlashComm1 + shared-expert-DP vs eager baseline.
+    # ACLGraph (FULL_DECODE_ONLY): requested combination vs eager baseline.
     compare_logprobs(
         runner_kwargs={
             "model_name": model,

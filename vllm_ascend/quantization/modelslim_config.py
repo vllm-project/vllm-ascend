@@ -118,6 +118,11 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
     },
+    "kimi_k3": {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "experts": ["experts.0.w1", "experts.0.w3", "experts.0.w2"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+    },
     "deepseek_v32": {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
@@ -377,6 +382,22 @@ def get_packed_modules_mapping(model_type: str) -> dict[str, list[str]]:
         Returns empty dict if model_type is not found.
     """
     return packed_modules_model_mapping.get(model_type, {})
+
+
+def _is_kimi_k3_text_config(hf_config: PretrainedConfig) -> bool:
+    if hf_config.model_type != "kimi_linear":
+        return False
+    from vllm_ascend.transformers_utils.configs.kimi_k3 import KimiK3TextConfig
+
+    return isinstance(hf_config, KimiK3TextConfig)
+
+
+def _get_packed_modules_mapping_for_hf_config(
+    hf_config: PretrainedConfig,
+) -> dict[str, list[str]]:
+    """Resolve Kimi K3's checkpoint layout without changing its model type."""
+    model_type = "kimi_k3" if _is_kimi_k3_text_config(hf_config) else hf_config.model_type
+    return get_packed_modules_mapping(model_type)
 
 
 def _is_missing_v_shard(shard_key: str, quant_description: Mapping[str, Any]) -> bool:
@@ -671,7 +692,8 @@ class AscendModelSlimConfig(QuantizationConfig):
         )
 
         vllm_config = get_current_vllm_config()
-        model_type = vllm_config.model_config.hf_config.model_type
+        hf_config = vllm_config.model_config.hf_config
+        model_type = hf_config.model_type
 
         if model_type in ["minimax", "minimax_m2"]:
             # Adapt to Minimax architecture: update layer names to MoE convention
@@ -688,11 +710,24 @@ class AscendModelSlimConfig(QuantizationConfig):
             # Adapt to bailing_hybrid architecture: update layer names to MoE convention
             prefix = prefix.replace("linear_attn", "attention")
             prefix = prefix.replace("self_attn", "attention")
-        if model_type in packed_modules_model_mapping:
-            self.packed_modules_mapping = packed_modules_model_mapping[model_type]
+        packed_modules_mapping = _get_packed_modules_mapping_for_hf_config(hf_config)
+        if packed_modules_mapping:
+            self.packed_modules_mapping = packed_modules_mapping
         prefix = self.quant_prefix_mapper(model_type, prefix)
 
         if isinstance(layer, LinearBase):
+            linear_attn_config = getattr(hf_config, "linear_attn_config", None)
+            is_k3_replaced_gate = (
+                _is_kimi_k3_text_config(hf_config)
+                and isinstance(linear_attn_config, dict)
+                and linear_attn_config.get("use_full_rank_gate", False)
+                and prefix.endswith((".g_a_proj", ".g_b_proj"))
+                and not self._has_quant_weight(prefix, self.packed_modules_mapping)
+            )
+            if is_k3_replaced_gate:
+                from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+
+                return AscendUnquantizedLinearMethod()
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 # Delayed import to avoid circular import
                 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod

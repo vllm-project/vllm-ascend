@@ -1,0 +1,259 @@
+{
+  "schema_version": 1,
+  "model": "Kimi-K3",
+  "constants": {
+    "hidden_size": 7168,
+    "routed_expert_hidden_size": 3584,
+    "routed_intermediate_size": 3072,
+    "shared_experts": 2,
+    "shared_intermediate_per_expert": 3072,
+    "shared_intermediate_total": 6144,
+    "experts": 896,
+    "top_k": 16,
+    "ep_size": 64,
+    "local_experts": 14,
+    "situ_beta": 4.0,
+    "situ_linear_beta": 25.0
+  },
+  "real_service_evidence_scope": {
+    "tp": 16,
+    "prefill_tokens": 65,
+    "decode_tokens": 1,
+    "other_tp_real_service_capture_required": false
+  },
+  "a3_dequant_situ_quant": {
+    "torch_op": "_C_ascend::dequant_situ_quant",
+    "attributes": {
+      "beta": 4.0,
+      "linear_beta": 25.0,
+      "activate_left": true,
+      "quant_mode": "dynamic"
+    },
+    "shared": {
+      "input_mode": "int32_dequant",
+      "optional_inputs": {
+        "bias": null,
+        "quant_scale": null,
+        "quant_offset": null,
+        "group_index": null
+      },
+      "cases": [
+        {
+          "id": "a3_shared_decode_tp1",
+          "phase": "decode",
+          "tp": 1,
+          "inputs": {
+            "x": {"shape": [1, 12288], "dtype": "int32", "format": "ND"},
+            "weight_scale": {"shape": [12288], "dtype": "float32", "format": "ND"},
+            "activation_scale": {"shape": [1, 1], "dtype": "float32", "format": "ND"}
+          },
+          "outputs": {
+            "y": {"shape": [1, 6144], "dtype": "int8", "format": "ND"},
+            "scale": {"shape": [1], "dtype": "float32", "format": "ND"}
+          }
+        },
+        {
+          "id": "a3_shared_prefill_tp1",
+          "phase": "prefill",
+          "tp": 1,
+          "inputs": {
+            "x": {"shape": [65, 12288], "dtype": "int32", "format": "ND"},
+            "weight_scale": {"shape": [12288], "dtype": "float32", "format": "ND"},
+            "activation_scale": {"shape": [65, 1], "dtype": "float32", "format": "ND"}
+          },
+          "outputs": {
+            "y": {"shape": [65, 6144], "dtype": "int8", "format": "ND"},
+            "scale": {"shape": [65], "dtype": "float32", "format": "ND"}
+          }
+        },
+        {
+          "id": "a3_shared_decode_tp2",
+          "phase": "decode",
+          "tp": 2,
+          "inputs": {
+            "x": {"shape": [1, 6144], "dtype": "int32", "format": "ND"},
+            "weight_scale": {"shape": [6144], "dtype": "float32", "format": "ND"},
+            "activation_scale": {"shape": [1, 1], "dtype": "float32", "format": "ND"}
+          },
+          "outputs": {
+            "y": {"shape": [1, 3072], "dtype": "int8", "format": "ND"},
+            "scale": {"shape": [1], "dtype": "float32", "format": "ND"}
+          }
+        },
+        {
+          "id": "a3_shared_prefill_tp2",
+          "phase": "prefill",
+          "tp": 2,
+          "inputs": {
+            "x": {"shape": [65, 6144], "dtype": "int32", "format": "ND"},
+            "weight_scale": {"shape": [6144], "dtype": "float32", "format": "ND"},
+            "activation_scale": {"shape": [65, 1], "dtype": "float32", "format": "ND"}
+          },
+          "outputs": {
+            "y": {"shape": [65, 3072], "dtype": "int8", "format": "ND"},
+            "scale": {"shape": [65], "dtype": "float32", "format": "ND"}
+          }
+        },
+        {
+          "id": "a3_shared_decode_tp4",
+          "phase": "decode",
+          "tp": 4,
+          "inputs": {
+            "x": {"shape": [1, 3072], "dtype": "int32", "format": "ND"},
+            "weight_scale": {"shape": [3072], "dtype": "float32", "format": "ND"},
+            "activation_scale": {"shape": [1, 1], "dtype": "float32", "format": "ND"}
+          },
+          "outputs": {
+            "y": {"shape": [1, 1536], "dtype": "int8", "format": "ND"},
+            "scale": {"shape": [1], "dtype": "float32", "format": "ND"}
+          }
+        },
+        {
+          "id": "a3_shared_prefill_tp4",
+          "phase": "prefill",
+          "tp": 4,
+          "inputs": {
+            "x": {"shape": [65, 3072], "dtype": "int32", "format": "ND"},
+            "weight_scale": {"shape": [3072], "dtype": "float32", "format": "ND"},
+            "activation_scale": {"shape": [65, 1], "dtype": "float32", "format": "ND"}
+          },
+          "outputs": {
+            "y": {"shape": [65, 1536], "dtype": "int8", "format": "ND"},
+            "scale": {"shape": [65], "dtype": "float32", "format": "ND"}
+          }
+        },
+        {
+          "id": "a3_shared_decode_tp8",
+          "phase": "decode",
+          "tp": 8,
+          "inputs": {
+            "x": {"shape": [1, 1536], "dtype": "int32", "format": "ND"},
+            "weight_scale": {"shape": [1536], "dtype": "float32", "format": "ND"},
+            "activation_scale": {"shape": [1, 1], "dtype": "float32", "format": "ND"}
+          },
+          "outputs": {
+            "y": {"shape": [1, 768], "dtype": "int8", "format": "ND"},
+            "scale": {"shape": [1], "dtype": "float32", "format": "ND"}
+          }
+        },
+        {
+          "id": "a3_shared_prefill_tp8",
+          "phase": "prefill",
+          "tp": 8,
+          "inputs": {
+            "x": {"shape": [65, 1536], "dtype": "int32", "format": "ND"},
+            "weight_scale": {"shape": [1536], "dtype": "float32", "format": "ND"},
+            "activation_scale": {"shape": [65, 1], "dtype": "float32", "format": "ND"}
+          },
+          "outputs": {
+            "y": {"shape": [65, 768], "dtype": "int8", "format": "ND"},
+            "scale": {"shape": [65], "dtype": "float32", "format": "ND"}
+          }
+        },
+        {
+          "id": "a3_shared_decode_tp16",
+          "phase": "decode",
+          "tp": 16,
+          "inputs": {
+            "x": {"shape": [1, 768], "dtype": "int32", "format": "ND"},
+            "weight_scale": {"shape": [768], "dtype": "float32", "format": "ND"},
+            "activation_scale": {"shape": [1, 1], "dtype": "float32", "format": "ND"}
+          },
+          "outputs": {
+            "y": {"shape": [1, 384], "dtype": "int8", "format": "ND"},
+            "scale": {"shape": [1], "dtype": "float32", "format": "ND"}
+          }
+        },
+        {
+          "id": "a3_shared_prefill_tp16",
+          "phase": "prefill",
+          "tp": 16,
+          "inputs": {
+            "x": {"shape": [65, 768], "dtype": "int32", "format": "ND"},
+            "weight_scale": {"shape": [768], "dtype": "float32", "format": "ND"},
+            "activation_scale": {"shape": [65, 1], "dtype": "float32", "format": "ND"}
+          },
+          "outputs": {
+            "y": {"shape": [65, 384], "dtype": "int8", "format": "ND"},
+            "scale": {"shape": [65], "dtype": "float32", "format": "ND"}
+          }
+        }
+      ]
+    },
+    "routed": {
+      "input_mode": "predequantized_bf16",
+      "tp_invariant": true,
+      "dequant_inputs": {
+        "weight_scale": null,
+        "activation_scale": null,
+        "bias": null,
+        "quant_scale": null,
+        "quant_offset": null,
+        "group_index": null
+      },
+      "cases": [
+        {
+          "id": "a3_routed_decode_empty",
+          "phase": "decode",
+          "tokens": 1,
+          "rows": 0,
+          "inputs": {"x": {"shape": [0, 6144], "dtype": "bfloat16", "format": "ND"}},
+          "outputs": {
+            "y": {"shape": [0, 3072], "dtype": "int8", "format": "ND"},
+            "scale": {"shape": [0], "dtype": "float32", "format": "ND"}
+          }
+        },
+        {
+          "id": "a3_routed_decode_max_local",
+          "phase": "decode",
+          "tokens": 1,
+          "rows": 14,
+          "upstream_group_counts": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+          "inputs": {"x": {"shape": [14, 6144], "dtype": "bfloat16", "format": "ND"}},
+          "outputs": {
+            "y": {"shape": [14, 3072], "dtype": "int8", "format": "ND"},
+            "scale": {"shape": [14], "dtype": "float32", "format": "ND"}
+          }
+        },
+        {
+          "id": "a3_routed_prefill_max_local",
+          "phase": "prefill",
+          "tokens": 65,
+          "rows": 910,
+          "upstream_group_counts": [65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65],
+          "inputs": {"x": {"shape": [910, 6144], "dtype": "bfloat16", "format": "ND"}},
+          "outputs": {
+            "y": {"shape": [910, 3072], "dtype": "int8", "format": "ND"},
+            "scale": {"shape": [910], "dtype": "float32", "format": "ND"}
+          }
+        }
+      ]
+    }
+  },
+  "a5_situ_mx_quant": {
+    "torch_op": "_C_ascend::situ_mx_quant",
+    "attributes": {
+      "beta": 4.0,
+      "linear_beta": 25.0,
+      "activate_left": true,
+      "axis": -1,
+      "dst_type": 36
+    },
+    "input_dtype": "bfloat16",
+    "output_dtype": "float8_e4m3fn",
+    "scale_dtype": "float8_e8m0fnu",
+    "shared_cases": [
+      {"tp": 1, "x_shape": ["M", 12288], "y_shape": ["M", 6144], "mxscale_shape": ["M", 96, 2]},
+      {"tp": 2, "x_shape": ["M", 6144], "y_shape": ["M", 3072], "mxscale_shape": ["M", 48, 2]},
+      {"tp": 4, "x_shape": ["M", 3072], "y_shape": ["M", 1536], "mxscale_shape": ["M", 24, 2]},
+      {"tp": 8, "x_shape": ["M", 1536], "y_shape": ["M", 768], "mxscale_shape": ["M", 12, 2]},
+      {"tp": 16, "x_shape": ["M", 768], "y_shape": ["M", 384], "mxscale_shape": ["M", 6, 2]}
+    ],
+    "routed_case": {
+      "tp_invariant": true,
+      "x_shape": ["M", 6144],
+      "y_shape": ["M", 3072],
+      "mxscale_shape": ["M", 48, 2]
+    }
+  }
+}

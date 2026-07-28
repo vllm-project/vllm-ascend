@@ -490,6 +490,58 @@ class TestMooncakeTransferGroups(unittest.TestCase):
         self.assertEqual(len(qga_pulls), 2)
         self.assertTrue(all(pull.num_group_pulls == 2 for pull in qga_pulls))
 
+    def test_hybrid_mla_rank_stays_with_mamba_owner_for_unequal_tp(self):
+        request_id = "cmpl-ab51f3aa-8754-4ceb-93cd-e7bfee331f2d-0-9edb7c3a"
+        consumers_by_prefill_rank: defaultdict[int, set[int]] = defaultdict(set)
+
+        for decode_tp_rank in range(8):
+            worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+            worker.tp_rank = decode_tp_rank
+            worker.tp_size = 8
+            worker._decode_tp_size = 8
+            worker._prefill_tp_size = 16
+            worker._prefill_pp_size = 1
+            worker.num_key_value_heads = 1
+            worker.use_sparse = False
+            worker.kv_group2layeridx = {
+                0: (
+                    {
+                        "kv_cache_spec_type": "AscendMLAAttentionSpec",
+                        "kv_cache_group_id": 0,
+                        "kv_cache_spec": {"total_num_kv_heads": 1},
+                    },
+                    [3],
+                ),
+                1: (
+                    {
+                        "kv_cache_spec_type": "MambaSpec",
+                        "kv_cache_group_id": 1,
+                        "kv_cache_spec": {},
+                    },
+                    [0, 1, 2, 4],
+                ),
+            }
+
+            chosen_ranks, rank_group_pulls = worker._get_hybrid_remote_rank_group_pulls(
+                request_id,
+                prefill_tp_size=16,
+            )
+            owned_mamba_ranks = {decode_tp_rank * 2, decode_tp_rank * 2 + 1}
+            mla_ranks = {
+                rank
+                for rank, group_pulls in rank_group_pulls.items()
+                if any(group_pull.group_id == 0 for group_pull in group_pulls)
+            }
+
+            self.assertEqual(set(chosen_ranks), owned_mamba_ranks)
+            self.assertEqual(len(mla_ranks), 1)
+            self.assertTrue(mla_ranks.issubset(owned_mamba_ranks))
+            for rank in chosen_ranks:
+                consumers_by_prefill_rank[rank].add(decode_tp_rank)
+
+        self.assertEqual(set(consumers_by_prefill_rank), set(range(16)))
+        self.assertTrue(all(len(consumers) == 1 for consumers in consumers_by_prefill_rank.values()))
+
     def test_hybrid_group_pulls_metadata_filters_groups_per_remote_card(self):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.vllm_config = MockVllmConfig()
@@ -1060,6 +1112,203 @@ class TestCoreFunctionality(unittest.TestCase):
         self.assertEqual(src_list, [0x1000 + 2 * 128, 0x2000 + 2 * 256])
         self.assertEqual(dst_list, [0x3000 + 3 * 160, 0x4000 + 3 * 512])
         self.assertEqual(length_list, [100, 200])
+
+    def test_append_mamba_transfer_meta_kimi_k3_sd_tp16_to_tp8(self):
+        self.thread.tp_size = 8
+        self.thread.vllm_config.model_config.hf_text_config = types.SimpleNamespace(
+            linear_attn_config={"num_heads": 96, "head_dim": 128}
+        )
+        src_list: list[int] = []
+        dst_list: list[int] = []
+        length_list: list[int] = []
+        local_bases = [0x100000, 0x300000]
+        remote_bases = [0x200000, 0x400000]
+        local_strides = [30000, 800000]
+        remote_strides = [15000, 400000]
+        local_block_id = 2
+        remote_block_id = 3
+
+        self.thread._append_mamba_transfer_meta(
+            src_list,
+            dst_list,
+            length_list,
+            group_spec={
+                "kv_cache_spec_type": "MambaSpec",
+                "shapes": [[3, 4608], [12, 128, 128]],
+                "dtype_sizes": [2, 4],
+            },
+            src_layer_base_addr=local_bases,
+            dst_layer_base_addr=remote_bases,
+            block_len=[27648, 786432],
+            block_stride=local_strides,
+            remote_block_stride=remote_strides,
+            remote_block_id=remote_block_id,
+            local_block_id=local_block_id,
+            tp_num_need_pulls=2,
+            remote_tp_offset=1,
+        )
+
+        local_conv_base = local_bases[0] + local_block_id * local_strides[0]
+        remote_conv_base = remote_bases[0] + remote_block_id * remote_strides[0]
+        expected_src: list[int] = []
+        expected_dst: list[int] = []
+        for state_idx in range(3):
+            for local_segment_offset, remote_segment_offset in zip((0, 1536, 3072), (0, 768, 1536)):
+                expected_src.append(local_conv_base + (state_idx * 4608 + local_segment_offset + 768) * 2)
+                expected_dst.append(remote_conv_base + (state_idx * 2304 + remote_segment_offset) * 2)
+        expected_src.append(local_bases[1] + local_block_id * local_strides[1] + 393216)
+        expected_dst.append(remote_bases[1] + remote_block_id * remote_strides[1])
+
+        self.assertEqual(src_list, expected_src)
+        self.assertEqual(dst_list, expected_dst)
+        self.assertEqual(length_list, [1536] * 9 + [393216])
+
+    def test_append_mamba_transfer_meta_kimi_k3_sd_tp32_to_tp8(self):
+        self.thread.tp_size = 8
+        self.thread.vllm_config.model_config.hf_text_config = types.SimpleNamespace(
+            linear_attn_config={"num_heads": 96, "head_dim": 128}
+        )
+        src_list: list[int] = []
+        dst_list: list[int] = []
+        length_list: list[int] = []
+
+        self.thread._append_mamba_transfer_meta(
+            src_list,
+            dst_list,
+            length_list,
+            group_spec={
+                "kv_cache_spec_type": "MambaSpec",
+                "shapes": [[3, 4608], [12, 128, 128]],
+                "dtype_sizes": [2, 4],
+            },
+            src_layer_base_addr=[0x100000, 0x300000],
+            dst_layer_base_addr=[0x200000, 0x400000],
+            block_len=[27648, 786432],
+            block_stride=[27648, 786432],
+            remote_block_stride=[6912, 196608],
+            remote_block_id=0,
+            local_block_id=0,
+            tp_num_need_pulls=4,
+            remote_tp_offset=3,
+        )
+
+        expected_src: list[int] = []
+        expected_dst: list[int] = []
+        for state_idx in range(3):
+            for local_segment_offset, remote_segment_offset in zip((0, 1536, 3072), (0, 384, 768)):
+                expected_src.append(0x100000 + (state_idx * 4608 + local_segment_offset + 3 * 384) * 2)
+                expected_dst.append(0x200000 + (state_idx * 1152 + remote_segment_offset) * 2)
+        expected_src.append(0x300000 + 3 * 196608)
+        expected_dst.append(0x400000)
+
+        self.assertEqual(src_list, expected_src)
+        self.assertEqual(dst_list, expected_dst)
+        self.assertEqual(length_list, [768] * 9 + [196608])
+
+    def test_append_mamba_transfer_meta_kimi_k3_sd_tp32_to_tp16(self):
+        self.thread.tp_size = 16
+        self.thread.vllm_config.model_config.hf_text_config = types.SimpleNamespace(
+            linear_attn_config={"num_heads": 96, "head_dim": 128}
+        )
+        src_list: list[int] = []
+        dst_list: list[int] = []
+        length_list: list[int] = []
+
+        self.thread._append_mamba_transfer_meta(
+            src_list,
+            dst_list,
+            length_list,
+            group_spec={
+                "kv_cache_spec_type": "MambaSpec",
+                "shapes": [[3, 2304], [6, 128, 128]],
+                "dtype_sizes": [2, 4],
+            },
+            src_layer_base_addr=[0x100000, 0x300000],
+            dst_layer_base_addr=[0x200000, 0x400000],
+            block_len=[13824, 393216],
+            block_stride=[13824, 393216],
+            remote_block_stride=[6912, 196608],
+            remote_block_id=0,
+            local_block_id=0,
+            tp_num_need_pulls=2,
+            remote_tp_offset=1,
+        )
+
+        expected_src: list[int] = []
+        expected_dst: list[int] = []
+        for state_idx in range(3):
+            for local_segment_offset, remote_segment_offset in zip((0, 768, 1536), (0, 384, 768)):
+                expected_src.append(0x100000 + (state_idx * 2304 + local_segment_offset + 384) * 2)
+                expected_dst.append(0x200000 + (state_idx * 1152 + remote_segment_offset) * 2)
+        expected_src.append(0x300000 + 196608)
+        expected_dst.append(0x400000)
+
+        self.assertEqual(src_list, expected_src)
+        self.assertEqual(dst_list, expected_dst)
+        self.assertEqual(length_list, [768] * 9 + [196608])
+
+    def test_append_mamba_transfer_meta_legacy_qwen_layout(self):
+        self.thread.tp_size = 4
+        self.thread.vllm_config.model_config.hf_text_config = types.SimpleNamespace(
+            linear_num_key_heads=16,
+            linear_key_head_dim=128,
+            linear_num_value_heads=32,
+            linear_value_head_dim=128,
+        )
+        src_list: list[int] = []
+        dst_list: list[int] = []
+        length_list: list[int] = []
+
+        self.thread._append_mamba_transfer_meta(
+            src_list,
+            dst_list,
+            length_list,
+            group_spec={
+                "kv_cache_spec_type": "MambaSpec",
+                "shapes": [[3, 2048], [8, 128, 128]],
+                "dtype_sizes": [2, 4],
+            },
+            src_layer_base_addr=[0x100000, 0x300000],
+            dst_layer_base_addr=[0x200000, 0x400000],
+            block_len=[12288, 524288],
+            block_stride=[12288, 524288],
+            remote_block_stride=[6144, 262144],
+            remote_block_id=0,
+            local_block_id=0,
+            tp_num_need_pulls=2,
+            remote_tp_offset=0,
+        )
+
+        self.assertEqual(len(src_list), 10)
+        self.assertEqual(len(dst_list), 10)
+        self.assertEqual(length_list, [512, 512, 1024] * 3 + [262144])
+
+    def test_append_mamba_transfer_meta_rejects_ds_layout(self):
+        self.thread.tp_size = 8
+        self.thread.vllm_config.model_config.hf_text_config = types.SimpleNamespace(
+            linear_attn_config={"num_heads": 96, "head_dim": 128}
+        )
+
+        with self.assertRaisesRegex(ValueError, "only supports SD"):
+            self.thread._append_mamba_transfer_meta(
+                [],
+                [],
+                [],
+                group_spec={
+                    "kv_cache_spec_type": "MambaSpec",
+                    "shapes": [[4608, 3], [12, 128, 128]],
+                    "dtype_sizes": [2, 4],
+                },
+                src_layer_base_addr=[0x100000, 0x300000],
+                dst_layer_base_addr=[0x200000, 0x400000],
+                block_len=[27648, 786432],
+                block_stride=[27648, 786432],
+                remote_block_stride=[13824, 393216],
+                remote_block_id=0,
+                local_block_id=0,
+                tp_num_need_pulls=2,
+                remote_tp_offset=0,
+            )
 
     def test_transfer_kv_cache_failure(self):
         self.engine.batch_transfer_sync_read.return_value = -1
@@ -2120,6 +2369,31 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         worker.register_kv_caches(mla_caches)
         self.assertTrue(worker.use_mla)
         self.assertEqual(len(worker.block_len_per_addr[0]), 2)
+
+    def test_registered_hybrid_buffer_recovers_aligned_raw_base(self):
+        alignment = 2 * 1024 * 1024
+        tensor_size = 4 * alignment
+        logical_view_offset = 0x17200
+        raw_tensor = torch.empty(tensor_size + alignment, dtype=torch.uint8)
+        aligned_offset = (-raw_tensor.data_ptr()) % alignment
+        aligned_tensor = raw_tensor[aligned_offset : aligned_offset + tensor_size]
+        logical_tensor = aligned_tensor[logical_view_offset:]
+        layer_name = "model.layers.0.self_attn"
+
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.num_blocks = 1579
+        worker._layer_specs = {layer_name: MagicMock()}
+        worker.kv_cache_config = types.SimpleNamespace(
+            kv_cache_tensors=[types.SimpleNamespace(size=tensor_size, shared_by=[layer_name])]
+        )
+
+        self.assertEqual(aligned_tensor.data_ptr() % alignment, 0)
+        self.assertNotEqual(logical_tensor.data_ptr() % alignment, 0)
+        with patch.object(worker, "_get_mamba_conv_padding", return_value=0):
+            ptrs, lengths = worker._get_registered_kv_tensor_buffers({layer_name: logical_tensor})
+
+        self.assertEqual(ptrs, [aligned_tensor.data_ptr()])
+        self.assertEqual(lengths, [tensor_size])
 
     def test_device_id_selection_with_physical_devices(self):
         # Test with physical devices set

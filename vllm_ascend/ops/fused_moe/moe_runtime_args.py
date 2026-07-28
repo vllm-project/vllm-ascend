@@ -58,8 +58,10 @@ dataclass directly.
 from __future__ import annotations
 
 import torch
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 import vllm_ascend.ops.fused_moe.moe_stage_params as _stage_params
+from vllm_ascend.ops.activation import SituActivationConfig
 from vllm_ascend.ops.fused_moe.moe_stage_contracts import (
     MoEAllGatherCombineMetadata,
     MoEAllToAllCombineMetadata,
@@ -128,7 +130,7 @@ def build_fused_experts_input(
     apply_router_weight_on_input: bool = False,
     log2phy: torch.Tensor | None = None,
     pertoken_scale: torch.Tensor | None = None,
-    activation: str = "silu",
+    activation: str | MoEActivation | SituActivationConfig = "silu",
     need_trans: bool = False,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,

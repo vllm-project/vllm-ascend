@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2025 Tianjin University, Ltd.
+ * Copyright (c) 2026 Tianjin University, Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -20,8 +20,8 @@ extern "C" {
  * k : required
  * w : required
  * u : required
- * gOptional : optional, only non-null aclTensor is supported
- * gkOptional : optional, reserved (must be nullptr)
+ * gOptional : optional, scalar gate tensor; either gOptional or gkOptional must be non-null
+ * gkOptional : optional, key-wise gate tensor; either gOptional or gkOptional must be non-null
  * initalStateOptional : optional
  * outputFinalState : required
  * chunkSize : required

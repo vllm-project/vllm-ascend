@@ -77,6 +77,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     # it will consume more NPU memory. If reducing NPU memory usage is a higher priority
     # for your DeepSeek W8A8 scene, then disable it.
     "VLLM_ASCEND_ENABLE_MLAPO": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", "1"))),
+    # Experimental A5 MLA decode optimization. Split each request's Block Table
+    # while broadcasting Query, then merge Local FIA outputs with AttentionUpdate.
+    # It is disabled by default until the end-to-end accuracy/performance gates pass.
+    "VLLM_ASCEND_MLA_FIA_SPLIT": lambda: bool(int(os.getenv("VLLM_ASCEND_MLA_FIA_SPLIT", "0"))),
     # Whether to enable weight cast format to FRACTAL_NZ.
     # 0: close nz;
     # 1: only quant case enable nz;

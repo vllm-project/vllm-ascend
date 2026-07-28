@@ -183,6 +183,41 @@ class TestUtils(TestBase):
         with mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=False):
             self.assertFalse(utils.enable_dsa_cp_with_o_proj_tp())
 
+    def test_flashcomm1_and_shared_expert_dp_switches_are_independent(self):
+        cases = [
+            (False, False),
+            (False, True),
+            (True, False),
+            (True, True),
+        ]
+        for enable_flashcomm1, enable_shared_expert_dp in cases:
+            with self.subTest(
+                enable_flashcomm1=enable_flashcomm1,
+                enable_shared_expert_dp=enable_shared_expert_dp,
+            ):
+                utils.clear_enable_sp()
+                vllm_config = mock.MagicMock(
+                    additional_config={
+                        "enable_flashcomm1": enable_flashcomm1,
+                        "refresh": True,
+                    }
+                )
+                ascend_config = mock.MagicMock(
+                    enable_flashcomm1=enable_flashcomm1,
+                    enable_shared_expert_dp=enable_shared_expert_dp,
+                    enable_sp_by_pass=False,
+                )
+
+                with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config):
+                    self.assertEqual(
+                        utils.enable_sp(
+                            vllm_config,
+                            enable_shared_expert_dp=enable_shared_expert_dp,
+                        ),
+                        enable_flashcomm1,
+                    )
+                    self.assertEqual(utils.shared_expert_dp_enabled(), enable_shared_expert_dp)
+
     def test_vllm_version_is(self):
         with mock.patch.dict(os.environ, {"VLLM_VERSION": "1.0.0"}):
             with mock.patch("vllm.__version__", "1.0.0"):

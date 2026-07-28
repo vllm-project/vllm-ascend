@@ -25,6 +25,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, _MEGA_MOE_SUPPORTED, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
+from vllm_ascend.ops.activation import SituActivationConfig
 from vllm_ascend.ops.fused_moe import comm_utils
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
@@ -436,6 +437,15 @@ class FusedMC2CommImpl(MoECommMethod):
         self,
         fused_experts_input: MoEFusedExpertsInput,
     ):
+        # FIX(mega all-route): the shared expert (and any unquantized MoE) is QuantType.NONE and
+        # cannot go through MegaMoe (which handles W8A8/W4A8/MXFP only). All-route now sends every
+        # MoE layer here, so delegate unquantized layers to the generic base path
+        # (dispatch -> unified_apply_mlp -> combine), which uses their intact weights. Quantized
+        # routed experts (whose standard weights are freed for MegaMoe) still take the path below.
+        if fused_experts_input.quant.quant_type == QuantType.NONE or isinstance(
+            fused_experts_input.activation, SituActivationConfig
+        ):
+            return super().fused_experts(fused_experts_input)
         assert not (fused_experts_input.weights.w1_scale is None or fused_experts_input.weights.w2_scale is None), (
             "w1_scale and w2_scale cannot be None for FusedMC2CommImpl."
         )

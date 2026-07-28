@@ -14,7 +14,7 @@ import torch
 import torch.nn.functional as F
 import torch_npu  # noqa: F401
 
-from vllm_ascend.ops.triton.kda.kda import fused_recurrent_kda
+from vllm_ascend.ops.triton.kda.kda import fused_kda_gate, fused_recurrent_kda
 
 DEVICE = "npu"
 
@@ -367,3 +367,84 @@ def test_fused_recurrent_kda_fp32(
         e = cu_seqlens[i + 1]
         tri_state = tri_ht[e - 1].transpose(-1, -2).unsqueeze(0)
         assert_close(f"ht_{i}", ref_states[i], tri_state, NPU_RMSE_RATIO_HT)
+
+
+@pytest.mark.skip_global_cleanup
+@torch.inference_mode()
+def test_fused_kda_safe_gate_matches_kimi_k3_reference():
+    """K3 uses lower_bound * sigmoid((raw + bias) * exp(A_log))."""
+    torch.manual_seed(20260720)
+    tokens, heads, head_dim = 17, 4, 128
+    raw_gate = torch.randn(tokens, heads * head_dim, dtype=torch.bfloat16, device=DEVICE)
+    a_log = torch.randn(1, 1, heads, 1, dtype=torch.float32, device=DEVICE) * 0.1
+    dt_bias = torch.randn(heads * head_dim, dtype=torch.float32, device=DEVICE) * 0.1
+    lower_bound = -5.0
+
+    got = fused_kda_gate(
+        raw_gate,
+        a_log,
+        head_dim,
+        g_bias=dt_bias,
+        safe_gate=True,
+        lower_bound=lower_bound,
+    )
+    expected = lower_bound * torch.sigmoid(
+        (raw_gate.float().view(tokens, heads, head_dim) + dt_bias.view(heads, head_dim)) * a_log.reshape(heads, 1).exp()
+    )
+
+    torch.testing.assert_close(got, expected, rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.skip_global_cleanup
+@torch.inference_mode()
+def test_fused_recurrent_kda_spec_decode_uses_accepted_state():
+    """Spec decode reads accepted-1 state and writes each draft token's slot."""
+    torch.manual_seed(20260721)
+    heads, head_dim = 4, 128
+    cu_seqlens = torch.tensor([0, 3, 5], dtype=torch.int32, device=DEVICE)
+    state_indices = torch.tensor([[1, 2, 3], [4, 5, 0]], dtype=torch.int32, device=DEVICE)
+    num_accepted_tokens = torch.tensor([2, 1], dtype=torch.int32, device=DEVICE)
+
+    q = torch.randn(1, 5, heads, head_dim, dtype=torch.bfloat16, device=DEVICE)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    g = F.logsigmoid(torch.randn(1, 5, heads, head_dim, dtype=torch.float32, device=DEVICE))
+    beta = torch.rand(1, 5, heads, dtype=torch.bfloat16, device=DEVICE).sigmoid()
+    state = torch.randn(6, heads, head_dim, head_dim, dtype=torch.float32, device=DEVICE)
+    state_before = state.clone()
+
+    expected_outputs = []
+    expected_states = []
+    for seq, (start, end) in enumerate(((0, 3), (3, 5))):
+        accepted_offset = int(num_accepted_tokens[seq].item()) - 1
+        initial_slot = int(state_indices[seq, accepted_offset].item())
+        expected, final_state = naive_recurrent_kda(
+            reference_l2norm(q[:, start:end].contiguous()),
+            reference_l2norm(k[:, start:end].contiguous()),
+            v[:, start:end],
+            g[:, start:end],
+            beta[:, start:end],
+            initial_state=state_before[initial_slot].transpose(-1, -2).unsqueeze(0),
+            output_final_state=True,
+        )
+        expected_outputs.append(expected)
+        expected_states.append(final_state)
+
+    got, _ = fused_recurrent_kda(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=state,
+        inplace_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        cu_seqlens=cu_seqlens,
+        ssm_state_indices=state_indices,
+        num_accepted_tokens=num_accepted_tokens,
+    )
+
+    assert_close("spec_o", torch.cat(expected_outputs, dim=1), got, NPU_RMSE_RATIO_O)
+    for seq, final_slot in enumerate((3, 5)):
+        got_state = state[final_slot].transpose(-1, -2).unsqueeze(0)
+        assert_close(f"spec_ht_{seq}", expected_states[seq], got_state, NPU_RMSE_RATIO_HT)

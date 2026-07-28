@@ -21,7 +21,9 @@ from typing import Any, Generic, TypeVar
 
 import numpy as np
 import torch
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
+from vllm_ascend.ops.activation import SituActivationConfig
 from vllm_ascend.ops.fused_moe.moe_stage_params import MoEQuantParams, MoERoutingParams
 
 TMoECombineMetadata = TypeVar("TMoECombineMetadata")
@@ -65,7 +67,7 @@ class MoEFusedExpertsInput:
     weights: MoEWeights
     routing: MoERoutingParams
     quant: MoEQuantParams
-    activation: str = "silu"
+    activation: str | MoEActivation | SituActivationConfig = "silu"
     need_trans: bool = False
     dynamic_eplb: bool = False
     swiglu_limit: float = 0.0
@@ -143,7 +145,7 @@ class MoEMlpComputeInput:
     weights: MoEWeights
     quant: MoEQuantParams
     fusion: bool
-    activation: str = "silu"
+    activation: str | MoEActivation | SituActivationConfig = "silu"
     need_trans: bool = False
     dynamic_eplb: bool = False
     swiglu_limit: float = 0.0
