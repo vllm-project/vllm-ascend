@@ -494,15 +494,6 @@ class FinegrainedTPConfig:
         if any(size > 0 for size in module_tp_sizes) and enabled_configs:
             logger.info("finegrained_tp_config enabled: %s", ", ".join(enabled_configs))
 
-    def get_max_finegrained_tp_size(self) -> int:
-        max_finegrained_tp_size = 1
-        max_finegrained_tp_size = max(max_finegrained_tp_size, self.oproj_tensor_parallel_size)
-        max_finegrained_tp_size = max(max_finegrained_tp_size, self.lmhead_tensor_parallel_size)
-        max_finegrained_tp_size = max(max_finegrained_tp_size, self.embedding_tensor_parallel_size)
-        max_finegrained_tp_size = max(max_finegrained_tp_size, self.mlp_tensor_parallel_size)
-        max_finegrained_tp_size = max(max_finegrained_tp_size, self.olora_tensor_parallel_size)
-        return max_finegrained_tp_size
-
 
 class AscendCompilationConfig:
     """
