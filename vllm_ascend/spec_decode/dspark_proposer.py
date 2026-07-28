@@ -470,7 +470,13 @@ class AscendDSparkProposer(AscendDflashProposer):
             valid_query_end = query_end
         valid_query_end = torch.maximum(query_start, valid_query_end)
 
-        num_context = min(target_token_ids.shape[0], target_hidden_states.shape[0], target_positions.shape[0])
+        num_context = target_token_ids.shape[0]
+        if target_positions.shape[0] < num_context or target_hidden_states.shape[0] < num_context:
+            raise ValueError(
+                "DSpark context inputs are shorter than target_token_ids: "
+                f"tokens={num_context}, positions={target_positions.shape[0]}, "
+                f"hidden_states={target_hidden_states.shape[0]}."
+            )
         self._dflash_num_context = num_context
         if num_context > 0:
             context_token_indices = self.arange_dflash[:num_context]
@@ -566,14 +572,14 @@ class AscendDSparkProposer(AscendDflashProposer):
         self,
         num_input_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        block_size = self.num_speculative_tokens
-        if num_input_tokens % block_size != 0:
+        tokens_per_request = self.num_speculative_tokens
+        if num_input_tokens % tokens_per_request != 0:
             raise ValueError(
-                f"DSpark decode requires a multiple of block_size tokens, got "
-                f"{num_input_tokens} tokens for block_size={block_size}"
+                f"DSpark decode requires a multiple of tokens_per_request, got "
+                f"{num_input_tokens} tokens for tokens_per_request={tokens_per_request}"
             )
-        batch_size = num_input_tokens // block_size
-        draft_positions = self.positions[:num_input_tokens].view(batch_size, block_size)
+        batch_size = num_input_tokens // tokens_per_request
+        draft_positions = self.positions[:num_input_tokens].view(batch_size, tokens_per_request)
         context_end = draft_positions[:, :1].to(torch.int64) - 1
         context_start = torch.clamp(context_end + 1 - self._dspark_window_size, min=0)
         context_positions = context_start + self._dspark_window_offsets
@@ -581,7 +587,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         cache_valid = context_positions <= context_end
         request_slots = (
             self._request_slots_buffer[:num_input_tokens]
-            .view(batch_size, block_size)[:, :1]
+            .view(batch_size, tokens_per_request)[:, :1]
             .to(torch.int64)
             .expand(-1, self._dspark_window_size)
         )
