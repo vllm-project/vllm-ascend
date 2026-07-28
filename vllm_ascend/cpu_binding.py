@@ -651,6 +651,21 @@ class CpuAlloc:
         if not shutil.which("migratepages"):
             logger.info("The 'migratepages' command is not available, skipping memory binding.")
             return
+        if os.environ.get("VLLM_ASCEND_SKIP_MEM_MIGRATE") == "1":
+            # The process holds a cross-rank shared offload buffer (mmap'd
+            # /dev/shm) accessed from multiple NUMA nodes. migratepages would
+            # force-migrate the whole process — including the multi-GB shared
+            # buffer — one 4KB page at a time (~430MB/s: many minutes for V4's
+            # 129GB, infeasible for GLM's ~2.9TB), stalling EngineCore init.
+            # The shared buffer must not be pinned to one rank's NUMA node
+            # anyway (it is shared), so skip process-wide memory migration.
+            # The non-shared path never sets this flag, so its per-rank pinned
+            # tensors still get migrated normally.
+            logger.info(
+                "[migrate] NPU:%s memory migration SKIPPED "
+                "(VLLM_ASCEND_SKIP_MEM_MIGRATE=1, shared offload buffer present)",
+                npu)
+            return
         target_numa = _get_npu_numa_node(npu)
         if target_numa is None:
             logger.warning(

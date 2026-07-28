@@ -2,6 +2,7 @@
 
 import threading
 import time
+import os
 from concurrent.futures import ThreadPoolExecutor
 
 import torch
@@ -217,6 +218,11 @@ class ExpertOffloadManager:
         Returns a tensor of ``shape`` backed by the shared mmap. This avoids
         each rank duplicating the full expert set (GLM EP8: 2.9TB → 365GB).
         """
+        # Tell cpu_binding to skip NUMA migratepages for this worker (see
+        # cpu_binding.bind_memory): force-migrating the cross-rank shared
+        # buffer is both semantically wrong and pathologically slow. Set
+        # before warmup runs bind_cpus/bind_memory.
+        os.environ["VLLM_ASCEND_SKIP_MEM_MIGRATE"] = "1"
         elem_sz = torch.empty(0, dtype=dtype).element_size()
         nelem = 1
         for s in shape:
@@ -231,16 +237,56 @@ class ExpertOffloadManager:
             from vllm.distributed.parallel_state import get_ep_group
             dist.barrier(group=get_ep_group().cpu_group)
         storage = torch.UntypedStorage.from_file(path, shared=True, nbytes=nbytes)
-        tensor = torch.empty(0, dtype=dtype).set_(storage, 0, shape)
+        tensor = torch.empty(0, dtype=dtype, device='cpu').set_(storage, 0, shape)
         if self.ep_size > 1:
             import torch.distributed as dist
             from vllm.distributed.parallel_state import get_ep_group
             dist.barrier(group=get_ep_group().cpu_group)
+        # Lock the shared mmap (MLOCK_ONFAULT) so its pages are
+        # non-migratable. Without this, the worker's NUMA `migratepages`
+        # (cpu_binding.bind_memory, run once during warmup) crawls over the
+        # entire shared buffer (129GB for V4 TP2, ~2.9TB projected for GLM
+        # EP8) — a multi-minute stall that times out the EngineCore's init
+        # collective_rpc and wedges shm_broadcast. The non-shared path's
+        # per-expert pinned tensors are already mlocked by torch, which is
+        # why only the shared path hit this. ONFAULT avoids faulting the
+        # whole buffer up front; pages lock as the weight loader touches them.
+        self._mlock_shared(tensor.data_ptr(), nbytes)
         # Track paths for cleanup.
         if not hasattr(self, '_shm_paths'):
             self._shm_paths = []
         self._shm_paths.append(path)
         return tensor
+
+    @staticmethod
+    def _mlock_shared(ptr: int, nbytes: int) -> None:
+        """Lock a CPU address range so its pages become non-migratable.
+
+        Tries mlock2(MLOCK_ONFAULT) first (locks pages as they fault, no
+        upfront touch), then falls back to plain mlock. Needs CAP_IPC_LOCK to
+        exceed RLIMIT_MEMLOCK; failures are logged but non-fatal (the buffer
+        still works, just risks the NUMA-migration stall described above).
+        """
+        import ctypes
+        import ctypes.util
+        try:
+            libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6",
+                               use_errno=True)
+            MLOCK_ONFAULT = 1
+            rc = -1
+            mlock2 = getattr(libc, "mlock2", None)
+            if mlock2 is not None:
+                rc = mlock2(ctypes.c_void_p(ptr), ctypes.c_size_t(nbytes),
+                            ctypes.c_uint(MLOCK_ONFAULT))
+            if rc != 0:
+                rc = libc.mlock(ctypes.c_void_p(ptr), ctypes.c_size_t(nbytes))
+            if rc != 0:
+                logger.warning(
+                    "[shared_mmap] mlock failed errno=%s nbytes=%d — NUMA "
+                    "migratepages may stall on the shared buffer; grant "
+                    "CAP_IPC_LOCK to avoid it.", ctypes.get_errno(), nbytes)
+        except Exception as e:  # pragma: no cover - environment dependent
+            logger.warning("[shared_mmap] mlock unavailable: %s", e)
 
     def init_layer_cpu_buffers(self, layer, layer_moe_idx: int):
         """Allocate CPU weight + scale/offset buffers for one MoE layer.
@@ -268,12 +314,24 @@ class ExpertOffloadManager:
                 layer_moe_idx, "w2", (ntotal, *w2_shape), params_dtype)
             self.w13_weights_cpu.append(w13_buf)
             self.w2_weights_cpu.append(w2_buf)
-            # Per-rank pinned staging for async H2D (mmap isn't pinned).
-            if not hasattr(self, '_w13_staging') or self._w13_staging is None:
-                self._w13_staging = torch.empty(
-                    w13_shape, dtype=params_dtype, pin_memory=True)
-                self._w2_staging = torch.empty(
-                    w2_shape, dtype=params_dtype, pin_memory=True)
+            # Per-rank pinned staging POOL for async H2D (mmap isn't pinned).
+            # Size must cover the largest single synchronized load so a slot is
+            # never reused while its prior async H2D is still in flight on
+            # load_stream: decode loads ≤ topk experts; multi-card prefill loads
+            # one EP shard (ntotal // ep_size); single-card prefill loads ntotal.
+            # _expert_src_storage additionally syncs on wrap as a safety net, so
+            # any pool size is correct — this sizing is for throughput.
+            shard = ntotal // max(1, self.ep_size)
+            _POOL = max(getattr(self, 'topk', 8), shard)
+            if not hasattr(self, '_w13_staging_pool'):
+                self._w13_staging_pool = [
+                    torch.empty(w13_shape, dtype=params_dtype, device='cpu',
+                                pin_memory=True) for _ in range(_POOL)]
+                self._w2_staging_pool = [
+                    torch.empty(w2_shape, dtype=params_dtype, device='cpu',
+                                pin_memory=True) for _ in range(_POOL)]
+                self._w13_staging_counter = 0
+                self._w2_staging_counter = 0
         else:
             w13_list = [
                 torch.empty(w13_shape, dtype=params_dtype, device="cpu", pin_memory=True)
@@ -391,6 +449,14 @@ class ExpertOffloadManager:
         t1 = time.perf_counter()
         self.process_weights_after_loading()
         t2 = time.perf_counter()
+
+        # Shared mmap buffer: ensure ALL ranks finished writing the shared mmap
+        # before any H2D reads (avoid fill/read race — rank 0 finishes filling
+        # and starts the profile run's H2D while rank 1 is still writing).
+        if self.offload_config.shared_cpu_buffer and self.ep_size > 1:
+            import torch.distributed as dist
+            from vllm.distributed.parallel_state import get_ep_group
+            dist.barrier(group=get_ep_group().cpu_group)
 
         num_moe_layers = len(self.moe_layers)
         if self.offload_config.cache_policy_enabled:
@@ -562,13 +628,31 @@ class ExpertOffloadManager:
             per_w2 = w2_storage.nbytes() // num_experts
             self.w13_expert_size_bytes = per_w13
             self.w2_expert_size_bytes = per_w2
-            for expert_id in range(num_experts):
-                self._expert_dst_storage(layer_id, expert_id, 'w13').copy_(
-                    w13_storage[expert_id * per_w13 : (expert_id + 1) * per_w13]
-                )
-                self._expert_dst_storage(layer_id, expert_id, 'w2').copy_(
-                    w2_storage[expert_id * per_w2 : (expert_id + 1) * per_w2]
-                )
+            # SHARED mmap read/write race: the .to('npu') above READ the shared
+            # mmap (raw weights) and the loop below WRITES NZ bytes back into
+            # the SAME shared mmap. With every rank doing both concurrently,
+            # rank A's NZ write races rank B's read → rank B re-NZ-casts
+            # already-NZ bytes → corrupt, non-deterministic weights (the
+            # per-rank hash of the buffer diverges run to run). Serialize:
+            # all reads, barrier, let rank 0 alone write, barrier. Non-shared
+            # has no shared buffer (each rank owns its buffers) → no race.
+            if use_shared and self.ep_size > 1:
+                torch_npu.npu.synchronize()
+                import torch.distributed as dist
+                from vllm.distributed.parallel_state import get_ep_group
+                dist.barrier(group=get_ep_group().cpu_group)
+            if not use_shared or self.ep_rank == 0:
+                for expert_id in range(num_experts):
+                    self._expert_dst_storage(layer_id, expert_id, 'w13').copy_(
+                        w13_storage[expert_id * per_w13 : (expert_id + 1) * per_w13]
+                    )
+                    self._expert_dst_storage(layer_id, expert_id, 'w2').copy_(
+                        w2_storage[expert_id * per_w2 : (expert_id + 1) * per_w2]
+                    )
+            if use_shared and self.ep_size > 1:
+                import torch.distributed as dist
+                from vllm.distributed.parallel_state import get_ep_group
+                dist.barrier(group=get_ep_group().cpu_group)
 
     def _process_scale_bias_cpu_buffers(self):
         """Apply update_bias transformation to scale_bias CPU buffers.
@@ -1432,14 +1516,34 @@ class ExpertOffloadManager:
     def _expert_src_storage(self, layer_idx, eid, which='w13'):
         """Return expert eid's bytes as UntypedStorage for H2D **read**.
 
-        Shared (mmap): copy expert view into pinned staging first (mmap isn't
-        pinned → can't async H2D directly), return staging storage.
-        Non-shared: expert tensor's own storage (already pinned).
+        Shared (mmap): copy the expert's raw byte-slice of the big mmap into a
+        pinned staging buffer (mmap isn't pinned → can't async H2D directly)
+        and return the staging storage. The copy is RAW STORAGE (not a tensor
+        copy_) because the mmap holds NZ-encoded device bytes — a "liar
+        tensor" whose logical shape/stride must not be reinterpreted — exactly
+        mirroring the fill path (_expert_dst_storage) and the non-shared read.
+
+        The staging pool is cycled per (w13/w2). Before reusing a slot whose
+        prior async H2D may still be in flight on load_stream, we sync — this
+        makes any pool size correct (the pool is sized to the max single load
+        for throughput, but the wrap-sync is the correctness guarantee).
+        Non-shared: expert tensor's own (already pinned) storage, no staging.
         """
         cpu_buf = getattr(self, f'{which}_weights_cpu')[layer_idx]
         if self.offload_config.shared_cpu_buffer:
-            staging = getattr(self, f'_{which}_staging')
-            staging.copy_(cpu_buf[eid])
+            pool = getattr(self, f'_{which}_staging_pool')
+            counter = getattr(self, f'_{which}_staging_counter', 0)
+            n = len(pool)
+            # Safety net: about to reuse a slot — ensure its prior async H2D
+            # (issued on load_stream) has completed so we don't overwrite data
+            # the device hasn't read yet.
+            if counter > 0 and counter % n == 0:
+                self.load_stream.synchronize()
+            staging = pool[counter % n]
+            setattr(self, f'_{which}_staging_counter', counter + 1)
+            sz = getattr(self, f'{which}_expert_size_bytes')
+            staging.untyped_storage()[:sz].copy_(
+                cpu_buf.untyped_storage()[eid * sz:(eid + 1) * sz])
             return staging.untyped_storage()
         else:
             return cpu_buf[eid].untyped_storage()
