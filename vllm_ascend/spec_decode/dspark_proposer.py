@@ -63,24 +63,29 @@ class AscendDSparkProposer(AscendDflashProposer):
         self.use_cuda_graph = False
         # Max query tokens depend on whether sampling from anchor or not.
         self.max_query_tokens = self.max_batch_size * self.num_query_per_req
-        # These are sliced by ``num_input_tokens`` (the padded query count) just
-        # like the inherited ``self.input_ids`` (``max_num_tokens``); size them
-        # to cover both the valid query data and any padded graph size so
-        # ``self.positions[:num_input_tokens]`` never truncates below the query
-        # length and breaks RoPE (see AscendDflashProposer.__init__).
-        query_buffer_len = max(self.max_query_tokens, self.max_num_tokens)
-        # Position ids for the draft query block.
+        # DSpark is eager-only (``use_cuda_graph = False``), so there is no
+        # cudagraph padding: ``num_input_tokens`` is bounded by
+        # ``max_query_tokens`` in every path (decode uses the unpadded
+        # ``num_query_total``; ``dummy_run`` clamps via ``min(..., max_query_tokens)``
+        # and ``_sync_metadata_across_dp`` only takes a max, never pads up).
+        # ``max_query_tokens`` is therefore sufficient here -- unlike DFlash,
+        # which needs ``max(max_query_tokens, max_num_tokens)`` because its
+        # graph-padded ``num_input_tokens`` can exceed ``max_query_tokens``.
+        # (``self.input_ids``, sliced by ``num_query_total`` in the profile
+        # forward, is inherited from ``AscendDflashProposer.__init__`` already
+        # sized ``max(max_batch*(1+K), max_num_tokens)`` >= this buffer.)
+        # Position ids for the draft query block [max_query_tokens].
         # Overrides dflash:49; v2 uses input_buffers.positions.
         self.positions = torch.zeros(
-            query_buffer_len,
+            self.max_query_tokens,
             dtype=torch.int32,
             device=device,
         )
-        # Primary-group query slot mapping buffer.
+        # Primary-group query slot mapping buffer [max_query_tokens].
         # Overrides dflash:37; v2 uses BlockTables.slot_mappings. Per-non-
         # primary-gid buffers live in _per_group_query_slot_mapping_buffers.
         self._slot_mapping_buffer = torch.zeros(
-            query_buffer_len,
+            self.max_query_tokens,
             dtype=torch.int32,
             device=device,
         )

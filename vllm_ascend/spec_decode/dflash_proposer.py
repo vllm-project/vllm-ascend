@@ -28,18 +28,31 @@ class AscendDflashProposer(AscendEagleProposer):
         self.max_query_tokens = self.max_batch_size * (1 + self.num_speculative_tokens)
         self.max_positions = self.max_num_tokens + self.max_query_tokens
 
-        # ``self.positions`` / ``self._slot_mapping_buffer`` are the query-side
-        # buffers sliced by ``num_input_tokens`` in ``_run_merged_draft`` /
-        # ``_pad_draft_buffers`` -- exactly like the inherited ``self.input_ids``
-        # (sized ``max_num_tokens``). ``num_input_tokens`` is the query token
-        # count padded up to a runner cudagraph capture size, which is bounded
-        # by ``max_num_tokens`` and can exceed ``max_query_tokens``. If these
-        # buffers were only ``max_query_tokens`` long, ``self.positions[:num_input_tokens]``
-        # would silently truncate below ``input_ids[:num_input_tokens]`` and RoPE
-        # would fail its ``positions.shape[0] == num_tokens`` check. Size them to
-        # cover both the valid query data (``max_query_tokens``) and the padded
-        # graph size (``max_num_tokens``).
+        # The DFlash draft processes up to ``num_query_total = num_reqs * (1+K)``
+        # query tokens, whose upper bound is
+        # ``max_query_tokens = max_num_seqs * (1+K)``. Every per-query buffer must
+        # therefore be at least ``max_query_tokens`` long. This is NOT the same as
+        # the inherited ``max_num_tokens`` (= ``max_num_batched_tokens``): with a
+        # large ``num_speculative_tokens`` (e.g. K=8) ``max_query_tokens`` can
+        # exceed ``max_num_tokens``. Any per-query buffer sized only
+        # ``max_num_tokens`` then either (a) gets an out-of-bounds write from the
+        # input-expansion triton kernel, or (b) silently truncates when sliced
+        # ``[:num_query_total]``, leaving ``positions`` and the query tensor with
+        # different lengths and tripping RoPE's ``positions.shape[0] == num_tokens``
+        # assertion (seen in both the decode and the profile-run forward).
+        # Size every per-query buffer to cover both the query data and any padded
+        # graph size.
         query_buffer_len = max(self.max_query_tokens, self.max_num_tokens)
+
+        # ``self.input_ids`` is allocated by the vLLM base proposer at
+        # ``max_num_tokens``; the input-id kernel writes ``num_query_total``
+        # entries into it and the profile forward slices ``[:num_query_total]``,
+        # so it must be re-sized to ``query_buffer_len`` alongside the others.
+        self.input_ids = torch.zeros(
+            query_buffer_len,
+            dtype=self.input_ids.dtype,
+            device=device,
+        )
 
         self._context_slot_mapping_buffers = torch.zeros(
             self.max_num_tokens,
