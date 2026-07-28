@@ -78,6 +78,7 @@ class NpuType(str, Enum):
     A2 = "a2"
     A3 = "a3"
     _310P = "310p"
+    A5 = "a5"
     CPU = "cpu"
 
 
