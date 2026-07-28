@@ -61,14 +61,14 @@ jobs:
         id: get_hash
         run: |
           HASH=$(sha256sum .pre-commit-config.yaml | awk '{print $1}')
-          echo "HASH=$HASH" >> $GITHUB_OUTPUT
+          echo "PRE_COMMIT_HASH=$HASH" >> $GITHUB_OUTPUT
 
       - name: Check if cache exists
         id: check-cache
         uses: runs-on/cache/restore@v5
         with:
           path: /tmp/pre-commit-cache
-          key: pre-commit-${{ steps.get_hash.outputs.HASH }}
+          key: pre-commit-${{ steps.get_hash.outputs.PRE_COMMIT_HASH }}
           lookup-only: true
 
       - name: Install pre-commit
@@ -98,4 +98,4 @@ jobs:
         uses: runs-on/cache/save@v5
         with:
           path: /tmp/pre-commit-cache
-          key: pre-commit-${{ steps.get_hash.outputs.HASH }}
+          key: pre-commit-${{ steps.get_hash.outputs.PRE_COMMIT_HASH }}
