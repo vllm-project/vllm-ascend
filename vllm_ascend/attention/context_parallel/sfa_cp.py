@@ -467,7 +467,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         assert valid_block_ids is not None and block_table is not None
         kv = torch.index_select(kv_cache[0], 0, valid_block_ids)
         split_sizes: tuple[int, ...]
-        if self.use_sparse_c8_sfa:
+        if self.enable_sparse_sfa_c8:
             # Sparse C8 stores nope, rope, and quantization data in one packed
             # SFA KV cache. The remaining cache entries belong to the indexer
             # and must not participate in the DCP SFA KV all-gather.
@@ -700,7 +700,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         knope_scale: torch.Tensor | None,
         k_li: torch.Tensor | None,
         fused_kv_no_split: torch.Tensor | None,
-        kv_ag_handle: torch.distributed.Work | None,
+        kv_ag_handles: list[torch.distributed.Work],
         kv_cache: tuple[torch.Tensor, ...] | None,
         slot_mapping_sfa: torch.Tensor,
         attn_metadata: M,
@@ -718,7 +718,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             knope_scale,
             k_li,
             fused_kv_no_split,
-            kv_ag_handle,
+            kv_ag_handles,
             kv_cache,
             slot_mapping_sfa,
             attn_metadata,
