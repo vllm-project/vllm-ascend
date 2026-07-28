@@ -149,8 +149,8 @@ jobs:
       - name: Get pre-commit config hash
         id: get_hash
         run: |
-          HASH=$(sha256sum .pre-commit-config.yaml | awk '{print $1}')
-          echo "PRE_COMMIT_HASH=$HASH" >> $GITHUB_OUTPUT
+          PRE_COMMIT_HASH=$(sha256sum .pre-commit-config.yaml | awk '{print $1}')
+          echo "PRE_COMMIT_HASH=$PRE_COMMIT_HASH" >> $GITHUB_OUTPUT
 
       - name: Restore pre-commit cache
         uses: runs-on/cache/restore@v5
