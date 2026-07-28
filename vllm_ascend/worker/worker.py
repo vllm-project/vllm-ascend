@@ -126,17 +126,18 @@ class NPUWorker(WorkerBase):
         # Since vLLM PR #45026, vLLM no longer sets device control env vars
         # internally, and RayExecutorV2 sets
         # RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1 to prevent Ray
-        # from setting it. The driver's ASCEND_RT_VISIBLE_DEVICES (e.g. "0,1")
-        # is propagated to all workers via driver_env_vars, so every worker
-        # sees all devices and aclInit() races on device 0.
-        # Force-set the env var to this worker's assigned physical device so
-        # aclInit() (triggered by check_ascend_device_type below) binds the
-        # correct NPU.
-        assigned = vllm_config.parallel_config.assigned_physical_gpu_ids
-        if assigned is not None and local_rank < len(assigned):
-            device_env = current_platform.device_control_env_var
-            if device_env:
-                os.environ[device_env] = str(assigned[local_rank])
+        # from setting it. Without ASCEND_RT_VISIBLE_DEVICES, aclInit()
+        # (triggered by check_ascend_device_type below) defaults to device 0,
+        # which may be assigned to another DP rank, causing
+        # ACL_ERROR_INVALID_DEVICE (error code 107001).
+        # Only needed for the ray backend; the mp backend handles device
+        # isolation via local_rank shifting in _init_device.
+        if vllm_config.parallel_config.distributed_executor_backend == "ray":
+            assigned = vllm_config.parallel_config.assigned_physical_gpu_ids
+            if assigned is not None and local_rank < len(assigned):
+                device_env = current_platform.device_control_env_var
+                if device_env:
+                    os.environ[device_env] = str(assigned[local_rank])
 
         check_ascend_device_type()
 
@@ -452,12 +453,8 @@ class NPUWorker(WorkerBase):
                 f"DP adjusted local rank {self.local_rank} is out of bounds for {visible_device_count} devices."
             )
 
-        # On Ascend, ASCEND_RT_VISIBLE_DEVICES is a filter (not a remapping
-        # like CUDA_VISIBLE_DEVICES), so torch.npu.set_device() expects the
-        # physical device ID, not the visible index returned by
-        # logical_device_id_to_visible_device_id().
-        physical_device_index = current_platform.device_id_to_physical_device_id(self.local_rank)
-        device = torch.device(f"{current_platform.device_type}:{physical_device_index}")
+        visible_device_index = current_platform.logical_device_id_to_visible_device_id(self.local_rank)
+        device = torch.device(f"{current_platform.device_type}:{visible_device_index}")
 
         torch.npu.set_device(device)
 
