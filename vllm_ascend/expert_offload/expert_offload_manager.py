@@ -305,6 +305,7 @@ class ExpertOffloadManager:
         w2_shape = (layer.w2_weight.shape[2], layer.w2_weight.shape[1])
 
         use_shared = self.offload_config.shared_cpu_buffer
+        use_shard = self.offload_config.shard_per_rank
         if use_shared:
             # ONE mmap-backed shared tensor per (layer, w13/w2): (ntotal, *shape).
             # All ranks mmap the same /dev/shm file → one physical copy.
@@ -332,6 +333,27 @@ class ExpertOffloadManager:
                                 pin_memory=True) for _ in range(_POOL)]
                 self._w13_staging_counter = 0
                 self._w2_staging_counter = 0
+        elif use_shard:
+            # shard-per-rank: each rank holds ONLY its EP shard of weight
+            # experts (ntotal // ep_size), as per-expert pinned tensors (like
+            # the non-shared path, but shard-sized). No mmap, no cross-process
+            # sharing, no staging — H2D reads each expert's own pinned storage.
+            # Scales/offsets stay full-size (negligible memory). Placement must
+            # be constrained to EP ownership (expert e → rank e // shard) so a
+            # rank only loads experts it actually holds.
+            shard = ntotal // max(1, self.ep_size)
+            self._shard_size = shard
+            self._shard_base = self.ep_rank * shard
+            w13_list = [
+                torch.empty(w13_shape, dtype=params_dtype, device="cpu",
+                            pin_memory=True) for _ in range(shard)
+            ]
+            w2_list = [
+                torch.empty(w2_shape, dtype=params_dtype, device="cpu",
+                            pin_memory=True) for _ in range(shard)
+            ]
+            self.w13_weights_cpu.append(w13_list)
+            self.w2_weights_cpu.append(w2_list)
         else:
             w13_list = [
                 torch.empty(w13_shape, dtype=params_dtype, device="cpu", pin_memory=True)
@@ -583,6 +605,7 @@ class ExpertOffloadManager:
         num_moe_layers = len(self.w13_weights_cpu)
         num_experts = len(self.w13_weights_cpu[0])
         use_shared = self.offload_config.shared_cpu_buffer
+        use_shard = self.offload_config.shard_per_rank
         for layer_id in range(num_moe_layers):
             if use_shared:
                 w13 = self.w13_weights_cpu[layer_id].to('npu')
@@ -642,12 +665,17 @@ class ExpertOffloadManager:
                 from vllm.distributed.parallel_state import get_ep_group
                 dist.barrier(group=get_ep_group().cpu_group)
             if not use_shared or self.ep_rank == 0:
-                for expert_id in range(num_experts):
-                    self._expert_dst_storage(layer_id, expert_id, 'w13').copy_(
-                        w13_storage[expert_id * per_w13 : (expert_id + 1) * per_w13]
+                for local_i in range(num_experts):
+                    # _expert_dst_storage takes a GLOBAL eid (shard-per-rank
+                    # remaps it to the local slot); w13/w2_storage are indexed
+                    # by the local position in the stacked tensor (which equals
+                    # the global id for full / shared modes).
+                    geid = (self._shard_base + local_i) if use_shard else local_i
+                    self._expert_dst_storage(layer_id, geid, 'w13').copy_(
+                        w13_storage[local_i * per_w13 : (local_i + 1) * per_w13]
                     )
-                    self._expert_dst_storage(layer_id, expert_id, 'w2').copy_(
-                        w2_storage[expert_id * per_w2 : (expert_id + 1) * per_w2]
+                    self._expert_dst_storage(layer_id, geid, 'w2').copy_(
+                        w2_storage[local_i * per_w2 : (local_i + 1) * per_w2]
                     )
             if use_shared and self.ep_size > 1:
                 import torch.distributed as dist
@@ -879,11 +907,27 @@ class ExpertOffloadManager:
             "(total gates=%d, moe_layers=%d)",
             len(self._gate_weights_npu), len(self.moe_layers))
 
+    def _shard_local(self, global_eid: int) -> int | None:
+        """Map a GLOBAL expert id to the CPU weight buffer's local index.
+
+        shard-per-rank: this rank owns shard [base, base+shard); return the
+        local index, or None if the expert isn't owned here (caller skips the
+        load). Other modes: identity — the buffer is full (global-indexed) or
+        shared (global-indexed mmap slice).
+        """
+        if not self.offload_config.shard_per_rank:
+            return global_eid
+        local = global_eid - self._shard_base
+        return local if 0 <= local < self._shard_size else None
+
     def load_w13(self, layer_moe_idx: int, expert_id: int,
                  loaded_weight: torch.Tensor, shard_id: str):
         """Store w1/w3 shard to CPU buffer (transposed) via the load pool."""
         self._weight_load_calls += 1
-        cpu = self.w13_weights_cpu[layer_moe_idx][expert_id]
+        idx = self._shard_local(expert_id)
+        if idx is None:
+            return  # shard-per-rank: expert not owned by this rank
+        cpu = self.w13_weights_cpu[layer_moe_idx][idx]
         intermed = cpu.shape[1] // 2
         if loaded_weight.ndim > 0 and loaded_weight.shape[0] > intermed:
             if loaded_weight.shape[0] == 2 * intermed:
@@ -899,7 +943,10 @@ class ExpertOffloadManager:
                 loaded_weight: torch.Tensor):
         """Store w2 weight to CPU buffer (transposed) via the load pool."""
         self._weight_load_calls += 1
-        dst = self.w2_weights_cpu[layer_moe_idx][expert_id]
+        idx = self._shard_local(expert_id)
+        if idx is None:
+            return  # shard-per-rank: expert not owned by this rank
+        dst = self.w2_weights_cpu[layer_moe_idx][idx]
         owned = loaded_weight.cpu().clone()
         fut = self._get_load_pool().submit(self._copy_w2, dst, owned)
         self._track_load_future(fut)
@@ -1101,11 +1148,14 @@ class ExpertOffloadManager:
 
         for slot in range(ndl):
             for eid in range(min(ntotal, len(self.w13_weights_cpu[0]))):
+                # _expert_src_storage takes a GLOBAL eid (shard-per-rank remaps
+                # it to the local shard slot); the prefill-pool slot stays local.
+                geid = (self._shard_base + eid) if self.offload_config.shard_per_rank else eid
                 self._prefill_w13[slot].untyped_storage()[eid * self.w13_expert_size_bytes : (eid + 1) * self.w13_expert_size_bytes].copy_(
-                    self._expert_src_storage(0, eid, 'w13')
+                    self._expert_src_storage(0, geid, 'w13')
                 )
                 self._prefill_w2[slot].untyped_storage()[eid * self.w2_expert_size_bytes : (eid + 1) * self.w2_expert_size_bytes].copy_(
-                    self._expert_src_storage(0, eid, 'w2')
+                    self._expert_src_storage(0, geid, 'w2')
                 )
 
             # Initialize scale/offset buffers with layer 0 data (W8A8)
@@ -1545,6 +1595,9 @@ class ExpertOffloadManager:
             staging.untyped_storage()[:sz].copy_(
                 cpu_buf.untyped_storage()[eid * sz:(eid + 1) * sz])
             return staging.untyped_storage()
+        elif self.offload_config.shard_per_rank:
+            # shard-per-rank: eid is GLOBAL; remap to this rank's local slot.
+            return cpu_buf[eid - self._shard_base].untyped_storage()
         else:
             return cpu_buf[eid].untyped_storage()
 
@@ -1558,6 +1611,9 @@ class ExpertOffloadManager:
         if self.offload_config.shared_cpu_buffer:
             sz = getattr(self, f'{which}_expert_size_bytes')
             return cpu_buf.untyped_storage()[eid * sz:(eid + 1) * sz]
+        elif self.offload_config.shard_per_rank:
+            # shard-per-rank: eid is GLOBAL; remap to this rank's local slot.
+            return cpu_buf[eid - self._shard_base].untyped_storage()
         else:
             return cpu_buf[eid].untyped_storage()
 
@@ -1619,8 +1675,11 @@ class ExpertOffloadManager:
                                                     cpu_group)
 
         # Plan placement: stable slot (prev_log2phy) + hotness (new order).
+        # shard-per-rank: force EP ownership (expert → e//shard) so a rank only
+        # places experts it holds in its shard CPU buffer.
+        force_shard = getattr(self, '_shard_size', None) if self.offload_config.shard_per_rank else None
         placement = plan_placement(global_counts, self.ep_size, per_rank_slots,
-                                   prev_log2phy, hotness)
+                                   prev_log2phy, hotness, force_shard=force_shard)
         if cache_on:
             self._mc_prev_log2phy[layer_idx] = placement.log2phy.clone()
         if self._debug:

@@ -108,27 +108,37 @@ def _plan_single_rank(global_counts, num_device_experts):
 
 
 def _assign_experts_to_ranks(active, ep_size, num_device_experts,
-                             prev_rank_of=None):
+                             prev_rank_of=None, force_shard=None):
     """Assign each expert to a rank. Residence-aware: an expert that was on a
     rank last step (``prev_rank_of``) stays there — no cross-rank move means no
     redundant re-H2D on the new rank (the expert is already physically resident
     on its home rank). Genuinely-new experts (not in prev_rank_of, or whose home
     rank is full) go to the least-loaded rank (LB). Deterministic, so every rank
-    computes the same assignment. Returns (rank_of, rank_load, unassigned)."""
+    computes the same assignment. Returns (rank_of, rank_load, unassigned).
+
+    ``force_shard`` (shard-per-rank): pin each expert to its EP-owning rank
+    (``e // force_shard``) — no cross-rank placement, since each rank's CPU
+    buffer only holds its own shard. Overflow (owner rank full) → unassigned."""
     prev_rank_of = prev_rank_of or {}
     rank_of = {}
     rank_load = [0] * ep_size
     rank_count = [0] * ep_size
     unassigned: list[int] = []
     for count, e in active:
-        candidates = [r for r in range(ep_size)
-                      if rank_count[r] < num_device_experts]
-        if not candidates:
-            unassigned.append(e)
-            continue
-        home = prev_rank_of.get(e)
-        r = home if home in candidates else min(
-            candidates, key=lambda r: (rank_load[r], r))
+        if force_shard:
+            r = e // force_shard
+            if rank_count[r] >= num_device_experts:
+                unassigned.append(e)
+                continue
+        else:
+            candidates = [r for r in range(ep_size)
+                          if rank_count[r] < num_device_experts]
+            if not candidates:
+                unassigned.append(e)
+                continue
+            home = prev_rank_of.get(e)
+            r = home if home in candidates else min(
+                candidates, key=lambda r: (rank_load[r], r))
         rank_of[e] = r
         rank_load[r] += count
         rank_count[r] += 1
@@ -141,6 +151,7 @@ def plan_placement(
     num_device_experts: int,
     prev_log2phy: torch.Tensor | None = None,
     hotness=None,
+    force_shard: int | None = None,
 ) -> Placement:
     """Deterministically place one layer's active experts onto ranks/slots.
 
@@ -155,6 +166,8 @@ def plan_placement(
         hotness: optional ``[global_num_experts]`` hotness scores (list/np/tensor).
             New experts (not stable-kept) are ordered by hotness desc when filling
             free slots, so hotter experts get priority slots.
+        force_shard: shard-per-rank shard size. If set, each expert is pinned to
+            its EP-owning rank (e // force_shard) — no cross-rank placement.
 
     Returns:
         Placement (see class docstring). per_rank_experts entries may contain -1
@@ -181,7 +194,8 @@ def plan_placement(
             if pid >= 0:
                 prev_rank_of[expert] = pid // num_device_experts
     rank_of, rank_load, unassigned = _assign_experts_to_ranks(
-        active, ep_size, num_device_experts, prev_rank_of)
+        active, ep_size, num_device_experts, prev_rank_of,
+        force_shard=force_shard)
 
     # Slot assignment (stable if prev_log2phy given): experts staying on the
     # same rank keep their prev slot (cache hit); new experts fill freed slots
