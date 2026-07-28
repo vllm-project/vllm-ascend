@@ -49,8 +49,8 @@ jobs:
       AWS_S3_FORCE_PATH_STYLE: "false"
       AWS_REGION: ap-southeast-1
       RUNS_ON_RUNNER_NAME: ""
-      AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK_HK }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK_HK }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
