@@ -3,6 +3,7 @@
 import sys
 import unittest
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import torch
@@ -35,7 +36,7 @@ class TestAscendDSACPOProjTPParams(unittest.TestCase):
             self.output_size_per_partition = 3
             self.weight = torch.nn.Parameter(torch.randn(4, 3), requires_grad=False)
             self.weight_scale = torch.nn.Parameter(torch.randn(2, 3), requires_grad=False)
-            self.quant_method = SimpleNamespace(quant_method=_OProjLinearMethod())
+            self.quant_method: Any = SimpleNamespace(quant_method=_OProjLinearMethod())
 
     def setUp(self):
         AscendDSACPImpl.o_proj_full_pools.clear()
