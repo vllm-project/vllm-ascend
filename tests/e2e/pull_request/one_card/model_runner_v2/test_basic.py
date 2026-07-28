@@ -34,6 +34,7 @@ DFLASH_MAIN_MODEL = ["Qwen/Qwen3-8B"]
 DFLASH_MODELS = ["z-lab/Qwen3-8B-DFlash-b16"]
 DSPARK_MAIN_MODEL = ["Qwen/Qwen3-8B"]
 DSPARK_MODELS = ["deepseek-ai/dspark_qwen3_8b_block7"]
+MTP_MODELS = ["wemaster/deepseek_mtp_main_random_bf16"]
 
 # TODO: drop this skip when v0.25.1 maintenance is removed.
 _SKIP_V025_MRV2_SPEC_DECODE = pytest.mark.skipif(
@@ -255,6 +256,48 @@ def test_dspark_spec_decoding(
     golden = [0.84, 0.48, 0.32, 0.20, 0.09, 0.09, 0.02]
     match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
+
+
+@_SKIP_V025_MRV2_SPEC_DECODE
+@pytest.mark.parametrize("model", MTP_MODELS)
+@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("enforce_eager", [True])
+@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+def test_mtp_spec_decoding(
+    model: str,
+    max_tokens: int,
+    enforce_eager: bool,
+) -> None:
+    # The MTP draft head has random weights, so acceptance is ~0 and there is
+    # no trained golden to compare against -- this is a smoke test (assert only
+    # that the MTP MLA propose->verify loop produces output). Eager only for
+    # now: graph-mode MTP draft is not yet stabilized, so the cudagraph
+    # compilation_config matrix from the eagle/dflash/dspark tests is omitted.
+    # Remaining differences vs those tests are model-inherent: no separate
+    # draft `model` (MTP is unified), no golden, and `enable_expert_parallel`
+    # for the DeepSeek MoE target.
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+    num_speculative_tokens = 3
+    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
+    with VllmRunner(
+        model,
+        max_model_len=1024,
+        enforce_eager=enforce_eager,
+        async_scheduling=True,
+        enable_expert_parallel=True,
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": num_speculative_tokens,
+        },
+    ) as runner:
+        outputs = runner.model.generate(prompts, sampling_params)
+
+    assert len(outputs) == len(prompts)
 
 
 @pytest.mark.parametrize("model", MODELS)

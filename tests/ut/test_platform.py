@@ -34,6 +34,7 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.parallel_config.pipeline_parallel_size = 1
         mock_vllm_config.parallel_config.context_parallel_size = 1
         mock_vllm_config.parallel_config.decode_context_parallel_size = 1
+        mock_vllm_config.use_v2_model_runner = False
         mock_vllm_config.cache_config = MagicMock()
         mock_vllm_config.scheduler_config = MagicMock()
         mock_vllm_config.scheduler_config.max_num_seqs = None
@@ -289,6 +290,7 @@ class TestNPUPlatform(TestBase):
 
     def test_set_additional_forward_context_v2_includes_required_moe_fields(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
         dummy_comm_method = object()
 
         with (
@@ -314,6 +316,7 @@ class TestNPUPlatform(TestBase):
 
     def test_set_additional_forward_context_reads_v2_profile_override(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
 
         with (
             patch("vllm_ascend.platform.envs_vllm.VLLM_USE_V2_MODEL_RUNNER", True, create=True),
@@ -910,25 +913,24 @@ class TestNPUPlatform(TestBase):
 
         self.assertEqual(vllm_config.cache_config.block_size, 512)
 
-    def test_validate_parallel_config_rejects_pcp_plus_dp(self):
+    def test_validate_parallel_config_rejects_pcp_for_model_runner_v1(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
-        vllm_config.parallel_config.data_parallel_size = 2
         vllm_config.parallel_config.prefill_context_parallel_size = 2
 
-        with pytest.raises(ValueError, match="PCP \(Prefill Context Parallelism\) and DP \(Data Parallelism\)"):
+        with pytest.raises(ValueError, match="Prefill Context Parallel"):
             self.platform._validate_parallel_config(vllm_config)
+
+    def test_validate_parallel_config_defers_pcp_validation_to_model_runner_v2(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.prefill_context_parallel_size = 2
+
+        self.platform._validate_parallel_config(vllm_config)
 
     def test_validate_parallel_config_accepts_dp_only(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.parallel_config.data_parallel_size = 2
         vllm_config.parallel_config.prefill_context_parallel_size = 1
-
-        self.platform._validate_parallel_config(vllm_config)
-
-    def test_validate_parallel_config_accepts_pcp_only(self):
-        vllm_config = TestNPUPlatform.mock_vllm_config()
-        vllm_config.parallel_config.data_parallel_size = 1
-        vllm_config.parallel_config.prefill_context_parallel_size = 2
 
         self.platform._validate_parallel_config(vllm_config)
 

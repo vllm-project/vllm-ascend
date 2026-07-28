@@ -17,6 +17,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 import torch
 import torch_npu
@@ -41,12 +42,11 @@ from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
-from vllm_ascend.attention.context_parallel.common_cp import AscendMetadataForDecode, AscendMetadataForPrefill
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     PagedAttentionGraphParam,
     cache_graph_workspace,
-    enable_cp,
+    enable_dcp,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -82,18 +82,18 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["AscendAttentionBackendImpl"]:
-        if enable_cp():
-            from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionCPImpl
+        if enable_dcp():
+            from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPImpl
 
-            return AscendAttentionCPImpl
+            return AscendAttentionDCPImpl
         return AscendAttentionBackendImpl
 
     @staticmethod
     def get_builder_cls() -> type["AscendAttentionMetadataBuilder"]:
-        if enable_cp():
-            from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionCPMetadataBuilder
+        if enable_dcp():
+            from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPMetadataBuilder
 
-            return AscendAttentionCPMetadataBuilder
+            return AscendAttentionDCPMetadataBuilder
         return AscendAttentionMetadataBuilder
 
     @staticmethod
@@ -162,7 +162,6 @@ class AscendMetadata:
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
 
     # Number of tokens excluding padding.
-    num_actual_tokens_pcp_padded: int = 0
     num_actual_tokens: int = 0
     num_decode_tokens: int = 0
     num_prefills: int = 0
@@ -195,11 +194,6 @@ class AscendMetadata:
     # and 1st slot in block 1, respectively.
     # (num_tokens,)
     slot_mapping: torch.Tensor = None
-    # pcp
-    prefill: AscendMetadataForPrefill | None = None
-    # dcp
-    decode_meta: AscendMetadataForDecode | None = None
-
     causal: bool = True
     # runner_type in model_config.
     model_runner_type: str = ""
@@ -219,6 +213,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
     reorder_batch_threshold: int = 1
+    metadata_cls: type[AscendMetadata] = AscendMetadata
 
     def __init__(
         self,
@@ -266,6 +261,33 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     def reorder_batch(self, input_batch, scheduler_output: "SchedulerOutput") -> bool:
         return False
 
+    def _split_decodes_and_prefills(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+    ) -> tuple[int, int, int, int]:
+        return split_decodes_and_prefills(
+            common_attn_metadata,
+            decode_threshold=self.decode_threshold,
+        )
+
+    def _build_backend_metadata(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        *,
+        block_table: torch.Tensor,
+        query_lens: torch.Tensor,
+        seq_lens: torch.Tensor,
+        num_decodes: int,
+        num_prefills: int,
+    ) -> dict[str, Any]:
+        """Extension point for layouts such as DCP.
+
+        The base builder owns common token classification, padding, masks and
+        cache metadata. Specialized backends only add their phase-specific
+        metadata here.
+        """
+        return {}
+
     def build(
         self,
         common_prefix_len: int,
@@ -276,8 +298,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
 
-        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
-            common_attn_metadata, decode_threshold=self.decode_threshold
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = self._split_decodes_and_prefills(
+            common_attn_metadata
         )
 
         block_table = common_attn_metadata.block_table_tensor
@@ -343,7 +365,15 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 dim=0,
             )
 
-        attn_metadata = AscendMetadata(
+        backend_metadata = self._build_backend_metadata(
+            common_attn_metadata,
+            block_table=block_table,
+            query_lens=query_start_loc_cpu[1:] - query_start_loc_cpu[:-1],
+            seq_lens=seq_lens,
+            num_decodes=num_decodes,
+            num_prefills=num_prefills,
+        )
+        attn_metadata = self.metadata_cls(
             num_actual_tokens=num_actual_tokens,
             num_decode_tokens=num_decode_tokens,
             block_tables=block_table,
@@ -360,6 +390,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             num_decodes=num_decodes,
             causal=common_attn_metadata.causal,
             model_runner_type=self.model_config.runner_type,
+            **backend_metadata,
         )
         return attn_metadata
 
@@ -448,7 +479,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_tokens,
         vllm_config,
         speculative_config=None,
-        num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
     ):
         use_layer_aware_replay = needs_layer_aware_fia_graph_replay()

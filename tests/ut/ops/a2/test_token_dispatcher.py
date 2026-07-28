@@ -146,11 +146,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.hier_comm_patch = patch(
             "vllm_ascend.ops.fused_moe.token_dispatcher.is_hierarchical_communication_enabled", return_value=False
         )
-        self.hier_comm_patch.start()
-        self.skip_allreduce_patch = patch(
-            "vllm_ascend.ops.fused_moe.token_dispatcher.should_skip_allreduce_across_dp_group", return_value=False
-        )
-        self.mock_skip_allreduce = self.skip_allreduce_patch.start()
+        self.mock_hier_comm = self.hier_comm_patch.start()
 
         kwargs = {"with_quant": False, "top_k": 8, "num_experts": 128}
         self.dispatcher = TokenDispatcherWithMC2(**kwargs)
@@ -165,26 +161,24 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.ascend_config_patch.stop()
         self.ascend_config_utils_patch.stop()
         self.hier_comm_patch.stop()
-        self.skip_allreduce_patch.stop()
 
     def test_init(self):
         self.assertEqual(self.dispatcher.ep_rank_id, 0)
         self.assertEqual(self.dispatcher.ep_world_size, 8)
         self.assertTrue(self.dispatcher.enable_dispatch_v2)
         self.assertTrue(self.dispatcher.need_extra_args)
-        self.assertEqual(self.dispatcher.global_bs, 0)
+        self.assertEqual(self.dispatcher.global_bs, 1024)
 
     def test_init_uses_mc2_capacity_for_non_uniform_global_bs(self):
         self.mock_get_config.return_value.parallel_config.tensor_parallel_size = 4
-        self.mock_skip_allreduce.return_value = True
 
         dispatcher = TokenDispatcherWithMC2(with_quant=False, top_k=8, num_experts=128)
 
         self.assertEqual(dispatcher.global_bs, 256)
 
-    def test_get_dispatch_mc2_kwargs_with_skip_allreduce_omits_mc2_mask(self):
+    def test_get_dispatch_mc2_kwargs_without_hier_comm_omits_mc2_mask(self):
         self.mock_get_config.return_value.parallel_config.tensor_parallel_size = 4
-        self.mock_skip_allreduce.return_value = True
+        self.mock_hier_comm.return_value = False
         dispatcher = TokenDispatcherWithMC2(with_quant=False, top_k=8, num_experts=128)
 
         hidden_states = torch.randn(10, 128)
@@ -205,7 +199,9 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.assertEqual(kwargs["global_bs"], 256)
         self.assertNotIn("x_active_mask", kwargs)
 
-    def test_get_dispatch_mc2_kwargs_without_skip_allreduce_keeps_mc2_mask(self):
+    def test_get_dispatch_mc2_kwargs_with_hier_comm_keeps_mc2_mask(self):
+        self.mock_hier_comm.return_value = True
+        dispatcher = TokenDispatcherWithMC2(with_quant=False, top_k=8, num_experts=128)
         hidden_states = torch.randn(10, 128)
         topk_ids = torch.randint(0, 8, (10, 1))
         topk_weights = torch.randn(10, 1)
@@ -219,7 +215,7 @@ class TestTokenDispatcherWithMC2(TestBase):
             mc2_mask=mc2_mask,
         )
 
-        kwargs = self.dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
+        kwargs = dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
 
         self.assertEqual(kwargs["global_bs"], 0)
         self.assertIs(kwargs["x_active_mask"], mc2_mask)

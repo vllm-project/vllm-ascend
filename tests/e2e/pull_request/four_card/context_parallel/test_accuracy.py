@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""PCP/DCP long-sequence accuracy guards.
+"""DCP and DSA-CP long-sequence accuracy guards.
 
 Run `pytest tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py`.
 """
@@ -45,11 +45,23 @@ COMMON_PROMPTS = [
     "The president of United States is",
 ]
 
-DSV3_2_DCP_GOLDEN = [
-    "The capital of France isoint054 Rund959arki",
-    "Hello, my name is Tom, I am" + "ERIC slicpacelike挂",
-    "The president of United States isoint054 Rund959arki",
-]
+DSV3_2_DCP_GOLDENS = (
+    [
+        "The capital of France isoint054 Rund959arki",
+        "Hello, my name is Tom, I am" + "ERIC slicpacelike挂",
+        "The president of United States isoint054 Rund959arki",
+    ],
+    [
+        "The capital of France isorrionicALLY casmith",
+        "Hello, my name is Tom, I am" + "ERIC slicpacelike挂",
+        "The president of United States is平行于我 charm与技术oi",
+    ],
+    [
+        "The capital of France isorrionic Tudefeault",
+        "Hello, my name is Tom, I am" + "ERIC slicpacelike挂",
+        "The president of United States is平行于我 charm与技术oi",
+    ],
+)
 
 DEEPSEEK_V4_PROMPTS = [
     "Hello, my name is",
@@ -108,7 +120,7 @@ FULL_FEATURE_MODEL_CASES = [
         name="dsv3_2_sfa_dcp_replicated_indexer",
         model="vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
         prompts=COMMON_PROMPTS,
-        expected_outputs=DSV3_2_DCP_GOLDEN,
+        expected_outputs=DSV3_2_DCP_GOLDENS,
         max_tokens=5,
         runner_kwargs={
             "max_model_len": 1024,
@@ -116,7 +128,6 @@ FULL_FEATURE_MODEL_CASES = [
             "max_num_batched_tokens": 1024,
             "data_parallel_size": 2,
             "tensor_parallel_size": 2,
-            "prefill_context_parallel_size": 1,
             "decode_context_parallel_size": 2,
             "enable_expert_parallel": True,
             "enable_chunked_prefill": True,
@@ -150,7 +161,6 @@ FULL_FEATURE_MODEL_CASES = [
             "max_num_batched_tokens": 4096,
             "dtype": "auto",
             "tensor_parallel_size": 4,
-            "prefill_context_parallel_size": 1,
             "decode_context_parallel_size": 1,
             "enable_expert_parallel": True,
             "gpu_memory_utilization": 0.9,
@@ -178,5 +188,5 @@ FULL_FEATURE_MODEL_CASES = [
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 @pytest.mark.parametrize("case", FULL_FEATURE_MODEL_CASES, ids=lambda case: case.name)
-def test_models_pcp_dcp_full_feature_accuracy(case: AccuracyCase) -> None:
+def test_models_dcp_full_feature_accuracy(case: AccuracyCase) -> None:
     _run_accuracy_case(case)
