@@ -108,10 +108,7 @@ def test_all_gather_wait_and_switch_restore_tp_storage() -> None:
     layer = _input_sharded_layer()
     method = _TestLinearMethod()
     state = method.enable_tp_weight_switch(layer, tp_size=2)
-    original_ptrs = {
-        name: getattr(layer, name).data_ptr()
-        for name in ("weight", "weight_scale", "input_scale")
-    }
+    original_ptrs = {name: getattr(layer, name).data_ptr() for name in ("weight", "weight_scale", "input_scale")}
     handles: list[MagicMock] = []
 
     def fake_all_gather_async(gather_input, group, *, output, async_op):
