@@ -90,6 +90,7 @@ class RunnerInfo:
     label: str
     image_tag: str = ""
     csrc_cache_target: str = ""
+    soc: str = ""
 
 
 RunnerKey = tuple[int, NpuType]
@@ -131,6 +132,22 @@ def _is_soc_specific_test(file_path: str) -> bool:
     if not hw_values:
         return False
     return any(v not in _COARSE_HW_TYPES for v in hw_values)
+
+
+def _get_soc_label(file_path: str) -> str:
+    """Return the SOC-specific value from the first test file's
+    ``requires_hardware`` marker that is not a coarse type, or empty
+    string if none found."""
+    markers = _parse_test_markers(file_path)
+    if markers is None:
+        return ""
+    hw_values = markers.get("requires_hardware")
+    if not hw_values:
+        return ""
+    for v in hw_values:
+        if v not in _COARSE_HW_TYPES:
+            return v
+    return ""
 
 
 def _parse_runner_key(runner_key: str) -> RunnerKey:
@@ -403,6 +420,7 @@ def _load_runners() -> list[RunnerInfo]:
             label=label,
             image_tag=info.get("image_tag", ""),
             csrc_cache_target=info.get("csrc_cache_target", ""),
+            soc=info.get("soc", ""),
         )
         for label, info in raw.items()
     ]
@@ -720,15 +738,20 @@ def _find_runner(
     num_npus: int,
     npu_type: NpuType,
     runners: list[RunnerInfo],
-    label_suffix: str = "",
+    soc: str = "",
 ) -> RunnerInfo | None:
     if npu_type == NpuType.CPU:
         candidates = [r for r in runners if r.npu_type == NpuType.CPU]
     else:
         candidates = [r for r in runners if r.npu_type == npu_type and r.num_npus == num_npus]
-    if label_suffix:
-        # Prefer runners whose label ends with the given suffix
-        preferred = [r for r in candidates if r.label.endswith(label_suffix)]
+    if soc:
+        # Prefer runners whose soc field matches exactly
+        preferred = [r for r in candidates if r.soc == soc]
+        if preferred:
+            return preferred[0]
+    elif not soc:
+        # Generic: prefer runners without a specific soc
+        preferred = [r for r in candidates if not r.soc]
         if preferred:
             return preferred[0]
     return candidates[0] if candidates else None
@@ -820,6 +843,7 @@ def _build_test_group(
     runner: RunnerInfo,
     tests: list[str],
     partition: str,
+    label: str = "",
 ) -> dict:
     group: dict = {
         "num_npus": num_npus,
@@ -828,6 +852,8 @@ def _build_test_group(
         "tests": " ".join(sorted(tests)),
         "partition": partition,
     }
+    if label:
+        group["label"] = label
     if runner.image_tag:
         group["image_tag"] = runner.image_tag
     if runner.csrc_cache_target:
@@ -865,35 +891,38 @@ def _resolve_to_runners(
         partition_key = f"{npu_type.value}_x{num_npus}"
         psize = partition_config.get(partition_key, 1)
 
-        if npu_type == NpuType.A3 and psize > 1:
-            # Split A3 tests into SOC-specific (e.g. ascend910_9392) and
-            # generic, so they can be routed to different runner pools.
-            soc_specific: list[str] = []
-            generic: list[str] = []
-            for t in tests:
-                if _is_soc_specific_test(t):
-                    soc_specific.append(t)
-                else:
-                    generic.append(t)
+        # Split tests into SOC-specific (e.g. ascend910_9392) and generic
+        # for all architectures. SOC-specific tests use the original runner;
+        # generic tests use the runner pool (with dash suffix if available).
+        soc_specific: list[str] = []
+        generic: list[str] = []
+        for t in tests:
+            if _is_soc_specific_test(t):
+                soc_specific.append(t)
+            else:
+                generic.append(t)
 
-            # SOC-specific tests are few — no partition needed.
-            if soc_specific:
-                runner_soc = _find_runner(num_npus, npu_type, runners, label_suffix="")
-                if runner_soc is not None:
-                    result.append(
-                        _build_test_group(
-                            num_npus,
-                            npu_type,
-                            runner_soc,
-                            soc_specific,
-                            "1-1",
-                        )
+        # SOC-specific tests — no partition, use original runner.
+        if soc_specific:
+            soc_label = _get_soc_label(soc_specific[0])
+            runner_soc = _find_runner(num_npus, npu_type, runners, soc=soc_label)
+            if runner_soc is not None:
+                result.append(
+                    _build_test_group(
+                        num_npus,
+                        npu_type,
+                        runner_soc,
+                        soc_specific,
+                        "1-1",
+                        label=soc_label,
                     )
+                )
 
-            # Generic A3 tests use the full partition config.
-            if generic:
-                runner_gen = _find_runner(num_npus, npu_type, runners, label_suffix="-")
-                if runner_gen is not None:
+        # Generic tests — full partition, use runner pool (no soc).
+        if generic:
+            runner_gen = _find_runner(num_npus, npu_type, runners, soc="")
+            if runner_gen is not None:
+                if psize > 1:
                     buckets = _partition_tests(sorted(generic), psize, estimated_times)
                     for i, bucket in enumerate(buckets):
                         if not bucket:
@@ -907,14 +936,8 @@ def _resolve_to_runners(
                                 f"{i + 1}-{psize}",
                             )
                         )
-        elif psize > 1:
-            buckets = _partition_tests(sorted(tests), psize, estimated_times)
-            for i, bucket in enumerate(buckets):
-                if not bucket:
-                    continue
-                result.append(_build_test_group(num_npus, npu_type, runner, bucket, f"{i + 1}-{psize}"))
-        else:
-            result.append(_build_test_group(num_npus, npu_type, runner, tests, "1-1"))
+                else:
+                    result.append(_build_test_group(num_npus, npu_type, runner_gen, generic, "1-1"))
 
     if errors:
         details = "".join(errors)
