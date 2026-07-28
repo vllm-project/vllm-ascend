@@ -28,6 +28,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.rope_dsv4 import RopeDataProxy, get_cos_and_sin_dsa
+from vllm_ascend.ops.triton.spec_decode.dspark_cache import dspark_masked_cache_store
 from vllm_ascend.utils import AscendDeviceType, enable_dsa_cp, get_ascend_device_type
 
 from .deepseek_v4 import (
@@ -56,7 +57,7 @@ class DSparkDecodeMetadata:
     padding_kv: torch.Tensor
 
 
-DSparkContextStoreIndices = dict[str, typing.Any]
+DSparkPagedCacheContract = tuple[tuple[int, int], torch.device]
 DSparkContextSyncIndices = dict[str, typing.Any]
 
 
@@ -323,77 +324,31 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             )
         return kv_cache
 
-    def prepare_context_store_indices(
-        self,
-        positions: torch.Tensor,
-        slot_mapping: torch.Tensor | None,
-    ) -> DSparkContextStoreIndices | None:
-        if positions.numel() == 0 or slot_mapping is None:
-            return None
-        kv_cache = self._get_dspark_kv_cache()
-        if kv_cache is None:
-            return None
-
-        valid = (positions >= 0) & (slot_mapping >= 0)
-        safe_positions = torch.where(valid, positions, torch.zeros_like(positions))
-        cache_block_size = kv_cache.shape[1]
-        slots_int64 = slot_mapping.to(device=positions.device, dtype=torch.int64)
-        block_ids = torch.div(slots_int64, cache_block_size, rounding_mode="floor")
-        block_offsets = slots_int64.remainder(cache_block_size)
-        valid &= block_ids < kv_cache.shape[0]
-        valid_token_indices = torch.nonzero(valid.reshape(-1), as_tuple=False).squeeze(-1)
-        flat_block_ids = block_ids.reshape(-1).index_select(0, valid_token_indices)
-        flat_block_offsets = block_offsets.reshape(-1).index_select(0, valid_token_indices)
-        return {
-            "safe_positions": safe_positions,
-            "valid_token_indices": valid_token_indices,
-            "flat_block_ids": flat_block_ids,
-            "flat_block_offsets": flat_block_offsets,
-            "paged_cache_shape": tuple(kv_cache.shape[:2]),
-            "paged_cache_device": kv_cache.device,
-        }
-
     def precompute_context_kv(
         self,
         main_x: torch.Tensor,
         positions: torch.Tensor,
         slot_mapping: torch.Tensor | None,
         rope_cos_sin: tuple[torch.Tensor, torch.Tensor] | None = None,
-        store_indices: DSparkContextStoreIndices | None = None,
+        cache_contract: DSparkPagedCacheContract | None = None,
     ) -> None:
         if positions.numel() == 0:
             return
         if slot_mapping is None:
             return
-        if store_indices is None:
+        projection_positions = positions
+        if rope_cos_sin is None:
             valid = (positions >= 0) & (slot_mapping >= 0)
-            safe_positions = torch.where(valid, positions, torch.zeros_like(positions))
-        else:
-            safe_positions = store_indices["safe_positions"]
-        shared_kv = self._project_shared_kv(main_x, safe_positions, rope_cos_sin)
+            projection_positions = torch.where(valid, positions, torch.zeros_like(positions))
+        shared_kv = self._project_shared_kv(main_x, projection_positions, rope_cos_sin)
         kv_cache = self._get_dspark_kv_cache()
         if kv_cache is None:
             # KV caches are not bound during the memory profiling dummy run.
             return
 
-        if store_indices is None:
-            store_indices = self.prepare_context_store_indices(positions, slot_mapping)
-            if store_indices is None:
-                return
-        kv_cache = self._validate_paged_cache_contract(
-            store_indices["paged_cache_shape"],
-            store_indices["paged_cache_device"],
-        )
-        cache_tokens = kv_cache.flatten(start_dim=2)
-        flat_shared_kv = shared_kv.reshape(-1, shared_kv.shape[-1]).index_select(
-            0,
-            store_indices["valid_token_indices"],
-        )
-        cache_tokens[
-            store_indices["flat_block_ids"],
-            store_indices["flat_block_offsets"],
-            : self.head_dim,
-        ] = flat_shared_kv.to(cache_tokens.dtype)
+        if cache_contract is not None:
+            kv_cache = self._validate_paged_cache_contract(*cache_contract)
+        dspark_masked_cache_store(kv_cache, shared_kv, positions, slot_mapping)
 
     def prepare_context_sync_indices(
         self,
@@ -785,19 +740,16 @@ class DeepseekV4DSparkModel(nn.Module):
             return
         main_x = self.main_norm(self.main_proj(context_states))
         first_attn = self.layers[str(self.mtp_start_layer_idx)].self_attn
-        store_indices = first_attn.prepare_context_store_indices(
+        valid_context = context_positions >= 0
+        if context_slot_mapping is not None:
+            valid_context &= context_slot_mapping >= 0
+        safe_context_positions = torch.where(
+            valid_context,
             context_positions,
-            context_slot_mapping,
+            torch.zeros_like(context_positions),
         )
-        safe_context_positions = (
-            store_indices["safe_positions"]
-            if store_indices is not None
-            else torch.where(
-                context_positions >= 0,
-                context_positions,
-                torch.zeros_like(context_positions),
-            )
-        )
+        first_kv_cache = first_attn._get_dspark_kv_cache()
+        cache_contract = None if first_kv_cache is None else (tuple(first_kv_cache.shape[:2]), first_kv_cache.device)
         rope_cos, rope_sin = get_cos_and_sin_dsa(safe_context_positions)
         for layer in self.layers.values():
             rotary_emb = layer.self_attn.rotary_emb
@@ -807,7 +759,7 @@ class DeepseekV4DSparkModel(nn.Module):
                 context_positions,
                 context_slot_mapping,
                 rope_cos_sin,
-                store_indices,
+                cache_contract,
             )
 
     def reset_request_slots(self, request_slots: torch.Tensor | None) -> None:
