@@ -170,17 +170,17 @@ class TPWeightSwitchMixin:
 
         state = TPWeightSwitchState()
 
-        for spec in gather_specs:
-            tensor = getattr(layer, spec.attr_name, None)
+        for gather_spec in gather_specs:
+            tensor = getattr(layer, gather_spec.attr_name, None)
             if tensor is None:
                 raise RuntimeError(
-                    f"{type(self).__name__} declares TP gather attr {spec.attr_name!r}, "
+                    f"{type(self).__name__} declares TP gather attr {gather_spec.attr_name!r}, "
                     f"but layer {getattr(layer, 'prefix', layer)} does not have it."
                 )
-            dim = spec.gather_dim if spec.gather_dim >= 0 else tensor.dim() + spec.gather_dim
+            dim = gather_spec.gather_dim if gather_spec.gather_dim >= 0 else tensor.dim() + gather_spec.gather_dim
             if dim < 0 or dim >= tensor.dim():
                 raise RuntimeError(
-                    f"Invalid TP gather dim {spec.gather_dim} for attr {spec.attr_name!r} "
+                    f"Invalid TP gather dim {gather_spec.gather_dim} for attr {gather_spec.attr_name!r} "
                     f"with shape {tuple(tensor.shape)}."
                 )
 
@@ -198,7 +198,7 @@ class TPWeightSwitchMixin:
             gather_shape = (full_shape[dim], *full_shape[:dim], *full_shape[dim + 1 :])
             pool_key = (
                 pool_key_prefix,
-                spec.attr_name,
+                gather_spec.attr_name,
                 tp_tensor.device.type,
                 tp_tensor.device.index,
                 tp_tensor.dtype,
@@ -216,32 +216,32 @@ class TPWeightSwitchMixin:
                 full_tensor = gather_output
             else:
                 full_tensor = torch.movedim(gather_output, 0, dim)
-            state.gather_parts[spec.attr_name] = TPWeightGatherPart(
-                spec=spec,
+            state.gather_parts[gather_spec.attr_name] = TPWeightGatherPart(
+                spec=gather_spec,
                 tp_tensor=tp_tensor,
                 gather_input=gather_input,
                 gather_output=gather_output,
                 full_tensor=full_tensor,
             )
 
-        for spec in repeat_specs:
-            tensor = getattr(layer, spec.attr_name, None)
+        for repeat_spec in repeat_specs:
+            tensor = getattr(layer, repeat_spec.attr_name, None)
             if tensor is None:
                 raise RuntimeError(
-                    f"{type(self).__name__} declares TP repeat attr {spec.attr_name!r}, "
+                    f"{type(self).__name__} declares TP repeat attr {repeat_spec.attr_name!r}, "
                     f"but layer {getattr(layer, 'prefix', layer)} does not have it."
                 )
-            dim = spec.repeat_dim if spec.repeat_dim >= 0 else tensor.dim() + spec.repeat_dim
+            dim = repeat_spec.repeat_dim if repeat_spec.repeat_dim >= 0 else tensor.dim() + repeat_spec.repeat_dim
             if dim < 0 or dim >= tensor.dim():
                 raise RuntimeError(
-                    f"Invalid TP repeat dim {spec.repeat_dim} for attr {spec.attr_name!r} "
+                    f"Invalid TP repeat dim {repeat_spec.repeat_dim} for attr {repeat_spec.attr_name!r} "
                     f"with shape {tuple(tensor.shape)}."
                 )
             repeats = [1] * tensor.dim()
             repeats[dim] = tp_size
             tp_tensor = tensor.detach()
-            state.repeat_parts[spec.attr_name] = TPWeightRepeatPart(
-                spec=spec,
+            state.repeat_parts[repeat_spec.attr_name] = TPWeightRepeatPart(
+                spec=repeat_spec,
                 tp_tensor=tp_tensor,
                 full_tensor=tp_tensor.repeat(*repeats),
             )
@@ -286,11 +286,11 @@ class TPWeightSwitchMixin:
         use_full_weight: bool,
     ) -> None:
         """Switch layer tensor attributes between TP-local and full views."""
-        for attr_name, part in state.gather_parts.items():
-            target = part.full_tensor if use_full_weight else part.tp_tensor
+        for attr_name, gather_part in state.gather_parts.items():
+            target = gather_part.full_tensor if use_full_weight else gather_part.tp_tensor
             with torch.no_grad():
                 getattr(layer, attr_name).set_(target)
-        for attr_name, part in state.repeat_parts.items():
-            target = part.full_tensor if use_full_weight else part.tp_tensor
+        for attr_name, repeat_part in state.repeat_parts.items():
+            target = repeat_part.full_tensor if use_full_weight else repeat_part.tp_tensor
             with torch.no_grad():
                 getattr(layer, attr_name).set_(target)
