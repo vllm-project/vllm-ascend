@@ -852,7 +852,7 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
 :::::{tab-set}
 :sync-group: script
 
-::::{tab-item} Prefill Node 
+::::{tab-item} Prefill Node
 :sync: Prefill Node
 
 ```{code-block} bash
@@ -1006,7 +1006,7 @@ Key Parameter Descriptions:
 :::::{tab-set}
 :sync-group: run server
 
-::::{tab-item} A3 series 
+::::{tab-item} A3 series
 :sync: A3
 
 ```{code-block} bash

@@ -881,6 +881,7 @@ vllm bench serve --model /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot  --
 The function call feature is supported from v0.13.0rc1 on. Please use the latest version.
 
 Refer to [DeepSeek-V3.2 Usage Guide](https://docs.vllm.ai/projects/recipes/en/latest/DeepSeek/DeepSeek-V3_2.html#tool-calling-example) for details.
+
 ## 10 FAQ
 
 For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
