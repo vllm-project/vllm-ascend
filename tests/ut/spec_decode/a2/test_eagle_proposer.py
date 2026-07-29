@@ -1640,7 +1640,8 @@ class TestEagleProposerPropose:
         assert 'self.kernel_block_size' in src
         sig = inspect.signature(RunnerCls._propose)
         sig_name = self.get_param_names(sig)
-        assert sig_name == ['self', 'target_token_ids', 'target_positions', 'target_hidden_states', 'next_token_ids',
+        assert sig_name == ['self', 'num_speculative_tokens', 'target_token_ids', 'target_positions',
+                            'target_hidden_states', 'next_token_ids',
                             'token_indices_to_sample', 'common_attn_metadata', 'target_model_batch_desc',
                             'sampling_metadata', 'mm_embed_inputs', 'req_scheduled_tokens', 'long_seq_metadata',
                             'num_prefill_reqs', 'num_decode_reqs', 'scheduler_output', 'num_scheduled_tokens',
