@@ -185,6 +185,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --enable-prefix-caching \
 --additional-config '{"multistream_overlap_shared_expert": true}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' 
 ```
 
@@ -221,6 +222,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --enable-prefix-caching \
 --additional-config '{"multistream_overlap_shared_expert": true}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' 
 ```
 
@@ -262,6 +264,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --enable-prefix-caching \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --additional-config '{"multistream_overlap_shared_expert": true}' \
+--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
@@ -331,6 +334,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 \
 --trust-remote-code \
 --gpu-memory-utilization 0.95 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
@@ -378,6 +382,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 \
 --trust-remote-code \
 --gpu-memory-utilization 0.95 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
@@ -431,6 +436,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --gpu-memory-utilization 0.95 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --additional-config '{"multistream_overlap_shared_expert": true}' \
+--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
@@ -480,6 +486,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --gpu-memory-utilization 0.95 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --additional-config '{"multistream_overlap_shared_expert": true}' \
+--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
@@ -601,6 +608,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --enable-prefix-caching \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --additional-config '{"multistream_overlap_shared_expert": true}' \
+--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
@@ -653,6 +661,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --enable-prefix-caching \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --additional-config '{"multistream_overlap_shared_expert": true}' \
+--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
@@ -826,6 +835,7 @@ Before you start, please
             --enable-chunked-prefill \
             --quantization ascend \
             --gpu-memory-utilization 0.95 \
+            --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
             --enforce-eager \
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
@@ -905,6 +915,7 @@ Before you start, please
             --max-num-seqs 64 \
             --enable-chunked-prefill \
             --gpu-memory-utilization 0.95 \
+            --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
             --quantization ascend \
             --enforce-eager \
             --enable-auto-tool-choice \
@@ -987,6 +998,7 @@ Before you start, please
             --trust-remote-code \
             --max-num-seqs 8 \
             --gpu-memory-utilization 0.92 \
+            --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
             --quantization ascend \
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
@@ -1067,6 +1079,7 @@ Before you start, please
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
+             --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
              --quantization ascend \
              --enable-auto-tool-choice \
              --tool-call-parser glm47 \
@@ -1147,6 +1160,7 @@ Before you start, please
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
+             --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
              --quantization ascend \
              --enable-auto-tool-choice \
              --tool-call-parser glm47 \
@@ -1227,6 +1241,7 @@ Before you start, please
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
+             --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
              --quantization ascend \
              --enable-auto-tool-choice \
              --tool-call-parser glm47 \
