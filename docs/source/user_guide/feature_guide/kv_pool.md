@@ -459,15 +459,7 @@ export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824   # 1 GB
 
 ### Installing Memcache
 
-<<<<<<< HEAD
-<<<<<<< HEAD
 **MemCache depends on MemFabric. Therefore, MemFabric must be installed. Installing the memcache after the memfabric is installed.**
-=======
-**Memcache depends on MemFabric. Therefore, MemFabric must be installed. Installing the memcache after the MemFabric is installed.**
->>>>>>> 136ac734f... Some modifications based on aidd
-=======
-**Memcache depends on MemFabric. Therefore, MemFabric must be installed. Installing the memcache after the MemFabric is installed.**
->>>>>>> 136ac734f... Some modifications based on aidd
 
 ```shell
 pip install memfabric-hybrid
