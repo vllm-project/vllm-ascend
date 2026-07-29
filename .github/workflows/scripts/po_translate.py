@@ -26,41 +26,100 @@ from pathlib import Path
 
 import regex as re
 from openai import AsyncOpenAI
+from polib import POEntry, POFile, pofile
 
 SYSTEM_PROMPT = (
-    "You are a professional technical documentation translation expert, "
-    "proficient in English-Chinese technical document translation."
+    "You are a professional technical documentation translator specializing in "
+    "English-to-Chinese translations for Sphinx documentation. Return valid gettext "
+    "PO entries only, without explanations or markdown fences."
 )
 
-TRANSLATION_PROMPT = """Translate this Sphinx PO file (gettext format) from English to Chinese.
+TRANSLATION_PROMPT = """Translate these gettext PO entries from English to Chinese.
+
+Each entry has a msgid containing the English source and an empty msgstr.
+Fill every msgstr and return exactly the same entries in the same order.
 
 Rules:
-1. Only modify msgstr "", keep msgid unchanged
-2. Preserve format markers: %s, %d, {{}}, **, *, `, etc.
-3. Keep code blocks, references, variable names unchanged
-4. For already translated msgstr, optimize while maintaining style
-5. Maintain complete PO file format and structure
-6. Use standard Chinese technical terminology
-7. For difficult parts, keep original English
-8. Remove "#, fuzzy" markers
-9. Do NOT translate proper nouns: person names, contributor names, author names must be kept as-is in msgstr
-10. In list items, no space between marker and Chinese text: "1.中文" not "1. 中文"
-    (space causes Sphinx to ignore the translation)
-11.For Markdown links [text](url), translate the display text inside [], but keep the URL inside () unchanged.
-   Example: [Section 5.1](#51-single-node-online-deployment) → [第 5.1 节](#51-single-node-online-deployment)
-
-Return ONLY the complete PO file content, no extra explanations.
+1. Return only msgid/msgstr entries. Do not add a PO header, comments, or explanations.
+2. Keep every msgid exactly unchanged. Do not add, remove, merge, split, or reorder entries.
+3. Preserve format markers, code blocks, references, variables, commands, paths, URLs,
+   Markdown syntax, HTML tags, and other technical syntax.
+4. Keep person names, contributor names, GitHub usernames, dates, commit hashes, and
+   other proper nouns unchanged.
+5. For Markdown links, translate display text but keep the URL unchanged.
+6. For numbered Chinese list items, do not insert a space after the marker:
+   use "1.中文" instead of "1. 中文", because Sphinx may ignore the latter translation.
+7. Use consistent and natural Chinese technical terminology. If a term is uncertain,
+   keep the original English.
+8. Do not add fuzzy flags.
 
 {content}"""
+
+_HEADER_BLOCK_RE = re.compile(r'(?ms)^msgid ""\nmsgstr ""\n(?:"[^\n]*\\n"\n)+(?=\n|$)')
+
+
+def _normalize_msgid(text: str) -> str:
+    """Normalize harmless whitespace differences in an API-returned msgid."""
+    lines = [line.rstrip() for line in text.split("\n")]
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(lines)
+
+
+def _remove_extra_headers(content: str) -> str:
+    """Remove embedded PO headers while preserving the first catalog header."""
+    matches = list(_HEADER_BLOCK_RE.finditer(content))
+    if len(matches) <= 1:
+        return content
+
+    for match in reversed(matches[1:]):
+        start, end = match.span()
+        if end < len(content) and content[end] == "\n":
+            end += 1
+        content = content[:start] + content[end:]
+    return content
+
+
+def _load_po(content: str) -> POFile:
+    """Parse a catalog and recover metadata from a previously embedded header."""
+    po = pofile(_remove_extra_headers(content))
+    header_entries = [entry for entry in po if not entry.msgid]
+    if not po.metadata and header_entries:
+        key = None
+        for line in header_entries[0].msgstr.splitlines():
+            if ":" in line:
+                key, value = line.split(":", 1)
+                po.metadata[key] = value.strip()
+            elif key is not None:
+                po.metadata[key] += "\n" + line.strip()
+    po[:] = [entry for entry in po if entry.msgid]
+    return po
+
+
+def _active_entries(po: POFile) -> list[POEntry]:
+    return [entry for entry in po if entry.msgid and not entry.obsolete]
+
+
+def _pending_entries(po: POFile, retranslate_all: bool) -> list[POEntry]:
+    entries = _active_entries(po)
+    if retranslate_all:
+        return entries
+    return [entry for entry in entries if not entry.msgstr or "fuzzy" in entry.flags]
 
 
 class POTranslator:
     def __init__(self, api_key: str, max_concurrent: int = 5):
-        self.client = AsyncOpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+        self.client = AsyncOpenAI(
+            api_key=api_key,
+            base_url="https://api.deepseek.com",
+        )
         self.max_concurrent = max_concurrent
 
-    async def _call_api(self, content: str, chunk_info: str = "") -> str | None:
-        """Make a single translation API call."""
+    async def _call_api(
+        self,
+        content: str,
+        chunk_info: str = "",
+    ) -> str | None:
         prompt = TRANSLATION_PROMPT.format(content=content)
         system = SYSTEM_PROMPT
         if chunk_info:
@@ -75,10 +134,17 @@ class POTranslator:
             temperature=0.3,
         )
         text = response.choices[0].message.content
-        return self._clean_response(text) if text else None
+        if not text:
+            return None
+        cleaned = self._clean_response(text)
+        return cleaned if cleaned else None
 
-    async def translate_file(self, po_path: str) -> bool:
-        """Translate a single PO file with backup/restore on failure."""
+    async def translate_file(
+        self,
+        po_path: str,
+        retranslate_all: bool = False,
+    ) -> bool:
+        """Translate one PO file and restore it unless every target is valid."""
         path = Path(po_path)
         if not path.exists() or path.suffix != ".po":
             print(f"  Skip: {po_path} (not found or not .po)")
@@ -88,143 +154,338 @@ class POTranslator:
         shutil.copy2(po_path, backup)
 
         try:
-            content = path.read_text(encoding="utf-8")
-            lines = content.split("\n")
-            print(f"  {path.name} ({len(lines)} lines)", end=" ", flush=True)
+            raw_content = path.read_text(encoding="utf-8-sig")
+            po = _load_po(raw_content)
+            entries = _active_entries(po)
+            targets = _pending_entries(po, retranslate_all)
+            expected_msgids = [entry.msgid for entry in entries]
+            mode = "all" if retranslate_all else "pending"
+            print(
+                f"  {path.name} ({len(targets)}/{len(entries)} {mode})",
+                end=" ",
+                flush=True,
+            )
 
-            chunks = self._split_po_entries(content)
-            if len(chunks) > 1:
-                success = await self._translate_chunked(po_path, chunks)
-            else:
-                result = await self._call_api(content)
-                if result:
-                    Path(po_path).write_text(result, encoding="utf-8")
-                    success = True
-                else:
-                    success = False
+            if targets:
+                snippet = self._build_snippet(targets)
+                chunks = self._split_entries(snippet)
+                translated_chunks = await self._translate_chunks(chunks)
+                if translated_chunks is None:
+                    self._restore(backup, po_path)
+                    print("FAILED (API)")
+                    return False
 
-            if not success:
-                shutil.copy2(backup, po_path)
-                print("FAILED")
-            else:
-                print("OK")
-            return success
-        except Exception as e:
-            print(f"ERROR: {e}")
-            shutil.copy2(backup, po_path)
+                translations = self._collect_translations(
+                    translated_chunks,
+                    targets,
+                )
+                if translations is None:
+                    self._restore(backup, po_path)
+                    print("FAILED (merge)")
+                    return False
+
+                for entry in targets:
+                    entry.msgstr = translations[entry.msgid]
+                    entry.flags = [flag for flag in entry.flags if flag != "fuzzy"]
+
+            po.save(str(path), newline="\n")
+
+            error = validate_po_file(path, expected_msgids=expected_msgids)
+            if error:
+                self._restore(backup, po_path)
+                print(f"FAILED ({error})")
+                return False
+
+            print("OK")
+            return True
+        except Exception as exc:
+            self._restore(backup, po_path)
+            print(f"ERROR: {exc}")
             return False
         finally:
             Path(backup).unlink(missing_ok=True)
 
     @staticmethod
-    def _split_po_entries(content: str, max_lines: int = 300) -> list[str]:
-        """Split PO content into chunks on entry boundaries (blank-line separated).
+    def _restore(backup: str, po_path: str) -> None:
+        shutil.copy2(backup, po_path)
 
-        Splitting on raw line numbers can cut a msgid/msgstr pair in half,
-        causing the LLM to see an incomplete entry and produce duplicate or
-        orphaned msgstr lines.  This method keeps each entry intact.
-        """
-        # PO entries are separated by one or more blank lines.
-        entries = re.split(r"\n{2,}", content.strip())
+    @staticmethod
+    def _build_snippet(entries: list[POEntry]) -> str:
+        """Serialize only source msgids, never the catalog header or old msgstr."""
+        parts = []
+        for entry in entries:
+            escaped = entry.msgid.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+            parts.append(f'msgid "{escaped}"\nmsgstr ""')
+        return "\n\n".join(parts) + "\n"
+
+    @staticmethod
+    def _split_entries(
+        snippet: str,
+        max_chars: int = 6000,
+    ) -> list[str]:
+        """Split a minimal snippet on entry boundaries."""
+        entries = re.split(r"\n{2,}", snippet.strip())
         chunks: list[str] = []
         current: list[str] = []
-        current_lines = 0
+        current_chars = 0
 
         for entry in entries:
-            entry_lines = entry.count("\n") + 1
-            if current_lines + entry_lines > max_lines and current:
+            entry_chars = len(entry)
+            if current_chars + entry_chars > max_chars and current:
                 chunks.append("\n\n".join(current) + "\n")
                 current = []
-                current_lines = 0
+                current_chars = 0
             current.append(entry)
-            current_lines += entry_lines
+            current_chars += entry_chars
 
         if current:
             chunks.append("\n\n".join(current) + "\n")
+        return chunks
 
-        return chunks if len(chunks) > 1 else [content]
-
-    async def _translate_chunked(self, po_path: str, chunks: list[str]) -> bool:
-        """Translate large file in parallel entry-aligned chunks."""
+    async def _translate_chunks(
+        self,
+        chunks: list[str],
+    ) -> list[str] | None:
+        """Translate chunks concurrently and require every chunk to validate."""
         total = len(chunks)
         sem = asyncio.Semaphore(self.max_concurrent)
 
-        async def do_chunk(idx: int) -> tuple[int, str | None, str | None]:
+        async def do_chunk(idx: int) -> tuple[int, str | None]:
             async with sem:
                 info = f"chunk {idx + 1}/{total}"
-                try:
-                    result = await self._call_api(chunks[idx], chunk_info=info)
-                    if result is None:
-                        return (idx, None, "empty response")
-                    return (idx, result, None)
-                except Exception as e:
-                    return (idx, None, str(e)[:50])
+                source_entries = _active_entries(pofile(chunks[idx]))
+                for attempt in range(3):
+                    try:
+                        result = await self._call_api(
+                            chunks[idx],
+                            chunk_info=info,
+                        )
+                        if (
+                            result
+                            and self._collect_translations(
+                                [result],
+                                source_entries,
+                                quiet=True,
+                            )
+                            is not None
+                        ):
+                            return idx, result
+                    except Exception:
+                        pass
+                    if attempt < 2:
+                        await asyncio.sleep(2)
+                print(
+                    f"\n    Chunk {idx + 1} failed validation after 3 attempts",
+                    flush=True,
+                )
+                return idx, None
 
-        print(f"({total} chunks, {self.max_concurrent} parallel)", end=" ", flush=True)
-        results = await asyncio.gather(*[do_chunk(i) for i in range(total)])
-
-        # Check for failures
+        if total > 1:
+            print(
+                f"({total} chunks, {self.max_concurrent} parallel)",
+                end=" ",
+                flush=True,
+            )
+        results = await asyncio.gather(*[do_chunk(index) for index in range(total)])
         translated: list[str | None] = [None] * total
-        for idx, chunk_text, error in results:
-            if error:
-                print(f"\n    Chunk {idx + 1} failed: {error}")
-                return False
+        for idx, chunk_text in results:
             translated[idx] = chunk_text
+        if any(chunk is None for chunk in translated):
+            return None
+        return [chunk for chunk in translated if chunk is not None]
 
-        # Write result: join chunks with a single blank line between them
-        final = "\n\n".join(t.strip("\n") for t in translated) + "\n"
-        Path(po_path).write_text(final, encoding="utf-8")
-        return True
+    @staticmethod
+    def _collect_translations(
+        translated_chunks: list[str],
+        expected_entries: list[POEntry],
+        quiet: bool = False,
+    ) -> dict[str, str] | None:
+        """Parse API output and match every translation to an original msgid."""
+        expected_by_normalized: dict[str, POEntry] = {}
+        for entry in expected_entries:
+            normalized = _normalize_msgid(entry.msgid)
+            if normalized in expected_by_normalized:
+                if not quiet:
+                    print("\n    Duplicate normalized msgid in source")
+                return None
+            expected_by_normalized[normalized] = entry
+
+        translations: dict[str, str] = {}
+        try:
+            for chunk in translated_chunks:
+                translated_po = pofile(chunk)
+                for translated in _active_entries(translated_po):
+                    normalized = _normalize_msgid(translated.msgid)
+                    original = expected_by_normalized.get(normalized)
+                    if original is None:
+                        if not quiet:
+                            print(f"\n    API changed or added msgid: {translated.msgid[:80]}")
+                        return None
+                    if original.msgid in translations:
+                        if not quiet:
+                            print(f"\n    API returned a duplicate msgid: {translated.msgid[:80]}")
+                        return None
+                    if not translated.msgstr:
+                        if not quiet:
+                            print(f"\n    API left msgstr empty: {translated.msgid[:80]}")
+                        return None
+                    translations[original.msgid] = translated.msgstr
+        except Exception as exc:
+            if not quiet:
+                print(f"\n    Cannot parse API response: {exc}")
+            return None
+
+        missing = [entry.msgid for entry in expected_entries if entry.msgid not in translations]
+        if missing:
+            if not quiet:
+                print(f"\n    API omitted {len(missing)} msgid(s), first: {missing[0][:80]}")
+            return None
+        return translations
 
     @staticmethod
     def _clean_response(response: str) -> str:
-        """Strip markdown code block wrappers from API response."""
         response = response.strip()
         if response.startswith("```"):
             lines = response.split("\n")
-            lines = lines[1:]  # remove opening ```
+            lines = lines[1:]
             while lines and lines[-1].strip() == "```":
                 lines.pop()
             response = "\n".join(lines).strip()
+        if 'msgid "' not in response or 'msgstr "' not in response:
+            return ""
         return response
 
 
-async def async_main():
-    parser = argparse.ArgumentParser(description="PO File Translator (DeepSeek)")
-    parser.add_argument("--files", required=True, help="Comma-separated PO file paths")
-    parser.add_argument("--output-json", default=os.getenv("OUTPUT_JSON", "/tmp/translation_results.json"))
-    parser.add_argument("--api-key", default=os.getenv("DEEPSEEK_API_KEY"))
+def validate_po_file(
+    path: Path,
+    expected_msgids: list[str] | None = None,
+) -> str | None:
+    """Return an error message when a translated PO file is unsafe."""
+    content = path.read_text(encoding="utf-8")
+    if content.startswith("\ufeff"):
+        return "UTF-8 BOM"
+
+    headers = list(_HEADER_BLOCK_RE.finditer(content))
+    if len(headers) != 1:
+        return f"{len(headers)} PO headers"
+
+    try:
+        po = pofile(content)
+    except Exception as exc:
+        return f"parse error: {exc}"
+
+    entries = _active_entries(po)
+    msgids = [entry.msgid for entry in entries]
+    if expected_msgids is not None and msgids != expected_msgids:
+        return "msgid set or order changed"
+
+    empty = [entry for entry in entries if not entry.msgstr]
+    if empty:
+        return f"{len(empty)} empty msgstr"
+
+    fuzzy = [entry for entry in entries if "fuzzy" in entry.flags]
+    if fuzzy:
+        return f"{len(fuzzy)} fuzzy entries"
+    return None
+
+
+def validate_files(files_arg: str) -> int:
+    file_list = [item.strip() for item in files_arg.split(",") if item.strip()]
+    failed = 0
+    total_entries = 0
+
+    for filename in file_list:
+        path = Path(filename)
+        if not path.exists():
+            print(f"  FAIL: {filename} does not exist")
+            failed += 1
+            continue
+        error = validate_po_file(path)
+        if error:
+            print(f"  FAIL: {filename}: {error}")
+            failed += 1
+            continue
+        count = len(_active_entries(pofile(path.read_text(encoding="utf-8"))))
+        total_entries += count
+        print(f"  OK:   {filename}: {count} translated entries")
+
+    print(f"\nValidated {len(file_list) - failed}/{len(file_list)} file(s), {total_entries} translated entries")
+    return 1 if failed or not file_list else 0
+
+
+async def async_main() -> int:
+    parser = argparse.ArgumentParser(description="Sphinx PO file translator (DeepSeek)")
+    parser.add_argument(
+        "--files",
+        required=True,
+        help="Comma-separated PO file paths",
+    )
+    parser.add_argument(
+        "--output-json",
+        default=os.getenv(
+            "OUTPUT_JSON",
+            "/tmp/translation_results.json",
+        ),
+    )
+    parser.add_argument(
+        "--api-key",
+        default=os.getenv("DEEPSEEK_API_KEY"),
+    )
     parser.add_argument("--max-concurrent", type=int, default=5)
+    parser.add_argument(
+        "--retranslate-all",
+        action="store_true",
+        help="Translate every active entry, including non-empty msgstr values",
+    )
+    parser.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="Validate PO structure and coverage without calling the API",
+    )
     args = parser.parse_args()
+
+    if args.validate_only:
+        return validate_files(args.files)
 
     api_key = args.api_key or os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
         print("Error: DEEPSEEK_API_KEY not set")
         return 1
 
-    file_list = [f.strip() for f in args.files.split(",") if f.strip()]
-    print(f"Translating {len(file_list)} file(s), max_concurrent={args.max_concurrent}")
+    file_list = [item.strip() for item in args.files.split(",") if item.strip()]
+    mode = "full retranslation" if args.retranslate_all else "incremental"
+    print(f"Translating {len(file_list)} file(s) in {mode} mode, max_concurrent={args.max_concurrent}")
 
-    translator = POTranslator(api_key=api_key, max_concurrent=args.max_concurrent)
+    translator = POTranslator(
+        api_key=api_key,
+        max_concurrent=args.max_concurrent,
+    )
     success_files = []
+    for filename in file_list:
+        if await translator.translate_file(
+            filename,
+            retranslate_all=args.retranslate_all,
+        ):
+            success_files.append(filename)
 
-    for fp in file_list:
-        if await translator.translate_file(fp):
-            success_files.append(fp)
-
-    # Save results
+    failed_files = [filename for filename in file_list if filename not in success_files]
     results = {
         "success_files": success_files,
+        "failed_files": failed_files,
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "mode": mode,
         "total_files": len(file_list),
         "success_count": len(success_files),
     }
-    out = Path(args.output_json)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
+    output = Path(args.output_json)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(results, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
     print(f"\nResult: {len(success_files)}/{len(file_list)} translated -> {args.output_json}")
-    return 0 if success_files else 1
+    return 0 if file_list and not failed_files else 1
 
 
 if __name__ == "__main__":

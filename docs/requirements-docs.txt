@@ -9,4 +9,5 @@ msgspec
 sphinx-substitution-extensions
 sphinx-intl
 openai
+polib
 regex
