@@ -114,9 +114,13 @@ def build_attn_metadata(
     attn_state: Any | None = None,
     graph_pad_size: int = -1,
     num_input_tokens: int = 0,
+    prefill_context_parallel_metadata: AscendPrefillContextParallelMetadata | None = None,
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
     causal: bool | Mapping[int, bool] = True,
+    num_reqs_actual: int | None = None,
+    for_drafting: bool = False,
+    draft_index: int = 1,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
@@ -129,6 +133,13 @@ def build_attn_metadata(
     seq_lens_cpu = torch.from_numpy(seq_lens_np)[:num_reqs]
 
     attn_metadata: dict[str, Any] = {}
+    # DSA metadata is built once per cache group, but compressor/indexer
+    # metadata must share these step-local objects across all ratios.  They
+    # deliberately live only for this invocation: retaining them across
+    # execute steps would reuse request-specific SAS/QLI tensors.
+    prefill_ratio_to_sas_metadata: dict[Any, Any] = {}
+    decode_ratio_to_sas_metadata: dict[Any, Any] = {}
+    common_ratio_to_sas_metadata: dict[Any, Any] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
     for i, kv_cache_spec in enumerate(kv_cache_groups):
         block_table = block_tables[i]
@@ -146,6 +157,7 @@ def build_attn_metadata(
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens_cpu=seq_lens_cpu,
             seq_lens_cpu_upper_bound=seq_lens_cpu,
+            num_computed_tokens_cpu=num_computed_tokens_cpu,
             seq_lens=seq_lens[:num_reqs],
             num_reqs=num_reqs,
             num_actual_tokens=num_tokens,
@@ -156,6 +168,7 @@ def build_attn_metadata(
             attn_state=attn_state,
             graph_pad_size=graph_pad_size,
             num_input_tokens=num_input_tokens,
+            prefill_context_parallel_metadata=prefill_context_parallel_metadata,
             max_seq_len=max_seq_len,
             causal=group_causal,
             **common_attn_metadata_extra_kwargs,
@@ -163,7 +176,8 @@ def build_attn_metadata(
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
-            if for_cudagraph_capture:
+            is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
+            if for_cudagraph_capture and not is_dsa_builder:
                 metadata = attn_metadata_builder.build_for_cudagraph_capture(common_attn_metadata)
             else:
                 attn_metadata_extra_kwargs = (
@@ -174,11 +188,33 @@ def build_attn_metadata(
                     if model_specific_attn_metadata is not None
                     else {}
                 )
-                metadata = attn_metadata_builder.build(
-                    common_prefix_len=0,
-                    common_attn_metadata=common_attn_metadata,
-                    **attn_metadata_extra_kwargs,
-                )
+                if is_dsa_builder:
+                    attn_metadata_extra_kwargs.update(
+                        num_reqs_actual=num_reqs if num_reqs_actual is None else num_reqs_actual,
+                        prefill_ratio_to_sas_metadata=prefill_ratio_to_sas_metadata,
+                        decode_ratio_to_sas_metadata=decode_ratio_to_sas_metadata,
+                        common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
+                        block_size=attn_group.kv_cache_spec.block_size,
+                    )
+                if is_dsa_builder and for_drafting:
+                    metadata = attn_metadata_builder.build_for_drafting(
+                        common_attn_metadata,
+                        draft_index,
+                        **attn_metadata_extra_kwargs,
+                    )
+                else:
+                    metadata = attn_metadata_builder.build(
+                        common_prefix_len=0,
+                        common_attn_metadata=common_attn_metadata,
+                        **attn_metadata_extra_kwargs,
+                    )
+                if is_dsa_builder and not for_drafting:
+                    # Keep the exact objects selected by the builder.  This
+                    # also covers builders which replace an empty dict during
+                    # graph capture.
+                    prefill_ratio_to_sas_metadata = attn_metadata_builder.prefill_ratio_to_sas_metadata
+                    decode_ratio_to_sas_metadata = attn_metadata_builder.decode_ratio_to_sas_metadata
+                    common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
     return attn_metadata
