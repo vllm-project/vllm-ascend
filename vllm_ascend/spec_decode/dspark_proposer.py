@@ -442,7 +442,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                     ),
                     block_table_tensor=block_table[:num_reqs],
                     attn_states=AscendAttentionState.ChunkedPrefill,
-                    causal=false,
+                    causal=False,
                     is_prefilling=torch.zeros(num_reqs, dtype=torch.bool),
                 )
                 attn_metadata = builder.build_for_graph_capture(
