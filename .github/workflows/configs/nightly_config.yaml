@@ -172,6 +172,9 @@ a3:
       - name: qwen3-30b-a3b-w8a8
         os: linux-aarch64-nightly-a3-4
         config_file_path: Qwen3-30B-A3B-W8A8.yaml
+      - name: Qwen3-32B-W8A8C8-A3
+        os: linux-aarch64-nightly-a3-4
+        config_file_path: Qwen3-32B-W8A8C8-A3.yaml
       - name: qwen3-32b-int8-prefix-cache
         os: linux-aarch64-nightly-a3-4
         config_file_path: Prefix-Cache-Qwen3-32B-Int8.yaml
@@ -274,6 +277,9 @@ a3-560t:
       - name: qwen3-30b-a3b-w8a8
         os: linux-aarch64-a3-4-cn12-001
         config_file_path: Qwen3-30B-A3B-W8A8.yaml
+      - name: Qwen3-32B-W8A8C8-A3
+        os: linux-aarch64-a3-4-cn12-001
+        config_file_path: Qwen3-32B-W8A8C8-A3.yaml
       - name: qwen3-32b-int8-prefix-cache
         os: linux-aarch64-a3-4-cn12-001
         config_file_path: Prefix-Cache-Qwen3-32B-Int8.yaml
