@@ -286,6 +286,7 @@
   optional: false
   source_file_dependencies:
     - vllm_ascend/models
+    - vllm_ascend/transformers_utils
   tests:
     - tests/e2e/pull_request/four_card/test_deepseek_v4.py
 

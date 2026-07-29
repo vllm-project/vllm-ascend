@@ -70,6 +70,10 @@ def register_service_profiling():
 
 
 def register_model():
+    from vllm_ascend.transformers_utils.configs.kimi_k3 import register_kimi_k3_config
+
+    register_kimi_k3_config()
+
     from vllm_ascend.patch.hunyuan_vl_processor_compat import (
         install_hunyuan_vl_processor_compat,
     )
