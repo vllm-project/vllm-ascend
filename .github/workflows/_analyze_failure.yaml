@@ -132,8 +132,8 @@ jobs:
       group: failure-analysis-obs-daily-archive
       cancel-in-progress: false
     env:
-      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_FAILURE_ANALYSIS }}
-      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY_FAILURE_ANALYSIS }}
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
       PR_TITLE: ${{ github.event.pull_request.title }}
       RUN_ID: ${{ github.run_id }}
