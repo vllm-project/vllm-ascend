@@ -374,7 +374,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
         moe_comm_type = MoECommType.ALLGATHER
     elif lora_config is not None and vllm_config.parallel_config.enable_expert_parallel:
         # LoRA + EP requires AlltoAll because the MC2/FusedMC2 paths
-        # Ascend MoE LoRA cannot patch FusedMC2 path for dispatch_ffn_combine
+        # Ascend MoE LoRA cannot patch FusedMC2 path for dispatch_ffn_combine/mega_moe
         # is a single fused C++ op. This covers both normal model
         # forward and _dummy_run during profile_run.
         moe_comm_type = MoECommType.ALLTOALL
