@@ -22,7 +22,6 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import torch
-
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
