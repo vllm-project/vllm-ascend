@@ -45,6 +45,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
+from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     split_tensor_along_last_dim,
     tensor_model_parallel_all_reduce,
@@ -452,8 +453,19 @@ def _should_skip_sp_for_multimodal_encoder(prefix: str) -> bool:
     return any(part in prefix for part in _MULTIMODAL_ENCODER_PREFIX_PARTS)
 
 
+def _is_head_wise_attention_gate(prefix: str, output_size: int | None) -> bool:
+    """Return whether ``g_proj`` emits one gate value per attention head."""
+    if prefix.rsplit(".", 1)[-1] != "g_proj" or output_size is None:
+        return False
+    try:
+        hf_text_config = get_current_vllm_config().model_config.hf_text_config
+    except AssertionError:
+        return False
+    return output_size == getattr(hf_text_config, "num_attention_heads", None)
+
+
 def _get_column_parallel_op(
-    prefix, layer
+    prefix, layer, output_size: int | None = None
 ) -> MLPColumnParallelOp | DSV4OProjColumnParallelOp | SequenceColumnParallelOp | ShardedCPColumnParallelOp | None:
     if enable_dsa_cp() and ("q_b_proj" in prefix or "kv_b_proj" in prefix):
         return ShardedCPColumnParallelOp(layer)
@@ -472,11 +484,12 @@ def _get_column_parallel_op(
             "conv1d",  # gated deltanet of Qwen3 Next
             "query_key_value",  # qkv linear of Bailing
             "indexer_proj",  # indexer linear of M3
-            "g_proj",  # attention gate projection of Step3p5
         ]
         for a_prefix in sp_column_prefix:
             if a_prefix in prefix:
                 return SequenceColumnParallelOp(layer)
+        if _is_head_wise_attention_gate(prefix, output_size):
+            return SequenceColumnParallelOp(layer)
 
     return None
 
@@ -508,7 +521,7 @@ def _get_row_parallel_op(
     return None
 
 
-def get_parallel_op(disable_tp, prefix, layer, direct):
+def get_parallel_op(disable_tp, prefix, layer, direct, output_size: int | None = None):
     if (
         disable_tp
         or ("shared_experts" in prefix and shared_expert_dp_enabled())
@@ -531,7 +544,7 @@ def get_parallel_op(disable_tp, prefix, layer, direct):
         custom_op = _get_row_parallel_op(prefix, layer)
 
     if direct == "column":
-        custom_op = _get_column_parallel_op(prefix, layer)
+        custom_op = _get_column_parallel_op(prefix, layer, output_size)
 
     if custom_op is not None:
         logger.debug(

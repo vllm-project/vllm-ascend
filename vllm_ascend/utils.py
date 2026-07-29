@@ -859,6 +859,11 @@ def enable_sp_by_pass():
 
 
 def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
+    """Return whether FlashComm1 sequence parallelism is enabled.
+
+    ``enable_shared_expert_dp`` is retained for compatibility with existing
+    callers but no longer changes the FlashComm1 setting.
+    """
     global _ENABLE_SP
     if vllm_config is None:
         try:
@@ -880,16 +885,17 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
             except RuntimeError:
                 _ENABLE_SP = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
 
-        if not _ENABLE_SP and enable_shared_expert_dp:
-            _ENABLE_SP = True
-            logger.info("shared_expert_dp requires enable_sp=True. enable_sp has been set to True.")
-
     return bool(_ENABLE_SP)
 
 
 # TODO remove it after vllm has this func
 def shared_expert_dp_enabled() -> bool:
-    return get_ascend_config().enable_shared_expert_dp or enable_sp() or enable_sp_by_pass()
+    """Return whether shared-expert weights are replicated over TP.
+
+    FlashComm1 is a communication optimization and must not implicitly enable
+    shared-expert DP. The graph SP pass remains a legacy replication request.
+    """
+    return get_ascend_config().enable_shared_expert_dp or enable_sp_by_pass()
 
 
 def is_moe_model(vllm_config: VllmConfig):

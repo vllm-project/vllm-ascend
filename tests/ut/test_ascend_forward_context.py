@@ -166,6 +166,18 @@ def test_select_moe_comm_method_a2_uses_mc2_within_capacity(monkeypatch, num_tok
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
 
 
+def test_select_moe_comm_method_a2_uses_allgather_for_more_than_512_experts(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A2,
+        capacity=128,
+        ep_world_size=64,
+    )
+    vllm_config = _make_vllm_config(world_size=64, num_experts=896)
+
+    assert afc.select_moe_comm_method(128, vllm_config) == MoECommType.ALLGATHER
+
+
 @pytest.mark.parametrize(
     ("num_tokens", "ep_world_size", "expected"),
     [

@@ -452,6 +452,7 @@ def test_shared_forward_impl_returns_current_runner_contract(monkeypatch, has_sh
     nn.Module.__init__(runner)
     runner._shared_experts = object() if has_shared_experts else None
     hidden_states = torch.randn(2, 4)
+    shared_experts_input = torch.randn(2, 8)
     router_logits = torch.randn(2, 3)
     routed_out = torch.randn(2, 4)
     shared_out = torch.randn(2, 4)
@@ -469,7 +470,7 @@ def test_shared_forward_impl_returns_current_runner_contract(monkeypatch, has_sh
     monkeypatch.setattr(AscendMoERunner, "is_internal_router", property(lambda _: False))
     monkeypatch.setattr(fused_moe_module.torch.npu, "current_stream", lambda: current_stream)
 
-    result = runner.shared_forward_impl(hidden_states, router_logits)
+    result = runner.shared_forward_impl(hidden_states, router_logits, shared_experts_input)
 
     runner.no_shared_forward_impl.assert_called_once_with(
         hidden_states,
@@ -479,7 +480,29 @@ def test_shared_forward_impl_returns_current_runner_contract(monkeypatch, has_sh
     if has_shared_experts:
         assert result[0] is shared_out
         assert result[1] is routed_out
-        runner._forward_shared_experts.assert_called_once()
+        assert runner._forward_shared_experts.call_args.args[0] is shared_experts_input
     else:
         assert result is routed_out
         runner._forward_shared_experts.assert_not_called()
+
+
+def test_forward_impl_preserves_original_input_for_shared_experts(monkeypatch):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    routed_input = torch.randn(2, 3584)
+    shared_experts_input = torch.randn(2, 7168)
+    router_logits = torch.randn(2, 3)
+    expected = (torch.randn(2, 7168), torch.randn(2, 3584))
+    runner.shared_forward_impl = MagicMock(return_value=expected)
+
+    monkeypatch.setattr(AscendMoERunner, "shared_experts", property(lambda _: object()))
+    monkeypatch.setattr(AscendMoERunner, "_sequence_parallel_context", lambda _: nullcontext())
+
+    result = runner._forward_impl(routed_input, router_logits, shared_experts_input)
+
+    assert result is expected
+    runner.shared_forward_impl.assert_called_once_with(
+        routed_input,
+        router_logits,
+        shared_experts_input,
+    )

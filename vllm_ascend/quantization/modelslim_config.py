@@ -671,7 +671,9 @@ class AscendModelSlimConfig(QuantizationConfig):
         )
 
         vllm_config = get_current_vllm_config()
-        model_type = vllm_config.model_config.hf_config.model_type
+        hf_config = vllm_config.model_config.hf_config
+        hf_text_config = vllm_config.model_config.hf_text_config
+        model_type = hf_config.model_type
 
         if model_type in ["minimax", "minimax_m2"]:
             # Adapt to Minimax architecture: update layer names to MoE convention
@@ -693,6 +695,17 @@ class AscendModelSlimConfig(QuantizationConfig):
         prefix = self.quant_prefix_mapper(model_type, prefix)
 
         if isinstance(layer, LinearBase):
+            linear_attn_config = getattr(hf_text_config, "linear_attn_config", None)
+            uses_full_rank_gate = (
+                isinstance(linear_attn_config, Mapping)
+                and linear_attn_config.get("use_full_rank_gate", False)
+                and prefix.endswith((".g_a_proj", ".g_b_proj"))
+                and not self._has_quant_weight(prefix, self.packed_modules_mapping)
+            )
+            if uses_full_rank_gate:
+                from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+
+                return AscendUnquantizedLinearMethod()
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 # Delayed import to avoid circular import
                 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod

@@ -623,6 +623,29 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
         return states[..., :trunc_size]
 
+    @property
+    def _flashcomm_uses_tp_shared_experts(self) -> bool:
+        return _EXTRA_CTX.flash_comm_v1_enabled and not shared_expert_dp_enabled()
+
+    def _prepare_shared_expert_input(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self._flashcomm_uses_tp_shared_experts:
+            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, True)
+        return hidden_states
+
+    def _finalize_shared_expert_output(self, shared_out: torch.Tensor) -> torch.Tensor:
+        if self._flashcomm_uses_tp_shared_experts:
+            return torch.ops.vllm.pad_and_reduce(shared_out)
+
+        # NOTE: This is exactly the opposite of
+        # `maybe_all_reduce_tensor_model_parallel`.
+        moe_comm_type = _EXTRA_CTX.moe_comm_type
+        if (
+            moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
+            and not shared_expert_dp_enabled()
+        ):
+            shared_out = tensor_model_parallel_all_reduce(shared_out)
+        return shared_out
+
     def set_lora_context(self, lora_context):
         self.routed_experts._ascend_moe_lora_context = lora_context
 
@@ -739,6 +762,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 torch.npu.current_stream().wait_event(evt)
 
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap_shared_expert):
+            # FlashComm1 switches the token axis between complete TP blocks.
+            # Gather the sequence shard before entering a TP-sharded shared MLP.
+            torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
+            hidden_states = self._prepare_shared_expert_input(hidden_states)
+
             # Only used for int quantization
             has_quantized_shared = hasattr(self._shared_experts.gate_up_proj, "weight_scale") and hasattr(
                 self._shared_experts.down_proj, "weight_scale"
@@ -747,7 +775,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             if has_quantized_shared and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
-                torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
                 quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
                 # Execute the gate projection and activation concurrently with the
                 # dispatch communication.
@@ -856,19 +883,15 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         if self.multistream_overlap_shared_expert:
             torch.npu.current_stream().wait_stream(shared_experts_calculation_stream())
 
-        # NOTE: This is exactly the opposite of
-        # `maybe_all_reduce_tensor_model_parallel`
-        moe_comm_type = _EXTRA_CTX.moe_comm_type
-        if (
-            moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
-            and not shared_expert_dp_enabled()
-        ):
-            shared_out = tensor_model_parallel_all_reduce(shared_out)
-        return shared_out
+        return self._finalize_shared_expert_output(shared_out)
 
     def shared_forward_impl(  # type: ignore[override]
-        self, hidden_states: torch.Tensor, router_logits: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        shared_experts_input: torch.Tensor | None = None,
     ):
+        shared_hidden_states = shared_experts_input if shared_experts_input is not None else hidden_states
         if self.is_internal_router:
             gate = self.gate
             assert gate is not None
@@ -876,7 +899,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             # increase with extra hidden states. We also assume that all gate
             # linear is unquantized so that we the weight is pre-casted in
             # process_weights_after_loading of AscendUnquantizedLinearMethod.
-            hidden_states_fp32 = hidden_states.float()
+            hidden_states_fp32 = shared_hidden_states.float()
             before_routed_experts = torch.npu.current_stream().record_event()
             router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
             after_routed_experts = torch.npu.current_stream().record_event()
@@ -895,7 +918,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             return routed_out
 
         shared_out = self._forward_shared_experts(
-            hidden_states,
+            shared_hidden_states,
             FusedMoEEvents(
                 after_routed_experts=after_routed_experts,
                 before_routed_experts=before_routed_experts,
@@ -920,4 +943,4 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             if self.shared_experts is None:
                 return self.no_shared_forward_impl(hidden_states, router_logits)
             else:
-                return self.shared_forward_impl(hidden_states, router_logits)
+                return self.shared_forward_impl(hidden_states, router_logits, shared_experts_input)

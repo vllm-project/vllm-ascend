@@ -240,7 +240,13 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
-        self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(disable_tp, prefix, self, "column")
+        self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(
+            disable_tp,
+            prefix,
+            self,
+            "column",
+            output_size=sum(output_sizes),
+        )
         # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after
         # linear of vllm supports custom comm group
         self.output_sizes = output_sizes
@@ -394,7 +400,13 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         disable_tp: bool = False,
     ):
         #
-        self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(disable_tp, prefix, self, "column")
+        self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(
+            disable_tp,
+            prefix,
+            self,
+            "column",
+            output_size=output_size,
+        )
         # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after
         # linear of vllm supports custom comm group
         self.input_size_per_partition = input_size

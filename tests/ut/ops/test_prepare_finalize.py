@@ -99,6 +99,33 @@ class TestPrepareAndFinalize(unittest.TestCase):
         # Should concat back to original size
         self.assertEqual(final_result.shape[0], 4)
 
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=2)
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=0)
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_mc2_shared_expert_dp_keeps_routed_token_contract(
+        self,
+        mock_get_forward_context,
+        mock_tp_rank,
+        mock_tp_size,
+    ):
+        mock_context = MagicMock()
+        mock_context.mc2_mask = torch.tensor([1, 0, 1, 0])
+        mock_context.padded_num_tokens = 4
+        mock_get_forward_context.return_value = mock_context
+
+        layer = PrepareAndFinalizeWithMC2(self.moe_config)
+        prepare_output = layer.prepare(
+            torch.randn(3, 8),
+            torch.randn(3, 2),
+            enable_shared_expert_dp=True,
+            replace_allreduce=False,
+        )
+
+        self.assertEqual(prepare_output.hidden_states.shape, torch.Size([2, 8]))
+        self.assertEqual(prepare_output.router_logits.shape, torch.Size([2, 2]))
+        self.assertEqual(prepare_output.mc2_mask.tolist(), [1, 0])
+        self.assertEqual(prepare_output.padded_hidden_states_shape, torch.Size([4, 8]))
+
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=1)
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=0)
     def test_all2all_prepare_finalize(self, mock_tp_rank, mock_tp_size):
@@ -150,6 +177,21 @@ class TestPrepareAndFinalize(unittest.TestCase):
         # Should concat back
         self.assertEqual(final_result.shape[0], 2)
 
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=2)
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=0)
+    def test_all2all_shared_expert_dp_keeps_routed_token_contract(self, mock_tp_rank, mock_tp_size):
+        layer = PrepareAndFinalizeWithAll2All(self.moe_config)
+        prepare_output = layer.prepare(
+            torch.randn(2, 8),
+            torch.randn(2, 2),
+            enable_shared_expert_dp=True,
+            replace_allreduce=False,
+        )
+
+        self.assertEqual(prepare_output.hidden_states.shape, torch.Size([1, 8]))
+        self.assertEqual(prepare_output.router_logits.shape, torch.Size([1, 2]))
+        self.assertEqual(prepare_output.padded_hidden_states_shape, torch.Size([2, 8]))
+
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dp_group")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.enable_sp", return_value=False)
@@ -183,7 +225,11 @@ class TestPrepareAndFinalize(unittest.TestCase):
         hidden_states = torch.randn(3, 8)
         router_logits = torch.randn(3, 2)
 
-        prepare_output = layer.prepare(hidden_states, router_logits)
+        prepare_output = layer.prepare(
+            hidden_states,
+            router_logits,
+            enable_shared_expert_dp=True,
+        )
         h_out = prepare_output.hidden_states
         r_out = prepare_output.router_logits
         padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
@@ -193,7 +239,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
         self.assertEqual(r_out.shape[0], 12)
         self.assertIsNone(padded_hidden_states_shape)
 
-        # Finalize with reduce_scatter
+        # Shared-expert DP must not suppress routed-output reduce-scatter.
         def mock_reduce_scatter_func(tensor, dim):
             # Simulate reduce_scatter: take first half
             return tensor[:3]

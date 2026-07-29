@@ -296,6 +296,8 @@ def _select_a2_moe_comm_method(
         vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
     )
     num_experts_per_device = num_experts // ep_world_size
+    if num_experts > 512:
+        return MoECommType.ALLGATHER
     if num_experts_per_device <= 24 and ep_world_size >= 16 and num_tokens <= mc2_tokens_capacity:
         return MoECommType.MC2
     return MoECommType.ALLGATHER

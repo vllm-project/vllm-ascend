@@ -184,10 +184,10 @@ class TestColumnParallelOpDispatch(unittest.TestCase):
         for p in self._patches:
             p.stop()
 
-    def _get_column_op(self, prefix: str):
+    def _get_column_op(self, prefix: str, output_size: int | None = None):
         from vllm_ascend.ops.linear_op import _get_column_parallel_op
 
-        return _get_column_parallel_op(prefix, self.mock_layer)
+        return _get_column_parallel_op(prefix, self.mock_layer, output_size)
 
     def test_share_expert_disabled_with_sp_column(self):
         """share_expert / shared_expert prefix → None when SP enabled."""
@@ -196,11 +196,43 @@ class TestColumnParallelOpDispatch(unittest.TestCase):
         self.assertIsNone(self._get_column_op("model.layers.0.mlp.share_expert.gate_up_proj"))
         self.assertIsNone(self._get_column_op("model.layers.0.mlp.shared_expert.gate_up_proj"))
 
-    def test_g_proj_matches_sp_column_path(self):
-        """g_proj (Step3p5 attention gate) is included in SP column prefixes."""
+    def test_head_wise_g_proj_matches_sp_column_path(self):
         self._patches.append(patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True))
         self._patches[-1].start()
-        self.assertIsNotNone(self._get_column_op("model.layers.0.self_attn.g_proj"))
+        model_config = MagicMock()
+        model_config.hf_text_config.num_attention_heads = 64
+        with patch(
+            "vllm_ascend.ops.linear_op.get_current_vllm_config",
+            return_value=MagicMock(model_config=model_config),
+        ):
+            self.assertIsNotNone(self._get_column_op("model.layers.0.self_attn.g_proj", output_size=64))
+
+    def test_full_projection_g_proj_does_not_match_sp_column_path(self):
+        self._patches.append(patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True))
+        self._patches[-1].start()
+        model_config = MagicMock()
+        model_config.hf_text_config.num_attention_heads = 96
+        with patch(
+            "vllm_ascend.ops.linear_op.get_current_vllm_config",
+            return_value=MagicMock(model_config=model_config),
+        ):
+            self.assertIsNone(
+                self._get_column_op(
+                    "model.layers.0.self_attn.g_proj",
+                    output_size=96 * 128,
+                )
+            )
+
+    def test_g_proj_without_explicit_output_size_does_not_match_sp_column_path(self):
+        self._patches.append(patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True))
+        self._patches[-1].start()
+        model_config = MagicMock()
+        model_config.hf_text_config.num_attention_heads = 64
+        with patch(
+            "vllm_ascend.ops.linear_op.get_current_vllm_config",
+            return_value=MagicMock(model_config=model_config),
+        ):
+            self.assertIsNone(self._get_column_op("model.layers.0.self_attn.g_proj"))
 
     def test_multimodal_encoder_prefix_skips_sp_column(self):
         """Multimodal encoder variants should not enter the SP column path."""
@@ -250,14 +282,15 @@ class TestRowParallelOpDispatch(unittest.TestCase):
 
 
 class TestGetParallelOpShareExpert(unittest.TestCase):
-    """Tests for get_parallel_op — share_expert/shared_expert disables TP."""
+    """Tests for independent shared-expert weight placement."""
 
     def setUp(self):
         self.mock_layer = MagicMock()
         self.mock_group = MagicMock()
+        self.mock_group.rank_in_group = 1
+        self.mock_group.world_size = 4
         self._patches = [
             patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=self.mock_group),
-            patch("vllm_ascend.ops.linear_op.shared_expert_dp_enabled", return_value=True),
         ]
         for p in self._patches:
             p.start()
@@ -266,10 +299,14 @@ class TestGetParallelOpShareExpert(unittest.TestCase):
         for p in self._patches:
             p.stop()
 
-    def _call(self, prefix: str):
+    def _call(self, prefix: str, *, shared_expert_dp: bool):
         from vllm_ascend.ops.linear_op import get_parallel_op
 
-        return get_parallel_op(False, prefix, self.mock_layer, False)
+        with patch(
+            "vllm_ascend.ops.linear_op.shared_expert_dp_enabled",
+            return_value=shared_expert_dp,
+        ):
+            return get_parallel_op(False, prefix, self.mock_layer, False)
 
     def test_share_expert_disables_tp(self):
         """share_expert / shared_expert / shared_experts → (None, 0, 1)."""
@@ -278,10 +315,19 @@ class TestGetParallelOpShareExpert(unittest.TestCase):
             "model.layers.0.mlp.shared_expert.gate_up_proj",
             "model.layers.0.mlp.shared_experts.gate_up_proj",
         ):
-            custom_op, tp_rank, tp_size = self._call(prefix)
+            custom_op, tp_rank, tp_size = self._call(prefix, shared_expert_dp=True)
             self.assertIsNone(custom_op)
             self.assertEqual(tp_rank, 0)
             self.assertEqual(tp_size, 1)
+
+    def test_flashcomm_without_shared_expert_dp_keeps_tp_shards(self):
+        custom_op, tp_rank, tp_size = self._call(
+            "model.layers.0.mlp.shared_experts.gate_up_proj",
+            shared_expert_dp=False,
+        )
+        self.assertIsNone(custom_op)
+        self.assertEqual(tp_rank, 1)
+        self.assertEqual(tp_size, 4)
 
 
 if __name__ == "__main__":
