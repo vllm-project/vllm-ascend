@@ -48,11 +48,11 @@ from vllm_ascend.xlite.utils import (
 XliteInitResult: TypeAlias = tuple[XModel, torch.Tensor, int, torch.dtype]
 XliteForwardResult: TypeAlias = torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]
 
-_architecture_strategy_map: dict[str, type[XliteModelBase]] = {}
+_architecture_strategy_map: dict[str, type[XliteModel]] = {}
 """Mapping from model architecture names in `config.json` to their corresponding xlite adapter classes."""
 
 
-class XliteModelBase(ABC):
+class XliteModel(ABC):
     """Base adapter for converting vLLM models into xlite runtime models.
 
     Subclasses are responsible for mapping architecture-specific configuration and weights into the `xlite._C.Model`
@@ -63,8 +63,8 @@ class XliteModelBase(ABC):
             extraction for xlite model construction.
         vllm_config (VllmConfig): The configuration object provided by vLLM. Used to build xlite configuration at
             runtime.
-        xlite_config (XModelConfig): Native xlite configuration object populated by subclasses.
-        xlite_model (XModel): Native xlite model container populated by subclasses.
+        xlite_config (ModelConfig): Native xlite configuration object populated by subclasses.
+        xlite_model (Model): Native xlite model container populated by subclasses.
     """
 
     _attn_metadata_type: type | tuple[type, ...]
@@ -73,9 +73,6 @@ class XliteModelBase(ABC):
     _supported_architectures: Sequence[str] | str
     """The list of model architecture names (from HuggingFace `config.json` "architectures" field) supported by this
     adapter. Used for automatic adapter selection and registration."""
-    _decoder_layer_mlp_module: str = "mlp"
-    """The module name used to identify MLP modules (including MoE) in the decoder layers (nn.Module) of the runnable
-    model: e.g., in `Glm4MoeForCausalLM`, the MLP modules need to be accessed via `.model.layers[i].mlp`, thus `mlp`."""
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Automatically register subclasses in the architecture strategy map and metadata type set."""
@@ -199,11 +196,11 @@ class XliteModelBase(ABC):
         return format == torch_npu.Format.FRACTAL_NZ
 
     @staticmethod
-    def all_tensors_zero(tensors: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...] | None) -> bool:
+    def all_tensors_zero(tensors: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor] | None) -> bool:
         """Check if all tensors in the list/tuple are zero tensors.
 
         Args:
-            tensors (torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...] | None): The tensors to check.
+            tensors (torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor] | None): The tensors to check.
 
         Returns:
             bool: True if all tensors are zero tensors (or empty), False otherwise.
@@ -218,16 +215,11 @@ class XliteModelBase(ABC):
 
     @staticmethod
     def _transform_deq_scale(deq_scale: torch.Tensor) -> torch.Tensor:
-        """Repack a dequantization scale into the fixpipe hardware's expected format.
+        """
+        The data format required by the fixpipe hardware is as follows:
 
-        Data is stored in ``uint64_t``: the upper 32 bits are 0 and the lower 32 bits hold an FP32 value whose lower 10
-        bits are not involved in computation, making the effective data format TF32.
-
-        Args:
-            deq_scale (torch.Tensor): The original dequantization scale tensor.
-
-        Returns:
-            torch.Tensor: The repacked scale tensor for fixpipe computation.
+        Data is stored in uint64_t, with the upper 32 bits being 0 and the lower 32 bits storing the FP32 format. The
+        lower 10 bits of the FP32 format are not involved in computation, and the actual data format is TF32.
         """
         deq_scale_fp32 = deq_scale.to(torch.float32)
         scale = deq_scale_fp32.new_zeros(deq_scale.shape[0] * 2)
@@ -255,20 +247,11 @@ class XliteModelBase(ABC):
         return getattr(self.vllm_config.model_config.hf_config, "vision_config", None)
 
 
-class StandardXliteModel(XliteModelBase):
-    """xlite adapter base for standard architectures.
+class LlamaXliteModel(XliteModel):
+    """xlite adapter base for Llama-like architectures.
 
-    This is the *de facto* base adapter for all xlite-supported architectures. Configurations for various model types,
-    dense and MoE, are included.
-
-    Subclasses of :class:`XliteModelBase`, i.e., xlite model adapters, should inherit from :class:`StandardXliteModel`,
-    unless there is a major divergence.
-
-    **Developer Guide**: The :class:`StandardXliteModel` class is designed to be a flexible base for xlite adapters.
-    When developing a new adapter for a specific architecture to dock with the xlite backend, consider adding weight
-    loading lines in :meth:`StandardXliteModel._build_model` directly if feasible, using the highly flexible and
-    error-checked `get_layer_weights` utility. For :meth:`_build_model_config`, override it in the subclass only if the
-    architecture has unique configuration needs.
+    This is the *de facto* base adapter for all xlite-supported architectures and may contain configurations beyond
+    Llama-like dense models. `XliteModel` subclasses should inherit from this class unless there is a major divergence.
     """
 
     _attn_metadata_type = AscendMetadata
@@ -343,54 +326,33 @@ class StandardXliteModel(XliteModelBase):
         self.init_matmul_weights(layers, "mha_qkv", "self_attn.qkv_proj")
         self.init_matmul_weights(layers, "attn_out", "self_attn.o_proj")
 
-        with xlite_model.condition(lambda tensors: len(tensors) == xlite_config.n_layers):
-            xlite_model.mha_q_norm = get_layer_weights(layers, "self_attn.q_norm.weight")
-            xlite_model.mha_k_norm = get_layer_weights(layers, "self_attn.k_norm.weight")
-            xlite_config.qk_norm = bool(xlite_model.mha_q_norm) and bool(xlite_model.mha_k_norm)
+        mha_qkv_bias = get_layer_weights(layers, "self_attn.qkv_proj.bias")
+        xlite_config.qkv_bias = len(mha_qkv_bias) == xlite_config.n_layers
+        xlite_model.mha_qkv_bias = mha_qkv_bias if xlite_config.qkv_bias else []
+        q_norm = get_layer_weights(layers, "self_attn.q_norm.weight")
+        k_norm = get_layer_weights(layers, "self_attn.k_norm.weight")
+        xlite_config.qk_norm = len(q_norm) == len(k_norm) == xlite_config.n_layers
+        xlite_model.mha_q_norm = q_norm if xlite_config.qk_norm else []
+        xlite_model.mha_k_norm = k_norm if xlite_config.qk_norm else []
 
-        # Dense MLP weights
         self.init_matmul_weights(layers, "mlp_up_gate", "mlp.gate_up_proj")
         self.init_matmul_weights(layers, "mlp_down", "mlp.down_proj")
         xlite_model.mlp_norm = get_layer_weights(layers, "post_attention_layernorm.weight")
 
-        # MoE-specific weights
-        mlp_prefix = self._decoder_layer_mlp_module
-        xlite_model.gate = get_layer_weights(layers, f"{mlp_prefix}.gate.weight")
-        xlite_model.gate_bias = get_layer_weights(
-            layers,
-            f"{mlp_prefix}.gate.e_score_correction_bias",
-            f"{mlp_prefix}.e_score_correction_bias",  # for MiniMax-2.x compatibility
-            post_processor=lambda b: b.to(torch.float32),  # type conversion for numerical stability in xlite backend
-        )
-        self.init_matmul_weights(layers, "se_up_gate", f"{mlp_prefix}.shared_experts.gate_up_proj")
-        self.init_matmul_weights(layers, "se_down", f"{mlp_prefix}.shared_experts.down_proj")
+        if not self.quantization:
+            return
 
-        re_prefix = f"{mlp_prefix}.experts.routed_experts"
-        re_kwargs: WeightGetterConfig = {"secondary_flattening": f"{re_prefix}.local_num_experts"}
-        xlite_model.re_up_gate = get_layer_weights(layers, f"{re_prefix}.w13_weight", **re_kwargs)
-        xlite_model.re_down = get_layer_weights(layers, f"{re_prefix}.w2_weight", **re_kwargs)
-        xlite_config.experts_weight_nz = bool(xlite_model.re_up_gate) and self.is_tensor_nz(xlite_model.re_up_gate[0])
+        if xlite_model.mha_qkv:
+            xlite_config.quant_attn_weight_nz = self.is_tensor_nz(xlite_model.mha_qkv[0])
+            xlite_config.quant_attn_weight_transpose = True
 
-        # bias terms
         with xlite_model.condition(lambda tensors: not self.all_tensors_zero(tensors)):
-            xlite_model.mha_qkv_bias = get_layer_weights(layers, "self_attn.qkv_proj.bias")
-            xlite_config.qkv_bias = len(xlite_model.mha_qkv_bias) == xlite_config.n_layers
             xlite_model.norm_bias = get_dotted_attr(self.runnable, f"{model_prefix}model.norm.bias", raises=True)
             xlite_model.attn_norm_bias = get_layer_weights(layers, "input_layernorm.bias")
             xlite_model.mlp_norm_bias = get_layer_weights(layers, "post_attention_layernorm.bias")
             if xlite_config.qk_norm:
                 xlite_model.mha_q_norm_bias = get_layer_weights(layers, "self_attn.q_norm.bias")
                 xlite_model.mha_k_norm_bias = get_layer_weights(layers, "self_attn.k_norm.bias")
-
-        if not self.quantization:
-            return
-
-        xlite_config.quant_attn_weight_nz = bool(xlite_model.mha_qkv) and self.is_tensor_nz(xlite_model.mha_qkv[0])
-        xlite_config.quant_attn_weight_transpose = bool(xlite_model.mha_qkv)
-
-        re_kwargs["post_processor"] = self._transform_deq_scale
-        xlite_model.re_up_gate_scale = get_layer_weights(layers, f"{re_prefix}.w13_weight_scale", **re_kwargs)
-        xlite_model.re_down_scale = get_layer_weights(layers, f"{re_prefix}.w2_weight_scale", **re_kwargs)
 
     def _precompute_freqs_cis(self) -> torch.Tensor:
         """Precompute rotary cosine/sine cache on NPU.
@@ -435,7 +397,7 @@ class StandardXliteModel(XliteModelBase):
         if not self.quantization:
             return
 
-        def set_xlite_attr(xlite_attr: str, layer_attr: str) -> None:
+        def set_xlite_attr(xlite_attr: str, layer_attr: str):
             setattr(xlite_model, xlite_attr, get_layer_weights(layers, layer_attr))
 
         deq_scale = get_layer_weights(layers, f"{model_prefix}.deq_scale", post_processor=self._transform_deq_scale)
@@ -451,7 +413,7 @@ class StandardXliteModel(XliteModelBase):
             setattr(xlite_model, f"{xlite_prefix}_deq_scale", weight_scale)
 
 
-class QwenMoeXliteModel(StandardXliteModel):
+class QwenMoeXliteModel(LlamaXliteModel):
     """xlite adapter for Qwen MoE architectures."""
 
     _attn_metadata_type = AscendMetadata
@@ -468,7 +430,6 @@ class QwenMoeXliteModel(StandardXliteModel):
         xlite_config.moe_intermediate_size = hf_config.moe_intermediate_size
         xlite_config.norm_topk_prob = hf_config.norm_topk_prob
 
-<<<<<<< HEAD
     def _build_model(self) -> None:
         super()._build_model()
         xlite_model, xlite_config = self.xlite_model, self.xlite_config
@@ -486,10 +447,8 @@ class QwenMoeXliteModel(StandardXliteModel):
             xlite_model.re_up_gate_scale = get_layer_weights(layers, f"{prefix}w13_weight_scale_fp32", **kwargs)
             xlite_model.re_down_scale = get_layer_weights(layers, f"{prefix}w2_weight_scale", **kwargs)
 
-=======
->>>>>>> 1e5c79e1f... aidd low error mod
 
-class Glm4MoeXliteModel(StandardXliteModel):
+class Glm4MoeXliteModel(LlamaXliteModel):
     """xlite adapter for GLM4 MoE architectures."""
 
     _attn_metadata_type = AscendMetadata
@@ -514,7 +473,6 @@ class Glm4MoeXliteModel(StandardXliteModel):
         xlite_config.route_scale = hf_config.routed_scaling_factor
         xlite_config.gate_captured = False
 
-<<<<<<< HEAD
     def _build_model(self) -> None:
         super()._build_model()
         xlite_model, xlite_config = self.xlite_model, self.xlite_config
@@ -539,15 +497,13 @@ class Glm4MoeXliteModel(StandardXliteModel):
             kwargs["post_processor"] = self._transform_deq_scale
             xlite_model.re_up_gate_scale = get_layer_weights(layers, f"{prefix}w13_weight_scale_fp32", **kwargs)
             xlite_model.re_down_scale = get_layer_weights(layers, f"{prefix}w2_weight_scale", **kwargs)
-=======
->>>>>>> 1e5c79e1f... aidd low error mod
 
-class MiniMaxM2XliteModel(StandardXliteModel):
+
+class MiniMaxM2XliteModel(LlamaXliteModel):
     """xlite adapter for MiniMax M2 architectures."""
 
     _attn_metadata_type = AscendMetadata
     _supported_architectures = ["MiniMaxM2ForCausalLM"]
-    _decoder_layer_mlp_module = "block_sparse_moe"
 
     def _build_model_config(self) -> None:
         super()._build_model_config()
@@ -563,7 +519,6 @@ class MiniMaxM2XliteModel(StandardXliteModel):
         xlite_config.qk_norm_full = True
         xlite_config.scoring_func = ScoringFuncSigmoid
 
-<<<<<<< HEAD
     def _build_model(self) -> None:
         super()._build_model()
         xlite_model, xlite_config = self.xlite_model, self.xlite_config
@@ -587,10 +542,8 @@ class MiniMaxM2XliteModel(StandardXliteModel):
             xlite_model.re_up_gate_scale = get_layer_weights(layers, f"{prefix}w13_weight_scale_fp32", **kwargs)
             xlite_model.re_down_scale = get_layer_weights(layers, f"{prefix}w2_weight_scale", **kwargs)
 
-=======
->>>>>>> 1e5c79e1f... aidd low error mod
 
-def get_adapter_xlite_model(runnable: nn.Module, vllm_config: VllmConfig) -> XliteModelBase:
+def get_adapter_xlite_model(runnable: nn.Module, vllm_config: VllmConfig) -> XliteModel:
     """Look up and initialize the appropriate xlite model adapter based on the architecture specified in vLLM config and
     the runnable model.
 
@@ -602,7 +555,7 @@ def get_adapter_xlite_model(runnable: nn.Module, vllm_config: VllmConfig) -> Xli
         ValueError: If the model architecture is not supported by xlite.
 
     Returns:
-        XliteModelBase: An initialized xlite model adapter ready for inference.
+        XliteModel: An initialized xlite model adapter ready for inference.
     """
     architecture = vllm_config.model_config.architectures[0]
     if not (strategy_class := _architecture_strategy_map.get(architecture)):
@@ -703,8 +656,8 @@ class XliteWrapper:
         Args:
             input_ids (torch.Tensor): Token IDs for current step.
             positions (torch.Tensor): Position IDs used by attention.
-            intermediate_tensors (IntermediateTensors | None): Optional intermediate tensors from pipeline stages.
-            inputs_embeds (torch.Tensor | None): Optional external input embeddings (e.g. multimodal/deepstack
+            intermediate_tensors (Optional[IntermediateTensors]): Optional intermediate tensors from pipeline stages.
+            inputs_embeds (Optional[torch.Tensor]): Optional external input embeddings (e.g. multimodal/deepstack
                 scenarios).
             **model_kwargs (Any): Additional keyword arguments for the runnable.
 
