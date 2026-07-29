@@ -31,7 +31,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.utils import is_vl_model, parse_layer_idx
 
@@ -92,7 +91,6 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         self.prefix = prefix
         self.skip_topk = skip_topk
         hf_config = get_current_vllm_config().model_config.hf_text_config
-        self.enable_shared_expert_dp = get_ascend_config().enable_shared_expert_dp
         self.tp_size = get_tensor_model_parallel_world_size()
         self.layers = hf_config.num_hidden_layers
         if mla_modules.indexer is not None:

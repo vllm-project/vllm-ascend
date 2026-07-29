@@ -105,11 +105,12 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
 
-        draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs)
+        draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
+            desc.num_reqs,
+            self.speculator.input_batch.seq_lens_cpu_upper_bound,
+        )
 
         ret = super().run_fullgraph(desc)
-
-        positions = self.speculator.input_buffers.positions[:num_tokens]
 
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
         # calculate num_tokens_across_dp.
@@ -139,7 +140,6 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
                 num_tokens,
                 self.vllm_config,
                 self.speculator.speculative_config,
-                positions.shape[0],
                 draft_attn_metadatas=draft_attn_metadatas,
             )
         return ret

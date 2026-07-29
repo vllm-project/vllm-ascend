@@ -152,8 +152,8 @@ Here are two accuracy evaluation methods.
 
 | dataset | version | metric | mode | vllm-api-general-chat | note |
 |----- | ----- | ----- | ----- | -----| ----- |
-| GSM8K | - | accuracy | gen | 93.07 | 1 Atlas 800 A3 (64G × 16) |
-| C-Eval | - | accuracy | gen | 87.64 | 1 Atlas 800 A3 (64G × 16) |
+| GSM8K | - | accuracy | gen | 93.07 | 1 Atlas 800 A3 (64GB × 16) |
+| C-Eval | - | accuracy | gen | 87.64 | 1 Atlas 800 A3 (64GB × 16) |
 
 ### Using Language Model Evaluation Harness
 
@@ -167,7 +167,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### Using vLLM Benchmark
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 ### Lightweight Online Benchmark
 

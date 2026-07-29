@@ -133,6 +133,11 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         num_tokens_per_tp_rank = mc2_tokens_capacity // tp_size
+        # Surface the per-rank capacity for CANN MegaMoe's get_symm_buffer
+        # sizing (used by FusedMC2CommImpl._get_cann_symm_buffer). Without
+        # this, MegaMoe falls back to hidden_states.shape[0] which jitters
+        # under eager mode and forces sym-buffer rebuilds every step.
+        self.max_num_tokens_per_rank = num_tokens_per_tp_rank
         _max_global_bs = num_tokens_per_tp_rank * self.ep_world_size
 
         # When allreduce across DP is not skipped, tokens are uniform across ranks:
@@ -675,28 +680,28 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             "global_input_tokens_local_experts_indices must be provided"
         )
 
-        if scale_type == torch.float8_e8m0fnu:
-            experts_indices_2d_copy = global_input_tokens_local_experts_indices.reshape(
-                global_input_tokens_local_experts_indices.shape[0], 1
-            )
-            dynamic_scale_for_routing = dynamic_scale_after_all2all.view(torch.float8_e8m0fnu)
-            global_input_tokens, reversed_global_input_permutation_mapping, _, routed_scale = (
-                torch_npu.npu_moe_init_routing_v2(
-                    global_input_tokens,
-                    experts_indices_2d_copy,
-                    scale=dynamic_scale_for_routing,
-                    active_num=experts_indices_2d_copy.shape[0],
-                    expert_num=self.num_local_experts,
-                    expert_tokens_num_type=1,
-                    expert_tokens_num_flag=True,
-                    active_expert_range=[0, self.num_local_experts],
-                    x_dtype=dst_type,
+        if with_quant:
+            if scale_type == torch.float8_e8m0fnu:
+                experts_indices_2d_copy = global_input_tokens_local_experts_indices.reshape(
+                    global_input_tokens_local_experts_indices.shape[0], 1
                 )
-            )
-            dynamic_scale_after_all2all = routed_scale.view(torch.uint8)
-            experts_indices_2d_copy.untyped_storage().resize_(0)
-            return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
-        elif with_quant:
+                dynamic_scale_for_routing = dynamic_scale_after_all2all.view(torch.float8_e8m0fnu)
+                global_input_tokens, reversed_global_input_permutation_mapping, _, routed_scale = (
+                    torch_npu.npu_moe_init_routing_v2(
+                        global_input_tokens,
+                        experts_indices_2d_copy,
+                        scale=dynamic_scale_for_routing,
+                        active_num=experts_indices_2d_copy.shape[0],
+                        expert_num=self.num_local_experts,
+                        expert_tokens_num_type=1,
+                        expert_tokens_num_flag=True,
+                        active_expert_range=[0, self.num_local_experts],
+                        x_dtype=dst_type,
+                    )
+                )
+                dynamic_scale_after_all2all = routed_scale.view(torch.uint8)
+                experts_indices_2d_copy.untyped_storage().resize_(0)
+                return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
             dynamic_scale_after_all2all, _ = torch_npu.npu_moe_token_permute(
                 dynamic_scale_after_all2all.unsqueeze(-1), global_input_tokens_local_experts_indices
             )

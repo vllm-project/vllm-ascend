@@ -28,6 +28,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 
 
@@ -36,6 +37,11 @@ class AscendDSparkSpeculator(DSparkSpeculator):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
+        # TODO: Remove the if not vllm_version_is guard when dropping v0.25.1.
+        # input_batch is cached in propose() so that DFlashAclGraphManager
+        # can access seq_lens_cpu_upper_bound during full-graph replay.
+        if not vllm_version_is("0.25.1"):
+            self.input_batch: InputBatch | None = None
 
         # we need to update full graph params in run_fullgraph,
         # so create a stream to update full graph params.
@@ -55,8 +61,16 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         model_state: Any,
         kv_cache_config: Any,
         block_tables: Any,
+        target_input_buffers: Any,
+        target_attn_groups: Any,
     ) -> None:
-        super().set_attn(model_state, kv_cache_config, block_tables)
+        super().set_attn(
+            model_state,
+            kv_cache_config,
+            block_tables,
+            target_input_buffers,
+            target_attn_groups,
+        )
         self._context_slot_mappings = self._context_slot_mappings.to(torch.int32)  # type: ignore[has-type]
         # npu needs attn_backends to update full graph params in run_fullgraph.
         attn_backends: dict[str, type[AttentionBackend]] = {}
@@ -74,14 +88,16 @@ class AscendDSparkSpeculator(DSparkSpeculator):
 
         self.attn_backends = attn_backends
 
-    def build_draft_attn_metadatas(self, num_reqs_padded):
+    def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         with build_attn_metadata_wrapper():
             attn_metadata = self._build_draft_attn_metadata(
                 num_reqs=num_reqs_padded,
                 num_reqs_padded=num_reqs_padded,
                 num_tokens_padded=num_tokens_padded,
-                causal=self.dflash_causal,
+                seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                step=self.num_query_per_req,
+                causal=self._group_causal,
             )
         return [attn_metadata]
 
@@ -104,6 +120,11 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
     ) -> torch.Tensor:
+        # TODO: Remove the if not vllm_version_is guard when dropping v0.25.1.
+        # input_batch is cached here so that DFlashAclGraphManager can access
+        # seq_lens_cpu_upper_bound during full-graph replay.
+        if not vllm_version_is("0.25.1"):
+            self.input_batch = input_batch
         with build_attn_metadata_wrapper():
             return super().propose(
                 input_batch,
