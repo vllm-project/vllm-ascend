@@ -243,7 +243,7 @@ The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/v
 
 You can use ModelScope mirror to speed up download:
 
-<!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
+<!-- tests/e2e/doctests/001-quickstart-test.sh should be considered updating as well -->
 
 ```bash
 export VLLM_USE_MODELSCOPE=True
@@ -257,7 +257,7 @@ There are two ways to start vLLM on Ascend NPU:
 
     Create and run a simple inference test. The `example.py` can be like:
 
-    <!-- tests/e2e/doctests/001-quickstart-test.sh should be considered updating as well -->
+    <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
 
     ```python
     from vllm import LLM, SamplingParams
