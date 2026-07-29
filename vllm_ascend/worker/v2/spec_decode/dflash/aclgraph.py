@@ -109,8 +109,6 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
 
         ret = super().run_fullgraph(desc)
 
-        positions = self.speculator.input_buffers.positions[:num_tokens]
-
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
         # calculate num_tokens_across_dp.
         num_tokens_across_dp = torch.full([self.speculator.dp_size], num_tokens, device=self.device)
@@ -139,7 +137,6 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
                 num_tokens,
                 self.vllm_config,
                 self.speculator.speculative_config,
-                positions.shape[0],
                 draft_attn_metadatas=draft_attn_metadatas,
             )
         return ret

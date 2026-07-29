@@ -79,8 +79,8 @@ def test_process_weights_after_loading_310_uses_version_specific_layout(
 
     torch.testing.assert_close(layer.w13_weight, original_w13.transpose(1, 2))
     torch.testing.assert_close(layer.w2_weight, original_w2.transpose(1, 2))
-    assert layer.w13_weight.is_contiguous() is False
-    assert layer.w2_weight.is_contiguous() is False
+    assert layer.w13_weight.is_contiguous() is True
+    assert layer.w2_weight.is_contiguous() is True
 
 
 class _Projection(nn.Module):

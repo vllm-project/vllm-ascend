@@ -202,25 +202,6 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --speculative_config '{"enforce_eager": true, "method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 3}'
 ```
 
-Remarks:
-
-- `minimax_m2_append_think` keeps `<think>...</think>` inside `content`.
-- If you mainly rely on the reasoning semantics of `/v1/responses`, it is recommended to use `--reasoning-parser minimax_m2` instead.
-- To achieve better performance on long-context scenarios (e.g., 128k or 64k), we recommend the following adjustments:
-
-```bash
-    --tensor-parallel-size 8 \
-    --data-parallel-size 1 \
-    --decode-context-parallel-size 1 \
-    --prefill-context-parallel-size 2 \
-    --cp-kv-cache-interleave-size 128 \
-    --max-num-seqs 16 \
-    --max-model-len 138000 \
-    --max-num-batched-tokens 65536 \
-    --gpu-memory-utilization 0.85 \
-    --speculative_config '{"enforce_eager": true, "method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 1}'
-```
-
 > **Note**: The above parameters are validated in a specific test environment for reference only. Please adjust `--max-model-len`, `--max-num-seqs`, `--max-num-batched-tokens`, and `--gpu-memory-utilization` based on your actual input/output length, concurrency, and hardware configuration.
 
 - If you need to test with `curl` and tool calling, add the following to the startup command:

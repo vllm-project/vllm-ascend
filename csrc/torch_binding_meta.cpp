@@ -303,6 +303,28 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention_meta(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, softmax_max, softmax_sum);
 }
 
+at::Tensor npu_sparse_attention_score_meta(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
+    const at::Tensor &select_idx, const at::Tensor &block_table,
+    const c10::optional<at::Tensor> &select_num_idx,
+    const c10::optional<at::Tensor> &q_dequant_scale,
+    const c10::optional<at::Tensor> &k_dequant_scale,
+    const c10::optional<at::Tensor> &v_dequant_scale,
+    const c10::optional<at::Tensor> &actual_seq_lengths,
+    const c10::optional<at::Tensor> &actual_seq_lengths_kv,
+    c10::string_view q_input_layout, c10::string_view kv_input_layout,
+    int64_t num_key_value_heads, double scale_value, int64_t block_size,
+    int64_t top_k, int64_t inner_precise)
+{
+    TORCH_CHECK(std::string(q_input_layout) == "TND",
+                "npu_sparse_attention_score only supports query TND layout");
+    at::ScalarType out_dtype = (query.scalar_type() == at::kFloat8_e4m3fn)
+                                   ? at::kHalf
+                                   : query.scalar_type();
+    return at::empty_symint(query.sym_sizes(),
+                            query.options().dtype(out_dtype).device(c10::kMeta));
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_kv_quant_sparse_flash_attention_meta(
     const at::Tensor &query,
     const at::Tensor &key,
@@ -376,93 +398,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_kv_quant_sparse_flash_attenti
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, softmax_max, softmax_sum);
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_moe_init_routing_custom_meta(
-    const at::Tensor &x, const at::Tensor &expert_idx,
-    const c10::optional<at::Tensor> &scale, const c10::optional<at::Tensor> &offset, int64_t active_num,
-    int64_t expert_capacity, int64_t expert_num, int64_t drop_pad_mode, int64_t expert_tokens_num_type,
-    bool expert_tokens_num_flag, int64_t quant_mode, at::IntArrayRef active_expert_range, int64_t row_idx_type)
-{
-    constexpr int64_t DIM_X = 2;
-    constexpr int64_t DIM_EXPERT_IDX = 2;
-    constexpr int64_t LENGTH_ACTIVE_EXPERT_RANGE = 2;
-    constexpr int64_t EXPERT_TOKENS_COUNT = 1;
-    constexpr int64_t EXPERT_TOKENS_KEY_VALUE = 2;
-    constexpr int64_t QUANT_MODE_UNQUANT = -1;
-    constexpr int64_t QUANT_MODE_DYNAMIC_QUANT = 1;
-    constexpr int64_t CUMSUM = 0;
-    constexpr int64_t COUNT = 1;
-    constexpr int64_t KEY_VALUE = 2;
-
-    if (active_expert_range.empty()) {
-        active_expert_range =  at::IntArrayRef({0, expert_num});
-    }
-
-    int64_t x_dim = x.dim();
-    TORCH_CHECK(x_dim == DIM_X, "The x should be ", DIM_X,
-                "-Dimension, current is ", x_dim, "-Dimension.");
-
-    int64_t expert_idx_dim = expert_idx.dim();
-    TORCH_CHECK(expert_idx_dim == DIM_EXPERT_IDX, "The expert_idx should be ", DIM_EXPERT_IDX,
-                "-Dimension, current is ", expert_idx_dim, "-Dimension.");
-
-    // symbolic-meta-ok: active_expert_range is an IntArrayRef schema argument, not a Tensor shape.
-    int64_t active_expert_range_length = active_expert_range.size();
-    TORCH_CHECK(active_expert_range_length == LENGTH_ACTIVE_EXPERT_RANGE, "The active_expert_range should be ", LENGTH_ACTIVE_EXPERT_RANGE,
-                "-Dimension, current is ", expert_idx_dim, "-Dimension.");
-
-    int expert_length = active_expert_range[1] - active_expert_range[0];
-    auto bs = x.sym_size(0);
-    auto h = x.sym_size(1);
-    auto k = expert_idx.sym_size(1);
-    c10::SymInt expanded_scale_len(0);
-    at::Tensor expanded_x;
-
-    if (drop_pad_mode == 1) { // Drop/Pad
-        c10::SymDimVector expanded_x_shape = {c10::SymInt(expert_num), c10::SymInt(expert_capacity), h};
-        if (quant_mode == QUANT_MODE_UNQUANT) {
-            expanded_x = at::empty_symint(expanded_x_shape, x.options());
-        } else {
-            expanded_x = at::empty_symint(expanded_x_shape, x.options().dtype(at::kChar));
-        }
-        expanded_scale_len = c10::SymInt(expert_num * expert_capacity);
-    } else { // Dropless / Active
-        if (active_num > 0) { // Active
-            c10::SymInt num_out_tokens = (bs * k).min(c10::SymInt(active_num));
-            c10::SymDimVector expanded_x_shape = {num_out_tokens, h};
-            if (quant_mode == QUANT_MODE_UNQUANT) {
-                expanded_x = at::empty_symint(expanded_x_shape, x.options());
-            } else {
-                expanded_x = at::empty_symint(expanded_x_shape, x.options().dtype(at::kChar));
-            }
-            expanded_scale_len = num_out_tokens;
-        } else { // Dropless
-            c10::SymDimVector expanded_x_shape = {bs * k, h};
-            if (quant_mode == QUANT_MODE_UNQUANT) {
-                expanded_x = at::empty_symint(expanded_x_shape, x.options());
-            } else {
-                expanded_x = at::empty_symint(expanded_x_shape, x.options().dtype(at::kChar));
-            }
-            expanded_scale_len = bs * k;
-        }
-    }
-
-    c10::SymDimVector expanded_row_idx_shape = {bs * k};
-    at::Tensor expanded_row_idx = at::empty_symint(expanded_row_idx_shape, expert_idx.options());
-    at::Tensor expert_tokens_count_or_cumsum;
-    if (expert_tokens_num_type >= CUMSUM && expert_tokens_num_type <= COUNT) {
-        // expert_tokens_count_or_cumsum in [end-start, ]
-        expert_tokens_count_or_cumsum = at::empty_symint(
-            c10::SymDimVector{c10::SymInt(expert_length)}, x.options().dtype(at::kLong));
-    } else if (expert_tokens_num_type == KEY_VALUE) {
-        // key_value in [2, end-start]
-        expert_tokens_count_or_cumsum = at::empty_symint(
-            c10::SymDimVector{c10::SymInt(expert_num), c10::SymInt(2)}, x.options().dtype(at::kLong));
-    }
-
-    at::Tensor expanded_scale = at::empty_symint(
-        c10::SymDimVector{expanded_scale_len}, x.options().dtype(at::kFloat));
-    return {expanded_x, expanded_row_idx, expert_tokens_count_or_cumsum, expanded_scale};
-}
 std::tuple<at::Tensor,at::Tensor, at::Tensor> moe_gating_top_k_meta(
     const at::Tensor& x,
     int64_t k,
@@ -1657,12 +1592,11 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_lightning_indexer", &vllm_ascend::meta::npu_lightning_indexer_meta);
     // Sparse flash attention
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
+    ops.impl("npu_sparse_attention_score", &vllm_ascend::meta::npu_sparse_attention_score_meta);
     ops.impl("npu_kv_quant_sparse_flash_attention",
              &vllm_ascend::meta::npu_kv_quant_sparse_flash_attention_meta);
     // MoE dispatch-ffn-combine
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
-    // moe_init_routing_custom
-    ops.impl("npu_moe_init_routing_custom", &vllm_ascend::meta::npu_moe_init_routing_custom_meta);
     // Moe_gating_top_k
     ops.impl("moe_gating_top_k", &vllm_ascend::meta::moe_gating_top_k_meta);
     // Add_Rms_Norm_Bias

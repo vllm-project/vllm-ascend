@@ -48,7 +48,7 @@ Select an image based on your machine type and start the docker image on your no
     Start the docker image on your each node.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -88,7 +88,7 @@ Select an image based on your machine type and start the docker image on your no
     Start the docker image on your each node.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -949,8 +949,8 @@ After about several minutes, you can get the performance evaluation result.
 |High Throughput (16K)|Server-D Node|16|4|8|36K|1|
 |Low Latency (16K)|Server-P Node|16|8|2|36K|3|
 |Low Latency (16K)|Server-D Node|16|4|8|36K|3|
-|Long Context (64K)|Server-P Node|16|8|1(PCP2DCP8)|36K|3|
-|Long Context (64K)|Server-D Node|16|4|8|36K|3|
+|Long Context (64K)|Server-P Node|16|16|1|132K|3|
+|Long Context (64K)|Server-D Node|16|4|8|132K|3|
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
 
