@@ -28,12 +28,16 @@ end-user workflow.
 import os
 
 import pytest
-import requests
 import torch
 import torch_npu  # noqa: F401  # registers the NPU backend
-from transformers import AutoConfig, AutoModelForCausalLM
 
 from tests.e2e.conftest import RemoteOpenAIServer
+from tests.e2e.pull_request.weight_transfer_utils import (
+    build_trainer_model,
+    generate,
+    has_lifecycle_endpoints,
+    post,
+)
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 
@@ -43,53 +47,6 @@ PROMPTS = [
     "Hello, my name is",
     "The capital of France is",
 ]
-
-UPDATE_TIMEOUT = 300
-CONTROL_TIMEOUT = 60
-
-
-def _build_trainer_model(device_index: int):
-    device = f"npu:{device_index}"
-    override_path = os.getenv("WEIGHT_TRANSFER_TEST_MODEL")
-    if override_path:
-        model = AutoModelForCausalLM.from_pretrained(override_path, dtype=torch.bfloat16)
-    else:
-        config = AutoConfig.from_pretrained(MODEL_NAME, trust_remote_code=True)
-        model = AutoModelForCausalLM.from_config(config)
-    model = model.to(device=device, dtype=torch.bfloat16)
-    model.eval()
-    return model
-
-
-def _post(server: RemoteOpenAIServer, route: str, *, json=None, timeout=CONTROL_TIMEOUT):
-    response = requests.post(server.url_for(route), json=json, timeout=timeout)
-    response.raise_for_status()
-    return response
-
-
-def _generate(client, model, prompts):
-    completions = []
-    for prompt in prompts:
-        response = client.completions.create(model=model, prompt=prompt, max_tokens=16, temperature=0)
-        completions.append(response.choices[0].text)
-    return completions
-
-
-def _has_lifecycle_endpoints(server: RemoteOpenAIServer) -> bool:
-    """Probe ``/start_weight_update``; also performs the actual call when present."""
-    try:
-        response = requests.post(
-            server.url_for("start_weight_update"),
-            json={"is_checkpoint_format": True},
-            timeout=CONTROL_TIMEOUT,
-        )
-    except requests.RequestException:
-        return False
-    if response.status_code == 404:
-        return False
-    response.raise_for_status()
-    return True
-
 
 @pytest.mark.skipif(
     torch.npu.device_count() < 1,
@@ -134,13 +91,13 @@ def test_npu_ipc_weight_transfer_updates_server_weights():
     ) as server:
         client = server.get_client()
 
-        outputs_before = _generate(client, MODEL_NAME, PROMPTS)
+        outputs_before = generate(client, MODEL_NAME, PROMPTS)
 
         # Trainer shares physical NPU 0 with the server. It leaves
         # ASCEND_RT_VISIBLE_DEVICES unset (identity mapping logical 0 ->
         # physical 0) so both processes resolve to the same IPC UUID.
         torch.npu.set_device(INFERENCE_DEVICE_INDEX)
-        train_model = _build_trainer_model(INFERENCE_DEVICE_INDEX)
+        train_model = build_trainer_model(MODEL_NAME, INFERENCE_DEVICE_INDEX, eval_mode=True)
         os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
         from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
@@ -148,14 +105,14 @@ def test_npu_ipc_weight_transfer_updates_server_weights():
             NPUIPCWeightTransferEngine,
         )
 
-        _post(server, "init_weight_transfer_engine", json={"init_info": {}})
+        post(server, "init_weight_transfer_engine", json={"init_info": {}})
 
-        _post(server, "pause")
+        post(server, "pause")
         # The probe performs /start_weight_update when present, so it must not
         # be called again below. Older vLLM without the lifecycle endpoints is
         # out of scope for this IPC test.
-        if not _has_lifecycle_endpoints(server):
-            _post(server, "resume")
+        if not has_lifecycle_endpoints(server):
+            post(server, "resume")
             pytest.skip("vLLM build lacks the /start_weight_update lifecycle endpoints required by NPU IPC.")
 
         # trainer_send_weights POSTs to /update_weights itself; the server
@@ -168,9 +125,9 @@ def test_npu_ipc_weight_transfer_updates_server_weights():
             trainer_args=trainer_args,
         )
 
-        _post(server, "finish_weight_update")
-        _post(server, "resume")
+        post(server, "finish_weight_update")
+        post(server, "resume")
 
-        outputs_after = _generate(client, MODEL_NAME, PROMPTS)
+        outputs_after = generate(client, MODEL_NAME, PROMPTS)
 
     assert outputs_after != outputs_before, "server weights did not change after NPU IPC transfer"

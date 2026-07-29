@@ -4,13 +4,11 @@
 
 import pickle
 from collections.abc import Callable, Iterator
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any
 
 import pybase64 as base64
-import requests
 import torch
-from torch.multiprocessing.reductions import reduce_tensor
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.weight_transfer import WeightTransferConfig
@@ -27,6 +25,12 @@ from vllm_ascend.distributed.weight_transfer.device_mapping import get_npu_ipc_u
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     packed_npu_ipc_consumer,
     packed_npu_ipc_producer,
+)
+from vllm_ascend.distributed.weight_transfer.trainer_send import (
+    TrainerProcessCoordinator,
+    collect_parameter_metadata,
+    default_parameter_tensor,
+    dispatch_update_info,
 )
 
 
@@ -220,81 +224,16 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
             NPUIPCWeightTransferEngine._send_unpacked(iterator, args, npu_uuid)
 
     @staticmethod
-    def _is_rank_zero() -> bool:
-        """Return True if this is rank 0 or no distributed group exists."""
-        if not torch.distributed.is_initialized():
-            return True
-        return torch.distributed.get_rank() == 0
-
-    @staticmethod
-    def _all_gather_and_merge_handles(
-        handles: list[dict[str, tuple]],
-    ) -> list[dict[str, tuple]]:
-        """All-gather and merge IPC handle dicts across ranks.
-
-        Each rank contributes a list of ``{npu_uuid: ipc_args}`` dicts.
-        Rank 0 collects and merges per-index; other ranks receive a list
-        of empty dicts. No-op when no distributed group exists.
-        """
-        if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:
-            return handles
-
-        world_size = torch.distributed.get_world_size()
-        gathered: list[list[dict[str, tuple]] | None] = [None] * world_size
-        torch.distributed.all_gather_object(gathered, handles)
-        torch.distributed.barrier()
-        torch.npu.synchronize()
-
-        if torch.distributed.get_rank() == 0:
-            merged: list[dict[str, tuple]] = []
-            for param_idx in range(len(handles)):
-                m: dict[str, tuple] = {}
-                for rank_handles in gathered:
-                    if rank_handles is not None:
-                        m.update(rank_handles[param_idx])
-                merged.append(m)
-            return merged
-        return [{} for _ in handles]
-
-    @staticmethod
-    def _post_send_sync() -> None:
-        """Barrier + synchronize after a send; no-op if single-NPU."""
-        if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
-            torch.distributed.barrier()
-        torch.npu.synchronize()
-
-    @staticmethod
     def _send_unpacked(
         iterator: Iterator[tuple[str, torch.Tensor]],
         args: NPUIPCTrainerSendWeightsArgs,
         npu_uuid: str,
     ) -> None:
         """Send all weights in a single API call (non-packed mode)."""
-        names: list[str] = []
-        dtype_names: list[str] = []
-        shapes: list[list[int]] = []
-        ipc_handles: list[dict[str, tuple]] = []
-        # Hold strong refs to every contiguous copy until the send + post-send
-        # sync completes.  ``reduce_tensor``'s returned args do NOT keep
-        # storage alive.
-        weight_refs: list[torch.Tensor] = []
+        names, dtype_names, shapes, ipc_handles, weight_refs = collect_parameter_metadata(iterator, npu_uuid)
+        ipc_handles = TrainerProcessCoordinator.all_gather_and_merge_handles(ipc_handles)
 
-        for name, tensor in iterator:
-            names.append(name)
-            dtype_names.append(str(tensor.dtype).split(".")[-1])
-            shapes.append(list(tensor.shape))
-
-            weight = tensor.detach().contiguous()
-            weight_refs.append(weight)
-            # Store only the rebuild args (drop the func); the consumer rebuilds
-            # with the well-known ``rebuild_npu_tensor``, mirroring upstream's
-            # CUDA IPC engine.
-            _, ipc_args = reduce_tensor(weight)
-            ipc_handles.append({npu_uuid: ipc_args})
-
-        ipc_handles = NPUIPCWeightTransferEngine._all_gather_and_merge_handles(ipc_handles)
-
-        if NPUIPCWeightTransferEngine._is_rank_zero():
+        if TrainerProcessCoordinator.is_rank_zero():
             NPUIPCWeightTransferEngine._do_send(
                 args=args,
                 names=names,
@@ -303,7 +242,8 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
                 ipc_handles=ipc_handles,
             )
 
-        NPUIPCWeightTransferEngine._post_send_sync()
+        TrainerProcessCoordinator.post_send_sync()
+        _ = weight_refs
 
     @staticmethod
     def _send_packed(
@@ -312,7 +252,7 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
         npu_uuid: str,
     ) -> None:
         """Send weights in bounded-memory chunks (packed mode)."""
-        post_iter_func: Callable = lambda item: item[1]
+        post_iter_func: Callable = default_parameter_tensor
 
         for chunk in packed_npu_ipc_producer(
             iterator=iterator,
@@ -320,9 +260,9 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
             post_iter_func=post_iter_func,
             buffer_size_bytes=args.packed_buffer_size_bytes,
         ):
-            ipc_handle = NPUIPCWeightTransferEngine._all_gather_and_merge_handles([chunk["ipc_handle"]])[0]
+            ipc_handle = TrainerProcessCoordinator.all_gather_and_merge_handles([chunk["ipc_handle"]])[0]
 
-            if NPUIPCWeightTransferEngine._is_rank_zero():
+            if TrainerProcessCoordinator.is_rank_zero():
                 NPUIPCWeightTransferEngine._do_send(
                     args=args,
                     names=chunk["names"],
@@ -333,7 +273,7 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
                     packed=True,
                 )
 
-            NPUIPCWeightTransferEngine._post_send_sync()
+            TrainerProcessCoordinator.post_send_sync()
 
     @staticmethod
     def _do_send(
@@ -358,19 +298,9 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
         update_fields["ipc_handles"] = ipc_handles
         update_info = NPUIPCWeightTransferUpdateInfo(**update_fields)
 
-        if callable(args.send_mode):
-            args.send_mode(update_info)
-        elif args.send_mode == "ray":
-            import ray
-
-            handles = args.llm_handle if isinstance(args.llm_handle, list) else [args.llm_handle]
-            ray.get([h.update_weights.remote(dict(update_info=asdict(update_info))) for h in handles])
-        elif args.send_mode == "http":
-            pickled_handles = base64.b64encode(pickle.dumps(ipc_handles)).decode("utf-8")
-            http_fields = {k: v for k, v in update_fields.items() if k != "ipc_handles"}
-            http_fields["ipc_handles_pickled"] = pickled_handles
-
-            url = f"{args.url}/update_weights"
-            payload = {"update_info": http_fields}
-            response = requests.post(url, json=payload, timeout=300)
-            response.raise_for_status()
+        dispatch_update_info(
+            args=args,
+            update_info=update_info,
+            update_fields=update_fields,
+            ipc_handles=ipc_handles,
+        )

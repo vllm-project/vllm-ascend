@@ -103,7 +103,7 @@ def test_unpacked_send_stores_reduce_tensor_args_only():
 
     iterator = iter([("model.weight", torch.zeros(3))])
 
-    with patch(f"{_MODULE}.reduce_tensor", fake_reduce):
+    with patch("vllm_ascend.distributed.weight_transfer.trainer_send.reduce_tensor", fake_reduce):
         NPUIPCWeightTransferEngine._send_unpacked(iterator, trainer_args, npu_uuid)
 
     update_info = captured["update_info"]

@@ -42,17 +42,23 @@ Run with::
     pytest tests/e2e/multicard/2-cards/test_weight_transfer_hccl.py
 """
 
-import os
-import threading
-
 import pytest
-import requests
 import torch
 import torch_npu  # noqa: F401  # registers the NPU backend
-from transformers import AutoConfig, AutoModelForCausalLM
 from vllm.utils.network_utils import get_ip, get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
+from tests.e2e.pull_request.weight_transfer_utils import (
+    INIT_TIMEOUT,
+    UPDATE_TIMEOUT,
+    BackgroundPost,
+    build_trainer_model,
+    collect_weight_metadata,
+    generate,
+    has_lifecycle_endpoints,
+    log,
+    post,
+)
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 
@@ -64,129 +70,6 @@ PROMPTS = [
     "Hello, my name is",
     "The capital of France is",
 ]
-
-# HTTP timeouts (seconds). Weight broadcast can take a while for large models.
-INIT_TIMEOUT = 120
-UPDATE_TIMEOUT = 300
-CONTROL_TIMEOUT = 60
-
-
-def _log(message: str) -> None:
-    """Flushed log so step markers show up immediately even when stdout is piped."""
-    print(f"[trainer] {message}", flush=True)
-
-
-def _build_trainer_model(device_index: int):
-    """Build the trainer-side model without downloading the checkpoint weights.
-
-    By default the model is instantiated from the architecture config with random
-    weights (no ``model.safetensors`` download required); only the tiny config is
-    read, which the server already fetches. Its ``named_parameters`` carry the
-    same names/shapes/dtypes as the real checkpoint, so the HCCL broadcast +
-    layerwise reload path is exercised exactly as with real weights.
-
-    Set ``WEIGHT_TRANSFER_TEST_MODEL=/path/to/checkpoint`` to broadcast real
-    weights from a local directory instead.
-    """
-    device = f"npu:{device_index}"
-    override_path = os.getenv("WEIGHT_TRANSFER_TEST_MODEL")
-    if override_path:
-        _log(f"loading real trainer weights from {override_path}")
-        model = AutoModelForCausalLM.from_pretrained(override_path, dtype=torch.bfloat16)
-    else:
-        _log("building trainer model from config with random weights (download-free)")
-        config = AutoConfig.from_pretrained(MODEL_NAME, trust_remote_code=True)
-        model = AutoModelForCausalLM.from_config(config)
-    model = model.to(device=device, dtype=torch.bfloat16)
-    return model
-
-
-def _post(server: RemoteOpenAIServer, route: str, *, json=None, timeout=CONTROL_TIMEOUT):
-    response = requests.post(server.url_for(route), json=json, timeout=timeout)
-    response.raise_for_status()
-    return response
-
-
-class _BackgroundPost(threading.Thread):
-    """Run an HTTP POST in a thread while keeping its exception visible.
-
-    The trainer side blocks on collective HCCL ops, so the matching server-side
-    RPC must run concurrently. If that RPC fails, swallowing the exception would
-    deadlock the trainer forever; instead we record it and surface it on join().
-    """
-
-    def __init__(self, server: RemoteOpenAIServer, route: str, *, json=None, timeout=CONTROL_TIMEOUT):
-        super().__init__(daemon=True)
-        self._server = server
-        self._route = route
-        self._json = json
-        self._timeout = timeout
-        self.error: BaseException | None = None
-
-    def run(self) -> None:
-        try:
-            _post(self._server, self._route, json=self._json, timeout=self._timeout)
-            _log(f"background POST /{self._route} done")
-        except BaseException as exc:  # noqa: BLE001 - re-raised on join via raise_if_failed
-            self.error = exc
-            _log(f"background POST /{self._route} FAILED: {exc!r}")
-
-    def raise_if_failed(self) -> None:
-        if self.error is not None:
-            raise RuntimeError(f"server-side /{self._route} failed") from self.error
-
-
-def _generate(client, model, prompts):
-    completions = []
-    for prompt in prompts:
-        response = client.completions.create(
-            model=model,
-            prompt=prompt,
-            max_tokens=16,
-            temperature=0,
-        )
-        completions.append(response.choices[0].text)
-    return completions
-
-
-def _collect_weight_metadata(train_model):
-    """Collect parameter metadata and size the packed buffer for broadcasting."""
-    names: list[str] = []
-    dtype_names: list[str] = []
-    shapes: list[list[int]] = []
-    max_tensor_bytes = 0
-    for name, parameter in train_model.named_parameters():
-        names.append(name)
-        dtype_names.append(str(parameter.dtype).split(".")[-1])
-        shapes.append(list(parameter.shape))
-        tensor_bytes = parameter.numel() * parameter.element_size()
-        max_tensor_bytes = max(max_tensor_bytes, tensor_bytes)
-
-    # Keep the 1 GiB default unless a single tensor needs more (+128 MiB headroom).
-    packed_buffer_size_bytes = max(max_tensor_bytes + 128 * 2**20, 2**30)
-    return names, dtype_names, shapes, packed_buffer_size_bytes
-
-
-def _has_lifecycle_endpoints(server: RemoteOpenAIServer) -> bool:
-    """Detect whether the server exposes the vLLM-main start/finish endpoints.
-
-    On vLLM main, ``/start_weight_update`` and ``/finish_weight_update`` drive
-    the layerwise reload lifecycle. On v0.20.2 these endpoints do not exist and
-    ``update_weights`` is self-contained, so a probe returns 404.
-    """
-    try:
-        response = requests.post(
-            server.url_for("start_weight_update"),
-            json={"is_checkpoint_format": True},
-            timeout=CONTROL_TIMEOUT,
-        )
-    except requests.RequestException:
-        return False
-    if response.status_code == 404:
-        return False
-    response.raise_for_status()
-    return True
-
 
 @pytest.mark.skipif(
     torch.npu.device_count() < 2,
@@ -219,7 +102,7 @@ def test_hccl_weight_transfer_updates_server_weights():
         "VLLM_ASCEND_ENABLE_NZ": "0",
     }
 
-    _log(f"starting server on port {port} (device 0, dummy weights) ...")
+    log(f"starting server on port {port} (device 0, dummy weights) ...")
     with RemoteOpenAIServer(
         MODEL_NAME,
         vllm_serve_args=server_args,
@@ -233,15 +116,15 @@ def test_hccl_weight_transfer_updates_server_weights():
         client = server.get_client()
 
         # 1) Baseline generation with dummy weights (expected to be nonsense).
-        _log("generating baseline outputs (dummy weights) ...")
-        outputs_before = _generate(client, MODEL_NAME, PROMPTS)
-        _log(f"outputs BEFORE weight update: {outputs_before}")
+        log("generating baseline outputs (dummy weights) ...")
+        outputs_before = generate(client, MODEL_NAME, PROMPTS)
+        log(f"outputs BEFORE weight update: {outputs_before}")
 
         # 2) Build the trainer model on the trainer NPU (download-free by default).
-        _log(f"preparing trainer model on npu:{TRAINER_DEVICE_INDEX} ...")
+        log(f"preparing trainer model on npu:{TRAINER_DEVICE_INDEX} ...")
         torch.npu.set_device(TRAINER_DEVICE_INDEX)
-        train_model = _build_trainer_model(TRAINER_DEVICE_INDEX)
-        _log("trainer model ready")
+        train_model = build_trainer_model(MODEL_NAME, TRAINER_DEVICE_INDEX)
+        log("trainer model ready")
 
         # Import after the server is up so the HCCL engine plugin is registered.
         from vllm_ascend.distributed.weight_transfer.hccl_engine import (
@@ -262,8 +145,8 @@ def test_hccl_weight_transfer_updates_server_weights():
             rank_offset=rank_offset,
             world_size=world_size,
         )
-        _log(f"HCCL rendezvous at {master_address}:{master_port} (world_size={world_size}) ...")
-        init_thread = _BackgroundPost(
+        log(f"HCCL rendezvous at {master_address}:{master_port} (world_size={world_size}) ...")
+        init_thread = BackgroundPost(
             server,
             "init_weight_transfer_engine",
             json={"init_info": init_info},
@@ -277,19 +160,19 @@ def test_hccl_weight_transfer_updates_server_weights():
                 world_size=world_size,
             ),
         )
-        _log("trainer_init returned, waiting for server init RPC ...")
+        log("trainer_init returned, waiting for server init RPC ...")
         init_thread.join()
         init_thread.raise_if_failed()
-        _log("HCCL process group established")
+        log("HCCL process group established")
 
         # 4) Pause generation and start the weight update lifecycle. On vLLM
         #    main this probe also performs the actual /start_weight_update call,
         #    so we must not call it again below.
-        _post(server, "pause")
-        use_lifecycle = _has_lifecycle_endpoints(server)
-        _log(f"paused; lifecycle endpoints available: {use_lifecycle}")
+        post(server, "pause")
+        use_lifecycle = has_lifecycle_endpoints(server)
+        log(f"paused; lifecycle endpoints available: {use_lifecycle}")
 
-        names, dtype_names, shapes, packed_buffer_size_bytes = _collect_weight_metadata(train_model)
+        names, dtype_names, shapes, packed_buffer_size_bytes = collect_weight_metadata(train_model)
         update_info = dict(
             names=names,
             dtype_names=dtype_names,
@@ -303,8 +186,8 @@ def test_hccl_weight_transfer_updates_server_weights():
 
         # update_weights blocks on the server while it waits for HCCL broadcasts,
         # so run it in a thread while the trainer produces the data.
-        _log(f"broadcasting {len(names)} tensors via HCCL (packed) ...")
-        update_thread = _BackgroundPost(
+        log(f"broadcasting {len(names)} tensors via HCCL (packed) ...")
+        update_thread = BackgroundPost(
             server,
             "update_weights",
             json={"update_info": update_info},
@@ -321,19 +204,19 @@ def test_hccl_weight_transfer_updates_server_weights():
             iterator=train_model.named_parameters(),
             trainer_args=trainer_args,
         )
-        _log("trainer finished sending weights, waiting for server update RPC ...")
+        log("trainer finished sending weights, waiting for server update RPC ...")
         update_thread.join()
         update_thread.raise_if_failed()
-        _log("weight broadcast complete")
+        log("weight broadcast complete")
 
         # 5) Finalize the lifecycle and resume generation.
         if use_lifecycle:
-            _post(server, "finish_weight_update")
-        _post(server, "resume")
+            post(server, "finish_weight_update")
+        post(server, "resume")
 
         # 6) Generation after the broadcast weights are loaded.
-        outputs_after = _generate(client, MODEL_NAME, PROMPTS)
-        _log(f"outputs AFTER weight update: {outputs_after}")
+        outputs_after = generate(client, MODEL_NAME, PROMPTS)
+        log(f"outputs AFTER weight update: {outputs_after}")
 
     # Reaching here means the full HCCL transfer pipeline succeeded: every
     # control-plane RPC raised on a non-2xx response and each background POST
