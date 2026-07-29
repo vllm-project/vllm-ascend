@@ -15,6 +15,7 @@ finishes reading them (a load-WAR). The in-flight step's SWA attention (target
 verification + DSpark draft) then reads foreign KV, the draft proposal quality
 collapses, and the spec-decode acceptance length drops (e.g. 4.3 -> 2.5).
 """
+
 from functools import wraps
 
 import vllm.v1.core.kv_cache_coordinator as _kvcc
@@ -66,8 +67,7 @@ if _NEEDS_BACKPORT:
             vllm_config = args[0]
         if vllm_config is not None:
             _inflight_token_budget = (
-                vllm_config.max_concurrent_batches
-                * vllm_config.scheduler_config.max_num_batched_tokens
+                vllm_config.max_concurrent_batches * vllm_config.scheduler_config.max_num_batched_tokens
             )
         return _orig_scheduler_init(self, *args, **kwargs)
 
