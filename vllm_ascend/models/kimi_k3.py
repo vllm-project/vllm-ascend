@@ -56,9 +56,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, 
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader, maybe_remap_kv_scale_name
 from vllm.model_executor.models.deepseek_v2 import DeepSeekV2FusedQkvAProjLinear
 from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
     HasInnerState,
     IsHybrid,
     MixtureOfExperts,
+    SupportsEagle3,
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
@@ -285,6 +287,7 @@ class AscendKimiK3ForConditionalGeneration(
     HasInnerState,
     IsHybrid,
     MixtureOfExperts,
+    SupportsEagle3,
 ):
     supports_encoder_tp_data = True
     hf_to_vllm_mapper = WeightsMapper(
@@ -885,7 +888,7 @@ class KimiK3DecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class KimiK3TextModel(nn.Module):
+class KimiK3TextModel(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config: KimiK3TextConfig = vllm_config.model_config.hf_text_config
@@ -951,8 +954,18 @@ class KimiK3TextModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             block_residual = intermediate_tensors["block_residual"]
 
-        for layer in self.layers[self.start_layer : self.end_layer]:
+        aux_hidden_states: list[torch.Tensor] = []
+        for layer_idx, layer in enumerate(
+            self.layers[self.start_layer : self.end_layer],
+            start=self.start_layer,
+        ):
             hidden_states, block_residual = layer(positions, hidden_states, block_residual)
+            # DSpark/EAGLE3 aux hidden states: collect the residual stream at
+            # the configured target layers for the draft model. The runner
+            # stores aux layers as (target_layer_id + 1), so the hidden state
+            # produced by layer N is collected when (N + 1) is in the set.
+            if (layer_idx + 1) in self.aux_hidden_state_layers:
+                aux_hidden_states.append(hidden_states)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states, "block_residual": block_residual})
@@ -963,7 +976,10 @@ class KimiK3TextModel(nn.Module):
             self.output_attn_res_proj,
             self.output_attn_res_norm,
         )
-        return self.norm(hidden_states)
+        hidden_states = self.norm(hidden_states)
+        if aux_hidden_states:
+            return hidden_states, aux_hidden_states
+        return hidden_states
 
     def load_weights(
         self,

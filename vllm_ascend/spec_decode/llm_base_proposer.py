@@ -49,6 +49,7 @@ from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.deepseek_v4_dspark import DSparkDeepseekV4ForCausalLM
+from vllm_ascend.models.kimi_k3_dspark import K3DSparkForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
@@ -342,10 +343,29 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self.model.config.image_token_index = model.config.image_token_id
             elif self.get_model_name(model) == "PixtralForConditionalGeneration":
                 self.model.config.image_token_index = model.config.vision_config.image_token_id
-            elif self.get_model_name(model) == "KimiK25ForConditionalGeneration":
-                self.model.config.image_token_index = model.config.media_placeholder_token_id
+            elif self.get_model_name(model) in (
+                "KimiK25ForConditionalGeneration",
+                "KimiK3ForConditionalGeneration",
+            ):
+                # K3 (like K2.5) uses media_placeholder_token_id, not
+                # image_token_index; the generic else-branch would raise
+                # AttributeError on KimiK3Config.
+                self.model.config.image_token_index = (
+                    model.config.media_placeholder_token_id
+                )
             else:
-                self.model.config.image_token_index = model.config.image_token_index
+                # Fallback for multimodal targets whose config does not expose
+                # image_token_index (e.g. KimiK3, which uses
+                # media_placeholder_token_id and whose vllm-ascend class name
+                # is AscendKimiK3ForConditionalGeneration, so the named branches
+                # above do not match it).
+                self.model.config.image_token_index = getattr(
+                    model.config,
+                    "image_token_index",
+                    getattr(
+                        model.config, "media_placeholder_token_id", None
+                    ),
+                )
             target_language_model = model.get_language_model()
         else:
             target_language_model = model
@@ -763,6 +783,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     Eagle3VwnLlamaForCausalLM,
                     Eagle3DeepseekV2ForCausalLM,
                     DSparkDeepseekV4ForCausalLM,
+                    K3DSparkForCausalLM,
                 ),
             )
             target_hidden_states = self.model.combine_hidden_states(target_hidden_states)

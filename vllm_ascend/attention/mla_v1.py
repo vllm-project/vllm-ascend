@@ -1530,6 +1530,51 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
         return k_pe, kv_c_normed
 
+    def _exec_kv_rope(
+        self,
+        kv_no_split: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        kv_cache: tuple,
+        slots: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Normalize + rotate + cache MLA KV (RoPE path), mirroring vllm's
+        separate-ops precompute (rmsnorm + rotary + concat_and_cache_mla).
+
+        Avoids the fused ``npu_kv_rmsnorm_rope_cache`` op, which on torch_npu
+        2.10 (Ascend910_9382) rejects the call with EZ1001 (it requires
+        v/kRopeScale/cKvScale/offsets inputs this impl does not pass). Only
+        the RoPE draft hits this path; the NoPE target uses
+        ``_exec_kv_no_rope``.
+        """
+        assert self.kv_a_layernorm is not None
+        assert len(kv_cache) > 1, "MLA requires separate latent and positional KV caches"
+        num_tokens = kv_no_split.shape[0]
+        kv_no_split = kv_no_split.view(
+            num_tokens,
+            self.num_kv_heads,
+            self.kv_lora_rank + self.qk_rope_head_dim,
+        )
+        kv_c, k_pe = kv_no_split.split(
+            [self.kv_lora_rank, self.qk_rope_head_dim],
+            dim=-1,
+        )
+        kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
+        kv_c_normed = kv_c_normed.view(num_tokens, self.num_kv_heads, self.kv_lora_rank)
+        k_pe = k_pe.view(num_tokens, self.num_kv_heads, self.qk_rope_head_dim)
+        # Rotate k_pe BEFORE the cache write so the paged cache stores rotated
+        # k_pe (matching the fused op's kRopeOut/kCacheRef); attention reads
+        # it as-is. Same rope_single used for q_pe in mla_preprocess_*.
+        k_pe = self.rope_single(k_pe, cos, sin)
+        DeviceOperator.reshape_and_cache(
+            key=kv_c_normed,
+            value=k_pe,
+            key_cache=kv_cache[0],
+            value_cache=kv_cache[1],
+            slot_mapping=slots,
+        )
+        return k_pe, kv_c_normed
+
     def exec_kv_decode(
         self,
         kv_no_split: torch.Tensor,
@@ -1544,29 +1589,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             # first two outputs of npu_kv_rmsnorm_rope_cache.
             return kv_cache[1], kv_cache[0]
 
-        assert self.kv_a_layernorm is not None
-        B = kv_no_split.shape[0]
-        N = self.num_kv_heads
-        S = 1
-        # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
-        kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
-        cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
-        c_kv_scale = None
-        if get_ascend_device_type() == AscendDeviceType.A5 and self.fa_quant_layer:
-            c_kv_scale = self.fak_descale_reciprocal
-        k_pe, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
-            kv_no_split,
-            self.kv_a_layernorm.weight,  # type: ignore[union-attr]
-            cos,
-            sin,
-            slots.to(torch.int64),
-            kv_cache[1],
-            kv_cache[0],
-            c_kv_scale=c_kv_scale,
-            epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
-            cache_mode=cache_mode,
-        )
-        return k_pe, k_nope
+        # RoPE KV write via separate ops (mirror vllm); see _exec_kv_rope.
+        # Decode attention consumes the full paged caches, matching the
+        # first two outputs of npu_kv_rmsnorm_rope_cache.
+        self._exec_kv_rope(kv_no_split, cos, sin, kv_cache, slots)
+        return kv_cache[1], kv_cache[0]
 
     def exec_kv_prefill(
         self,
@@ -1580,30 +1607,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             # Prefill attention needs the just-written current-token KV.
             return self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
 
-        assert self.kv_a_layernorm is not None
-        B = kv_no_split.shape[0]
-        N = self.num_kv_heads
-        S = 1
-        # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
-        kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
-        cache_mode = "PA"
-        c_kv_scale = None
-        if get_ascend_device_type() == AscendDeviceType.A5 and self.fa_quant_layer:
-            c_kv_scale = self.fak_descale_reciprocal
-        _, _, k_pe, k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
-            kv_no_split,
-            self.kv_a_layernorm.weight,  # type: ignore[union-attr]
-            cos,
-            sin,
-            slots.to(torch.int64),
-            kv_cache[1],
-            kv_cache[0],
-            c_kv_scale=c_kv_scale,
-            epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
-            cache_mode=cache_mode,
-            is_output_kv=True,
-        )
-        return k_pe, k_nope
+        # RoPE KV write via separate ops (mirror vllm); see _exec_kv_rope.
+        # Prefill attention needs the just-written current-token KV.
+        return self._exec_kv_rope(kv_no_split, cos, sin, kv_cache, slots)
 
     def rope_single(
         self,
@@ -1619,6 +1625,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         B, N, D = x.shape
         S = 1
         x = x.view(B, N, S, D)
+        # npu_interleave_rope requires cos/sin to share x's dtype (BF16/FP16);
+        # get_cos_and_sin_mla returns FP32 cos/sin (the fused
+        # npu_kv_rmsnorm_rope_cache handled FP32 internally, this op does not).
+        # Cast to x.dtype to satisfy aclnnInterleaveRope (EZ1001 otherwise).
+        cos = cos.to(x.dtype)
+        sin = sin.to(x.dtype)
         x = torch_npu.npu_interleave_rope(x, cos, sin)
         return x.view(B, N, D)
 
@@ -1685,8 +1697,20 @@ class AscendMLAImpl(MLAAttentionImpl):
                 q_nope = F.pad(q_nope, (0, 0, 0, self.head_padding), "constant", 0)
             # Output shape: [num_heads, num_tokens, dim]
             attn_output_shape = (self.num_heads_padded, num_tokens, self.kv_lora_rank)
-            sparse_mode = 3
-            attn_mask = attn_metadata.decode.attn_mask  # type:ignore
+            if _EXTRA_CTX.is_draft_model:
+                # DSpark/dflash MLA draft forward is non-causal (bidirectional):
+                # every query token attends to the trailing context window plus
+                # all other query tokens in the draft block. On Ascend FIA this
+                # is sparse_mode=0 with NO atten_mask (a mask under sparse_mode=0
+                # is applied as defaultMask and would wrongly hide the upper
+                # triangle -- see vllm_ascend/attention/attention_mask.py). The
+                # target path always runs with is_draft_model=False, so its
+                # causal (sparse_mode=3) behavior is byte-for-byte unchanged.
+                sparse_mode = 0
+                attn_mask = None
+            else:
+                sparse_mode = 3
+                attn_mask = attn_metadata.decode.attn_mask  # type:ignore
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
             if self.fa_quant_layer:
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads)
