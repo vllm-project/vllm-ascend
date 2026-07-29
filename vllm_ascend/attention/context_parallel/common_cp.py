@@ -130,7 +130,12 @@ def _process_attn_out_lse(attn_output: torch.Tensor, softmax_lse: torch.Tensor) 
     return attn_out_lse
 
 
-def _npu_attention_update(head_size, attn_out_lse: torch.Tensor) -> torch.Tensor:
+def _npu_attention_update(
+    head_size,
+    attn_out_lse: torch.Tensor,
+    current_attn_output: torch.Tensor | None = None,
+    current_attn_lse: torch.Tensor | None = None,
+) -> torch.Tensor:
     pcp_size = get_pcp_group().world_size
     dcp_size = get_decode_context_model_parallel_world_size()
     # [PCP * S, DCP * H, D+1]
@@ -151,9 +156,21 @@ def _npu_attention_update(head_size, attn_out_lse: torch.Tensor) -> torch.Tensor
     #    lse: [N, S, H, 1] -> [N, S*H]
     out_flat = out_flat.flatten(1, 2)  # [N, S*H, D]
     lse_flat = lse_flat.flatten(1, -1)  # [N, S*H]
-    #  unbind to list
-    out_list = out_flat.unbind(0)  # [S*H, D]
-    lse_list = lse_flat.unbind(0)  # [S*H]
+    # Unbind history shards to lists.
+    out_list = list(out_flat.unbind(0))  # [S*H, D]
+    lse_list = list(lse_flat.unbind(0))  # [S*H]
+
+    # Split DCP+MTP attention computes the replicated current-token chunk
+    # after history communication. Append it once, locally, so it is not
+    # duplicated by the CP collective.
+    if (current_attn_output is None) != (current_attn_lse is None):
+        raise ValueError("current_attn_output and current_attn_lse must be provided together")
+    if current_attn_output is not None and current_attn_lse is not None:
+        assert current_attn_output.shape == (S, H, D)
+        assert current_attn_lse.shape == (S, H, 1)
+        out_list.append(current_attn_output.to(torch.float32).flatten(0, 1))
+        lse_list.append(current_attn_lse.to(torch.float32).flatten())
+
     attn_out, _ = torch_npu.npu_attention_update(lse_list, out_list, 0)
     attn_out = attn_out.view(-1, H, D)
     return attn_out

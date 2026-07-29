@@ -361,7 +361,11 @@ class BaseDeviceAdaptor:
         from vllm_ascend.attention.mla_v1 import DecodeMLAPreprocessResult
 
         decode_preprocess_res = DecodeMLAPreprocessResult(
-            decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope=dequant_scale_q_nope
+            ql_nope=decode_q_nope,
+            q_pe=decode_q_pe,
+            cache_k_nope=decode_k_nope,
+            cache_k_pe=decode_k_pe,
+            dequant_scale_q_nope=dequant_scale_q_nope,
         )
         return decode_preprocess_res, None
 
@@ -1434,7 +1438,11 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         from vllm_ascend.attention.mla_v1 import DecodeMLAPreprocessResult
 
         decode_preprocess_res = DecodeMLAPreprocessResult(
-            decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope=dequant_scale_q_nope
+            ql_nope=decode_q_nope,
+            q_pe=decode_q_pe,
+            cache_k_nope=decode_k_nope,
+            cache_k_pe=decode_k_pe,
+            dequant_scale_q_nope=dequant_scale_q_nope,
         )
         return decode_preprocess_res, None
 

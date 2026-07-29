@@ -19,6 +19,7 @@
 
 import copy
 import logging
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import accumulate
@@ -1967,9 +1968,24 @@ class PCPManager:
             dcp_seq_lens[: sfa_cp_seq_len.shape[0]].copy_(sfa_cp_seq_len, non_blocking=True)
             dcp_seq_lens[sfa_cp_seq_len.shape[0] :].fill_(0)
         elif is_mla:
-            attn_metadata.decode.cp_seq_len = cp_seq_len
+            if getattr(attn_metadata, "decode", None):
+                # Full-graph MTP keeps padded decode rows in attention
+                # metadata, while seq_lens only contains the active requests.
+                # FIA requires one KV length per BSND batch row, including
+                # padded rows. Keep active lengths and mark padding as empty.
+                num_decodes = attn_metadata.num_decodes
+                cp_seq_len = cp_seq_len[:num_decodes]
+                num_padded_decodes = num_decodes - cp_seq_len.numel()
+                if num_padded_decodes > 0:
+                    cp_seq_len = F.pad(
+                        cp_seq_len,
+                        (0, num_padded_decodes),
+                        value=0,
+                    )
+                attn_metadata.decode.cp_seq_len = cp_seq_len
         else:
-            attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp.numpy()
+            if getattr(attn_metadata, "decode_meta", None):
+                attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp.numpy()
 
     def generate_pcp_metadata(
         self,
@@ -2190,10 +2206,19 @@ class PCPManager:
 
             # Generate MTP attention masks for decode requests when cp_size > 1
             # with speculative decoding.
+            use_mla_dcp_mtp_split_attention = (
+                getattr(self.vllm_config.model_config, "use_mla", False)
+                and os.getenv(
+                    "VLLM_ASCEND_MLA_DCP_MTP_ATTENTION_MODE",
+                    "irregular_mask",
+                ).strip().lower()
+                == "split"
+            )
             if (
                 self.dcp_world_size * self.pcp_world_size > 1
                 and self.speculative_config
                 and num_scheduled_tokens is not None
+                and not use_mla_dcp_mtp_split_attention
             ):
                 # Generate the mask contents for the real decode requests.
                 if self.num_decode_reqs > 0:

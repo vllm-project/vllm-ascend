@@ -1588,6 +1588,28 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
             common_attn_metadata.graph_pad_size = -1
             common_attn_metadata.num_input_tokens = input_batch_size
+            if self.method == "mtp":
+                if common_attn_metadata.is_prefilling is not None:
+                    # Follow-up MTP draft passes are single-token decodes. This
+                    # metadata is shallow-copied from the first pass, so clear its
+                    # stale request-level prefill marker before DCP builders use it.
+                    common_attn_metadata.is_prefilling = torch.zeros_like(
+                        common_attn_metadata.is_prefilling
+                    )
+
+                long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
+                if long_seq_metadata is not None:
+                    # DCP keeps the full-query lengths from the first prefill in
+                    # long-sequence metadata. The MLA builder prioritizes these
+                    # fields over max_query_len when classifying decode/prefill,
+                    # so give each follow-up MTP step its own current-query view.
+                    long_seq_metadata = copy.copy(long_seq_metadata)
+                    query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+                    long_seq_metadata.query_lens_pcp_full_cpu = (
+                        query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+                    )
+                    long_seq_metadata.max_query_len_pcp_full = common_attn_metadata.max_query_len
+                    common_attn_metadata.prefill_context_parallel_metadata = long_seq_metadata
 
         # The loop part
         used_update_positions += 1

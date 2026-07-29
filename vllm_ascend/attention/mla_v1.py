@@ -164,6 +164,7 @@ class AscendMLADecodeMetadata:
     sin: torch.Tensor = None
     cos: torch.Tensor = None
     cp_seq_len: torch.Tensor = None
+    cp_history_seq_len: list[int] | None = None
     dcp_mtp_attn_mask: torch.Tensor = None
 
 
@@ -433,7 +434,10 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
-                treat_short_extends_as_decodes=common_attn_metadata.prefill_context_parallel_metadata is None,
+                treat_short_extends_as_decodes=(
+                    common_attn_metadata.prefill_context_parallel_metadata is None
+                    or common_attn_metadata.attn_state == AscendAttentionState.SpecDecoding
+                ),
             )
         )
         self.set_num_actual_tokens(common_attn_metadata)
@@ -682,8 +686,10 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
 class DecodeMLAPreprocessResult(NamedTuple):
     ql_nope: torch.Tensor | None = None
     q_pe: torch.Tensor | None = None
-    k_nope: torch.Tensor | None = None
-    k_pe: torch.Tensor | None = None
+    cache_k_nope: torch.Tensor | None = None
+    cache_k_pe: torch.Tensor | None = None
+    current_k_nope: torch.Tensor | None = None
+    current_k_pe: torch.Tensor | None = None
     decode_q_wo_k_up: torch.Tensor | None = None
     dequant_scale_q_nope: torch.Tensor | None = None
 
@@ -716,6 +722,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_sharing_target_layer_name: str | None,
         **kwargs,
     ):
+        self.need_to_return_lse_for_decode = True
         self.vllm_config = get_current_vllm_config()
         self.num_heads = num_heads
         self.head_size = head_size
@@ -1297,7 +1304,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         sin: torch.Tensor,
         kv_cache: tuple,
         slots: torch.Tensor,
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Write current K/V to cache and return cache/current K/V explicitly.
+
+        Returns:
+            (cache_k_nope, cache_k_pe, current_k_nope, current_k_pe)
+        """
         assert self.kv_a_layernorm is not None
         B = kv_no_split.shape[0]
         N = self.num_kv_heads
@@ -1308,7 +1320,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         c_kv_scale = None
         if get_ascend_device_type() == AscendDeviceType.A5 and self.fa_quant_layer:
             c_kv_scale = self.fak_descale_reciprocal
-        k_pe, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
+        cache_k_pe, cache_k_nope, current_k_pe, current_k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv_no_split,
             self.kv_a_layernorm.weight,  # type: ignore[union-attr]
             cos,
@@ -1319,8 +1331,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             c_kv_scale=c_kv_scale,
             epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
             cache_mode=cache_mode,
+            is_output_kv=True,
         )
-        return k_pe, k_nope
+        return cache_k_nope, cache_k_pe, current_k_nope, current_k_pe
 
     def exec_kv_prefill(
         self,
@@ -1371,14 +1384,18 @@ class AscendMLAImpl(MLAAttentionImpl):
         self,
         q_nope: torch.Tensor,
         q_pe: torch.Tensor,
-        k_nope: torch.Tensor,
-        k_pe: torch.Tensor,
+        cache_k_nope: torch.Tensor,
+        cache_k_pe: torch.Tensor,
         block_size: int,
         attn_metadata: AscendMLAMetadata,
         dequant_scale_q_nope=None,
+        current_k_nope: torch.Tensor | None = None,
+        current_k_pe: torch.Tensor | None = None,
     ) -> torch.Tensor:
         decode_meta = attn_metadata.decode
         assert decode_meta is not None
+        k_nope = cache_k_nope
+        k_pe = cache_k_pe
         # TODO: The CANN package is expected to support num_heads that are not
         # powers of 2 in 2026 Q2. Once supported, all padding operations under
         # `if self.head_padding > 0` in this function can be removed.
@@ -1613,9 +1630,17 @@ class AscendMLAImpl(MLAAttentionImpl):
             decode_q_pe = (decode_q_pe / dequant_scale_q_nope.unsqueeze(-1) / self.fak_descale_float).to(torch.bfloat16)
         decode_slots = attn_metadata.slot_mapping[:num_decode_tokens:1]
         decode_kv_no_split = kv_no_split[:num_decode_tokens]
-        decode_k_pe, decode_k_nope = self.exec_kv_decode(decode_kv_no_split, cos, sin, kv_cache, decode_slots)
+        cache_k_nope, cache_k_pe, current_k_nope, current_k_pe = self.exec_kv_decode(
+            decode_kv_no_split, cos, sin, kv_cache, decode_slots
+        )
         return DecodeMLAPreprocessResult(
-            decode_ql_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope=dequant_scale_q_nope
+            ql_nope=decode_ql_nope,
+            q_pe=decode_q_pe,
+            cache_k_nope=cache_k_nope,
+            cache_k_pe=cache_k_pe,
+            current_k_nope=current_k_nope,
+            current_k_pe=current_k_pe,
+            dequant_scale_q_nope=dequant_scale_q_nope,
         )
 
     def _mla_preprocess(self, layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv):
@@ -1717,9 +1742,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         o_proj_input = torch.zeros(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
 
         # MLA Preprocess
+        use_dcp_mtp_split_attn = getattr(self, "_use_dcp_mtp_split_attention", lambda: False)()
         if (self.fa_quant_layer or self.enable_mlapo) and (
             attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS and attn_metadata.num_prefills == 0
-        ):
+        ) and not use_dcp_mtp_split_attn:
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states.contiguous(), need_gather_q_kv
             )
@@ -1735,11 +1761,13 @@ class AscendMLAImpl(MLAAttentionImpl):
             output_decode = self._forward_decode(
                 decode_preprocess_res.ql_nope,
                 decode_preprocess_res.q_pe,
-                decode_preprocess_res.k_nope,
-                decode_preprocess_res.k_pe,
+                decode_preprocess_res.cache_k_nope,
+                decode_preprocess_res.cache_k_pe,
                 kv_cache[0].shape[1],
                 attn_metadata,
                 decode_preprocess_res.dequant_scale_q_nope,
+                current_k_nope=decode_preprocess_res.current_k_nope,
+                current_k_pe=decode_preprocess_res.current_k_pe,
             )
 
             o_proj_input[:num_decode_tokens] = output_decode
