@@ -621,61 +621,68 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     # update long_seq related params and flatten block_table
                     common_attn_metadata.context_parallel_metadata = dcp_manager.long_seq_metadata
 
-            assert len(self.draft_attn_groups) > 0
-            # update the tensor's address for each step.
-            for draft_index in range(self.num_speculative_tokens):
-                step_metadata = self.shallow_copy_metadata(common_attn_metadata)
-                extra_attn_metadata_args: dict = {}
-                if self.use_compress:
-                    extra_attn_metadata_args.update(
-                        prefill_ratio_to_sas_metadata=dict(),
-                        decode_ratio_to_sas_metadata=dict(),
-                        common_ratio_to_sas_metadata=dict(),
-                        block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
-                    )
-                # Set the real slot_mapping.
-                slot_mapping_lens = step_metadata.slot_mapping.shape[0]
-                self.slot_mapping_group[draft_index][:slot_mapping_lens].copy_(step_metadata.slot_mapping)
-                self.slot_mapping_group[draft_index][slot_mapping_lens:].fill_(PADDING_SLOT_ID)
-                step_metadata.slot_mapping = self.slot_mapping_group[draft_index]
-                self.seq_lens_group[draft_index][:num_reqs].copy_(step_metadata.seq_lens)
-                self.seq_lens_group[draft_index][num_reqs:].fill_(0)
-                step_metadata.seq_lens = self.seq_lens_group[draft_index][:num_reqs]
-                self.query_start_loc_group[draft_index][: num_reqs + 1].copy_(step_metadata.query_start_loc)
-                self.query_start_loc_group[draft_index][num_reqs + 1 :].fill_(0)
-                step_metadata.query_start_loc = self.query_start_loc_group[draft_index][: num_reqs + 1]
-                if self.dcp_size > 1 and draft_index > 0:
-                    assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
-                    step_metadata.block_table_tensor = self.block_table_tensor_clone[:num_reqs]
+                # The per-group metadata build below needs common_attn_metadata,
+                # which is only constructed above inside the FULL-graph branch.
+                # Keep this assert + loop INSIDE the FULL block: in non-FULL
+                # contexts (the NONE-mode warmup in _warmup_and_capture; profile
+                # is skipped earlier in the runner) the per-group machinery is
+                # neither needed nor available, and the draft model runs below in
+                # eager mode using the common attention metadata.
+                assert len(self.draft_attn_groups) > 0
+                # update the tensor's address for each step.
+                for draft_index in range(self.num_speculative_tokens):
+                    step_metadata = self.shallow_copy_metadata(common_attn_metadata)
+                    extra_attn_metadata_args: dict = {}
+                    if self.use_compress:
+                        extra_attn_metadata_args.update(
+                            prefill_ratio_to_sas_metadata=dict(),
+                            decode_ratio_to_sas_metadata=dict(),
+                            common_ratio_to_sas_metadata=dict(),
+                            block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
+                        )
+                    # Set the real slot_mapping.
+                    slot_mapping_lens = step_metadata.slot_mapping.shape[0]
+                    self.slot_mapping_group[draft_index][:slot_mapping_lens].copy_(step_metadata.slot_mapping)
+                    self.slot_mapping_group[draft_index][slot_mapping_lens:].fill_(PADDING_SLOT_ID)
+                    step_metadata.slot_mapping = self.slot_mapping_group[draft_index]
+                    self.seq_lens_group[draft_index][:num_reqs].copy_(step_metadata.seq_lens)
+                    self.seq_lens_group[draft_index][num_reqs:].fill_(0)
+                    step_metadata.seq_lens = self.seq_lens_group[draft_index][:num_reqs]
+                    self.query_start_loc_group[draft_index][: num_reqs + 1].copy_(step_metadata.query_start_loc)
+                    self.query_start_loc_group[draft_index][num_reqs + 1 :].fill_(0)
+                    step_metadata.query_start_loc = self.query_start_loc_group[draft_index][: num_reqs + 1]
+                    if self.dcp_size > 1 and draft_index > 0:
+                        assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
+                        step_metadata.block_table_tensor = self.block_table_tensor_clone[:num_reqs]
 
-                # Build per-group metadata with correct block_table for
-                # multi-group KV cache models (e.g. Gemma4 MTP).
-                per_layer_attn_metadata = dict()
-                for attn_group in self.draft_attn_groups:
-                    gid = attn_group.kv_cache_group_id
-                    grp_cm = step_metadata
-                    per_group_bt = getattr(self, "_per_group_block_tables", {}).get(gid)
-                    if per_group_bt is not None:
-                        grp_cm = copy.copy(step_metadata)
-                        grp_cm.block_table_tensor = per_group_bt[:num_reqs]
-                    grp_builder = attn_group.get_metadata_builder()
-                    if not self.use_compress or draft_index == 0:
-                        grp_meta = grp_builder.build_for_graph_capture(
-                            grp_cm,
-                            AscendAttentionState.SpecDecoding
-                            if self.method == "mtp"
-                            else AscendAttentionState.ChunkedPrefill,
-                            **extra_attn_metadata_args,
-                        )
-                    else:
-                        grp_meta = grp_builder.build_for_drafting(
-                            grp_cm,
-                            draft_index,
-                            **extra_attn_metadata_args,
-                        )
-                    for layer_name in attn_group.layer_names:
-                        per_layer_attn_metadata[layer_name] = grp_meta
-                multi_steps_attn_metadata.append(per_layer_attn_metadata)
+                    # Build per-group metadata with correct block_table for
+                    # multi-group KV cache models (e.g. Gemma4 MTP).
+                    per_layer_attn_metadata = dict()
+                    for attn_group in self.draft_attn_groups:
+                        gid = attn_group.kv_cache_group_id
+                        grp_cm = step_metadata
+                        per_group_bt = getattr(self, "_per_group_block_tables", {}).get(gid)
+                        if per_group_bt is not None:
+                            grp_cm = copy.copy(step_metadata)
+                            grp_cm.block_table_tensor = per_group_bt[:num_reqs]
+                        grp_builder = attn_group.get_metadata_builder()
+                        if not self.use_compress or draft_index == 0:
+                            grp_meta = grp_builder.build_for_graph_capture(
+                                grp_cm,
+                                AscendAttentionState.SpecDecoding
+                                if self.method == "mtp"
+                                else AscendAttentionState.ChunkedPrefill,
+                                **extra_attn_metadata_args,
+                            )
+                        else:
+                            grp_meta = grp_builder.build_for_drafting(
+                                grp_cm,
+                                draft_index,
+                                **extra_attn_metadata_args,
+                            )
+                        for layer_name in attn_group.layer_names:
+                            per_layer_attn_metadata[layer_name] = grp_meta
+                    multi_steps_attn_metadata.append(per_layer_attn_metadata)
 
         model_positions = self._get_positions(num_tokens)
 
