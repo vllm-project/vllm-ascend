@@ -19,7 +19,10 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateInfo,
 )
 
-from vllm_ascend.distributed.weight_transfer.lifecycle import LayerwiseReloadLifecyclePolicy
+from vllm_ascend.distributed.weight_transfer.lifecycle import (
+    LayerwiseReloadLifecyclePolicy,
+    WeightUpdateLifecyclePolicy,
+)
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
@@ -114,6 +117,7 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
     # Define backend-specific dataclass types
     init_info_cls = HCCLWeightTransferInitInfo
     update_info_cls = HCCLWeightTransferUpdateInfo
+    supports_draft_weight_update = False
 
     def __init__(  # type: ignore[misc]
         self,
@@ -124,12 +128,16 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
     ) -> None:
         super().__init__(config, vllm_config, device, model)
         self.model_update_group: PyHcclCommunicator | None = None  # type: ignore[no-redef]
+        self._weight_update_lifecycle_policy: WeightUpdateLifecyclePolicy = LayerwiseReloadLifecyclePolicy()
+
+    def set_weight_update_lifecycle_policy(self, policy: WeightUpdateLifecyclePolicy) -> None:
+        self._weight_update_lifecycle_policy = policy
 
     def start_weight_update(self) -> None:
-        LayerwiseReloadLifecyclePolicy().start(self.model)
+        self._weight_update_lifecycle_policy.start(self.model)
 
     def finish_weight_update(self) -> None:
-        LayerwiseReloadLifecyclePolicy().finish(self.model, self.model_config)
+        self._weight_update_lifecycle_policy.finish(self.model, self.model_config)
 
     def init_transfer_engine(self, init_info: HCCLWeightTransferInitInfo) -> None:
         """
@@ -159,11 +167,7 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
             device=device,
         )
 
-    def receive_weights(
-        self,
-        update_info: HCCLWeightTransferUpdateInfo,
-        load_weights: Callable[[list[tuple[str, torch.Tensor]]], None],
-    ) -> None:
+    def receive_weights(self, update_info: HCCLWeightTransferUpdateInfo) -> None:
         """
         Receive weights from trainer via HCCL broadcast and load them incrementally.
 
@@ -174,9 +178,8 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
         Args:
             update_info: HCCL update info containing parameter names, dtypes, shapes,
                         and packed flag
-            load_weights: Callable that loads weights into the model. Called
-                         incrementally for each batch of weights to avoid OOM.
         """
+        load_weights = self._weight_update_lifecycle_policy.make_load_weights(self.model)
         if self.model_update_group is None:
             raise RuntimeError("HCCL weight transfer not initialized. Call init_transfer_engine() first.")
 

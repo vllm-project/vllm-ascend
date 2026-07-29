@@ -1399,7 +1399,9 @@ class TestNPUWorkerWeightUpdate(TestBase):
 
         worker.start_weight_update(is_checkpoint_format=True)
 
-        mock_init_reload.assert_called_once_with(worker.model_runner.model)
+        mock_init_reload.assert_not_called()
+        engine.set_weight_update_lifecycle_policy.assert_called_once()
+        engine.start_weight_update.assert_called_once_with()
         self.assertTrue(worker._weight_update_active)
         self.assertTrue(worker._is_checkpoint_format)
 
@@ -1412,6 +1414,8 @@ class TestNPUWorkerWeightUpdate(TestBase):
         worker.start_weight_update(is_checkpoint_format=False)
 
         mock_init_reload.assert_not_called()
+        engine.set_weight_update_lifecycle_policy.assert_called_once()
+        engine.start_weight_update.assert_called_once_with()
         self.assertTrue(worker._weight_update_active)
         self.assertFalse(worker._is_checkpoint_format)
 
@@ -1438,55 +1442,40 @@ class TestNPUWorkerWeightUpdate(TestBase):
         with self.assertRaises(RuntimeError):
             worker.update_weights({"names": [], "dtype_names": [], "shapes": []})
 
-    @patch("torch.npu.synchronize", create=True)
-    @patch("vllm.model_executor.model_loader.reload.finalize_layerwise_reload")
-    @patch("vllm.model_executor.model_loader.reload.initialize_layerwise_reload")
-    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
-    def test_update_weights_checkpoint_format(self, mock_init_reload, mock_finalize_reload, mock_sync):
+    def test_start_draft_weight_update_raises_clear_error(self):
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
 
-        engine.parse_update_info.return_value = "typed_update"
+        with self.assertRaisesRegex(RuntimeError, "does not support draft model weight updates"):
+            worker.start_draft_weight_update()
+
+    @patch("vllm.model_executor.model_loader.reload.finalize_layerwise_reload")
+    @patch("vllm.model_executor.model_loader.reload.initialize_layerwise_reload")
+    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
+    def test_update_weights_checkpoint_format(self, mock_init_reload, mock_finalize_reload):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
         worker._weight_update_active = True
         worker._is_checkpoint_format = True
 
         worker.update_weights({"foo": "bar"})
 
-        engine.parse_update_info.assert_called_once_with({"foo": "bar"})
-        engine.receive_weights.assert_called_once()
-        _, kwargs = engine.receive_weights.call_args
-        self.assertIs(kwargs["load_weights"], worker.model_runner.model.load_weights)
-        mock_sync.assert_called_once()
+        engine.update_weights.assert_called_once_with({"foo": "bar"})
 
         # reload lifecycle is split across start_weight_update / finish_weight_update
         mock_init_reload.assert_not_called()
         mock_finalize_reload.assert_not_called()
 
-    @patch("torch.npu.synchronize", create=True)
     @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
-    def test_update_weights_kernel_format(self, mock_sync):
+    def test_update_weights_kernel_format(self):
         engine = MagicMock()
-
-        def fake_receive(update_info, load_weights):
-            load_weights([("layer.weight", torch.zeros(2))])
-
-        engine.receive_weights.side_effect = fake_receive
         worker = self._make_worker(engine=engine)
-        param = torch.nn.Parameter(torch.ones(2), requires_grad=True)
-        worker.model_runner.model.get_parameter.return_value = param
-
-        engine.parse_update_info.return_value = "typed_update"
-        from vllm_ascend.distributed.weight_transfer.lifecycle import get_weight_update_lifecycle_policy
-
         worker._weight_update_active = True
         worker._is_checkpoint_format = False
-        worker._weight_update_lifecycle_policy = get_weight_update_lifecycle_policy(False)
 
         worker.update_weights({"foo": "bar"})
 
-        worker.model_runner.model.get_parameter.assert_called_once_with("layer.weight")
-        torch.testing.assert_close(param.detach(), torch.zeros(2))
-        self.assertTrue(param.requires_grad)
+        engine.update_weights.assert_called_once_with({"foo": "bar"})
 
     @patch("vllm.model_executor.model_loader.reload.finalize_layerwise_reload")
     def test_finish_weight_update_resets_state(self, mock_finalize_reload):
@@ -1499,7 +1488,8 @@ class TestNPUWorkerWeightUpdate(TestBase):
 
         from vllm_ascend.distributed.weight_transfer.lifecycle import LayerwiseReloadLifecyclePolicy
 
-        mock_finalize_reload.assert_called_once_with(worker.model_runner.model, worker.model_config)
+        engine.finish_weight_update.assert_called_once_with()
+        mock_finalize_reload.assert_not_called()
         self.assertFalse(worker._weight_update_active)
         self.assertTrue(worker._is_checkpoint_format)
         self.assertIsInstance(worker._weight_update_lifecycle_policy, LayerwiseReloadLifecyclePolicy)

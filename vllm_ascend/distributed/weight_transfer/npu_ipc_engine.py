@@ -22,6 +22,7 @@ from vllm.distributed.weight_transfer.ipc_engine import (
 )
 
 from vllm_ascend.distributed.weight_transfer.device_mapping import get_npu_ipc_uuid
+from vllm_ascend.distributed.weight_transfer.lifecycle import WeightUpdateLifecyclePolicy, get_weight_update_lifecycle_policy
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     packed_npu_ipc_consumer,
     packed_npu_ipc_producer,
@@ -81,6 +82,7 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
 
     init_info_cls = NPUIPCWeightTransferInitInfo
     update_info_cls = NPUIPCWeightTransferUpdateInfo
+    supports_draft_weight_update = False
 
     def __init__(  # type: ignore[misc]
         self,
@@ -90,6 +92,10 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
         model: torch.nn.Module,
     ) -> None:
         super().__init__(config, vllm_config, device, model)
+        self._weight_update_lifecycle_policy: WeightUpdateLifecyclePolicy = get_weight_update_lifecycle_policy(False)
+
+    def set_weight_update_lifecycle_policy(self, policy: WeightUpdateLifecyclePolicy) -> None:
+        self._weight_update_lifecycle_policy = policy
 
     def parse_update_info(self, update_dict: dict[str, Any]) -> NPUIPCWeightTransferUpdateInfo:
         """Parse update dict, deserializing pickled IPC handles if present.
@@ -121,25 +127,19 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
         pass
 
     def start_weight_update(self) -> None:
-        """No-op for NPU IPC engine (no layerwise reloading)."""
-        pass
+        self._weight_update_lifecycle_policy.start(self.model)
 
     def finish_weight_update(self) -> None:
-        """No-op for NPU IPC engine (no layerwise reloading)."""
-        pass
+        self._weight_update_lifecycle_policy.finish(self.model, self.model_config)
 
-    def receive_weights(
-        self,
-        update_info: NPUIPCWeightTransferUpdateInfo,
-        load_weights: Callable[[list[tuple[str, torch.Tensor]]], None],
-    ) -> None:
+    def receive_weights(self, update_info: NPUIPCWeightTransferUpdateInfo) -> None:
         """Receive weights from the trainer via NPU IPC handles.
 
         Args:
             update_info: NPU IPC update info containing parameter names,
                 dtypes, shapes, and IPC handles.
-            load_weights: Callable that loads weights into the model.
         """
+        load_weights = self._weight_update_lifecycle_policy.make_load_weights(self.model)
         device_index = torch.accelerator.current_device_index()
         physical_npu_id = npu_generate_uuid()
 

@@ -300,6 +300,15 @@ class NPUWorker(WorkerBase):
                 "VLLM_ASCEND_ENABLE_NZ=0."
             )
 
+    def start_draft_weight_update(self) -> None:
+        """Draft model weight update is not supported on Ascend backends."""
+        self._check_weight_transfer_engine()
+        assert self.weight_transfer_engine is not None
+        raise RuntimeError(
+            f"{type(self.weight_transfer_engine).__name__} does not support "
+            "draft model weight updates."
+        )
+
     def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
         """Begin a new weight update; prepares the model for layerwise reload."""
         self._check_weight_transfer_engine()
@@ -313,10 +322,13 @@ class NPUWorker(WorkerBase):
 
         from vllm_ascend.distributed.weight_transfer.lifecycle import get_weight_update_lifecycle_policy
 
-        model = self.model_runner.model
         policy = get_weight_update_lifecycle_policy(is_checkpoint_format)
+        set_policy = getattr(self.weight_transfer_engine, "set_weight_update_lifecycle_policy", None)
+        if callable(set_policy):
+            set_policy(policy)
+
         with torch.device(self.device):
-            policy.start(model)
+            self.weight_transfer_engine.start_weight_update()
 
         self._weight_update_lifecycle_policy = policy
         self._is_checkpoint_format = is_checkpoint_format
@@ -327,23 +339,12 @@ class NPUWorker(WorkerBase):
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
 
-        typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
-        model = self.model_runner.model
-
         # state machine driven by start/finish.
         if not self._weight_update_active:
             raise RuntimeError("start_weight_update must be called before update_weights.")
 
-        policy = self._weight_update_lifecycle_policy
         with torch.device(self.device):
-            self.weight_transfer_engine.receive_weights(
-                typed_update_info,
-                load_weights=policy.make_load_weights(model),
-            )
-
-        # HCCL broadcast / packed paths are asynchronous.
-        # Sync so the next step uses the new weights.
-        torch.npu.synchronize()
+            self.weight_transfer_engine.update_weights(update_info)
 
     def finish_weight_update(self) -> None:
         """Finish the current weight update; runs layerwise postprocessing."""
@@ -352,9 +353,9 @@ class NPUWorker(WorkerBase):
         if not self._weight_update_active:
             raise RuntimeError("start_weight_update must be called before finish_weight_update.")
 
-        model = self.model_runner.model
+        assert self.weight_transfer_engine is not None
         with torch.device(self.device):
-            self._weight_update_lifecycle_policy.finish(model, self.model_config)
+            self.weight_transfer_engine.finish_weight_update()
 
         from vllm_ascend.distributed.weight_transfer.lifecycle import get_weight_update_lifecycle_policy
 
