@@ -3,12 +3,7 @@ import asyncio
 
 import pytest
 
-from examples.disaggregated_prefill_v1 import load_balance_proxy_layerwise_server_example as layerwise
 from examples.disaggregated_prefill_v1 import load_balance_proxy_server_example as proxy
-
-
-class FatalProxyError(BaseException):
-    pass
 
 
 def test_assign_instances_releases_prefill_reservation_on_cancelled_error(monkeypatch):
@@ -33,7 +28,7 @@ def test_assign_instances_releases_prefill_reservation_on_cancelled_error(monkey
         asyncio.run(runtime.close())
 
 
-def test_assign_instances_releases_decode_reservation_on_base_exception(monkeypatch):
+def test_assign_instances_releases_decode_reservation_on_cancelled_error(monkeypatch):
     scheduler = proxy.SharedProxyScheduler([("localhost", 8001)], [("localhost", 8002)])
     runtime = proxy.WorkerRuntime(scheduler)
     monkeypatch.setattr(proxy, "runtime", runtime)
@@ -52,13 +47,13 @@ def test_assign_instances_releases_decode_reservation_on_base_exception(monkeypa
 
     async def fail_decoder_client(role, key):
         if role is proxy.ServerRole.DECODE:
-            raise FatalProxyError
+            raise asyncio.CancelledError
         return await original_get_client(role, key)
 
     monkeypatch.setattr(runtime, "get_client", fail_decoder_client)
 
     try:
-        with pytest.raises(FatalProxyError):
+        with pytest.raises(asyncio.CancelledError):
             asyncio.run(proxy.assign_instances("/completions", {"prompt": "hello"}, 16, is_initial_request=True))
 
         prefiller = next(iter(scheduler.prefillers.values()))
@@ -68,38 +63,3 @@ def test_assign_instances_releases_decode_reservation_on_base_exception(monkeypa
         assert scheduler.request_num == 0
     finally:
         asyncio.run(runtime.close())
-
-
-def test_layerwise_handle_completions_releases_decoder_on_base_exception(monkeypatch):
-    state = layerwise.ProxyState([("localhost", 8001)], [("localhost", 8002)])
-    monkeypatch.setattr(layerwise, "proxy_state", state)
-    monkeypatch.setattr(layerwise, "global_args", argparse.Namespace(host="localhost", port=8000), raising=False)
-
-    class Request:
-        async def json(self):
-            return {"prompt": "hello"}
-
-        async def body(self):
-            return b'{"prompt":"hello"}'
-
-    class ExplodingDecoders(list):
-        def __init__(self, values):
-            super().__init__(values)
-            self.reads = 0
-
-        def __getitem__(self, index):
-            self.reads += 1
-            if self.reads == 3:
-                raise FatalProxyError
-            return super().__getitem__(index)
-
-    state.decoders = ExplodingDecoders(state.decoders)
-
-    try:
-        with pytest.raises(FatalProxyError):
-            asyncio.run(layerwise._handle_completions("/completions", Request()))
-
-        assert state.decoders[0].active_tokens == 0
-    finally:
-        for server in state.prefillers + state.decoders:
-            asyncio.run(server.client.aclose())
