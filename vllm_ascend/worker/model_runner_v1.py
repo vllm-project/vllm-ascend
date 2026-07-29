@@ -4361,14 +4361,7 @@ class NPUModelRunner(GPUModelRunner):
         for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
             if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
                 continue
-<<<<<<< HEAD
-            max_num_blocks_per_req = cdiv(
-                max_model_len,
-                block_sizes[i] * get_decode_context_model_parallel_world_size(),
-            )
-=======
             max_num_blocks_per_req = cdiv(max_model_len, block_sizes[i] * get_kv_cache_shard_count())
->>>>>>> aa34edd1 ([Feature][MRv2] pcp/dcp public logic modification for MRv2)
             if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
                 mamba_blocks_per_req = (
                     max_num_blocks_per_req if self.cache_config.enable_prefix_caching else 1
