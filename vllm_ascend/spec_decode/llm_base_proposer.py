@@ -283,6 +283,27 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
         return model
 
+    def _get_image_token_index(self, model: nn.Module) -> int:
+        model_name = self.get_model_name(model)
+        if model_name in [
+            "Qwen2_5_VLForConditionalGeneration",
+            "Qwen3VLForConditionalGeneration",
+            "Qwen3VLMoeForConditionalGeneration",
+            "Qwen3_5ForConditionalGeneration",
+            "Qwen3_5MoeForConditionalGeneration",
+            "Step3p7ForConditionalGeneration",
+        ]:
+            return model.config.image_token_id
+        if model_name == "PixtralForConditionalGeneration":
+            return model.config.vision_config.image_token_id
+        if model_name in [
+            "KimiK25ForConditionalGeneration",
+            "KimiK3ForConditionalGeneration",
+            "AscendKimiK3ForConditionalGeneration",
+        ]:
+            return model.config.media_placeholder_token_id
+        return model.config.image_token_index
+
     def load_model(self, model: nn.Module) -> None:
         assert get_pp_group().is_last_rank, f"{self.method} drafter must be loaded on the last pipeline stage."
 
@@ -331,21 +352,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         if supports_multimodal(model):
             # handle multimodality
-            if self.get_model_name(model) in [
-                "Qwen2_5_VLForConditionalGeneration",
-                "Qwen3VLForConditionalGeneration",
-                "Qwen3VLMoeForConditionalGeneration",
-                "Qwen3_5ForConditionalGeneration",
-                "Qwen3_5MoeForConditionalGeneration",
-                "Step3p7ForConditionalGeneration",
-            ]:
-                self.model.config.image_token_index = model.config.image_token_id
-            elif self.get_model_name(model) == "PixtralForConditionalGeneration":
-                self.model.config.image_token_index = model.config.vision_config.image_token_id
-            elif self.get_model_name(model) == "KimiK25ForConditionalGeneration":
-                self.model.config.image_token_index = model.config.media_placeholder_token_id
-            else:
-                self.model.config.image_token_index = model.config.image_token_index
+            self.model.config.image_token_index = self._get_image_token_index(model)
             target_language_model = model.get_language_model()
         else:
             target_language_model = model
@@ -415,6 +422,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         " from the target model."
                     )
             elif self.method == "dspark":
+                logger.critical(f"=================================================== {self.model.has_own_embed_tokens=}")
                 if not getattr(self.model, "has_own_embed_tokens", True):
                     share_embeddings = True
                     logger.info(
@@ -462,6 +470,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             draft_has_own_lm_head = (getattr(self.model, "draft_id_to_target_id", None) is not None) or (
                 getattr(self.model, "has_own_lm_head", True)
             )
+            logger.critical(f"=================================================== {self.model.has_own_lm_head=}")
             if draft_has_own_lm_head and self.method == "dflash":
                 logger.info(
                     "[spec_decode/base] DFlash draft uses d2t vocab remapping;"

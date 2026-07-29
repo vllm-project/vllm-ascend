@@ -29,7 +29,12 @@ from transformers import BatchFeature
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.distributed import divide, get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    divide,
+    get_pp_group,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+)
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
@@ -56,9 +61,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, 
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader, maybe_remap_kv_scale_name
 from vllm.model_executor.models.deepseek_v2 import DeepSeekV2FusedQkvAProjLinear
 from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
     HasInnerState,
     IsHybrid,
     MixtureOfExperts,
+    SupportsEagle3,
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
@@ -282,6 +289,7 @@ class AscendKimiK3ForConditionalGeneration(
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
+    SupportsEagle3,
     HasInnerState,
     IsHybrid,
     MixtureOfExperts,
@@ -407,7 +415,7 @@ class AscendKimiK3ForConditionalGeneration(
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         del kwargs
         if intermediate_tensors is not None:
             inputs_embeds = None
@@ -885,7 +893,7 @@ class KimiK3DecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class KimiK3TextModel(nn.Module):
+class KimiK3TextModel(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config: KimiK3TextConfig = vllm_config.model_config.hf_text_config
@@ -940,7 +948,7 @@ class KimiK3TextModel(nn.Module):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         del kwargs
         if get_pp_group().is_first_rank:
             hidden_states = inputs_embeds if inputs_embeds is not None else self.embed_input_ids(input_ids)
@@ -951,8 +959,15 @@ class KimiK3TextModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             block_residual = intermediate_tensors["block_residual"]
 
+        aux_hidden_states: list[torch.Tensor] = []
         for layer in self.layers[self.start_layer : self.end_layer]:
             hidden_states, block_residual = layer(positions, hidden_states, block_residual)
+            if layer.layer_idx + 1 in self.aux_hidden_state_layers:
+                aux_hidden_state = hidden_states
+                if aux_hidden_state.shape[0] != positions.shape[0]:
+                    aux_hidden_state = tensor_model_parallel_all_gather(aux_hidden_state, dim=0)
+                    aux_hidden_state = aux_hidden_state[: positions.shape[0]]
+                aux_hidden_states.append(aux_hidden_state)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states, "block_residual": block_residual})
@@ -963,7 +978,10 @@ class KimiK3TextModel(nn.Module):
             self.output_attn_res_proj,
             self.output_attn_res_norm,
         )
-        return self.norm(hidden_states)
+        hidden_states = self.norm(hidden_states)
+        if aux_hidden_states:
+            return hidden_states, aux_hidden_states
+        return hidden_states
 
     def load_weights(
         self,
@@ -1036,7 +1054,14 @@ class KimiK3TextModel(nn.Module):
         return loaded_params
 
 
-class AscendKimiK3ForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid):
+class AscendKimiK3ForCausalLM(
+    nn.Module,
+    HasInnerState,
+    SupportsPP,
+    SupportsEagle3,
+    MixtureOfExperts,
+    IsHybrid,
+):
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
@@ -1073,7 +1098,7 @@ class AscendKimiK3ForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExp
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         return self.model(input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
