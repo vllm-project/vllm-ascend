@@ -437,6 +437,29 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
 
         self.quant_type = self._get_quant_type()
 
+        # [expert_offload] Only QUANTIZED MoE layers (W4A8/W8A8/mxfp4) are
+        # offload-eligible: the offload path NZ-casts + packs expert weights
+        # into the quantized GMM's weight format and pages them via quantized
+        # apply hooks. An unquantized (bf16/fp16) MoE layer has no NZ cast and
+        # no quantized apply path, so it cannot be paged in/out. Drop the
+        # offload flags for such a layer so the three offload init blocks below
+        # (log2phy/_expert_map override, num_local_experts shrink, device-weight
+        # re-create + CPU buffer + weight-loader wrap) are all skipped — it runs
+        # as a normal fully-resident bf16 MoE. This is the GLM MTP draft case:
+        # its experts ship as FLOAT while target layers are W8A8_DYNAMIC, so
+        # quant_type==NONE uniquely identifies it at init (params_dtype cannot,
+        # being bf16-nominal for all W4A8 layers). enable_multi_card is given a
+        # safe default here; the multi-card init block below overrides it for
+        # eligible layers.
+        self.enable_multi_card = False
+        if self.enable_expert_offload and self.quant_type == QuantType.NONE:
+            logger.info_once(
+                "[expert_offload] MoE layer %s is unquantized (quant_type=NONE) "
+                "— skipping offload, running fully resident on device.",
+                getattr(self, "layer_name", "?"))
+            self.enable_expert_offload = False
+            self.routed_experts.enable_expert_offload = False
+
         self.moe_config.tp_group = get_tp_group()
         self.moe_config.dp_group = get_dp_group()
         if self.moe_config.ep_size > 1:
