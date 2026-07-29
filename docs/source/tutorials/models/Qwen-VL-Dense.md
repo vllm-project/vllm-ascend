@@ -199,7 +199,7 @@ For more details, please refer to the [Installation Guide](../../installation.md
 
 Run docker container to start the vLLM server on single-NPU:
 
-=== "A5 series"
+=== "Ascend950DT series"
 
     ```bash
     export HCCL_OP_EXPANSION_MODE="AIV"
