@@ -640,6 +640,9 @@ class NPUWorker(WorkerBase):
             all_gather_group=all_gather_group,
         )
 
+        if self.use_v2_model_runner:
+            return None
+
         kv_connector_output = output.kv_connector_output
         if not kv_connector_output:
             return None
