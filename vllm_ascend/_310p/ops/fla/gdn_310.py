@@ -63,16 +63,21 @@ def _clear_states_without_initial(
 
     A boolean-mask ``index_put_`` (``states[~has_initial_state] = 0``) lowers to
     an aicpu ``IndexPut`` kernel that fails on 310P (error 0x2a -> 507018). Use
-    an elementwise mask multiply instead, mirroring the Triton ``clear_ssm_states``
+    an elementwise select instead, mirroring the Triton ``clear_ssm_states``
     helper used on the non-310P path.
+
+    ``torch.where`` rather than a mask multiply: ``states * 0`` propagates any
+    NaN/Inf left in a stale cache row, whereas the ``index_put_`` this replaces
+    overwrote it unconditionally.
     """
     if states.numel() == 0:
         return states
 
     keep = has_initial_state.to(device=states.device, dtype=torch.bool).reshape(-1)
     mask_shape = [states.shape[0]] + [1] * (states.ndim - 1)
-    keep = keep.reshape(mask_shape).to(states.dtype)
-    return states * keep
+    keep = keep.reshape(mask_shape)
+    zero = torch.zeros((), dtype=states.dtype, device=states.device)
+    return torch.where(keep, states, zero)
 
 
 def _flatten_state_indices(
