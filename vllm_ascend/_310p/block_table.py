@@ -7,7 +7,6 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.worker.cp_utils import get_kv_cache_shard_count
 
-from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 from vllm_ascend.worker.block_table import BlockTable as AscendBlockTable
 from vllm_ascend.worker.block_table import MultiGroupBlockTable as AscendMultiGroupBlockTable
 

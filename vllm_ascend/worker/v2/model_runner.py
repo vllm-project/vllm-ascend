@@ -367,9 +367,7 @@ class NPUModelRunner(GPUModelRunner):
             attn_state=attn_state,
         )
 
-        self.input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
-            self.pcp_manager, self.input_batch
-        )
+        self.input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(self.pcp_manager, self.input_batch)
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)

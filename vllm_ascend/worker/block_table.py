@@ -8,7 +8,6 @@ from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.block_table import _compute_slot_mapping_kernel
 from vllm.v1.worker.cp_utils import get_kv_cache_shard_count
 
-from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 from vllm_ascend.utils import vllm_version_is
 
 

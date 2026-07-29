@@ -31,8 +31,30 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 class AscendPCPManager(PCPManager):
     """PCP manager that refreshes Ascend-only local-batch metadata."""
 
-    def __init__(self, *args, vllm_config: VllmConfig, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        pcp_world_size: int,
+        pcp_rank: int,
+        device: torch.device,
+        vllm_config: VllmConfig,
+        req_states: RequestState | None = None,
+        max_num_reqs: int | None = None,
+        max_num_tokens: int | None = None,
+        block_tables: BlockTables | None = None,
+        dcp_world_size: int = 1,
+        dcp_rank: int = 0,
+        cp_interleave: int = 1,
+    ) -> None:
+        super().__init__(
+            pcp_world_size,
+            pcp_rank, device,
+            req_states=req_states,
+            max_num_reqs=max_num_reqs,
+            max_num_tokens=max_num_tokens,
+            block_tables=block_tables,
+            dcp_world_size=dcp_world_size,
+            dcp_rank=dcp_rank,
+            cp_interleave=cp_interleave)
         self.vllm_config = vllm_config
 
     def partition_batch(self, input_batch: AscendInputBatch) -> AscendInputBatch:
@@ -40,9 +62,7 @@ class AscendPCPManager(PCPManager):
         local_batch = super().partition_batch(input_batch)
         assert isinstance(local_batch, AscendInputBatch)
 
-        local_seq_lens_np = (
-            local_batch.num_computed_tokens_np + local_batch.num_scheduled_tokens
-        )
+        local_seq_lens_np = local_batch.num_computed_tokens_np + local_batch.num_scheduled_tokens
         local_batch.seq_lens_np = local_seq_lens_np
         local_batch.attn_state = build_attn_state(
             self.vllm_config,
@@ -52,7 +72,6 @@ class AscendPCPManager(PCPManager):
             local_batch.num_scheduled_tokens,
         )
         return local_batch
-
 
 
 def maybe_build_ascend_pcp_manager(
@@ -68,12 +87,13 @@ def maybe_build_ascend_pcp_manager(
     if pcp_size <= 1:
         return None
 
-    PCPManager.validate_config(vllm_config, supports_mm_inputs)
+    AscendPCPManager.validate_config(vllm_config, supports_mm_inputs)
     dcp_size = parallel_config.decode_context_parallel_size
     return AscendPCPManager(
         pcp_world_size=pcp_size,
         pcp_rank=get_pcp_group().rank_in_group,
         device=device,
+        vllm_config=vllm_config,
         req_states=req_states,
         max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
         max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
@@ -81,5 +101,4 @@ def maybe_build_ascend_pcp_manager(
         dcp_world_size=dcp_size,
         dcp_rank=get_dcp_group().rank_in_group if dcp_size > 1 else 0,
         cp_interleave=parallel_config.cp_kv_cache_interleave_size,
-        vllm_config=vllm_config,
     )
