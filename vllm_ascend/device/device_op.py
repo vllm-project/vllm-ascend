@@ -112,7 +112,7 @@ class BaseDeviceAdaptor:
         quant_mode: int = -1,
         act_quant_type: torch.dtype | None = None,
     ):
-        return torch.ops.custom.npu_moe_init_routing_group_quant(
+        return torch_npu.npu_moe_init_routing_v2(
             hidden_states,
             topk_ids,
             scale=scale,
@@ -145,12 +145,10 @@ class BaseDeviceAdaptor:
         eps: float = 1e-20,
         bias_opt: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids, out = torch.ops.custom.npu_moe_gating_top_k(
+        topk_weights, topk_ids, out = torch_npu.npu_moe_gating_top_k(
             x,
             k,
             bias=bias_opt,
-            input_ids=None,
-            tid2eid=None,
             k_group=k_group,
             group_count=group_count,
             group_select_mode=group_select_mode,
@@ -599,14 +597,14 @@ class BaseDeviceAdaptor:
             # Reshape cache as [num_blocks * block_size, remaining] for flat indexing
             cache_flat = cache.view(cache.shape[0] * cache.shape[1], -1)
             x_flat = x.contiguous().view(x.shape[0], -1)
-            torch.ops.custom.scatter_nd_update_asc(
+            torch_npu.npu_scatter_nd_update_(
                 cache_flat,
                 flat_idx.view(-1, 1)[: x_flat.shape[0]],
                 x_flat,
             )
         else:
             x_flat = x.view(-1, x.shape[-1])
-            torch.ops.custom.scatter_nd_update_asc(
+            torch_npu.npu_scatter_nd_update_(
                 cache.view(-1, cache.shape[-1]),
                 slot_mapping.view(-1, 1)[: x_flat.shape[0]],
                 x_flat,
@@ -651,13 +649,13 @@ class BaseDeviceAdaptor:
                 kv_scale_out = kv_scale_out.unsqueeze(-1)
 
             cache_k_flat, idx_flat = BaseDeviceAdaptor._to_flat_slot_mapping(slot_mapping, indexer_k_cache)
-            torch.ops.custom.scatter_nd_update_asc(
+            torch_npu.npu_scatter_nd_update_(
                 cache_k_flat,
                 idx_flat,
                 kv_out.contiguous().view(kv_out.shape[0], -1),
             )
             cache_s_flat, _ = BaseDeviceAdaptor._to_flat_slot_mapping(slot_mapping, indexer_scale_cache)
-            torch.ops.custom.scatter_nd_update_asc(
+            torch_npu.npu_scatter_nd_update_(
                 cache_s_flat,
                 idx_flat,
                 kv_scale_out.contiguous().view(kv_scale_out.shape[0], -1),
@@ -674,7 +672,7 @@ class BaseDeviceAdaptor:
             return None, None
         kv_out, kv_scale = torch_npu.npu_dynamic_quant(kv, dst_type=torch.int8)
         kv_scale = kv_scale.unsqueeze(-1)
-        torch.ops.custom.scatter_nd_update_asc(
+        torch_npu.npu_scatter_nd_update_(
             indexer_k_cache.reshape(-1, indexer_k_cache.shape[-1]),
             slot_mapping.view(-1, 1)[: kv_out.shape[0]],
             kv_out.reshape(-1, indexer_k_cache.shape[-1]),
@@ -689,7 +687,7 @@ class BaseDeviceAdaptor:
         if kv_scale.ndim < 4:
             kv_scale = kv_scale.unsqueeze(-1)
         cache_flat, idx_flat = BaseDeviceAdaptor._to_flat_slot_mapping(slot_mapping, indexer_scale_cache)
-        torch.ops.custom.scatter_nd_update_asc(
+        torch_npu.npu_scatter_nd_update_(
             cache_flat,
             idx_flat,
             kv_scale.contiguous().view(kv_scale.shape[0], -1),
@@ -707,13 +705,13 @@ class BaseDeviceAdaptor:
         indexer_k_cache = torch.zeros(dummy_shape, dtype=kv_dummy.dtype, device=hidden_states.device)
         indexer_scale_cache = torch.zeros(dummy_shape, dtype=torch.float16, device=hidden_states.device)
         cache_k_flat, idx_flat = BaseDeviceAdaptor._to_flat_slot_mapping(slot_mapping, indexer_k_cache)
-        torch.ops.custom.scatter_nd_update_asc(
+        torch_npu.npu_scatter_nd_update_(
             cache_k_flat,
             idx_flat,
             kv_dummy.contiguous().view(kv_dummy.shape[0], -1),
         )
         cache_s_flat, _ = BaseDeviceAdaptor._to_flat_slot_mapping(slot_mapping, indexer_scale_cache)
-        torch.ops.custom.scatter_nd_update_asc(
+        torch_npu.npu_scatter_nd_update_(
             cache_s_flat,
             idx_flat,
             kv_scale_dummy.contiguous().view(kv_scale_dummy.shape[0], -1),

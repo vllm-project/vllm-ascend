@@ -968,23 +968,24 @@ class DeepseekV2DecoderLayer(nn.Module):
         self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
 
     def hc_pre(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
-        y = torch.ops.custom.npu_hc_pre(
-            x,
+        x_4d = x.unsqueeze(1)
+        y, post, comb, _, _, _, _, _ = torch.ops.cann_ops_transformer.mhc_pre_sinkhorn(
+            x_4d,
             hc_fn,
             hc_scale,
             hc_base,
-            hc_mult=self.hc_mult,
-            hc_sinkhorn_iters=self.hc_sinkhorn_iters,
-            norm_eps=self.norm_eps,
-            hc_eps=self.hc_eps,
+            self.hc_mult,
+            self.hc_sinkhorn_iters,
+            self.hc_eps,
+            self.norm_eps,
+            False,
         )
-        return y
+        comb = comb.unflatten(-1, (self.hc_mult, self.hc_mult))
+        return y.squeeze(1), post.squeeze(1), comb.squeeze(1)
 
     def hc_post(self, x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor, comb: torch.Tensor):
-        y = torch.ops.custom.npu_hc_post(
-            x.unsqueeze(dim=0), residual.unsqueeze(dim=0), post.unsqueeze(dim=0), comb.unsqueeze(dim=0)
-        )
-        return y.squeeze(dim=0)
+        y = torch.ops.cann_ops_transformer.mhc_post(residual, comb, x, post)
+        return y
 
     def forward(
         self,
