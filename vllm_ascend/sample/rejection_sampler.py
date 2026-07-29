@@ -184,11 +184,23 @@ class AscendRejectionSampler(RejectionSampler):
         # won't affect the original logits tensor.
         assert logits is not None
         bonus_logits = logits[bonus_logits_indices]
+        # When force_topk is active, pass the original max_num_logprobs so
+        # that force_topk can engage (D5 won't trigger on -1). When force_topk
+        # is inactive or unavailable, keep the upstream behavior (-1) to
+        # return full [B,V] logits for _get_logprobs_tensors.
+        _force_topk_active = (
+            hasattr(self.sampler, "_force_topk_enabled")
+            and self.sampler._force_topk_enabled(sampling_metadata)
+        )
         bonus_sampler_output = self.sampler(
             logits=bonus_logits,
             sampling_metadata=replace(
                 sampling_metadata,
-                max_num_logprobs=sampling_metadata.max_num_logprobs,
+                max_num_logprobs=(
+                    sampling_metadata.max_num_logprobs
+                    if _force_topk_active
+                    else -1
+                ),
             ),
             predict_bonus_token=True,
             # Override the logprobs mode to return logits because they are
