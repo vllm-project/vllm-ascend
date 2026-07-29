@@ -155,10 +155,22 @@ class TestUtils(TestBase):
         ):
             self.assertTrue(utils.enable_dsa_cp_with_o_proj_tp())
 
-    def test_enable_dsa_cp_with_o_proj_tp_rejects_single_role_pd(self):
+    def test_enable_dsa_cp_with_o_proj_tp_accepts_kv_producer(self):
         mock_vllm_config = mock.MagicMock()
         mock_vllm_config.kv_transfer_config = mock.MagicMock(
             kv_role="kv_producer", is_kv_producer=True, is_kv_consumer=False
+        )
+
+        with (
+            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
+            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
+        ):
+            self.assertTrue(utils.enable_dsa_cp_with_o_proj_tp())
+
+    def test_enable_dsa_cp_with_o_proj_tp_rejects_kv_consumer(self):
+        mock_vllm_config = mock.MagicMock()
+        mock_vllm_config.kv_transfer_config = mock.MagicMock(
+            kv_role="kv_consumer", is_kv_producer=False, is_kv_consumer=True
         )
 
         with (
