@@ -40,6 +40,7 @@ from vllm_ascend.utils import vllm_version_is
 
 if not vllm_version_is("0.25.1"):
     from vllm.v1.worker.gpu.model_runner import sort_batch_req_ids
+    from vllm_ascend.worker.v2.pcp_manager import maybe_build_ascend_pcp_manager
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
@@ -54,7 +55,6 @@ from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.pcp_manager import maybe_build_ascend_pcp_manager
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
@@ -134,13 +134,14 @@ class NPUModelRunner(GPUModelRunner):
 
             # GPUModelRunner constructs the community PCP manager while initializing
             # the KV cache. Replace it with the Ascend subclass.
-            self.pcp_manager = maybe_build_ascend_pcp_manager(
-                self.vllm_config,
-                self.device,
-                self.supports_mm_inputs,
-                self.req_states,
-                self.block_tables,
-            )
+            if not vllm_version_is("0.25.1"):
+                self.pcp_manager = maybe_build_ascend_pcp_manager(
+                    self.vllm_config,
+                    self.device,
+                    self.supports_mm_inputs,
+                    self.req_states,
+                    self.block_tables,
+                )
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -367,7 +368,8 @@ class NPUModelRunner(GPUModelRunner):
             attn_state=attn_state,
         )
 
-        input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
+        if not vllm_version_is("0.25.1"):
+            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)
