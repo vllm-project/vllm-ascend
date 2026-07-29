@@ -2,32 +2,27 @@
 
 add_op_to_compiled_list()
 
-add_ops_compile_options(
-        OP_NAME KvCacheFullBlockDump
-        OPTIONS --cce-auto-sync=off
-                -Wno-deprecated-declarations
-                -Werror
-                --op_relocatable_kernel_binary=true
-)
-
-target_sources(op_host_aclnn PRIVATE
+if (BUILD_OPEN_PROJECT)
+    target_sources(op_host_aclnn PRIVATE
         kv_cache_full_block_dump_def.cpp
-)
-
-target_sources(optiling PRIVATE
-        kv_cache_full_block_dump_tiling.cpp
-)
-
-if (NOT BUILD_OPEN_PROJECT)
-    target_sources(opmaster_ct PRIVATE
-            kv_cache_full_block_dump_tiling.cpp
     )
-endif ()
+endif()
 
-target_include_directories(optiling PRIVATE
+add_ops_compile_options(
+    OP_NAME KvCacheFullBlockDump
+    OPTIONS
+        --cce-auto-sync=off
+        -Wno-deprecated-declarations
+        -Werror
+        --op_relocatable_kernel_binary=true
+)
+
+if (NOT BUILD_OPS_RTY_KERNEL)
+    add_modules_sources(
+        OPTYPE kv_cache_full_block_dump
+        ACLNNTYPE aclnn
+    )
+    target_include_directories(${OPHOST_NAME}_tiling_obj PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-target_sources(opsproto PRIVATE
-        kv_cache_full_block_dump_proto.cpp
-)
+    )
+endif()

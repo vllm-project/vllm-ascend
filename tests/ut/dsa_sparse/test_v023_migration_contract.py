@@ -148,6 +148,47 @@ class TestOperatorABI(unittest.TestCase):
         self.assertNotIn("resident_row[evicted_tokens] = -1", source)
 
 
+class TestOperatorCMakeRegistration(unittest.TestCase):
+    def test_custom_package_uses_v023_module_targets(self):
+        operators = {
+            "kv_cache_full_block_dump": ("op_host_aclnn", "aclnn"),
+            "kvcache_scatter_copy": ("op_host_aclnn", "aclnn"),
+            "lightning_indexer_decode_update": (
+                "op_host_aclnnInner",
+                "aclnn_inner",
+            ),
+            "sparse_flash_attention_for_offload": (
+                "op_host_aclnnInner",
+                "aclnn_inner",
+            ),
+        }
+        obsolete_targets = ("opsproto", "opapi", "optiling")
+
+        for operator, (opdef_target, aclnn_type) in operators.items():
+            source = _read(
+                f"csrc/attention/{operator}/op_host/CMakeLists.txt"
+            )
+            with self.subTest(operator=operator):
+                self.assertIn("if (BUILD_OPEN_PROJECT)", source)
+                self.assertRegex(
+                    source,
+                    rf"target_sources\(\s*{opdef_target}\s+PRIVATE",
+                )
+                self.assertIn("if (NOT BUILD_OPS_RTY_KERNEL)", source)
+                self.assertRegex(
+                    source,
+                    rf"add_modules_sources\(\s*"
+                    rf"OPTYPE\s+{operator}\s+"
+                    rf"ACLNNTYPE\s+{aclnn_type}\s*\)",
+                )
+                for target in obsolete_targets:
+                    self.assertNotRegex(
+                        source,
+                        rf"target_(?:sources|include_directories)"
+                        rf"\(\s*{target}\b",
+                    )
+
+
 class TestV023LifecycleContract(unittest.TestCase):
     def test_allocate_slots_signature_tracks_v023(self):
         function = _function_node(
