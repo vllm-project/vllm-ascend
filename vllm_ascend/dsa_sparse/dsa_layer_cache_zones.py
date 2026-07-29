@@ -149,8 +149,9 @@ def resolve_layer_cache_zones(
         forward_context: ForwardContext,
 ) -> LayerCacheZones:
     attn = forward_context.no_compile_layers[layer_name]
+    mla_attn = getattr(attn, "mla_attn", attn)
     virtual_engine = int(getattr(forward_context, "virtual_engine", 0) or 0)
-    sfa_cache = _select_virtual_engine_cache(attn.mla_attn.kv_cache,
+    sfa_cache = _select_virtual_engine_cache(mla_attn.kv_cache,
                                              virtual_engine)
     if not isinstance(sfa_cache, (tuple, list)) or len(sfa_cache) < 2:
         raise RuntimeError(
@@ -159,7 +160,7 @@ def resolve_layer_cache_zones(
     nopek_cache_zone = sfa_cache[0]
     ropek_cache_zone = sfa_cache[1]
 
-    impl = getattr(attn.mla_attn, "impl", None)
+    impl = getattr(mla_attn, "impl", None)
     indexer_layer_name = getattr(impl, "indexer_k_cache_layer_name", None)
     indexer_cache_zone = None
     if indexer_layer_name is not None:
