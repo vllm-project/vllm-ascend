@@ -112,7 +112,7 @@ The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/v
 
 You can use ModelScope mirror to speed up download:
 
-<!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
+<!-- tests/e2e/doctests/001-quickstart-test.sh should be considered updating as well -->
 
 ```bash
 export VLLM_USE_MODELSCOPE=True
@@ -128,10 +128,10 @@ With vLLM installed, you can start generating texts for list of input prompts (i
 Create and run a simple inference test. The `example.py` can be like:
 
 <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
-=======
-=======
->>>>>>> 5a96004b9... Additions to the previous revision
     <!-- tests/e2e/doctests/001-quickstart-test.sh should be considered updating as well -->
+=======
+    <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
+>>>>>>> 73a801d9b... Correct the path
 
     ```python
     from vllm import LLM, SamplingParams
