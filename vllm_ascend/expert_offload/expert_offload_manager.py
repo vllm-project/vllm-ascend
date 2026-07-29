@@ -152,6 +152,11 @@ class ExpertOffloadManager:
         # (mxfp4, w4a8_dynamic) flags so the draft reuses the target's path.
         self._cast_done_layers: set[int] = set()
         self._cast_quant_kind: tuple[bool, bool] | None = None
+        # Separate prefill pool for layers whose expert format differs from the
+        # target (layer 0) — e.g. an MTP draft that is bf16/w8a8 while the
+        # target is w4a8. Allocated lazily; None while unused. Keys mirror the
+        # _prefill_* attrs minus the prefix ('w13','w2','w13_scale',...).
+        self._draft_pool: dict[str, list[torch.Tensor]] | None = None
 
         self.load_stream = torch_npu.npu.Stream()
 
@@ -509,17 +514,40 @@ class ExpertOffloadManager:
         for layer_id in range(len(self.w13_weights_cpu)):
             self._cast_one_layer(layer_id)
 
+    def _detect_cast_kind(self, layer_id: int) -> tuple[bool, bool, bool]:
+        """Detect the NZ-cast kind for one layer's CPU weight format.
+
+        Returns (mxfp4, w4a8_dynamic, should_cast). Mirrors the dtype branches
+        in process_weights_after_loading but PER-LAYER, so an MTP draft whose
+        format differs from the target (e.g. bf16 draft on a w4a8 target) is
+        detected on its own: a non-quantized (bf16/fp16) layer needs NO cast.
+        """
+        layer = self.moe_layers[layer_id]
+        w = self.w13_weights_cpu[layer_id][0]
+        if w.dtype == torch.uint8:
+            return (True, False, True)              # W4A8_MXFP
+        if w.dtype == torch.int8:
+            is_w4a8 = (hasattr(layer, 'w13_weight_scale')
+                       and getattr(layer.w13_weight_scale, 'dtype', None)
+                       == torch.int64)
+            if getattr(layer.w13_weight, 'dtype', None) == torch.int32 or is_w4a8:
+                return (False, True, True)          # W4A8_DYNAMIC (packed int32)
+            return (False, False, True)             # W8A8 (plain NZ)
+        return (False, False, False)                # bf16/fp16: no cast
+
     def _cast_one_layer(self, layer_id: int) -> None:
         """NZ-cast + write one layer's CPU weight buffers into device format.
 
-        Idempotent (skips layers already in _cast_done_layers). Extracted from
-        _cast_cpu_weights_to_device_format so it can also run lazily for an MTP
-        draft layer registered after _finalize_offload (its CPU buffer would
-        otherwise stay raw int8 → size/format mismatch on H2D).
+        Idempotent (skips layers already in _cast_done_layers). Detects the
+        cast kind PER-LAYER (so a bf16/w8a8 MTP draft is handled on its own
+        format, not the target's). Non-quantized layers (bf16) skip the cast.
         """
         if layer_id in self._cast_done_layers:
             return
-        mxfp4, w4a8_dynamic = self._cast_quant_kind or (False, False)
+        mxfp4, w4a8_dynamic, should_cast = self._detect_cast_kind(layer_id)
+        if not should_cast:
+            self._cast_done_layers.add(layer_id)
+            return
         use_shard = self.offload_config.shard_per_rank
         num_experts = len(self.w13_weights_cpu[layer_id])
         w13 = torch.stack(self.w13_weights_cpu[layer_id]).to('npu')
@@ -1038,6 +1066,97 @@ class ExpertOffloadManager:
                     tuple(self._prefill_w13[0].shape),
                     tuple(self._prefill_w2[0].shape))
 
+    # ------------------------------------------------------------------ #
+    # Per-format prefill pool: a draft MoE layer may be bf16 / w8a8 while  #
+    # the target is w4a8 — a different expert format/size that the shared  #
+    # (layer-0-sized) main pool can't hold. Give such layers their own pool.#
+    # ------------------------------------------------------------------ #
+    _POOL_SUFFIXES = ('w13', 'w2', 'w13_scale', 'w13_scale_fp32',
+                      'w13_offset', 'w2_scale', 'w2_offset',
+                      'w13_scale_bias', 'w2_scale_bias')
+
+    def _alloc_prefill_pool_slots(self, pool_layer) -> dict:
+        """Allocate ndl prefill-pool slots (w13/w2 + quant attrs) NZ-cast for
+        ONE layer's format. Shared by the main pool (layer 0) and a draft pool
+        (a different-format layer). Returns a dict keyed by suffix."""
+        from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+        ndl = self.num_device_layers
+        dev = pool_layer.w13_weight.device
+        dt = pool_layer.w13_weight.dtype
+        ntotal = self.mc_shard_size
+        pool: dict[str, list] = {s: [] for s in self._POOL_SUFFIXES}
+        for _ in range(ndl):
+            pool['w13'].append(torch.empty(
+                (ntotal,) + tuple(pool_layer.w13_weight.shape[1:]),
+                dtype=dt, device=dev))
+            pool['w2'].append(torch.empty(
+                (ntotal,) + tuple(pool_layer.w2_weight.shape[1:]),
+                dtype=dt, device=dev))
+            for suf, attr in (('w13_scale', 'w13_weight_scale'),
+                              ('w13_scale_fp32', 'w13_weight_scale_fp32'),
+                              ('w13_offset', 'w13_weight_offset'),
+                              ('w2_scale', 'w2_weight_scale'),
+                              ('w2_offset', 'w2_weight_offset'),
+                              ('w13_scale_bias', 'w13_scale_bias'),
+                              ('w2_scale_bias', 'w2_scale_bias')):
+                base = getattr(pool_layer, attr, None)
+                if base is not None:
+                    pool[suf].append(torch.empty(
+                        (ntotal,) + tuple(base.shape[1:]),
+                        dtype=torch.float32 if suf.endswith('_fp32')
+                        else base.dtype, device=dev))
+        # NZ-cast the weight tensors to the device format (mirror the decode
+        # path). bf16/other dtypes skip NZ (no cast branch for them).
+        if dt == torch.int8:
+            for i in range(ndl):
+                pool['w13'][i] = torch_npu.npu_format_cast(
+                    pool['w13'][i], ACL_FORMAT_FRACTAL_NZ)
+                pool['w2'][i] = torch_npu.npu_format_cast(
+                    pool['w2'][i], ACL_FORMAT_FRACTAL_NZ)
+        elif dt == torch.int32:
+            for i in range(ndl):
+                t13, t2 = pool['w13'][i], pool['w2'][i]
+                i8_13 = torch.empty(t13.shape[:-1] + (t13.shape[-1] * 4,),
+                                    dtype=torch.int8, device=dev)
+                i8_2 = torch.empty(t2.shape[:-1] + (t2.shape[-1] * 4,),
+                                   dtype=torch.int8, device=dev)
+                pool['w13'][i] = torch_npu.npu_format_cast(
+                    i8_13, ACL_FORMAT_FRACTAL_NZ).view(torch.int32)
+                pool['w2'][i] = torch_npu.npu_format_cast(
+                    i8_2, ACL_FORMAT_FRACTAL_NZ).view(torch.int32)
+        elif dt == torch.uint8:
+            for i in range(ndl):
+                for k in ('w13', 'w2'):
+                    t = pool[k][i]
+                    t = torch_npu.npu_format_cast(
+                        t.transpose(1, 2).contiguous().view(torch.uint8), 29,
+                        customize_dtype=torch.float8_e4m3fn,
+                        input_dtype=torch_npu.float4_e2m1fn_x2)
+                    pool[k][i] = t.transpose(1, 2)
+        return pool
+
+    def _is_draft_format(self, layer_idx: int) -> bool:
+        """A layer whose on-device expert byte-size differs from layer 0 — e.g.
+        an MTP draft that is bf16/w8a8 while the target is w4a8."""
+        return (layer_idx < len(self.w13_expert_size_bytes)
+                and len(self.w13_expert_size_bytes) > 0
+                and self.w13_expert_size_bytes[layer_idx]
+                != self.w13_expert_size_bytes[0])
+
+    def _pool(self, suffix: str, layer_idx: int) -> list[torch.Tensor]:
+        """Return the prefill-pool list named ``suffix`` for this layer's
+        format: the main pool for target-format layers, a separate draft pool
+        (lazily allocated) for a different-format draft."""
+        if self._is_draft_format(layer_idx):
+            if self._draft_pool is None:
+                logger.info(
+                    "[PREFILL_POOL] allocating separate draft pool for layer "
+                    "%d (expert format differs from target)", layer_idx)
+                self._draft_pool = self._alloc_prefill_pool_slots(
+                    self.moe_layers[layer_idx])
+            return self._draft_pool[suffix]
+        return getattr(self, f'_prefill_{suffix}')
+
     def _init_prefill_pool_data(self, dev, ntotal: int, ndl: int):
         """Load layer 0 weights into all prefill pool slots.
 
@@ -1233,29 +1352,37 @@ class ExpertOffloadManager:
         with torch_npu.npu.stream(self.load_stream):
             w13_sz = self.w13_expert_size_bytes[layer_idx]
             w2_sz = self.w2_expert_size_bytes[layer_idx]
+            # Route to the format-matching pool (main for target, draft pool for
+            # a different-format draft) — a bf16/w8a8 draft can't use the
+            # w4a8-sized main pool.
+            p_w13 = self._pool('w13', layer_idx)
+            p_w2 = self._pool('w2', layer_idx)
             for local_i in range(shard):
                 eid = base + local_i
-                self._prefill_w13[pool_slot].untyped_storage()[local_i * w13_sz : (local_i + 1) * w13_sz].copy_(
+                p_w13[pool_slot].untyped_storage()[local_i * w13_sz : (local_i + 1) * w13_sz].copy_(
                     self._expert_src_storage(layer_idx, eid, 'w13'))
-                self._prefill_w2[pool_slot].untyped_storage()[local_i * w2_sz : (local_i + 1) * w2_sz].copy_(
+                p_w2[pool_slot].untyped_storage()[local_i * w2_sz : (local_i + 1) * w2_sz].copy_(
                     self._expert_src_storage(layer_idx, eid, 'w2'))
             # quant scales / offsets / scale_bias (w4a8) — shard only
-            for scale_name, prefill_list in [("w13_weight_scale", self._prefill_w13_scale),
-                                             ("w2_weight_scale", self._prefill_w2_scale)]:
+            for scale_name, suf in [("w13_weight_scale", "w13_scale"),
+                                    ("w2_weight_scale", "w2_scale")]:
+                prefill_list = self._pool(suf, layer_idx)
                 if pool_slot < len(prefill_list) and scale_name in self.scale_cpu_buffers \
                         and layer_idx < len(self.scale_cpu_buffers[scale_name]):
                     for local_i in range(min(shard, len(self.scale_cpu_buffers[scale_name][layer_idx]))):
                         src = self.scale_cpu_buffers[scale_name][layer_idx][base + local_i]
                         prefill_list[pool_slot][local_i].copy_(src.reshape(prefill_list[pool_slot][local_i].shape))
-            for off_name, prefill_list in [("w13_weight_offset", self._prefill_w13_offset),
-                                           ("w2_weight_offset", self._prefill_w2_offset)]:
+            for off_name, suf in [("w13_weight_offset", "w13_offset"),
+                                  ("w2_weight_offset", "w2_offset")]:
+                prefill_list = self._pool(suf, layer_idx)
                 if pool_slot < len(prefill_list) and off_name in self.offset_cpu_buffers \
                         and layer_idx < len(self.offset_cpu_buffers[off_name]):
                     for local_i in range(min(shard, len(self.offset_cpu_buffers[off_name][layer_idx]))):
                         src = self.offset_cpu_buffers[off_name][layer_idx][base + local_i]
                         prefill_list[pool_slot][local_i].copy_(src.reshape(prefill_list[pool_slot][local_i].shape))
-            for sb_name, prefill_list in [("w13_scale_bias", self._prefill_w13_scale_bias),
-                                          ("w2_scale_bias", self._prefill_w2_scale_bias)]:
+            for sb_name, suf in [("w13_scale_bias", "w13_scale_bias"),
+                                 ("w2_scale_bias", "w2_scale_bias")]:
+                prefill_list = self._pool(suf, layer_idx)
                 if pool_slot < len(prefill_list) and sb_name in self.scale_bias_cpu_buffers \
                         and layer_idx < len(self.scale_bias_cpu_buffers[sb_name]):
                     for local_i in range(min(shard, len(self.scale_bias_cpu_buffers[sb_name][layer_idx]))):

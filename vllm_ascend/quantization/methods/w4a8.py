@@ -593,20 +593,24 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                     layer_idx = mgr.moe_layers.index(layer)
                 except ValueError:
                     layer_idx = 0
-                prefill_slot = layer_idx % len(mgr._prefill_w13)
+                prefill_slot = layer_idx % len(mgr._pool('w13', layer_idx))
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         if use_prefill_pool:
             # Prefill pool holds all experts; swap weight references to the
             # pool and use an identity log2phy. Weight tensors are int32
-            # (liar tensors with NZ storage) matching the decode path.
-            w1 = [mgr._prefill_w13[prefill_slot]]
-            w1_scale = [mgr._prefill_w13_scale[prefill_slot]]
-            w2 = [mgr._prefill_w2[prefill_slot]]
-            w2_scale = [mgr._prefill_w2_scale[prefill_slot]]
-            if mgr._prefill_w13_scale_bias and mgr._prefill_w2_scale_bias:
-                w1_scale_bias = [mgr._prefill_w13_scale_bias[prefill_slot]]
-                w2_scale_bias = [mgr._prefill_w2_scale_bias[prefill_slot]]
+            # (liar tensors with NZ storage) matching the decode path. Route to
+            # the format-matching pool (main for target, draft pool for a
+            # different-format MTP draft).
+            w1 = [mgr._pool('w13', layer_idx)[prefill_slot]]
+            w1_scale = [mgr._pool('w13_scale', layer_idx)[prefill_slot]]
+            w2 = [mgr._pool('w2', layer_idx)[prefill_slot]]
+            w2_scale = [mgr._pool('w2_scale', layer_idx)[prefill_slot]]
+            _w13_sb = mgr._pool('w13_scale_bias', layer_idx)
+            _w2_sb = mgr._pool('w2_scale_bias', layer_idx)
+            if _w13_sb and _w2_sb:
+                w1_scale_bias = [_w13_sb[prefill_slot]]
+                w2_scale_bias = [_w2_sb[prefill_slot]]
             else:
                 w1_scale_bias = None
                 w2_scale_bias = None
