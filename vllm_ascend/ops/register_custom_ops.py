@@ -122,6 +122,21 @@ def _maybe_pad_and_reduce_fake(x: torch.Tensor, is_ep_comm: bool = False) -> tor
     return x
 
 
+def _pad_and_reduce_impl(x: torch.Tensor) -> torch.Tensor:
+    pad_size = _EXTRA_CTX.pad_size
+    if pad_size > 0:
+        x = F.pad(x, (0, 0, 0, pad_size))
+    return tensor_model_parallel_reduce_scatter(x, 0)
+
+
+def _pad_and_reduce_fake(x: torch.Tensor) -> torch.Tensor:
+    return torch.empty(
+        (x.shape[0] // get_tensor_model_parallel_world_size(), *x.shape[1:]),
+        device=x.device,
+        dtype=x.dtype,
+    )
+
+
 def _maybe_all_reduce_tensor_model_parallel_impl(final_hidden_states: torch.Tensor) -> torch.Tensor:
     moe_comm_type = _EXTRA_CTX.moe_comm_type
     if (
@@ -214,6 +229,14 @@ direct_register_custom_op(
     op_name="maybe_pad_and_reduce",
     op_func=_maybe_pad_and_reduce_impl,
     fake_impl=_maybe_pad_and_reduce_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="pad_and_reduce",
+    op_func=_pad_and_reduce_impl,
+    fake_impl=_pad_and_reduce_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )

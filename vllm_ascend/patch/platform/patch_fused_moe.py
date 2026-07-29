@@ -31,6 +31,7 @@ import vllm.model_executor.layers.fused_moe as _fused_moe_pkg
 import vllm.model_executor.layers.fused_moe.layer as _fused_moe_layer
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ops.activation import SituActivationConfig
 from vllm_ascend.utils import is_310p
 
 # Capture the real original before fused_moe.py's module-level code runs.
@@ -45,6 +46,21 @@ else:
 def _ascend_FusedMoE(*args, runner_cls=None, runner_args=None, **kwargs):
     if runner_cls is None:
         runner_cls = _DefaultAscendMoERunner
+    activation = kwargs.get("activation")
+    if isinstance(activation, SituActivationConfig):
+        runner_args = dict(runner_args) if runner_args is not None else {}
+        runtime_activation = runner_args.get("runtime_activation")
+        if runtime_activation is not None and runtime_activation != activation:
+            raise ValueError(
+                "Conflicting Ascend MoE runtime activations: "
+                f"runner_args={runtime_activation!r}, activation={activation!r}."
+            )
+        runner_args["runtime_activation"] = activation
+        # Upstream FusedMoE only accepts its built-in activation names and uses
+        # the selected activation to determine whether expert weights are
+        # gated. SiTU has the same gated layout as SiLU; the Ascend runner
+        # receives the real SiTU parameters separately above.
+        kwargs["activation"] = "silu"
     # RoutedExperts allocates its parameters before AscendMoERunner is
     # constructed. Propagate Ascend EPLB capacity into the upstream factory so
     # redundant expert slots are present when weights are created and loaded.

@@ -58,8 +58,9 @@ class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
 
     quant_type: QuantType = QuantType.W4A16MXFP
 
-    def __init__(self) -> None:
+    def __init__(self, *, use_weight_packed: bool = False) -> None:
         ensure_mxfp4_moe_available("W4A16_MXFP4 MoE quantization")
+        self.use_weight_packed = use_weight_packed
         self.ep_group = get_ep_group()
 
         vllm_config = get_current_vllm_config()
@@ -79,13 +80,15 @@ class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
         params_dtype: torch.dtype,
     ) -> dict[str, Any]:
         param_dict = {}
-        param_dict["w13_weight"] = torch.empty(
+        w13_weight_name = "w13_weight_packed" if self.use_weight_packed else "w13_weight"
+        w2_weight_name = "w2_weight_packed" if self.use_weight_packed else "w2_weight"
+        param_dict[w13_weight_name] = torch.empty(
             num_experts,
             2 * intermediate_size_per_partition,
             hidden_sizes // 2,
             dtype=torch.uint8,
         )
-        param_dict["w2_weight"] = torch.empty(
+        param_dict[w2_weight_name] = torch.empty(
             num_experts,
             hidden_sizes,
             intermediate_size_per_partition // 2,
@@ -178,8 +181,14 @@ class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
                 hidden_states=x,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
+                w1=getattr(
+                    layer,
+                    "w13_weight_packed" if self.use_weight_packed else "w13_weight",
+                ),
+                w2=getattr(
+                    layer,
+                    "w2_weight_packed" if self.use_weight_packed else "w2_weight",
+                ),
                 quant_type=self.quant_type,
                 dynamic_eplb=self.dynamic_eplb,
                 expert_map=expert_map,
@@ -201,15 +210,23 @@ class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
         )
 
     def process_weights_after_loading(self, layer):
-        layer.w13_weight.data = unpack_uint8_to_fp4_return_float32(layer.w13_weight.data)
-        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
-        layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, 29, customize_dtype=torch.bfloat16)
-        layer.w13_weight.data = torch_npu.npu_convert_weight_to_int4pack(layer.w13_weight.data).contiguous()
+        w13_weight = getattr(
+            layer,
+            "w13_weight_packed" if self.use_weight_packed else "w13_weight",
+        )
+        w2_weight = getattr(
+            layer,
+            "w2_weight_packed" if self.use_weight_packed else "w2_weight",
+        )
+        w13_weight.data = unpack_uint8_to_fp4_return_float32(w13_weight.data)
+        w13_weight.data = w13_weight.data.transpose(1, 2)
+        w13_weight.data = torch_npu.npu_format_cast(w13_weight.data, 29, customize_dtype=torch.bfloat16)
+        w13_weight.data = torch_npu.npu_convert_weight_to_int4pack(w13_weight.data).contiguous()
 
-        layer.w2_weight.data = unpack_uint8_to_fp4_return_float32(layer.w2_weight.data)
-        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
-        layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, 29, customize_dtype=torch.bfloat16)
-        layer.w2_weight.data = torch_npu.npu_convert_weight_to_int4pack(layer.w2_weight.data).contiguous()
+        w2_weight.data = unpack_uint8_to_fp4_return_float32(w2_weight.data)
+        w2_weight.data = w2_weight.data.transpose(1, 2)
+        w2_weight.data = torch_npu.npu_format_cast(w2_weight.data, 29, customize_dtype=torch.bfloat16)
+        w2_weight.data = torch_npu.npu_convert_weight_to_int4pack(w2_weight.data).contiguous()
 
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2).contiguous()
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2).contiguous()

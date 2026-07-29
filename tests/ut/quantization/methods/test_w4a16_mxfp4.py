@@ -33,6 +33,18 @@ class TestAscendW4A16MXFP4MoEMethod(TestBase):
         )
         self.assertEqual(result["w2_weight"].shape, (self.num_experts, self.hidden_size, self.intermediate_size // 2))
 
+    def test_get_weight_uses_packed_checkpoint_names(self):
+        self.scheme.use_weight_packed = True
+
+        result = self.scheme.get_weight(
+            self.num_experts,
+            self.intermediate_size,
+            self.hidden_size,
+            torch.bfloat16,
+        )
+
+        self.assertEqual(set(result), {"w13_weight_packed", "w2_weight_packed"})
+
     def test_get_dynamic_quant_param_based_on_group_size(self):
         group_sizes = [16, 32, 64]
         for gs in group_sizes:
@@ -61,6 +73,35 @@ class TestAscendW4A16MXFP4MoEMethod(TestBase):
         self.assertEqual(layer.w13_weight_scale.shape, (8, 4, 256))
         self.assertEqual(layer.w2_weight.shape, (8, 256, 128))
         self.assertEqual(layer.w2_weight_scale.shape, (8, 8, 128))
+
+    @patch("vllm_ascend.quantization.methods.w4a16_mxfp4.torch_npu")
+    def test_process_weights_uses_packed_checkpoint_names(self, mock_torch_npu):
+        mock_torch_npu.npu_format_cast.side_effect = lambda x, *args, **kwargs: x
+        mock_torch_npu.npu_convert_weight_to_int4pack.side_effect = lambda x: x
+        self.scheme.use_weight_packed = True
+
+        layer = nn.Module()
+        layer.w13_weight_packed = nn.Parameter(
+            torch.randint(0, 255, (8, 256, 64), dtype=torch.uint8),
+            requires_grad=False,
+        )
+        layer.w2_weight_packed = nn.Parameter(
+            torch.randint(0, 255, (8, 128, 128), dtype=torch.uint8),
+            requires_grad=False,
+        )
+        layer.w13_weight_scale = nn.Parameter(
+            torch.randint(0, 255, (8, 256, 4), dtype=torch.uint8),
+            requires_grad=False,
+        )
+        layer.w2_weight_scale = nn.Parameter(
+            torch.randint(0, 255, (8, 128, 8), dtype=torch.uint8),
+            requires_grad=False,
+        )
+
+        self.scheme.process_weights_after_loading(layer)
+
+        self.assertEqual(layer.w13_weight_packed.shape, (8, 128, 256))
+        self.assertEqual(layer.w2_weight_packed.shape, (8, 256, 128))
 
     @patch("vllm_ascend.quantization.methods.w4a16_mxfp4.torch_npu")
     @patch("vllm_ascend.quantization.methods.w4a16_mxfp4._EXTRA_CTX")

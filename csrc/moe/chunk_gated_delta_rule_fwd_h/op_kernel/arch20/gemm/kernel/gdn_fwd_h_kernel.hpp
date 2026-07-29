@@ -174,7 +174,8 @@ public:
         kHeadDim = gdnFwdHTilingData->kHeadDim;
         vHeadDim = gdnFwdHTilingData->vHeadDim;
         chunkSize = gdnFwdHTilingData->chunkSize;
-        initalStateStride0 = gdnFwdHTilingData->initalStateStride0;
+        // Contiguous state layout: stride equals vHeadDim (initalStateStride0 attr removed).
+        initalStateStride0 = gdnFwdHTilingData->vHeadDim;
         useInitialState = gdnFwdHTilingData->useInitialState;
         storeFinalState = gdnFwdHTilingData->storeFinalState;
         isVariedLen = gdnFwdHTilingData->isVariedLen;

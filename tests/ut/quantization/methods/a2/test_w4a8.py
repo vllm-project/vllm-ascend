@@ -323,6 +323,18 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         with self.assertRaisesRegex(AssertionError, re.escape(expected_message)):
             self.quant_method.pack_to_int32(weight)
 
+    def test_pack_to_int32_preserves_prepacked_int4_bytes(self):
+        self.quant_method.new_quant_version = True
+        # Each int8 byte already contains two int4 values. The ABI conversion
+        # must only reinterpret four adjacent bytes as int32, not repack them.
+        weight = torch.tensor([[[0x21, 0x43, 0x65, 0x07]]], dtype=torch.int8)
+
+        packed = self.quant_method.pack_to_int32(weight)
+
+        self.assertEqual(packed.dtype, torch.int32)
+        self.assertEqual(packed.shape, torch.Size([1, 1, 1]))
+        torch.testing.assert_close(packed.view(torch.int8), weight)
+
     def test_get_weight_compressed_tensors(self):
         self.quant_method.quant_method = COMPRESSED_TENSORS_METHOD
         result = self.quant_method.get_weight(self.experts, self.input_size, self.output_size, torch.bfloat16)

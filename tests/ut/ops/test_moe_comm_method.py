@@ -4,10 +4,13 @@ import torch
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from tests.ut.base import TestBase
+from vllm_ascend.ops.activation import SituActivationConfig
 from vllm_ascend.ops.fused_moe.moe_comm_method import (
     AllGatherCommImpl,
     AlltoAllCommImpl,
+    FusedMC2CommImpl,
     MC2CommImpl,
+    MoECommMethod,
 )
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEAllGatherCombineMetadata,
@@ -53,6 +56,61 @@ class TestMoECommMethod(TestBase):
     def tearDown(self):
         self._patch_get_ascend_config.stop()
         self._patch_get_ascend_config_module.stop()
+
+    def test_fused_mc2_situ_falls_back_to_decomposed_mc2_pipeline(self):
+        comm_impl = object.__new__(FusedMC2CommImpl)
+        fused_input = MoEFusedExpertsInput(
+            hidden_states=torch.randn(2, 4),
+            topk_weights=torch.ones(2, 1),
+            topk_ids=torch.zeros(2, 1, dtype=torch.int32),
+            weights=MoEWeights(
+                w1=[torch.randn(1, 4, 4)],
+                w2=[torch.randn(1, 2, 4)],
+            ),
+            routing=MoERoutingParams(
+                expert_map=None,
+                global_redundant_expert_num=0,
+                mc2_mask=None,
+                apply_router_weight_on_input=False,
+            ),
+            quant=MoEQuantParams(),
+            activation=SituActivationConfig(beta=4.0, linear_beta=25.0),
+        )
+        expected = object()
+
+        with patch.object(MoECommMethod, "fused_experts", return_value=expected) as mock_decomposed:
+            result = comm_impl.fused_experts(fused_input)
+
+        self.assertIs(result, expected)
+        mock_decomposed.assert_called_once_with(fused_input)
+
+    def test_fused_mc2_unquantized_non_situ_does_not_fall_back(self):
+        comm_impl = object.__new__(FusedMC2CommImpl)
+        fused_input = MoEFusedExpertsInput(
+            hidden_states=torch.randn(2, 4),
+            topk_weights=torch.ones(2, 1),
+            topk_ids=torch.zeros(2, 1, dtype=torch.int32),
+            weights=MoEWeights(
+                w1=[torch.randn(1, 4, 4)],
+                w2=[torch.randn(1, 2, 4)],
+            ),
+            routing=MoERoutingParams(
+                expert_map=None,
+                global_redundant_expert_num=0,
+                mc2_mask=None,
+                apply_router_weight_on_input=False,
+            ),
+            quant=MoEQuantParams(),
+            activation=None,
+        )
+
+        with (
+            patch.object(MoECommMethod, "fused_experts") as mock_decomposed,
+            self.assertRaisesRegex(AssertionError, "w1_scale and w2_scale"),
+        ):
+            comm_impl.fused_experts(fused_input)
+
+        mock_decomposed.assert_not_called()
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather")

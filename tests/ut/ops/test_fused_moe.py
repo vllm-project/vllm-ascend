@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -7,6 +8,7 @@ import torch
 from torch import nn
 
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ops.activation import AscendSituAndMul, SituActivationConfig
 from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
 from vllm_ascend.ops.fused_moe.fused_moe import (
     AscendMoERunner,
@@ -44,6 +46,60 @@ def _build_unquantized_method(*, dynamic_eplb: bool = False):
     method.moe = SimpleNamespace(has_bias=False)
     method._maybe_pad_weight = MagicMock(side_effect=lambda weight: weight)
     return method
+
+
+def test_ascend_runner_prefers_runtime_situ_activation():
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner.routed_experts = SimpleNamespace(activation="upstream-activation")
+    runner._ascend_runtime_activation = SituActivationConfig(
+        beta=4.0,
+        linear_beta=25.0,
+    )
+
+    assert runner.activation == SituActivationConfig(
+        beta=4.0,
+        linear_beta=25.0,
+    )
+
+
+def test_ascend_runner_uses_upstream_activation_by_default():
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner.routed_experts = SimpleNamespace(activation="upstream-activation")
+    runner._ascend_runtime_activation = None
+
+    assert runner.activation == "upstream-activation"
+
+
+def test_fused_moe_factory_bridges_situ_activation(monkeypatch):
+    from vllm_ascend.patch.platform import patch_fused_moe
+
+    captured = {}
+
+    def fake_fused_moe(*args, **kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(patch_fused_moe, "_original_FusedMoE", fake_fused_moe)
+    monkeypatch.setattr(
+        patch_fused_moe,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            eplb_config=SimpleNamespace(
+                dynamic_eplb=False,
+                expert_map_path=None,
+                num_redundant_experts=0,
+            )
+        ),
+    )
+    activation = SituActivationConfig(beta=4.0, linear_beta=25.0)
+
+    patch_fused_moe._ascend_FusedMoE(
+        activation=activation,
+        runner_cls=object,
+    )
+
+    assert captured["activation"] == "silu"
+    assert captured["runner_args"]["runtime_activation"] is activation
 
 
 @pytest.mark.parametrize(
@@ -206,6 +262,188 @@ def test_shared_experts_part2_applies_optional_gate(with_gate):
     if with_gate:
         expected = expected * 0.5
     torch.testing.assert_close(output, expected)
+
+
+def test_unquantized_shared_situ_uses_split_bf16_path(monkeypatch):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
+    gate_up = torch.randn(2, 8, dtype=torch.bfloat16)
+    down_out = torch.randn(2, 4, dtype=torch.bfloat16)
+    runner._shared_experts = SimpleNamespace(
+        gate_up_proj=_Projection(),
+        down_proj=_Projection(),
+        act_fn=AscendSituAndMul(beta=4.0, linear_beta=25.0),
+    )
+    runner._shared_experts_part1 = MagicMock(return_value=gate_up)
+    runner._shared_experts_part2 = MagicMock(return_value=down_out)
+    runner.quant_type = QuantType.W4A8MXFP
+    runner.multistream_overlap_shared_expert = False
+    events = fused_moe_module.FusedMoEEvents(
+        before_routed_experts=MagicMock(),
+        before_dispatch=MagicMock(),
+        before_gmm2=MagicMock(),
+        before_combine=MagicMock(),
+    )
+
+    monkeypatch.setattr(fused_moe_module, "npu_stream_switch", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(fused_moe_module, "shared_expert_dp_enabled", lambda: True)
+    monkeypatch.setattr(fused_moe_module, "shared_experts_calculation_stream", MagicMock())
+    monkeypatch.setattr(
+        fused_moe_module.torch.npu,
+        "current_stream",
+        MagicMock(return_value=MagicMock()),
+    )
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(
+            flash_comm_v1_enabled=False,
+            moe_comm_type=MoECommType.ALLGATHER,
+        ),
+    )
+
+    output = runner._forward_shared_experts(hidden_states, events)
+
+    assert output is down_out
+    runner._shared_experts_part1.assert_called_once_with(hidden_states)
+    runner._shared_experts_part2.assert_called_once_with(hidden_states, gate_up)
+
+
+def test_w8a8_shared_situ_uses_dequant_situ_quant(monkeypatch):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
+    gate_up = torch.ones(2, 4, dtype=torch.int32)
+    quantized_input = torch.ones(2, 4, dtype=torch.int8)
+    input_scale = torch.ones(2, dtype=torch.float32)
+    quantized_situ = torch.ones(2, 2, dtype=torch.int8)
+    situ_scale = torch.ones(2, dtype=torch.float32)
+    down_out = torch.randn(2, 4, dtype=torch.bfloat16)
+    gate_up_proj = MagicMock()
+    gate_up_proj.weight = torch.ones(4, 4, dtype=torch.int8)
+    gate_up_proj.weight_scale = torch.ones(4, dtype=torch.bfloat16)
+    gate_up_proj.weight_scale_fp32 = torch.ones(4, dtype=torch.float32)
+    down_proj = MagicMock()
+    down_proj.weight = torch.ones(2, 4, dtype=torch.int8)
+    down_proj.weight_scale = torch.ones(4, dtype=torch.bfloat16)
+    runner._shared_experts = SimpleNamespace(
+        gate_up_proj=gate_up_proj,
+        down_proj=down_proj,
+        act_fn=AscendSituAndMul(beta=4.0, linear_beta=25.0),
+    )
+    runner.quant_type = QuantType.W4A8
+    runner.multistream_overlap_shared_expert = False
+    stream = MagicMock()
+    events = fused_moe_module.FusedMoEEvents(
+        before_routed_experts=MagicMock(),
+        before_dispatch=MagicMock(),
+        before_gmm2=MagicMock(),
+        before_combine=MagicMock(),
+    )
+    fast_dynamic_quant = MagicMock(return_value=(quantized_input, input_scale))
+    fast_quant_matmul = MagicMock(side_effect=[gate_up, down_out])
+    custom_ops = SimpleNamespace(
+        dequant_situ_quant=MagicMock(return_value=(quantized_situ, situ_scale)),
+    )
+
+    monkeypatch.setattr(fused_moe_module, "npu_stream_switch", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(fused_moe_module, "shared_expert_dp_enabled", lambda: True)
+    monkeypatch.setattr(fused_moe_module, "shared_experts_calculation_stream", MagicMock())
+    monkeypatch.setattr(fused_moe_module.torch.npu, "current_stream", MagicMock(return_value=stream))
+    monkeypatch.setattr(fused_moe_module.torch_npu, "npu_dynamic_quant", fast_dynamic_quant, raising=False)
+    monkeypatch.setattr(fused_moe_module.torch_npu, "npu_quant_matmul", fast_quant_matmul)
+    monkeypatch.setattr(fused_moe_module.torch.ops, "_C_ascend", custom_ops)
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(
+            flash_comm_v1_enabled=False,
+            moe_comm_type=MoECommType.ALLGATHER,
+        ),
+    )
+
+    output = runner._forward_shared_experts(hidden_states, events)
+
+    torch.testing.assert_close(output, down_out)
+    gate_up_proj.assert_not_called()
+    down_proj.assert_not_called()
+    fast_dynamic_quant.assert_called_once_with(hidden_states)
+    assert fast_quant_matmul.call_count == 2
+    situ_call = custom_ops.dequant_situ_quant.call_args.kwargs
+    assert situ_call["x"] is gate_up
+    assert situ_call["weight_scale"] is gate_up_proj.weight_scale_fp32
+    assert situ_call["activation_scale"] is input_scale
+    assert situ_call["beta"] == 4.0
+    assert situ_call["linear_beta"] == 25.0
+
+
+@pytest.mark.parametrize("quant_type", [QuantType.W4A8MXFP, QuantType.W8A8MXFP])
+def test_mxfp_shared_situ_uses_situ_mx_quant(monkeypatch, quant_type):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
+    quantized_input = torch.ones(2, 4, dtype=torch.float8_e4m3fn)
+    input_scale = torch.ones(2, 1, dtype=torch.float32)
+    gate_up = torch.randn(2, 4, dtype=torch.bfloat16)
+    quantized_situ = torch.ones(2, 2, dtype=torch.float8_e4m3fn)
+    situ_scale = torch.ones(2, 1, dtype=torch.float32)
+    down_out = torch.randn(2, 4, dtype=torch.bfloat16)
+    gate_up_proj = MagicMock(return_value=(gate_up, None))
+    gate_up_proj.weight_scale = torch.ones(1)
+    down_proj = MagicMock(return_value=(down_out, None))
+    down_proj.weight_scale = torch.ones(1)
+    runner._shared_experts = SimpleNamespace(
+        gate_up_proj=gate_up_proj,
+        down_proj=down_proj,
+        act_fn=AscendSituAndMul(beta=4.0, linear_beta=25.0),
+    )
+    runner.quant_type = quant_type
+    runner.multistream_overlap_shared_expert = False
+    events = fused_moe_module.FusedMoEEvents(
+        before_routed_experts=MagicMock(),
+        before_dispatch=MagicMock(),
+        before_gmm2=MagicMock(),
+        before_combine=MagicMock(),
+    )
+    custom_ops = SimpleNamespace(
+        situ_mx_quant=MagicMock(return_value=(quantized_situ, situ_scale)),
+    )
+
+    monkeypatch.setattr(fused_moe_module, "npu_stream_switch", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(fused_moe_module, "shared_expert_dp_enabled", lambda: True)
+    monkeypatch.setattr(fused_moe_module, "shared_experts_calculation_stream", MagicMock())
+    monkeypatch.setattr(
+        fused_moe_module.torch.npu,
+        "current_stream",
+        MagicMock(return_value=MagicMock()),
+    )
+    monkeypatch.setattr(
+        fused_moe_module.torch_npu,
+        "npu_dynamic_mx_quant",
+        MagicMock(return_value=(quantized_input, input_scale)),
+        raising=False,
+    )
+    monkeypatch.setattr(fused_moe_module.torch.ops, "_C_ascend", custom_ops)
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(
+            flash_comm_v1_enabled=False,
+            moe_comm_type=MoECommType.ALLGATHER,
+        ),
+    )
+
+    output = runner._forward_shared_experts(hidden_states, events)
+
+    assert output is down_out
+    gate_up_proj.assert_called_once_with((quantized_input, input_scale))
+    down_proj.assert_called_once_with((quantized_situ, situ_scale))
+    situ_call = custom_ops.situ_mx_quant.call_args.kwargs
+    assert situ_call["x"] is gate_up
+    assert situ_call["beta"] == 4.0
+    assert situ_call["linear_beta"] == 25.0
+    assert situ_call["dst_type"] == 36
 
 
 @pytest.mark.parametrize("has_shared_experts", [False, True])
