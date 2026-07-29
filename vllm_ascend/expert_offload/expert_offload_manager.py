@@ -141,6 +141,12 @@ class ExpertOffloadManager:
 
         self.load_stream = torch_npu.npu.Stream()
 
+        self._init_prefill_pool_state()
+        self._is_prefetch: bool = False
+        self._init_prefetch_state()
+
+    def _init_prefill_pool_state(self) -> None:
+        """Prefill-pool attribute init (ndl layers × all experts on NPU)."""
         # Prefill pool: ndl layers × all experts on NPU, shared round-robin
         self._prefill_w13: list[torch.Tensor] = []
         self._prefill_w2: list[torch.Tensor] = []
@@ -157,8 +163,9 @@ class ExpertOffloadManager:
         self._prefill_log2phy: torch.Tensor = None              # identity [0..127]
         self._prefill_initialized: bool = False
         self._skip_prefill: bool = False  # set during profile runs
-        self._is_prefetch: bool = False  
 
+    def _init_prefetch_state(self) -> None:
+        """Next-layer expert-prefetch infrastructure init."""
         # Next-layer expert prefetch infrastructure
         self._prefetch_stream = torch_npu.npu.Stream()
         # NPU copy of gate weights for graph-capturable on-device prediction
@@ -898,89 +905,12 @@ class ExpertOffloadManager:
         ntotal = self.mc_shard_size
 
         for _ in range(ndl):
-            # w13: [ntotal, hidden_size, w13_up_dim] — match decode layer shape
-            w13_shape = (ntotal,) + tuple(pool_layer.w13_weight.shape[1:])
-            self._prefill_w13.append(
-                torch.empty(w13_shape, dtype=dt, device=dev))
-
-            # w2: [ntotal, hidden_size, intermediate_size_per_partition]
-            w2_shape = (ntotal,) + tuple(pool_layer.w2_weight.shape[1:])
-            self._prefill_w2.append(
-                torch.empty(w2_shape, dtype=dt, device=dev))
-
-            # W8A8 scale/offset (optional)
-            if hasattr(pool_layer, 'w13_weight_scale'):
-                s13_shape = (ntotal,) + tuple(pool_layer.w13_weight_scale.shape[1:])
-                self._prefill_w13_scale.append(
-                    torch.empty(s13_shape, dtype=pool_layer.w13_weight_scale.dtype, device=dev))
-            if hasattr(pool_layer, 'w13_weight_scale_fp32'):
-                fp32_13_shape = (ntotal,) + tuple(pool_layer.w13_weight_scale_fp32.shape[1:])
-                self._prefill_w13_scale_fp32.append(
-                    torch.empty(fp32_13_shape, dtype=torch.float32, device=dev))
-            if hasattr(pool_layer, 'w13_weight_offset'):
-                o13_shape = (ntotal,) + tuple(pool_layer.w13_weight_offset.shape[1:])
-                self._prefill_w13_offset.append(
-                    torch.empty(o13_shape, dtype=pool_layer.w13_weight_offset.dtype, device=dev))
-            if hasattr(pool_layer, 'w2_weight_scale'):
-                s2_shape = (ntotal,) + tuple(pool_layer.w2_weight_scale.shape[1:])
-                self._prefill_w2_scale.append(
-                    torch.empty(s2_shape, dtype=pool_layer.w2_weight_scale.dtype, device=dev))
-            if hasattr(pool_layer, 'w2_weight_offset'):
-                o2_shape = (ntotal,) + tuple(pool_layer.w2_weight_offset.shape[1:])
-                self._prefill_w2_offset.append(
-                    torch.empty(o2_shape, dtype=pool_layer.w2_weight_offset.dtype, device=dev))
-            # W4A8_DYNAMIC scale_bias (optional, per-channel new_quant_version)
-            if hasattr(pool_layer, 'w13_scale_bias'):
-                sb13_shape = (ntotal,) + tuple(pool_layer.w13_scale_bias.shape[1:])
-                self._prefill_w13_scale_bias.append(
-                    torch.empty(sb13_shape, dtype=pool_layer.w13_scale_bias.dtype, device=dev))
-            if hasattr(pool_layer, 'w2_scale_bias'):
-                sb2_shape = (ntotal,) + tuple(pool_layer.w2_scale_bias.shape[1:])
-                self._prefill_w2_scale_bias.append(
-                    torch.empty(sb2_shape, dtype=pool_layer.w2_scale_bias.dtype, device=dev))
+            self._alloc_prefill_pool_slot(pool_layer, dev, dt, ntotal)
 
         # Cast prefill pool weight tensors to the on-device format (kernel
         # requires it). Must happen BEFORE loading data — same order as decode
         # path: create → format-cast → copy_(cpu → npu).
-        if dt == torch.int8:
-            from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
-            for i in range(ndl):
-                self._prefill_w13[i] = torch_npu.npu_format_cast(
-                    self._prefill_w13[i], ACL_FORMAT_FRACTAL_NZ)
-                self._prefill_w2[i] = torch_npu.npu_format_cast(
-                    self._prefill_w2[i], ACL_FORMAT_FRACTAL_NZ)
-        elif dt == torch.int32:
-            # W4A8_DYNAMIC: the device path creates int8, NZ-casts, then views
-            # as int32 (pack_to_int32). An empty int32 tensor cannot be
-            # NZ-cast directly ("Cannot resize storage without base format"),
-            # so rebuild each pool tensor the device way: allocate the int8
-            # backing tensor with the expanded shape, NZ-cast it, then view as
-            # int32. The int8 last-dim is 4x the int32 last-dim.
-            from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
-            for i in range(ndl):
-                t13 = self._prefill_w13[i]
-                t2 = self._prefill_w2[i]
-                i8_shape13 = t13.shape[:-1] + (t13.shape[-1] * 4,)
-                i8_shape2 = t2.shape[:-1] + (t2.shape[-1] * 4,)
-                t13_i8 = torch.empty(i8_shape13, dtype=torch.int8, device=dev)
-                t2_i8 = torch.empty(i8_shape2, dtype=torch.int8, device=dev)
-                t13_nz = torch_npu.npu_format_cast(t13_i8, ACL_FORMAT_FRACTAL_NZ)
-                t2_nz = torch_npu.npu_format_cast(t2_i8, ACL_FORMAT_FRACTAL_NZ)
-                self._prefill_w13[i] = t13_nz.view(torch.int32)
-                self._prefill_w2[i] = t2_nz.view(torch.int32)
-        elif dt == torch.uint8:
-            # W4A8_MXFP: mirror the device process (cast29 on the pre-transpose
-            # shape, then transpose) so the pool holds the same byte layout as
-            # the decode-path device slots.
-            for i in range(ndl):
-                for attr in ("_prefill_w13", "_prefill_w2"):
-                    t = getattr(self, attr)[i]
-                    t = torch_npu.npu_format_cast(
-                        t.transpose(1, 2).contiguous().view(torch.uint8), 29,
-                        customize_dtype=torch.float8_e4m3fn,
-                        input_dtype=torch_npu.float4_e2m1fn_x2,
-                    )
-                    getattr(self, attr)[i] = t.transpose(1, 2)
+        self._cast_prefill_pool_format(dev, dt)
 
         # Prefill log2phy: identity — all experts mapped to their slots
         self._prefill_log2phy = torch.arange(ntotal, dtype=torch.int32, device=dev)
@@ -996,6 +926,76 @@ class ExpertOffloadManager:
                     ndl, ntotal,
                     tuple(self._prefill_w13[0].shape),
                     tuple(self._prefill_w2[0].shape))
+
+    def _alloc_prefill_pool_slot(self, pool_layer, dev, dt, ntotal: int):
+        """Append one prefill-pool slot (weights always; scales/offsets/scale_bias
+        only if the layer carries them). Weights use the layer dtype `dt`;
+        per-channel fp32 scales use float32; the rest use their source dtype."""
+        # (target_attr, source_attr, dtype_override)
+        quant_specs = [
+            ("_prefill_w13_scale", "w13_weight_scale", None),
+            ("_prefill_w13_scale_fp32", "w13_weight_scale_fp32", torch.float32),
+            ("_prefill_w13_offset", "w13_weight_offset", None),
+            ("_prefill_w2_scale", "w2_weight_scale", None),
+            ("_prefill_w2_offset", "w2_weight_offset", None),
+            ("_prefill_w13_scale_bias", "w13_scale_bias", None),
+            ("_prefill_w2_scale_bias", "w2_scale_bias", None),
+        ]
+        self._prefill_w13.append(torch.empty(
+            (ntotal,) + tuple(pool_layer.w13_weight.shape[1:]), dtype=dt, device=dev))
+        self._prefill_w2.append(torch.empty(
+            (ntotal,) + tuple(pool_layer.w2_weight.shape[1:]), dtype=dt, device=dev))
+        for tgt, src, dtype_override in quant_specs:
+            if not hasattr(pool_layer, src):
+                continue
+            src_t = getattr(pool_layer, src)
+            dtype = dtype_override if dtype_override is not None else src_t.dtype
+            getattr(self, tgt).append(torch.empty(
+                (ntotal,) + tuple(src_t.shape[1:]), dtype=dtype, device=dev))
+
+    def _cast_prefill_pool_format(self, dev, dt):
+        """Cast prefill-pool weight tensors to the on-device (kernel) format.
+
+        Must run BEFORE data is loaded (same create → format-cast ordering as
+        the decode path). dtype-dispatched:
+          - int8 (W8A8): straight FRACTAL_NZ cast.
+          - int32 (W4A8_DYNAMIC): rebuild via int8 backing → NZ → view int32
+            (an empty int32 tensor can't be NZ-cast directly).
+          - uint8 (W4A8_MXFP): cast29 on the pre-transpose shape, then transpose.
+        """
+        n = len(self._prefill_w13)
+        if dt == torch.int8:
+            from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+            for i in range(n):
+                self._prefill_w13[i] = torch_npu.npu_format_cast(
+                    self._prefill_w13[i], ACL_FORMAT_FRACTAL_NZ)
+                self._prefill_w2[i] = torch_npu.npu_format_cast(
+                    self._prefill_w2[i], ACL_FORMAT_FRACTAL_NZ)
+        elif dt == torch.int32:
+            from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+            for i in range(n):
+                t13 = self._prefill_w13[i]
+                t2 = self._prefill_w2[i]
+                t13_nz = torch_npu.npu_format_cast(
+                    torch.empty(t13.shape[:-1] + (t13.shape[-1] * 4,),
+                                dtype=torch.int8, device=dev),
+                    ACL_FORMAT_FRACTAL_NZ)
+                t2_nz = torch_npu.npu_format_cast(
+                    torch.empty(t2.shape[:-1] + (t2.shape[-1] * 4,),
+                                dtype=torch.int8, device=dev),
+                    ACL_FORMAT_FRACTAL_NZ)
+                self._prefill_w13[i] = t13_nz.view(torch.int32)
+                self._prefill_w2[i] = t2_nz.view(torch.int32)
+        elif dt == torch.uint8:
+            for i in range(n):
+                for attr in ("_prefill_w13", "_prefill_w2"):
+                    t = getattr(self, attr)[i]
+                    t = torch_npu.npu_format_cast(
+                        t.transpose(1, 2).contiguous().view(torch.uint8), 29,
+                        customize_dtype=torch.float8_e4m3fn,
+                        input_dtype=torch_npu.float4_e2m1fn_x2,
+                    )
+                    getattr(self, attr)[i] = t.transpose(1, 2)
 
     def _init_prefill_pool_data(self, dev, ntotal: int, ndl: int):
         """Load layer 0 weights into all prefill pool slots.
