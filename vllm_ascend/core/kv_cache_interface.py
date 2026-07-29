@@ -32,6 +32,18 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     cache_sparse_sfa_c8: bool = False
 
     @property
+    def storage_block_size(self) -> int:
+        """Return the physical block size consumed by Ascend kernels.
+
+        DeepSeek-V4's ``compress_ratio`` controls how many scheduler tokens
+        advance one compressed-cache token.  Ascend's cache manager and DSA
+        metadata already apply that mapping, so shrinking the physical page a
+        second time (the upstream MLA default) would under-allocate C4 caches
+        and reduce C128 pages to zero for a 32-token manager block.
+        """
+        return self.block_size
+
+    @property
     def page_size_bytes(self) -> int:
         return (
             self.block_size

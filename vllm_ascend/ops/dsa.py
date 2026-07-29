@@ -244,17 +244,22 @@ def _build_kv_cache(self, forward_context):
             compress_kv_cache = compress_kv_cache[virtual_engine]
     if self.compress_ratio == 4:
         indexer_state_cache = self.indexer.compressor.state_cache.kv_cache
+        indexer_cache_components = get_kvcache_components(
+            self.indexer.k_cache.kv_cache,
+        )
         if get_ascend_device_type() in {AscendDeviceType.A5}:
-            indexer_k_cache, indexer_scale_cache, indexer_full_cache = (
-                self.indexer.k_cache.kv_cache[0][0],
-                self.indexer.k_cache.kv_cache[0][1],
-                self.indexer.k_cache.kv_cache[0][2],
-            )
+            if len(indexer_cache_components) != 3:
+                raise ValueError(
+                    "A5 DSA indexer cache must expose key, scale and full "
+                    f"components, got {len(indexer_cache_components)}."
+                )
+            indexer_k_cache, indexer_scale_cache, indexer_full_cache = indexer_cache_components
         else:
-            indexer_k_cache, indexer_scale_cache = (
-                self.indexer.k_cache.kv_cache[0][0],
-                self.indexer.k_cache.kv_cache[0][1],
-            )
+            if len(indexer_cache_components) != 2:
+                raise ValueError(
+                    f"DSA indexer cache must expose key and scale components, got {len(indexer_cache_components)}."
+                )
+            indexer_k_cache, indexer_scale_cache = indexer_cache_components
 
     if get_ascend_device_type() in {AscendDeviceType.A5}:
         kv_cache = tuple(
@@ -292,3 +297,17 @@ def unfold_kvcache(kvcache):
     while isinstance(kvcache, list) and len(kvcache) == 1:
         kvcache = kvcache[0]
     return kvcache
+
+
+def get_kvcache_components(
+    kvcache: torch.Tensor | list | tuple,
+) -> tuple[torch.Tensor, ...]:
+    """Normalize legacy per-engine and MRV2 direct component bindings."""
+    kvcache = unfold_kvcache(kvcache)
+    if isinstance(kvcache, torch.Tensor):
+        return (kvcache,)
+    if isinstance(kvcache, (list, tuple)) and all(isinstance(component, torch.Tensor) for component in kvcache):
+        return tuple(kvcache)
+    raise TypeError(
+        f"Expected a KV cache tensor or a flat sequence of cache component tensors, got {type(kvcache).__name__}."
+    )
