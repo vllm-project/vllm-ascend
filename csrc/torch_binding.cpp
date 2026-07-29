@@ -46,6 +46,7 @@
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
+#include "attention/custom_fused_infer_attention_v310/custom_fused_infer_attention_v310_torch_adpt.h"
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
@@ -2084,6 +2085,23 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                                   Tensor? num_accepted_tokens, "
         "                                   float scale_value=1.0) -> (Tensor output)");
     ops.impl("npu_recurrent_gated_delta_rule_310", torch::kPrivateUse1, &vllm_ascend::npu_recurrent_gated_delta_rule_310);
+
+    ops.def(
+        "npu_custom_fused_infer_attention_v310(Tensor query, "
+        "                                       Tensor[] key, "
+        "                                       Tensor[] value, *, "
+        "                                       Tensor? attn_mask=None, "
+        "                                       SymInt[]? actual_seq_lengths_q=None, "
+        "                                       SymInt[]? actual_seq_lengths_kv=None, "
+        "                                       Tensor? block_table=None, "
+        "                                       int num_heads=1, "
+        "                                       float scale_value=1.0, "
+        "                                       str input_layout='BSH', "
+        "                                       int num_key_value_heads=0, "
+        "                                       int block_size=0, "
+        "                                       int inner_precise=1) -> Tensor");
+    ops.impl("npu_custom_fused_infer_attention_v310", torch::kPrivateUse1,
+             &vllm_ascend::npu_custom_fused_infer_attention_v310);
 
     ops.def(
         "chunk_gated_delta_rule_fwd_h(Tensor k, Tensor w, Tensor u, Tensor? g=None, *, Tensor? gk=None, Tensor? initial_state=None, bool? output_final_state=False, int? chunk_size=None, bool? save_new_value=True, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? use_exp2=False, bool? transpose_state_layout=False) -> (Tensor h_out, Tensor v_new_out, Tensor final_state_out)"
