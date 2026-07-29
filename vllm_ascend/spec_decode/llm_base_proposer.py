@@ -340,10 +340,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self.model.config.image_token_index = model.config.image_token_id
             elif self.get_model_name(model) == "PixtralForConditionalGeneration":
                 self.model.config.image_token_index = model.config.vision_config.image_token_id
-            elif self.get_model_name(model) == "KimiK25ForConditionalGeneration":
+            elif self.get_model_name(model) in (
+                "KimiK25ForConditionalGeneration",
+                "KimiK3ForConditionalGeneration",
+            ):
                 self.model.config.image_token_index = model.config.media_placeholder_token_id
             else:
-                self.model.config.image_token_index = model.config.image_token_index
+                self.model.config.image_token_index = getattr(
+                    model.config,
+                    "image_token_index",
+                    getattr(model.config, "media_placeholder_token_id", None),
+                )
             target_language_model = model.get_language_model()
         else:
             target_language_model = model

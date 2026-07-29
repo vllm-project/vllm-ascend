@@ -15,6 +15,7 @@
 
 import math
 import os
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -436,6 +437,36 @@ def test_is_pd_decode_recompute_scheduler_enabled_kv_producer():
     vllm_config.kv_transfer_config.is_kv_consumer = False
     vllm_config.kv_transfer_config.is_kv_producer = True
     assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is False
+
+
+@pytest.mark.parametrize(
+    ("top_layer_types", "text_layer_types", "is_linear_attn", "expected"),
+    [
+        (["linear_attention"], None, False, True),
+        (None, ["linear_attention"], False, True),
+        (None, None, True, True),
+        (["full_attention"], ["full_attention"], False, False),
+    ],
+)
+def test_check_gdn_layer_detects_supported_config_shapes(
+    top_layer_types,
+    text_layer_types,
+    is_linear_attn,
+    expected,
+):
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                layer_types=top_layer_types,
+                text_config=SimpleNamespace(
+                    layer_types=text_layer_types,
+                    is_linear_attn=is_linear_attn,
+                ),
+            ),
+        ),
+    )
+
+    assert utils.check_gdn_layer(vllm_config) is expected
 
 
 def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer():

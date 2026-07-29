@@ -1418,8 +1418,7 @@ def enable_dsa_cp_with_o_proj_tp() -> bool:
 
 def check_gdn_layer(vllm_config) -> bool:
     """
-    gdn layer is marked with `linear_attention`.
-    So, if `linear_attention` is detected, we think the model has gdn-attention.
+    Detect a model with GDN attention from either supported HF config shape.
     """
     if not hasattr(vllm_config, "model_config"):
         return False
@@ -1430,15 +1429,16 @@ def check_gdn_layer(vllm_config) -> bool:
 
     hf_config = model_config.hf_config
 
-    # Use `or []` to prevent errors when layer_types is None
-    layer_types = getattr(hf_config, "layer_types", None) or []
-    if "linear_attention" in layer_types:
-        return True
-
-    text_config = getattr(hf_config, "text_config", None)
-    if text_config:
-        text_layer_types = getattr(text_config, "layer_types", None) or []
-        if "linear_attention" in text_layer_types:
+    for config in (
+        hf_config,
+        getattr(hf_config, "text_config", None),
+    ):
+        if config is None:
+            continue
+        # Most hybrid models expose layer_types. Kimi Linear/K3 instead
+        # exposes the equivalent is_linear_attn property.
+        layer_types = getattr(config, "layer_types", None) or []
+        if "linear_attention" in layer_types or bool(getattr(config, "is_linear_attn", False)):
             return True
 
     return False

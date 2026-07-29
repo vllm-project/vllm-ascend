@@ -57,9 +57,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, 
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader, maybe_remap_kv_scale_name
 from vllm.model_executor.models.deepseek_v2 import DeepSeekV2FusedQkvAProjLinear
 from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
     HasInnerState,
     IsHybrid,
     MixtureOfExperts,
+    SupportsEagle3,
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
@@ -432,6 +434,7 @@ class AscendKimiK3ForConditionalGeneration(
     HasInnerState,
     IsHybrid,
     MixtureOfExperts,
+    SupportsEagle3,
 ):
     supports_encoder_tp_data = True
     hf_to_vllm_mapper = WeightsMapper(
@@ -570,6 +573,9 @@ class AscendKimiK3ForConditionalGeneration(
     def compute_logits(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor | None:
         del kwargs
         return self.language_model.compute_logits(hidden_states)
+
+    def set_dspark_aux_capture_materialized(self, enabled: bool) -> None:
+        self.language_model.set_dspark_aux_capture_materialized(enabled)
 
     @classmethod
     def get_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig):
@@ -1035,7 +1041,7 @@ class KimiK3DecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class KimiK3TextModel(nn.Module):
+class KimiK3TextModel(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config: KimiK3TextConfig = vllm_config.model_config.hf_text_config
@@ -1073,6 +1079,10 @@ class KimiK3TextModel(nn.Module):
             self.output_attn_res_norm = PPMissingLayer()
             self.output_attn_res_proj = PPMissingLayer()
             self.norm = PPMissingLayer()
+        # Legacy Qwen3/GQA DSpark checkpoints were trained from the
+        # materialized Kimi residual stream. Keep the PR #13071 raw-boundary
+        # behavior as the default for MLA-style draft checkpoints.
+        self.dspark_aux_capture_materialized = False
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1101,8 +1111,29 @@ class KimiK3TextModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             block_residual = intermediate_tensors["block_residual"]
 
-        for layer in self.layers[self.start_layer : self.end_layer]:
+        aux_hidden_states: list[torch.Tensor] = []
+        for layer_idx, layer in enumerate(
+            self.layers[self.start_layer : self.end_layer],
+            start=self.start_layer,
+        ):
+            # The GQA drafter consumes the materialized input to the next
+            # target layer. Kimi K3 stores part of that stream separately in
+            # block_residual, so fold it through that layer's projection.
+            if self.dspark_aux_capture_materialized and layer_idx in self.aux_hidden_state_layers:
+                if block_residual.shape[1] == 0:
+                    aux_hidden_states.append(hidden_states)
+                else:
+                    aux_hidden_states.append(
+                        _apply_attention_residual(
+                            hidden_states,
+                            block_residual,
+                            layer.self_attention_res_proj,
+                            layer.self_attention_res_norm,
+                        )
+                    )
             hidden_states, block_residual = layer(positions, hidden_states, block_residual)
+            if not self.dspark_aux_capture_materialized and (layer_idx + 1) in self.aux_hidden_state_layers:
+                aux_hidden_states.append(hidden_states)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states, "block_residual": block_residual})
@@ -1113,7 +1144,10 @@ class KimiK3TextModel(nn.Module):
             self.output_attn_res_proj,
             self.output_attn_res_norm,
         )
-        return self.norm(hidden_states)
+        hidden_states = self.norm(hidden_states)
+        if aux_hidden_states:
+            return hidden_states, aux_hidden_states
+        return hidden_states
 
     def load_weights(
         self,
@@ -1218,6 +1252,9 @@ class AscendKimiK3ForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExp
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
+    def set_dspark_aux_capture_materialized(self, enabled: bool) -> None:
+        self.model.dspark_aux_capture_materialized = enabled
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -1287,9 +1324,14 @@ class AscendKimiK3ForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExp
 
 
 def get_spec_layer_idx_from_weight_name(config: KimiK3TextConfig, weight_name: str) -> int | None:
-    for index in range(config.num_nextn_predict_layers):
+    num_nextn_predict_layers = getattr(
+        config,
+        "num_nextn_predict_layers",
+        0,
+    )
+    for index in range(num_nextn_predict_layers):
         layer_idx = config.num_hidden_layers + index
-        if weight_name.startswith(f"model.layers.{layer_idx}."):
+        if f"layers.{layer_idx}." in weight_name:
             return layer_idx
     return None
 

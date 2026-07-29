@@ -628,6 +628,17 @@ class NPUModelRunner(GPUModelRunner):
                 return tuple(i + 1 for i in dspark_layer_ids)
         return None
 
+    def _draft_uses_qwen3_gqa_dspark(self) -> bool:
+        """Return whether the draft expects Kimi's materialized residual."""
+        if self.speculative_config is None or not self.speculative_config.use_dspark():
+            return False
+        draft_model_config = self.speculative_config.draft_model_config
+        if draft_model_config is None:
+            return False
+        hf_config = draft_model_config.hf_config
+        architectures = getattr(hf_config, "architectures", ()) or ()
+        return getattr(hf_config, "model_type", None) == "qwen3" and "Qwen3DSparkModel" in architectures
+
     def _use_aclgraph(self) -> bool:
         return (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -3480,6 +3491,21 @@ class NPUModelRunner(GPUModelRunner):
                 if not aux_layers:
                     aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
                 self.model.set_aux_hidden_state_layers(aux_layers)
+                if self.speculative_config.use_dspark():
+                    # Only Kimi targets expose this hook. Qwen target models do
+                    # not, so their existing DSpark auxiliary stream is unchanged.
+                    set_capture_mode = getattr(
+                        self.model,
+                        "set_dspark_aux_capture_materialized",
+                        None,
+                    )
+                    if set_capture_mode is not None:
+                        materialized = self._draft_uses_qwen3_gqa_dspark()
+                        set_capture_mode(materialized)
+                        logger.info(
+                            "Kimi K3 DSpark auxiliary capture uses %s stream.",
+                            "materialized GQA" if materialized else "raw MLA",
+                        )
 
                 if pp_group.world_size > 1:
                     inner_model = self.model
@@ -3588,9 +3614,17 @@ class NPUModelRunner(GPUModelRunner):
                 self.drafter,
                 AscendEagleProposer | AscendDflashProposer | AscendDSparkProposer | AscendDraftModelProposer,
             )
-            block_size = (self.kernel_block_sizes[0] if isinstance(
-                self.kernel_block_sizes, list) else self.kernel_block_sizes)
-            self.drafter.initialize_attn_backend(kv_cache_config, block_size)
+            if isinstance(self.kernel_block_sizes, list):
+                draft_kernel_block_sizes = [
+                    int(sizes[0] if isinstance(sizes, (list, tuple)) else sizes)
+                    for sizes in self.kernel_block_sizes
+                ]
+            else:
+                draft_kernel_block_sizes = [int(self.kernel_block_sizes)]
+            self.drafter.initialize_attn_backend(
+                kv_cache_config,
+                draft_kernel_block_sizes,
+            )
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)

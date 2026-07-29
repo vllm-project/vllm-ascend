@@ -702,6 +702,9 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 non_blocking=True,
             )
             num_accepted_tokens = self.num_accepted_tokens[:spec_batch_size]
+            # Zero-length rows are skipped before the recurrent kernel reads
+            # this value. Keep the padding sentinel within the public
+            # accepted-token range [1, query_width].
             num_accepted_tokens[num_spec_decodes:].fill_(1)
 
         if (
