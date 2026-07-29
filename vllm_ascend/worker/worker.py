@@ -20,6 +20,7 @@
 import copy
 import gc
 import logging
+import os
 from types import NoneType
 from typing import Any
 
@@ -436,7 +437,7 @@ class NPUWorker(WorkerBase):
 
         visible_device_index = current_platform.logical_device_id_to_visible_device_id(self.local_rank)
         device = torch.device(f"{current_platform.device_type}:{visible_device_index}")
-
+        os.environ.pop(current_platform.device_control_env_var, None)
         torch.npu.set_device(device)
         check_ascend_device_type()
 
