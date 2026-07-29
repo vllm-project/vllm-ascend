@@ -844,10 +844,17 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             # For requests that cross the local slice boundary, offset removes the
             # tokens that live on later ranks so local_seq_lens matches local queries.
             offset = query_start_loc[1:] - local_query_end
+            valid_local_req = (local_query_lens > 0) & (seq_lens > 0)
+            safe_local_seq_lens = torch.clamp_min(seq_lens - offset, 0)
+            safe_local_seq_lens = torch.where(
+                valid_local_req,
+                safe_local_seq_lens,
+                torch.zeros_like(safe_local_seq_lens),
+            )
             if local_seq_lens is not None:
-                local_seq_lens[:num_reqs] = (local_query_lens > 0) * (seq_lens - offset)
+                local_seq_lens[:num_reqs] = safe_local_seq_lens
             else:
-                local_seq_lens = (local_query_lens > 0) * (seq_lens - offset)
+                local_seq_lens = safe_local_seq_lens
 
             if start_pos_out is not None:
                 seq_lens_q = query_start_loc[1:] - query_start_loc[:-1]

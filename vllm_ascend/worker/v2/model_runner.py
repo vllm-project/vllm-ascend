@@ -125,11 +125,6 @@ class NPUModelRunner(GPUModelRunner):
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
         set_mc2_mask(vllm_config, self.device)
 
-        # we need to update full graph params in run_fullgraph,
-        # so create a stream to update full graph params.
-        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
-            self.update_stream: torch.npu.Stream = torch.npu.Stream()
-
         # we need to use return value of `get_cudagraph_and_dp_padding`
         # to set forward_context in `run_fullgraph`.
         # so we can inherit `execute_model` method.

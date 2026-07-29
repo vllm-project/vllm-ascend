@@ -117,7 +117,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
     ```shell
     #!/bin/sh
-    vllm serve Qwen/Qwen3-VL-Reranker-2B \
+    vllm serve Qwen/Qwen3-Reranker-0.6B \
         --served-model-name Qwen/Qwen3-Reranker-0.6B \
         --runner pooling \
         --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}' \
@@ -251,7 +251,7 @@ Here are two accuracy evaluation methods.
         os.environ["HF_DATASETS_CACHE"] = data_path
         os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
     
-        model = VllmCrossEncoderWrapper(f"/home/data/Qwen3-Reranker-0.6B",
+        model = VllmCrossEncoderWrapper(f"/root/.cache/Qwen3-Reranker-0.6B",
                                     revision="norm",
                                     dtype="float16",
                                     enforce_eager=True,
@@ -281,7 +281,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/cli/) for 
 Take the `serve` as an example. Run the code as follows.
 
 ```bash
-vllm bench serve --model Qwen/Qwen3-Reranker-0.6B --backend vllm-rerank  --prot 8000 --dataset-name random-rerank --endpoint /v1/rerank --random-input 200  --save-result --result-dir ./
+vllm bench serve --model Qwen/Qwen3-Reranker-0.6B --backend vllm-rerank  --port 8000 --dataset-name random-rerank --endpoint /v1/rerank --random-input 200  --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.

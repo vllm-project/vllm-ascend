@@ -120,9 +120,6 @@ a3:
       - name: deepseek-r1-0528-w8a8
         os: linux-aarch64-nightly-a3-16
         config_file_path: DeepSeek-R1-0528-W8A8.yaml
-      - name: MiniMax-M2.5-w8a8-QuaRot-A3
-        os: linux-aarch64-nightly-a3-16
-        config_file_path: MiniMax-M2.5-w8a8-QuaRot-A3.yaml
       - name: DeepSeek-V4-Flash-W8A8-A3
         os: linux-aarch64-nightly-a3-16
         config_file_path: DeepSeek-V4-Flash-W8A8-A3.yaml
@@ -225,9 +222,6 @@ a3-560t:
       - name: deepseek-r1-0528-w8a8
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: DeepSeek-R1-0528-W8A8.yaml
-      - name: MiniMax-M2.5-w8a8-QuaRot-A3
-        os: linux-aarch64-a3-16-cn12-001
-        config_file_path: MiniMax-M2.5-w8a8-QuaRot-A3.yaml
       - name: DeepSeek-V4-Flash-W8A8-A3
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: DeepSeek-V4-Flash-W8A8-A3.yaml
