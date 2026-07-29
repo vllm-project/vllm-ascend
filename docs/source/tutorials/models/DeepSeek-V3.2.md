@@ -498,7 +498,6 @@ vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
     }'
 ```
 
-
 ::::
 ::::{tab-item} Node 1(Prefill)
 :sync: Node 1(Prefill)
@@ -653,7 +652,6 @@ vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
     --additional-config '{"recompute_scheduler_enable" : true}'
 ```
 
-
 ::::
 
 ::::{tab-item} Node 1(Decode)
@@ -788,7 +786,6 @@ Refer to [Distributed DP Server With Large-Scale Expert Parallelism](https://doc
     ```
 
 Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
-
 
 ## 6 Functional Verification
 
