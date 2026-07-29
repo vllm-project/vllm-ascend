@@ -65,7 +65,7 @@ We need to add environment variable `export DYNAMIC_EPLB="true"` to enable vLLM-
 | num_redundant_experts | Number of redundant experts. | 0 |
 | eplb_heat_collection_stage | Request stage used to collect expert heat. Available values: `all`, `prefill`, and `decode`. | `all` |
 
-```mermaid
+```shell
 graph TB
    A[start] --> B(collect_heat)
    B --> C(execute_algorithm)

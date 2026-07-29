@@ -83,7 +83,7 @@ from vllm import LLM, SamplingParams
 prompts = [
     "The future of AI is",
     "Machine learning enables",
-    "Deep learning models can"
+    "Deep learning models can",
 ]
 
 sampling_params = SamplingParams(
