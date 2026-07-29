@@ -24,20 +24,20 @@ The following model variants are available. It is recommended to download the mo
 
 | Model | Hardware Requirement | Download |
 |-------|---------------------|----------|
-| Qwen3-0.6B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B) |
-| Qwen3-1.7B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B) |
-| Qwen3-4B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-4B) |
-| Qwen3-8B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-8B) |
-| Qwen3-14B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-14B) |
-| Qwen3-32B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-32B) |
+| Qwen3-0.6B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B) |
+| Qwen3-1.7B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B) |
+| Qwen3-4B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-4B) |
+| Qwen3-8B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-8B) |
+| Qwen3-14B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-14B) |
+| Qwen3-32B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-32B) |
 
 **Quantized Versions for Atlas A2/A3 inference products:**
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
-| Qwen3-8B-W4A8 | W4A8 | 1 Atlas A3 inference products (64G × 16) or 1 Atlas A2 inference products (64G × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8) |
-| Qwen3-32B-W4A4 | W4A4 | 1 Atlas A3 inference products (64G × 16) or 1 Atlas A2 inference products (64G × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W4A4) |
-| Qwen3-32B-W8A8 | W8A8 | 1 Atlas A3 inference products (64G × 16) or 1 Atlas A2 inference products (64G × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8) |
+| Qwen3-8B-W4A8 | W4A8 | 1 Atlas A3 inference products (64GB × 16) or 1 Atlas A2 inference products (64GB × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8) |
+| Qwen3-32B-W4A4 | W4A4 | 1 Atlas A3 inference products (64GB × 16) or 1 Atlas A2 inference products (64GB × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W4A4) |
+| Qwen3-32B-W8A8 | W8A8 | 1 Atlas A3 inference products (64GB × 16) or 1 Atlas A2 inference products (64GB × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8) |
 
 **Quantized Versions for Atlas inference products:**
 
