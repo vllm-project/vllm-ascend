@@ -10,7 +10,7 @@
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
+# See the License for the specific language govserning permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
@@ -132,7 +132,14 @@ def _random_sample_310p(
     probs: torch.Tensor,
     generators: dict[int, torch.Generator],
 ) -> torch.Tensor:
-    """310P random sampling without NPU random-number generation."""
+    """
+    310P does not support the required NPU random-generation path.
+    The previous implementation generated [batch, vocab] random values
+    on the CPU and copied them to the NPU, causing performance degradation on
+    small models and RC devices. This implementation generates only one CPU
+    random value per request and performs inverse-CDF sampling on the NPU,
+    reducing CPU computation and H2D transfer overhead.
+    """
     with npu_stream_switch(global_stream()):
         uniforms = _generate_request_uniforms_310p(
             probs.shape[0],
