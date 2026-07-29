@@ -1,5 +1,6 @@
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 from po_translate import (
     POTranslator,
@@ -133,7 +134,16 @@ def test_partial_api_response_restores_original_file(
     async def no_sleep(seconds: float) -> None:
         return None
 
+    async def reject_single_entry(
+        entry: POEntry,
+        chunk_info: str = "",
+    ) -> None:
+        return None
+
     translator._call_api = call_api  # type: ignore[method-assign]
+    translator._call_single_entry_api = (  # type: ignore[method-assign]
+        reject_single_entry
+    )
     monkeypatch.setattr(asyncio, "sleep", no_sleep)
     assert not asyncio.run(translator.translate_file(str(path)))
     assert path.read_bytes() == original
@@ -208,6 +218,62 @@ def test_split_entries_counts_separators() -> None:
 
     assert len(chunks) == 3
     assert all(len(chunk.rstrip("\n")) <= 60 for chunk in chunks)
+
+
+def test_split_entries_rebalances_tiny_tail() -> None:
+    entries = [POEntry(msgid=f"entry-{index}-{'x' * 100}") for index in range(5)]
+    serialized = [str(POEntry(msgid=entry.msgid, msgstr="")) for entry in entries]
+    max_chars = sum(len(entry) for entry in serialized[:4]) + 6
+    snippet = POTranslator._build_snippet(entries)
+
+    chunks = POTranslator._split_entries(snippet, max_chars=max_chars)
+    chunk_sizes = [len([entry for entry in pofile(chunk) if entry.msgid]) for chunk in chunks]
+    chunk_msgids = [entry.msgid for chunk in chunks for entry in pofile(chunk) if entry.msgid]
+
+    assert sum(chunk_sizes) == len(entries)
+    assert chunk_sizes[-1] > 1
+    assert chunk_msgids == [entry.msgid for entry in entries]
+    assert all(len(chunk.rstrip("\n")) <= max_chars for chunk in chunks)
+
+
+def test_single_entry_plain_text_fallback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "messages.po"
+    msgid = "See [the guide](#source-anchor)"
+    _write_po(path, [POEntry(msgid=msgid, msgstr="")])
+    translator = POTranslator(api_key="test")
+
+    async def call_api(content: str, chunk_info: str = "") -> None:
+        return None
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            message = SimpleNamespace(
+                content="翻译：参见[指南](#translated-anchor)",
+            )
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=message)],
+            )
+
+    async def no_sleep(seconds: float) -> None:
+        return None
+
+    translator._call_api = call_api  # type: ignore[method-assign]
+    translator.client = SimpleNamespace(  # type: ignore[assignment]
+        chat=SimpleNamespace(completions=FakeCompletions()),
+    )
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    assert asyncio.run(translator.translate_file(str(path)))
+    assert pofile(str(path)).find(msgid).msgstr == "参见[指南](#source-anchor)"
+
+
+def test_plain_text_fallback_rejects_partial_po() -> None:
+    response = 'msgid "Source"\n这里缺少 msgstr'
+
+    assert POTranslator._clean_plain_translation(response, "Source") == ""
 
 
 def test_api_generated_header_is_not_merged(tmp_path: Path) -> None:

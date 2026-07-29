@@ -55,6 +55,24 @@ Rules:
 
 {content}"""
 
+SINGLE_ENTRY_SYSTEM_PROMPT = (
+    "You are a professional technical documentation translator specializing in "
+    "English-to-Chinese translations. Return only the translated text, without "
+    "explanations, labels, or wrapper fences."
+)
+
+SINGLE_ENTRY_PROMPT = """Translate the following documentation text from English to Chinese.
+
+Preserve format markers, code blocks, references, variables, commands, paths, URLs,
+Markdown/Sphinx syntax, HTML tags, names, and other technical syntax. For Markdown
+links, translate the display text but keep the target unchanged.
+
+Return only the translated text.
+
+<source>
+{content}
+</source>"""
+
 _HEADER_BLOCK_RE = re.compile(r'(?ms)^msgid ""\nmsgstr ""\n(?:"[^\n]*\\n"\n)+(?=\n|$)')
 _MARKDOWN_TARGET_RE = re.compile(r"!?\[[^\]\n]*\]\(\s*(?P<target><[^>\n]+>|[^\s)\n]+)")
 _RST_TARGET_RE = re.compile(r":(?:ref|doc):`(?:[^`<>]*<)?(?P<target>[^`<>]+)>?`")
@@ -199,6 +217,39 @@ class POTranslator:
         cleaned = self._clean_response(text)
         return cleaned if cleaned else None
 
+    async def _call_single_entry_api(
+        self,
+        entry: POEntry,
+        chunk_info: str = "",
+    ) -> str | None:
+        """Translate one msgid with a simpler response contract."""
+        system = SINGLE_ENTRY_SYSTEM_PROMPT
+        if chunk_info:
+            system = f"{SINGLE_ENTRY_SYSTEM_PROMPT} ({chunk_info})"
+        response = await self.client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": system},
+                {
+                    "role": "user",
+                    "content": SINGLE_ENTRY_PROMPT.format(content=entry.msgid),
+                },
+            ],
+            max_tokens=8000,
+            temperature=0.1,
+        )
+        text = response.choices[0].message.content
+        if not text:
+            return None
+
+        po_response = self._clean_response(text)
+        if po_response:
+            return po_response
+        translation = self._clean_plain_translation(text, entry.msgid)
+        if not translation:
+            return None
+        return f"{POEntry(msgid=entry.msgid, msgstr=translation)}\n"
+
     async def translate_file(
         self,
         po_path: str,
@@ -283,9 +334,9 @@ class POTranslator:
         snippet: str,
         max_chars: int = 6000,
     ) -> list[str]:
-        """Split a minimal snippet on entry boundaries."""
+        """Split on entry boundaries without leaving an avoidably tiny tail."""
         entries = re.split(r"\n{2,}", snippet.strip())
-        chunks: list[str] = []
+        chunk_entries: list[list[str]] = []
         current: list[str] = []
         current_chars = 0
 
@@ -293,7 +344,7 @@ class POTranslator:
             entry_chars = len(entry)
             separator_chars = 2 if current else 0
             if current_chars + separator_chars + entry_chars > max_chars and current:
-                chunks.append("\n\n".join(current) + "\n")
+                chunk_entries.append(current)
                 current = []
                 current_chars = 0
                 separator_chars = 0
@@ -301,8 +352,23 @@ class POTranslator:
             current_chars += separator_chars + entry_chars
 
         if current:
-            chunks.append("\n\n".join(current) + "\n")
-        return chunks
+            chunk_entries.append(current)
+
+        if len(chunk_entries) > 1:
+            minimum_tail_chars = min(1000, max_chars // 2)
+            previous = chunk_entries[-2]
+            tail = chunk_entries[-1]
+
+            def serialized_chars(group: list[str]) -> int:
+                return sum(len(entry) for entry in group) + 2 * (len(group) - 1)
+
+            while len(previous) > 1 and serialized_chars(tail) < minimum_tail_chars:
+                candidate = previous[-1]
+                if serialized_chars([candidate, *tail]) > max_chars:
+                    break
+                tail.insert(0, previous.pop())
+
+        return ["\n\n".join(group) + "\n" for group in chunk_entries]
 
     async def _translate_chunks(
         self,
@@ -363,16 +429,64 @@ class POTranslator:
             info = f"chunk {idx + 1}/{total}"
             return idx, await attempt_chunk(chunks[idx], info)
 
+        async def recover_single_entry(
+            entry: POEntry,
+            info: str,
+        ) -> str | None:
+            last_result = None
+            last_error = None
+            for attempt in range(3):
+                try:
+                    async with sem:
+                        result = await self._call_single_entry_api(
+                            entry,
+                            chunk_info=info,
+                        )
+                    last_result = result
+                    if (
+                        result
+                        and self._collect_translations(
+                            [result],
+                            [entry],
+                            quiet=True,
+                        )
+                        is not None
+                    ):
+                        return result
+                except Exception as exc:
+                    last_error = exc
+                if attempt < 2:
+                    await asyncio.sleep(2 * (attempt + 1))
+
+            if last_result:
+                self._collect_translations(
+                    [last_result],
+                    [entry],
+                    quiet=False,
+                )
+            elif last_error:
+                print(f"\n    {info} API error: {last_error}", flush=True)
+            else:
+                print(
+                    f"\n    {info} returned an empty or invalid translation",
+                    flush=True,
+                )
+            return None
+
         async def recover_chunk(
             content: str,
             info: str,
         ) -> list[str] | None:
             source_entries = _active_entries(pofile(content))
             if len(source_entries) == 1:
-                result = await attempt_chunk(
-                    content,
-                    f"{info} single-entry recovery",
-                    diagnose=True,
+                recovery_info = f"{info} plain-text single-entry recovery"
+                print(
+                    f"\n    {info} failed; retrying with the single-entry contract",
+                    flush=True,
+                )
+                result = await recover_single_entry(
+                    source_entries[0],
+                    recovery_info,
                 )
                 return [result] if result else None
 
@@ -497,6 +611,28 @@ class POTranslator:
         if 'msgid "' not in response or 'msgstr "' not in response:
             return ""
         return response
+
+    @staticmethod
+    def _clean_plain_translation(response: str, source: str) -> str:
+        """Remove response wrappers while rejecting malformed PO fragments."""
+        response = response.strip()
+        source = source.strip()
+        if response.startswith("```") and not source.startswith("```"):
+            lines = response.split("\n")
+            if len(lines) >= 2 and lines[-1].strip() == "```":
+                response = "\n".join(lines[1:-1]).strip()
+
+        if re.search(r"(?m)^\s*msg(?:id|str)\b", response):
+            return ""
+
+        response = re.sub(
+            r"^(?:翻译(?:如下|结果)?|译文|Translation)\s*[:：]\s*",
+            "",
+            response,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        return response.strip()
 
 
 def validate_po_file(
