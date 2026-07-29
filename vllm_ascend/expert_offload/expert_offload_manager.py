@@ -1314,6 +1314,30 @@ class ExpertOffloadManager:
 
         log2phy.copy_(log2phy_h, non_blocking=_EXTRA_CTX.capturing)
 
+    def _mc_handle_prefill_regime(self, layer_idx) -> bool:
+        """Multi-card PREFILL (non-MC2 comm): load this rank's EP shard into the
+        prefill pool. Returns True when handled so the caller returns early.
+
+        We load even during profile_run: the decode buffer is too small for the
+        EP shard, so multi-card prefill MUST use the pool, and real weights
+        avoid GMM errors on garbage scales (single-card can skip during profile
+        because its AllGather reuses decode weights; multi-card All2All cannot).
+        """
+        from vllm_ascend.ascend_forward_context import MoECommType
+        if _EXTRA_CTX.moe_comm_type == MoECommType.MC2:
+            return False
+        if self._prefill_initialized:
+            self._prefill_load_layer_shard(layer_idx)
+            if self._debug:
+                base = self.ep_rank * self.mc_shard_size
+                logger.info(
+                    "[MC_OBS] rank=%s L=%s PREFILL: loaded EP shard "
+                    "experts[%d..%d] (%d experts) into pool on rank%d "
+                    "(static shard, reloaded each prefill forward)",
+                    self.ep_rank, layer_idx, base, base + self.mc_shard_size - 1,
+                    self.mc_shard_size, self.ep_rank)
+        return True
+
     def update_weights_multi_card(self, layer, topk_ids, log2phy,
                                   topk_weights=None, hidden_states=None,
                                   mc2_mask=None):
@@ -1355,27 +1379,7 @@ class ExpertOffloadManager:
         # (selected by select_moe_comm_method -> ALLGATHER for multi-card large
         # batches). Drive off the comm TYPE (MC2=decode, else prefill) — the
         # single source of truth — so this stays in lockstep with apply().
-        # Load the shard; apply() separately wires pool/shard config. No log2phy
-        # for AllGather (it routes via expert_map, not physical ids).
-        from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
-        is_prefill = _EXTRA_CTX.moe_comm_type != MoECommType.MC2
-        if is_prefill:
-            # Load the EP shard into the prefill pool. We load even during
-            # profile_run (_skip_prefill=True): the decode buffer (64 slots) is
-            # too small for the 128-expert shard, so multi-card prefill MUST use
-            # the pool, and real weights avoid GMM errors on garbage scales.
-            # (Single-card skips loading during profile because its AllGather
-            # path can reuse decode weights — multi-card All2All cannot.)
-            if self._prefill_initialized:
-                self._prefill_load_layer_shard(layer_idx)
-                if self._debug:
-                    base = self.ep_rank * self.mc_shard_size
-                    logger.info(
-                        "[MC_OBS] rank=%s L=%s PREFILL: loaded EP shard "
-                        "experts[%d..%d] (%d experts) into pool on rank%d "
-                        "(static shard, reloaded each prefill forward)",
-                        self.ep_rank, layer_idx, base, base + self.mc_shard_size - 1,
-                        self.mc_shard_size, self.ep_rank)
+        if self._mc_handle_prefill_regime(layer_idx):
             return
         # ---- DECODE (MC2) branch: graph-aware (mirror single-card) ----
         # Dynamic placement varies per step (router-driven) and is incompatible
@@ -1640,22 +1644,23 @@ class ExpertOffloadManager:
             (hits if resident_map.get(slot) == eid else misses).append((slot, eid))
         return resident_map, hits, misses
 
+    def _load_expert_weights_into_slot(self, layer, layer_idx, eid, slot):
+        """H2D-copy one expert's w13/w2 + quant scale/offset/scale_bias from the
+        pinned CPU buffer into the device slot, on the caller's load_stream."""
+        layer.w13_weight.data.untyped_storage()[
+            slot * self.w13_expert_size_bytes:(slot + 1) * self.w13_expert_size_bytes
+        ].copy_(self._expert_src_storage(layer_idx, eid, 'w13'), non_blocking=True)
+        layer.w2_weight.data.untyped_storage()[
+            slot * self.w2_expert_size_bytes:(slot + 1) * self.w2_expert_size_bytes
+        ].copy_(self._expert_src_storage(layer_idx, eid, 'w2'), non_blocking=True)
+        self._copy_quant_attrs_into_slot(layer, layer_idx, eid, slot)
+
     def _h2d_load_mc_misses(self, layer, layer_idx, misses, resident_map):
         """H2D-load missed experts (w13/w2 + quant attrs) into their slots on
         load_stream, then synchronize to gate the compute stream."""
         with torch_npu.npu.stream(self.load_stream):
             for slot, eid in misses:
-                layer.w13_weight.data.untyped_storage()[
-                    slot * self.w13_expert_size_bytes:
-                    (slot + 1) * self.w13_expert_size_bytes].copy_(
-                    self._expert_src_storage(layer_idx, eid, 'w13'),
-                    non_blocking=True)
-                layer.w2_weight.data.untyped_storage()[
-                    slot * self.w2_expert_size_bytes:
-                    (slot + 1) * self.w2_expert_size_bytes].copy_(
-                    self._expert_src_storage(layer_idx, eid, 'w2'),
-                    non_blocking=True)
-                self._copy_quant_attrs_into_slot(layer, layer_idx, eid, slot)
+                self._load_expert_weights_into_slot(layer, layer_idx, eid, slot)
                 resident_map[slot] = eid
             self.load_stream.synchronize()
 
@@ -1749,14 +1754,7 @@ class ExpertOffloadManager:
                             sorted(list(need_to_load))[n_copies:][:20])
                     break  # no free slots — should not happen in normal usage
                 
-                layer.w13_weight.data.untyped_storage()[slot * self.w13_expert_size_bytes : (slot + 1) * self.w13_expert_size_bytes].copy_(
-                    self._expert_src_storage(layer_idx, eid, 'w13'), non_blocking=True
-                )
-                layer.w2_weight.data.untyped_storage()[slot * self.w2_expert_size_bytes : (slot + 1) * self.w2_expert_size_bytes].copy_(
-                    self._expert_src_storage(layer_idx, eid, 'w2'), non_blocking=True
-                )
-                # Copy scales/offsets/scale_bias from CPU to NPU
-                self._copy_quant_attrs_into_slot(layer, layer_idx, eid, slot)
+                self._load_expert_weights_into_slot(layer, layer_idx, eid, slot)
                 # Refresh derived fp32 scale if present (W8A8_DYNAMIC)
                 if hasattr(layer, 'w13_weight_scale_fp32'):
                     layer.w13_weight_scale_fp32[slot].copy_(
