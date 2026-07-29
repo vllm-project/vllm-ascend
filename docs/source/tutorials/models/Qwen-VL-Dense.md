@@ -26,7 +26,7 @@ Requires 1 card on Atlas 800I A2 (64G × 8), Atlas 800 A3 (64G × 16), or Atlas 
 
 - `Qwen3-VL-8B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
 
-Requires 1 card on Ascend950DT series (96G × 8) node. 
+Requires 1 card on Ascend950DT series (96G × 8) node.
 
 - `Qwen3-VL-8B-Instruct-w8a8`(Quantized version): [Download model weight](todo)
 
@@ -34,7 +34,7 @@ Requires 2 cards on Atlas 800I A2 (64G × 8), Atlas 800 A3 (64G × 16), or Atlas
 
 - `Qwen3-VL-32B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)
 
-Requires 1 card on Ascend950DT series (96G × 8) node. 
+Requires 1 card on Ascend950DT series (96G × 8) node.
 
 - `Qwen3-VL-32B-Instruct-w8a8`(Quantized version): [Download model weight](todo)
 
@@ -263,7 +263,7 @@ Run docker container to start the vLLM server on single-NPU:
     ```
 
 === "Atlas inference products"
-    
+
     ```bash
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
