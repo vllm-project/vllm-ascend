@@ -27,7 +27,7 @@ Below series are NOT supported yet:
 - Atlas 200I A2 (Ascend-cann-kernels-310b) unplanned yet
 - Ascend 910, Ascend 910 Pro B (Ascend-cann-kernels-910) unplanned yet
 
-From a technical view, vllm-ascend supports devices if torch-npu is supported. Otherwise, we have to implement it by using custom ops. We also welcome you to join us to improve together.
+From a technical view, vllm-ascend supports devices if TorchNPU is supported. Otherwise, we have to implement it by using custom ops. We also welcome you to join us to improve together.
 
 ### 2. How to get our docker containers?
 
@@ -227,7 +227,7 @@ ACL graph capture can still fail when the runtime resources required by the sele
 
 ### 18. How to install custom version of torch_npu?
 
-torch-npu will be overridden  when installing vllm-ascend. If you need to install a specific version of torch-npu, you can manually install the specified version of torch-npu after vllm-ascend is installed.
+TorchNPU will be overridden  when installing vllm-ascend. If you need to install a specific version of TorchNPU, you can manually install the specified version of TorchNPU after vllm-ascend is installed.
 
 ### 19. On certain systems (e.g., Kylin OS), `docker pull` may fail with an `invalid tar header` error
 
