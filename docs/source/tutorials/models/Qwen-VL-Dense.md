@@ -25,11 +25,17 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 Requires 1 card on Atlas 800I A2 (64G × 8), Atlas 800 A3 (64G × 16), or Atlas inference products:
 
 - `Qwen3-VL-8B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
+
+Requires 1 card on Ascend950DT series (96G × 8) node. 
+
 - `Qwen3-VL-8B-Instruct-w8a8`(Quantized version): [Download model weight](todo)
 
 Requires 2 cards on Atlas 800I A2 (64G × 8), Atlas 800 A3 (64G × 16), or Atlas inference products:
 
 - `Qwen3-VL-32B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)
+
+Requires 1 card on Ascend950DT series (96G × 8) node. 
+
 - `Qwen3-VL-32B-Instruct-w8a8`(Quantized version): [Download model weight](todo)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
@@ -252,6 +258,38 @@ Run docker container to start the vLLM server on single-NPU:
     --gpu-memory-utilization 0.91 \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32]}' \
+    --mm-processor-cache-gb 0 
+
+    ```
+
+=== "Atlas inference products"
+    
+    ```bash
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+
+    vllm serve Qwen/Qwen3-VL-8B-Instruct \
+    --dtype float16 \
+    --max_model_len 16384 \
+    --host 0.0.0.0 \
+    --port $2 \
+    --dtype bfloat16 \
+    --served-model-name qwen3vl \
+    --no-enable-prefix-caching \
+    --data-parallel-size $3 \
+    --tensor-parallel-size $4 \ 
+    --trust-remote-code \
+    --max-num-seqs 128 \
+    --max-model-len 32768 \
+    --max-num-batched-tokens 16384 \
+    --gpu-memory-utilization 0.91 \
+    --async-scheduling \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32]}' \
+    --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}'
     --mm-processor-cache-gb 0 
 
     ```
