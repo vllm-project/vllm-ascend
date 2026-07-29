@@ -17,7 +17,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
-    block_hash_to_bytes,
+    _block_hash_to_bytes,
     get_block_hashes,
 )
 from vllm_ascend.utils import vllm_version_is
@@ -48,7 +48,7 @@ class ExternalCachedBlockPool:
     ) -> list[KVCacheBlock] | None:
         if self._exists is None:
             return [self._present_block] * len(group_ids)
-        h = block_hash_to_bytes(block_hash)
+        h = _block_hash_to_bytes(block_hash)
         if all((group_id, h) in self._exists for group_id in group_ids):
             return [self._present_block] * len(group_ids)
         return None
@@ -178,20 +178,19 @@ class AscendStoreCoordinator:
             for group_id, mask in enumerate(masks)
         )
 
-    def _reachable_masks(
+    def store_mask(
         self,
         aligned_token_len: int,
-        retention_interval: int | None,
-        num_prompt_tokens: int | None,
-    ) -> list[tuple[int, list[bool] | None]]:
+        num_prompt_tokens: int | None = None,
+    ) -> tuple[list[bool], ...]:
         assert aligned_token_len % self.lcm_block_size == 0, (
             f"aligned_token_len ({aligned_token_len}) must be a multiple of lcm_block_size ({self.lcm_block_size})"
         )
-        masks: list[tuple[int, list[bool] | None]] = []
+        masks: list[list[bool]] = []
         for group_id, spec in enumerate(self.group_effective_specs):
             num_chunks = aligned_token_len // self.group_effective_block_sizes[group_id]
             if not _uses_reachable_mask(self.group_cache_families[group_id]):
-                masks.append((num_chunks, None))
+                masks.append([True] * num_chunks)
                 continue
             manager_cls = _get_manager_class(_unwrap_spec(self.kv_cache_groups[group_id].kv_cache_spec))
             mask = _reachable_block_mask(
@@ -201,29 +200,11 @@ class AscendStoreCoordinator:
                 alignment_tokens=self.lcm_block_size,
                 kv_cache_spec=spec,
                 use_eagle=group_id in self.eagle_reachable_group_ids,
-                retention_interval=retention_interval,
+                retention_interval=self.retention_interval,
                 num_prompt_tokens=num_prompt_tokens,
             )
-            masks.append((num_chunks, mask))
-        return masks
-
-    def store_mask(
-        self,
-        aligned_token_len: int,
-        num_prompt_tokens: int | None = None,
-    ) -> tuple[list[bool], ...]:
-        masks = self._reachable_masks(aligned_token_len, self.retention_interval, num_prompt_tokens)
-        return tuple([True] * num_chunks if mask is None else mask for num_chunks, mask in masks)
-
-    def lookup_mask(
-        self,
-        aligned_token_len: int,
-    ) -> tuple[list[bool] | None, ...]:
-        masks = self._reachable_masks(aligned_token_len, None, None)
-        for num_chunks, mask in masks:
-            if mask is not None:
-                assert len(mask) == num_chunks
-        return tuple(None if mask is None or all(mask) else mask for _, mask in masks)
+            masks.append([True] * num_chunks if mask is None else mask)
+        return tuple(masks)
 
     def block_hashes_for_spec(self, block_hashes: list[BlockHash], spec: KVCacheSpec) -> BlockHashList:
         if not vllm_version_is("0.25.1"):
