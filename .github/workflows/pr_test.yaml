@@ -145,7 +145,25 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           chmod +x .github/workflows/scripts/gitleaks.sh
           .github/workflows/scripts/gitleaks.sh
-          
+
+      - name: Get pre-commit config hash
+        id: get_hash
+        run: |
+          PRE_COMMIT_HASH=$(sha256sum .pre-commit-config.yaml | awk '{print $1}')
+          echo "PRE_COMMIT_HASH=$PRE_COMMIT_HASH" >> $GITHUB_OUTPUT
+
+      - name: Restore pre-commit cache
+        uses: runs-on/cache/restore@v5
+        env:
+          RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+          RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
+          RUNS_ON_S3_FORCE_PATH_STYLE: "false"
+          AWS_S3_FORCE_PATH_STYLE: "false"
+          AWS_REGION: ap-southeast-1
+        with:
+          path: /tmp/pre-commit-cache
+          key: pre-commit-${{ steps.get_hash.outputs.PRE_COMMIT_HASH }}
+
       - name: Run pre-commit
         env:
           PRE_COMMIT_HOME: /tmp/pre-commit-cache
