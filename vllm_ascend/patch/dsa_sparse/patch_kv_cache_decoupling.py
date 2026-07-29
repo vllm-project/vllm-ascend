@@ -365,6 +365,58 @@ def _can_allocate_by_group(
     return pool.can_allocate(needed, reserved_blocks=reserved_blocks)
 
 
+def _can_fit_full_sequence(
+    self,
+    request,
+    num_new_computed_tokens: int = 0,
+    new_computed_blocks=None,
+    num_external_computed_tokens: int = 0,
+    num_encoder_tokens: int = 0,
+    reserved_blocks: int = 0,
+) -> bool:
+    """Check v0.23 full-sequence admission without allocating blocks."""
+    if new_computed_blocks is not None:
+        new_computed_block_list = new_computed_blocks.blocks
+    else:
+        new_computed_block_list = self.empty_kv_cache_blocks.blocks
+
+    num_local_computed_tokens = (
+        request.num_computed_tokens + num_new_computed_tokens)
+    total_computed_tokens = min(
+        num_local_computed_tokens + num_external_computed_tokens,
+        self.max_model_len,
+    )
+    full_num_tokens = min(request.num_tokens, self.max_model_len)
+
+    if isinstance(self.block_pool, MultiBlockPool):
+        return _can_allocate_by_group(
+            self,
+            request_id=request.request_id,
+            num_tokens=full_num_tokens,
+            new_computed_blocks=new_computed_block_list,
+            num_encoder_tokens=num_encoder_tokens,
+            total_computed_tokens=total_computed_tokens,
+            num_tokens_main_model=full_num_tokens,
+            apply_admission_cap=True,
+            reserved_blocks=reserved_blocks,
+        )
+
+    num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
+        request_id=request.request_id,
+        num_tokens=full_num_tokens,
+        new_computed_blocks=new_computed_block_list,
+        num_encoder_tokens=num_encoder_tokens,
+        total_computed_tokens=total_computed_tokens,
+        num_tokens_main_model=full_num_tokens,
+        apply_admission_cap=True,
+    )
+    available_blocks = (
+        self.block_pool.get_num_free_blocks()
+        - max(0, int(reserved_blocks))
+    )
+    return num_blocks_to_allocate <= available_blocks
+
+
 @wraps(_ORIGINAL_ALLOCATE_SLOTS)
 def _allocate_slots(
     self,
@@ -465,6 +517,8 @@ def install_dsa_kv_cache_decoupling_patch() -> None:
     coordinator_mod.get_kv_cache_coordinator = _get_kv_cache_coordinator
     # kv_cache_manager imports the factory by value.
     manager_mod.get_kv_cache_coordinator = _get_kv_cache_coordinator
+    manager_mod.KVCacheManager.can_fit_full_sequence = (
+        _can_fit_full_sequence)
     manager_mod.KVCacheManager.allocate_slots = _allocate_slots
     coordinator_mod.MultiBlockPool = MultiBlockPool
     coordinator_mod.DSASplitKVCacheCoordinator = (

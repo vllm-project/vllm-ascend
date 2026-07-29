@@ -179,6 +179,45 @@ def _load_sfa_prefill_layer_resolver_contract():
     return namespace["_resolve_sfa_prefill_layer_names"], FakeIndexerKVSpec
 
 
+def _load_full_sequence_fit_contract():
+    path = (
+        REPO_ROOT
+        / "vllm_ascend/patch/dsa_sparse/patch_kv_cache_decoupling.py"
+    )
+    module = ast.parse(path.read_text(encoding="utf-8"))
+    function_names = {
+        "_can_allocate_by_group",
+        "_can_fit_full_sequence",
+    }
+    selected_nodes = [
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name in function_names
+    ]
+    if {node.name for node in selected_nodes} != function_names:
+        raise AssertionError(
+            "DSA full-sequence admission helpers are incomplete"
+        )
+
+    class FakeMultiBlockPool:
+        def __init__(self, can_allocate):
+            self._can_allocate = can_allocate
+
+        def can_allocate(self, needed, *, reserved_blocks=0):
+            return self._can_allocate(needed, reserved_blocks)
+
+    contract_module = ast.Module(body=selected_nodes, type_ignores=[])
+    ast.fix_missing_locations(contract_module)
+    namespace = {
+        "Any": object,
+        "KVCacheBlock": object,
+        "MultiBlockPool": FakeMultiBlockPool,
+        "Sequence": list,
+    }
+    exec(compile(contract_module, str(path), "exec"), namespace)
+    return namespace["_can_fit_full_sequence"], FakeMultiBlockPool
+
+
 class TestOperatorABI(unittest.TestCase):
     def test_acl_operator_names_are_unchanged(self):
         ksc = _read(
@@ -583,6 +622,86 @@ class TestV023LifecycleContract(unittest.TestCase):
                 "full_sequence_must_fit",
                 "reserved_blocks",
             ],
+        )
+
+    def test_full_sequence_fit_uses_v023_group_admission_semantics(self):
+        can_fit_full_sequence, multi_block_pool_cls = (
+            _load_full_sequence_fit_contract()
+        )
+        coordinator_calls = []
+        allocation_calls = []
+
+        class FakeCoordinator:
+            def get_num_blocks_to_allocate_by_group(self, **kwargs):
+                coordinator_calls.append(kwargs)
+                return [3, 5]
+
+        pool = multi_block_pool_cls(
+            lambda needed, reserved: (
+                allocation_calls.append((needed, reserved))
+                or needed == [3, 5]
+                and reserved == 2
+            )
+        )
+        manager = types.SimpleNamespace(
+            block_pool=pool,
+            coordinator=FakeCoordinator(),
+            empty_kv_cache_blocks=types.SimpleNamespace(
+                blocks=((), ()),
+            ),
+            max_model_len=512,
+        )
+        request = types.SimpleNamespace(
+            request_id="request-0",
+            num_computed_tokens=128,
+            num_tokens=768,
+        )
+
+        self.assertTrue(
+            can_fit_full_sequence(
+                manager,
+                request,
+                num_new_computed_tokens=64,
+                num_external_computed_tokens=32,
+                reserved_blocks=2,
+            )
+        )
+        self.assertEqual(allocation_calls, [([3, 5], 2)])
+        self.assertEqual(
+            coordinator_calls,
+            [
+                {
+                    "request_id": "request-0",
+                    "num_tokens": 512,
+                    "new_computed_blocks": ((), ()),
+                    "num_encoder_tokens": 0,
+                    "total_computed_tokens": 224,
+                    "num_tokens_main_model": 512,
+                    "apply_admission_cap": True,
+                }
+            ],
+        )
+
+    def test_full_sequence_fit_is_installed_on_kv_cache_manager(self):
+        installer = _function_node(
+            "vllm_ascend/patch/dsa_sparse/"
+            "patch_kv_cache_decoupling.py",
+            "install_dsa_kv_cache_decoupling_patch",
+        )
+        bindings = {
+            (
+                ast.unparse(node.targets[0]),
+                ast.unparse(node.value),
+            )
+            for node in installer.body
+            if isinstance(node, ast.Assign) and len(node.targets) == 1
+        }
+        self.assertIn(
+            (
+                "manager_mod.KVCacheManager.can_fit_full_sequence",
+                "_can_fit_full_sequence",
+            ),
+            bindings,
         )
 
     def test_indexer_spec_uses_logical_model_abi(self):
