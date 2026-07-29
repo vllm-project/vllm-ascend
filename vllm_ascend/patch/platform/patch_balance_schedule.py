@@ -78,6 +78,8 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
+from vllm_ascend.ascend_config import init_ascend_config
+
 
 def _balance_scheduling_enabled(vllm_config) -> bool:
     # Primary source of truth is AscendConfig. The additional_config fallback
@@ -121,6 +123,15 @@ class BalanceScheduler(Scheduler):
             include_finished_set,
             log_stats,
         )
+        short_request_first_config = init_ascend_config(vllm_config).scheduler_config.short_request_first_config
+        if short_request_first_config.enabled:
+            from vllm_ascend.core.short_request_first_scheduler import install_short_request_first_waiting_queue
+
+            install_short_request_first_waiting_queue(
+                self,
+                threshold=short_request_first_config.threshold,
+                long_max_wait_ms=short_request_first_config.long_max_wait_ms,
+            )
         self._balance_enabled = _balance_scheduling_enabled(vllm_config)
         # Injected by BalanceDPEngineCoreProc._has_global_unfinished_reqs
         # before the first gather. Only used on the enabled path (balance
@@ -869,10 +880,10 @@ class BalanceDPEngineCoreProc(DPEngineCoreProc):
 
 
 # The scheduler is constructed as ``Scheduler(...)`` from
-# ``vllm.v1.core.sched.scheduler``. This only takes effect when scheduler_cls
-# is unset (the PD-mixed balance path); vllm-ascend's recompute / dynamic-batch
-# / profiling schedulers set scheduler_cls and bypass this name, which is
-# correct -- balance scheduling (PD-mixed) must not touch those configs.
+# ``vllm.v1.core.sched.scheduler``. This takes effect when scheduler_cls is
+# unset, covering ordinary synchronous, PD-prefill, and PD-mixed paths.
+# vLLM-Ascend's recompute, dynamic-batch, and profiling schedulers set
+# scheduler_cls and correctly bypass this name.
 _sched_mod.Scheduler = BalanceScheduler
 
 # Activate BalanceDPEngineCoreProc ONLY when balance scheduling is enabled.

@@ -269,10 +269,6 @@ class AscendConfig:
         if self.mega_moe_max_tokens <= 0:
             raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
 
-        # Whether to use NPU device group for DP metadata all_reduce.
-        # "True": use NPU device group, "False" (default): use CPU group.
-        self.dp_allreduce_on_npu = additional_config.get("dp_allreduce_on_npu", False)
-
         # Enable optimized reduce sampling scheme
         self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
 
@@ -493,6 +489,15 @@ class FinegrainedTPConfig:
         if any(size > 0 for size in module_tp_sizes) and enabled_configs:
             logger.info("finegrained_tp_config enabled: %s", ", ".join(enabled_configs))
 
+    def get_max_finegrained_tp_size(self) -> int:
+        max_finegrained_tp_size = 1
+        max_finegrained_tp_size = max(max_finegrained_tp_size, self.oproj_tensor_parallel_size)
+        max_finegrained_tp_size = max(max_finegrained_tp_size, self.lmhead_tensor_parallel_size)
+        max_finegrained_tp_size = max(max_finegrained_tp_size, self.embedding_tensor_parallel_size)
+        max_finegrained_tp_size = max(max_finegrained_tp_size, self.mlp_tensor_parallel_size)
+        max_finegrained_tp_size = max(max_finegrained_tp_size, self.olora_tensor_parallel_size)
+        return max_finegrained_tp_size
+
 
 class AscendCompilationConfig:
     """
@@ -533,6 +538,18 @@ class AscendCompilationConfig:
                 Default: True
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
+        from vllm_ascend.utils import is_310p
+
+        if is_310p():
+            if enable_npugraph_ex:
+                logger.warning("npugraph_ex is not supported on Ascend 310P. Disabling it.")
+            if enable_static_kernel:
+                logger.warning(
+                    "static kernel requires npugraph_ex, which is not supported on Ascend 310P. Disabling it."
+                )
+            enable_npugraph_ex = False
+            enable_static_kernel = False
+
         self.fuse_norm_quant = fuse_norm_quant
         self.fuse_qknorm_rope = fuse_qknorm_rope
         self.enable_npugraph_ex = enable_npugraph_ex

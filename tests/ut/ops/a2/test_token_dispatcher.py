@@ -146,11 +146,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.hier_comm_patch = patch(
             "vllm_ascend.ops.fused_moe.token_dispatcher.is_hierarchical_communication_enabled", return_value=False
         )
-        self.hier_comm_patch.start()
-        self.skip_allreduce_patch = patch(
-            "vllm_ascend.ops.fused_moe.token_dispatcher.should_skip_allreduce_across_dp_group", return_value=False
-        )
-        self.mock_skip_allreduce = self.skip_allreduce_patch.start()
+        self.mock_hier_comm = self.hier_comm_patch.start()
 
         kwargs = {"with_quant": False, "top_k": 8, "num_experts": 128}
         self.dispatcher = TokenDispatcherWithMC2(**kwargs)
@@ -165,26 +161,24 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.ascend_config_patch.stop()
         self.ascend_config_utils_patch.stop()
         self.hier_comm_patch.stop()
-        self.skip_allreduce_patch.stop()
 
     def test_init(self):
         self.assertEqual(self.dispatcher.ep_rank_id, 0)
         self.assertEqual(self.dispatcher.ep_world_size, 8)
         self.assertTrue(self.dispatcher.enable_dispatch_v2)
         self.assertTrue(self.dispatcher.need_extra_args)
-        self.assertEqual(self.dispatcher.global_bs, 0)
+        self.assertEqual(self.dispatcher.global_bs, 1024)
 
     def test_init_uses_mc2_capacity_for_non_uniform_global_bs(self):
         self.mock_get_config.return_value.parallel_config.tensor_parallel_size = 4
-        self.mock_skip_allreduce.return_value = True
 
         dispatcher = TokenDispatcherWithMC2(with_quant=False, top_k=8, num_experts=128)
 
         self.assertEqual(dispatcher.global_bs, 256)
 
-    def test_get_dispatch_mc2_kwargs_with_skip_allreduce_omits_mc2_mask(self):
+    def test_get_dispatch_mc2_kwargs_without_hier_comm_omits_mc2_mask(self):
         self.mock_get_config.return_value.parallel_config.tensor_parallel_size = 4
-        self.mock_skip_allreduce.return_value = True
+        self.mock_hier_comm.return_value = False
         dispatcher = TokenDispatcherWithMC2(with_quant=False, top_k=8, num_experts=128)
 
         hidden_states = torch.randn(10, 128)
@@ -205,7 +199,9 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.assertEqual(kwargs["global_bs"], 256)
         self.assertNotIn("x_active_mask", kwargs)
 
-    def test_get_dispatch_mc2_kwargs_without_skip_allreduce_keeps_mc2_mask(self):
+    def test_get_dispatch_mc2_kwargs_with_hier_comm_keeps_mc2_mask(self):
+        self.mock_hier_comm.return_value = True
+        dispatcher = TokenDispatcherWithMC2(with_quant=False, top_k=8, num_experts=128)
         hidden_states = torch.randn(10, 128)
         topk_ids = torch.randint(0, 8, (10, 1))
         topk_weights = torch.randn(10, 1)
@@ -219,7 +215,7 @@ class TestTokenDispatcherWithMC2(TestBase):
             mc2_mask=mc2_mask,
         )
 
-        kwargs = self.dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
+        kwargs = dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
 
         self.assertEqual(kwargs["global_bs"], 0)
         self.assertIs(kwargs["x_active_mask"], mc2_mask)
@@ -500,9 +496,9 @@ class TestTokenDispatcherWithAllGather(TestBase):
         self.dispatcher = TokenDispatcherWithAllGather(**kwargs)
 
         # Mock NPU functions
-        self.patcher_npu_moe_init_routing_custom = patch("torch.ops._C_ascend.npu_moe_init_routing_custom")
-        self.mock_npu_moe_init_routing_custom = self.patcher_npu_moe_init_routing_custom.start()
-        self.mock_npu_moe_init_routing_custom.return_value = (
+        self.patcher_npu_moe_init_routing_v2 = patch("torch_npu.npu_moe_init_routing_v2")
+        self.mock_npu_moe_init_routing_v2 = self.patcher_npu_moe_init_routing_v2.start()
+        self.mock_npu_moe_init_routing_v2.return_value = (
             torch.randn(6, 128),  # sorted_hidden_states
             torch.tensor([0, 1, 2, 3, 4, 5]),  # expanded_row_idx
             torch.tensor([0, 1, 0, 1, 0, 1]),  # expanded_expert_idx
@@ -513,7 +509,7 @@ class TestTokenDispatcherWithAllGather(TestBase):
         self.mock_npu_moe_token_unpermute.return_value = torch.randn(6, 128)
 
     def tearDown(self):
-        self.patcher_npu_moe_init_routing_custom.stop()
+        self.patcher_npu_moe_init_routing_v2.stop()
         self.patcher_npu_moe_token_unpermute.stop()
 
     @pytest.mark.skip("Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
@@ -530,8 +526,8 @@ class TestTokenDispatcherWithAllGather(TestBase):
         results = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
         # Verify npu_moe_init_routing is called
-        self.mock_npu_moe_init_routing_custom.assert_called_once()
-        args, kwargs = self.mock_npu_moe_init_routing_custom.call_args
+        self.mock_npu_moe_init_routing_v2.assert_called_once()
+        args, kwargs = self.mock_npu_moe_init_routing_v2.call_args
 
         self.assertEqual(results.group_list_type, 1)
         self.assertIsInstance(results.combine_metadata, MoEAllGatherCombineMetadata)
@@ -551,8 +547,8 @@ class TestTokenDispatcherWithAllGather(TestBase):
         results = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
         # Verify npu_moe_init_routing is called
-        self.mock_npu_moe_init_routing_custom.assert_called_once()
-        args, kwargs = self.mock_npu_moe_init_routing_custom.call_args
+        self.mock_npu_moe_init_routing_v2.assert_called_once()
+        args, kwargs = self.mock_npu_moe_init_routing_v2.call_args
 
         self.assertEqual(results.group_list_type, 1)
         self.assertIsInstance(results.combine_metadata, MoEAllGatherCombineMetadata)
@@ -710,11 +706,11 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.addCleanup(patcher10.stop)
         self.mock_npu_dynamic_quant.return_value = (torch.randn(16, 16), torch.randn(16))
 
-        # Mock torch.ops._C_ascend.npu_moe_init_routing_custom
-        patcher11 = patch("torch.ops._C_ascend.npu_moe_init_routing_custom")
-        self.mock_npu_moe_init_routing_custom = patcher11.start()
+        # Mock torch.ops._C_ascend.npu_moe_init_routing_v2
+        patcher11 = patch("torch_npu.npu_moe_init_routing_v2")
+        self.mock_npu_moe_init_routing_v2 = patcher11.start()
         self.addCleanup(patcher11.stop)
-        self.mock_npu_moe_init_routing_custom.return_value = (
+        self.mock_npu_moe_init_routing_v2.return_value = (
             torch.randn(16, 16),
             torch.arange(16),
             None,

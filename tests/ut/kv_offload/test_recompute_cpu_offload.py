@@ -7,7 +7,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from vllm.v1.outputs import KVConnectorOutput
-from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 
 # Clean up stale mock modules installed by other kv offload tests that replace
 # real kv_transfer packages with fake modules, breaking imports of this package.
@@ -600,9 +599,6 @@ def test_recompute_scheduler_remote_kv_restore_keeps_exact_token_position():
     scheduler.failed_recving_kv_req_ids = set()
     scheduler.finished_recving_kv_req_ids = {"req-1"}
     scheduler.kv_cache_manager = MagicMock()
-    scheduler.is_mtp_kv_consumer = True
-    scheduler.num_spec_tokens = 2
-    scheduler.max_model_len = 32
 
     request = SimpleNamespace(
         request_id="req-1",
@@ -616,7 +612,7 @@ def test_recompute_scheduler_remote_kv_restore_keeps_exact_token_position():
 
     scheduler.kv_cache_manager.cache_blocks.assert_called_once_with(request, 8)
     assert request.num_computed_tokens == 8
-    assert request.spec_token_ids == [PLACEHOLDER_TOKEN_ID] * 2
+    assert request.spec_token_ids == []
     assert scheduler.finished_recving_kv_req_ids == set()
 
 

@@ -57,9 +57,15 @@ repos:
   hooks:
   - id: actionlint
     exclude: '.*\.github/workflows/(scripts|configs)/.*\.ya?ml$'
-
+        
 - repo: local
   hooks:
+  - id: gitleaks-offline-scan
+    name: Gitleaks Secret Scan(Local Binary)
+    entry: .github/workflows/scripts/gitleaks.sh
+    language: system
+    pass_filenames: false
+    always_run: true
   - id: shellcheck
     name: Lint shell scripts
     entry: tools/shellcheck.sh

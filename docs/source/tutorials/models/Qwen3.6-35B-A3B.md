@@ -233,7 +233,7 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
       --max-num-seqs 16 \
       --served-model-name qwen3.6 \
       --dtype float16 \
-      --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+      --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}' \
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}' \
       --quantization ascend \
       --max-model-len 20480 \
@@ -246,11 +246,11 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
     - `--dtype float16` is used for Atlas inference products to match the Atlas inference execution path.
     - `--max-num-seqs 16` limits concurrent active requests to reduce KV cache and graph capture pressure on Atlas inference products.
     - `--gpu-memory-utilization` controls KV cache capacity. Reduce it if startup or runtime requests report OOM.
-    - `--additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}'` disables norm-quant fusion for the Atlas inference products serving path.
+    - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required because `enable_npugraph_ex` is not supported on Atlas inference products.
     - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}'` enables decode ACLGraph replay and explicitly limits capture sizes for Atlas inference products.
     - `--no-enable-prefix-caching` is the default recommendation for this Atlas inference products example to reduce memory pressure.
     - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
-    - To enable MTP speculative decoding, use --speculative_config '{"method": "mtp", "num_speculative_tokens": 1}'. We recommend setting num_speculative_tokens to 1.
+    - To enable MTP speculative decoding, use --speculative_config '{"method": "mtp", "num_speculative_tokens": 1}'. We recommend setting num_speculative_tokens to 1. If your usage scenario involves fewer than two concurrent requests, it is recommended to enable MTP. Otherwise, it is recommended not to enable MTP.
 
 Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
 

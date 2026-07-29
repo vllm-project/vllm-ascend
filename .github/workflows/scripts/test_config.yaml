@@ -75,6 +75,8 @@
   base: attention_common
   source_file_dependencies:
     - vllm_ascend/attention/attention_v1.py
+  tests:
+    - tests/e2e/pull_request/two_card/test_gemma4.py
 
 - name: attention_fa3
   optional: false
@@ -286,6 +288,15 @@
     - vllm_ascend/models
   tests:
     - tests/e2e/pull_request/four_card/test_deepseek_v4.py
+
+- name: models_minimax_m3
+  optional: false
+  source_file_dependencies:
+    - vllm_ascend/models/minimax_m3
+    - vllm_ascend/models/__init__.py
+    - csrc/attention/sparse_attention_score
+  tests:
+    - tests/e2e/pull_request/one_card/test_minimax_m3_sparse_attn.py
 
 # Ops
 - name: ops_basic
@@ -611,6 +622,18 @@
   tests:
     - tests/ut/
 # Single File
+- name: dependency_documentation
+  optional: true
+  cpu_only: true
+  source_file_dependencies:
+    - docs/source/community/versioning_policy.md
+    - docs/source/installation.md
+    - mkdocs.yml
+    - pyproject.toml
+    - requirements.txt
+  tests:
+    - tests/ut/test_dependency_documentation.py
+
 - name: misc
   optional: false
   source_file_dependencies:
@@ -731,6 +754,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_cpu_weight_offload.py: 1400
   tests/e2e/pull_request/one_card/test_guided_decoding.py: 610
   tests/e2e/pull_request/one_card/test_minicpm.py: 330
+  tests/e2e/pull_request/one_card/test_minimax_m3_sparse_attn.py: 600
   tests/e2e/pull_request/one_card/test_multi_instance.py: 140
   tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py: 340
   tests/e2e/pull_request/one_card/test_npu_ipc_weight_transfer.py: 190
@@ -746,7 +770,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py: 20
   tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py: 150
   tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py: 510
-  tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora_tp.py: 280
+  tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora.py: 500
   tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py: 520
   tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 740
   tests/e2e/pull_request/two_card/test_data_parallel.py: 570
@@ -785,6 +809,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_qwen3_5.py: 610
   tests/e2e/pull_request/four_card/test_qwen3_next.py: 1180
   tests/e2e/pull_request/four_card/test_graph_mode.py: 480
+  tests/e2e/pull_request/two_card/test_gemma4.py: 1200
   tests/ut/attention/a2/test_attention_cp.py: 40
   tests/ut/attention/a2/test_attention_cp_precision.py: 30
   tests/ut/attention/a2/test_attention_v1.py: 30

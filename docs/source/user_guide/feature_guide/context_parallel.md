@@ -1,96 +1,61 @@
-# Context Parallel Guide
+# Decode Context Parallel Guide
 
 ## Overview
 
-This guide shows how to use Context Parallel, a long sequence inference optimization technique. Context Parallel includes `PCP` (Prefill Context Parallel) and `DCP` (Decode Context Parallel), which reduces NPU memory usage and improves inference speed in long sequence LLM inference.
+Decode Context Parallel (DCP) shards the KV cache along the sequence dimension across devices in a Tensor Parallel (TP) group. It removes redundant KV-cache copies and can increase the batch size available for long-context decoding.
 
-## Benefits of Context Parallel
+Prefill Context Parallel is not supported by vLLM Ascend. The upstream `prefill_context_parallel_size` option must remain at its default value of `1`.
 
-Context parallel mainly solves the problem of serving long context requests. As prefill and decode present quite different characteristics and have quite different SLO (service level objectives), we need to implement context parallel separately for them. The major considerations are:
-
-- For long context prefill, we can use context parallel to reduce TTFT (time to first token) by amortizing the computation time of the prefill across query tokens.
-- For long context decode, we can use context parallel to reduce KV cache duplication and offer more space for KV cache to increase the batch size (and hence the throughput).
-
-To learn more about the theory and implementation details of context parallel, please refer to the [context parallel developer guide](../../developer_guide/Design_Documents/context_parallel.md).
+DSA-CP is a separate sparse-attention optimization controlled by `additional_config.enable_dsa_cp`. See [Additional Configuration](../configuration/additional_config.md) for its configuration and model requirements.
 
 ## Supported Scenarios
 
-Currently context parallel can be used together with most other features, supported features are as follows:
+DCP supports eager and graph execution, prefix caching, chunked prefill, speculative decoding, P/D disaggregation, and MLAPO on the model and hardware combinations documented by vLLM Ascend. The SFA attention backend supports speculative decoding. In the MLA and GQA attention backend, speculative decoding is supported in the P/D disaggregation deployment scenario and not supported in the mixed deployment scenario.
 
-|         | Eager | Graph | Prefix <br> Cache | Chunked <br> Prefill | SpecDecode <br> (MTP) | PD <br> disaggregation | MLAPO |
-| ------- | ----- | ----- | ------ | ------ | ----- | ----- | ----- |
-| **PCP** | ✅    | ✅     | ✅      | ✅       | ✅      | ✅ | ✅|
-| **DCP** | ✅    | ✅     | ✅      | ✅       | ✅      | ✅ | ✅ |
+## Usage
 
-## How to use Context Parallel
+Offline example:
 
-You can enable `PCP` and `DCP` by `prefill_context_parallel_size` and `decode_context_parallel_size`, refer to the following example:
+```python
+from vllm import LLM, SamplingParams
 
-- Offline example:
+prompts = ["The future of AI is"]
+sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
-    ```python
-    from vllm import LLM, SamplingParams
+llm = LLM(
+    model="deepseek-ai/DeepSeek-V2-Lite",
+    tensor_parallel_size=2,
+    decode_context_parallel_size=2,
+)
+outputs = llm.generate(prompts, sampling_params)
+```
 
-    prompts = [
-        "The future of AI is",
-    ]
-    sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+Online example:
 
-    llm = LLM(
-        model="deepseek-ai/DeepSeek-V2-Lite",
-        tensor_parallel_size=2,
-        decode_context_parallel_size=2,
-        prefill_context_parallel_size=2,
-    )
-    outputs = llm.generate(prompts, sampling_params)
-    ```
+```bash
+vllm serve deepseek-ai/DeepSeek-V2-Lite \
+    --tensor-parallel-size 2 \
+    --decode-context-parallel-size 2
+```
 
-- Online example:
-
-    ```bash
-    vllm serve deepseek-ai/DeepSeek-V2-Lite \
-        --tensor-parallel-size 2 \
-        --decode-context-parallel-size 2 \
-        --prefill-context-parallel-size 2 \
-    ```
-
-The total world size is `tensor_parallel_size` * `prefill_context_parallel_size`, so the examples above need 4 NPUs for each.
+DCP reuses the TP devices and does not increase the world size.
 
 ## Constraints
 
-- While using DCP, the following constraints must be met:
-    - For MLA-based model, such as DeepSeek-R1:
-        - `tensor_parallel_size >= decode_context_parallel_size`
-        - `tensor_parallel_size % decode_context_parallel_size == 0`
-    - For GQA-based model, such as Qwen3-235B:
-        - `(tensor_parallel_size // num_key_value_heads) >= decode_context_parallel_size`
-        - `(tensor_parallel_size // num_key_value_heads) % decode_context_parallel_size == 0`
-
-- While using Context Parallel in KV cache transfer-needed scenario (e.g. KV pooling, PD disaggregation), to simplify KV cache transmission, `cp_kv_cache_interleave_size` must be set to the same value of KV cache `block_size`(default: 128), which specifies CP to split KV cache in a block-interleave style. For example:
+- For an MLA model such as DeepSeek-R1:
+    - `tensor_parallel_size >= decode_context_parallel_size`
+    - `tensor_parallel_size % decode_context_parallel_size == 0`
+- For a GQA model such as Qwen3-235B:
+    - `(tensor_parallel_size // num_key_value_heads) >= decode_context_parallel_size`
+    - `(tensor_parallel_size // num_key_value_heads) % decode_context_parallel_size == 0`
+- In a KV-cache transfer scenario such as KV pooling or P/D disaggregation, set `cp_kv_cache_interleave_size` to the KV-cache `block_size` (default: 128):
 
     ```shell
     vllm serve deepseek-ai/DeepSeek-V2-Lite \
         --tensor-parallel-size 2 \
         --decode-context-parallel-size 2 \
-        --prefill-context-parallel-size 2 \
         --cp-kv-cache-interleave-size 128 \
-        --kv-transfer-config {...} \
+        --kv-transfer-config '{...}'
     ```
 
-## Experimental Results
-
-To evaluate the effectiveness of Context Parallel in long sequence LLM inference scenarios, we use **DeepSeek-R1-W8A8** and **Qwen3-235B**, deploy PD disaggregate instances in the environment of 64 cards Ascend Atlas A3 inference products*64G (A3), the configuration and performance data are as follows.
-
-- DeepSeek-R1-W8A8:
-
-    | Configuration | Input length <br> 32k | Input length <br> 64k | Input length <br> 128k |
-    | ----------------------------- | ------------------------- | ------------------------- | ------------------------- |
-    | P node: (DP2 TP8 EP16) *2 <br> D node: (DP32 EP32)*1       | TTFT: 9.3s <br> TPOT: 72ms | TTFT: 22.8s <br> TPOT: 74ms | TTFT: 73.2s <br> TPOT: 82ms |
-    | P node: (PCP2 TP8 DCP8 EP16) *2 <br> D node: (DP32 EP32)*1 | TTFT: 7.9s <br> TPOT: 74ms | TTFT: 15.9s <br> TPOT: 78ms | TTFT: 46.0s <br> TPOT: 83ms |
-
-- Qwen3-235B:
-
-    | Configuration | Input length <br> 32k | Input length <br> 64k | Input length <br> 120k |
-    | ----------------------------- | ------------------------- | ------------------------- | ------------------------- |
-    | P node: (DP2 TP8 EP16) *2 <br> D node: (DP32 EP32)*1       | TTFT: 5.1s <br> TPOT: 65ms | TTFT: 13.1s <br> TPOT: 85ms | TTFT: 33.9s <br> TPOT: 120ms |
-    | P node: (PCP2 TP8 DCP2 EP16) *2 <br> D node: (DP32 EP32)*1 | TTFT: 3.0s <br> TPOT: 66ms | TTFT: 8.9s <br> TPOT: 86ms | TTFT: 22.7s <br> TPOT: 121ms |
+For implementation details, see the [Decode Context Parallel design document](../../developer_guide/Design_Documents/context_parallel.md).
