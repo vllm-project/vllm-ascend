@@ -122,6 +122,7 @@ class NPUWorker(WorkerBase):
         from vllm_ascend.logger import configure_ascend_file_logging
 
         configure_ascend_file_logging()
+        check_ascend_device_type()
 
         super().__init__(
             vllm_config=vllm_config,
@@ -434,12 +435,28 @@ class NPUWorker(WorkerBase):
             assert self.local_rank < visible_device_count, (
                 f"DP adjusted local rank {self.local_rank} is out of bounds for {visible_device_count} devices."
             )
-
+        # For Ray backend, clear ASCEND_RT_VISIBLE_DEVICES before aclInit().
+        # aclInit() uses physical device 0 as the default; if the env var
+        # excludes device 0 (common in CI), initialization fails with
+        # error 107001. Ray workers use assigned_physical_gpu_ids for
+        # device binding, so the env var is not needed.
+        is_ray_backend = (
+            parallel_config.distributed_executor_backend in ("ray", "external_launcher")
+            or parallel_config.data_parallel_backend == "ray"
+        )
+        if is_ray_backend:
+            evar = current_platform.device_control_env_var
+            if evar in os.environ:
+                old_val = os.environ.pop(evar)
+                logger.info(
+                    "Cleared %s (was '%s') for Ray backend; device "
+                    "assignment via assigned_physical_gpu_ids=%s",
+                    evar, old_val, assigned_physical_gpu_ids,
+                )
         visible_device_index = current_platform.logical_device_id_to_visible_device_id(self.local_rank)
         device = torch.device(f"{current_platform.device_type}:{visible_device_index}")
-        os.environ.pop(current_platform.device_control_env_var, None)
+
         torch.npu.set_device(device)
-        check_ascend_device_type()
 
         # Import _inductor for graph mode execution with triton
         # This lazy import avoids torch_npu re-initialization in patch
