@@ -27,13 +27,13 @@ from vllm_ascend.distributed.parallel_state import get_global_rank
 DEFAULT_GLOBAL_SEGMENT_SIZE = 1073741824  # 1.0 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
 MOONCAKE_LAYERWISE_CLIENT_METHODS = (
-    "batch_put_start",
+    "batch_put_session_start",
     "batch_put_from_multi_buffer_ranges",
-    "batch_put_end",
-    "batch_put_revoke",
-    "batch_get_start",
+    "batch_put_session_end",
+    "batch_put_session_revoke",
+    "batch_get_session_start",
     "batch_get_into_multi_buffer_ranges",
-    "batch_get_end",
+    "batch_get_session_end",
 )
 _KVPOOL_RANGE_DEBUG_PREFIX = "[KVPOOL_RANGE_DEBUG]"
 
@@ -240,10 +240,10 @@ class MooncakeBackend(Backend):
         return require_aligned_batch_results(operation, keys, method(*args))
 
     def batch_put_start(self, keys: list[str], sizes: list[int]) -> list[int]:
-        return self._call_layerwise_batch("batch_put_start", keys, keys, sizes)
+        return self._call_layerwise_batch("batch_put_session_start", keys, keys, sizes)
 
     def batch_get_start(self, keys: list[str]) -> list[int]:
-        return self._call_layerwise_batch("batch_get_start", keys, keys)
+        return self._call_layerwise_batch("batch_get_session_start", keys, keys)
 
     def batch_copy_put(
         self,
@@ -278,16 +278,18 @@ class MooncakeBackend(Backend):
         )
 
     def batch_commit(self, keys: list[str]) -> list[int]:
-        return self._call_layerwise_batch("batch_put_end", keys, keys)
+        return self._call_layerwise_batch("batch_put_session_end", keys, keys)
 
     def batch_revoke(self, keys: list[str]) -> list[int]:
-        return self._call_layerwise_batch("batch_put_revoke", keys, keys)
+        return self._call_layerwise_batch("batch_put_session_revoke", keys, keys)
 
     def batch_get_end(self, keys: list[str]) -> int:
         self.ensure_initialized()
-        if self.store is None or not callable(getattr(self.store, "batch_get_end", None)):
-            raise RuntimeError("Mooncake client does not support batch_get_end")
-        return int(self.store.batch_get_end(keys))
+        if self.store is None or not callable(
+            getattr(self.store, "batch_get_session_end", None)
+        ):
+            raise RuntimeError("Mooncake client does not support batch_get_session_end")
+        return int(self.store.batch_get_session_end(keys))
 
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         self.ensure_initialized()

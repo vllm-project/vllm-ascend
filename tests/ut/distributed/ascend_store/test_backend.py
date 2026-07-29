@@ -49,13 +49,13 @@ with patch.dict(sys.modules, {"vllm_ascend.distributed.parallel_state": _paralle
 
 class _StrictLayerwiseStore:
     def __init__(self):
-        self.batch_put_start = MagicMock(return_value=[0])
+        self.batch_put_session_start = MagicMock(return_value=[0])
         self.batch_put_from_multi_buffer_ranges = MagicMock(return_value=[64])
-        self.batch_put_end = MagicMock(return_value=[0])
-        self.batch_put_revoke = MagicMock(return_value=[0])
-        self.batch_get_start = MagicMock(return_value=[0])
+        self.batch_put_session_end = MagicMock(return_value=[0])
+        self.batch_put_session_revoke = MagicMock(return_value=[0])
+        self.batch_get_session_start = MagicMock(return_value=[0])
         self.batch_get_into_multi_buffer_ranges = MagicMock(return_value=[64])
-        self.batch_get_end = MagicMock(return_value=0)
+        self.batch_get_session_end = MagicMock(return_value=0)
 
 
 class _BackendDefaults(Backend):
@@ -515,17 +515,17 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         self.assertEqual(b.batch_revoke(["k"]), [0])
         self.assertEqual(b.batch_get_end(["k"]), 0)
 
-        b.store.batch_put_start.assert_called_once_with(["k"], [64])
-        b.store.batch_get_start.assert_called_once_with(["k"])
+        b.store.batch_put_session_start.assert_called_once_with(["k"], [64])
+        b.store.batch_get_session_start.assert_called_once_with(["k"])
         b.store.batch_put_from_multi_buffer_ranges.assert_called_once_with(
             ["k"], [[100]], [[64]], [[0]]
         )
         b.store.batch_get_into_multi_buffer_ranges.assert_called_once_with(
             ["k"], [[200]], [[64]], [[0]]
         )
-        b.store.batch_put_end.assert_called_once_with(["k"])
-        b.store.batch_put_revoke.assert_called_once_with(["k"])
-        b.store.batch_get_end.assert_called_once_with(["k"])
+        b.store.batch_put_session_end.assert_called_once_with(["k"])
+        b.store.batch_put_session_revoke.assert_called_once_with(["k"])
+        b.store.batch_get_session_end.assert_called_once_with(["k"])
 
     def test_validate_layerwise_support_checks_every_client_method(self):
         b = self._make_backend()
@@ -550,7 +550,9 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         b.store = object()
 
         self.assertTrue(hasattr(b, "validate_layerwise_support"))
-        with self.assertRaisesRegex(RuntimeError, "batch_put_start.*batch_get_end"):
+        with self.assertRaisesRegex(
+            RuntimeError, "batch_put_session_start.*batch_get_session_end"
+        ):
             b.validate_layerwise_support()
 
     def test_layerwise_result_shape_guard_rejects_invalid_results(self):
