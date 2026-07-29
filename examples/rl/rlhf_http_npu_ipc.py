@@ -36,11 +36,17 @@ The example performs the following steps:
 
 import os
 
-import requests
 import torch
 from openai import OpenAI
 from transformers import AutoModelForCausalLM
 
+from examples.rl.weight_transfer_http_utils import (
+    finish_weight_update,
+    init_weight_transfer_engine,
+    pause_generation,
+    resume_generation,
+    start_weight_update,
+)
 from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
     NPUIPCTrainerSendWeightsArgs,
     NPUIPCWeightTransferEngine,
@@ -66,50 +72,6 @@ def generate_completions(client: OpenAI, model: str, prompts: list[str]) -> list
         results.append(response.choices[0].text)
     return results
 
-
-def init_weight_transfer_engine(base_url: str) -> None:
-    """Initialize weight transfer via HTTP endpoint (no-op for NPU IPC)."""
-    url = f"{base_url}/init_weight_transfer_engine"
-    payload: dict[str, dict] = {"init_info": {}}
-    response = requests.post(url, json=payload, timeout=60)
-    response.raise_for_status()
-
-
-def start_weight_update(base_url: str, is_checkpoint_format: bool = True) -> None:
-    """Start weight update via HTTP endpoint.
-
-    Prepares the model for layerwise reload on the vLLM server side.
-    Must be called before update_weights.
-    """
-    url = f"{base_url}/start_weight_update"
-    payload = {"is_checkpoint_format": is_checkpoint_format}
-    response = requests.post(url, json=payload, timeout=60)
-    response.raise_for_status()
-
-
-def finish_weight_update(base_url: str) -> None:
-    """Finish weight update via HTTP endpoint.
-
-    Finalizes layerwise reload on the vLLM server side.
-    Must be called after all update_weights calls are complete.
-    """
-    url = f"{base_url}/finish_weight_update"
-    response = requests.post(url, timeout=60)
-    response.raise_for_status()
-
-
-def pause_generation(base_url: str) -> None:
-    """Pause generation via HTTP endpoint."""
-    url = f"{base_url}/pause"
-    response = requests.post(url, timeout=60)
-    response.raise_for_status()
-
-
-def resume_generation(base_url: str) -> None:
-    """Resume generation via HTTP endpoint."""
-    url = f"{base_url}/resume"
-    response = requests.post(url, timeout=60)
-    response.raise_for_status()
 
 
 def main():
@@ -155,7 +117,7 @@ def main():
 
     # Initialize weight transfer on vLLM server (no-op for NPU IPC)
     print("Initializing weight transfer (NPU IPC backend)...")
-    init_weight_transfer_engine(BASE_URL)
+    init_weight_transfer_engine(BASE_URL, {})
 
     # Pause generation before weight sync
     pause_generation(BASE_URL)
