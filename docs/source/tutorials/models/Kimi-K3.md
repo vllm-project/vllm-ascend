@@ -138,6 +138,7 @@ vllm serve $MODEL_PATH \
     --port $PORT \
     --allowed-local-media-path / \
     --trust-remote-code \
+    --quantization ascend \
     --tensor-parallel-size 16 \
     --data-parallel-size 4 \
     --data-parallel-size-local 1 \
@@ -150,11 +151,10 @@ vllm serve $MODEL_PATH \
     --max-num-batched-tokens 24576 \
     --gpu-memory-utilization 0.9 \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": false}' \
     --mm-processor-cache-gb 0 \
     --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true}' \
     --mm-encoder-tp-mode data \
-    --limit-mm-per-prompt '{"vision_chunk": 40}' \
+    --limit-mm-per-prompt '{"vision_chunk": 2}' \
     --enable-auto-tool-choice \
     --reasoning-parser kimi_k3 \
     --tool-call-parser kimi_k3
@@ -193,6 +193,7 @@ vllm serve $MODEL_PATH \
     --port $PORT \
     --allowed-local-media-path / \
     --trust-remote-code \
+    --quantization ascend \
     --tensor-parallel-size 16 \
     --data-parallel-size 4 \
     --data-parallel-size-local 1 \
@@ -206,11 +207,10 @@ vllm serve $MODEL_PATH \
     --max-num-batched-tokens 24576 \
     --gpu-memory-utilization 0.9 \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": false}' \
     --mm-processor-cache-gb 0 \
     --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true}' \
     --mm-encoder-tp-mode data \
-    --limit-mm-per-prompt '{"vision_chunk": 40}' \
+    --limit-mm-per-prompt '{"vision_chunk": 2}' \
     --enable-auto-tool-choice \
     --reasoning-parser kimi_k3 \
     --tool-call-parser kimi_k3
@@ -322,8 +322,6 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export HCCL_BUFFSIZE=1024
 export TASK_QUEUE_ENABLE=1
-export VLLM_TORCH_PROFILER_DIR="./vllm_profile"
-export VLLM_TORCH_PROFILER_WITH_STACK=1
 export VLLM_USE_V1=1
 export ASCEND_RT_VISIBLE_DEVICES=$1
 export ASCEND_BUFFER_POOL=4:8
@@ -357,8 +355,7 @@ vllm serve <KIMI_K3_MODEL_PATH> \
     --mamba-cache-mode align \
     --enable-prefix-caching \
     --additional-config '{"recompute_scheduler_enable":false}' \
-    --limit-mm-per-prompt '{"vision_chunk": 0}' \
-    --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}' \
+    --limit-mm-per-prompt '{"vision_chunk": 2}' \
     --kv-transfer-config \
     '{
       "kv_connector": "MultiConnector",
@@ -417,8 +414,6 @@ export VLLM_ASCEND_ENABLE_MLAPO=1
 export HCCL_BUFFSIZE=1024
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
-export VLLM_TORCH_PROFILER_DIR="./vllm_profile"
-export VLLM_TORCH_PROFILER_WITH_STACK=1
 export VLLM_USE_V1=1
 export ASCEND_RT_VISIBLE_DEVICES=$1
 export ASCEND_BUFFER_POOL=4:8
@@ -448,8 +443,7 @@ vllm serve <KIMI_K3_MODEL_PATH> \
     --mamba-cache-mode align \
     --enable-prefix-caching \
     --additional-config '{"recompute_scheduler_enable":false}' \
-    --limit-mm-per-prompt '{"vision_chunk":0}' \
-    --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}' \
+    --limit-mm-per-prompt '{"vision_chunk":2}' \
     --kv-transfer-config \
     '{
       "kv_connector": "MooncakeConnectorV1",
@@ -679,8 +673,6 @@ Change these values from the standard Section 5.1 deployment on all four nodes:
 | `--max-model-len` | 131027 | 250000 |
 | `--max-num-batched-tokens` | 24576 | 8192 |
 | `--gpu-memory-utilization` | 0.9 | 0.95 |
-| `torch_profiler_with_stack` | `false` | `true` |
-| `--limit-mm-per-prompt` | `{"vision_chunk": 40}` | `{"vision_chunk": 2}` |
 
 The master-node `vllm serve` command is:
 
@@ -690,6 +682,7 @@ vllm serve <KIMI_K3_MODEL_PATH> \
     --port <SERVICE_PORT> \
     --allowed-local-media-path / \
     --trust-remote-code \
+    --quantization ascend \
     --tensor-parallel-size 16 \
     --data-parallel-size 4 \
     --data-parallel-size-local 1 \
@@ -702,7 +695,6 @@ vllm serve <KIMI_K3_MODEL_PATH> \
     --max-num-batched-tokens 8192 \
     --gpu-memory-utilization 0.95 \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}' \
     --mm-processor-cache-gb 0 \
     --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true}' \
     --mm-encoder-tp-mode data \
