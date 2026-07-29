@@ -330,7 +330,7 @@ class KernelComputeWy {
     // Cube: G = Kβ @ K^T → attnLocal; then A = −strictlower(G ⊙ Λ).
     CastFloatRowsToHalf(qHalf, kBeta, FIXED_CHUNK_SIZE, kHeadDim_, alignK_);
     CastFloatRowsToHalf(kHalf, kFloat, FIXED_CHUNK_SIZE, kHeadDim_, alignK_);
-    cubeGemm_.GemmATransB(attnLocal, qHalf, kHalf, kHeadDim_, kHeadDim_, kHeadDim_);
+    cubeGemm_.GemmATransB(attnLocal, qHalf, kHalf, scratch, kHeadDim_, kHeadDim_, kHeadDim_);
     SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
     ApplyLambdaNegStrictLower(attnLocal, gLocal, scratch);
 

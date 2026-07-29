@@ -1,5 +1,6 @@
 #include "chunk_gated_delta_rule_compute_wy_tiling.h"
 
+#include <algorithm>
 #include <register/op_impl_registry.h>
 #include <tiling/tiling_api.h>
 
@@ -33,8 +34,13 @@ static ge::graphStatus FillCubeTiling(gert::TilingContext *context, int64_t m, i
     mm.SetCType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND, matmul_tiling::DataType::DT_FLOAT);
     mm.SetBias(false);
     mm.SetOrgShape(m, n, k);
-    mm.SetShape(m, n, k);
+    // Cap the tiled block at the 64-wide chunk: on 310P a cube base dim of 128 is
+    // mis-driven by this kernel (baseN=128 -> wrong results, baseK=128 -> aicore timeout).
+    // OrgShape keeps the real sizes so strides are right; the kernel re-sets
+    // SetOrgShape/SetSingleShape at runtime and the matmul iterates internally.
+    mm.SetShape(std::min<int64_t>(m, FIXED_CHUNK), std::min<int64_t>(n, FIXED_CHUNK), std::min<int64_t>(k, FIXED_CHUNK));
     mm.SetBufferSpace(-1, -1, -1);
+    mm.SetFixSplit(FIXED_CHUNK, FIXED_CHUNK, FIXED_CHUNK);
     if (mm.GetTiling(out) == -1) {
         return ge::GRAPH_FAILED;
     }
