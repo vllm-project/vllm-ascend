@@ -98,7 +98,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
     CUSTOM_OPS_ARRAY=(
         "scatter_nd_update_v2"
         "moe_grouped_matmul"
-        "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
         "lightning_indexer"
         "sparse_flash_attention"
         "kv_quant_sparse_flash_attention"
@@ -122,7 +121,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "inplace_partial_rotary_mul"
         "rms_norm_dynamic_quant"
         "dequant_swiglu_quant"
-        "grouped_matmul_swiglu_quant"
         "grouped_matmul_swiglu_quant_v2"
         "recurrent_gated_delta_rule"
         "ngram_spec_decode"
@@ -143,7 +141,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
 
     CUSTOM_OPS_ARRAY=(
         "scatter_nd_update_v2"
-        "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
         "lightning_indexer"
         "sparse_flash_attention"
         "kv_quant_sparse_flash_attention"
@@ -171,7 +168,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "inplace_partial_rotary_mul"
         "rms_norm_dynamic_quant"
         "dequant_swiglu_quant"
-        "grouped_matmul_swiglu_quant"
         "grouped_matmul_swiglu_quant_v2"
         "recurrent_gated_delta_rule"
         "ngram_spec_decode"

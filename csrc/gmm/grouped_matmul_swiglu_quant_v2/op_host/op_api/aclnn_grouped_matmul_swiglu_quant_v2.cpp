@@ -123,7 +123,7 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzV2GetWorkspaceSize(const aclTen
         auto expertNum = groupListViewShape[0];
         auto weightScale0 = (*weightScale)[0];
         auto weightScaleStorageShape = weightScale0->GetViewShape();
-        auto n = weightScaleStorageShape[1];
+        auto n = weightScaleStorageShape[weightScaleStorageShape.GetDimNum() - 1];
         auto xViewShape = x->GetViewShape();
         auto k = xViewShape[1];
         storageShape = {expertNum, n / 64, k / 16, 16, 8};
@@ -152,7 +152,7 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzV2GetWorkspaceSize(const aclTen
             auto groupListViewShape = groupList->GetViewShape();
             auto weightScale0 = (*weightScale)[i];
             auto weightScaleStorageShape = weightScale0->GetViewShape();
-            auto n = weightScaleStorageShape[0];
+            auto n = weightScaleStorageShape[weightScaleStorageShape.GetDimNum() - 1];
             auto xViewShape = x->GetViewShape();
             auto k = xViewShape[1];
             storageShape = {n / 64, k / 16, 16, 8};
