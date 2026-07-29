@@ -1800,7 +1800,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         dsa_k_cache_idx = self.kv_cache_indexer_k_idx
         dsa_k_scale_cache_idx = self.kv_cache_indexer_scale_idx
 
-        if get_ascend_config().c8_enable_reshape_optim:
+        use_li_c8_reshape_optim = self._use_li_c8_reshape_optim()
+        if use_li_c8_reshape_optim:
             torch.ops._C_ascend.store_kv_block(
                 k_li,
                 kv_cache[dsa_k_cache_idx],
@@ -1815,10 +1816,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                 slot_mapping.view(-1, 1),
                 k_li.view(-1, k_li.shape[-1]),
             )
-        if self.use_sparse_c8_indexer:
-            assert len(kv_cache) == (3 if self.use_sparse_c8_sfa else 4)
+        if self.enable_sparse_li_c8:
+            assert len(kv_cache) == (3 if self.enable_sparse_sfa_c8 else 4)
             if k_li_scale is not None:
-                if get_ascend_config().c8_enable_reshape_optim:
+                if use_li_c8_reshape_optim:
                     torch.ops._C_ascend.store_kv_block(
                         k_li_scale,
                         kv_cache[dsa_k_scale_cache_idx],
