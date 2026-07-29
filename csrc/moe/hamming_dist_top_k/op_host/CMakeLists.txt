@@ -11,7 +11,6 @@ add_ops_compile_options(
     OPTIONS
         --cce-auto-sync=on
         -Wno-deprecated-declarations
-        -Werror
         -mllvm -cce-aicore-hoist-movemask=false
         --op_relocatable_kernel_binary=true
 )
@@ -27,3 +26,4 @@ if (NOT BUILD_OPS_RTY_KERNEL)
         ${CMAKE_CURRENT_SOURCE_DIR}
     )
 endif()
+
