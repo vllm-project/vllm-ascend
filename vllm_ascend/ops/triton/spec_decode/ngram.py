@@ -195,13 +195,24 @@ def triton_ngram_spec_decode(
     max_n,
     k,
 ):
-    device = torch_npu.npu.current_device()
-    properties = triton.runtime.driver.active.utils.get_device_properties(device)
-    vectorcore_num = properties["num_vectorcore"]
-
     batch_size = token_ids.shape[0]
     device = token_ids.device
     max_seq_len = token_ids.shape[1]
+
+    # Guard against an empty batch: launching the kernel with grid=(0,) is
+    # invalid. Return correctly-shaped empty outputs so callers stay uniform.
+    if batch_size == 0:
+        empty = torch.empty(0, dtype=torch.int32, device=device)
+        return (
+            empty,
+            torch.empty((0, k), dtype=torch.int32, device=device),
+            empty,
+            empty,
+        )
+
+    device_idx = torch_npu.npu.current_device()
+    properties = triton.runtime.driver.active.utils.get_device_properties(device_idx)
+    vectorcore_num = properties["num_vectorcore"]
 
     # Normalize sampled_token_ids: accept a list[list[int]] (padded to a
     # rectangular int32 tensor) or a pre-batched tensor, then slice to the
