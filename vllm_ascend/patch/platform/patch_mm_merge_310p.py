@@ -43,7 +43,11 @@ def _merge_multimodal_embeddings_310p(
         # deepstack path), so the index must be moved to the embedding
         # device explicitly.
         mm_idx = torch.nonzero(is_multimodal, as_tuple=True)[0].to(device=inputs_embeds.device, non_blocking=True)
-        inputs_embeds.index_copy_(0, mm_idx, mm_embeds_flat.to(dtype=input_dtype))
+        inputs_embeds.index_copy_(
+            0,
+            mm_idx,
+            mm_embeds_flat.to(device=inputs_embeds.device, dtype=input_dtype),
+        )
     except RuntimeError as e:
         num_actual_tokens = len(mm_embeds_flat)
         num_expected_tokens = is_multimodal.sum().item()
