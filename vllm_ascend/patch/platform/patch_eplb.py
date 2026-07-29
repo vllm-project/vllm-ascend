@@ -10,13 +10,13 @@ import torch
 from pydantic.dataclasses import rebuild_dataclass
 from vllm.config import ParallelConfig
 from vllm.config import parallel as _parallel_config
+from vllm.distributed import get_ep_group
 from vllm.distributed.eplb import eplb_communicator as _eplb_communicator
 from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
-from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from vllm_ascend.distributed.eplb_communicator import HcclEplbCommunicator
-from vllm_ascend.ops.fused_moe import eplb as _eplb_ops  # noqa: F401
+from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 
 _PATCH_MARKER = "_vllm_ascend_eplb_patch"
 
@@ -115,17 +115,110 @@ def _patch_router() -> None:
         if eplb_state is None:
             return topk_ids
         self._validate_eplb_state()
-        return torch.ops.vllm.ascend_eplb_map_and_record(
+        physical_id_lookup = getattr(eplb_state, "physical_id_lookup", None)
+        if physical_id_lookup is None:
+            raise RuntimeError("Ascend EPLB physical ID lookup is not initialized.")
+        return torch.ops.vllm.ascend_eplb_map_to_physical(
             topk_ids,
-            eplb_state.logical_to_physical_map,
-            eplb_state.logical_replica_count,
-            eplb_state.expert_load_view,
-            eplb_state.should_record_tensor,
-            eplb_state.num_unpadded_tokens_tensors[dbo_current_ubatch_id()],
+            physical_id_lookup,
         )
 
     setattr(_apply_eplb_mapping, _PATCH_MARKER, True)
     BaseRouter._apply_eplb_mapping = _apply_eplb_mapping
+
+
+def _refresh_layer_lookup(layer_state) -> None:
+    logical_to_physical_map = layer_state.logical_to_physical_map
+    logical_replica_count = layer_state.logical_replica_count
+    if logical_to_physical_map is None or logical_replica_count is None:
+        raise RuntimeError("Cannot build Ascend EPLB lookup before layer state is initialized.")
+    new_lookup = _eplb_ops.build_physical_id_lookup(
+        logical_to_physical_map,
+        logical_replica_count,
+        get_ep_group().rank_in_group,
+    )
+    physical_id_lookup = getattr(layer_state, "physical_id_lookup", None)
+    if physical_id_lookup is not None and physical_id_lookup.shape == new_lookup.shape:
+        physical_id_lookup.copy_(new_lookup, non_blocking=True)
+    else:
+        layer_state.physical_id_lookup = new_lookup
+
+
+def _refresh_model_lookups(model_state, layer_idx: int | None = None) -> None:
+    layers = list(model_state.model.moe_layers)
+    selected_layers = enumerate(layers) if layer_idx is None else ((layer_idx, layers[layer_idx]),)
+    for _, layer in selected_layers:
+        layer_state = layer.eplb_state
+        if layer_state is not None:
+            _refresh_layer_lookup(layer_state)
+
+
+def _wrap_set_layer_state(original_set_layer_state):
+    state_signature = signature(original_set_layer_state)
+    required_parameters = {
+        "self",
+        "moe_layer_idx",
+        "expert_load_view",
+        "logical_to_physical_map",
+        "logical_replica_count",
+    }
+    if not required_parameters.issubset(state_signature.parameters):
+        raise RuntimeError("Unsupported vLLM EPLB contract: EplbLayerState.set_layer_state signature changed.")
+
+    @wraps(original_set_layer_state)
+    def _set_layer_state(*args, **kwargs):
+        bound = state_signature.bind(*args, **kwargs)
+        result = original_set_layer_state(*bound.args, **bound.kwargs)
+        _refresh_layer_lookup(bound.arguments["self"])
+        return result
+
+    setattr(_set_layer_state, _PATCH_MARKER, True)
+    return _set_layer_state
+
+
+def _wrap_commit_eplb_maps(original_commit, *, per_layer: bool):
+    commit_signature = signature(original_commit)
+    required_parameters = {"model_state", "new_physical_to_logical_map"}
+    if per_layer:
+        required_parameters.add("layer")
+    if not required_parameters.issubset(commit_signature.parameters):
+        raise RuntimeError("Unsupported vLLM EPLB contract: map commit signature changed.")
+
+    @wraps(original_commit)
+    def _commit(*args, **kwargs):
+        bound = commit_signature.bind(*args, **kwargs)
+        result = original_commit(*bound.args, **bound.kwargs)
+        layer_idx = bound.arguments["layer"] if per_layer else None
+        _refresh_model_lookups(bound.arguments["model_state"], layer_idx)
+        return result
+
+    setattr(_commit, _PATCH_MARKER, True)
+    return _commit
+
+
+def _wrap_from_mapping(original_from_mapping):
+    from_mapping_signature = signature(original_from_mapping)
+    required_parameters = {
+        "cls",
+        "model",
+        "model_config",
+        "device",
+        "parallel_config",
+        "expanded_physical_to_logical",
+        "num_valid_physical_experts",
+    }
+    if not required_parameters.issubset(from_mapping_signature.parameters):
+        raise RuntimeError("Unsupported vLLM EPLB contract: EplbState.from_mapping signature changed.")
+
+    @wraps(original_from_mapping)
+    def _from_mapping(*args, **kwargs):
+        state = original_from_mapping(*args, **kwargs)
+        for model_state in state.model_states.values():
+            _refresh_model_lookups(model_state)
+        return state
+
+    setattr(_from_mapping, _PATCH_MARKER, True)
+    return _from_mapping
 
 
 def _wrap_eplb_state_step(original_step):
@@ -152,9 +245,27 @@ def _wrap_eplb_state_step(original_step):
 
 def _patch_eplb_state() -> None:
     original_step = _eplb_state.EplbState.step
-    if getattr(original_step, _PATCH_MARKER, False):
-        return
-    _eplb_state.EplbState.step = _wrap_eplb_state_step(original_step)
+    if not getattr(original_step, _PATCH_MARKER, False):
+        _eplb_state.EplbState.step = _wrap_eplb_state_step(original_step)
+
+    original_set_layer_state = _eplb_state.EplbLayerState.set_layer_state
+    if not getattr(original_set_layer_state, _PATCH_MARKER, False):
+        _eplb_state.EplbLayerState.set_layer_state = _wrap_set_layer_state(original_set_layer_state)
+
+    original_commit = _eplb_state._commit_eplb_maps
+    if not getattr(original_commit, _PATCH_MARKER, False):
+        _eplb_state._commit_eplb_maps = _wrap_commit_eplb_maps(original_commit, per_layer=False)
+
+    original_commit_layer = _eplb_state._commit_eplb_maps_for_layer
+    if not getattr(original_commit_layer, _PATCH_MARKER, False):
+        _eplb_state._commit_eplb_maps_for_layer = _wrap_commit_eplb_maps(
+            original_commit_layer,
+            per_layer=True,
+        )
+
+    original_from_mapping = _eplb_state.EplbState.__dict__["from_mapping"].__func__
+    if not getattr(original_from_mapping, _PATCH_MARKER, False):
+        _eplb_state.EplbState.from_mapping = classmethod(_wrap_from_mapping(original_from_mapping))
 
 
 _patch_parallel_config()

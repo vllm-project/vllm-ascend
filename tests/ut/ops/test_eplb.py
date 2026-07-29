@@ -1,47 +1,92 @@
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
 import torch
 
-from vllm_ascend.ops.fused_moe.eplb import map_and_record
+from vllm_ascend.ops.fused_moe.eplb import (
+    EPLB_LOOKUP_NUM_ROWS,
+    build_physical_id_lookup,
+    map_to_physical,
+    record_local_expert_load,
+)
 
 
 def _eplb_inputs():
-    topk_ids = torch.tensor([[0, 1], [0, 0], [-1, 1]], dtype=torch.int32)
-    logical_to_physical_map = torch.tensor([[0, 2], [1, -1]], dtype=torch.int32)
-    logical_replica_count = torch.tensor([2, 1], dtype=torch.int32)
-    expert_load = torch.zeros(3, dtype=torch.int64)
-    return topk_ids, logical_to_physical_map, logical_replica_count, expert_load
+    logical_to_physical_map = torch.tensor(
+        [[0, 4, -1], [1, 5, -1], [2, -1, -1]],
+        dtype=torch.int64,
+    )
+    logical_replica_count = torch.tensor([2, 2, 1], dtype=torch.int64)
+    return logical_to_physical_map, logical_replica_count
 
 
-def test_map_and_record_matches_knuth_replica_selection():
-    topk_ids, logical_map, replica_count, expert_load = _eplb_inputs()
+def test_build_physical_id_lookup_applies_rank_and_expert_offsets():
+    logical_map, replica_count = _eplb_inputs()
 
-    physical_ids = map_and_record(
-        topk_ids,
-        logical_map,
-        replica_count,
-        expert_load,
-        torch.tensor(True),
-        torch.tensor(2, dtype=torch.int32),
+    rank0_lookup = build_physical_id_lookup(logical_map, replica_count, ep_rank=0)
+    rank1_lookup = build_physical_id_lookup(logical_map, replica_count, ep_rank=1)
+
+    assert rank0_lookup.shape == (EPLB_LOOKUP_NUM_ROWS, 3)
+    assert rank0_lookup.dtype == torch.int32
+    torch.testing.assert_close(rank0_lookup[0], torch.tensor([0, 5, 2], dtype=torch.int32))
+    torch.testing.assert_close(rank1_lookup[0], torch.tensor([4, 1, 2], dtype=torch.int32))
+    torch.testing.assert_close(rank0_lookup[1], rank1_lookup[0])
+
+
+def test_map_to_physical_uses_periodic_rows_and_preserves_invalid_ids():
+    logical_map, replica_count = _eplb_inputs()
+    lookup = build_physical_id_lookup(logical_map, replica_count, ep_rank=0)
+    topk_ids = torch.zeros((EPLB_LOOKUP_NUM_ROWS + 1, 2), dtype=torch.int32)
+    topk_ids[:, 1] = -1
+
+    physical_ids = map_to_physical(topk_ids, lookup)
+
+    assert physical_ids[0, 0] == 0
+    assert physical_ids[EPLB_LOOKUP_NUM_ROWS - 1, 0] == 4
+    assert physical_ids[EPLB_LOOKUP_NUM_ROWS, 0] == physical_ids[0, 0]
+    assert torch.all(physical_ids[:, 1] == -1)
+
+
+def test_record_local_expert_load_updates_only_current_rank_slice():
+    expert_load = torch.zeros(6, dtype=torch.int32)
+
+    record_local_expert_load(
+        expert_tokens=torch.tensor([3, 5], dtype=torch.int64),
+        group_list_type=1,
+        expert_load_view=expert_load,
+        record_enabled=torch.tensor(True),
+        ep_rank=1,
+        ep_size=3,
     )
 
-    torch.testing.assert_close(
-        physical_ids,
-        torch.tensor([[0, 1], [2, 2], [-1, 1]], dtype=torch.int32),
+    torch.testing.assert_close(expert_load, torch.tensor([0, 0, 3, 5, 0, 0], dtype=torch.int32))
+
+
+def test_record_local_expert_load_converts_cumulative_group_list():
+    expert_load = torch.zeros(4, dtype=torch.int32)
+
+    record_local_expert_load(
+        expert_tokens=torch.tensor([2, 7], dtype=torch.int64),
+        group_list_type=0,
+        expert_load_view=expert_load,
+        record_enabled=torch.tensor(True),
+        ep_rank=0,
+        ep_size=2,
     )
-    torch.testing.assert_close(expert_load, torch.tensor([1, 1, 2], dtype=torch.int64))
+
+    torch.testing.assert_close(expert_load, torch.tensor([2, 5, 0, 0], dtype=torch.int32))
 
 
-def test_map_and_record_honors_record_switch():
-    topk_ids, logical_map, replica_count, expert_load = _eplb_inputs()
+def test_record_local_expert_load_honors_record_switch():
+    expert_load = torch.zeros(2, dtype=torch.int32)
 
-    map_and_record(
-        topk_ids,
-        logical_map,
-        replica_count,
-        expert_load,
-        torch.tensor(False),
+    record_local_expert_load(
+        expert_tokens=torch.tensor([3, 5], dtype=torch.int32),
+        group_list_type=1,
+        expert_load_view=expert_load,
+        record_enabled=torch.tensor(False),
+        ep_rank=0,
+        ep_size=1,
     )
 
     torch.testing.assert_close(expert_load, torch.zeros_like(expert_load))
