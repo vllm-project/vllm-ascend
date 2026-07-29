@@ -32,9 +32,9 @@ import csv
 import os
 import subprocess
 import tempfile
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Iterator
 
 HEADER = [
     "name",
