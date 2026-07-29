@@ -1,8 +1,115 @@
-# Decode Context Parallel (DCP)
+# Context Parallel
 
 Decode Context Parallel shards the KV cache along the sequence dimension across devices in a Tensor Parallel (TP) group. It eliminates redundant KV-cache storage without adding devices to the process world.
 
-Prefill Context Parallel is not supported by vLLM Ascend. This document describes only DCP and the separate DSA-CP sparse-attention path.
+This document also describes MRV2 Prefill Context Parallelism (PCP) for
+Sparse Flash Attention (SFA), and the separate DSA-CP sparse-attention path.
+These are related because they all affect attention metadata and cache layouts,
+but they solve different parallelization problems and have independent
+configuration switches.
+
+## MRV2 SFA Prefill Context Parallelism (PCP)
+
+### Scope and invariants
+
+MRV2 PCP is selected by `prefill_context_parallel_size > 1`. It partitions a
+prefill batch by tokens across a PCP group, while preserving a cache view that
+is complete on every PCP rank. Its SFA implementation is deliberately small:
+it reuses the normal SFA implementation and overrides only the points at which
+PCP changes data ownership.
+
+The key invariants are:
+
+- Prefill tokens are partitioned between PCP ranks by the upstream PCP batch
+  manager. Decode tokens are replicated, because every rank participates in a
+  decode step.
+- SFA latent KV, RoPE `cos`/`sin`, indexer keys, and their slot mappings are
+  gathered before a cache write. Thus every PCP rank writes the same complete
+  SFA and indexer cache.
+- Prefill attention output is already the local token slice with the full head
+  set. Decode query heads can be split by PCP by upstream metadata, so the
+  output is restored with `finalize_mla_pcp_decode`.
+- PCP does not use the DSA-CP/FlashComm1 data protocol. The current supported
+  graph mode is eager prefill plus `FULL_DECODE_ONLY` graph replay.
+
+### Execution path
+
+1. `AscendPCPManager` derives the PCP-local `AscendInputBatch` from the global
+   MRV2 batch. It refreshes `seq_lens_np`, attention state, and the padded
+   decode-only layout required by graph replay.
+2. `AscendSFABackend` selects `AscendSFACPMetadataBuilder` and
+   `AscendSFACPImpl` when PCP is enabled. The builder intentionally remains
+   thin: upstream PCP owns token partitioning and the normal SFA builder still
+   owns SFA metadata construction.
+3. `AscendSFACPImpl.exec_kv` gathers the prefill portion of latent KV, `cos`,
+   `sin`, and slot mappings before native RMSNorm/RoPE/cache write. The
+   `cos`/`sin` gather is essential: the gathered KV must be rotated with the
+   positions from which it was produced.
+4. `AscendSFACPImpl._write_indexer_cache` applies the same gather protocol to
+   the LightningIndexer key cache. This keeps sparse top-k selection
+   deterministic across PCP ranks.
+5. `AscendSFACPImpl._execute_sparse_flash_attention_process` calls
+   `finalize_mla_pcp_decode` after SFA. The call is a no-op for prefill and
+   reconstructs the full decode head layout when PCP split decode heads.
+
+### Graph capture
+
+A normal MRV2 capture builds a global dummy batch, but PCP replay consumes a
+PCP-local batch and PCP-local slot mappings. `_prepare_pcp_inputs_to_capture`
+therefore passes the dummy batch through `AscendPCPManager.partition_batch` and
+`prepare_attn` before building capture metadata. Dummy attention metadata is
+marked `DecodeOnly`, so capture never enters prefill-only PCP cache gathers.
+`AscendPCPManager.prepare_dummy_attn` also returns the same block-table and
+slot-mapping buffers used by replay, preserving graph input addresses.
+
+### Last three commits of PR #13038
+
+| Commit | Responsibility |
+| --- | --- |
+| `a1710d0` (`stash for cherry-pick 1`) | Adds the SFA PCP implementation: backend dispatch, native preprocessing, replicated SFA/indexer cache writes, and PCP decode-output restoration. |
+| `2617cbb` (`stash for cherry-pick 2`) | Connects PCP to MRV2 worker execution: PCP-local batch metadata, graph capture inputs, split SFA indexer cache allocation/reshape/bind, and cache-only backend handling during graph parameter updates. |
+| `7e7d837` (`fix rebase bug`) | Removes a residual V1 model-runner change, keeping this feature scoped to MRV2. |
+
+The split indexer cache is intentionally represented by a cache-only backend:
+the indexer owns physical cache storage but never executes an attention kernel.
+During graph parameter updates the runtime must therefore select the real SFA
+backend, rather than the first cache-only indexer backend.
+
+### PCP and DSA-CP are different features
+
+| Aspect | MRV2 SFA PCP | DSA-CP |
+| --- | --- | --- |
+| Primary goal | Scale prefill by partitioning batch tokens across a PCP group. | Optimize DSA sparse attention for indexer models by changing its attention parallel layout. |
+| Enablement | `prefill_context_parallel_size > 1`. | `additional_config.enable_dsa_cp=true` and FlashComm/SP enabled. |
+| Applicability | Current implementation is MRV2, MLA/SFA focused. | Only models with a DSA indexer, such as DeepSeek V3.2/V4-family compatible models. |
+| Data ownership | Prefill tokens are PCP-local; SFA and indexer caches are replicated after gather. | DSA-CP keeps heads replicated and shards tokens in its CP layout; it also has a distinct output and `o_proj` protocol. |
+| Output reconciliation | Decode-only head shards are restored by `finalize_mla_pcp_decode`. | DSA-CP uses its own all-to-all/partial-output merge and may temporarily gather a full `o_proj` weight for prefill or mixed batches. |
+| Graph boundary | PCP supports eager prefill and `FULL_DECODE_ONLY` capture. | Its behavior is controlled by the existing DSA-CP/FlashComm path, not by the PCP manager. |
+
+`enable_dsa_cp` must therefore not be treated as the PCP switch. PCP can use
+the normal SFA path with `enable_dsa_cp=False`; DSA-CP changes the semantics of
+that SFA path even when no MRV2 PCP group is present. This PR does not make the
+combined PCP + DSA-CP mode a separately validated feature contract.
+
+### Sparse-C8 and DSA-CP cache-write ownership
+
+The original native SFA flow already centralizes this distinction in
+`_maybe_store_kvcache_for_c8_n_dsacp`:
+
+- For ordinary SFA C8, it packs `k_nope`, `k_pe`, and `k_nope_scale` and
+  scatters them with `slot_mapping_sfa`.
+- For DSA-CP, it waits for the DSA-CP gather path and uses the DSA-CP-specific
+  representation and slot-mapping protocol instead.
+
+The PR's `2617cbb` also added an earlier inline branch,
+`if self.use_sparse_c8_sfa and not self.enable_dsa_cp`, immediately after
+`exec_kv`. That branch duplicates the ordinary-C8 scatter, because the original
+helper is still called later in the same forward. Therefore it is **not** a PCP
+requirement and should be removed; it causes two equivalent scatter writes for
+the `(C8=true, DSA-CP=false)` case. Its `not self.enable_dsa_cp` predicate only
+avoids applying that duplicate ordinary-SFA write to the DSA-CP layout. The
+correct design is to retain the existing centralized helper and inline only
+the DSA-CP gather change that this PR needs.
 
 ## KV-cache layout
 

@@ -1957,26 +1957,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             kv_outputs = self.exec_kv(kv_no_split, cos, sin, kv_cache, kv_slots, attn_metadata)
             k_pe, k_nope = kv_outputs[:2]
             knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
-            if self.use_sparse_c8_sfa and not self.enable_dsa_cp:
-                logger.info("sparse c8 sfa")
-                assert k_pe is not None
-                assert k_nope is not None
-                assert knope_scale is not None
-                packed_kv = torch.cat(
-                    [
-                        k_nope.view(-1, k_nope.shape[-1]),
-                        k_pe.view(-1, k_pe.shape[-1]),
-                        knope_scale.view(-1, knope_scale.shape[-1]),
-                    ],
-                    dim=-1,
-                )
-                packed_head_dim = self.sfa_qsfa_packed_kv_head_dim
-                assert packed_kv.shape[-1] == packed_head_dim
-                torch_npu.npu_scatter_nd_update_(
-                    kv_cache[0].view(-1, packed_head_dim),
-                    slot_mapping_sfa.view(-1, 1),
-                    packed_kv.view(-1, packed_head_dim),
-                )
 
             if self.enable_dsa_cp:
                 assert k_pe is not None
