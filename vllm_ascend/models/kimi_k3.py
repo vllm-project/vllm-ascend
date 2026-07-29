@@ -16,10 +16,10 @@
 
 """Native multimodal Kimi K3 model for vLLM-Ascend."""
 
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from copy import deepcopy
-from dataclasses import dataclass
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 import numpy as np
 import torch
@@ -28,9 +28,10 @@ from torch import nn
 from transformers import BatchFeature
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, ImageDummyOptions
 from vllm.distributed import divide, get_pp_group, get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
+from vllm.logger import logger
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.fused_moe import FusedMoE, fused_moe_make_expert_params_mapping
@@ -84,9 +85,8 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     NestedTensors,
-    VisionChunkImage,
 )
-from vllm.multimodal.parse import MultiModalDataItems, VisionChunkProcessorItems
+from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -107,7 +107,7 @@ from vllm_ascend.ops.kimi_kda import uses_kimi_k3_global_inputs_embeds
 from vllm_ascend.ops.kimi_kda_state import kimi_kda_state_shape
 from vllm_ascend.transformers_utils.configs.kimi_k3 import KimiK3Config, KimiK3TextConfig, KimiK3VisionConfig
 from vllm_ascend.transformers_utils.processors.kimi_k3 import KimiK3Processor
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
 
 
 def _routed_latent_quant_config(
@@ -130,6 +130,22 @@ def _resolve_packed_expert_weight_name(
     return packed_name if packed_name in params_dict else name
 
 
+def _is_vit_use_data_parallel(num_heads: int) -> bool:
+    """Keep vision TP fallback compatible with the vLLM release branch."""
+    if not vllm_version_is("0.25.1"):
+        return is_vit_use_data_parallel(num_heads)
+
+    # TODO: Remove this branch when vLLM 0.25.1 support is dropped.
+    if num_heads % get_tensor_model_parallel_world_size() != 0:
+        logger.warning_once(
+            "The number of vision attention heads is not divisible by "
+            "the tensor parallel size. Falling back to data parallelism "
+            "for the vision encoder."
+        )
+        return True
+    return is_vit_use_data_parallel()
+
+
 def _move_module_to_device(
     module: nn.Module,
     *,
@@ -150,10 +166,50 @@ def _move_module_to_device(
     return module.to(device=device, dtype=dtype)
 
 
-@dataclass
-class MaxImageTokenMeta:
-    width: int = 3000
-    height: int = 3000
+def navit_resize_image(
+    width: int,
+    height: int,
+    patch_size: int,
+    merge_kernel_size: int,
+    in_patch_limit: int,
+    patch_limit_on_one_side: int,
+    fixed_output_tokens: int | None,
+) -> dict[str, int]:
+    """Mirror the checkpoint's NaViT resize and media-token calculation."""
+
+    scale_by_total = math.sqrt(in_patch_limit / (max(1.0, width // patch_size) * max(1.0, height // patch_size)))
+    scale_by_width = patch_limit_on_one_side * patch_size / width
+    scale_by_height = patch_limit_on_one_side * patch_size / height
+    scale = min(1.0, scale_by_total, scale_by_width, scale_by_height)
+    new_width = max(1, int(width * scale))
+    new_height = max(1, int(height * scale))
+    max_side = patch_limit_on_one_side * patch_size
+    new_width = min(new_width, max_side)
+    new_height = min(new_height, max_side)
+
+    factor = merge_kernel_size * patch_size
+    pad_height = (factor - new_height % factor) % factor
+    pad_width = (factor - new_width % factor) % factor
+
+    if fixed_output_tokens is not None:
+        num_tokens = fixed_output_tokens
+    else:
+        token_height = (new_height + pad_height) // factor
+        token_width = (new_width + pad_width) // factor
+        if token_height * merge_kernel_size > patch_limit_on_one_side:
+            raise ValueError("Kimi K3 resized image exceeds the height patch limit")
+        if token_width * merge_kernel_size > patch_limit_on_one_side:
+            raise ValueError("Kimi K3 resized image exceeds the width patch limit")
+        num_tokens = token_height * token_width
+
+    return {
+        "num_tokens": num_tokens,
+        "new_width": new_width,
+        "new_height": new_height,
+        "pad_width": pad_width,
+        "pad_height": pad_height,
+        "sampled_nframes": 1,
+    }
 
 
 class KimiK3MediaPixelInputs(TensorSchema):
@@ -175,31 +231,86 @@ class KimiK3ProcessingInfo(BaseProcessingInfo):
             revision=self.ctx.model_config.revision,
             trust_remote_code=self.ctx.model_config.trust_remote_code,
         )
-        configured_id = self.hf_config.media_placeholder_token_id
-        tokenizer_id = tokenizer.convert_tokens_to_ids("<|media_pad|>")
-        valid_tokenizer_id = isinstance(tokenizer_id, int) and (
-            tokenizer.unk_token_id is None or tokenizer_id != tokenizer.unk_token_id
+        config_token_id = self.hf_config.media_placeholder_token_id
+        resolved_token_id = tokenizer.convert_tokens_to_ids("<|media_pad|>")
+        unk_token_id = getattr(tokenizer, "unk_token_id", None)
+        valid_resolved_id = isinstance(resolved_token_id, int) and (
+            unk_token_id is None or resolved_token_id != unk_token_id
         )
-        self.media_token_id = tokenizer_id if valid_tokenizer_id else configured_id
+        if valid_resolved_id and resolved_token_id != config_token_id:
+            logger.warning_once(
+                "Kimi-K3 config.media_placeholder_token_id (%d) disagrees "
+                "with tokenizer mapping for <|media_pad|> (%d). "
+                "Using tokenizer value.",
+                config_token_id,
+                resolved_token_id,
+            )
+            self.hf_config.media_placeholder_token_id = resolved_token_id
+            self.media_token_id = resolved_token_id
+        else:
+            self.media_token_id = config_token_id
         self.hf_config.media_placeholder_token_id = self.media_token_id
         self.media_token = tokenizer.decode(self.media_token_id)
         self.image_processor = image_processor
-        self.hf_processor = KimiK3Processor(image_processor, tokenizer, self.media_token_id)
+        self.hf_processor = KimiK3Processor(image_processor, tokenizer)
         self.media_tokens_calculator = image_processor.media_tokens_calculator
 
-    def get_hf_processor(self):
+    def get_hf_processor(self, **kwargs: object) -> KimiK3Processor:
+        del kwargs
         return self.hf_processor
 
     def get_hf_config(self) -> KimiK3Config:
         return self.ctx.get_hf_config(KimiK3Config)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"vision_chunk": None}
+        return {"image": None}
+
+    @classmethod
+    def get_max_image_size(
+        cls,
+        patch_size: int,
+        merge_kernel_size: int,
+        in_patch_limit: int,
+        patch_limit_on_one_side: int,
+        fixed_output_tokens: int | None,
+    ) -> ImageSize:
+        max_side = patch_limit_on_one_side * patch_size
+        best_score = (-1, -1)
+        best_size = (max_side, max_side)
+
+        for width_patches in range(patch_limit_on_one_side + 1):
+            width = min((width_patches + 1) * patch_size - 1, max_side)
+            for height_patches in range(
+                width_patches,
+                patch_limit_on_one_side + 1,
+            ):
+                height = min((height_patches + 1) * patch_size - 1, max_side)
+                resize_config = navit_resize_image(
+                    width,
+                    height,
+                    patch_size,
+                    merge_kernel_size,
+                    in_patch_limit,
+                    patch_limit_on_one_side,
+                    fixed_output_tokens,
+                )
+                padded_width = resize_config["new_width"] + resize_config["pad_width"]
+                padded_height = resize_config["new_height"] + resize_config["pad_height"]
+                num_patches = padded_width // patch_size * (padded_height // patch_size)
+                score = (resize_config["num_tokens"], num_patches)
+                if score > best_score:
+                    best_score = score
+                    best_size = (width, height)
+
+        return ImageSize(width=best_size[0], height=best_size[1])
 
 
 class KimiK3DummyInputsBuilder(BaseDummyInputsBuilder[KimiK3ProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        return "<|media_begin|>image<|media_content|><|media_pad|><|media_end|>" * mm_counts.get("vision_chunk", 0)
+        return self.info.get_hf_config().image_placeholder * mm_counts.get(
+            "image",
+            0,
+        )
 
     def get_dummy_mm_data(
         self,
@@ -207,15 +318,26 @@ class KimiK3DummyInputsBuilder(BaseDummyInputsBuilder[KimiK3ProcessingInfo]):
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
-        del seq_len, mm_options
-        count = mm_counts.get("vision_chunk", 0)
-        images = self._get_dummy_images(
-            height=MaxImageTokenMeta.height,
-            width=MaxImageTokenMeta.width,
-            num_images=count,
+        del seq_len
+        media_proc_cfg = self.info.image_processor.media_proc_cfg
+        max_size = self.info.get_max_image_size(
+            media_proc_cfg["patch_size"],
+            media_proc_cfg["merge_kernel_size"],
+            media_proc_cfg["in_patch_limit"],
+            media_proc_cfg["patch_limit_on_one_side"],
+            media_proc_cfg["fixed_output_tokens"],
+        )
+        image_overrides = cast(
+            ImageDummyOptions | None,
+            mm_options.get("image"),
         )
         return {
-            "vision_chunk": [VisionChunkImage(type="image", image=image) for image in images],
+            "image": self._get_dummy_images(
+                height=max_size.height,
+                width=max_size.width,
+                num_images=mm_counts.get("image", 0),
+                overrides=image_overrides,
+            ),
         }
 
 
@@ -229,8 +351,14 @@ class KimiK3MultiModalProcessor(BaseMultiModalProcessor[KimiK3ProcessingInfo]):
         grid_thws = hf_inputs.get("grid_thws", torch.empty((0, 3)))
         grid_sizes = grid_thws.prod(-1)
         return {
-            "pixel_values": MultiModalFieldConfig.flat_from_sizes("vision_chunk", grid_sizes),
-            "grid_thws": MultiModalFieldConfig.batched("vision_chunk", keep_on_cpu=True),
+            "pixel_values": MultiModalFieldConfig.flat_from_sizes(
+                "image",
+                grid_sizes,
+            ),
+            "grid_thws": MultiModalFieldConfig.batched(
+                "image",
+                keep_on_cpu=True,
+            ),
         }
 
     def _call_hf_processor(
@@ -240,11 +368,24 @@ class KimiK3MultiModalProcessor(BaseMultiModalProcessor[KimiK3ProcessingInfo]):
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        # Vision chunks require joint text/media processing.  Overriding this
-        # hook also makes the processor-cache miss path use dummy text instead
-        # of the generic image-only helper, which does not support
-        # ``vision_chunks``.
+        # Always route through KimiK3Processor, which wraps bare images into
+        # the media dictionaries expected by the checkpoint processor.
         return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
+
+    def _hf_processor_applies_updates(
+        self,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
+    ) -> bool:
+        del (
+            prompt_text,
+            mm_items,
+            hf_processor_mm_kwargs,
+            tokenization_kwargs,
+        )
+        return False
 
     def _get_prompt_updates(
         self,
@@ -254,39 +395,25 @@ class KimiK3MultiModalProcessor(BaseMultiModalProcessor[KimiK3ProcessingInfo]):
     ) -> Sequence[PromptUpdate]:
         del hf_processor_mm_kwargs, out_mm_kwargs
         media_token_id = self.info.media_token_id
-        tokenizer = self.info.get_tokenizer()
-        target = (
-            tokenizer.encode(
-                "<|media_begin|>image<|media_content|>",
-                add_special_tokens=False,
-            )
-            + [media_token_id]
-            + tokenizer.encode("<|media_end|>", add_special_tokens=False)
-        )
+        media_token = self.info.media_token
+        image_placeholder = self.info.get_hf_config().image_placeholder
 
-        def replacement(item_idx: int) -> PromptUpdateDetails[list[int]]:
-            media = mm_items.get_items("vision_chunk", (VisionChunkProcessorItems,))
-            item = media.get(item_idx)
-            if item["type"] != "image":
-                raise ValueError("Kimi K3 currently supports image inputs only")
-            image = item["image"]
-            if not hasattr(image, "size"):
-                raise ValueError("Kimi K3 image processor did not resolve the input to a PIL image")
-            width, height = image.size
+        def replacement(item_idx: int) -> PromptUpdateDetails[str]:
+            images = mm_items.get_items("image", (ImageProcessorItems,))
+            image = images.get(item_idx)
+            if image is None:
+                raise ValueError(f"Missing Kimi K3 image at index {item_idx}")
+            num_media_tokens = self.info.media_tokens_calculator({"type": "image", "image": image})
+            width, height = images.get_image_size(item_idx)
             full = (
-                tokenizer.encode(
-                    f"<|media_begin|>image {width}x{height}<|media_content|>",
-                    add_special_tokens=False,
-                )
-                + [media_token_id] * self.info.media_tokens_calculator(item)
-                + tokenizer.encode("<|media_end|>", add_special_tokens=False)
+                f"<|media_begin|>image {width}x{height}<|media_content|>{media_token * num_media_tokens}<|media_end|>"
             )
             return PromptUpdateDetails.select_token_id(full, media_token_id)
 
         return [
             PromptReplacement(
-                modality="vision_chunk",
-                target=target,
+                modality="image",
+                target=image_placeholder,
                 replacement=replacement,
             )
         ]
@@ -309,6 +436,7 @@ class AscendKimiK3ForConditionalGeneration(
     supports_encoder_tp_data = True
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
+            "language_model.layers.": "language_model.model.layers.",
             "mm_projector.proj.0": "mm_projector.linear_1",
             "mm_projector.proj.2": "mm_projector.linear_2",
         }
@@ -318,7 +446,7 @@ class AscendKimiK3ForConditionalGeneration(
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         del i
         if modality == "image":
-            return "<|media_begin|>image<|media_content|><|media_pad|><|media_end|>"
+            return "<|kimi_image_placeholder|>"
         raise ValueError(f"Kimi K3 does not support modality: {modality}")
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
@@ -326,13 +454,14 @@ class AscendKimiK3ForConditionalGeneration(
         model_config = vllm_config.model_config
         config: KimiK3Config = model_config.hf_config
         self.config = config
+        self.model_config = model_config
         self.quant_config = vllm_config.quant_config
         self.hidden_size = config.text_config.hidden_size
         self.device = current_platform.current_device()
-        self.use_data_parallel = model_config.multimodal_config.mm_encoder_tp_mode == "data"
+        self.use_data_parallel = _is_vit_use_data_parallel(config.vision_config.num_attention_heads)
         vision_quant = self._maybe_ignore_quant_config(self.quant_config)
 
-        with self._mark_tower_model(vllm_config, "vision_chunk"):
+        with self._mark_tower_model(vllm_config, "image"):
             self.vision_tower = KimiK3VisionTower(
                 config.vision_config,
                 quant_config=vision_quant,
@@ -1243,7 +1372,7 @@ class KimiK3VisionEncoderLayer(nn.Module):
         prefix: str,
     ) -> None:
         super().__init__()
-        self.use_data_parallel = is_vit_use_data_parallel()
+        self.use_data_parallel = _is_vit_use_data_parallel(config.num_attention_heads)
         self.hidden_dim = config.hidden_size
         self.qkv_hidden_size = config.qkv_hidden_size
         self.num_heads = config.num_attention_heads

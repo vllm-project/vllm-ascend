@@ -10,13 +10,20 @@ from torch import nn
 from vllm_ascend.models import kimi_k3
 from vllm_ascend.models.kimi_k3 import (
     AscendKimiK3ForCausalLM,
+    AscendKimiK3ForConditionalGeneration,
     KimiK3MLP,
     KimiK3MoE,
+    KimiK3TextModel,
+    KimiK3VisionEncoderLayer,
     _move_module_to_device,
     _resolve_packed_expert_weight_name,
     _routed_latent_quant_config,
 )
 from vllm_ascend.ops.activation import AscendSituAndMul, SituActivationConfig
+from vllm_ascend.transformers_utils.configs.kimi_k3 import (
+    KimiK3Config,
+    KimiK3VisionConfig,
+)
 
 
 def test_kimi_k3_model_declares_checkpoint_packing_contract():
@@ -85,6 +92,52 @@ def test_kimi_k3_resolves_packed_expert_checkpoint_names(
     expected: str,
 ):
     assert _resolve_packed_expert_weight_name(name, params) == expected
+
+
+def test_kimi_k3_vit_dp_compat_calls_release_helper_without_num_heads(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls: list[None] = []
+
+    def release_helper():
+        calls.append(None)
+        return False
+
+    monkeypatch.setattr(kimi_k3, "vllm_version_is", lambda version: version == "0.25.1")
+    monkeypatch.setattr(kimi_k3, "get_tensor_model_parallel_world_size", lambda: 4)
+    monkeypatch.setattr(kimi_k3, "is_vit_use_data_parallel", release_helper)
+
+    assert kimi_k3._is_vit_use_data_parallel(8) is False
+    assert calls == [None]
+
+
+def test_kimi_k3_vit_dp_compat_recreates_release_tp_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def unexpected_release_helper():
+        pytest.fail("The release helper must not run after the TP fallback")
+
+    monkeypatch.setattr(kimi_k3, "vllm_version_is", lambda version: version == "0.25.1")
+    monkeypatch.setattr(kimi_k3, "get_tensor_model_parallel_world_size", lambda: 16)
+    monkeypatch.setattr(kimi_k3, "is_vit_use_data_parallel", unexpected_release_helper)
+
+    assert kimi_k3._is_vit_use_data_parallel(12) is True
+
+
+def test_kimi_k3_vit_dp_compat_passes_num_heads_to_main_helper(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls = []
+
+    def main_helper(num_heads):
+        calls.append(num_heads)
+        return True
+
+    monkeypatch.setattr(kimi_k3, "vllm_version_is", lambda version: False)
+    monkeypatch.setattr(kimi_k3, "is_vit_use_data_parallel", main_helper)
+
+    assert kimi_k3._is_vit_use_data_parallel(12) is True
+    assert calls == [12]
 
 
 def test_kimi_k3_skips_explicit_move_for_meta_modules():

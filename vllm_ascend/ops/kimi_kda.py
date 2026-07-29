@@ -59,7 +59,7 @@ def uses_kimi_k3_global_inputs_embeds(vllm_config: VllmConfig) -> bool:
     if not is_vl_model(vllm_config) or model_config.multimodal_config is None:
         return False
     multimodal_config = model_config.multimodal_config
-    return bool(multimodal_config.enable_mm_embeds or multimodal_config.get_limit_per_prompt("vision_chunk") > 0)
+    return bool(multimodal_config.enable_mm_embeds or multimodal_config.get_limit_per_prompt("image") > 0)
 
 
 def _load_a_log(
