@@ -135,6 +135,55 @@ def _get_config_bool(configs: tuple[Any, ...], attr: str) -> bool:
     return False
 
 
+def _resolve_sfa_prefill_layer_names(
+    kv_cache_spec: AttentionSpec,
+    layer_names: list[str],
+    vllm_config: VllmConfig,
+) -> list[str]:
+    """Resolve the MLA layer that owns an independent Indexer cache plane.
+
+    vLLM's MLA metadata builder reads ``prefill_backend`` from the first
+    static-forward-context layer. ``DeepseekV32IndexerCache`` is an
+    ``AttentionLayerBase`` but has no prefill backend of its own. The Ascend
+    split-cache path binds its ``IndexerKVSpec`` to the SFA metadata builder,
+    so use the owning sibling MLA layer for that base-class-only lookup.
+    """
+    if not isinstance(kv_cache_spec, IndexerKVSpec):
+        return layer_names
+    if not layer_names:
+        raise RuntimeError(
+            "IndexerKVSpec attention group has no layer names.")
+
+    static_forward_context = (
+        vllm_config.compilation_config.static_forward_context)
+    indexer_layer_name = layer_names[0]
+    indexer_layer = static_forward_context.get(indexer_layer_name)
+    if indexer_layer is None:
+        raise RuntimeError(
+            "Indexer KV cache layer is missing from static forward context: "
+            f"{indexer_layer_name!r}.")
+    if hasattr(indexer_layer, "prefill_backend"):
+        return layer_names
+
+    indexer_cache_suffix = ".indexer.k_cache"
+    if not indexer_layer_name.endswith(indexer_cache_suffix):
+        raise RuntimeError(
+            "Unexpected Indexer KV cache layer name; expected suffix "
+            f"{indexer_cache_suffix!r}, got {indexer_layer_name!r}.")
+
+    attention_prefix = indexer_layer_name.removesuffix(
+        indexer_cache_suffix)
+    mla_layer_name = f"{attention_prefix}.attn"
+    mla_layer = static_forward_context.get(mla_layer_name)
+    if mla_layer is None or not hasattr(mla_layer, "prefill_backend"):
+        raise RuntimeError(
+            "Unable to resolve the owning MLA attention layer "
+            f"{mla_layer_name!r} for Indexer KV cache layer "
+            f"{indexer_layer_name!r}.")
+
+    return [mla_layer_name, *layer_names[1:]]
+
+
 class AscendSFABackend(AttentionBackend):
     accept_output_buffer: bool = True
 
@@ -276,9 +325,14 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         metadata_cls: type[AscendSFAMetadata] | None = None,
         supports_dcp_with_varlen: bool = False,
     ):
-        super().__init__(
+        prefill_layer_names = _resolve_sfa_prefill_layer_names(
             kv_cache_spec,
             layer_names,
+            vllm_config,
+        )
+        super().__init__(
+            kv_cache_spec,
+            prefill_layer_names,
             vllm_config,
             device,
             metadata_cls if metadata_cls is not None else AscendSFAMetadata,

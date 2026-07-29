@@ -146,6 +146,39 @@ def _load_indexer_merge_contract():
     return namespace["merge"], FakeAttentionSpec, FakeIndexerKVSpec
 
 
+def _load_sfa_prefill_layer_resolver_contract():
+    path = REPO_ROOT / "vllm_ascend/attention/sfa_v1.py"
+    module = ast.parse(path.read_text(encoding="utf-8"))
+    resolver_node = next(
+        node
+        for node in module.body
+        if (
+            isinstance(node, ast.FunctionDef)
+            and node.name == "_resolve_sfa_prefill_layer_names"
+        )
+    )
+    resolver_node.decorator_list = []
+    contract_module = ast.Module(
+        body=[resolver_node],
+        type_ignores=[],
+    )
+    ast.fix_missing_locations(contract_module)
+
+    class FakeAttentionSpec:
+        pass
+
+    class FakeIndexerKVSpec(FakeAttentionSpec):
+        pass
+
+    namespace = {
+        "AttentionSpec": FakeAttentionSpec,
+        "IndexerKVSpec": FakeIndexerKVSpec,
+        "VllmConfig": object,
+    }
+    exec(compile(contract_module, str(path), "exec"), namespace)
+    return namespace["_resolve_sfa_prefill_layer_names"], FakeIndexerKVSpec
+
+
 class TestOperatorABI(unittest.TestCase):
     def test_acl_operator_names_are_unchanged(self):
         ksc = _read(
@@ -353,6 +386,87 @@ class TestKVCacheGroupingContract(unittest.TestCase):
             return True
 
         self.assertFalse(is_uniform([indexer_spec, mla_spec]))
+
+    def test_split_indexer_uses_parent_mla_prefill_backend(self):
+        resolver, indexer_cls = (
+            _load_sfa_prefill_layer_resolver_contract()
+        )
+        prefill_backend = object()
+        attention_prefix = "model.layers.0.self_attn"
+        mla_layer_name = f"{attention_prefix}.attn"
+        indexer_layer_name = f"{attention_prefix}.indexer.k_cache"
+        static_forward_context = {
+            mla_layer_name: types.SimpleNamespace(
+                prefill_backend=prefill_backend,
+            ),
+            indexer_layer_name: types.SimpleNamespace(),
+        }
+        vllm_config = types.SimpleNamespace(
+            compilation_config=types.SimpleNamespace(
+                static_forward_context=static_forward_context,
+            ),
+        )
+
+        resolved = resolver(
+            indexer_cls(),
+            [indexer_layer_name],
+            vllm_config,
+        )
+
+        self.assertEqual(resolved, [mla_layer_name])
+        self.assertIs(
+            static_forward_context[resolved[0]].prefill_backend,
+            prefill_backend,
+        )
+
+        source = ast.parse(_read("vllm_ascend/attention/sfa_v1.py"))
+        builder = next(
+            node
+            for node in source.body
+            if (
+                isinstance(node, ast.ClassDef)
+                and node.name == "AscendSFAMetadataBuilder"
+            )
+        )
+        init = next(
+            node
+            for node in builder.body
+            if (
+                isinstance(node, ast.FunctionDef)
+                and node.name == "__init__"
+            )
+        )
+        self.assertTrue(
+            any(
+                isinstance(call.func, ast.Name)
+                and call.func.id == "_resolve_sfa_prefill_layer_names"
+                for call in (
+                    node
+                    for node in ast.walk(init)
+                    if isinstance(node, ast.Call)
+                )
+            )
+        )
+        super_init_calls = [
+            call
+            for call in (
+                node
+                for node in ast.walk(init)
+                if isinstance(node, ast.Call)
+            )
+            if (
+                isinstance(call.func, ast.Attribute)
+                and call.func.attr == "__init__"
+                and isinstance(call.func.value, ast.Call)
+                and isinstance(call.func.value.func, ast.Name)
+                and call.func.value.func.id == "super"
+            )
+        ]
+        self.assertEqual(len(super_init_calls), 1)
+        self.assertEqual(
+            ast.unparse(super_init_calls[0].args[1]),
+            "prefill_layer_names",
+        )
 
 
 class TestV023LifecycleContract(unittest.TestCase):
