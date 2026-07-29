@@ -15,6 +15,7 @@ import re
 import sys
 import types
 import unittest
+from dataclasses import dataclass, fields
 from pathlib import Path
 from unittest import mock
 
@@ -102,6 +103,47 @@ def _function_node(relative_path: str, function_name: str) -> ast.FunctionDef:
     raise AssertionError(
         f"Function {function_name!r} not found in {relative_path}"
     )
+
+
+def _load_indexer_merge_contract():
+    path = REPO_ROOT / "vllm_ascend/core/kv_cache_interface.py"
+    module = ast.parse(path.read_text(encoding="utf-8"))
+    merge_node = None
+    for node in module.body:
+        if isinstance(node, ast.ClassDef) and node.name == "IndexerKVSpec":
+            merge_node = next(
+                child
+                for child in node.body
+                if (
+                    isinstance(child, ast.FunctionDef)
+                    and child.name == "merge"
+                )
+            )
+            break
+    assert merge_node is not None
+    merge_node.decorator_list = []
+    contract_module = ast.Module(body=[merge_node], type_ignores=[])
+    ast.fix_missing_locations(contract_module)
+
+    @dataclass(frozen=True, kw_only=True)
+    class FakeAttentionSpec:
+        block_size: int
+        num_kv_heads: int
+        head_size: int
+        dtype: str
+        page_size_padded: int | None = None
+
+    @dataclass(frozen=True, kw_only=True)
+    class FakeIndexerKVSpec(FakeAttentionSpec):
+        pass
+
+    namespace = {
+        "AttentionSpec": FakeAttentionSpec,
+        "Self": object,
+        "fields": fields,
+    }
+    exec(compile(contract_module, str(path), "exec"), namespace)
+    return namespace["merge"], FakeAttentionSpec, FakeIndexerKVSpec
 
 
 class TestOperatorABI(unittest.TestCase):
@@ -285,6 +327,32 @@ class TestBuildResourceControl(unittest.TestCase):
             1,
             "the main extension must be configured exactly once",
         )
+
+
+class TestKVCacheGroupingContract(unittest.TestCase):
+    def test_mixed_indexer_and_mla_specs_signal_non_uniform(self):
+        merge, attention_cls, indexer_cls = _load_indexer_merge_contract()
+        indexer_spec = indexer_cls(
+            block_size=128,
+            num_kv_heads=1,
+            head_size=128,
+            dtype="bf16",
+        )
+        mla_spec = attention_cls(
+            block_size=128,
+            num_kv_heads=1,
+            head_size=512,
+            dtype="bf16",
+        )
+
+        def is_uniform(specs):
+            try:
+                merge(indexer_cls, specs)
+            except AssertionError:
+                return False
+            return True
+
+        self.assertFalse(is_uniform([indexer_spec, mla_spec]))
 
 
 class TestV023LifecycleContract(unittest.TestCase):

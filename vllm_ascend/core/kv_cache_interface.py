@@ -65,7 +65,10 @@ class IndexerKVSpec(AttentionSpec):
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         if not specs or not all(isinstance(spec, cls) for spec in specs):
-            raise TypeError(
+            # vLLM's is_kv_cache_spec_uniform() treats AssertionError as the
+            # signal that heterogeneous specs must use the hybrid grouping
+            # path. Keep the plugin-owned spec aligned with that contract.
+            raise AssertionError(
                 "All layers in an Indexer KV group must use IndexerKVSpec")
         merged = cls(
             block_size=specs[0].block_size,
