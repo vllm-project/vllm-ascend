@@ -35,6 +35,7 @@ class MiddleLayerAllgatherAddRMSNormPattern(_SequenceParallelPatternHelper):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_gather = self._all_gather(input)
             x_sliced = all_gather[:num_tokens]
+            residual = torch.ops.vllm.maybe_chunk_residual(x_sliced, residual)
             result, _, residual = self._add_rms_norm_bias(x_sliced, residual, weight)
 
             return result, residual
@@ -74,6 +75,7 @@ class LastLayerAllgatherRMSNormPattern(_SequenceParallelPatternHelper):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_gather = self._all_gather(input)
             x_sliced = all_gather[:num_tokens]
+            residual = torch.ops.vllm.maybe_chunk_residual(x_sliced, residual)
             result, _, _ = self._add_rms_norm_bias(x_sliced, residual, weight)
 
             return result
@@ -118,6 +120,7 @@ class Qwen3VLMiddleLayerAllgatherAddRMSNormPattern(_SequenceParallelPatternHelpe
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_gather = self._all_gather(input)
             x_sliced = all_gather[:num_tokens]
+            residual = torch.ops.vllm.maybe_chunk_residual(x_sliced, residual)
             add_ = x_sliced + deepstack_input_embeds
             result, _, residual = self._add_rms_norm_bias(add_, residual, weight)
 

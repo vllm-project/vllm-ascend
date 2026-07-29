@@ -1,4 +1,5 @@
 import os
+from typing import Any
 
 import pytest
 from vllm import SamplingParams
@@ -69,7 +70,7 @@ def test_qwen3_moe_dp2_tp2_ep_sp_output_matches_no_sp() -> None:
     model = os.environ.get("SP_TEST_MODEL", "Qwen/Qwen3-30B-A3B")
     prompts = [("hello " * 1400) + "\n只回答一个数字：2加2等于几？"]
     sampling_params = SamplingParams(max_tokens=16, temperature=0.0)
-    common_kwargs = {
+    common_kwargs: dict[str, Any] = {
         "data_parallel_size": 2,
         "tensor_parallel_size": 2,
         "enable_expert_parallel": True,
