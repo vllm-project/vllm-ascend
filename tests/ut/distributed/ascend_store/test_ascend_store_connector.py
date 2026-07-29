@@ -25,6 +25,7 @@ from vllm.distributed.kv_events import KVCacheEvent
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
     AscendStoreConnector,
     AscendStoreKVEvents,
+    LookupKeyServer,
 )
 
 # isort: on
@@ -102,6 +103,44 @@ class TestAscendStoreConnector(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertEqual(metadata, original_metadata)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.threading.Thread")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.MsgpackDecoder")
+    def test_lookup_rpc_converts_hash_strings_to_block_hashes(
+        self,
+        mock_decoder_cls,
+        mock_make_socket,
+        mock_thread_cls,
+    ):
+        block_hash_hex = "ab" * 32
+        mock_decoder_cls.return_value.decode.side_effect = [[0], [block_hash_hex]]
+        mock_make_socket.return_value.recv_multipart.return_value = [
+            (32).to_bytes(4, "big"),
+            b"groups",
+            (8).to_bytes(4, "big"),
+            b"hash",
+        ]
+        pool_worker = MagicMock()
+        server = LookupKeyServer(pool_worker, MagicMock())
+
+        def stop_server_after_lookup(*args, **kwargs):
+            server.running = False
+            return 16
+
+        pool_worker.lookup_scheduler.side_effect = stop_server_after_lookup
+
+        process_request = mock_thread_cls.call_args.kwargs["target"]
+        process_request()
+
+        pool_worker.lookup_scheduler.assert_called_once_with(
+            32,
+            [bytes.fromhex(block_hash_hex)],
+            [0],
+            use_layerwise=False,
+            hbm_hit_tokens=8,
+        )
+        mock_make_socket.return_value.send.assert_called_once_with((16).to_bytes(4, "big"))
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolScheduler")
     def test_init_scheduler_role(self, mock_scheduler_cls):
