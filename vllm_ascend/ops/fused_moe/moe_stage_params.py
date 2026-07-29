@@ -85,6 +85,16 @@ class MoEQuantParams:
         return self.quant_type == QuantType.W8A8FP
 
     @property
+    def is_weight_only(self) -> bool:
+        """Weight-only schemes: activations stay bf16/fp16, no activation quant."""
+        return self.quant_type in (QuantType.W4A16, QuantType.W4A16MXFP)
+
+    @property
+    def is_mxfp_full(self) -> bool:
+        """MXFP schemes that quantize both weights and activations."""
+        return self.quant_type in (QuantType.W8A8MXFP, QuantType.W4A4MXFP, QuantType.W4A8MXFP)
+
+    @property
     def use_w4a8_per_channel_gmm_swiglu(self) -> bool:
         return self.quant_type == QuantType.W4A8 and self.is_per_channel_weight
 
@@ -118,6 +128,42 @@ class MoEQuantParams:
             return torch.float32
         else:
             return None
+
+    @property
+    def act_quant_type(self) -> torch.dtype | None:
+        """Activation quant dtype derived from the quant scheme + MXFP leaf."""
+        if self.mxfp is not None:
+            if self.quant_type == QuantType.W4A16MXFP:
+                return self.mxfp.act_quant_type
+            return self.mxfp.act_quant_type or torch.float8_e4m3fn
+        return torch.int8 if self.is_int_quant else torch.float8_e4m3fn
+
+    @property
+    def weight_quant_type(self) -> torch.dtype | None:
+        """Weight quant dtype derived from the quant scheme + MXFP leaf."""
+        if self.mxfp is not None:
+            if self.quant_type in (QuantType.W4A8MXFP, QuantType.W4A16MXFP):
+                return self.mxfp.weight_quant_type
+            return self.mxfp.weight_quant_type or torch.float8_e4m3fn
+        return torch.float8_e4m3fn
+
+    @property
+    def scale_type(self) -> torch.dtype | None:
+        return self.mxfp.scale_dtype if self.mxfp is not None else None
+
+    @property
+    def per_token_scale_type(self) -> torch.dtype | None:
+        return self.mxfp.per_token_scale_dtype if self.mxfp is not None else None
+
+    def use_bf16(self, hidden_dtype: torch.dtype) -> bool:
+        """Whether the GMM2 output should be bf16.
+
+        MXFP schemes carry this on the leaf config; for other schemes it follows
+        the activation dtype of the incoming hidden states.
+        """
+        if self.mxfp is not None:
+            return self.mxfp.use_bf16
+        return hidden_dtype == torch.bfloat16
 
 
 __all__ = [

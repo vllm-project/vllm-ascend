@@ -25,14 +25,12 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device import utils as device_utils
 from vllm_ascend.device.mxfp_compat import (
-    FLOAT8_E8M0FNU_DTYPE,
     QUANT_DTYPES,
     SCALE_DTYPES,
 )
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
-from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
@@ -218,15 +216,10 @@ class BaseDeviceAdaptor:
         weight_scale: torch.Tensor,
         x_scale: torch.Tensor,
         bias=None,
-        use_mxfp_quant: bool = False,
         act_quant_type: torch.dtype | int = torch.float8_e4m3fn,
         weight_quant_type: torch.dtype | int = torch.float8_e4m3fn,
         swiglu_limit: float = 0.0,
-        mxfp_quant_dtype: QuantType | None = None,
     ):
-        if use_mxfp_quant:
-            raise RuntimeError("MXFP MoE quantization is only supported on Ascend A5.")
-
         return torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz(
             x=x,
             weight=weight,
@@ -271,14 +264,9 @@ class BaseDeviceAdaptor:
         scale_type,
         per_token_scale_type,
         use_bf16: bool = True,
-        use_mxfp_quant: bool = False,
         bias=None,
         fallback_output_dtype: torch.dtype | None = None,
-        mxfp_quant_dtype: QuantType | None = None,
     ) -> torch.Tensor:
-        if use_mxfp_quant:
-            raise RuntimeError("MXFP MoE quantization is only supported on Ascend A5.")
-
         if fallback_output_dtype is None:
             fallback_output_dtype = weight_scale[0].dtype if isinstance(weight_scale, list) else weight_scale.dtype
         return torch_npu.npu_grouped_matmul(
@@ -1171,91 +1159,31 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         weight_scale: torch.Tensor,
         x_scale: torch.Tensor,
         bias=None,
-        use_mxfp_quant: bool = False,
         act_quant_type: torch.dtype | int = torch.float8_e4m3fn,
         weight_quant_type: torch.dtype | int = torch.float8_e4m3fn,
         swiglu_limit: float = 0.0,
-        mxfp_quant_dtype: QuantType | None = None,
     ):
-        if not use_mxfp_quant:
-            if act_quant_type == torch.float8_e4m3fn:
-                out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
-                    x=x,
-                    weight=[weight],
-                    weight_scale=[weight_scale],
-                    x_scale=x_scale,
-                    group_list=group_list,
-                    quant_dtype=torch.float8_e4m3fn,
-                    dequant_dtype=torch.float32,
-                )
-                return out, out_scale, None
-            else:
-                return torch_npu.npu_grouped_matmul_swiglu_quant_v2(
-                    x=x,
-                    weight=weight,
-                    group_list=group_list,
-                    weight_scale=weight_scale,
-                    x_scale=x_scale,
-                    bias=bias,
-                    swiglu_limit=swiglu_limit,
-                    use_mxfp_quant=False,
-                )
-
-        # W4A8 mxfp
-        if mxfp_quant_dtype == QuantType.W4A8MXFP:
-            hidden_states = torch_npu.npu_grouped_matmul(
-                x=[x],
-                weight=[weight],
-                scale=None,
-                antiquant_scale=[weight_scale],
-                scale_dtype=None,
-                per_token_scale=[x_scale],
-                per_token_scale_dtype=torch.float8_e8m0fnu,
-                split_item=2,
-                group_type=0,
-                group_list=group_list,
-                x_dtype=torch.float8_e4m3fn,
-                weight_dtype=torch_npu.float4_e2m1fn_x2,
-                output_dtype=torch.bfloat16,
-            )[0]
-            # DSV4 need swiglu_limit input
-            out, out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
-                hidden_states,
-                topk_weight=None,
-                group_index=None,
-                dst_type=torch.float8_e4m3fn,
-                quant_mode=2,
-                clamp_value=swiglu_limit,
-            )
-        elif mxfp_quant_dtype == QuantType.W4A16MXFP:
-            hidden_states = torch_npu.npu_grouped_matmul(
-                x=[x],
-                weight=[weight],
-                antiquant_scale=[weight_scale],
-                group_list=group_list,
-                split_item=3,
-                group_type=0,
-                output_dtype=x.dtype,
-            )[0]
-            out = torch_npu.npu_swiglu(hidden_states)
-            out_scale = None
-        else:
+        if act_quant_type == torch.float8_e4m3fn:
             out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
                 x=x,
                 weight=[weight],
-                group_list=group_list,
                 weight_scale=[weight_scale],
                 x_scale=x_scale,
-                dequant_mode=2,
-                quant_mode=2,
+                group_list=group_list,
+                quant_dtype=torch.float8_e4m3fn,
                 dequant_dtype=torch.float32,
-                quant_dtype=act_quant_type,
-                x_dtype=act_quant_type if act_quant_type in QUANT_DTYPES else None,
-                weight_dtype=weight_quant_type if weight_quant_type in QUANT_DTYPES else None,
-                weight_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
-                x_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
             )
-        return out, A5DeviceAdaptor.maybe_normalize_mxfp_scale_layout(out_scale), None
+            return out, out_scale, None
+        return torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+            x=x,
+            weight=weight,
+            group_list=group_list,
+            weight_scale=weight_scale,
+            x_scale=x_scale,
+            bias=bias,
+            swiglu_limit=swiglu_limit,
+            use_mxfp_quant=False,
+        )
 
     @staticmethod
     def get_quant_gmm2_kwargs(
@@ -1309,80 +1237,27 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         scale_type,
         per_token_scale_type,
         use_bf16: bool = True,
-        use_mxfp_quant: bool = False,
         bias=None,
         fallback_output_dtype: torch.dtype | None = None,
-        mxfp_quant_dtype: QuantType | None = None,
     ) -> torch.Tensor:
-        if not use_mxfp_quant:
-            if act_quant_type == torch.float8_e4m3fn:
-                fallback_output_dtype = torch.bfloat16
-            return BaseDeviceAdaptor.npu_grouped_matmul_gmm2(
-                hidden_states=hidden_states,
-                weight=weight,
-                weight_scale=weight_scale,
-                per_token_scale=per_token_scale,
-                group_list=group_list,
-                group_list_type=group_list_type,
-                input_dtype=input_dtype,
-                act_quant_type=act_quant_type,
-                weight_quant_type=weight_quant_type,
-                scale_type=scale_type,
-                per_token_scale_type=per_token_scale_type,
-                use_bf16=use_bf16,
-                use_mxfp_quant=False,
-                bias=bias,
-                fallback_output_dtype=fallback_output_dtype,
-            )
-
-        gmm2_kwargs = cls.get_quant_gmm2_kwargs(
+        if act_quant_type == torch.float8_e4m3fn:
+            fallback_output_dtype = torch.bfloat16
+        return BaseDeviceAdaptor.npu_grouped_matmul_gmm2(
+            hidden_states=hidden_states,
+            weight=weight,
+            weight_scale=weight_scale,
+            per_token_scale=per_token_scale,
+            group_list=group_list,
+            group_list_type=group_list_type,
             input_dtype=input_dtype,
             act_quant_type=act_quant_type,
             weight_quant_type=weight_quant_type,
-            scale_type=scale_type if mxfp_quant_dtype != QuantType.W4A8MXFP else None,
+            scale_type=scale_type,
             per_token_scale_type=per_token_scale_type,
             use_bf16=use_bf16,
-            use_mxfp_quant=True,
-        )
-        output_dtype = gmm2_kwargs.pop("output_dtype")
-
-        if isinstance(weight, list) and len(weight) != 1:
-            raise ValueError(f"w2 must have a single tensor in MXFP path, but got {len(weight)}.")
-        if isinstance(weight_scale, list) and len(weight_scale) != 1:
-            raise ValueError(f"w2_scale must have a single tensor in MXFP path, but got {len(weight_scale)}.")
-        gmm2_weight = weight if isinstance(weight, list) else [weight]
-        gmm2_scale = weight_scale if isinstance(weight_scale, list) else [weight_scale]
-
-        if mxfp_quant_dtype == QuantType.W4A16MXFP:
-            return torch_npu.npu_grouped_matmul(
-                x=[hidden_states],
-                weight=gmm2_weight,
-                antiquant_scale=gmm2_scale,
-                bias=bias,
-                split_item=3,
-                group_type=0,
-                group_list_type=group_list_type,
-                group_list=group_list,
-                output_dtype=output_dtype,
-            )[0]
-
-        if mxfp_quant_dtype == QuantType.W4A8MXFP:
-            gmm2_scale = None  # type: ignore[assignment]
-            gmm2_kwargs.update({"antiquant_scale": [weight_scale]})
-
-        return torch_npu.npu_grouped_matmul(
-            x=[hidden_states],
-            weight=gmm2_weight,
-            scale=gmm2_scale,
             bias=bias,
-            per_token_scale=[per_token_scale],
-            split_item=2,
-            group_list_type=group_list_type,
-            group_type=0,
-            group_list=group_list,
-            output_dtype=output_dtype,
-            **gmm2_kwargs,
-        )[0]
+            fallback_output_dtype=fallback_output_dtype,
+        )
 
     @staticmethod
     def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_offset, key, value):
