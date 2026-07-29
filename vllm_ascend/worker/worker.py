@@ -20,7 +20,6 @@
 import copy
 import gc
 import logging
-import os
 from types import NoneType
 from typing import Any
 
@@ -122,23 +121,6 @@ class NPUWorker(WorkerBase):
         from vllm_ascend.logger import configure_ascend_file_logging
 
         configure_ascend_file_logging()
-
-        # Since vLLM PR #45026, vLLM no longer sets device control env vars
-        # internally, and RayExecutorV2 sets
-        # RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1 to prevent Ray
-        # from setting it. Without ASCEND_RT_VISIBLE_DEVICES, aclInit()
-        # (triggered by check_ascend_device_type below) defaults to device 0,
-        # which may be assigned to another DP rank, causing
-        # ACL_ERROR_INVALID_DEVICE (error code 107001).
-        # Only needed for the ray backend; the mp backend handles device
-        # isolation via local_rank shifting in _init_device.
-        assigned = vllm_config.parallel_config.assigned_physical_gpu_ids
-        if assigned is not None and local_rank < len(assigned):
-            device_env = current_platform.device_control_env_var
-            if device_env:
-                os.environ[device_env] = str(assigned[local_rank])
-
-        check_ascend_device_type()
 
         super().__init__(
             vllm_config=vllm_config,
@@ -456,6 +438,7 @@ class NPUWorker(WorkerBase):
         device = torch.device(f"{current_platform.device_type}:{visible_device_index}")
 
         torch.npu.set_device(device)
+        check_ascend_device_type()
 
         # Import _inductor for graph mode execution with triton
         # This lazy import avoids torch_npu re-initialization in patch
