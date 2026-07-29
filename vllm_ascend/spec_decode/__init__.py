@@ -46,8 +46,6 @@ def get_spec_decode_method(method, vllm_config, device, runner):
         return AscendGemma4Proposer(vllm_config, device, runner)
     elif method == "dspark":
         return AscendDSparkProposer(vllm_config, device, runner)
-    elif method == "mtp" and vllm_config.speculative_config.use_gemma4_mtp():
-        return AscendGemma4Proposer(vllm_config, device, runner)
     elif method in ("eagle", "eagle3", "mtp"):
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None and speculative_config.use_step3p5_mtp():
