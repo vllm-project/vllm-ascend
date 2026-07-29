@@ -23,8 +23,9 @@ The key invariants are:
 - Prefill tokens are partitioned between PCP ranks by the upstream PCP batch
   manager. Decode tokens are replicated, because every rank participates in a
   decode step.
-- SFA latent KV, RoPE `cos`/`sin`, indexer keys, and their slot mappings are
-  gathered before a cache write. Thus every PCP rank writes the same complete
+- SFA latent KV, RoPE `cos`/`sin`, and indexer keys are gathered before a cache
+  write. `PCPManager` has already built the corresponding gathered slot-mapping
+  layout from the global batch. Thus every PCP rank writes the same complete
   SFA and indexer cache.
 - Prefill attention output is already the local token slice with the full head
   set. Decode query heads can be split by PCP by upstream metadata, so the
@@ -42,12 +43,14 @@ The key invariants are:
    thin: upstream PCP owns token partitioning and the normal SFA builder still
    owns SFA metadata construction.
 3. `AscendSFACPImpl.exec_kv` gathers the prefill portion of latent KV, `cos`,
-   `sin`, and slot mappings before native RMSNorm/RoPE/cache write. The
-   `cos`/`sin` gather is essential: the gathered KV must be rotated with the
-   positions from which it was produced.
-4. `AscendSFACPImpl._write_indexer_cache` applies the same gather protocol to
-   the LightningIndexer key cache. This keeps sparse top-k selection
-   deterministic across PCP ranks.
+   and `sin` before native RMSNorm/RoPE/cache write. It directly consumes the
+   gathered slot mapping produced by `PCPManager`; SFA performs no additional
+   slot-mapping handling or collective. The `cos`/`sin`
+   gather is essential: the gathered KV must be rotated with the positions from
+   which it was produced.
+4. `AscendSFACPImpl._write_indexer_cache` applies the same key/scale gather
+   protocol to the LightningIndexer cache and uses the matching gathered slot
+   mapping. This keeps sparse top-k selection deterministic across PCP ranks.
 5. `AscendSFACPImpl._execute_sparse_flash_attention_process` calls
    `finalize_mla_pcp_decode` after SFA. The call is a no-op for prefill and
    reconstructs the full decode head layout when PCP split decode heads.

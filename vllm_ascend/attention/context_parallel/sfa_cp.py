@@ -5,7 +5,6 @@ from typing import Any, NamedTuple, TypeVar
 import torch
 import torch.distributed as dist
 from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import get_pcp_group
 from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -29,30 +28,6 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 
 M = TypeVar("M", bound=AscendSFAMetadata)
-
-
-def _get_pcp_gathered_slot_mapping(
-    slot_mapping: torch.Tensor,
-    local_num_tokens: int,
-) -> torch.Tensor:
-    """Normalize V2 PCP slot mappings to the layout expected by PCP helpers.
-
-    The generic PCP helper receives one slot entry per rank/token.  Depending
-    on the attention path V2 may provide either that gathered layout or only
-    the local rank's padded slice.  Normalize both forms before cache writes.
-    """
-    pcp_group = get_pcp_group()
-    pcp_size = pcp_group.world_size
-    slot_mapping = slot_mapping.reshape(-1)
-    if slot_mapping.numel() == pcp_size * local_num_tokens:
-        return slot_mapping
-    if slot_mapping.numel() == local_num_tokens:
-        return pcp_group.all_gather(slot_mapping.contiguous(), dim=0)
-    raise RuntimeError(
-        "Unexpected PCP SFA slot_mapping size: "
-        f"slots={tuple(slot_mapping.shape)}, local_num_tokens={local_num_tokens}, "
-        f"pcp_size={pcp_size}."
-    )
 
 
 class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
@@ -158,8 +133,9 @@ class AscendSFACPImpl(AscendSFAImpl):
         slots: torch.Tensor,
         attn_metadata: M,
     ):
-        # PCP: gather latent KV, positional cos/sin, and slot_mapping across
-        # PCP ranks before the fused RMSNorm+RoPE+cache-write op. Decode
+        # PCP: gather latent KV and positional cos/sin across PCP ranks before
+        # the fused RMSNorm+RoPE+cache-write op. Slots are already gathered by
+        # PCPManager. Decode
         # tokens are replicated across ranks and stay local; only the
         # prefill partition is all-gathered. After this every rank sees the
         # complete set of tokens and writes the full KV into its replicated
@@ -167,7 +143,6 @@ class AscendSFACPImpl(AscendSFAImpl):
         # they are derived from per-token positions and the gathered half
         # would otherwise be rotated with the wrong positions.
         num_decode_tokens = attn_metadata.num_decode_tokens or 0
-        slots = _get_pcp_gathered_slot_mapping(slots, kv_no_split.shape[0])
         (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
             (kv_no_split, cos, sin), slots, num_decode_tokens
         )
@@ -182,16 +157,13 @@ class AscendSFACPImpl(AscendSFAImpl):
         kv_cache: tuple,
         attn_metadata: M,
     ) -> None:
-        # PCP: gather indexer key (and optional scale) plus slot_mapping
-        # across PCP ranks before delegating to the parent's scatter write,
-        # so every rank writes the complete set of indexer keys into its
+        # PCP: gather indexer key (and optional scale) across PCP ranks before
+        # delegating to the parent's scatter write; PCPManager has already
+        # gathered the slot mapping, so every rank writes the complete set of
+        # indexer keys into its
         # replicated indexer cache. Same pattern as exec_kv: decode tokens
         # stay local (replicated), only the prefill partition is gathered.
         num_decode_tokens = attn_metadata.num_decode_tokens or 0
-        slot_mapping = _get_pcp_gathered_slot_mapping(
-            slot_mapping,
-            k_li.shape[0],
-        )
         tensors = (k_li,) if k_li_scale is None else (k_li, k_li_scale)
         gathered_tensors, gathered_slot_mapping = _gather_prefill_cache_inputs(
             tensors, slot_mapping, num_decode_tokens

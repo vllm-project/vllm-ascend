@@ -1954,7 +1954,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 kv_slots = slot_mapping_cp
             else:
                 kv_slots = slot_mapping_sfa
-            kv_outputs = self.exec_kv(kv_no_split, cos, sin, kv_cache, kv_slots, attn_metadata)
+            kv_outputs = self.exec_kv(kv_no_split, cos, sin, kv_cache, kv_slots, attn_metadata) # pcp rebuild
             k_pe, k_nope = kv_outputs[:2]
             knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
 
@@ -2003,7 +2003,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if kv_cache is not None and self.has_indexer:
             assert k_li is not None
-            self._write_indexer_cache(k_li, k_li_scale, slot_mapping, kv_cache, attn_metadata)
+            self._write_indexer_cache(k_li, k_li_scale, slot_mapping, kv_cache, attn_metadata) # pcp rebuild
 
         if self.enable_dsa_cp and attn_metadata.dsa_cp_context is not None:
             topk_num_tokens = attn_metadata.dsa_cp_context.local_end_with_pad - attn_metadata.dsa_cp_context.local_start
