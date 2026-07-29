@@ -508,6 +508,8 @@ class KVPoolWorker:
                     self.tp_size,
                     self.dcp_size,
                     ready_event,
+                    invalid_block_ids=self._invalid_block_ids,
+                    invalid_block_ids_lock=self._invalid_block_ids_lock,
                 )
                 self.kv_recv_thread.start()
                 ready_event.wait()
