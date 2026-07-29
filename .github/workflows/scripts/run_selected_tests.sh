@@ -51,15 +51,99 @@ project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
 mkdir -p "${pytest_log_dir}"
 
+# Sanitize pytest target/nodeid to tests/outputs/<name>/ (same rules as
+# split_coverage_by_context.py). Case-level targets are staging dirs that are
+# later split into <file>--<test_name>/covdata/; file-level targets keep one
+# covdata dir per test file.
+sanitize_coverage_dirname() {
+  local target="$1"
+  local path node
+  if [[ "${target}" == *"::"* ]]; then
+    path="${target%%::*}"
+    node="${target#*::}"
+    path="${path%.py}"
+    target="${path}::${node}"
+  else
+    target="${target%.py}"
+  fi
+  target="${target//\//__}"
+  target="${target//::/--}"
+  printf '%s' "${target}"
+}
+
+# Heavy / coverage-fragile E2E files keep file-level coverage via
+# `coverage run -m pytest` (no pytest-cov / no --cov-context=test / no split).
+# All other targets keep per-test contexts via pytest-cov.
+FILE_LEVEL_COV_TARGETS=(
+  "tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py"
+  "tests/e2e/pull_request/two_card/test_data_parallel.py"
+  "tests/e2e/pull_request/two_card/test_external_launcher.py"
+  "tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py"
+  "tests/e2e/pull_request/four_card/test_pipeline_parallel.py"
+  "tests/e2e/pull_request/four_card/test_graph_mode.py"
+)
+
+coverage_file_path() {
+  local target="$1"
+  printf '%s' "${target%%::*}"
+}
+
+is_file_level_cov_target() {
+  local target_file
+  target_file="$(coverage_file_path "$1")"
+  local known
+  for known in "${FILE_LEVEL_COV_TARGETS[@]}"; do
+    if [ "${target_file}" = "${known}" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 setup_coverage() {
   local target="$1"
-  local test_basename="${target%.py}"
-  test_basename="${test_basename//\//__}"
-  test_basename="${test_basename//::/--}"
+  local test_basename
+  # File-level targets always key off the .py path, even if a nodeid is passed.
+  if is_file_level_cov_target "${target}"; then
+    test_basename="$(sanitize_coverage_dirname "$(coverage_file_path "${target}")")"
+  else
+    test_basename="$(sanitize_coverage_dirname "${target}")"
+  fi
   local covdata_dir="${project_root}/tests/outputs/${test_basename}/covdata"
   mkdir -p "${covdata_dir}"
+  # pytest-cov / coverage.py honor COVERAGE_FILE over coveragerc data_file.
   export COVERAGE_FILE="${covdata_dir}/coverage"
+  export COVERAGE_RCFILE="${project_root}/tests/coveragerc"
   echo -e "  \033[33mCOVERAGE_FILE:\033[0m ${COVERAGE_FILE}"
+}
+
+# After pytest-cov finishes, expand contexts into per-test output directories.
+split_coverage_by_context() {
+  local covdata_dir="$1"
+  if [ ! -d "${covdata_dir}" ]; then
+    echo -e "  \033[33mWARNING:\033[0m covdata dir missing, skip split: ${covdata_dir}"
+    return 0
+  fi
+  echo -e "  \033[33mSplitting coverage by test case under:\033[0m ${covdata_dir}"
+  python3 "${project_root}/.github/workflows/scripts/split_coverage_by_context.py" \
+    --covdata-dir "${covdata_dir}" \
+    --outputs-root "${project_root}/tests/outputs" \
+    --rcfile "${project_root}/tests/coveragerc"
+}
+
+# Shared pytest-cov flags for case-level runs. Data is written to
+# COVERAGE_FILE; --cov-report= skips terminal/HTML output.
+# File-level targets use `coverage run -m pytest` instead.
+PYTEST_COV_BASE_ARGS=(
+  --cov=vllm_ascend
+  --cov-config="${project_root}/tests/coveragerc"
+  --cov-report=
+)
+
+pytest_cov_args_for_target() {
+  # Case-level only; file-level uses `coverage run -m pytest` instead.
+  echo -e "  \033[33mCoverage mode:\033[0m case-level (--cov-context=test)" >&2
+  printf '%s\n' "${PYTEST_COV_BASE_ARGS[@]}" --cov-context=test
 }
 
 setup_vllm_cache_root() {
@@ -117,16 +201,36 @@ run_pytest_target() {
   if [ "${record_timing}" = true ]; then
     start_time=$(date +%s%N)
   fi
+  local covdata_dir=""
+  local file_level_cov=false
+  local cov_args=()
   if [ "${enable_coverage}" = "true" ]; then
     setup_coverage "${target}"
-    set +e
-    python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
+    covdata_dir="$(dirname "${COVERAGE_FILE}")"
+    if is_file_level_cov_target "${target}"; then
+      file_level_cov=true
+      echo -e "  \033[33mCoverage mode:\033[0m file-level (coverage run -m pytest)" >&2
+      set +e
+      python -m coverage run --rcfile="${project_root}/tests/coveragerc" \
+        -m pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
+    else
+      mapfile -t cov_args < <(pytest_cov_args_for_target "${target}")
+      set +e
+      pytest -sv --color=yes "${cov_args[@]}" "${target}" 2>&1 | tee "${log_file}"
+    fi
   else
     set +e
     pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
   fi
   local status=${PIPESTATUS[0]}
   set -e
+  if [ "${enable_coverage}" = "true" ] && [ -n "${covdata_dir}" ] && [ "${file_level_cov}" = false ]; then
+    set +e
+    split_coverage_by_context "${covdata_dir}"
+    set -e
+  elif [ "${enable_coverage}" = "true" ] && [ "${file_level_cov}" = true ]; then
+    echo -e "  \033[33mKeeping file-level coverage under:\033[0m ${covdata_dir}"
+  fi
   if [ "${record_timing}" = true ]; then
     local elapsed_ns=$(( $(date +%s%N) - start_time ))
     local elapsed=$(( elapsed_ns / 1000000000 )).$(( (elapsed_ns % 1000000000) / 100000000 ))
@@ -158,17 +262,26 @@ run_pytest_batch() {
   if [ "${record_timing}" = true ]; then
     start_time=$(date +%s%N)
   fi
+  local covdata_dir=""
+  local cov_args=()
   if [ "${enable_coverage}" = "true" ]; then
-    echo "DEBUG: Go to the [Coverage Branch] page."
     setup_coverage "cpu-ut"
+    covdata_dir="$(dirname "${COVERAGE_FILE}")"
+    # CPU UT batches always keep case-level contexts.
+    mapfile -t cov_args < <(pytest_cov_args_for_target "cpu-ut")
     set +e
-    python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${batch_targets[@]}" 2>&1 | tee "${log_file}"
+    pytest -sv --color=yes "${cov_args[@]}" "${batch_targets[@]}" 2>&1 | tee "${log_file}"
   else
     set +e
     pytest -sv --color=yes "${batch_targets[@]}" 2>&1 | tee "${log_file}"
   fi
   local status=${PIPESTATUS[0]}
   set -e
+  if [ "${enable_coverage}" = "true" ] && [ -n "${covdata_dir}" ]; then
+    set +e
+    split_coverage_by_context "${covdata_dir}"
+    set -e
+  fi
   if [ "${record_timing}" = true ]; then
     local elapsed_ns=$(( $(date +%s%N) - start_time ))
     local elapsed=$(( elapsed_ns / 1000000000 )).$(( (elapsed_ns % 1000000000) / 100000000 ))
