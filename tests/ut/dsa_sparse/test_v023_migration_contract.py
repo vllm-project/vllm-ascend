@@ -12,8 +12,11 @@ from __future__ import annotations
 import ast
 import importlib.util
 import re
+import sys
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -44,6 +47,51 @@ def _load_build_jobs_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_engine_process_entrypoint_contract(engine_core_proc):
+    path = (
+        REPO_ROOT
+        / "vllm_ascend/patch/dsa_sparse/patch_engine_process.py"
+    )
+    source_module = ast.parse(path.read_text(encoding="utf-8"))
+    function_names = {
+        "_install_dsa_runtime_patches",
+        "is_dsa_run_engine_core_wrapper",
+        "_dsa_sparse_run_engine_core",
+        "ensure_dsa_engine_core_entrypoint",
+    }
+    selected_nodes = []
+    for node in source_module.body:
+        if (
+            isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name)
+                and target.id == "_DSA_RUN_ENGINE_CORE_WRAPPER_ATTR"
+                for target in node.targets
+            )
+        ):
+            selected_nodes.append(node)
+        elif isinstance(node, ast.FunctionDef) and node.name in function_names:
+            selected_nodes.append(node)
+        elif (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "setattr"
+        ):
+            selected_nodes.append(node)
+
+    contract_module = ast.Module(body=selected_nodes, type_ignores=[])
+    ast.fix_missing_locations(contract_module)
+    namespace = {
+        "EngineCoreProc": engine_core_proc,
+        "_reattach_dsa_config_from_additional_config": lambda kwargs: None,
+        "_is_dsa_enabled_on_config": lambda config: True,
+        "verify_dsa_runtime_patches_installed": lambda: None,
+    }
+    exec(compile(contract_module, str(path), "exec"), namespace)
+    return namespace
 
 
 def _function_node(relative_path: str, function_name: str) -> ast.FunctionDef:
@@ -240,6 +288,97 @@ class TestBuildResourceControl(unittest.TestCase):
 
 
 class TestV023LifecycleContract(unittest.TestCase):
+    def test_engine_child_composes_dsa_outside_late_platform_patch(self):
+        for balance_enabled in (False, True):
+            with self.subTest(balance_enabled=balance_enabled):
+                calls = []
+
+                def upstream_run_engine_core(*args, **kwargs):
+                    calls.append("upstream")
+                    return "upstream"
+
+                class FakeEngineCoreProc:
+                    run_engine_core = upstream_run_engine_core
+
+                entrypoint = _load_engine_process_entrypoint_contract(
+                    FakeEngineCoreProc
+                )
+                entrypoint["ensure_dsa_engine_core_entrypoint"]()
+
+                runtime_module = types.ModuleType(
+                    "vllm_ascend.patch.dsa_sparse.patch_runtime"
+                )
+                platform_patch_installed = False
+
+                def install_dsa_runtime_patches():
+                    nonlocal platform_patch_installed
+                    if platform_patch_installed:
+                        return
+                    platform_patch_installed = True
+
+                    captured_entrypoint = FakeEngineCoreProc.run_engine_core
+                    self.assertIs(
+                        captured_entrypoint,
+                        upstream_run_engine_core,
+                        "late platform imports must not capture the DSA wrapper",
+                    )
+
+                    def balance_run_engine_core(*args, **kwargs):
+                        calls.append("balance")
+                        config = kwargs["vllm_config"]
+                        if config.balance_enabled:
+                            calls.append("balance_custom")
+                            return "balance"
+                        return captured_entrypoint(*args, **kwargs)
+
+                    FakeEngineCoreProc.run_engine_core = (
+                        balance_run_engine_core
+                    )
+
+                runtime_module.install_dsa_runtime_patches = (
+                    install_dsa_runtime_patches
+                )
+                fake_packages = {}
+                for module_name in (
+                    "vllm_ascend",
+                    "vllm_ascend.patch",
+                    "vllm_ascend.patch.dsa_sparse",
+                ):
+                    package = types.ModuleType(module_name)
+                    package.__path__ = []
+                    fake_packages[module_name] = package
+                fake_packages[runtime_module.__name__] = runtime_module
+
+                def verify_entrypoint():
+                    self.assertTrue(
+                        entrypoint["is_dsa_run_engine_core_wrapper"](
+                            FakeEngineCoreProc.run_engine_core
+                        )
+                    )
+
+                entrypoint["verify_dsa_runtime_patches_installed"] = (
+                    verify_entrypoint
+                )
+                config = types.SimpleNamespace(
+                    balance_enabled=balance_enabled
+                )
+                with mock.patch.dict(sys.modules, fake_packages):
+                    result = FakeEngineCoreProc.run_engine_core(
+                        vllm_config=config
+                    )
+
+                self.assertTrue(
+                    entrypoint["is_dsa_run_engine_core_wrapper"](
+                        FakeEngineCoreProc.run_engine_core
+                    )
+                )
+                if balance_enabled:
+                    self.assertEqual(result, "balance")
+                    self.assertEqual(calls, ["balance", "balance_custom"])
+                else:
+                    self.assertEqual(result, "upstream")
+                    self.assertEqual(calls, ["balance", "upstream"])
+
     def test_allocate_slots_signature_tracks_v023(self):
         function = _function_node(
             "vllm_ascend/patch/dsa_sparse/"

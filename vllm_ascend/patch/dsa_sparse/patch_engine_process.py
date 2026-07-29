@@ -48,11 +48,36 @@ def _get_make_client_vllm_config(args, kwargs):
 
 
 def _install_dsa_runtime_patches() -> None:
-    from vllm_ascend.patch.dsa_sparse.patch_runtime import (
-        install_dsa_runtime_patches,
-    )
+    # A spawned EngineCore imports this module to resolve the process target
+    # before vllm-ascend's platform patches have necessarily been imported.
+    # Some of those patches (notably patch_balance_schedule) capture and
+    # replace EngineCoreProc.run_engine_core at import time.  Do not let them
+    # capture the DSA wrapper itself: wrapping that platform entrypoint again
+    # would otherwise create DSA -> platform -> DSA recursion.
+    current_run_engine_core = EngineCoreProc.run_engine_core
+    if is_dsa_run_engine_core_wrapper(current_run_engine_core):
+        original_run_engine_core = getattr(
+            EngineCoreProc,
+            "_dsa_sparse_original_run_engine_core",
+            None,
+        )
+        if original_run_engine_core is None:
+            raise RuntimeError(
+                "DSA EngineCore entrypoint wrapper has no original callable"
+            )
+        EngineCoreProc.run_engine_core = original_run_engine_core
 
-    install_dsa_runtime_patches()
+    try:
+        from vllm_ascend.patch.dsa_sparse.patch_runtime import (
+            install_dsa_runtime_patches,
+        )
+
+        install_dsa_runtime_patches()
+    finally:
+        # Platform patch imports may have replaced the class entrypoint.  Keep
+        # DSA outermost so the child installs its KV-cache aliases before the
+        # selected platform entrypoint constructs EngineCore.
+        ensure_dsa_engine_core_entrypoint()
 
 
 def is_dsa_run_engine_core_wrapper(fn) -> bool:
