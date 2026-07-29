@@ -81,7 +81,7 @@ docker run --rm \
 ::::{tab-item} A2 series
 :sync: A2
 
-Start the docker image on your each node.
+Start the docker image on each node.
 
 ```{code-block} bash
    :substitutions:
@@ -267,7 +267,7 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
 
 ### Prefill-Decode Disaggregation
 
-We'd like to show the deployment guide of `GLM-4.7` on multi-node environment with 2P1D for better performance.
+We'd like to show the deployment guide of `GLM-4.7` in a multi-node environment with 2P1D for better performance.
 
 Before you start, please
 
