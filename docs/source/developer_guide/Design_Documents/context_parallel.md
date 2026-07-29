@@ -108,8 +108,9 @@ helper is still called later in the same forward. Therefore it is **not** a PCP
 requirement and should be removed; it causes two equivalent scatter writes for
 the `(C8=true, DSA-CP=false)` case. Its `not self.enable_dsa_cp` predicate only
 avoids applying that duplicate ordinary-SFA write to the DSA-CP layout. The
-correct design is to retain the existing centralized helper and inline only
-the DSA-CP gather change that this PR needs.
+correct design is to retain the existing centralized helper. The native path
+therefore calls `_maybe_gather_kv_for_dsacp` rather than maintaining a second
+inline DSA-CP gather implementation.
 
 ## KV-cache layout
 
