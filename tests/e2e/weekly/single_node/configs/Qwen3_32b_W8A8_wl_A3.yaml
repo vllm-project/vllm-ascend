@@ -66,7 +66,7 @@ _benchmarks_perf1: &benchmarks_perf1
 
 test_cases:
   - name: "Qwen3_32b_accuracy_aime2024_A3"
-    model: "vllm-ascend/Qwen3-32B-W8A8-wl"
+    model: "vllm-ascend/Qwen3-32B-W8A8"
     envs:
       <<: *envs
       OMP_PROC_BIND: "false"
@@ -86,7 +86,7 @@ test_cases:
     benchmarks:
       <<: *benchmarks_aime
   - name: "Qwen3_32B_w8a8_Accuracy_A3"
-    model: "vllm-ascend/Qwen3-32B-W8A8-wl"
+    model: "vllm-ascend/Qwen3-32B-W8A8"
     envs:
       <<: *envs
       VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE: "1"

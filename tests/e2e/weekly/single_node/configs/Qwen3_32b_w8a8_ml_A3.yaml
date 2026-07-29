@@ -6,6 +6,7 @@ _envs: &envs
   TASK_QUEUE_ENABLE: "1"
   VLLM_USE_V1: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
+
 _server_cmd: &server_cmd
   - "--tensor-parallel-size"
   - "4"
@@ -43,7 +44,7 @@ _benchmarks_perf1: &benchmarks_perf1
 
 test_cases:
   - name: "Qwen3_32b_int8_Feature_stack_A3"
-    model: "vllm-ascend/Qwen3-32B-W8A8-ml"
+    model: "vllm-ascend/Qwen3-32B-W8A8"
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -54,7 +55,7 @@ test_cases:
       - "--additional-config"
       - '{"ascend_scheduler_config":{"enabled":false},"enable_weight_nz_layout":true}'
   - name: "Qwen3_32B_w8a8_Performance_3500_1500_A3"
-    model: "vllm-ascend/Qwen3-32B-W8A8-ml"
+    model: "vllm-ascend/Qwen3-32B-W8A8"
     envs:
       <<: *envs
       LD_PRELOAD: "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD"
