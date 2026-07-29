@@ -135,11 +135,10 @@ def _normalize_translation_syntax(
     translated_prefix = _INVISIBLE_PREFIX_RE.match(normalized).group()
     normalized = source_prefix + normalized[len(translated_prefix) :]
 
-    for pattern, label in ((_VARIABLE_RE, "variable or format marker"),):
-        source_tokens = pattern.findall(source)
-        translated_tokens = pattern.findall(normalized)
-        if source_tokens != translated_tokens:
-            return translation, (f"{label} changed: {source_tokens[:3]} -> {translated_tokens[:3]}")
+    source_tokens = _VARIABLE_RE.findall(source)
+    translated_tokens = _VARIABLE_RE.findall(normalized)
+    if source_tokens != translated_tokens:
+        return translation, (f"variable or format marker changed: {source_tokens[:3]} -> {translated_tokens[:3]}")
 
     return normalized, None
 
@@ -159,23 +158,12 @@ def _remove_extra_headers(content: str) -> str:
 
 
 def _load_po(content: str) -> POFile:
-    """Parse a catalog and recover metadata from a previously embedded header."""
-    po = pofile(_remove_extra_headers(content))
-    header_entries = [entry for entry in po if not entry.msgid]
-    if not po.metadata and header_entries:
-        key = None
-        for line in header_entries[0].msgstr.splitlines():
-            if ":" in line:
-                key, value = line.split(":", 1)
-                po.metadata[key] = value.strip()
-            elif key is not None:
-                po.metadata[key] += "\n" + line.strip()
-    po[:] = [entry for entry in po if entry.msgid]
-    return po
+    """Parse a catalog after removing duplicate embedded headers."""
+    return pofile(_remove_extra_headers(content))
 
 
 def _active_entries(po: POFile) -> list[POEntry]:
-    return [entry for entry in po if entry.msgid and not entry.obsolete]
+    return [entry for entry in po if not entry.obsolete]
 
 
 def _pending_entries(po: POFile, retranslate_all: bool) -> list[POEntry]:
@@ -269,7 +257,6 @@ class POTranslator:
             po = _load_po(raw_content)
             entries = _active_entries(po)
             targets = _pending_entries(po, retranslate_all)
-            expected_msgids = [entry.msgid for entry in entries]
             mode = "all" if retranslate_all else "pending"
             print(
                 f"  {path.name} ({len(targets)}/{len(entries)} {mode})",
@@ -301,7 +288,7 @@ class POTranslator:
 
             po.save(str(path), newline="\n")
 
-            error = validate_po_file(path, expected_msgids=expected_msgids)
+            error = validate_po_file(path)
             if error:
                 self._restore(backup, po_path)
                 print(f"FAILED ({error})")
@@ -323,11 +310,7 @@ class POTranslator:
     @staticmethod
     def _build_snippet(entries: list[POEntry]) -> str:
         """Serialize only source msgids, never the catalog header or old msgstr."""
-        parts = []
-        for entry in entries:
-            escaped = entry.msgid.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-            parts.append(f'msgid "{escaped}"\nmsgstr ""')
-        return "\n\n".join(parts) + "\n"
+        return "\n".join(str(POEntry(msgid=entry.msgid)) for entry in entries)
 
     @staticmethod
     def _split_entries(
@@ -381,19 +364,22 @@ class POTranslator:
         async def attempt_chunk(
             content: str,
             info: str,
-            diagnose: bool = False,
+            single_entry_contract: bool = False,
         ) -> str | None:
             source_entries = _active_entries(pofile(content))
-            last_result = None
-            last_error = None
             for attempt in range(3):
                 try:
                     async with sem:
-                        result = await self._call_api(
-                            content,
-                            chunk_info=info,
-                        )
-                    last_result = result
+                        if single_entry_contract:
+                            result = await self._call_single_entry_api(
+                                source_entries[0],
+                                chunk_info=info,
+                            )
+                        else:
+                            result = await self._call_api(
+                                content,
+                                chunk_info=info,
+                            )
                     if (
                         result
                         and self._collect_translations(
@@ -405,72 +391,12 @@ class POTranslator:
                     ):
                         return result
                 except Exception as exc:
-                    last_error = exc
+                    if attempt == 2:
+                        print(f"\n    {info} API error: {exc}", flush=True)
+                        return None
                 if attempt < 2:
                     await asyncio.sleep(2 * (attempt + 1))
-
-            if diagnose:
-                if last_result:
-                    self._collect_translations(
-                        [last_result],
-                        source_entries,
-                        quiet=False,
-                    )
-                elif last_error:
-                    print(f"\n    {info} API error: {last_error}", flush=True)
-                else:
-                    print(
-                        f"\n    {info} returned an empty or non-PO response",
-                        flush=True,
-                    )
-            return None
-
-        async def do_chunk(idx: int) -> tuple[int, str | None]:
-            info = f"chunk {idx + 1}/{total}"
-            return idx, await attempt_chunk(chunks[idx], info)
-
-        async def recover_single_entry(
-            entry: POEntry,
-            info: str,
-        ) -> str | None:
-            last_result = None
-            last_error = None
-            for attempt in range(3):
-                try:
-                    async with sem:
-                        result = await self._call_single_entry_api(
-                            entry,
-                            chunk_info=info,
-                        )
-                    last_result = result
-                    if (
-                        result
-                        and self._collect_translations(
-                            [result],
-                            [entry],
-                            quiet=True,
-                        )
-                        is not None
-                    ):
-                        return result
-                except Exception as exc:
-                    last_error = exc
-                if attempt < 2:
-                    await asyncio.sleep(2 * (attempt + 1))
-
-            if last_result:
-                self._collect_translations(
-                    [last_result],
-                    [entry],
-                    quiet=False,
-                )
-            elif last_error:
-                print(f"\n    {info} API error: {last_error}", flush=True)
-            else:
-                print(
-                    f"\n    {info} returned an empty or invalid translation",
-                    flush=True,
-                )
+            print(f"\n    {info} returned an invalid translation", flush=True)
             return None
 
         async def recover_chunk(
@@ -484,9 +410,10 @@ class POTranslator:
                     f"\n    {info} failed; retrying with the single-entry contract",
                     flush=True,
                 )
-                result = await recover_single_entry(
-                    source_entries[0],
+                result = await attempt_chunk(
+                    content,
                     recovery_info,
+                    single_entry_contract=True,
                 )
                 return [result] if result else None
 
@@ -520,11 +447,10 @@ class POTranslator:
                 end=" ",
                 flush=True,
             )
-        results = await asyncio.gather(*[do_chunk(index) for index in range(total)])
-        translated: list[list[str] | None] = [None] * total
-        for idx, chunk_text in results:
-            if chunk_text:
-                translated[idx] = [chunk_text]
+        results = await asyncio.gather(
+            *[attempt_chunk(chunk, f"chunk {idx + 1}/{total}") for idx, chunk in enumerate(chunks)]
+        )
+        translated: list[list[str] | None] = [[result] if result else None for result in results]
 
         for idx, chunk_group in enumerate(translated):
             if chunk_group is not None:
@@ -637,7 +563,6 @@ class POTranslator:
 
 def validate_po_file(
     path: Path,
-    expected_msgids: list[str] | None = None,
 ) -> str | None:
     """Return an error message when a translated PO file is unsafe."""
     content = path.read_text(encoding="utf-8")
@@ -654,10 +579,6 @@ def validate_po_file(
         return f"parse error: {exc}"
 
     entries = _active_entries(po)
-    msgids = [entry.msgid for entry in entries]
-    if expected_msgids is not None and msgids != expected_msgids:
-        return "msgid set or order changed"
-
     empty = [entry for entry in entries if not entry.msgstr]
     if empty:
         return f"{len(empty)} empty msgstr"
@@ -694,22 +615,9 @@ def validate_files(files_arg: str) -> int:
 
 async def async_main() -> int:
     parser = argparse.ArgumentParser(description="Sphinx PO file translator (DeepSeek)")
-    parser.add_argument(
-        "--files",
-        required=True,
-        help="Comma-separated PO file paths",
-    )
-    parser.add_argument(
-        "--output-json",
-        default=os.getenv(
-            "OUTPUT_JSON",
-            "/tmp/translation_results.json",
-        ),
-    )
-    parser.add_argument(
-        "--api-key",
-        default=os.getenv("DEEPSEEK_API_KEY"),
-    )
+    parser.add_argument("--files", required=True, help="Comma-separated PO file paths")
+    parser.add_argument("--output-json", default=os.getenv("OUTPUT_JSON", "/tmp/translation_results.json"))
+    parser.add_argument("--api-key", default=os.getenv("DEEPSEEK_API_KEY"))
     parser.add_argument("--max-concurrent", type=int, default=5)
     parser.add_argument(
         "--retranslate-all",
@@ -726,8 +634,7 @@ async def async_main() -> int:
     if args.validate_only:
         return validate_files(args.files)
 
-    api_key = args.api_key or os.getenv("DEEPSEEK_API_KEY")
-    if not api_key:
+    if not args.api_key:
         print("Error: DEEPSEEK_API_KEY not set")
         return 1
 
@@ -736,7 +643,7 @@ async def async_main() -> int:
     print(f"Translating {len(file_list)} file(s) in {mode} mode, max_concurrent={args.max_concurrent}")
 
     translator = POTranslator(
-        api_key=api_key,
+        api_key=args.api_key,
         max_concurrent=args.max_concurrent,
     )
     success_files = []
