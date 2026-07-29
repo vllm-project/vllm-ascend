@@ -35,8 +35,8 @@ from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.pull_request.weight_transfer_utils import (
     build_trainer_model,
     generate,
-    has_lifecycle_endpoints,
     post,
+    start_weight_update_if_available,
 )
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -108,10 +108,10 @@ def test_npu_ipc_weight_transfer_updates_server_weights():
         post(server, "init_weight_transfer_engine", json={"init_info": {}})
 
         post(server, "pause")
-        # The probe performs /start_weight_update when present, so it must not
-        # be called again below. Older vLLM without the lifecycle endpoints is
-        # out of scope for this IPC test.
-        if not has_lifecycle_endpoints(server):
+        # This starts /start_weight_update when the endpoint is present, so it
+        # must not be called again below. Older vLLM without the lifecycle
+        # endpoints is out of scope for this IPC test.
+        if not start_weight_update_if_available(server):
             post(server, "resume")
             pytest.skip("vLLM build lacks the /start_weight_update lifecycle endpoints required by NPU IPC.")
 

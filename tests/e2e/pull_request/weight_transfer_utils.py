@@ -118,8 +118,8 @@ def collect_weight_metadata(train_model) -> tuple[list[str], list[str], list[lis
     return names, dtype_names, shapes, packed_buffer_size_bytes
 
 
-def has_lifecycle_endpoints(server: RemoteOpenAIServer) -> bool:
-    """Probe ``/start_weight_update``; also performs the actual call when present."""
+def start_weight_update_if_available(server: RemoteOpenAIServer) -> bool:
+    """Start the weight update lifecycle if the endpoint exists."""
     try:
         response = requests.post(
             server.url_for("start_weight_update"),

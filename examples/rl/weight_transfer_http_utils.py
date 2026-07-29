@@ -7,13 +7,17 @@ from typing import Any
 import requests
 
 
+def weight_transfer_url(base_url: str, endpoint: str) -> str:
+    return f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
+
+
 def post_weight_transfer_endpoint(
     base_url: str,
     endpoint: str,
     payload: dict[str, Any] | None = None,
     timeout: int = 60,
 ) -> None:
-    url = f"{base_url}/{endpoint}"
+    url = weight_transfer_url(base_url, endpoint)
     response = requests.post(url, json=payload, timeout=timeout) if payload is not None else requests.post(url, timeout=timeout)
     response.raise_for_status()
 
@@ -47,7 +51,6 @@ def finish_weight_update(base_url: str) -> None:
 
 
 def get_world_size(base_url: str) -> int:
-    url = f"{base_url}/get_world_size"
-    response = requests.get(url, timeout=10)
+    response = requests.get(weight_transfer_url(base_url, "get_world_size"), timeout=10)
     response.raise_for_status()
     return response.json()["world_size"]

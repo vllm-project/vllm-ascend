@@ -4,6 +4,7 @@
 from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from vllm_ascend.distributed.weight_transfer.trainer_send import (
@@ -70,7 +71,7 @@ def test_dispatch_update_info_callable_mode():
 
 def test_dispatch_update_info_http_mode_posts_pickled_handles():
     response = MagicMock()
-    args = MagicMock(send_mode="http", url="http://localhost:8000")
+    args = MagicMock(send_mode="http", url="http://localhost:8000/")
     ipc_handles = [{"uuid": (1, 2, 3)}]
     update_info = _UpdateInfo(["w"], ["float32"], [[1]], False, ipc_handles)
 
@@ -96,3 +97,16 @@ def test_dispatch_update_info_http_mode_posts_pickled_handles():
     assert "ipc_handles_pickled" in payload["update_info"]
     assert payload["update_info"]["names"] == ["w"]
     response.raise_for_status.assert_called_once()
+
+
+def test_dispatch_update_info_rejects_unknown_send_mode():
+    args = MagicMock(send_mode="unsupported")
+    update_info = _UpdateInfo(["w"], ["float32"], [[1]], False, [])
+
+    with pytest.raises(ValueError, match="Unsupported weight transfer send_mode"):
+        dispatch_update_info(
+            args=args,
+            update_info=update_info,
+            update_fields={"names": ["w"]},
+            ipc_handles=[],
+        )

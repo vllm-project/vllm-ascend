@@ -110,7 +110,9 @@ def dispatch_update_info(
         http_fields = {k: v for k, v in update_fields.items() if k != "ipc_handles"}
         http_fields["ipc_handles_pickled"] = pickled_handles
 
-        url = f"{args.url}/update_weights"
+        url = f"{args.url.rstrip('/')}/update_weights"
         payload = {"update_info": http_fields}
         response = requests.post(url, json=payload, timeout=300)
         response.raise_for_status()
+    else:
+        raise ValueError(f"Unsupported weight transfer send_mode: {args.send_mode!r}")

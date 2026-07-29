@@ -55,9 +55,9 @@ from tests.e2e.pull_request.weight_transfer_utils import (
     build_trainer_model,
     collect_weight_metadata,
     generate,
-    has_lifecycle_endpoints,
     log,
     post,
+    start_weight_update_if_available,
 )
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -165,11 +165,10 @@ def test_hccl_weight_transfer_updates_server_weights():
         init_thread.raise_if_failed()
         log("HCCL process group established")
 
-        # 4) Pause generation and start the weight update lifecycle. On vLLM
-        #    main this probe also performs the actual /start_weight_update call,
-        #    so we must not call it again below.
+        # 4) Pause generation and start the weight update lifecycle when the
+        #    server exposes /start_weight_update. Do not call it again below.
         post(server, "pause")
-        use_lifecycle = has_lifecycle_endpoints(server)
+        use_lifecycle = start_weight_update_if_available(server)
         log(f"paused; lifecycle endpoints available: {use_lifecycle}")
 
         names, dtype_names, shapes, packed_buffer_size_bytes = collect_weight_metadata(train_model)

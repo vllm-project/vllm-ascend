@@ -20,12 +20,11 @@
 # and '{"backend": "ipc"}' loads NPUIPCWeightTransferEngine instead of the
 # (unavailable) NCCL / CUDA IPC engines on Ascend NPU.
 #
-# Why this approach (factory swap) instead of patching Literal["nccl", "ipc"]:
-#   WeightTransferConfig.backend is a pydantic Literal["nccl", "ipc"].
-#   Adding "hccl" / "npu_ipc" would require modifying pydantic core schemas —
-#   fragile across pydantic versions. Swapping the factory entries means users
-#   pass the already-accepted "nccl" / "ipc" strings, but the factory resolves
-#   them to HCCL / NPU IPC.
+# Why this approach (factory swap):
+#   WeightTransferConfig.backend accepts custom strings, so users can pass
+#   "hccl" / "npu_ipc" directly. We still replace the upstream-compatible
+#   "nccl" / "ipc" aliases on Ascend so existing weight transfer examples and
+#   configs resolve to HCCL / NPU IPC instead of CUDA-specific engines.
 #
 # Timing — guaranteed to run before first factory usage:
 #
@@ -46,8 +45,8 @@
 #       → config.backend == "nccl" → factory loads HCCLWeightTransferEngine
 #
 # Future Plan:
-#   Remove this patch when upstream vllm relaxes the Literal type to str
-#   or provides an extension point for out-of-tree backends.
+#   Remove this patch when upstream vLLM provides a stable extension point for
+#   out-of-tree backend aliases.
 
 from vllm_ascend.distributed.weight_transfer.registry import register_ascend_weight_transfer_engines
 
