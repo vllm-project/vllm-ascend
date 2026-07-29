@@ -234,6 +234,134 @@ def test_runner_reduction_contract(monkeypatch, moe_comm_type, flash_comm_v1_ena
     assert runner._maybe_reduce_shared_expert_output(shared_output) is shared_output
 
 
+def test_flashcomm_shared_expert_io_uses_gather_and_reduce_for_all_moe(monkeypatch):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    hidden_states = torch.randn(2, 4)
+    gathered = torch.randn(4, 4)
+    shared_out = torch.randn(4, 4)
+    reduced = torch.randn(2, 4)
+    gather = MagicMock(return_value=gathered)
+    pad_and_reduce = MagicMock(return_value=reduced)
+
+    monkeypatch.setattr(fused_moe_module, "shared_expert_dp_enabled", lambda: False)
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(
+            flash_comm_v1_enabled=True,
+            moe_comm_type=MoECommType.MC2,
+        ),
+    )
+    monkeypatch.setattr(
+        fused_moe_module.torch.ops.vllm,
+        "maybe_all_gather_and_maybe_unpad",
+        gather,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        fused_moe_module.torch.ops.vllm,
+        "pad_and_reduce",
+        pad_and_reduce,
+        raising=False,
+    )
+
+    assert runner._prepare_shared_expert_input(hidden_states) is gathered
+    assert runner._finalize_shared_expert_output(shared_out) is reduced
+    gather.assert_called_once_with(hidden_states, True)
+    pad_and_reduce.assert_called_once_with(shared_out)
+
+
+def test_shared_expert_dp_keeps_flashcomm_replica_path(monkeypatch):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    hidden_states = torch.randn(2, 4)
+    shared_out = torch.randn(2, 4)
+    gather = MagicMock()
+    pad_and_reduce = MagicMock()
+
+    monkeypatch.setattr(fused_moe_module, "shared_expert_dp_enabled", lambda: True)
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(
+            flash_comm_v1_enabled=True,
+            moe_comm_type=MoECommType.MC2,
+        ),
+    )
+    monkeypatch.setattr(
+        fused_moe_module.torch.ops.vllm,
+        "maybe_all_gather_and_maybe_unpad",
+        gather,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        fused_moe_module.torch.ops.vllm,
+        "pad_and_reduce",
+        pad_and_reduce,
+        raising=False,
+    )
+
+    assert runner._prepare_shared_expert_input(hidden_states) is hidden_states
+    assert runner._finalize_shared_expert_output(shared_out) is shared_out
+    gather.assert_not_called()
+    pad_and_reduce.assert_not_called()
+
+
+@pytest.mark.parametrize("shared_expert_dp", [False, True])
+def test_shared_expert_output_follows_dp_weight_layout(monkeypatch, shared_expert_dp):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    shared_out = torch.randn(2, 4)
+    reduced = torch.randn(2, 4)
+    all_reduce = MagicMock(return_value=reduced)
+
+    monkeypatch.setattr(fused_moe_module, "shared_expert_dp_enabled", lambda: shared_expert_dp)
+    monkeypatch.setattr(fused_moe_module, "tensor_model_parallel_all_reduce", all_reduce)
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(
+            flash_comm_v1_enabled=False,
+            moe_comm_type=MoECommType.MC2,
+        ),
+    )
+
+    output = runner._finalize_shared_expert_output(shared_out)
+    if shared_expert_dp:
+        assert output is shared_out
+        all_reduce.assert_not_called()
+    else:
+        assert output is reduced
+        all_reduce.assert_called_once_with(shared_out)
+
+
+def test_shared_expert_consistency_uses_shared_input_width(monkeypatch):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    runner.hidden_size = 4
+    runner.moe_config = SimpleNamespace(in_dtype=torch.float32)
+    integrated_out = torch.randn(10, 4)
+    shared_experts = MagicMock(return_value=integrated_out)
+    shared_experts.gate_up_proj.input_size = 8
+    runner._shared_experts = shared_experts
+    runner._shared_experts_part1 = MagicMock(return_value=torch.randn(10, 4))
+    runner._shared_experts_part2 = MagicMock(return_value=integrated_out)
+    test_input = torch.randn(10, 8)
+    rand = MagicMock(return_value=(test_input + 1) / 2)
+    monkeypatch.setattr(fused_moe_module.torch, "rand", rand)
+
+    runner._validate_shared_expert_consistency()
+
+    rand.assert_called_once_with(10, 8, device="npu", dtype=torch.float32)
+    shared_experts.assert_called_once()
+    torch.testing.assert_close(shared_experts.call_args.args[0], test_input)
+    runner._shared_experts_part1.assert_called_once()
+    torch.testing.assert_close(runner._shared_experts_part1.call_args.args[0], test_input)
+    runner._shared_experts_part2.assert_called_once()
+    torch.testing.assert_close(runner._shared_experts_part2.call_args.args[0], test_input)
+    torch.testing.assert_close(
+        runner._shared_experts_part2.call_args.args[1], runner._shared_experts_part1.return_value
+    )
+
+
 class _Projection(nn.Module):
     def forward(self, hidden_states):
         return hidden_states * 2.0 + 1.0, None

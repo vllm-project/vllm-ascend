@@ -500,11 +500,18 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
 
     def _validate_shared_expert_consistency(self):
         """Validate that split shared expert computation matches integrated computation."""
+        assert self._shared_experts is not None
+        shared_hidden_size = self._shared_experts.gate_up_proj.input_size
+        logger.info_once(
+            "[fused_moe/layer] Shared expert split computation validation dimensions:"
+            " routed_hidden_size=%s, shared_hidden_size=%s.",
+            self.hidden_size,
+            shared_hidden_size,
+        )
         test_input = (
-            torch.rand(10, self.hidden_size, device="npu", dtype=self.moe_config.in_dtype) * 2 - 1
+            torch.rand(10, shared_hidden_size, device="npu", dtype=self.moe_config.in_dtype) * 2 - 1
         )  # Random input for testing, scoped to [-1, 1]
 
-        assert self._shared_experts is not None
         integrated_out = self._shared_experts(test_input)
         part1_out = self._shared_experts_part1(test_input)
         split_out = self._shared_experts_part2(test_input, part1_out)
@@ -515,13 +522,15 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 "[fused_moe/layer] Shared expert split computation validation failed."
                 " The split-path computation does not match the integrated-path result."
                 " max_abs_diff=%s, integrated_sum=%s, integrated_norm=%s,"
-                " split_sum=%s, split_norm=%s, hidden_size=%s, dtype=%s.",
+                " split_sum=%s, split_norm=%s, routed_hidden_size=%s,"
+                " shared_hidden_size=%s, dtype=%s.",
                 diff.max().item(),
                 integrated_out.sum().item(),
                 integrated_out.norm().item(),
                 split_out.sum().item(),
                 split_out.norm().item(),
                 self.hidden_size,
+                shared_hidden_size,
                 self.moe_config.in_dtype,
             )
             raise ValueError("FusedMoE shared experts split computation does not match the integrated computation.")
