@@ -2,12 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NPU IPC-based weight transfer engine using Ascend IPC for communication."""
 
-import os
 import pickle
-import socket
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
-from functools import lru_cache
 from typing import Any
 
 import pybase64 as base64
@@ -26,6 +23,7 @@ from vllm.distributed.weight_transfer.ipc_engine import (
     IPCWeightTransferUpdateInfo,
 )
 
+from vllm_ascend.distributed.weight_transfer.device_mapping import get_npu_ipc_uuid
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     packed_npu_ipc_consumer,
     packed_npu_ipc_producer,
@@ -58,45 +56,9 @@ class NPUIPCWeightTransferUpdateInfo(IPCWeightTransferUpdateInfo):
     identical."""
 
 
-@lru_cache(maxsize=1)
-def get_ip() -> str:
-    try:
-        # try to get ip from network interface
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
-    except Exception:  # noqa: BLE001
-        # fallback to get ip from hostname
-        return socket.gethostbyname(socket.gethostname())
-
-
-@lru_cache(maxsize=1)
 def npu_generate_uuid() -> str:
-    """Generate a unique identifier for the current process's physical NPU chip.
-
-    Returns ``{host_ip}-{physical_chip_id}`` where ``host_ip`` is the local
-    machine's IP address and ``physical_chip_id`` is derived from the current
-    logical device index mapped through ``ASCEND_RT_VISIBLE_DEVICES``.
-
-    On Ascend NPU, ``torch.accelerator.current_device_index()`` returns the
-    *logical* device index. When ``ASCEND_RT_VISIBLE_DEVICES`` is set, it
-    maps logical indices to physical chip IDs (e.g., ``ASCEND_RT_VISIBLE_DEVICES=2,3``
-    means logical device 0 → physical chip 2, logical device 1 → physical chip 3).
-    If the env var is not set, the logical index is used directly as the
-    physical chip ID (identity mapping).
-
-    The result is cached because it is constant for the lifetime of the
-    process. Both the trainer and inference worker processes co-located
-    on the same physical NPU chip will produce the same UUID, which is
-    required for NPU IPC handle matching.
-    """
-    logical_device = torch.accelerator.current_device_index()
-    visible_devices = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", None)
-    if visible_devices:
-        physical_device = int(visible_devices.split(",")[logical_device].strip())
-    else:
-        physical_device = logical_device
-    return f"{get_ip()}-{physical_device}"
+    """Generate a unique identifier for the current process's physical NPU chip."""
+    return get_npu_ipc_uuid()
 
 
 class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitInfo, NPUIPCWeightTransferUpdateInfo]):

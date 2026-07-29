@@ -147,9 +147,12 @@ class NPUWorker(WorkerBase):
 
         # Weight transfer engine is created in `load_model` once the model
         # is available, since the engine needs a reference to the model.
+        from vllm_ascend.distributed.weight_transfer.lifecycle import get_weight_update_lifecycle_policy
+
         self.weight_transfer_engine = None
         self._weight_update_active = False
         self._is_checkpoint_format = True
+        self._weight_update_lifecycle_policy = get_weight_update_lifecycle_policy(True)
 
         # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
         from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
@@ -308,13 +311,14 @@ class NPUWorker(WorkerBase):
 
         self._check_nz_disabled()
 
-        if is_checkpoint_format:
-            from vllm.model_executor.model_loader.reload import initialize_layerwise_reload
+        from vllm_ascend.distributed.weight_transfer.lifecycle import get_weight_update_lifecycle_policy
 
-            model = self.model_runner.model
-            with torch.device(self.device):
-                initialize_layerwise_reload(model)
+        model = self.model_runner.model
+        policy = get_weight_update_lifecycle_policy(is_checkpoint_format)
+        with torch.device(self.device):
+            policy.start(model)
 
+        self._weight_update_lifecycle_policy = policy
         self._is_checkpoint_format = is_checkpoint_format
         self._weight_update_active = True
 
@@ -330,24 +334,12 @@ class NPUWorker(WorkerBase):
         if not self._weight_update_active:
             raise RuntimeError("start_weight_update must be called before update_weights.")
 
+        policy = self._weight_update_lifecycle_policy
         with torch.device(self.device):
-            if self._is_checkpoint_format:
-                self.weight_transfer_engine.receive_weights(
-                    typed_update_info,
-                    load_weights=model.load_weights,
-                )
-            else:
-
-                def load_weights_direct(weights: list[tuple[str, torch.Tensor]]) -> None:
-                    with torch.no_grad():
-                        for name, weight in weights:
-                            param = model.get_parameter(name)
-                            param.copy_(weight)
-
-                self.weight_transfer_engine.receive_weights(
-                    typed_update_info,
-                    load_weights=load_weights_direct,
-                )
+            self.weight_transfer_engine.receive_weights(
+                typed_update_info,
+                load_weights=policy.make_load_weights(model),
+            )
 
         # HCCL broadcast / packed paths are asynchronous.
         # Sync so the next step uses the new weights.
@@ -360,15 +352,15 @@ class NPUWorker(WorkerBase):
         if not self._weight_update_active:
             raise RuntimeError("start_weight_update must be called before finish_weight_update.")
 
-        if self._is_checkpoint_format:
-            from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
+        model = self.model_runner.model
+        with torch.device(self.device):
+            self._weight_update_lifecycle_policy.finish(model, self.model_config)
 
-            model = self.model_runner.model
-            with torch.device(self.device):
-                finalize_layerwise_reload(model, self.model_config)
+        from vllm_ascend.distributed.weight_transfer.lifecycle import get_weight_update_lifecycle_policy
 
         self._weight_update_active = False
         self._is_checkpoint_format = True
+        self._weight_update_lifecycle_policy = get_weight_update_lifecycle_policy(True)
 
     def shutdown(self) -> None:
         if ensure_kv_transfer_shutdown is not None:

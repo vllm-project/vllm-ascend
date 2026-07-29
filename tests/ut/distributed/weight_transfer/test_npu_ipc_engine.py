@@ -157,3 +157,10 @@ def test_receive_weights_rebuilds_with_rebuild_npu_tensor():
     assert torch.equal(received["weights"][0][1], rebuilt_weight)
     # Index 6 (device index) overwritten with the receiver's device.
     assert seen["args"][6] == device_index
+
+
+def test_npu_generate_uuid_delegates_device_mapping():
+    with patch(f"{_MODULE}.get_npu_ipc_uuid", return_value="host-0") as get_uuid:
+        assert npu_ipc_engine.npu_generate_uuid() == "host-0"
+
+    get_uuid.assert_called_once_with()

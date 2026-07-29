@@ -19,6 +19,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateInfo,
 )
 
+from vllm_ascend.distributed.weight_transfer.lifecycle import LayerwiseReloadLifecyclePolicy
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
@@ -125,18 +126,10 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
         self.model_update_group: PyHcclCommunicator | None = None  # type: ignore[no-redef]
 
     def start_weight_update(self) -> None:
-        from vllm.model_executor.model_loader.reload import (
-            initialize_layerwise_reload,
-        )
-
-        initialize_layerwise_reload(self.model)
+        LayerwiseReloadLifecyclePolicy().start(self.model)
 
     def finish_weight_update(self) -> None:
-        from vllm.model_executor.model_loader.reload import (
-            finalize_layerwise_reload,
-        )
-
-        finalize_layerwise_reload(self.model, self.model_config)
+        LayerwiseReloadLifecyclePolicy().finish(self.model, self.model_config)
 
     def init_transfer_engine(self, init_info: HCCLWeightTransferInitInfo) -> None:
         """

@@ -1357,9 +1357,12 @@ class TestNPUWorkerWeightUpdate(TestBase):
 
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+        from vllm_ascend.distributed.weight_transfer.lifecycle import get_weight_update_lifecycle_policy
+
         worker.weight_transfer_engine = engine
         worker._weight_update_active = False
         worker._is_checkpoint_format = True
+        worker._weight_update_lifecycle_policy = get_weight_update_lifecycle_policy(True)
         worker.device = torch.device("cpu")
         worker.model_runner = MagicMock()
         worker.model_runner.model = MagicMock()
@@ -1473,8 +1476,11 @@ class TestNPUWorkerWeightUpdate(TestBase):
         worker.model_runner.model.get_parameter.return_value = param
 
         engine.parse_update_info.return_value = "typed_update"
+        from vllm_ascend.distributed.weight_transfer.lifecycle import get_weight_update_lifecycle_policy
+
         worker._weight_update_active = True
         worker._is_checkpoint_format = False
+        worker._weight_update_lifecycle_policy = get_weight_update_lifecycle_policy(False)
 
         worker.update_weights({"foo": "bar"})
 
@@ -1491,9 +1497,12 @@ class TestNPUWorkerWeightUpdate(TestBase):
 
         worker.finish_weight_update()
 
+        from vllm_ascend.distributed.weight_transfer.lifecycle import LayerwiseReloadLifecyclePolicy
+
         mock_finalize_reload.assert_called_once_with(worker.model_runner.model, worker.model_config)
         self.assertFalse(worker._weight_update_active)
         self.assertTrue(worker._is_checkpoint_format)
+        self.assertIsInstance(worker._weight_update_lifecycle_policy, LayerwiseReloadLifecyclePolicy)
 
     def test_finish_without_start_raises(self):
         engine = MagicMock()
@@ -1505,8 +1514,11 @@ class TestNPUWorkerWeightUpdate(TestBase):
     def test_double_finish_raises(self):
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
+        from vllm_ascend.distributed.weight_transfer.lifecycle import get_weight_update_lifecycle_policy
+
         worker._weight_update_active = True
         worker._is_checkpoint_format = False
+        worker._weight_update_lifecycle_policy = get_weight_update_lifecycle_policy(False)
 
         worker.finish_weight_update()
 
@@ -1518,8 +1530,11 @@ class TestNPUWorkerWeightUpdate(TestBase):
         engine = MagicMock()
         engine.parse_update_info.return_value = "typed"
         worker = self._make_worker(engine=engine)
+        from vllm_ascend.distributed.weight_transfer.lifecycle import get_weight_update_lifecycle_policy
+
         worker._weight_update_active = True
         worker._is_checkpoint_format = False
+        worker._weight_update_lifecycle_policy = get_weight_update_lifecycle_policy(False)
         worker.finish_weight_update()
 
         with self.assertRaises(RuntimeError):
