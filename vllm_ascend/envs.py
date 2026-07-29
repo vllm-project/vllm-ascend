@@ -28,9 +28,9 @@ from typing import Any
 # begin-env-vars-definition
 
 env_variables: dict[str, Callable[[], Any]] = {
-    # max compile thread number for package building. Usually, it is set to
-    # the number of CPU cores. If not set, the default value is None, which
-    # means all number of CPU cores will be used.
+    # Maximum compile job count for package building. A positive explicit
+    # value is used for both the ACLNN package and the main CMake extension.
+    # If unset, setup.py selects a memory-aware default capped at 8 jobs.
     "MAX_JOBS": lambda: os.getenv("MAX_JOBS", None),
     # The build type of the package. It can be one of the following values:
     # Release, Debug, RelWithDebugInfo. If not set, the default value is Release.

@@ -133,6 +133,10 @@ def get_chip_type() -> str:
 
 
 envs = load_module_from_path("envs", os.path.join(ROOT_DIR, "vllm_ascend", "envs.py"))
+build_jobs = load_module_from_path(
+    "_vllm_ascend_build_jobs",
+    os.path.join(ROOT_DIR, "vllm_ascend", "build_jobs.py"),
+)
 
 if not envs.SOC_VERSION:
     soc_version = get_chip_type()
@@ -223,38 +227,72 @@ class build_and_install_aclnn(Command):
 
     def run(self):
         try:
-            print("Running bash build_aclnn.sh ...")
+            print("[build_ext] Running bash build_aclnn.sh ...", flush=True)
             subprocess.check_call(["bash", "csrc/build_aclnn.sh", ROOT_DIR, envs.SOC_VERSION])
-            print("build_aclnn.sh executed successfully!")
+            print("[build_ext] build_aclnn.sh executed successfully!", flush=True)
         except subprocess.CalledProcessError as e:
-            print(f"Error running build_aclnn.sh: {e}")
+            if e.returncode == -9:
+                print(
+                    "[build_ext] build_aclnn.sh was killed by SIGKILL. "
+                    "This usually means the host or container ran out of "
+                    "memory; retry with MAX_JOBS=1 or MAX_JOBS=2.",
+                    flush=True,
+                )
+            else:
+                print(f"Error running build_aclnn.sh: {e}", flush=True)
             raise SystemExit(e.returncode)
 
 
 class cmake_build_ext(build_ext):
     # A dict of extension directories that have been configured.
     did_config: dict[str, bool] = {}
+    _resolved_num_jobs: int | None = None
 
     #
     # Determine number of compilation jobs
     #
     def compute_num_jobs(self):
-        # `num_jobs` is either the value of the MAX_JOBS environment variable
-        # (if defined) or the number of CPUs available.
-        num_jobs = envs.MAX_JOBS
-        if num_jobs is not None:
-            num_jobs = int(num_jobs)
-            logger.info("Using MAX_JOBS=%d as the number of jobs.", num_jobs)
-        else:
-            try:
-                # os.sched_getaffinity() isn't universally available, so fall
-                #  back to os.cpu_count() if we get an error here.
-                num_jobs = len(os.sched_getaffinity(0))
-            except AttributeError:
-                num_jobs = os.cpu_count()
-        num_jobs = max(1, num_jobs)
+        if self._resolved_num_jobs is not None:
+            return self._resolved_num_jobs
 
-        return num_jobs
+        configured_max_jobs = envs.MAX_JOBS
+        plan = build_jobs.resolve_build_jobs(configured_max_jobs)
+        self._resolved_num_jobs = plan.num_jobs
+        if configured_max_jobs is not None:
+            logger.info(
+                "Using MAX_JOBS=%d as the number of build jobs.",
+                plan.num_jobs,
+            )
+            print(
+                f"[build_ext] Using MAX_JOBS={plan.num_jobs}.",
+                flush=True,
+            )
+        else:
+            # build_aclnn.sh/build.sh and the main extension must share one
+            # limit.  Without this export the ACLNN phase can use twice the
+            # visible CPU count before compute_num_jobs() is consulted.
+            os.environ["MAX_JOBS"] = str(plan.num_jobs)
+            memory_gib = (
+                "unknown"
+                if plan.available_memory_bytes is None
+                else f"{plan.available_memory_bytes / 1024**3:.1f} GiB"
+            )
+            logger.info(
+                "MAX_JOBS is not set; selected %d build jobs from %d CPUs "
+                "and %s available memory.",
+                plan.num_jobs,
+                plan.cpu_count,
+                memory_gib,
+            )
+            print(
+                "[build_ext] MAX_JOBS is not set; "
+                f"using {plan.num_jobs} jobs "
+                f"(CPUs={plan.cpu_count}, available memory={memory_gib}). "
+                "Set MAX_JOBS explicitly to override.",
+                flush=True,
+            )
+
+        return plan.num_jobs
 
     #
     # Perform cmake configuration for a single extension.
@@ -347,23 +385,19 @@ class cmake_build_ext(build_ext):
         if envs.VLLM_ASCEND_ENABLE_BATCH_MEMCPY is not None:
             cmake_args += [f"-DVLLM_ASCEND_ENABLE_BATCH_MEMCPY={envs.VLLM_ASCEND_ENABLE_BATCH_MEMCPY}"]
 
-        build_tool = []
         # TODO(ganyi): ninja and ccache support for ascend c auto codegen. now we can only use make build
         # if which('ninja') is not None:
-        #     build_tool += ['-G', 'Ninja']
+        #     cmake_args += ['-G', 'Ninja']
         # Default build tool to whatever cmake picks.
 
         cmake_args += [source_dir]
         logging.info("cmake config command: %s", cmake_args)
+        print("[build_ext] Configuring the main CMake extension ...", flush=True)
         try:
             subprocess.check_call(cmake_args, cwd=self.build_temp)
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"CMake configuration failed: {e}")
-
-        subprocess.check_call(
-            ["cmake", ext.cmake_lists_dir, *build_tool, *cmake_args],
-            cwd=self.build_temp,
-        )
+        print("[build_ext] Main CMake configure finished.", flush=True)
 
     def build_extensions(self) -> None:
         if not envs.COMPILE_CUSTOM_KERNELS:
@@ -398,10 +432,23 @@ class cmake_build_ext(build_ext):
             f"-j={num_jobs}",
             *[f"--target={name}" for name in targets],
         ]
+        print(
+            f"[build_ext] Building the main CMake extension with {num_jobs} jobs ...",
+            flush=True,
+        )
         try:
             subprocess.check_call(["cmake", *build_args], cwd=self.build_temp)
+        except subprocess.CalledProcessError as e:
+            if e.returncode == -9:
+                raise RuntimeError(
+                    "The main CMake build was killed by SIGKILL. This "
+                    "usually means the host or container ran out of memory; "
+                    "retry with MAX_JOBS=1 or MAX_JOBS=2."
+                ) from e
+            raise RuntimeError(f"Build library failed: {e}") from e
         except OSError as e:
             raise RuntimeError(f"Build library failed: {e}")
+        print("[build_ext] Main CMake build finished.", flush=True)
         # Install the libraries
         install_args = [
             "cmake",
@@ -438,6 +485,10 @@ class cmake_build_ext(build_ext):
 
     def run(self):
         if envs.COMPILE_CUSTOM_KERNELS:
+            # Resolve and export the shared job limit before build_aclnn.
+            # build_extensions() reuses the cached value for the main CMake
+            # extension.
+            self.compute_num_jobs()
             # First, ensure ACLNN custom-ops is built and installed.
             self.run_command("build_aclnn")
 

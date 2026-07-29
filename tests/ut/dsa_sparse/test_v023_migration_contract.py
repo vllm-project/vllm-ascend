@@ -34,6 +34,18 @@ def _load_lightweight_types_module():
     return module
 
 
+def _load_build_jobs_module():
+    path = REPO_ROOT / "vllm_ascend/build_jobs.py"
+    spec = importlib.util.spec_from_file_location(
+        "_build_jobs_contract",
+        path,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _function_node(relative_path: str, function_name: str) -> ast.FunctionDef:
     module = ast.parse(_read(relative_path))
     for node in ast.walk(module):
@@ -187,6 +199,44 @@ class TestOperatorCMakeRegistration(unittest.TestCase):
                         rf"target_(?:sources|include_directories)"
                         rf"\(\s*{target}\b",
                     )
+
+
+class TestBuildResourceControl(unittest.TestCase):
+    def test_automatic_jobs_are_cpu_and_memory_bounded(self):
+        module = _load_build_jobs_module()
+        gib = 1024**3
+
+        self.assertEqual(module.default_build_jobs(128, 64 * gib), 8)
+        self.assertEqual(module.default_build_jobs(128, 16 * gib), 3)
+        self.assertEqual(module.default_build_jobs(128, 4 * gib), 1)
+        self.assertEqual(module.default_build_jobs(2, 64 * gib), 2)
+
+    def test_explicit_max_jobs_is_preserved_and_validated(self):
+        module = _load_build_jobs_module()
+
+        plan = module.resolve_build_jobs("2")
+        self.assertEqual(plan.num_jobs, 2)
+        self.assertEqual(plan.source, "MAX_JOBS")
+        for invalid in ("", "0", "-1", "many"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    module.resolve_build_jobs(invalid)
+
+    def test_job_limit_is_exported_before_aclnn_build(self):
+        source = _read("setup.py")
+        start = source.index("class cmake_build_ext(")
+        end = source.index("class custom_install(", start)
+        command = source[start:end]
+
+        self.assertLess(
+            command.index('os.environ["MAX_JOBS"]'),
+            command.index('self.run_command("build_aclnn")'),
+        )
+        self.assertEqual(
+            command.count("subprocess.check_call(cmake_args"),
+            1,
+            "the main extension must be configured exactly once",
+        )
 
 
 class TestV023LifecycleContract(unittest.TestCase):
