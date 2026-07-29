@@ -53,16 +53,6 @@ msgstr "如果工作负载基本均匀，或者 FCFS 顺序比短请求延迟更
 msgid "## Configuration"
 msgstr "## 配置"
 
-msgid ""
-"Add `short_request_first_config` to the prefill (P) node's "
-"`additional_config` in a PD-disaggregated deployment. Because "
-"ShortRequestFirst is wired through the recompute scheduler, keep "
-"`recompute_scheduler_enable=true` in the same P-node config:"
-msgstr ""
-"在 PD 分离部署中，将 `short_request_first_config` 添加到预填充（P）节点的 `additional_config` "
-"中。由于 ShortRequestFirst 通过重计算调度器连接，请在同一 P 节点配置中保持 "
-"`recompute_scheduler_enable=true`："
-
 msgid "### Fields"
 msgstr "### 字段"
 
@@ -258,8 +248,15 @@ msgstr ""
 msgid "## Minimal examples"
 msgstr "## 最小示例"
 
-msgid "P-node `additional_config` example:"
-msgstr "P节点 `additional_config` 示例："
-
 msgid "Disable it explicitly:"
 msgstr "显式禁用它："
+
+msgid ""
+"Add `short_request_first_config` to the prefill (P) node's "
+"`scheduler_config` in a PD-disaggregated deployment. Because "
+"ShortRequestFirst is wired through the recompute scheduler, keep "
+"`recompute_scheduler_enable=true` in the same P-node configuration:"
+msgstr ""
+"在 PD 分离部署中，将 `short_request_first_config` 添加到预填充（P）节点的 `scheduler_config` "
+"中。由于 ShortRequestFirst 通过重计算调度器连接，请在同一 P 节点配置中保持 "
+"`recompute_scheduler_enable=true`："

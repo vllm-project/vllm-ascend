@@ -46,7 +46,6 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_tokens_capacity,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.utils import set_weight_prefetch_method
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -119,19 +118,12 @@ class NPUModelRunner(GPUModelRunner):
             pin_memory=True,
         )
 
-        # set _WEIGHT_PREFETCH_METHOD, _mc2_tokens_capacity and _reserved_mc2_mask which
-        # is necessary for weight_prfetching function, and MoE communication optimization.
-        set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
+        # Set _mc2_tokens_capacity and _reserved_mc2_mask for MoE communication optimization.
         # TODO: remove set_cos_and_sin (together with update_cos_sin) when mla can properly handle cos/sin internally
         self.decode_query_len = self.num_speculative_steps + 1
         set_cos_and_sin(vllm_config, self.max_num_reqs, self.decode_query_len, self.dtype, self.device)
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
         set_mc2_mask(vllm_config, self.device)
-
-        # we need to update full graph params in run_fullgraph,
-        # so create a stream to update full graph params.
-        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
-            self.update_stream: torch.npu.Stream = torch.npu.Stream()
 
         # we need to use return value of `get_cudagraph_and_dp_padding`
         # to set forward_context in `run_fullgraph`.

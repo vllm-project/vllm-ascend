@@ -12,7 +12,6 @@ import regex as re
 
 from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import (
     ROUTING_DISAGGREGATED_PREFILL,
-    ROUTING_GENERIC_DP,
     ExternalDPConfig,
     NodeTemplate,
     RankInfo,
@@ -303,14 +302,6 @@ def build_dist_envs(cur_ip: str, master_ip: str) -> dict[str, str]:
 def build_proxy_server_cmd(config: ExternalDPConfig, ranks: list[RankInfo]) -> list[str]:
     routing = config.routing
     cmd = [sys.executable, routing.proxy_script, "--host", routing.proxy_host, "--port", str(routing.proxy_port)]
-
-    if routing.type == ROUTING_GENERIC_DP:
-        worker_ranks = [rank for rank in ranks if rank.role == "worker"]
-        if not worker_ranks:
-            raise ValueError("generic_dp proxy requires worker ranks")
-        cmd.extend(["--dp-hosts", *[rank.host for rank in worker_ranks]])
-        cmd.extend(["--dp-ports", *[str(rank.port) for rank in worker_ranks]])
-        return cmd
 
     if routing.type == ROUTING_DISAGGREGATED_PREFILL:
         prefiller_ranks = [rank for rank in ranks if rank.role == "prefiller"]

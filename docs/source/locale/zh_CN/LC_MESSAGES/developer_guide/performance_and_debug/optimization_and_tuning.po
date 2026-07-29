@@ -75,8 +75,8 @@ msgstr ""
 "**jemalloc** 是一种内存分配器，可提升多线程场景下的性能并减少内存碎片。jemalloc "
 "使用本地线程内存管理器来分配变量，从而避免线程间的锁竞争，大幅优化性能。"
 
-msgid "#### 1.2. Tcmalloc"
-msgstr "#### 1.2. Tcmalloc"
+msgid "#### 1.2. TCMalloc"
+msgstr "#### 1.2. TCMalloc"
 
 msgid ""
 "**TCMalloc (Thread Caching Malloc)** is a universal memory allocator that "
@@ -155,9 +155,6 @@ msgid ""
 "These settings must be applied on the host OS and with root privileges. Not "
 "inside containers."
 msgstr "这些设置必须在宿主机操作系统上以 root 权限应用，而非在容器内部。"
-
-msgid "Set CPU Frequency Governor to `performance`"
-msgstr "将 CPU 频率调节器设置为 `performance`"
 
 msgid ""
 "- Forces all CPU cores to run under the `performance` governor\n"
@@ -258,3 +255,6 @@ msgstr "目的"
 
 msgid "Benefits"
 msgstr "优势"
+
+msgid "#### 4.1 Set CPU Frequency Governor to `performance`"
+msgstr "#### 4.1 将CPU频率调节器设置为`performance`"

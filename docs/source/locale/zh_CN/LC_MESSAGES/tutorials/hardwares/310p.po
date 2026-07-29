@@ -150,7 +150,7 @@ msgstr ""
 msgid ""
 "Run the following commands to start the vLLM server on NPU for the Qwen3 "
 "Dense series."
-msgstr "运行以下命令，在NPU上为Qwen3 Dense系列启动vLLM服务器。"
+msgstr "运行以下命令，在NPU上为Qwen3 Dense系列启动vLLM服务。"
 
 msgid "#### Prepare Model Weights"
 msgstr "#### 准备模型权重"
