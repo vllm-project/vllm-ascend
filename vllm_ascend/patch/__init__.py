@@ -473,7 +473,47 @@
 #       before grammar compilation or safely handles mixed-backend grammar
 #       failures without killing the engine.
 #
-# ** 18. File: platform/patch_torch_accelerator.py**
+# ** 18. File: platform/patch_swa_inflight_free.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.kv_cache_coordinator.KVCacheCoordinator.remove_skipped_blocks`
+#      `vllm.v1.core.sched.scheduler.Scheduler.__init__`
+#      `vllm.v1.core.sched.scheduler.Scheduler._update_after_schedule`
+#      `vllm.v1.core.sched.scheduler.Scheduler.update_from_output`
+#    Why:
+#       vLLM v0.25.1 is missing upstream PR #47728 ("[Bugfix][V1] Free
+#       out-of-window blocks on the processed-token basis under async
+#       scheduling"), which is on main but was not cherry-picked to v0.25.1.
+#       v0.25.1's `allocate_slots` frees sliding-window / chunked-local blocks
+#       on the optimistic `num_computed_tokens`. Under `--async-scheduling` +
+#       speculative decoding that leads the real committed position by the
+#       in-flight step's tokens (async look-ahead + 1 + num_speculative_tokens,
+#       rejected drafts roll it back further), so out-of-window blocks still
+#       inside the in-flight step's SWA attention window are freed, recycled by
+#       another request, and overwritten before that step reads them (load-WAR).
+#       The in-flight SWA attention (target verification + DSpark draft) then
+#       reads foreign KV and the spec-decode acceptance length collapses
+#       (e.g. 4.3 -> 2.5). `defer_block_free` is off for non-KV-connector
+#       configs and does not cover `remove_skipped_blocks` anyway, so the
+#       hazard is live on Ascend.
+#    How：
+#       Runtime-only backport (no vLLM source edit), active only when vLLM
+#       lacks `Request.num_in_flight_tokens` (real v0.25.1); a no-op on newer
+#       vLLM that already ships PR #47728, so the upstream fix is never applied
+#       twice. It (1) subtracts the per-request in-flight token count in
+#       `KVCacheCoordinator.remove_skipped_blocks` so SWA frees happen on the
+#       processed-token basis, (2) tracks that count by wrapping
+#       `_update_after_schedule` (increment) / `update_from_output` (decrement),
+#       and (3) publishes `max_concurrent_batches * max_num_batched_tokens` at
+#       Scheduler init so `patch_kv_cache_coordinator._select_kv_token_budget`
+#       sizes the recycling-aware admission cap on the in-flight basis. The
+#       scheduler wrappers compose on top of `patch_pp_mtp`'s wrappers.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/47728
+#    Future Plan:
+#       Remove this patch once the supported upstream vLLM revision for v0.25.1
+#       maintenance includes PR #47728.
+#
+# ** 19. File: platform/patch_torch_accelerator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch.accelerator.memory_stats`, `torch.accelerator.memory_reserved`,
 #      `torch.accelerator.reset_peak_memory_stats`, `torch.accelerator.get_memory_info`,
@@ -493,7 +533,7 @@
 #       Remove this patch once `torch.accelerator` correctly routes to the NPU
 #       backend for these memory APIs.
 #
-# ** 19. File: platform/patch_tool_choice_none_content.py**
+# ** 20. File: platform/patch_tool_choice_none_content.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionResponse`
 #      `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionStreamResponse`
@@ -509,7 +549,7 @@
 #    Future Plan:
 #       Remove this patch once the supported vLLM version contains PR #44105.
 #
-# ** 20. File: platform/patch_use_v2_model_runner.py**
+# ** 21. File: platform/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
 #    Why:
@@ -534,7 +574,7 @@
 #       (model architecture, Triton, feature checks) without crashes or
 #       degraded functionality.
 #
-# ** 21. File: platform/patch_weight_transfer_engine.py**
+# ** 22. File: platform/patch_weight_transfer_engine.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.distributed.weight_transfer.factory.WeightTransferEngineFactory._registry["nccl"]`
 #    Why:
