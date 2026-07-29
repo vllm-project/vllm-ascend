@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import inspect
 from types import MethodType
 
 from vllm.sampling_params import SamplingParams
@@ -8,6 +9,12 @@ from vllm.v1.request import Request
 from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 
 from vllm_ascend.core.recompute_scheduler import RecomputeScheduler
+
+
+def test_schedule_accepts_vllm_prefill_throttle_argument():
+    signature = inspect.signature(RecomputeScheduler.schedule)
+
+    assert signature.parameters["throttle_prefills"].default is False
 
 
 def test_pd_consumer_first_step_injects_placeholder_spec_tokens():
