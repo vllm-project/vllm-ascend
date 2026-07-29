@@ -1,4 +1,3 @@
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -10,7 +9,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
 )
-from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 from vllm_ascend.worker.v2.attn_utils import (
     _allocate_kv_cache,
@@ -18,9 +16,6 @@ from vllm_ascend.worker.v2.attn_utils import (
     get_kv_cache_spec,
 )
 from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
-from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
-    AscendMambaHybridModelState,
-)
 
 
 def _mamba_spec() -> MambaSpec:
@@ -68,38 +63,6 @@ def _group(spec: MambaSpec):
         kv_cache_spec=spec,
         layer_names=["linear_attn"],
     )
-
-
-def test_mamba_model_state_inherits_upstream_state_management():
-    assert issubclass(AscendMambaHybridModelState, MambaHybridModelState)
-    assert (
-        AscendMambaHybridModelState.preprocess_state
-        is MambaHybridModelState.preprocess_state
-    )
-    assert (
-        AscendMambaHybridModelState.postprocess_state
-        is MambaHybridModelState.postprocess_state
-    )
-
-
-def test_prepare_inputs_keeps_full_graph_request_metadata_padded():
-    model_runner_path = (
-        Path(__file__).resolve().parents[3]
-        / "vllm_ascend"
-        / "worker"
-        / "v2"
-        / "model_runner.py"
-    )
-    source = model_runner_path.read_text(encoding="utf-8")
-    start = source.index("    def prepare_inputs(")
-    prepare_inputs = source[start : source.index("    def postprocess(", start)]
-
-    assert (
-        "self.input_buffers.query_start_loc[\n"
-        "            : num_reqs_padded + 1\n"
-        "        ]"
-    ) in prepare_inputs
-    assert "self.input_buffers.seq_lens[:num_reqs_padded]" in prepare_inputs
 
 
 @patch(

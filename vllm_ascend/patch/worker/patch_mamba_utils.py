@@ -16,7 +16,6 @@ from vllm.v1.worker.mamba_utils import MambaCopyBuffers
 
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 from vllm_ascend.ops.triton.mamba.postprocess import (
-    _copy_mamba_state_block,
     postprocess_mamba_fused_kernel,
     precopy_mamba_align_fused_kernel,
 )
@@ -189,12 +188,7 @@ def _batch_memcpy_unavailable(src_ptrs, dst_ptrs, sizes):
 if _can_launch_triton_batch_memcpy():
     mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel
     mamba_utils.batch_memcpy = _batch_memcpy_triton
-    # Keep the Ascend kernels that fix Mamba state migration accuracy. The
-    # surrounding buffer/context lifecycle continues to come from upstream.
-    mamba_utils._copy_mamba_state_block = _copy_mamba_state_block
-    mamba_utils.postprocess_mamba_fused_kernel = (
-        postprocess_mamba_fused_kernel
-    )
+    mamba_utils.postprocess_mamba_fused_kernel = postprocess_mamba_fused_kernel
     mamba_utils.precopy_mamba_align_fused_kernel = (
         precopy_mamba_align_fused_kernel
     )
