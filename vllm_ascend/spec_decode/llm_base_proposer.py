@@ -840,7 +840,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self.query_start_loc.cpu[:num_reqs].copy_(common_attn_metadata.query_start_loc_cpu)
             
             graph_num_reqs = int(batch_descriptor.num_reqs)
-            actual_num_reqs = int(common_attention_metadata.num_reqs)
+            actual_num_reqs = int(common_attn_metadata.num_reqs)
             
             draft_query_width = int(num_input_tokens) // graph_num_reqs
             
