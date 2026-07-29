@@ -16,11 +16,11 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
