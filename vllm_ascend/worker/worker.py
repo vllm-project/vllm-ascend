@@ -132,12 +132,11 @@ class NPUWorker(WorkerBase):
         # ACL_ERROR_INVALID_DEVICE (error code 107001).
         # Only needed for the ray backend; the mp backend handles device
         # isolation via local_rank shifting in _init_device.
-        if vllm_config.parallel_config.distributed_executor_backend == "ray":
-            assigned = vllm_config.parallel_config.assigned_physical_gpu_ids
-            if assigned is not None and local_rank < len(assigned):
-                device_env = current_platform.device_control_env_var
-                if device_env:
-                    os.environ[device_env] = str(assigned[local_rank])
+        assigned = vllm_config.parallel_config.assigned_physical_gpu_ids
+        if assigned is not None and local_rank < len(assigned):
+            device_env = current_platform.device_control_env_var
+            if device_env:
+                os.environ[device_env] = str(assigned[local_rank])
 
         check_ascend_device_type()
 
