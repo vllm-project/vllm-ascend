@@ -40,6 +40,7 @@ from vllm_ascend.utils import vllm_version_is
 
 if not vllm_version_is("0.25.1"):
     from vllm.v1.worker.gpu.model_runner import sort_batch_req_ids
+
     from vllm_ascend.worker.v2.pcp_manager import maybe_build_ascend_pcp_manager
 
 from vllm_ascend.ascend_config import get_ascend_config
