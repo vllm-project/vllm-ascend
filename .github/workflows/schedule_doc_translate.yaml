@@ -27,8 +27,8 @@ on:
         required: false
         default: 'releases/v0.23.0'
         type: string
-      retranslate_all:
-        description: 'One-time full retranslation of every active PO entry'
+      force:
+        description: 'Retranslate all PO files'
         required: false
         default: false
         type: boolean
@@ -82,7 +82,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y make
           pip install -r requirements-docs.txt
-          if [ "${{ inputs.retranslate_all }}" = "true" ]; then
+          if [ "${{ inputs.force }}" = "true" ]; then
             echo "Removing existing PO files before clean regeneration"
             find source/locale/zh_CN/LC_MESSAGES \
               -type f -name '*.po' -delete
@@ -95,7 +95,7 @@ jobs:
         id: detect
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          if [ "${{ inputs.retranslate_all }}" = "true" ]; then
+          if [ "${{ inputs.force }}" = "true" ]; then
             po_files=$(find docs/source/locale/zh_CN/LC_MESSAGES \
               -type f -name '*.po' -print | sort | tr '\n' ',' | sed 's/,$//')
             echo "Full retranslation requested"
@@ -121,7 +121,7 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
           RETRANSLATE_ARGS=()
-          if [ "${{ inputs.retranslate_all }}" = "true" ]; then
+          if [ "${{ inputs.force }}" = "true" ]; then
             RETRANSLATE_ARGS+=(--retranslate-all)
           fi
           python .github/workflows/scripts/po_translate.py \
