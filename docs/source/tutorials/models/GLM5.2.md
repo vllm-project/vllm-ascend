@@ -72,6 +72,7 @@ docker run --rm \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /etc/hccn.conf:/etc/hccn.conf \
+    -v /root/.cache:/root/.cache \
     -it $IMAGE bash
 ```
 
@@ -107,6 +108,7 @@ docker run --rm \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /etc/hccn.conf:/etc/hccn.conf \
+    -v /root/.cache:/root/.cache \
     -it $IMAGE bash
 ```
 
@@ -237,7 +239,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --gpu-memory-utilization 0.90 \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_dsa_cp": true, "enable_sparse_li_c8": true,"enable_balance_scheduling": true,"fuse_muls_add":true, "enable_reduce_sample": "True"}'  \
+    --additional-config '{"enable_dsa_cp": true, "enable_sparse_li_c8": true,"enable_balance_scheduling": true,"fuse_muls_add":true, "enable_reduce_sample": true}'  \
     --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp","enforce_eager":true}'
 ```
 
@@ -288,7 +290,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --gpu-memory-utilization 0.90 \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_dsa_cp": true, "enable_sparse_li_c8": true,"enable_balance_scheduling": true,"fuse_muls_add":true, "enable_reduce_sample": "true"}'  \
+    --additional-config '{"enable_dsa_cp": true, "enable_sparse_li_c8": true,"enable_balance_scheduling": true,"fuse_muls_add":true, "enable_reduce_sample": true}'  \
     --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp","enforce_eager":true}'
 ```
 
