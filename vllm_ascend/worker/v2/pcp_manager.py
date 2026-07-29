@@ -71,7 +71,11 @@ class AscendPCPManager(PCPManager):
             local_seq_lens_np,
             local_batch.num_reqs,
             local_batch.num_scheduled_tokens,
-            local_batch.num_scheduled_tokens,
+            local_batch.num_scheduled_tokens - (
+                local_batch.num_draft_tokens_per_req
+                if local_batch.num_draft_tokens_per_req is not None
+                else 0
+            ),
         )
         return local_batch
 
