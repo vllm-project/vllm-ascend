@@ -681,17 +681,13 @@ class NPUWorker(WorkerBase):
                 self.model_runner.get_model(),
             )
 
-    def _run_to_completion(self, num_tokens, eager) -> None:
+    def _run_to_completion(self, num_tokens, eager) -> float:
         import time
 
-        mode = CUDAGraphMode.NONE if eager else CUDAGraphMode.FULL
-
+        mode = True if eager else False
         for _ in range(5):
             self.model_runner._dummy_run(
-                num_tokens=num_tokens,
-                cudagraph_runtime_mode=mode,
-                uniform_decode=True,
-                force_attention=True,
+                num_tokens=num_tokens, is_profile=mode, uniform_decode=True, force_attention=True,
             )
 
         latencies: list[float] = []
@@ -699,7 +695,7 @@ class NPUWorker(WorkerBase):
             torch.npu.synchronize()
             start = time.perf_counter()
             self.model_runner._dummy_run(
-                num_tokens=num_tokens, cudagraph_runtime_mode=mode, uniform_decode=True, force_attention=True
+                num_tokens=num_tokens, is_profile=mode, uniform_decode=True, force_attention=True,
             )
             torch.npu.synchronize()
             latencies.append((time.perf_counter() - start) * 1000)
@@ -724,7 +720,7 @@ class NPUWorker(WorkerBase):
 
         ccs = ((eager_t0 + eager_t1) / 2 - b) // k
 
-        logger.info("We suggest max cudagraph size is: ", ccs)
+        logger.info("We suggest max-cudagraph-size is: %d", ccs)
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # Note: need to adapt for graph mode.
