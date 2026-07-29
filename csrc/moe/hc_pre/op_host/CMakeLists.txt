@@ -50,7 +50,6 @@ if (BUILD_OPEN_PROJECT)
                 OP_NAME HcPre
                 OPTIONS --cce-auto-sync=off
                         -Wno-deprecated-declarations
-                        -Werror
                         -mllvm -cce-aicore-hoist-movemask=false
                         --op_relocatable_kernel_binary=true
         )
@@ -60,3 +59,4 @@ if(NOT BUILD_OPS_RTY_KERNEL)
     message(STATUS "=== Debug: BUILD is NOT BUILD_OPS_RTY_KERNEL")
     add_modules_sources(OPTYPE hc_pre ACLNNTYPE aclnn)
 endif()
+

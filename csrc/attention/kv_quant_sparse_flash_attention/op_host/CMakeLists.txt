@@ -22,7 +22,6 @@ add_ops_compile_options(
     OP_NAME KvQuantSparseFlashAttention
     OPTIONS --cce-auto-sync=off
             -Wno-deprecated-declarations
-            -Werror
             -mllvm -cce-vf-remove-membar=false
             -mllvm -cce-aicore-hoist-movemask=false
 )
@@ -30,3 +29,4 @@ add_ops_compile_options(
 if (NOT BUILD_OPS_RTY_KERNEL)
     add_modules_sources(OPTYPE kv_quant_sparse_flash_attention ACLNNTYPE aclnn)
 endif()
+

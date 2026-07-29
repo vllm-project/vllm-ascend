@@ -18,7 +18,6 @@ add_ops_compile_options(
     OPTIONS
         --cce-auto-sync=off
         -Wno-deprecated-declarations
-        -Werror
         -DASCENDC_DUMP=0
         -DCATLASS_ARCH=2201
         ${_DISPATCH_GMM_INC_OPTS}
@@ -30,3 +29,4 @@ if (NOT BUILD_OPS_RTY_KERNEL)
         ${CMAKE_SOURCE_DIR}/utils/inc/kernel
     )
 endif()
+

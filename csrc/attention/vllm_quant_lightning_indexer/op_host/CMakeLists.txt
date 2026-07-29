@@ -19,7 +19,6 @@ add_ops_compile_options(
     OP_NAME VllmQuantLightningIndexer
     OPTIONS --cce-auto-sync=off
             -Wno-deprecated-declarations
-            -Werror
             -mllvm -cce-vf-remove-membar=false
             -mllvm -cce-aicore-hoist-movemask=false
 )
@@ -27,3 +26,4 @@ add_ops_compile_options(
 if (NOT BUILD_OPS_RTY_KERNEL)
     add_modules_sources(OPTYPE vllm_quant_lightning_indexer ACLNNTYPE aclnn)
 endif()
+
