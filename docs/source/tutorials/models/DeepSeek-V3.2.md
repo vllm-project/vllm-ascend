@@ -4,6 +4,8 @@
 
 DeepSeek-V3.2 is a sparse attention model. The main architecture is similar to DeepSeek-V3.1, but with a sparse attention mechanism, which is designed to explore and validate optimizations for training and inference efficiency in long-context scenarios.
 
+The `DeepSeek-V3.2` model is first supported in `vllm-ascend:v0.13.0rc1`, and all **v0.13.0rc1 and later versions** can run stably. To use the latest features (e.g., PD separation, MTP), it is recommended to use v0.13.0rc1 or a later version.
+
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
 ## Supported Features
@@ -25,7 +27,7 @@ It is recommended to download the model weight to the shared directory of multip
 
 If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
 
-### Installation
+### Docker Image Installation
 
 You can use our official docker image to run `DeepSeek-V3.2` directly.
 
@@ -103,11 +105,15 @@ You can use our official docker image to run `DeepSeek-V3.2` directly.
         -it $IMAGE bash
     ```
 
+To verify the successful installation of the environment, please refer to [installation](../../installation.md).
+
+If you want to deploy multi-node environment, you need to set up environment on each node.
+
+### Source Code Installation
+
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
 - Install `vllm-ascend` from source, refer to [installation](../../installation.md).
-
-If you want to deploy multi-node environment, you need to set up environment on each node.
 
 ## Deployment
 
@@ -151,9 +157,13 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 
 ```
 
+Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+
 ### Multi-node Deployment
 
 - `DeepSeek-V3.2-w8a8`: require at least 2 Atlas 800 A2 (64G × 8).
+
+Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
 Run the following scripts on two nodes respectively.
 
@@ -361,9 +371,16 @@ Run the following scripts on two nodes respectively.
 
     ```
 
+**Notice:**
+The parameters are explained as follows:
+
+- For multi-node deployment, we recommend using `dp2tp16` (A3) or `dp2tp8` (A2) with expert parallel enabled.
+
 ### Prefill-Decode Disaggregation
 
 We'd like to show the deployment guide of `DeepSeek-V3.2` on multi-node environment with 1P1D for better performance.
+
+Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
 Before you start, please
 
@@ -796,6 +813,9 @@ Refer to [Distributed DP Server With Large-Scale Expert Parallelism](https://doc
     python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address 141.61.39.117 --dp-rpc-port 12777 --vllm-start-port 9100
     ```
 
+**Notice:**
+To support a long context window on the stage of prefill, the parameter `"layer_sharding": ["q_b_proj", "o_proj"]` and `"enable_dsa_cp": true` needs to be added to `--additional-config` on each prefill node.
+
 ### Request Forwarding
 
 To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_layerwise_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py)
@@ -921,3 +941,24 @@ vllm bench serve --model /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot  --
 The function call feature is supported from v0.13.0rc1 on. Please use the latest version.
 
 Refer to [DeepSeek-V3.2 Usage Guide](https://docs.vllm.ai/projects/recipes/en/latest/DeepSeek/DeepSeek-V3_2.html#tool-calling-example) for details.
+
+## Best Practices
+
+In this chapter, we recommend best practices in prefill-decode disaggregation scenario with 1P1D architecture using 4 Atlas 800 A3 (64G × 16):
+
+- Low-latency: `dp2 tp16` on prefill nodes and `dp8 tp4` on decode nodes is recommended for low latency.
+- High-throughput: Adjust `max-num-seqs` and `max-num-batched-tokens` to balance throughput and latency according to the actual usage scenario.
+
+**Notice:** `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the [Deployment](#deployment) chapter.
+
+## FAQ
+
+- Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+
+- **Q: How to resolve empty output or garbled characters in PD separated deployment?**
+
+  A: This is a known issue. Please ensure `--no-enable-prefix-caching` is set and use the latest version of vllm-ascend.
+
+- **Q: How to configure the model weight path correctly?**
+
+  A: The model weight path in the deployment commands (e.g., `/root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot`) should be adjusted to your actual download path. Refer to the [Model Weight](#model-weight) section for details.
