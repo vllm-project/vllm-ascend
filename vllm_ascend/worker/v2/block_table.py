@@ -132,7 +132,8 @@ def _compute_slot_mappings_kernel(
     end_idx = tl.load(query_start_loc + batch_idx + 1)
     for i in range(start_idx, end_idx, TRITON_BLOCK_SIZE):
         offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
-        positions = tl.load(pos + offset, mask=offset < end_idx, other=0)
+        first_position = tl.load(pos + i)
+        positions = tl.load(pos + offset, mask=offset < end_idx, other=first_position)
 
         # Type conversion of 'position' to int32 to be compatible with npu
         # otherwise, it will degrade to scalar computation
@@ -144,12 +145,22 @@ def _compute_slot_mappings_kernel(
         # replace the % operation with sub and mul instead
         block_offsets = positions - (block_size * CP_SIZE) * block_indices
 
-        # The 'block_indics' variable results in non-contiguous memory assess,
-        # which triggers degradation toscalar computation.
-        # Mitigate this by loading the complete data block and extracting the required data with tl.gather
-        block_numbers = tl.load(block_table_ptr + req_state_idx * block_table_stride + tl.arange(0, TOTAL_BLOCK_SIZE))
+        # The 'block_indices' variable results in non-contiguous memory access,
+        # which triggers degradation to scalar computation. Mitigate this by
+        # loading a contiguous window and extracting the requested data with
+        # tl.gather. Shift the window for long contexts so block indices beyond
+        # TOTAL_BLOCK_SIZE remain in range without increasing NPU UB usage.
+        first_block_index = first_position.to(tl.int32) // (block_size * CP_SIZE)
+        block_table_window_start = first_block_index // TOTAL_BLOCK_SIZE * TOTAL_BLOCK_SIZE
+        block_table_offsets = tl.arange(0, TOTAL_BLOCK_SIZE)
+        absolute_block_table_offsets = block_table_window_start + block_table_offsets
+        block_numbers = tl.load(
+            block_table_ptr + req_state_idx * block_table_stride + absolute_block_table_offsets,
+            mask=absolute_block_table_offsets < block_table_stride,
+            other=0,
+        )
         block_numbers = block_numbers.to(tl.float32)
-        block_numbers = tl.gather(block_numbers, block_indices, 0)
+        block_numbers = tl.gather(block_numbers, block_indices - block_table_window_start, 0)
 
         if CP_SIZE == 1:
             # Common case: Context parallelism is not used.
