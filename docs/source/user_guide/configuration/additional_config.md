@@ -203,7 +203,7 @@ An example of additional configuration is as follows:
         "lmhead_tensor_parallel_size": 8,
         "oproj_tensor_parallel_size": 8,
         "embedding_tensor_parallel_size": 8,
-        "mlp_tensor_parallel_size": 8
+        "mlp_tensor_parallel_size": 8,
     },
     "enable_kv_nz": False,
     "multistream_overlap_shared_expert": True,
@@ -211,7 +211,7 @@ An example of additional configuration is as follows:
         "enable_block_verify": True,
         "enable_entropy_verify": True,
         "posterior_threshold": 0.95,
-        "posterior_alpha": 0.4
+        "posterior_alpha": 0.4,
     },
     "refresh": False
 }
