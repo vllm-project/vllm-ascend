@@ -203,10 +203,16 @@ class AscendDSABackend(AttentionBackend):
     def get_builder_cls():
         from vllm_ascend.utils import enable_dsa_cp
 
-        if enable_dsa_cp():
+        use_dsa_cp = enable_dsa_cp()
+        use_pcp = get_current_vllm_config().parallel_config.prefill_context_parallel_size > 1
+        if use_dsa_cp and use_pcp:
+            raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
+        if use_dsa_cp:
             from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 
             return AscendDSACPMetadataBuilder
+        if use_pcp:
+            return AscendDSAPCPMetadataBuilder
         return AscendDSAMetadataBuilder
 
     @staticmethod
@@ -250,10 +256,16 @@ class AscendDSABackend(AttentionBackend):
     def get_impl_cls() -> type["DSAAttentionImpl"]:
         from vllm_ascend.utils import enable_dsa_cp
 
-        if enable_dsa_cp():
+        use_dsa_cp = enable_dsa_cp()
+        use_pcp = get_current_vllm_config().parallel_config.prefill_context_parallel_size > 1
+        if use_dsa_cp and use_pcp:
+            raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
+        if use_dsa_cp:
             from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPImpl
 
             return AscendDSACPImpl
+        if use_pcp:
+            return AscendDSAPCPImpl
         return AscendDSAImpl
 
     @staticmethod
@@ -350,6 +362,20 @@ class AscendDSAPCPMetadata:
     block_size: int
     full_compress_sin: torch.Tensor | None = None
     full_compress_cos: torch.Tensor | None = None
+
+
+@dataclass
+class _DSACompressorReplayMetadata:
+    """Minimal compressor metadata for one ordered PCP segment."""
+
+    full_compress_sin: torch.Tensor
+    full_compress_cos: torch.Tensor
+    num_compressed_tokens: int
+    start_pos: torch.Tensor
+    query_start_loc: torch.Tensor
+    block_table: torch.Tensor
+    block_size: int
+    num_reqs_actual: int = 1
 
 
 @dataclass
@@ -1989,7 +2015,7 @@ class AscendDSAImpl(DSAAttentionImpl):
 
     def _compute_compressor_metadata(
         self,
-        metadata: AscendDSAPrefillMetadata | AscendDSADecodeMetadata,
+        metadata: (AscendDSAPrefillMetadata | AscendDSADecodeMetadata | _DSACompressorReplayMetadata),
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         assert metadata.full_compress_cos is not None
         assert metadata.full_compress_sin is not None
@@ -3403,3 +3429,479 @@ class AscendDSAImpl(DSAAttentionImpl):
         q = hadamard_scale(q_linear, q_shape, q_dim, scale=hidden_size**-0.5)
 
         return q
+
+
+class AscendDSAPCPImpl(AscendDSAImpl):
+    """DSA implementation with replicated-cache PCP execution."""
+
+    supports_pcp: bool = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.pcp_world_size <= 1:
+            raise ValueError("AscendDSAPCPImpl requires PCP size greater than one.")
+        if self.dcp_world_size != 1:
+            raise NotImplementedError("DSA PCP currently requires DCP size to be one.")
+        if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
+            raise NotImplementedError("DSA PCP currently supports ModelRunner V2 only.")
+        if self.vllm_config.cache_config.enable_prefix_caching:
+            raise NotImplementedError("DSA PCP does not support prefix caching yet.")
+        # Stateful compressor replay must finish before local QLI/attention.
+        self.multistream_dsv4_dsa_overlap = False
+
+    @staticmethod
+    def _require_pcp_metadata(
+        metadata: AscendDSAMetadata,
+    ) -> AscendDSAPCPMetadata:
+        if metadata.pcp is None:
+            raise RuntimeError("DSA PCP attention metadata is missing.")
+        return metadata.pcp
+
+    @staticmethod
+    def _get_segment_hidden(
+        gathered_hidden_states: torch.Tensor,
+        pcp_metadata: AscendDSAPCPMetadata,
+        segment: AscendDSAPCPSegment,
+    ) -> torch.Tensor:
+        rank_start = segment.rank * pcp_metadata.local_num_input_tokens
+        token_start = rank_start + segment.token_start
+        return gathered_hidden_states[token_start : token_start + segment.num_tokens]
+
+    def _make_replay_metadata(
+        self,
+        pcp_metadata: AscendDSAPCPMetadata,
+        segment: AscendDSAPCPSegment,
+    ) -> _DSACompressorReplayMetadata:
+        if pcp_metadata.full_compress_cos is None:
+            raise RuntimeError("DSA PCP compressor cosine cache is missing.")
+        if pcp_metadata.full_compress_sin is None:
+            raise RuntimeError("DSA PCP compressor sine cache is missing.")
+        num_compressed_tokens = min(
+            segment.num_tokens,
+            segment.num_tokens // self.compress_ratio + 1,
+        )
+        return _DSACompressorReplayMetadata(
+            full_compress_sin=pcp_metadata.full_compress_sin,
+            full_compress_cos=pcp_metadata.full_compress_cos,
+            num_compressed_tokens=num_compressed_tokens,
+            start_pos=torch.tensor(
+                [segment.start_pos],
+                dtype=torch.int32,
+                device=pcp_metadata.raw_slot_mapping.device,
+            ),
+            query_start_loc=torch.tensor(
+                [0, segment.num_tokens],
+                dtype=torch.int32,
+                device=pcp_metadata.raw_slot_mapping.device,
+            ),
+            block_table=pcp_metadata.gathered_block_tables[
+                segment.rank,
+                segment.row : segment.row + 1,
+            ],
+            block_size=pcp_metadata.block_size,
+        )
+
+    def _replay_main_compressor(
+        self,
+        hidden_states: torch.Tensor,
+        segment: AscendDSAPCPSegment,
+        output_metadata: AscendDSAPCPMetadata,
+        state_metadata: AscendDSAPCPMetadata,
+        compress_kv_cache: torch.Tensor,
+        state_cache: torch.Tensor,
+    ) -> None:
+        replay_metadata = self._make_replay_metadata(
+            output_metadata,
+            segment,
+        )
+        state_block_table = state_metadata.gathered_block_tables[
+            segment.rank,
+            segment.row : segment.row + 1,
+        ]
+        compress_cos, compress_sin, compress_slot_mapping = self._compute_compressor_metadata(replay_metadata)
+        compressed_kv = torch.ops._C_ascend.compressor(
+            hidden_states,
+            self.compressor_wkv.weight,
+            self.compressor_wgate.weight,
+            state_cache.squeeze(-2),
+            self.compressor_ape,
+            self.compressor_norm.weight,
+            compress_sin.view(-1, compress_sin.shape[-1]),
+            compress_cos.view(-1, compress_cos.shape[-1]),
+            state_block_table=state_block_table,
+            cu_seqlens=replay_metadata.query_start_loc,
+            seqused=None,
+            start_pos=replay_metadata.start_pos,
+            rope_head_dim=self.rope_head_dim,
+            cmp_ratio=self.compress_ratio,
+            coff=2 if self.compressor_overlap else 1,
+            norm_eps=self.compressor_norm_eps,
+            rotary_mode=2,
+            cache_mode=1,
+        )
+        if compressed_kv.shape[0] > 0:
+            DeviceOperator.dsa_kv_compress_scatter(
+                compress_kv_cache,
+                compressed_kv,
+                compress_slot_mapping,
+            )
+
+    def _replay_indexer_compressor(
+        self,
+        hidden_states: torch.Tensor,
+        segment: AscendDSAPCPSegment,
+        output_metadata: AscendDSAPCPMetadata,
+        state_metadata: AscendDSAPCPMetadata,
+        indexer_state_cache: torch.Tensor,
+        indexer_k_cache: torch.Tensor,
+        indexer_scale_cache: torch.Tensor,
+        indexer_full_cache: torch.Tensor | None,
+        hadamard: torch.Tensor,
+    ) -> None:
+        expected_key_dtype = torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
+        expected_scale_dtype = torch.float if get_ascend_device_type() == AscendDeviceType.A5 else torch.float16
+        if indexer_k_cache.dtype != expected_key_dtype:
+            raise TypeError(
+                f"DSA PCP indexer key cache dtype mismatch: expected {expected_key_dtype}, got {indexer_k_cache.dtype}."
+            )
+        if indexer_scale_cache.dtype != expected_scale_dtype:
+            raise TypeError(
+                "DSA PCP indexer scale cache dtype mismatch: "
+                f"expected {expected_scale_dtype}, got "
+                f"{indexer_scale_cache.dtype}."
+            )
+        replay_metadata = self._make_replay_metadata(
+            output_metadata,
+            segment,
+        )
+        state_block_table = state_metadata.gathered_block_tables[
+            segment.rank,
+            segment.row : segment.row + 1,
+        ]
+        compress_cos, compress_sin, indexer_slot_mapping = self._compute_compressor_metadata(replay_metadata)
+        kv = torch.ops._C_ascend.compressor(
+            hidden_states,
+            self.indexcom_wkv.weight,
+            self.indexcom_wgate.weight,
+            indexer_state_cache.squeeze(-2),
+            self.indexcom_ape,
+            self.indexcom_norm.weight,
+            compress_sin.view(-1, compress_sin.shape[-1]),
+            compress_cos.view(-1, compress_cos.shape[-1]),
+            state_block_table=state_block_table,
+            cu_seqlens=replay_metadata.query_start_loc,
+            seqused=None,
+            start_pos=replay_metadata.start_pos,
+            rope_head_dim=self.rope_head_dim,
+            cmp_ratio=self.compress_ratio,
+            coff=2 if self.compressor_overlap else 1,
+            norm_eps=self.compressor_norm_eps,
+            rotary_mode=2,
+            cache_mode=1,
+        )
+        if kv.numel() == 0:
+            return
+        if self.indexcom_rotate:
+            kv = rotate_activation(kv, hadamard)
+        _, kv_scale = DeviceOperator.indexer_quant_scatter_part1(
+            kv,
+            indexer_k_cache,
+            indexer_full_cache,
+            indexer_slot_mapping,
+        )
+        if kv_scale is not None:
+            DeviceOperator.dsa_indexer_scatter_scale_part3(
+                kv_scale,
+                indexer_scale_cache,
+                indexer_slot_mapping,
+            )
+
+    def _prepare_pcp_caches(
+        self,
+        layer_name: str,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        attn_metadata: DSAMetadataList,
+    ) -> None:
+        """Gather canonical tokens and replay DSA cache updates in global order.
+
+        Cache compressors are stateful, so all PCP ranks replay identical
+        segments before the rank-local attention calculation starts.
+        """
+        reference_pcp = self._require_pcp_metadata(attn_metadata[0])
+        local_num_input_tokens = reference_pcp.local_num_input_tokens
+        if hidden_states.shape[0] > local_num_input_tokens:
+            raise ValueError(
+                "DSA PCP hidden state rows exceed the padded local token count, "
+                f"got {hidden_states.shape[0]} and {local_num_input_tokens}."
+            )
+        padded_hidden_states = hidden_states.new_zeros((local_num_input_tokens, *hidden_states.shape[1:]))
+        padded_hidden_states[: hidden_states.shape[0]].copy_(hidden_states)
+        gathered_hidden_states = get_pcp_group().all_gather(
+            padded_hidden_states.contiguous(),
+            dim=0,
+        )
+
+        for metadata in attn_metadata[1:]:
+            pcp_metadata = self._require_pcp_metadata(metadata)
+            if (
+                pcp_metadata.local_num_input_tokens != local_num_input_tokens
+                or pcp_metadata.canonical_segments != reference_pcp.canonical_segments
+            ):
+                raise ValueError("DSA PCP metadata groups disagree on the canonical token layout.")
+
+        (
+            compress_kv_cache,
+            swa_kv_cache,
+            state_cache,
+            indexer_k_cache,
+            indexer_scale_cache,
+            indexer_full_cache,
+        ) = DeviceOperator.unpack_dsa_forward_kv_cache(
+            kv_cache,
+            self.compress_ratio,
+        )
+        if self.compress_ratio == 4:
+            (
+                compressor_attn_metadata,
+                compressor_kv_state_metadata,
+                indexer_kv_state_metadata,
+                indexer_kv_scale_metadata,
+                swa_metadata,
+            ) = attn_metadata
+        elif self.compress_ratio == 128:
+            (
+                compressor_attn_metadata,
+                compressor_kv_state_metadata,
+                swa_metadata,
+            ) = attn_metadata
+            indexer_kv_state_metadata = None
+            indexer_kv_scale_metadata = None
+        else:
+            (swa_metadata,) = attn_metadata
+            compressor_attn_metadata = None
+            compressor_kv_state_metadata = None
+            indexer_kv_state_metadata = None
+            indexer_kv_scale_metadata = None
+
+        swa_pcp = self._require_pcp_metadata(swa_metadata)
+        canonical_hidden_parts: list[torch.Tensor] = []
+        canonical_position_parts: list[torch.Tensor] = []
+        canonical_slot_parts: list[torch.Tensor] = []
+        rank_slot_mapping = swa_pcp.raw_slot_mapping.view(
+            self.pcp_world_size,
+            local_num_input_tokens,
+        )
+        for segment in reference_pcp.canonical_segments:
+            canonical_hidden_parts.append(
+                self._get_segment_hidden(
+                    gathered_hidden_states,
+                    reference_pcp,
+                    segment,
+                )
+            )
+            canonical_position_parts.append(
+                torch.arange(
+                    segment.start_pos,
+                    segment.start_pos + segment.num_tokens,
+                    dtype=torch.long,
+                    device=hidden_states.device,
+                )
+            )
+            segment_slot_mapping = rank_slot_mapping[
+                segment.rank,
+                segment.token_start : segment.token_start + segment.num_tokens,
+            ]
+            if bool(torch.any(segment_slot_mapping == PAD_SLOT_ID)):
+                raise ValueError("Canonical DSA PCP segment unexpectedly contains PAD slots.")
+            canonical_slot_parts.append(segment_slot_mapping)
+
+        if canonical_hidden_parts:
+            canonical_hidden_states = torch.cat(
+                canonical_hidden_parts,
+                dim=0,
+            )
+            canonical_positions = torch.cat(
+                canonical_position_parts,
+                dim=0,
+            )
+            canonical_slot_mapping = torch.cat(
+                canonical_slot_parts,
+                dim=0,
+            )
+            kv = self.kv_norm(self.wkv(canonical_hidden_states))
+            assert self.rope_head_dim is not None
+            kv = kv.view(
+                -1,
+                1,
+                self.nope_head_dim + self.rope_head_dim,
+            )
+            cos, sin = get_cos_and_sin_dsa(canonical_positions)
+            torch.ops._C_ascend.inplace_partial_rotary_mul(
+                kv.unsqueeze(1),
+                cos[layer_name],
+                sin[layer_name],
+                rotary_mode="interleave",
+                partial_slice=[self.nope_head_dim, self.head_dim],
+            )
+            DeviceOperator.dsa_kv_compress_scatter(
+                swa_kv_cache,
+                kv,
+                DeviceOperator.format_dsa_slot_mapping(
+                    canonical_slot_mapping,
+                    swa_pcp.block_size,
+                ),
+            )
+
+        if self.compress_ratio <= 1:
+            return
+        assert compressor_attn_metadata is not None
+        assert compressor_kv_state_metadata is not None
+        assert compress_kv_cache is not None
+        assert state_cache is not None
+        compressor_pcp = self._require_pcp_metadata(compressor_attn_metadata)
+        compressor_state_pcp = self._require_pcp_metadata(compressor_kv_state_metadata)
+        for segment in reference_pcp.canonical_segments:
+            segment_hidden_states = self._get_segment_hidden(
+                gathered_hidden_states,
+                reference_pcp,
+                segment,
+            )
+            self._replay_main_compressor(
+                segment_hidden_states,
+                segment,
+                compressor_pcp,
+                compressor_state_pcp,
+                compress_kv_cache,
+                state_cache,
+            )
+
+        if self.compress_ratio != 4 or self.skip_topk:
+            return
+        assert indexer_kv_state_metadata is not None
+        assert indexer_kv_scale_metadata is not None
+        assert indexer_k_cache is not None
+        assert indexer_scale_cache is not None
+        (
+            indexer_state_cache,
+            _,
+            _,
+            _,
+        ) = DeviceOperator.unpack_dsa_indexer_kv_cache(kv_cache)
+        indexer_state_pcp = self._require_pcp_metadata(indexer_kv_state_metadata)
+        indexer_output_pcp = self._require_pcp_metadata(indexer_kv_scale_metadata)
+        if indexer_kv_scale_metadata.hadamard is None:
+            raise RuntimeError("DSA PCP indexer Hadamard tensor is missing.")
+        for segment in reference_pcp.canonical_segments:
+            self._replay_indexer_compressor(
+                self._get_segment_hidden(
+                    gathered_hidden_states,
+                    reference_pcp,
+                    segment,
+                ),
+                segment,
+                indexer_output_pcp,
+                indexer_state_pcp,
+                indexer_state_cache,
+                indexer_k_cache,
+                indexer_scale_cache,
+                indexer_full_cache,
+                indexer_kv_scale_metadata.hadamard,
+            )
+
+    def forward(  # type: ignore[override]
+        self,
+        layer_name,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...] | None,
+        attn_metadata: DSAMetadataList,
+        need_gather_q_kv: bool = False,
+        output: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if output is None:
+            raise ValueError("Output tensor must be provided.")
+        if attn_metadata is None:
+            return super().forward(
+                layer_name,
+                hidden_states,
+                kv_cache,
+                attn_metadata,
+                need_gather_q_kv,
+                output,
+            )
+        if not isinstance(attn_metadata, list):
+            attn_metadata = [attn_metadata]
+        if kv_cache is None:
+            raise ValueError("kv_cache tensor tuple must be provided.")
+
+        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+            hidden_states,
+            need_gather_q_kv,
+        )
+        reference_metadata = attn_metadata[0]
+        reference_pcp = self._require_pcp_metadata(reference_metadata)
+        actual_tokens = reference_metadata.num_actual_tokens
+        decode_tokens = reference_metadata.num_decode_tokens
+        local_num_input_tokens = reference_pcp.local_num_input_tokens
+        if not 0 <= actual_tokens <= local_num_input_tokens:
+            raise ValueError(
+                f"Invalid DSA PCP local token counts, actual={actual_tokens}, padded={local_num_input_tokens}."
+            )
+        if output.shape[0] != local_num_input_tokens:
+            raise ValueError(
+                "DSA PCP output rows must match padded local tokens, "
+                f"got {output.shape[0]} and {local_num_input_tokens}."
+            )
+
+        wait_for_kv_layer_from_connector(layer_name)
+        self._prepare_pcp_caches(
+            layer_name,
+            hidden_states,
+            kv_cache,
+            attn_metadata,
+        )
+        if actual_tokens == 0:
+            output.zero_()
+            notify_kv_cache_written(layer_name)
+            maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+            return output
+
+        o_proj_input = hidden_states.new_zeros(
+            (
+                local_num_input_tokens,
+                self.n_local_heads,
+                self.head_dim,
+            )
+        )
+        if reference_metadata.num_prefills > 0:
+            output_prefill = self._forward_prefill(
+                layer_name,
+                hidden_states[decode_tokens:actual_tokens],
+                kv_cache,
+                attn_metadata,
+                cache_is_prepared=True,
+            )
+            o_proj_input[decode_tokens:actual_tokens] = output_prefill
+        if reference_metadata.num_decodes > 0:
+            output_decode = self._forward_decode(
+                layer_name,
+                hidden_states[:decode_tokens],
+                kv_cache,
+                attn_metadata,
+                cache_is_prepared=True,
+            )
+            o_proj_input[:decode_tokens] = output_decode
+
+        cos = reference_metadata.cos[layer_name]
+        sin = reference_metadata.sin[layer_name]
+        torch.ops._C_ascend.inplace_partial_rotary_mul(
+            o_proj_input.unsqueeze(1),
+            cos,
+            -sin,
+            rotary_mode="interleave",
+            partial_slice=[self.nope_head_dim, self.head_dim],
+        )
+        self._forward_o_proj(o_proj_input, output)
+        output[actual_tokens:].zero_()
+        maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+        return output
