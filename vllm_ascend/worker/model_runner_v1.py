@@ -3418,7 +3418,7 @@ class NPUModelRunner(GPUModelRunner):
                         # FULL descriptors explicitly store the padded request count B
                         # Reuse that requests count and mark the draft as uniform decode
                         drafter_num_reqs = int(num_reqs_padded)
-                        drafter_uniform_decode = True
+                        draft_uniform_decode = True
                     else:
                         
                         # PIECEWISE descriptors are token-count based and dont store the logical requests count B
