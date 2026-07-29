@@ -907,7 +907,13 @@ class TestDCPGraphParams(TestBase):
         block_tables = torch.zeros(2, 5, dtype=torch.long)
 
         decode = AscendMLADCPDecodeMetadata(
-            input_positions, block_table, seq_lens, max_seq_lens, seq_lens_list, cp_seq_len=cp_seq_len
+            input_positions=input_positions,
+            block_table=block_table,
+            seq_lens=seq_lens,
+            seq_lens_device=seq_lens,
+            max_seq_lens=max_seq_lens,
+            seq_lens_list=seq_lens_list,
+            cp_seq_len=cp_seq_len,
         )
         metadata = AscendMLAMetadata(
             8, slot_mapping, query_start_loc, seq_lens, seq_lens, block_tables, 4, 4, 0, decode=decode

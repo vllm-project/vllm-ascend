@@ -113,10 +113,12 @@ def test_mla_dcp_mixed_cache_hit_batch_uses_decode_bsnd_metadata(mock_fia) -> No
     impl._merge_dcp_attention_output = lambda output, _lse, _rank: output
     impl._v_up_proj_batch_major = lambda output: output
 
+    seq_lens = torch.tensor([20])
     decode = AscendMLADCPDecodeMetadata(
         input_positions=torch.arange(4),
         block_table=torch.ones((1, 2), dtype=torch.int32),
-        seq_lens=torch.tensor([20]),
+        seq_lens=seq_lens,
+        seq_lens_device=seq_lens,
         max_seq_lens=20,
         seq_lens_list=[20],
         cp_seq_len=torch.tensor([10], dtype=torch.int32),

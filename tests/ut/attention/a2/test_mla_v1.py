@@ -213,6 +213,7 @@ class TestAscendMLADecodeMetadata(TestBase):
         input_positions = torch.tensor([[1, 2, 3, 4], [1, 2, 3, 4]])
         block_table = torch.tensor([[0, 3, 2, 1], [0, 2, 1, 3]])
         seq_lens = torch.tensor([[2], [3]])
+        seq_lens_device = torch.tensor([[2], [3]])
         max_seq_lens = 4
         seq_lens_list = [2, 3]
         attn_mask = None
@@ -221,6 +222,7 @@ class TestAscendMLADecodeMetadata(TestBase):
             input_positions=input_positions,
             block_table=block_table,
             seq_lens=seq_lens,
+            seq_lens_device=seq_lens_device,
             max_seq_lens=max_seq_lens,
             seq_lens_list=seq_lens_list,
             attn_mask=attn_mask,
@@ -229,6 +231,7 @@ class TestAscendMLADecodeMetadata(TestBase):
         self.assertIs(metadata.input_positions, input_positions)
         self.assertIs(metadata.block_table, block_table)
         self.assertIs(metadata.seq_lens, seq_lens)
+        self.assertIs(metadata.seq_lens_device, seq_lens_device)
         self.assertEqual(metadata.max_seq_lens, max_seq_lens)
         self.assertEqual(metadata.seq_lens_list, seq_lens_list)
         self.assertIsNone(attn_mask)
@@ -709,6 +712,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     def test_build_decode_only_metadata(self, mock_get_cos_and_sin_mla):
         torch.Tensor.pin_memory = lambda x: x  # noqa
+        seq_lens_device = torch.tensor([4, 5, 6])
 
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=torch.tensor([0, 1, 2, 3]),
@@ -724,7 +728,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             positions=torch.tensor([10, 10]),
             attn_state=AscendAttentionState.DecodeOnly,
             num_computed_tokens_cpu=None,
-            seq_lens=None,
+            seq_lens=seq_lens_device,
             max_seq_len=6,
         )
 
@@ -749,6 +753,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.assertEqual(metadata.num_actual_tokens, base_inputs["num_actual_tokens"])
         self.assertTrue(torch.all(metadata.slot_mapping == base_inputs["slot_mapping"]))
         self.assertEqual(metadata.head_dim, self.kv_cache_spec.head_size)
+        self.assertEqual(metadata.decode.seq_lens_device.data_ptr(), seq_lens_device.data_ptr())
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     def test_build_decode_metadata_without_disable_padded_drafter_batch(self, mock_get_cos_and_sin_mla):
