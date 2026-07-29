@@ -2,7 +2,7 @@
 
 ## Introduction
 
-gpt-oss-120b and gpt-oss-20b are two open-weight reasoning models that push the frontier of accuracy and inference cost. The models use an efficient mixture-of-expert transformer architecture and are trained using large-scale distillation and reinforcement learning. We optimize the models to have strong agentic capabilities (deep research browsing, python tool use, and support for developer-provided functions), all while using a rendered chat format that enables clear instruction following and role delineation. Both models achieve strong results on benchmarks ranging from mathematics, coding, and safety. We release the model weights, inference implementations, tool environments, and tokenizers under an Apache 2.0 license to enable broad use and further research
+gpt-oss-120b and gpt-oss-20b are two open-weight reasoning models that push the frontier of accuracy and inference cost. The models use an efficient mixture-of-experts transformer architecture and are trained using large-scale distillation and reinforcement learning. We optimize the models to have strong agentic capabilities (deep research browsing, python tool use, and support for developer-provided functions), all while using a rendered chat format that enables clear instruction following and role delineation. Both models achieve strong results on benchmarks ranging from mathematics, coding, and safety. We release the model weights, inference implementations, tool environments, and tokenizers under an Apache 2.0 license to enable broad use and further research.
 
 ## Supported Features
 
@@ -14,12 +14,12 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### Model Weight
 
-- `gpt-oss-120b`(bf16 version): require 1 Atlas 800 A3 (64G × 16) nodes or 1 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://huggingface.co/unsloth/gpt-oss-120b-BF16)
+- `gpt-oss-120b`(bf16 version): require 1 Atlas 800 A3 (64GB × 16) nodes or 1 Atlas 800 A2 (64GB × 8) nodes. [Download model weight](https://huggingface.co/unsloth/gpt-oss-120b-BF16)
 
 ### Installation
 
 You can use our official docker image for supporting gpt-oss-120b-bf16 models.
-Currently, we provide the all-in-one images.[Download images](https://quay.io/repository/ascend/vllm-ascend?tab=tags)
+Currently, we provide the all-in-one images. [Download images](https://quay.io/repository/ascend/vllm-ascend?tab=tags)
 
 #### Docker Pull (by tag)
 
@@ -79,7 +79,7 @@ Run into
 
 "openai_harmony.HarmonyError: error downloading or loading vocab file: failed to download or load vocab error"
 
-Solution: This is caused by a bug in openai_harmony code. This can be worked around by downloading the tiktoken encoding files in advance and setting the TIKTOKEN_ENCODINGS_BASE environment variable. See this [GitHub](https://github.com/openai/harmony/pull/41) issue for more information.
+Solution: This is caused by a bug in openai_harmony code. This can be worked around by downloading the tiktoken encoding files in advance and setting the TIKTOKEN_ENCODINGS_BASE environment variable. See this [GitHub](https://github.com/openai/harmony/issues/35) issue for more information.
 
 ```bash
 mkdir -p tiktoken_encodings
@@ -90,7 +90,7 @@ export TIKTOKEN_ENCODINGS_BASE=${PWD}/tiktoken_encodings
 
 ### Single-node Deployment
 
-`gpt-oss-120b` can both be deployed on 1 Atlas 800 A3(64G × 16), 1 Atlas 800 A2(64G × 8).
+`gpt-oss-120b` can both be deployed on 1 Atlas 800 A3(64GB × 16), 1 Atlas 800 A2(64GB × 8).
 
 Run the following script to execute online inference.
 
@@ -107,7 +107,7 @@ export OMP_PROC_BIND=false
 export VLLM_USE_V1=1
 export TASK_QUEUE_ENABLE=1
 export OMP_NUM_THREADS=1
-export TIKTOKEN_ENCODINGS_BASE=/${PWD}/tiktoken_encodings
+export TIKTOKEN_ENCODINGS_BASE=${PWD}/tiktoken_encodings
 
 vllm serve unsloth/gpt-oss-120b-BF16 \
 --served-model-name gpt-oss-120b-bf16 \

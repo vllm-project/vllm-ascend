@@ -196,7 +196,7 @@ curl http://<node0_ip>:<port>/v1/completions \
 | dataset | version | metric | mode | vllm-api-general-chat | note |
 |----- | ----- | ----- | ----- | -----| ----- |
 | textvqa | - | accuracy | gen | 50.28 | 1 Atlas 800 A2 |
-| ominidocbench | - | accuracy | gen | 66.86 | 1 Atlas 800 A2 |
+| omnidocbench | - | accuracy | gen | 66.86 | 1 Atlas 800 A2 |
 
 ## 8 Performance Evaluation
 
@@ -210,7 +210,7 @@ The performance result is:
 
 **Input/Output**: 1080P/256
 
-**Performance**: TTFT = 2s, TPOT = 200ms, Average performance of each card is 864 TPS (Token Per Second).
+**Performance**: TTFT = 2s, TPOT = 200ms, Average performance of each card is 864TPS (Token Per Second).
 
 ## 9 Performance Tuning
 
@@ -220,7 +220,7 @@ The performance result is:
 
 #### Table 1: Scenario Overview
 
-> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs).
+> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64GB × 16 NPUs).
 
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
