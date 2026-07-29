@@ -31,7 +31,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
+from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.models.deepseek_v4 import (
     DeepseekV2DecoderLayer,
@@ -265,7 +267,9 @@ class DeepseekV4DSparkModel(nn.Module):
 
 
 @support_torch_compile
-class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
+class DSparkDeepseekV4ForCausalLM(
+    nn.Module, SupportsPP, DeepseekV2MixtureOfExperts
+):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
@@ -308,7 +312,9 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
+        intermediate_tensors: IntermediateTensors | None = None,
     ) -> torch.Tensor:
+        del intermediate_tensors
         return self.model(
             input_ids=input_ids,
             positions=positions,

@@ -120,6 +120,9 @@ def test_pp_ipc_cached_request_data_carries_confirmed_token_for_sync_and_async(
 ):
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.use_pp = True
+    scheduler.pp_mtp_broadcast = False
+    scheduler.sync_pp_spec = not async_scheduling
+    scheduler._pending_sampled_token_ids = {"req-0": [13]}
     scheduler.use_v2_model_runner = False
     scheduler.scheduler_config = SimpleNamespace(async_scheduling=async_scheduling)
     scheduler.vllm_config = SimpleNamespace(
@@ -162,6 +165,9 @@ def test_pp_ipc_cached_request_data_fills_empty_confirmed_token_only_for_async(
 ):
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.use_pp = True
+    scheduler.pp_mtp_broadcast = False
+    scheduler.sync_pp_spec = not async_scheduling
+    scheduler._pending_sampled_token_ids = {}
     scheduler.use_v2_model_runner = False
     scheduler.scheduler_config = SimpleNamespace(async_scheduling=async_scheduling)
     scheduler.vllm_config = SimpleNamespace(

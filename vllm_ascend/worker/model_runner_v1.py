@@ -652,8 +652,12 @@ class NPUModelRunner(GPUModelRunner):
     def _get_drafter(self):
         return get_spec_decode_method(self.speculative_config.method, self.vllm_config, self.device, self)
 
-    def _eagle3_uses_aux_hidden_state(self) -> bool:
-        if self.speculative_config is None or self.speculative_config.method != "eagle3":
+    def _uses_aux_hidden_state_outputs_with_pp(self) -> bool:
+        if self.speculative_config is None:
+            return False
+        if self.speculative_config.use_dspark():
+            return True
+        if self.speculative_config.method != "eagle3":
             return False
 
         draft_model_config = self.speculative_config.draft_model_config
@@ -3644,7 +3648,7 @@ class NPUModelRunner(GPUModelRunner):
             should_configure_aux_hidden_states = (
                 self.use_aux_hidden_state_outputs
                 if pp_group.world_size == 1
-                else self._eagle3_uses_aux_hidden_state()
+                else self._uses_aux_hidden_state_outputs_with_pp()
             )
             if should_configure_aux_hidden_states:
                 from vllm.model_executor.models.interfaces import supports_eagle3
@@ -3675,7 +3679,11 @@ class NPUModelRunner(GPUModelRunner):
                             "materialized GQA" if materialized else "raw MLA",
                         )
 
-                if pp_group.world_size > 1:
+                if (
+                    pp_group.world_size > 1
+                    and self.speculative_config is not None
+                    and self.speculative_config.method == "eagle3"
+                ):
                     inner_model = self.model
                     if hasattr(inner_model, "get_language_model"):
                         inner_model = inner_model.get_language_model()
