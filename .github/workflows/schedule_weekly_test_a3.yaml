@@ -308,6 +308,24 @@ jobs:
           # Clear logs generated before the test to avoid confusion
           rm -rf "${ASCEND_LOG_PREFIX:?}"/* || true
 
+  upload-good-table:
+    name: Upload weekly good table
+    needs: [setup-vars, parse-trigger, single-node-tests, double-node-tests, multi-node-tests]
+    if: >-
+      always() &&
+      inputs.request_id == '' &&
+      needs.setup-vars.result == 'success' &&
+      needs.parse-trigger.outputs.run == 'true'
+    strategy:
+      matrix:
+        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+    uses: ./.github/workflows/_upload_good_table.yaml
+    with:
+      runner: linux-aarch64-a3-0
+      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+      test_frequency: weekly
+      artifact_name: good-table-weekly-a3-${{ matrix.vllm_ascend_branch }}
+
   merge-benchmark-artifacts:
     name: Merge benchmark artifacts into weekly-a3.zip
     needs: [parse-trigger, single-node-tests, double-node-tests, multi-node-tests]

@@ -32,6 +32,11 @@ nightly 与 weekly 使用独立的 Good 表:
 /root/.cache/vllm-ascend/<branch>/weekly/good_table.csv
 ```
 
+使用 Good 表的正式定时任务和手动任务还会把当前表上传为 GitHub Actions
+Artifact，名称为 `good-table-<frequency>-<platform>-<branch>`。下载并解压后
+仍保留频率目录：`nightly/good_table.csv` 或 `weekly/good_table.csv`。PR 评论
+命令触发的任务不会上传正式基线 Artifact。
+
 工具读取当前流水线对应的表。列结构:
 
 ```csv

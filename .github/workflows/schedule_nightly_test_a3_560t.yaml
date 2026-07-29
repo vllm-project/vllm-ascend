@@ -347,6 +347,24 @@ jobs:
           # Clear logs generated before the test to avoid confusion
           rm -rf "${ASCEND_LOG_PREFIX:?}"/* || true
 
+  upload-good-table:
+    name: Upload nightly good table
+    needs: [setup-vars, parse-trigger, single-node-tests, multi-node-tests, double-node-tests, multi-card-tests]
+    if: >-
+      always() &&
+      inputs.request_id == '' &&
+      needs.setup-vars.result == 'success' &&
+      needs.parse-trigger.outputs.run == 'true'
+    strategy:
+      matrix:
+        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+    uses: ./.github/workflows/_upload_good_table.yaml
+    with:
+      runner: linux-aarch64-a3-0-cn12-001
+      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+      test_frequency: nightly
+      artifact_name: good-table-nightly-a3-560t-${{ matrix.vllm_ascend_branch }}
+
   merge-benchmark-artifacts:
     name: Merge benchmark artifacts into nightly-a3-560t.zip
     needs: [parse-trigger, single-node-tests, multi-node-tests, double-node-tests, multi-card-tests]

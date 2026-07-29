@@ -54,6 +54,13 @@ Nightly and weekly do not share baselines:
 /root/.cache/vllm-ascend/<branch>/weekly/good_table.csv
 ```
 
+Formal scheduled and manually dispatched workflows that use a good table also
+publish the current table as a GitHub Actions artifact named
+`good-table-<frequency>-<platform>-<branch>`. The downloaded archive preserves
+the cadence-specific path: `nightly/good_table.csv` or
+`weekly/good_table.csv`. PR-command runs do not publish the formal baseline
+artifact.
+
 For the requested case, all supplied dimensions (`--name`, `--config-yaml`,
 `--soc`, and `--scene`) are matched. The good commit is the
 `vLLM-Ascend Git information` of the most recent successful row. Legacy
