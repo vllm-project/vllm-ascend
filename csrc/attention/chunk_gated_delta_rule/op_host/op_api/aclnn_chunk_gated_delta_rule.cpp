@@ -186,7 +186,7 @@ aclnnStatus aclnnChunkGatedDeltaRuleGetWorkspaceSize(const aclTensor *query, con
         initialState_ = l0op::Contiguous(initialState, uniqueExecutor.get());
     }
     CHECK_RET(initialState_ != nullptr, ACLNN_ERR_INNER_NULLPTR);
-    
+
     auto actualSeqLengths_ = l0op::Contiguous(actualSeqLengths, uniqueExecutor.get());
     CHECK_RET(actualSeqLengths_ != nullptr, ACLNN_ERR_INNER_NULLPTR);
     // gOptional 为可选输入，非空时才做 contiguous
