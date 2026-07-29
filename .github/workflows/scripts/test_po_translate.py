@@ -139,6 +139,77 @@ def test_partial_api_response_restores_original_file(
     assert path.read_bytes() == original
 
 
+def test_failed_chunk_is_recovered_with_smaller_requests(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "messages.po"
+    _write_po(
+        path,
+        [
+            POEntry(msgid="First", msgstr=""),
+            POEntry(msgid="Second", msgstr=""),
+            POEntry(msgid="Third", msgstr=""),
+            POEntry(msgid="Fourth", msgstr=""),
+        ],
+    )
+    translator = POTranslator(api_key="test")
+
+    async def call_api(content: str, chunk_info: str = "") -> str:
+        entries = [entry for entry in pofile(content) if entry.msgid]
+        if len(entries) > 1:
+            first = entries[0]
+            return _response({first.msgid: f"译-{first.msgid}"})
+        only = entries[0]
+        return _response({only.msgid: f"译-{only.msgid}"})
+
+    async def no_sleep(seconds: float) -> None:
+        return None
+
+    translator._call_api = call_api  # type: ignore[method-assign]
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    assert asyncio.run(translator.translate_file(str(path)))
+
+    translated = pofile(str(path))
+    for msgid in ("First", "Second", "Third", "Fourth"):
+        assert translated.find(msgid).msgstr == f"译-{msgid}"
+
+
+def test_translation_restores_protected_markdown_syntax(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "messages.po"
+    msgid = "\u200b### See [Section](#source-anchor)"
+    _write_po(path, [POEntry(msgid=msgid, msgstr="")])
+    translator = POTranslator(api_key="test")
+
+    async def call_api(content: str, chunk_info: str = "") -> str:
+        return _response(
+            {
+                msgid: "### 参见[章节](#translated-anchor)",
+            }
+        )
+
+    translator._call_api = call_api  # type: ignore[method-assign]
+    assert asyncio.run(translator.translate_file(str(path)))
+
+    msgstr = pofile(str(path)).find(msgid).msgstr
+    assert msgstr == "\u200b### 参见[章节](#source-anchor)"
+
+
+def test_split_entries_counts_separators() -> None:
+    entries = [
+        POEntry(msgid="a" * 20),
+        POEntry(msgid="b" * 20),
+        POEntry(msgid="c" * 20),
+    ]
+    snippet = POTranslator._build_snippet(entries)
+    chunks = POTranslator._split_entries(snippet, max_chars=60)
+
+    assert len(chunks) == 3
+    assert all(len(chunk.rstrip("\n")) <= 60 for chunk in chunks)
+
+
 def test_api_generated_header_is_not_merged(tmp_path: Path) -> None:
     path = tmp_path / "messages.po"
     _write_po(path, [POEntry(msgid="New", msgstr="")])

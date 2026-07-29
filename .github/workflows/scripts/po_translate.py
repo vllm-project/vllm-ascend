@@ -56,6 +56,16 @@ Rules:
 {content}"""
 
 _HEADER_BLOCK_RE = re.compile(r'(?ms)^msgid ""\nmsgstr ""\n(?:"[^\n]*\\n"\n)+(?=\n|$)')
+_MARKDOWN_TARGET_RE = re.compile(r"!?\[[^\]\n]*\]\(\s*(?P<target><[^>\n]+>|[^\s)\n]+)")
+_RST_TARGET_RE = re.compile(r":(?:ref|doc):`(?:[^`<>]*<)?(?P<target>[^`<>]+)>?`")
+_VARIABLE_RE = re.compile(
+    r"(?:\$\{[A-Za-z_][A-Za-z0-9_]*\}"
+    r"|\$[A-Za-z_][A-Za-z0-9_]*"
+    r"|\{[A-Za-z_][A-Za-z0-9_.:-]*\}"
+    r"|%\([^)]+\)[#0+\-]?[0-9.]*(?:[diouxXeEfFgGcrs%])"
+    r"|(?<!%)%[#0+\-]?[0-9.]*(?:[diouxXeEfFgGcrs%]))"
+)
+_INVISIBLE_PREFIX_RE = re.compile(r"^[\ufeff\u200b\u200c\u200d\u2060]*")
 
 
 def _normalize_msgid(text: str) -> str:
@@ -64,6 +74,56 @@ def _normalize_msgid(text: str) -> str:
     while lines and not lines[-1]:
         lines.pop()
     return "\n".join(lines)
+
+
+def _restore_ordered_targets(
+    source: str,
+    translation: str,
+    pattern: re.Pattern,
+    label: str,
+) -> tuple[str, str | None]:
+    """Restore protected targets by position while keeping translated labels."""
+    source_matches = list(pattern.finditer(source))
+    translated_matches = list(pattern.finditer(translation))
+    if len(source_matches) != len(translated_matches):
+        return translation, (f"{label} count changed ({len(source_matches)} -> {len(translated_matches)})")
+
+    for source_match, translated_match in reversed(list(zip(source_matches, translated_matches))):
+        start, end = translated_match.span("target")
+        translation = translation[:start] + source_match.group("target") + translation[end:]
+    return translation, None
+
+
+def _normalize_translation_syntax(
+    source: str,
+    translation: str,
+) -> tuple[str, str | None]:
+    """Repair safe markup drift and reject changes to protected syntax."""
+    normalized = translation
+    for pattern, label in (
+        (_MARKDOWN_TARGET_RE, "Markdown link target"),
+        (_RST_TARGET_RE, "Sphinx reference target"),
+    ):
+        normalized, error = _restore_ordered_targets(
+            source,
+            normalized,
+            pattern,
+            label,
+        )
+        if error:
+            return translation, error
+
+    source_prefix = _INVISIBLE_PREFIX_RE.match(source).group()
+    translated_prefix = _INVISIBLE_PREFIX_RE.match(normalized).group()
+    normalized = source_prefix + normalized[len(translated_prefix) :]
+
+    for pattern, label in ((_VARIABLE_RE, "variable or format marker"),):
+        source_tokens = pattern.findall(source)
+        translated_tokens = pattern.findall(normalized)
+        if source_tokens != translated_tokens:
+            return translation, (f"{label} changed: {source_tokens[:3]} -> {translated_tokens[:3]}")
+
+    return normalized, None
 
 
 def _remove_extra_headers(content: str) -> str:
@@ -231,12 +291,14 @@ class POTranslator:
 
         for entry in entries:
             entry_chars = len(entry)
-            if current_chars + entry_chars > max_chars and current:
+            separator_chars = 2 if current else 0
+            if current_chars + separator_chars + entry_chars > max_chars and current:
                 chunks.append("\n\n".join(current) + "\n")
                 current = []
                 current_chars = 0
+                separator_chars = 0
             current.append(entry)
-            current_chars += entry_chars
+            current_chars += separator_chars + entry_chars
 
         if current:
             chunks.append("\n\n".join(current) + "\n")
@@ -246,39 +308,97 @@ class POTranslator:
         self,
         chunks: list[str],
     ) -> list[str] | None:
-        """Translate chunks concurrently and require every chunk to validate."""
+        """Translate chunks and recover failed chunks with smaller requests."""
         total = len(chunks)
         sem = asyncio.Semaphore(self.max_concurrent)
 
-        async def do_chunk(idx: int) -> tuple[int, str | None]:
-            async with sem:
-                info = f"chunk {idx + 1}/{total}"
-                source_entries = _active_entries(pofile(chunks[idx]))
-                for attempt in range(3):
-                    try:
+        async def attempt_chunk(
+            content: str,
+            info: str,
+            diagnose: bool = False,
+        ) -> str | None:
+            source_entries = _active_entries(pofile(content))
+            last_result = None
+            last_error = None
+            for attempt in range(3):
+                try:
+                    async with sem:
                         result = await self._call_api(
-                            chunks[idx],
+                            content,
                             chunk_info=info,
                         )
-                        if (
-                            result
-                            and self._collect_translations(
-                                [result],
-                                source_entries,
-                                quiet=True,
-                            )
-                            is not None
-                        ):
-                            return idx, result
-                    except Exception:
-                        pass
-                    if attempt < 2:
-                        await asyncio.sleep(2)
-                print(
-                    f"\n    Chunk {idx + 1} failed validation after 3 attempts",
-                    flush=True,
+                    last_result = result
+                    if (
+                        result
+                        and self._collect_translations(
+                            [result],
+                            source_entries,
+                            quiet=True,
+                        )
+                        is not None
+                    ):
+                        return result
+                except Exception as exc:
+                    last_error = exc
+                if attempt < 2:
+                    await asyncio.sleep(2 * (attempt + 1))
+
+            if diagnose:
+                if last_result:
+                    self._collect_translations(
+                        [last_result],
+                        source_entries,
+                        quiet=False,
+                    )
+                elif last_error:
+                    print(f"\n    {info} API error: {last_error}", flush=True)
+                else:
+                    print(
+                        f"\n    {info} returned an empty or non-PO response",
+                        flush=True,
+                    )
+            return None
+
+        async def do_chunk(idx: int) -> tuple[int, str | None]:
+            info = f"chunk {idx + 1}/{total}"
+            return idx, await attempt_chunk(chunks[idx], info)
+
+        async def recover_chunk(
+            content: str,
+            info: str,
+        ) -> list[str] | None:
+            source_entries = _active_entries(pofile(content))
+            if len(source_entries) == 1:
+                result = await attempt_chunk(
+                    content,
+                    f"{info} single-entry recovery",
+                    diagnose=True,
                 )
-                return idx, None
+                return [result] if result else None
+
+            midpoint = len(source_entries) // 2
+            first_half = source_entries[:midpoint]
+            second_half = source_entries[midpoint:]
+            smaller_chunks = [
+                self._build_snippet(first_half),
+                self._build_snippet(second_half),
+            ]
+            print(
+                f"\n    {info} failed; retrying as {len(first_half)}+{len(second_half)} entries",
+                flush=True,
+            )
+            recovered = []
+            for part, smaller in enumerate(smaller_chunks, start=1):
+                part_info = f"{info}.{part}"
+                result = await attempt_chunk(smaller, part_info)
+                if result:
+                    recovered.append(result)
+                    continue
+                nested = await recover_chunk(smaller, part_info)
+                if nested is None:
+                    return None
+                recovered.extend(nested)
+            return recovered
 
         if total > 1:
             print(
@@ -287,12 +407,27 @@ class POTranslator:
                 flush=True,
             )
         results = await asyncio.gather(*[do_chunk(index) for index in range(total)])
-        translated: list[str | None] = [None] * total
+        translated: list[list[str] | None] = [None] * total
         for idx, chunk_text in results:
-            translated[idx] = chunk_text
-        if any(chunk is None for chunk in translated):
-            return None
-        return [chunk for chunk in translated if chunk is not None]
+            if chunk_text:
+                translated[idx] = [chunk_text]
+
+        for idx, chunk_group in enumerate(translated):
+            if chunk_group is not None:
+                continue
+            recovered = await recover_chunk(
+                chunks[idx],
+                f"chunk {idx + 1}/{total}",
+            )
+            if recovered is None:
+                print(
+                    f"\n    Chunk {idx + 1} could not be recovered",
+                    flush=True,
+                )
+                return None
+            translated[idx] = recovered
+
+        return [chunk for chunk_group in translated if chunk_group is not None for chunk in chunk_group]
 
     @staticmethod
     def _collect_translations(
@@ -329,7 +464,15 @@ class POTranslator:
                         if not quiet:
                             print(f"\n    API left msgstr empty: {translated.msgid[:80]}")
                         return None
-                    translations[original.msgid] = translated.msgstr
+                    normalized_msgstr, syntax_error = _normalize_translation_syntax(
+                        original.msgid,
+                        translated.msgstr,
+                    )
+                    if syntax_error:
+                        if not quiet:
+                            print(f"\n    API changed protected syntax for {translated.msgid[:80]}: {syntax_error}")
+                        return None
+                    translations[original.msgid] = normalized_msgstr
         except Exception as exc:
             if not quiet:
                 print(f"\n    Cannot parse API response: {exc}")
