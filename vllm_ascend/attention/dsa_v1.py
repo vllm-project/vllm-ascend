@@ -1799,7 +1799,16 @@ class AscendDSAImpl(DSAAttentionImpl):
         assert output is not None, "Output tensor must be provided."
         output_padded = output
         forward_context = get_forward_context()
-        o_proj_input_shape = (forward_context.num_tokens, self.n_local_heads, self.head_dim)
+        num_forward_tokens = getattr(forward_context, "num_tokens", None)
+        if num_forward_tokens is None and forward_context.batch_descriptor is not None:
+            num_forward_tokens = forward_context.batch_descriptor.num_tokens
+        if num_forward_tokens is None:
+            num_forward_tokens = hidden_states.shape[0]
+        o_proj_input_shape = (
+            num_forward_tokens,
+            self.n_local_heads,
+            self.head_dim,
+        )
         if attn_metadata is None:
             # Profiling run: run o_proj on zero input so HCCL collectives are
             # captured by the ACL graph.  Non-OTP just zeros the output.
