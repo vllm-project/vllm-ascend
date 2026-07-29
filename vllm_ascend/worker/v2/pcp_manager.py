@@ -47,14 +47,16 @@ class AscendPCPManager(PCPManager):
     ) -> None:
         super().__init__(
             pcp_world_size,
-            pcp_rank, device,
+            pcp_rank,
+            device,
             req_states=req_states,
             max_num_reqs=max_num_reqs,
             max_num_tokens=max_num_tokens,
             block_tables=block_tables,
             dcp_world_size=dcp_world_size,
             dcp_rank=dcp_rank,
-            cp_interleave=cp_interleave)
+            cp_interleave=cp_interleave,
+        )
         self.vllm_config = vllm_config
 
     def partition_batch(self, input_batch: AscendInputBatch) -> AscendInputBatch:
