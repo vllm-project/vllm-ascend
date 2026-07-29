@@ -151,6 +151,7 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     calc_split_factor,
     check_gdn_layer,
+    embedding_tp_enable,
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
     enable_sp_by_pass,
@@ -158,9 +159,9 @@ from vllm_ascend.utils import (
     get_c_env,
     global_stream,
     is_hidden_state_cache_spec,
-    is_hierarchical_communication_enabled,
     kv_cache_spec_uses_sparse_sfa_c8,
     lmhead_tp_enable,
+    oproj_tp_enable,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
 )
@@ -635,6 +636,7 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens: int,
         is_draft_model: bool = False,
         cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        allow_dp_padding: bool = False,
     ) -> tuple[int, torch.Tensor | None, CUDAGraphMode]:
         # TODO: In vLLM, the only thing that needs to be synced is num_tokens, but in
         # our case, we still need to sync the other two flags as well. So we need to
@@ -660,17 +662,7 @@ class NPUModelRunner(GPUModelRunner):
         synced_cudagraph_mode = CUDAGraphMode(_post_process_cudagraph_mode(packed_tensor))
 
         # Create a tensor for num_tokens_after_padding
-        comm_method = select_moe_comm_method(max_tokens_across_dp, self.vllm_config)
-        is_mc2_with_hierarchical = (comm_method == MoECommType.MC2 and is_hierarchical_communication_enabled())
-        is_finegrained_tp = self.ascend_config.finegrained_tp_config.get_max_finegrained_tp_size() > 1
-        # There are three cases where padding between DPs is required:
-        # 1. comm_method == ALLGATHER;
-        # 2. comm_method == MC2 and is hierarchical communication, in this case,
-        #    the mc2 operator does not support dynamic batch size.
-        #    TODO(zzzzwwjj): It can be remove after op support this case.
-        # 3. when finegrained_tp is open, we need to ensure num_tokens remains consistent within finegrained_tp_group.
-        #    TODO(zzzzwwjj): We can do dp padding in finegrained_tp_group, instead of world_group.
-        if comm_method == MoECommType.ALLGATHER or is_mc2_with_hierarchical or is_finegrained_tp:
+        if allow_dp_padding or is_draft_model:
             num_tokens_after_padding = torch.tensor(
                 [max_tokens_across_dp] * self.dp_size, device="cpu", dtype=torch.int32
             )
@@ -2745,6 +2737,10 @@ class NPUModelRunner(GPUModelRunner):
             _, num_tokens_across_dp, synced_cudagraph_mode = self._sync_metadata_across_dp(
                 num_tokens=num_tokens_padded,
                 cudagraph_mode=cudagraph_mode,
+                allow_dp_padding=((cudagraph_mode != CUDAGraphMode.NONE)
+                                  or enable_sp(self.vllm_config)
+                                  or oproj_tp_enable()
+                                  or embedding_tp_enable()),
             )
 
             # Extract DP padding if there is any
