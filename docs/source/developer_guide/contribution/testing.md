@@ -34,7 +34,7 @@ docker run --rm --name vllm-ascend-ut \
 sed -i 's|ports.ubuntu.com|mirrors.huaweicloud.com|g' /etc/apt/sources.list
 pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple/
 
-# For torch-npu dev version or x86 machine
+# For TorchNPU dev version or x86 machine
 export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
 
 # src path

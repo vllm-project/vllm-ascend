@@ -16,9 +16,9 @@ This document describes how to install vllm-ascend manually.
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
     | Ascend HDK    | Refer to the documentation [CANN 9.0.1](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html) | Required for CANN |
-    | CANN          | == 9.0.1                        | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | == 2.10.0                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
-    | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
+    | CANN          | == 9.0.1                        | Required for vllm-ascend and TorchNPU    |
+    | TorchNPU     | == 2.10.0                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | torch         | == 2.10.0                       | Required for TorchNPU and vllm, No need to install manually, it will be auto installed in below steps |
     | NNAL          | == 9.0.1                        | Required for libatb.so, enables advanced tensor operations |
 
 ```{note}
@@ -31,9 +31,9 @@ Atlas inference products require CANN 9.1.0 . The Atlas A2/A3 requirements in th
  | Software      | Supported version                | Note                                      |
  |---------------|----------------------------------|-------------------------------------------|
  | Ascend HDK    | Refer to the documentation [CANN 9.1.0](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910beta1/releasenote/9.1.0-beta.1/release-note.md) | Required for CANN |
- | CANN          | == 9.1.0                | Required for vllm-ascend and torch-npu    |
- | torch-npu     | == 2.10.0                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
- | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
+ | CANN          | == 9.1.0                | Required for vllm-ascend and TorchNPU    |
+ | TorchNPU     | == 2.10.0                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+ | torch         | == 2.10.0                       | Required for TorchNPU and vllm, No need to install manually, it will be auto installed in below steps |
  | NNAL          | == 9.1.0                 | Required for libatb.so, enables advanced tensor operations |
  | triton / triton-ascend | Not supported          | Uninstalled in `Dockerfile.310p` |
 
@@ -153,10 +153,10 @@ apt-get update -y && apt-get install -y gcc g++ cmake libnuma-dev wget git curl 
 pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 ```
 
-**[Optional]** Then configure the extra-index of `pip` if you are working on an x86 machine or using torch-npu dev version:
+**[Optional]** Then configure the extra-index of `pip` if you are working on an x86 machine or using TorchNPU dev version:
 
 ```bash
-# For torch-npu dev version or x86 machine
+# For TorchNPU dev version or x86 machine
 pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"
 ```
 
@@ -259,7 +259,7 @@ pip uninstall -y triton-ascend triton
 :::
 
 ```{note}
-To build custom operators, gcc/g++ higher than 8 and C++17 or higher are required. If you are using `pip install -e .` and encounter a torch-npu version conflict, please install with `pip install --no-build-isolation -e .` to build on system env.
+To build custom operators, gcc/g++ higher than 8 and C++17 or higher are required. If you are using `pip install -e .` and encounter a TorchNPU version conflict, please install with `pip install --no-build-isolation -e .` to build on system env.
 If you encounter other problems during compiling, it is probably because an unexpected compiler is being used, you may export `CXX_COMPILER` and `C_COMPILER` in the environment to specify your g++ and gcc locations before compiling.
 
 If you are building in a CPU-only environment where `npu-smi` is unavailable, you need to set `SOC_VERSION` before `pip install -e .` so the build can target the correct chip. You can refer to `Dockerfile*` defaults, for example:
